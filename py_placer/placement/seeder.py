@@ -146,10 +146,12 @@ def zone_gate(part, constraint, tol: float):
     """
     if constraint is None:
         return (lambda x, y, rot: True), False
-    from placement.floorplan import zone_fits_courtyard
-    anchor = not any(
-        zone_fits_courtyard(constraint, part.rect(0.0, 0.0, r), tol)
-        for r in (part.rot % 360, (part.rot + 90) % 360))
+    from placement import floorplan as _fp
+    # The anchor decision moved to `floorplan.zone_is_anchor` (#799) so the
+    # load-time contradiction check asks the SAME question rather than a
+    # re-derivation of it. Resolved through the module object, not a
+    # `from ... import`, so a test that patches the decision is observed here.
+    anchor = _fp.zone_is_anchor(constraint, part, tol)
 
     if anchor:
         def _in(x, y, rot):
@@ -191,16 +193,17 @@ def _feasible_centre_box(part, constraint, tol, anchor):
         # Anchor zones constrain the ANCHOR POINT, so the centre box is the
         # zone itself; no courtyard term enters.
         return x0 - tol, y0 - tol, x1 + tol, y1 + tol
-    max_b0x = max_b0y = -float('inf')
-    min_b2x = min_b2y = float('inf')
-    for rot in (part.rot, part.rot + 90.0, part.rot + 180.0, part.rot + 270.0):
-        b = part.rect(0.0, 0.0, rot % 360)
-        max_b0x = max(max_b0x, b[0])
-        max_b0y = max(max_b0y, b[1])
-        min_b2x = min(min_b2x, b[2])
-        min_b2y = min(min_b2y, b[3])
-    return (x0 - tol - max_b0x, y0 - tol - max_b0y,
-            x1 + tol - min_b2x, y1 + tol - min_b2y)
+    # The per-rotation algebra is `floorplan.zone_origin_box` since #799, which
+    # needs it one rotation at a time; the union is this function's own shape.
+    # BIT-IDENTICAL to the max/min form it replaces: subtraction is monotone in
+    # its second operand, so `min_r(x0 - tol - b0_r)` is `x0 - tol - max_r(b0_r)`
+    # evaluated with the same operands in the same order.
+    from placement import floorplan as _fp
+    boxes = [_fp.zone_origin_box(constraint, part.rect(0.0, 0.0, rot % 360), tol)
+             for rot in (part.rot, part.rot + 90.0,
+                         part.rot + 180.0, part.rot + 270.0)]
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
 def zone_census_offsets(part, constraint, tol, tx, ty, grid_step=0.1,

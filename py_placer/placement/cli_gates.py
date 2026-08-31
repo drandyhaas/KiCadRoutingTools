@@ -98,8 +98,27 @@ def resolve_intent_gate_for_cli(intent, pcb_data, sources, path):
     resolve_sources = tuple(sources) or parse_sources('auto')
     bundle, problems = floorplan.resolve_intent_gate(
         intent, pcb_data, resolve_sources)
+    # Print the severity the finding CARRIES. This loop labelled everything
+    # `INTENT ERROR`, which was harmless while every finding reaching it
+    # defaulted to error -- and became a lie with #793, whose whole design is a
+    # finding at WARN so it can be loud without being fatal. Relabelling it
+    # ERROR at the four CLIs the issue was written for would have undone that.
+    # Default-severity output is unchanged: every pre-#793 finding here is an
+    # error, so only a demoted one now reads differently, which is correct and
+    # was previously wrong.
+    n_err = 0
     for v in problems:
-        print(f"  INTENT ERROR [{v.rule}] {v.message}", file=sys.stderr)
+        is_err = v.severity == floorplan.ERROR
+        n_err += is_err
+        label = 'INTENT ERROR' if is_err else 'INTENT WARN '
+        print(f"  {label} [{v.rule}] {v.message}", file=sys.stderr)
+    if problems:
+        # A tally, because these four CLIs PRINT the problems and act on none
+        # of them: without a count, "nothing was wrong" and "several things
+        # were wrong and scrolled past" look the same to a reader.
+        print(f"  ({n_err} error(s), {len(problems) - n_err} warning(s) from "
+              f"the intent; this gate reports, it does not exit)",
+              file=sys.stderr)
     zoned = [z for z in bundle['zones'] if z['refs']]
     bound = len({r for z in zoned for r in z['refs']})
     if not (zoned or bundle['keepouts'] or bundle['lock_refs']):

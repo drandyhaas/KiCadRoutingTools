@@ -712,12 +712,93 @@ def keepouts_for_ref(keepouts, ref: str, sides) -> Tuple[Dict, ...]:
     """
     out = []
     for k in keepouts:
-        if any(fnmatch.fnmatch(ref, pat) for pat in (k.get('allow') or ())):
+        if any(allow_pattern_matches(pat, ref) for pat in (k.get('allow') or ())):
             continue
         if not (set(sides) & set(k.get('sides') or ('F', 'B'))):
             continue
         out.append(k)
     return tuple(out)
+
+
+def allow_pattern_matches(pattern: str, ref: str) -> bool:
+    """Does ONE `allow` glob exempt ONE reference? (#793)
+
+    THE match, split out of `keepouts_for_ref` so the audit that asks "did this
+    pattern exempt ANYTHING" cannot answer it with a different matcher than the
+    exemption itself uses. A warning that disagrees with the resolver is worse
+    than no warning: it would send an author to fix a pattern that works, or
+    stay quiet about one that does not.
+
+    `fnmatch.fnmatch`, deliberately, not `fnmatchcase`: it applies
+    `os.path.normcase`, so matching is case-insensitive on Windows and
+    case-sensitive elsewhere. That platform split is PRE-EXISTING and is not
+    fixed here -- the point of this function is that both callers inherit
+    exactly the same behaviour, whatever it is.
+    """
+    return fnmatch.fnmatch(ref, pattern)
+
+
+def unresolved_keepout_allows(intent, pcb_data) -> List['Violation']:
+    """`allow` globs that match no reference on this board (#793).
+
+    The same failure class as `block_unresolved`, one construct over: a pattern
+    the author believes grants an exemption, that `keepouts_for_ref` never
+    matches. The consequence is worse than a no-op, because since #701 the seat
+    search consults the same resolver -- so a typo does not merely fail to
+    exempt the part, it STRANDS the part the keep-out was drawn around.
+
+    What the author saw before this, measured on splitflap_driver with a
+    keep-out over H1 carrying `allow: ["H01"]`:
+
+      * with H1 inside it, `rule_keepout` fires -- but its message is
+        "H1 (F) is inside keep-out 'mount-NW'", which describes the part and
+        never the exemption. The failing pattern reaches the JSON in
+        `expected.allow` and reaches the TEXT nowhere, and nothing anywhere
+        says it matched nothing;
+      * with the keep-out over empty space -- the state a board is in BEFORE
+        placement, which is when an intent is authored -- `violations 0,
+        errors 0, pass true`, exit 0. Silent, exactly as #793 says.
+
+    WARN by default, and settable. Not the forced-WARN of
+    `rule_edge_connector`'s `connector_affinity` branch: an author who wants a
+    stale glob to fail CI writes `{"keepout_allow_unresolved": "error"}`, and
+    `severity_of` gives that for free. Note `severity_of` DEFAULTS TO ERROR, so
+    the `default=WARN` here is load-bearing rather than decorative.
+
+    PER PATTERN, not per entry. `allow: ["H1", "H01"]` must still report the
+    typo -- an `any()` over the tuple sees one match and says nothing, which is
+    the bug this function exists to be.
+
+    Resolved means "matches SOME reference on the board", deliberately not
+    "the exemption changes an outcome". A pattern naming a real part that the
+    keep-out would not have bound anyway (wrong side) is not a typo, and
+    reporting it would put a finding on a correct spec.
+    """
+    refs = sorted((pcb_data.footprints or {}))
+    out: List[Violation] = []
+    for k in intent.keepouts:
+        dead = [p for p in (k.get('allow') or ())
+                if not any(allow_pattern_matches(p, r) for r in refs)]
+        if not dead:
+            continue
+        name = str(k.get('name') or '<unnamed>')
+        shown = ', '.join(refs[:6]) + (', ...' if len(refs) > 6 else '')
+        out.append(Violation(
+            rule='keepout_allow_unresolved',
+            severity=intent.severity_of('keepout_allow_unresolved',
+                                        default=WARN),
+            message=(f"keep-out {name!r}: allow pattern(s) "
+                     f"{', '.join(repr(p) for p in dead)} match no footprint "
+                     f"on this board ({shown}). They exempt NOTHING, and since "
+                     f"#701 the seat search refuses that part's pose too -- so "
+                     f"a stale pattern strands the very part the keep-out was "
+                     f"drawn around, rather than merely failing to excuse it"),
+            measured={'keepout': name, 'unmatched': list(dead),
+                      'matched': [p for p in (k.get('allow') or ())
+                                  if p not in dead],
+                      'available': refs[:12]},
+            expected={'allow': list(k.get('allow') or ())}))
+    return out
 
 
 def keepout_hit(entry, rects) -> float:
@@ -1023,29 +1104,16 @@ def resolve_intent_gate(intent: Intent, pcb_data,
          'exclusive': bool(z.exclusive)}
         for z in intent.blocks if z.rect is not None)
 
-    member_sides = {}
-    for ref in sorted(pcb_data.footprints):
-        fp = pcb_data.footprints[ref]
-        member_sides[ref] = legality.sides_occupied(
-            legality.footprint_side(fp), legality.footprint_has_through_pads(fp))
-    for z in intent.blocks:
-        mine = {r: member_sides[r] for r in blocks.get(z.name, ())
-                if r in member_sides}
-        hit = zone_covered_by_keepout(z, intent.keepouts, mine,
-                                      intent.zone_tolerance(z))
-        if hit is not None:
-            problems.append(Violation(
-                rule='intent_zone_in_keepout', block=z.name,
-                severity=intent.severity_of('intent_zone_in_keepout'),
-                message=(f"block {z.name!r} declares a zone that keep-out "
-                         f"{hit!r} covers entirely: its members are required "
-                         f"to be somewhere they are forbidden to be. No pose "
-                         f"satisfies both, so such a member can never LEAVE "
-                         f"its zone under the optimizer's monotone intent "
-                         f"gate, and cannot clear the keep-out without "
-                         f"leaving it"),
-                measured={'zone': list(z.rect), 'keepout': hit},
-                expected={'overlap': 'partial or none'}))
+    # Total coverage AND the per-member "leaves it no pose" case (#799), from
+    # the one function `grade` also calls -- so the same intent on the same
+    # board cannot get a different verdict depending on which entry point asked.
+    problems.extend(intent_zone_keepout_problems(intent, blocks, pcb_data))
+
+    # #793, raised HERE as well as in `grade`: the gate is what the four
+    # quenching CLIs run, and it is where a stale `allow` is actively stranding
+    # the part right now. One raiser, two reach points -- `block_unresolved`'s
+    # own shape, and for the same reason.
+    problems.extend(unresolved_keepout_allows(intent, pcb_data))
 
     lock: set = set()
     for pat in intent.must_lock:
@@ -1164,6 +1232,496 @@ def zone_escape(zone_rect, part_rect, anchor: bool) -> Tuple[float, str]:
         cy = (part_rect[1] + part_rect[3]) / 2.0
         return _rect_escape(zone_rect, (cx, cy, cx, cy))
     return _rect_escape(zone_rect, part_rect)
+
+
+def zone_is_anchor(zone_rect, part, tol: float) -> bool:
+    """Is this zone a spec-COORDINATE rather than a region? (#799)
+
+    ONE definition, for the three consumers that must agree: `seeder.zone_gate`
+    picks its containment branch with it, `rule_zone_containment` grades on it,
+    and the intent contradiction check asks it before deciding where a member
+    may sit. It used to live inline in `zone_gate`, which meant a load-time
+    check asking the same question had to re-derive it -- and a re-derivation
+    that disagreed would move the anchor boundary for one consumer only.
+
+    Pose-INVARIANT: `zone_fits_courtyard` reads only w/h and tests both orders,
+    so `part.rot` and `part.rot + 90` settle it for the whole 90-degree
+    lattice.
+    """
+    return not any(
+        zone_fits_courtyard(zone_rect, part.rect(0.0, 0.0, r), tol)
+        for r in (part.rot % 360, (part.rot + 90) % 360))
+
+
+def zone_origin_box(zone_rect, bounds, tol: float):
+    """Where a part with LOCAL box `bounds` may put its ORIGIN, at ONE rotation.
+
+    `zone_escape(zone_rect, part_rect, anchor=False) <= tol`, solved for the
+    origin. Containment at this rotation is `zone[0]-tol <= x + b[0]` and
+    `x + b[2] <= zone[2]+tol`, so `x` in `[zone[0]-tol-b[0], zone[2]+tol-b[2]]`.
+
+    Returns a possibly-INVERTED box: `hi < lo` on an axis means this rotation
+    admits nothing. That is `seeder._feasible_centre_box`'s own convention
+    (`zone_census_offsets` detects the inversion), and it is kept rather than
+    returning None so the two callers branch the same way.
+
+    THE COURTYARD IS NOT CENTRED ON THE FOOTPRINT ORIGIN, so this is the
+    algebra and never a half-extent -- `_feasible_centre_box`'s docstring
+    records two earlier forms that were wrong here in opposite directions, and
+    the offset reaches 10.15mm on tigard J3.
+
+    Lives here, beside `zone_escape` whose inverse it is, because the intent
+    contradiction check (#799) needs it PER ROTATION while the seeder needs
+    the union over rotations. One algebra, two shapes.
+    """
+    x0, y0, x1, y1 = (float(v) for v in zone_rect)
+    b0x, b0y, b2x, b2y = bounds
+    return (x0 - tol - b0x, y0 - tol - b0y, x1 + tol - b2x, y1 + tol - b2y)
+
+
+def _anchor_origin_box(zone_rect, bounds, tol: float):
+    """`zone_origin_box`'s spec-COORDINATE twin: the zone holds the part's
+    courtyard CENTRE rather than its whole courtyard.
+
+    `zone_escape(..., anchor=True)` measures `((b0+b2)/2, (b1+b3)/2)` offset
+    from the origin, so the admissible origin box is the zone shifted by minus
+    that offset. THE GRADE'S convention, deliberately -- `seeder.zone_gate`
+    constrains the footprint ORIGIN instead, and `zone_escape`'s docstring
+    records that the two differ by up to 10.15mm on tigard J3.
+
+    An earlier draft of #799 intersected the two conventions, on the theory
+    that a refusal should be true under both. Measured, that is a false-ERROR
+    machine: 234 of 1316 corpus parts have an off-centre courtyard (worst
+    36.825mm, kit-dev MCU_PORT201), and where the offset exceeds the zone extent
+    the two boxes are DISJOINT -- so the intersection is empty and ANY keep-out
+    anywhere on the board refuses the intent. This finding is a contradiction
+    between two GRADED claims, `zone_containment` and `keepout`, and both are
+    measured on the grade's convention. That is the one to use.
+    """
+    x0, y0, x1, y1 = (float(v) for v in zone_rect)
+    b0x, b0y, b2x, b2y = bounds
+    cx, cy = (b0x + b2x) / 2.0, (b0y + b2y) / 2.0
+    return (x0 - tol - cx, y0 - tol - cy, x1 + tol - cx, y1 + tol - cy)
+
+
+def _forbidden_origin_rect(entry, bounds):
+    """Origins at which a part with LOCAL box `bounds` would HIT rect `entry`.
+
+    `keepout_hit` fires when `rect_overlap_area > EPS`, and that area is
+    positive exactly when the placed box and the keep-out overlap on BOTH axes,
+    so the forbidden origin set is the OPEN rect
+
+        (k0 - b2x,  k1 - b2y,  k2 - b0x,  k3 - b0y)
+
+    Open, because touching is legal. Never a half-extent: the courtyard is not
+    centred on the footprint origin, and a symmetric deflation SHIFTS the box.
+
+    `None` for a circle (no disc/rect kernel exists here) and for a DEGENERATE
+    rect. Degenerate matters: `_rect` NORMALISES an inverted rect rather than
+    refusing it, so a typo'd `[15,20,15,10]` loads as a zero-width keep-out --
+    which `rect_overlap_area` can never report a positive area for, so it can
+    never hit anything, while this rect would still forbid a 2*courtyard-wide
+    band of origins. Returning None keeps it out of the candidate geometry;
+    `keepout_hit` still gets the final say on every candidate.
+    """
+    k = entry.get('rect')
+    if k is None:
+        return None
+    if not (k[2] - k[0] > 0.0 and k[3] - k[1] > 0.0):
+        return None
+    b0x, b0y, b2x, b2y = bounds
+    return (k[0] - b2x, k[1] - b2y, k[2] - b0x, k[3] - b0y)
+
+
+def _axis_candidates(lo: float, hi: float, cuts) -> List[float]:
+    """Coordinates worth testing on one axis: the ends, every cut clamped into
+    `[lo, hi]`, and the midpoint of each consecutive pair.
+
+    The cut coordinates themselves must be in the set, not only the midpoints.
+    A gap EXACTLY as wide as the courtyard leaves a measure-zero line of legal
+    origins, and that line is a keep-out edge -- a midpoints-only sample set
+    reports such an intent unsatisfiable, which it is not.
+
+    Cuts are CLAMPED into the box; the rects they came from are NOT clipped.
+    Clipping the holes and then testing strictly is a real and tempting bug:
+    on #799's own counterexample the hole clips to exactly the box, its corner
+    stops being strictly interior, and the check reports the contradiction
+    feasible -- passing every test written from the issue.
+    """
+    xs = {lo, hi}
+    for c in cuts:
+        if c < lo:
+            c = lo
+        elif c > hi:
+            c = hi
+        xs.add(c)
+    out = sorted(xs)
+    return out + [(a + b) / 2.0 for a, b in zip(out, out[1:])]
+
+
+#: Bound keep-outs past which the feasibility search abstains rather than
+#: paying O(k^2) candidates x O(k) hit tests. Abstaining reports FEASIBLE, so
+#: the cap can only cost a missed contradiction, never invent one.
+_JOINT_KEEPOUT_CAP = 16
+
+
+def zone_pose_feasibility(zone_rect, tolerance: float, part,
+                          keepouts) -> Dict[str, object]:
+    """Does `zone_rect` MINUS the keep-outs still hold `part` at some rotation?
+
+    #702 refuses an intent whose keep-out swallows a zone entirely. That is the
+    total-coverage case; this is the question underneath it, and they coincide
+    only there. Measured: zone `[10,10,20,20]` at tolerance 0 against a keep-out
+    `[10,10,19.9,20]` -- 99% of the zone -- raises nothing today while the
+    member has ZERO satisfying poses. Two keep-outs covering half each are
+    missed the same way, and neither triggers a per-entry test.
+
+    Why it must be refused where it is authored rather than discovered later:
+    the #702 quench gate is termwise-monotone, so for such a member `keepout`
+    falls only by leaving the zone, leaving raises `zone_containment`, and no
+    candidate lowers both. The member is CONFINED TO ITS ZONE for the whole run.
+    Confined, not frozen -- every pose inside the zone yields an identical term
+    vector, so the rule admits all of them; what the member can never do is get
+    OUT.
+
+    THE INVARIANT: compute a SUPERSET of the poses satisfying (zone AND binding
+    keep-outs) and refuse only when that superset is empty -- so a refusal is
+    sound, up to the one bounded exception recorded below.
+
+    THE ALGEBRA ONLY PROPOSES. Candidate origins come from coordinate
+    compression over the admissible box and the keep-outs' forbidden rects, and
+    every candidate is then judged by `zone_escape` and `keepout_hit` -- the
+    same two functions `rule_zone_containment` and `rule_keepout` grade with.
+    (Not `seeder.pose_ok`: it applies no zone predicate at all, and its
+    caller's `zone_gate` uses `_rect_inside` and a bare origin-in-zone test
+    rather than `zone_escape`. The kernel matches the GRADE, which is whose
+    contradiction this is.) So the verdict cannot drift from the grade,
+    and two float-scale traps disappear on their own: a keep-out a candidate
+    overlaps by less than `EPS` of AREA is not a hit and the candidate stands,
+    and a degenerate keep-out forbids nothing because it can hit nothing.
+
+    ONE KNOWN EXCEPTION TO "A FALSE ERROR IS IMPOSSIBLE", stated because it is
+    real. `keepout_hit` fires on overlap AREA above `EPS`, so the true
+    satisfying set is slightly LARGER than the open-rect complement the
+    candidates are drawn from -- and a free window can therefore fall strictly
+    between two sampled coordinates. Derived analytically and then run: zone
+    (0,0,10,2) tol 0, a 2x2 courtyard, keep-outs (-99,0.5,4,1) and
+    (5.9999978,-10,99,10) are refused, while (4.99999815, 1.0, 0) has
+    `zone_escape` 0.0 and `keepout_hit` 0.0 against both (raw areas 9.25e-7 and
+    7.0e-7, under EPS). For any two binding keep-outs with part-overlap lengths
+    L1 <= L2 on the free axis the window exists when the gap d satisfies
+    max(EPS/L1, 2*EPS/L2) < d <= EPS/L1 + EPS/L2.
+
+    It is bounded rather than open-ended: a missed pose must graze EVERY
+    binding keep-out by under one square micrometre, i.e. far below the 0.05mm
+    floor of any lattice the seat search sweeps, so no authored intent reaches
+    it. It is NOT modelled, because widening the candidate set to cover the
+    slack would invent tolerance the grade does not have -- and the grade would
+    then flag the pose this function admitted. `tests/test_799_*` carries the
+    counterexample as a recorded limitation so it is a change detector rather
+    than a surprise.
+
+    The zone side is slack by `EPS` and the keep-out side is not, and that
+    asymmetry is measured rather than chosen. `(z0 - tol - b0) + b0 < z0 - tol`
+    on a few percent of random triples (6.3% and 7.4% in two independent
+    probes; the sampling distribution is not pinned, so treat it as the order
+    of magnitude rather than a figure), so at `tolerance_mm: 0` a candidate sitting on a
+    zone-derived edge is rejected by its own construction; on the keep-out side
+    the worst boundary overlap over 200000 trials was 8.5e-12 mm2, six orders
+    below `EPS`, so no slack is needed and adding it would invent tolerance the
+    grade does not have.
+
+    Returns plain data with EVERY key present, so a consumer never needs a
+    defaulting `.get` to tell "nothing binds it" from "it was not considered":
+
+        feasible   bool          -- False is the only value that refuses
+        reason     str           -- see below
+        witness    (x, y, rot)|None
+        bound      (names,...)   -- keep-outs that BIND this ref
+        keepouts_freeing (names,...)  -- each alone leaves it a pose
+        keepouts_joint   (names,...)  -- none alone does; together they refuse
+        undecided_circles (names,...) -- why an abstention abstained
+        rotations  (floats,...)
+
+    `reason` is one of `no_keepout_binds`, `seated`, `keepout_alone`,
+    `keepout_any_of`, `keepout_joint`, `circle_undecided`, `too_many_keepouts`,
+    `zone_too_small`. The three refusing ones say how the blame divides:
+    ONE entry is the whole cause (`keepout_alone`), SEVERAL are each
+    individually necessary so lifting any one would free it (`keepout_any_of`),
+    or no single lift frees anything and they refuse jointly (`keepout_joint`).
+
+    CIRCLES ABSTAIN, and the abstention is SCOPED. No disc/rect free-area
+    kernel exists in this tree (`keepout_hit` returns a marker for a disc and
+    says why), so a disc contributes no candidate geometry and the candidate set
+    stops being provably sufficient -- a refusal would be unsound. But
+    abstaining whenever a circle merely appears in the bound list would let one
+    decorative disc anywhere on the board switch the check off for every part.
+    So: when nothing verifies, the search is re-run over the RECTS ALONE. If
+    the rects alone still refuse, the refusal is sound and is reported; only if
+    dropping the discs would have found a pose is the answer undecided.
+    `zone_covered_by_keepout` still decides total disc coverage exactly, which
+    is what #702 shipped, so nothing regresses there.
+
+    NOT MODELLED, deliberately: the board outline, clearance, and neighbours.
+    A FEASIBLE verdict says the zone and the intent's own keep-outs leave room,
+    never that the part can be seated -- `seeder.pose_ok` demands all three, and
+    "no legal pose" already has a better-informed owner in the `keepout_blocks`
+    verdict, which counts poses with the seat predicate and names the blocker.
+    Modelling them here would shrink the feasible set, i.e. move toward refusing
+    an intent that is fine.
+    """
+    out: Dict[str, object] = {
+        'feasible': True, 'reason': 'no_keepout_binds', 'witness': None,
+        'bound': (), 'keepouts_freeing': (), 'keepouts_joint': (),
+        'undecided_circles': (), 'rotations': ()}
+    if zone_rect is None:
+        return out
+    rot0 = float(part.rot) % 360
+    rots = tuple((rot0 + d) % 360 for d in (0.0, 90.0, 180.0, 270.0))
+    out['rotations'] = rots
+    bound = tuple(keepouts)
+    out['bound'] = tuple(str(k.get('name') or '<unnamed>') for k in bound)
+    if not bound:
+        return out
+    if len(bound) > _JOINT_KEEPOUT_CAP:
+        out['reason'] = 'too_many_keepouts'
+        return out
+
+    anchor = zone_is_anchor(zone_rect, part, tolerance)
+
+    def _search(entries):
+        """First (x, y, rot) satisfying zone AND every entry, or None."""
+        for rot in rots:
+            b = part.rect(0.0, 0.0, rot)
+            t = part.tht_rect(0.0, 0.0, rot)
+            box = (_anchor_origin_box(zone_rect, b, tolerance) if anchor
+                   else zone_origin_box(zone_rect, b, tolerance))
+            if box[2] < box[0] or box[3] < box[1]:
+                continue
+            holes = []
+            for k in entries:
+                for lb in ((b, t) if t is not None else (b,)):
+                    f = _forbidden_origin_rect(k, lb)
+                    if f is not None:
+                        holes.append(f)
+            cx = _axis_candidates(box[0], box[2],
+                                  [v for h in holes for v in (h[0], h[2])])
+            cy = _axis_candidates(box[1], box[3],
+                                  [v for h in holes for v in (h[1], h[3])])
+            for x in cx:
+                for y in cy:
+                    r = part.rect(x, y, rot)
+                    th = part.tht_rect(x, y, rot)
+                    if zone_escape(zone_rect, r, anchor)[0] > tolerance + legality.EPS:
+                        continue
+                    if any(keepout_hit(k, (r, th)) for k in entries):
+                        continue
+                    return (round(x, 6), round(y, 6), rot)
+        return None
+
+    seat = _search(bound)
+    if seat is not None:
+        out['reason'] = 'seated'
+        out['witness'] = seat
+        return out
+
+    rects = tuple(k for k in bound if k.get('rect') is not None)
+    discs = tuple(k for k in bound if k.get('rect') is None)
+    if discs and (not rects or _search(rects) is not None):
+        # Dropping the discs would have found a pose, so THEY are what refused
+        # it -- and that is the one question this cannot answer exactly.
+        out['reason'] = 'circle_undecided'
+        out['undecided_circles'] = tuple(
+            str(k.get('name') or '<unnamed>') for k in discs)
+        return out
+
+    # The rects alone refuse. Sound, so attribute it -- the same single-lift
+    # then joint-lift escalation `seed_from_intent` does with the pose census,
+    # in the currency this function has (names, from an exact search) rather
+    # than the census's pose COUNTS. Inventing a count here would be a figure a
+    # reader could quote.
+    if _search(()) is None:
+        # Nothing binds and it STILL does not fit: the zone is too small for
+        # the part, which is `zone_containment`'s finding and not this one.
+        # A named marker rather than a wrong message.
+        out['feasible'] = True
+        out['reason'] = 'zone_too_small'
+        return out
+    # Over ALL bound entries, not just the rects. Computing it over `rects`
+    # made "lifting any one of them would give it a pose" FALSE whenever a disc
+    # also bound the member: lifting the named rect left the disc still
+    # refusing. Measured -- A=[-50,-50,4,50], B=[5.999,-50,50,50],
+    # D=circle(7,5,4): the message named A and B, and lifting B alone left the
+    # part with no pose at all.
+    freeing = tuple(str(k.get('name') or '<unnamed>') for k in bound
+                    if _search(tuple(e for e in bound if e is not k)) is not None)
+    out['feasible'] = False
+    if freeing:
+        # `keepouts_freeing` carries the seeder's meaning: lifting this entry
+        # frees a pose. ONE such entry is the sole cause; SEVERAL means each is
+        # individually necessary and they refuse together, which is a different
+        # sentence -- "alone leaves it none" would be false of every one of
+        # them. Measured on two keep-outs covering half a zone each: both lifts
+        # free a pose, so the honest report is "lifting any one would".
+        out['reason'] = 'keepout_alone' if len(freeing) == 1 else 'keepout_any_of'
+        # NOTE the exact claim `freeing` supports: "lifting this entry leaves a
+        # pose". It does NOT support "this entry is the sole cause" -- two
+        # OVERLAPPING keep-outs each mask the other, so neither appears here
+        # while together they are the reason. Measured: two identical keep-outs
+        # plus a third made the message name only the third, which alone left
+        # 8mm2 free. The wording below says the thing that was computed.
+        out['keepouts_freeing'] = freeing
+    else:
+        out['reason'] = 'keepout_joint'
+        out['keepouts_joint'] = tuple(
+            str(k.get('name') or '<unnamed>') for k in rects)
+    return out
+
+
+class _LocalPart:
+    """`quench._Part`'s geometry interface over `legality.LocalBounds`.
+
+    Both entry points build this, rather than `grade` using its QuenchState
+    parts and the gate building something else: the same intent on the same
+    board must get the same verdict whichever asked, and two geometry sources
+    is how that stops being true.
+
+    Rotation is exact for any angle (`rotate_local_bounds` rotates the corners
+    and re-takes the bbox), so a part at a non-multiple of 90 gets its OWN
+    lattice -- which is the lattice `_candidate_rotations` offers it. Scoring
+    such a part on (0, 90, 180, 270) would credit poses the optimizer can never
+    generate.
+    """
+    __slots__ = ('rot', '_b', '_t')
+
+    def __init__(self, rot: float, local, tht_local=None):
+        self.rot = float(rot) % 360
+        self._b = tuple(local)
+        self._t = tuple(tht_local) if tht_local is not None else None
+
+    def rect(self, x: float, y: float, rot: float):
+        b = legality.rotate_local_bounds(*self._b, rot)
+        return (x + b[0], y + b[1], x + b[2], y + b[3])
+
+    def tht_rect(self, x: float, y: float, rot: float):
+        if self._t is None:
+            return None
+        t = legality.rotate_local_bounds(*self._t, rot)
+        return (x + t[0], y + t[1], x + t[2], y + t[3])
+
+
+def intent_zone_keepout_problems(intent, blocks, pcb_data,
+                                 pcb_file: str = '') -> List['Violation']:
+    """`intent_zone_in_keepout`, both the #702 case and the #799 one.
+
+    TOTAL COVERAGE RUNS FIRST, unchanged, and its Violation is byte-identical to
+    the one #702 shipped. Only when it says nothing does the per-member search
+    run. Three things that buys: #702's behaviour is preserved exactly, a disc
+    keeps the exact total-coverage answer `_swallows` can give it, and the
+    compatibility argument becomes auditable -- the widened check can only ADD
+    findings, and only where `_swallows` already said no.
+
+    PER MEMBER, because the answer genuinely differs per member: a block's parts
+    have different courtyards, different rotations and different `allow`
+    standing. A per-block verdict computed on one member, or on a synthetic
+    block bbox, is wrong for the others -- measured, a 2x2 part and an 8x8 part
+    in the same zone under the same keep-out disagree.
+
+    Members whose geometry is the +/-0.5mm FICTION (no courtyard AND no pads)
+    are skipped: it is not geometry anyone drew, so it must never gate. Note
+    `QuenchState.graded_parts()` never sets that flag -- only
+    `legality.part_local_bounds` does -- so this reads it from there rather than
+    from a `GradedPart`, which would silently always be False.
+    """
+    out: List[Violation] = []
+    zoned = [z for z in intent.blocks
+             if z.rect is not None and blocks.get(z.name)]
+    if not zoned or not intent.keepouts:
+        return out
+
+    member_sides = {}
+    for ref in sorted(pcb_data.footprints or {}):
+        fp = pcb_data.footprints[ref]
+        member_sides[ref] = legality.sides_occupied(
+            legality.footprint_side(fp), legality.footprint_has_through_pads(fp))
+
+    for z in zoned:
+        tol = intent.zone_tolerance(z)
+        mine = {r: member_sides[r] for r in blocks.get(z.name, ())
+                if r in member_sides}
+        hit = zone_covered_by_keepout(z, intent.keepouts, mine, tol)
+        if hit is not None:
+            out.append(Violation(
+                rule='intent_zone_in_keepout', block=z.name,
+                severity=intent.severity_of('intent_zone_in_keepout'),
+                message=(f"block {z.name!r} declares a zone that keep-out "
+                         f"{hit!r} covers entirely: its members are required "
+                         f"to be somewhere they are forbidden to be. No pose "
+                         f"satisfies both, so such a member can never LEAVE "
+                         f"its zone under the optimizer's monotone intent "
+                         f"gate, and cannot clear the keep-out without "
+                         f"leaving it"),
+                measured={'zone': list(z.rect), 'keepout': hit},
+                expected={'overlap': 'partial or none'}))
+
+    # Geometry only once the cheap tests are past, and only if some zoned
+    # member is actually bound by a keep-out. On every board that declares no
+    # keep-out -- which is every board `emit_intent` can write -- this function
+    # has already returned, so it costs no file read at all.
+    needs = [z for z in zoned
+             if any(keepouts_for_ref(intent.keepouts, r, member_sides[r])
+                    for r in blocks.get(z.name, ()) if r in member_sides)]
+    if not needs:
+        return out
+    locals_ = legality.part_local_bounds(pcb_data, pcb_file or None)
+    named = {v.block for v in out}
+
+    for z in needs:
+        if z.name in named:          # already reported as total coverage
+            continue
+        tol = intent.zone_tolerance(z)
+        for ref in blocks.get(z.name, ()):
+            lb = locals_.get(ref)
+            if lb is None or lb.synthetic:
+                continue
+            bound = keepouts_for_ref(intent.keepouts, ref, member_sides[ref])
+            if not bound:
+                continue
+            fp = pcb_data.footprints[ref]
+            part = _LocalPart(fp.rotation or 0.0, lb.local, lb.tht_local)
+            v = zone_pose_feasibility(z.rect, tol, part, bound)
+            if v['feasible']:
+                continue
+            names = list(v['keepouts_freeing'] or v['keepouts_joint'])
+            joint = v['reason'] == 'keepout_joint'
+            which = ', '.join(repr(n) for n in names)
+            out.append(Violation(
+                rule='intent_zone_in_keepout', block=z.name, ref=ref,
+                severity=intent.severity_of('intent_zone_in_keepout'),
+                message=(
+                    f"block {z.name!r} member {ref} has no pose inside its "
+                    f"zone, at any of {len(v['rotations'])} rotations, that "
+                    f"clears keep-out(s) {which} -- "
+                    + ("which refuse it JOINTLY: no single one of them "
+                       "leaves it a pose, and dropping all of them does"
+                       if joint else
+                       "which is what refuses it: lifting it would leave a "
+                       "pose"
+                       if len(names) == 1 else
+                       "which together leave it none -- lifting any one of "
+                       "them would give it a pose") +
+                    f". No pose satisfies both, so {ref} can never LEAVE its "
+                    f"zone under the optimizer's monotone intent gate, and "
+                    f"cannot clear the keep-out without leaving it"),
+                measured={'zone': list(z.rect), 'tolerance_mm': tol,
+                          'ref': ref, 'reason': v['reason'],
+                          'keepouts_freeing': list(v['keepouts_freeing']),
+                          'keepouts_joint': list(v['keepouts_joint']),
+                          'rotations': [round(r, 3) for r in v['rotations']],
+                          'anchor_graded': zone_is_anchor(z.rect, part, tol),
+                          'from_courtyard': lb.from_courtyard},
+                expected={'legal_poses': '>= 1'}))
+    return out
 
 
 def rule_zone_containment(ctx) -> Iterator[Violation]:
@@ -1459,7 +2017,7 @@ RULES = (
 #: next reader can see which names are the exception and why.
 _NON_RULE_SEVERITIES = frozenset({
     'intent_zone_outside_envelope', 'intent_zone_overlap', 'block_unresolved',
-    'intent_zone_in_keepout'})
+    'intent_zone_in_keepout', 'keepout_allow_unresolved'})
 
 #: Every rule name an intent may set a severity for. Derived from `RULES`, so a
 #: new rule is settable the moment it is registered -- a hand-listed set would
@@ -1616,7 +2174,10 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     blocks, block_problems = resolve_blocks(intent, pcb_data, group_sources)
     ctx = _Ctx(intent, pcb_data, pcb_file, state, blocks, locked, outline)
 
-    violations = list(validate_intent(intent)) + list(block_problems)
+    violations = (list(validate_intent(intent)) + list(block_problems)
+                  + list(unresolved_keepout_allows(intent, pcb_data))
+                  + list(intent_zone_keepout_problems(
+                      intent, blocks, pcb_data, pcb_file)))
     ran: List[str] = []
     skipped: Dict[str, str] = {}
     # Budget keys the emitter withheld and that are therefore NOT graded.
