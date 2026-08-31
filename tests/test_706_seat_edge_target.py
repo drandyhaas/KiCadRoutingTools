@@ -20,6 +20,30 @@ The two assertions that carry this file:
 Inertness is proved by DIFF, not by inspection: `wk/` is gitignored so the
 recorded baseline lives here, taken by running `upstream/main`'s own
 `_seat_edge` over the same lattice.
+
+The mutation battery that defends this file is `tests/mutate_711.py`. MEASURED,
+from the run, on the commit that added it:
+
+    33 rows: 33 killed, 0 survived, 0 broken, 0 disagreeing with expectation
+
+It did not start there. The first run reported 26 killed and SIX rows
+disagreeing, and every one was a real hole:
+
+  * four `#712` schema rows survived because the along-edge REFUSALS were
+    tested nowhere. `KEY_SETS` and the every-known-key fixture pin the two new
+    names, so the keys were covered and the validation was not -- pinning a
+    key is not testing what it refuses;
+  * `rotation-guard-deleted` survived because the three corpus parts it
+    asserts on cannot seat at ANY rotation, so "they did not rotate" held with
+    or without the guard;
+  * `rotation-gate-open-to-undeclared` survived because the sweep it was
+    checked against keeps the part overhanging, where a different gate blocks
+    first.
+
+And the battery poisoned itself once: `READER_VERSION = 2` -> `= 1` is the SAME
+NUMBER OF BYTES, and CPython caches bytecode on (mtime, size), so a restore
+inside one timestamp tick left every later import reading the mutant. It now
+clears `__pycache__` around every row and restores byte-exactly.
 """
 import json
 import os
