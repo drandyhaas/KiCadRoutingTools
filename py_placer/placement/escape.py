@@ -66,11 +66,100 @@ class FaceLedger:
     blocked_mm: float         # span lost to neighbours / outline
     blockers: Tuple[str, ...]  # WHO ate it -- the actionable field
     nets: Tuple[int, ...]
+    # --- the layer term (#700). APPENDED and DEFAULTED, so every existing
+    # construction keeps working and every existing key keeps its value.
+    via_pitch_mm: float = 0.0
+    signal_layers: int = 1
+    signal_layers_source: str = 'unknown'
 
     @property
     def deficit(self) -> int:
-        """Lanes short. Positive means the face cannot pass its own nets."""
+        """Lanes short. Positive means the face cannot pass its own nets.
+
+        OWN-LAYER, and it stays that way. `deficit_floor` is the layer-aware
+        number; this one is what `health_escape_worst_deficit`, board_brief's
+        POSITION_DEPENDENT keys and `options.move_blocker`'s lanes-to-mm
+        conversion have always meant.
+        """
         return max(0, self.demand - self.supply)
+
+    @property
+    def via_slots(self) -> int:
+        """Vias that fit in ONE row along this face -- UNOBSTRUCTED.
+
+        Measured on `span_mm`, not on `span_mm - blocked_mm`, and the
+        asymmetry with `supply` on the same row is deliberate. `blocked_mm`
+        comes from `_blocked_span`, which is side-blind and container-blind:
+        on rp2350, U8's pad rect CONTAINS U6's, so 6.90 of a 6.90mm face is
+        charged to it, and one of that face's four blockers sits on the
+        opposite board side. Feeding that into an upper bound turns the bound
+        into a lower one with no warning. Over-stating is inside this term's
+        contract -- it may never be used to PASS a face; under-stating is not.
+
+        ONE ROW, and the arithmetic is the reason rather than the caution. A
+        second-row via must be reached BETWEEN two first-row vias: the copper
+        gap there is `via_pitch - via_diameter`, and a track needs
+        `track_width + 2*clearance`. At the repo defaults that is 0.25mm
+        available against 0.80mm needed; at glasgow_revC's own netclass, 0.20
+        against 0.60. Row two is reachable only by thinning row one to
+        alternate slots, which nets about zero -- and that recursion is the
+        min-cost-flow escape model this module's docstring declines to be.
+        """
+        if self.via_pitch_mm <= 0:
+            return 0
+        return int(self.span_mm // self.via_pitch_mm)
+
+    @property
+    def other_layer_lanes(self) -> int:
+        """Lanes the OTHER signal layers could carry along this face.
+
+        `int(span // lane)`, NOT `(signal_layers - 1) * supply`. Multiplying
+        by `supply` makes the whole term vanish exactly where the deficit is:
+        a face in deficit is overwhelmingly one whose channel was eaten, so
+        `supply` is 0 and so is any multiple of it. Measured -- rp2350's U6,
+        the worst part on the 6-layer board that motivated #700, has supply 0
+        on all four faces and would have scored a layer term of zero. Inner
+        copper layers carry no footprint bodies, so charging them the
+        SURFACE's blockage was never right anyway.
+        """
+        if self.lane_pitch_mm <= 0 or self.signal_layers <= 1:
+            return 0
+        return (self.signal_layers - 1) * int(self.span_mm // self.lane_pitch_mm)
+
+    @property
+    def supply_other_max(self) -> int:
+        """Upper bound on nets this face could shed onto the other layers."""
+        return min(self.via_slots, self.other_layer_lanes)
+
+    @property
+    def supply_bound(self) -> str:
+        """WHICH term binds -- the actionable half, and the honest one.
+
+        `via_slots` is layer-INDEPENDENT by construction, so the `min` above
+        saturates almost at once: on every in-repo board the answer at 2
+        signal layers equals the answer at 6. Hiding that inside a `min()`
+        would reproduce #700 one level up -- a number that does not move with
+        the layer count. Naming the binding term turns it into the finding:
+        "six layers do not help this face because the via row binds at 9, not
+        because the layers are not there", and the action follows from that
+        (via geometry, underpad fanout, freeing span) in a way that "add
+        layers" never did.
+        """
+        if self.signal_layers <= 1:
+            return 'no_other_layer'
+        return ('via_slots' if self.via_slots <= self.other_layer_lanes
+                else 'layer_lanes')
+
+    @property
+    def deficit_floor(self) -> int:
+        """A LOWER BOUND on the deficit: short even using every other layer.
+
+        The dual of an upper bound on supply, and named so nobody reads it as
+        "the real total". `deficit_floor > 0` is a STRICTLY STRONGER verdict
+        than `deficit > 0`; `deficit_floor == 0` proves nothing at all, which
+        is why nothing gates on it.
+        """
+        return max(0, self.demand - self.supply - self.supply_other_max)
 
     def to_dict(self):
         return {'ref': self.ref, 'face': self.face,
@@ -79,7 +168,15 @@ class FaceLedger:
                 'supply': self.supply, 'demand': self.demand,
                 'deficit': self.deficit,
                 'blocked_mm': round(self.blocked_mm, 3),
-                'blockers': list(self.blockers), 'nets': len(self.nets)}
+                'blockers': list(self.blockers), 'nets': len(self.nets),
+                # The layer term. The board-wide values (via_pitch_mm,
+                # signal_layers, signal_layers_source) live on PartEscape
+                # rather than being repeated on all four faces.
+                'via_slots': self.via_slots,
+                'other_layer_lanes': self.other_layer_lanes,
+                'supply_other_max': self.supply_other_max,
+                'supply_bound': self.supply_bound,
+                'deficit_floor': self.deficit_floor}
 
 
 @dataclass(frozen=True)
@@ -90,17 +187,46 @@ class PartEscape:
     faces: Tuple[FaceLedger, ...]
     interior_pads: int        # need a via, not a lane -- a FANOUT signal
     interior_nets: Tuple[int, ...]
+    plane_layers_found: Tuple[str, ...] = ()   # #700, disclosure only
 
     @property
     def worst(self) -> Optional[FaceLedger]:
         live = [f for f in self.faces if f.deficit > 0]
         return max(live, key=lambda f: (f.deficit, f.face)) if live else None
 
+    @property
+    def worst_floor(self) -> Optional[FaceLedger]:
+        """The worst face by `deficit_floor` -- short on EVERY layer.
+
+        A property as well as a `to_dict` key, deliberately: `worst_deficit`
+        exists only as a key, and `getattr(p, 'worst_deficit', 0)` therefore
+        returned 0 silently and turned "38 faces are short" into "0". That
+        trap is documented in three places in this repo; one is enough.
+        """
+        live = [f for f in self.faces if f.deficit_floor > 0]
+        return (max(live, key=lambda f: (f.deficit_floor, f.face))
+                if live else None)
+
     def to_dict(self):
+        f0 = self.faces[0] if self.faces else None
         return {'ref': self.ref, 'pitch_mm': round(self.pitch_mm, 4),
                 'faces': [f.to_dict() for f in self.faces],
                 'interior_pads': self.interior_pads,
                 'interior_nets': len(self.interior_nets),
+                # Board-wide, so reported once rather than on all four faces.
+                'via_pitch_mm': round(f0.via_pitch_mm, 4) if f0 else 0.0,
+                'signal_layers': f0.signal_layers if f0 else 1,
+                'signal_layers_source': (f0.signal_layers_source if f0
+                                         else 'unknown'),
+                # Named even when the clamp kept signal_layers at 1: on
+                # interf_u_plane BOTH copper layers are 98% pours, and "this
+                # board has no signal layer left" is a fact a reader should
+                # see rather than infer from a clamped 1.
+                'plane_layers_found': list(self.plane_layers_found),
+                'worst_deficit_floor': (self.worst_floor.deficit_floor
+                                        if self.worst_floor else 0),
+                'worst_face_floor': (self.worst_floor.face
+                                     if self.worst_floor else None),
                 'worst_face': self.worst.face if self.worst else None,
                 'worst_deficit': self.worst.deficit if self.worst else 0}
 
@@ -175,6 +301,189 @@ def fine_pitch_parts(pcb_data, min_pads: int = MIN_PADS) -> List[str]:
     return out
 
 
+#: A copper layer is a PLANE when a named-net, board-level zone covers at
+#: least this much of the board's bounding box. Measured across the corpus:
+#: real planes cover 0.94-0.98 (kit-dev-coldfire B.Cu 0.98 / In1.Cu 0.94 /
+#: In2.Cu 0.95, interf_u_plane 0.98 on both, sonde_u 0.96, flat_hierarchy
+#: 0.95), while lvds_converter_dualclk's B.Cu zone -- which carries an EMPTY
+#: net name -- covers 0.0002. Nothing in the corpus sits between, so any
+#: threshold in (0.001, 0.94) separates them; 0.5 is "covers most of the
+#: board", which is what the word plane means. Erring high costs a signal
+#: layer, which is the conservative direction here (fewer layers -> smaller
+#: supply bound -> larger deficit_floor).
+MIN_PLANE_AREA_FRACTION = 0.5
+
+
+def via_pitch(pcb_data, pcb_file: Optional[str] = None,
+              clearance: Optional[float] = None,
+              via_diameter: Optional[float] = None,
+              via_drill: Optional[float] = None,
+              hole_to_hole: Optional[float] = None) -> float:
+    """Centre-to-centre spacing of two escape vias, at the board's OWN floor.
+
+    The via-side twin of `lane_pitch`, and resolved by the SAME policy for the
+    same reason -- board Default netclass, then the repo defaults, and NO fab
+    wrap. Fab-flooring one half while the other stays board-first is not a
+    conservative choice, it is an incommensurate one: measured, a fab-floored
+    via pitch against this module's board-first lane pitch takes the ledger's
+    summed deficit to ZERO on four of six real boards (tigard 41->0,
+    rp2350 121->0, ulx3s 19->0, watchy 25->0). A supply term that erases the
+    finding it is annotating is not a supply term.
+
+    The rule itself is `fab_tiers.min_via_center_distance` -- the #491
+    arithmetic, `max(via_diameter + clearance, via_drill + hole_to_hole)`,
+    where using only the copper half ships legal copper the fab cannot drill.
+    Reached through `fab_tiers` rather than `diff_pair_routing` because that
+    import costs +126 modules including the Rust router and numpy, into a
+    module whose docstring promises numpy only.
+
+    `clearance` is passed in by the ledger from `lane_pitch`'s OWN resolution
+    rather than resolved again here, so the two halves of a face's arithmetic
+    cannot price the same board at different clearances.
+    """
+    import routing_defaults as defaults
+    from fab_tiers import min_via_center_distance
+    path = pcb_file or getattr(pcb_data, 'source_path', None)
+    want = {'clearance': clearance, 'via_diameter': via_diameter,
+            'via_drill': via_drill, 'hole_to_hole': hole_to_hole}
+    fallback = {'clearance': defaults.CLEARANCE,
+                'via_diameter': getattr(defaults, 'VIA_SIZE', 0.5),
+                'via_drill': getattr(defaults, 'VIA_DRILL', 0.3),
+                'hole_to_hole': getattr(defaults, 'HOLE_TO_HOLE_CLEARANCE',
+                                        0.2)}
+    if path and any(v is None for v in want.values()):
+        try:
+            import list_nets
+            dr = list_nets.read_design_rules(path)
+            for key, val in want.items():
+                if val is None:
+                    got, _src = list_nets.board_floor(path, key, None,
+                                                      fallback[key], dr)
+                    want[key] = got
+        except Exception:                       # noqa: BLE001 - best effort
+            pass
+    for key, val in want.items():
+        if not val:
+            want[key] = fallback[key]
+    return min_via_center_distance(want['via_diameter'], want['clearance'],
+                                   want['via_drill'], want['hole_to_hole'])
+
+
+def signal_layer_count(pcb_data, *, signal_layers: Optional[int] = None,
+                       plane_layers: Optional[Sequence[str]] = None
+                       ) -> Tuple[int, str, Tuple[str, ...]]:
+    """``(count, source, plane_layers_found)`` -- copper layers that can
+    RECEIVE an escape.
+
+    Precedence, most authoritative first:
+
+      ``declared_count``   an explicit ``signal_layers=``. The only channel
+                           `options.add_layers` can use, since it is asking
+                           about a stackup this board does not have yet.
+      ``declared_planes``  caller-named plane layers, spelled the way
+                           ``health.ignore_net_ids`` is.
+      ``zones``            OBSERVED: layers carrying a named-net, board-level
+                           zone covering >= MIN_PLANE_AREA_FRACTION of the
+                           board bbox.
+      ``copper_layers``    every copper layer. The honest default, and the
+                           one that will nearly always fire -- placement runs
+                           BEFORE the pours exist, and measured, 0 of the six
+                           boards the placer actually runs on (glasgow,
+                           tigard, rp2350, watchy, ulx3s, orangecrab)
+                           declares a single zone. `rp2350_fpga_eensy_prePlane`
+                           says so in its own filename. This source is
+                           OPTIMISTIC and every consumer must print it.
+      ``unknown``          no copper-layer list at all. Returns 1, so the
+                           layer term contributes exactly ZERO and the ledger
+                           reports today's numbers unchanged.
+
+    There is deliberately no heuristic: `route.py`'s own docstring states that
+    this toolchain "cannot auto-detect which layers are ground planes vs
+    signal layers", and the parser DISCARDS the declared layer type (issue
+    #76 widened the copper filter to accept 'power'/'mixed'/'jumper', and the
+    pcbnew path has no type at all). So this either observes a pour or is
+    told.
+
+    CLAMPED AT 1, and the clamp is not padding: interf_u_plane is a 2-layer
+    board with 98% pours on BOTH sides, so the raw subtraction is 0 and
+    ``(L-1) * x`` would go NEGATIVE -- an upper bound TIGHTENING a verdict,
+    the one thing this term must never do.
+
+    The part's OWN layer is always counted, plane or not, because `supply`
+    already measures that layer directly; this only decides how many OTHERS
+    exist. Never returns None: `tests/test_board_brief.py` fails on any
+    undeclared None leaf, with a message about position dependence that reads
+    as unrelated.
+    """
+    cu = [l for l in (getattr(getattr(pcb_data, 'board_info', None),
+                              'copper_layers', None) or [])
+          if str(l).endswith('.Cu')]
+    if signal_layers is not None:
+        return max(1, int(signal_layers)), 'declared_count', ()
+    if not cu:
+        return 1, 'unknown', ()
+    if plane_layers is not None:
+        found = tuple(sorted({l for l in plane_layers if l in cu}))
+        return max(1, len(cu) - len(found)), 'declared_planes', found
+    found = _pour_layers(pcb_data, cu)
+    if found:
+        return max(1, len(cu) - len(found)), 'zones', found
+    bounds = getattr(getattr(pcb_data, 'board_info', None),
+                     'board_bounds', None)
+    # "I could not look" is not "there is nothing there". A board with no
+    # bounds cannot be measured for pours, and the fallback is the OPTIMISTIC
+    # answer, so the source string has to say why.
+    return len(cu), ('copper_layers' if bounds else
+                     'copper_layers (bounds unreadable; pours not measurable)'
+                     ), ()
+
+
+def _pour_layers(pcb_data, copper) -> Tuple[str, ...]:
+    """Copper layers carrying a board-level, named-net, board-sized pour."""
+    bounds = getattr(getattr(pcb_data, 'board_info', None),
+                     'board_bounds', None)
+    zones = getattr(pcb_data, 'zones', None) or []
+    if not bounds or not zones:
+        return ()
+    board_area = max(1e-9, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]))
+    out = set()
+    for z in zones:
+        layer = getattr(z, 'layer', None)
+        if layer not in copper or layer in out:
+            continue
+        if not (getattr(z, 'net_name', '') or '').strip():
+            continue          # a keep-out or an unnamed sliver, not a plane
+        if getattr(z, 'in_footprint', False):
+            continue          # a footprint's own local pour
+        poly = getattr(z, 'polygon', None) or ()
+        if len(poly) < 3:
+            continue
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        # Bounding box of the outline, not its exact area: this is a
+        # "does it cover most of the board" test with a 500x margin between
+        # the two populations, not an area measurement.
+        if ((max(xs) - min(xs)) * (max(ys) - min(ys)) / board_area
+                >= MIN_PLANE_AREA_FRACTION):
+            out.add(layer)
+    return tuple(sorted(out))
+
+
+def lane_pitch_parts(pcb_data, pcb_file: Optional[str] = None,
+                     track_width: Optional[float] = None,
+                     clearance: Optional[float] = None
+                     ) -> Tuple[float, float]:
+    """``(track_width, clearance)`` as `lane_pitch` resolves them.
+
+    Split out so the VIA half of a face's arithmetic can be priced at the
+    clearance the LANE half used, rather than resolving the board a second
+    time down a slightly different path. Two reads that agree on 27 of 27
+    in-repo boards still agree by coincidence; this makes them agree by
+    construction.
+    """
+    return _lane_parts(pcb_data, pcb_file, track_width, clearance)
+
+
 def lane_pitch(pcb_data, pcb_file: Optional[str] = None,
                track_width: Optional[float] = None,
                clearance: Optional[float] = None) -> float:
@@ -186,6 +495,11 @@ def lane_pitch(pcb_data, pcb_file: Optional[str] = None,
     structural finding. Explicit arguments win, then the board's Default
     netclass, then the repo defaults.
     """
+    tw, clr = _lane_parts(pcb_data, pcb_file, track_width, clearance)
+    return tw + clr
+
+
+def _lane_parts(pcb_data, pcb_file, track_width, clearance):
     import routing_defaults as defaults
     path = pcb_file or getattr(pcb_data, 'source_path', None)
     if path and (track_width is None or clearance is None):
@@ -204,7 +518,7 @@ def lane_pitch(pcb_data, pcb_file: Optional[str] = None,
         clearance = defaults.CLEARANCE
     if not track_width:
         track_width = getattr(defaults, 'TRACK_WIDTH', 0.25)
-    return float(track_width) + float(clearance)
+    return float(track_width), float(clearance)
 
 
 def _part_rect(fp) -> Tuple[float, float, float, float]:
@@ -311,13 +625,22 @@ def _blocked_span(pcb_data, ref, rect, face, reach, courtyards=None):
 
 def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                 ignore_net_ids: Optional[Sequence[int]] = None,
-                reach_mm: Optional[float] = None) -> PartEscape:
+                reach_mm: Optional[float] = None,
+                via_pitch_mm: Optional[float] = None,
+                signal_layers: int = 1,
+                signal_layers_source: str = 'unknown',
+                plane_layers_found: Sequence[str] = ()) -> PartEscape:
     """The full per-face ledger for one part.
 
     `ignore_net_ids` drops plane-routed rails, exactly as elsewhere in this
     module: a GND pad does not need a lane, it needs a via to the plane, and
     counting it as demand reports a deficit on every power-heavy face of every
     board.
+
+    The layer arguments default to "no other layer", so a caller that does not
+    pass them gets exactly today's numbers: `signal_layers=1` makes
+    `other_layer_lanes` zero, which makes `supply_other_max` zero, which makes
+    `deficit_floor == deficit`.
     """
     fp = pcb_data.footprints[ref]
     ignored = set(ignore_net_ids or ())
@@ -349,28 +672,60 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
             ref=ref, face=f, span_mm=span, lane_pitch_mm=lane,
             supply=int(usable // lane) if lane > 0 else 0,
             demand=len(nets), blocked_mm=blocked, blockers=blockers,
-            nets=nets))
+            nets=nets,
+            via_pitch_mm=float(via_pitch_mm or 0.0),
+            signal_layers=max(1, int(signal_layers)),
+            signal_layers_source=signal_layers_source))
     return PartEscape(ref=ref, pitch_mm=pitch, faces=tuple(faces),
                       interior_pads=len(interior),
-                      interior_nets=tuple(sorted(set(interior))))
+                      interior_nets=tuple(sorted(set(interior))),
+                      plane_layers_found=tuple(plane_layers_found or ()))
 
 
 def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
                   pcb_file: Optional[str] = None,
                   track_width: Optional[float] = None,
                   clearance: Optional[float] = None,
-                  ignore_net_ids: Optional[Sequence[int]] = None
+                  ignore_net_ids: Optional[Sequence[int]] = None,
+                  reach_mm: Optional[float] = None,
+                  via_diameter: Optional[float] = None,
+                  via_drill: Optional[float] = None,
+                  hole_to_hole: Optional[float] = None,
+                  signal_layers: Optional[int] = None,
+                  plane_layers: Optional[Sequence[str]] = None
                   ) -> List[PartEscape]:
     """Ledgers for every fine-pitch part, worst deficit first.
 
     Returns [] on a board with no fine-pitch parts, which is the common case
     and is not a failure -- there is simply no escape question to ask.
+
+    `signal_layers` / `plane_layers` feed the #700 layer term. Left alone they
+    are OBSERVED (a board-sized pour makes a layer a plane) and otherwise
+    every copper layer counts -- see `signal_layer_count`, whose `source` is
+    reported so a reader can see which answer they got. `reach_mm` reaches
+    `part_escape`'s escape-band depth, which was previously unreachable
+    through this entry point at all.
     """
-    lane = lane_pitch(pcb_data, pcb_file, track_width, clearance)
+    tw, clr = lane_pitch_parts(pcb_data, pcb_file, track_width, clearance)
+    lane = tw + clr
+    # The via half is priced at the SAME clearance the lane half resolved, so
+    # the two numbers on one row cannot come from different rules.
+    vpitch = via_pitch(pcb_data, pcb_file, clearance=clr,
+                       via_diameter=via_diameter, via_drill=via_drill,
+                       hole_to_hole=hole_to_hole)
+    nsig, source, planes = signal_layer_count(
+        pcb_data, signal_layers=signal_layers, plane_layers=plane_layers)
     targets = list(refs) if refs is not None else fine_pitch_parts(pcb_data)
     out = [part_escape(pcb_data, r, pitch_mm=lane,
-                       ignore_net_ids=ignore_net_ids)
+                       ignore_net_ids=ignore_net_ids, reach_mm=reach_mm,
+                       via_pitch_mm=vpitch, signal_layers=nsig,
+                       signal_layers_source=source, plane_layers_found=planes)
            for r in targets if r in pcb_data.footprints]
+    # Sorted by the OWN-LAYER deficit, unchanged. It selects `escape_lanes[:10]`
+    # and board_brief's `worst[:WORST_N]`, and feeds
+    # `health_escape_worst_deficit` -- so re-sorting on `deficit_floor` would
+    # move a published number. Consequence to know: the part with the largest
+    # `deficit_floor` is not necessarily first, and can be truncated away.
     out.sort(key=lambda p: (-(p.worst.deficit if p.worst else 0), p.ref))
     return out
 

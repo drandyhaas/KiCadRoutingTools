@@ -287,6 +287,33 @@ def count_copper_layers_in_file(pcb_path):
         return 0
 
 
+def count_copper_layers_in_data(pcb_data):
+    """Copper layers on an IN-MEMORY board -- the twin of
+    ``count_copper_layers_in_file``.
+
+    The file twin returns 0 for a live GUI board whose ``board_info.copper_layers``
+    is perfectly good, which is why ``placement.options.add_layers`` skipped
+    entirely on one ("could not count this board's copper layers") and why
+    ``fanout_clearance.resolve_drill_floors`` says so in its own docstring.
+
+    Returns 0 when the list is missing or empty -- the SAME "I could not look"
+    value its file twin returns, and deliberately NOT a 2-or-4 guess. The
+    ~25 sites that open-code this expression each spell their own fallback and
+    they DISAGREE (``or 2`` in check_drc and fanout_clearance, ``or 4`` and
+    ``else 2`` in the fanouts), so folding them into one helper would silently
+    re-bucket boards through ``_layer_bucket`` and change routed output. The
+    fallback stays at the call site, where it is visible.
+
+    Filters on ``.Cu``, matching ``fanout_clearance``. ``check_drc`` does not
+    filter; the two can only disagree on a layer list mixing copper and
+    non-copper names, which neither parse path produces (the text one requires
+    '.Cu' in the name, the pcbnew one maps copper ids through a canonical
+    table).
+    """
+    cu = getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+    return len([l for l in (cu or ()) if str(l).endswith('.Cu')])
+
+
 def min_via_center_distance(via_diameter, clearance, via_drill,
                             hole_to_hole=0.0):
     """Minimum centre-to-centre distance between two via drills (#491).

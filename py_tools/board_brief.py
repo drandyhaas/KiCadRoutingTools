@@ -206,6 +206,13 @@ POSITION_DEPENDENT = (
     'measurements.escape.worst[].faces[].deficit',
     'measurements.escape.worst[].faces[].blocked_mm',
     'measurements.escape.worst[].faces[].blockers',
+    # #700's layer-aware pair. Both derive from `supply`, already listed, so
+    # they inherit its position dependence exactly -- and `worst_face_floor`
+    # is None on a board with no floor-level deficit, the same way
+    # `worst_face` is on a board with no deficit at all.
+    'measurements.escape.worst[].worst_face_floor',
+    'measurements.escape.worst[].worst_deficit_floor',
+    'measurements.escape.worst[].faces[].deficit_floor',
     'measurements.locks.high',
     'measurements.locks.lock_argv',
     'measurements.locks.tally.findings_high',
@@ -247,7 +254,11 @@ POSE_DERIVED_KEPT = (
      'the pile coordinate for any part `mechanical.pose_shared_with` lists'),
     ('measurements.escape.worst[].faces[].face / .demand / .span_mm',
      'which face a net leaves through follows rotation, so the table is '
-     'right about the CURRENT angle only. Per-part totals are invariant'),
+     'right about the CURRENT angle only. Per-part totals are invariant. '
+     '#700\'s via_slots / other_layer_lanes / supply_other_max / '
+     'supply_bound derive from span_mm alone, so they follow rotation the '
+     'same way and are kept for the same reason -- unlike deficit_floor, '
+     'which also reads `supply` and is therefore nulled with it'),
     ('measurements.escape.worst[] membership and order',
      'the ledger is sorted by a deficit that is now null and truncated to '
      'the first 10, so on a board with more than 10 fine-pitch parts this '

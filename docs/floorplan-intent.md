@@ -444,6 +444,40 @@ Three things keep it honest:
   pad does not escape sideways at any pitch; it needs a via. Rolling it into a
   face's demand would blame the face for a fanout problem.
 
+#### The layer term (#700)
+
+`supply` and `deficit` are **own-layer**, and stay that way. Beside them the
+ledger now reports what the other signal layers could take:
+
+    supply_other_max = min(via_slots, (signal_layers - 1) x lanes along the face)
+    deficit_floor    = max(0, demand - supply - supply_other_max)
+
+- **`deficit_floor` is a LOWER bound**, the dual of an upper bound on supply.
+  `deficit_floor > 0` says the face is short *even using every other layer* — a
+  strictly stronger verdict than `deficit > 0`. **`deficit_floor == 0` proves
+  nothing**, which is why nothing gates on it and why the floorplan report
+  prints its line only when it is positive.
+- **`supply_bound` names which term binds**, and that is the actionable half.
+  `via_slots` does not depend on the layer count, so the `min` saturates almost
+  at once — on every in-repo board the answer at 2 signal layers equals the
+  answer at 6. Reported as `via_slots`, that is a finding with an action (via
+  geometry, underpad fanout, freeing span); hidden inside the `min()` it would
+  be a number that mysteriously ignores the stackup, which is the complaint
+  #700 was filed about one level up.
+- **`via_slots` is measured on the face's full span, unobstructed**, while
+  `supply` on the same row is not. Deliberate: `blocked_mm` is side-blind and
+  container-blind (on rp2350, U8's pad rect *contains* U6's and is charged the
+  whole 6.90 mm face), and feeding that into an upper bound would silently turn
+  it into a lower one.
+- **`signal_layers` is observed or declared, never guessed.** A copper layer
+  counts as a plane when a named-net, board-level zone covers most of the board.
+  Placement runs *before* the pours exist, so on a board being placed the answer
+  is usually "every copper layer" — which is **optimistic**, and
+  `signal_layers_source` says so on every row. Declare `plane_layers` under
+  `health` (e.g. `"plane_layers": ["In1.Cu", "In2.Cu"]`) for the real answer;
+  it is spelled the way `health.ignore_net_ids` names the plane *nets*, and it
+  is the channel that actually carries an answer on a board being placed.
+
 Detection is by **pad pitch, not footprint name** (a house library carries no
 pitch in its name) and is deliberately wider than the fanout test: fanout asks
 "is this pad boxed in", which needs interior pads; escape asks "do this face's
