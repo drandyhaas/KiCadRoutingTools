@@ -610,6 +610,7 @@ Examples:
                         zone_of.setdefault(r, z)
                 seeded_pose = {p['reference']: p for p in result['placements']}
                 fixes = []
+                pinned = []
                 for ref in broke:
                     z = zone_of.get(ref)
                     sp = seeded_pose.get(ref)
@@ -619,6 +620,24 @@ Examples:
                     # of this repair silently inert on most boards.
                     if sp is None or ref not in st.parts:
                         continue
+                    # A KiCad-LOCKED part is not this repair's to move (#797).
+                    # `_try_place` does not consult `locked` -- it is a seat
+                    # search, and every OTHER caller filters its candidates
+                    # first -- so without this the repair silently relocates a
+                    # part the user pinned. Measured on glasgow_revC, which is
+                    # what found it: adding `zone_exclusive` to `_repairable`
+                    # made the loop reach two locked FIDUCIALS and move them,
+                    # FID3 from (122.000, 118.500) to (128.000, 92.500) -- a
+                    # 26mm move of an optical alignment target, which is a
+                    # manufacturing fact and not a placement opinion.
+                    #
+                    # The violation is REPORTED instead. A locked part inside
+                    # a declared zone is a contradiction between the file and
+                    # the intent, and only its author can say which one is
+                    # wrong; silently moving the part picks for them.
+                    if getattr(st.parts[ref], 'locked', False):
+                        pinned.append(ref)
+                        continue
                     clr = seeder._try_place(
                         st, ref, sp['new_x'], sp['new_y'], set(),
                         constraint=z.rect if z is not None else None,
@@ -627,6 +646,17 @@ Examples:
                         p2 = st.parts[ref]
                         fixes.append({'reference': ref, 'new_x': p2.x,
                                       'new_y': p2.y, 'new_rotation': p2.rot})
+                if pinned:
+                    # Named, never silent: a reader who sees the grade error
+                    # and no repair line would otherwise conclude the repair
+                    # is broken, when it declined on purpose.
+                    print(f"  NOT repaired, {', '.join(pinned)} "
+                          f"{'is' if len(pinned) == 1 else 'are'} "
+                          f"(locked yes) in the file: a pinned part inside a "
+                          f"declared {' / '.join(_rules)} is a contradiction "
+                          f"between the board and the intent, and only its "
+                          f"author can say which is wrong. Unlock it, or move "
+                          f"the claim off it")
                 if fixes:
                     print(f"  polish walked "
                           f"{', '.join(f['reference'] for f in fixes)} out of "

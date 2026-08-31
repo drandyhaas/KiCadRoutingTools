@@ -50,9 +50,9 @@ MEASURED MUTATION TABLE, from `python3 -X utf8 tests/mutate_797.py`. The edits
 are in that file; these are the verdicts, recorded FROM THE RUN and not
 predicted here:
 
-    24 rows: 21 killed, 3 survived, 0 broken, 0 disagreeing with expectation
+    28 rows: 26 killed, 2 survived, 0 broken, 0 disagreeing with expectation
 
-    the three survivors, recorded rather than deleted:
+    the two survivors, recorded rather than deleted:
       the-grade-threshold-is-ge-not-gt     `> EPS` and `>= EPS` differ on
       the-gate-threshold-is-zero-not-EPS   exactly one input -- an overlap of
                                            1e-6 mm2 -- and no board can produce
@@ -65,18 +65,18 @@ predicted here:
                                            does not import either branch. The
                                            `zero-area-touch` rows are the
                                            killable form and DO guard it.
-      the-reseat-resolves-blocks-at-bare-empty-sources
-                                           no fixture here puts a `group:`-
-                                           shaped block on the re-seat path --
-                                           the synthetic boards have no KiCad
-                                           groups and no sheets, so 'auto' and
-                                           '()' resolve identically on them.
-                                           The guard is by construction.
 
 Two rows exist because the RUN corrected a prediction, not the engine:
 `the-gate-threshold-is-zero-not-EPS` was written expecting a kill and survived
 (see above), and `the-grade-threshold-is-ge-not-gt` was reported BROKEN rather
 than applied, because its one-line anchor matched twice in floorplan.py.
+
+Four more exist because a BLIND REVIEW of this branch found what they name:
+`the-unresolved-zone-guard-is-removed` and
+`the-edge-slide-is-armed-for-keepouts-only` are engine defects this branch had
+introduced; `the-edge-seat-has-no-exclusive-conjunct` and
+`the-repair-list-drops-zone_exclusive` guard the two paths that bypass
+`pose_ok`.
 
 NOT COVERED HERE, and why rather than silently: the courtyard-only measurement
 (a stranger whose LEADS cross a reserved zone is a pose the grade calls clean).
@@ -752,6 +752,44 @@ def arm_P_polish_repair(wd):
               f"overlap {ov}mm2 at {poses(out_a)['R1'][:2]}")
         check("P-a: place_seed exits 0 after repairing itself",
               r.returncode == 0, f"rc={r.returncode}")
+
+    # ---- P-c: the same fault on a LOCKED part ---------------------------
+    # `_try_place` does not consult `locked` -- it is a seat search, and every
+    # other caller filters its candidates first -- so this repair loop will
+    # relocate a pinned part unless it declines. Found on glasgow_revC, where
+    # adding `zone_exclusive` to `_repairable` made the loop reach two locked
+    # FIDUCIALS and move one 26mm.
+    bpath_c = os.path.join(wd, 'Pc-in.kicad_pcb')
+    out_c = os.path.join(wd, 'Pc-out.kicad_pcb')
+    _x_board(bpath_c)
+    with open(bpath_c, encoding='utf-8') as f:
+        _txt = f.read()
+    # Pin R1 the way KiCad does. The fixture writes `(at x y)` per footprint;
+    # `(locked yes)` beside it is what `extract_locked_refs` reads.
+    _txt = _txt.replace('\t\t(at 9.0 6.0)\n',
+                        '\t\t(at 9.0 6.0)\n\t\t(locked yes)\n', 1)
+    with open(bpath_c, 'w', encoding='utf-8') as f:
+        f.write(_txt)
+    r3 = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join('py_placer', 'place_seed.py'), bpath_c, out_c,
+         '--intent', ipath, '--clearance', '0.2',
+         '--board-edge-clearance', '0.5', '--force'],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=REPO, timeout=900, env=env)
+    from kicad_parser import parse_kicad_pcb as _pp
+    _locked_ok = 'R1' in _pp(bpath_c).footprints and \
+        getattr(_pp(bpath_c).footprints['R1'], 'locked', False)
+    check("P-c: the fixture really did pin R1, so this arm is not vacuous",
+          _locked_ok, f"R1 locked in the input: {_locked_ok}")
+    if _locked_ok and os.path.exists(out_c):
+        p3 = poses(out_c)['R1'][:2]
+        check("P-c: the LOCKED part was not moved by the repair",
+              p3 == (9.0, 6.0),
+              f"seat {p3}, input pose (9.0, 6.0)")
+        check("P-c: and the run SAYS it declined rather than going silent",
+              'NOT repaired' in r3.stdout and 'R1' in r3.stdout,
+              f"decline line present: {'NOT repaired' in r3.stdout}")
 
     # ---- P-b: the ordinary polished run ---------------------------------
     r2, s2, out2 = run(wd, _x_board, it, tag='Pb', polish=True)

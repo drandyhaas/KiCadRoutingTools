@@ -253,6 +253,13 @@ ROWS = [
      "",
      (T797P,), 'KILLED'),
 
+    ('the-repair-moves-a-locked-part', 'ps',
+     "                    if getattr(st.parts[ref], 'locked', False):\n"
+     "                        pinned.append(ref)\n"
+     "                        continue\n",
+     "",
+     (T797S,), 'KILLED'),
+
     ('the-edge-slide-is-armed-for-keepouts-only', 's',
      "            _slide = ((0.0,) if not (state.keepouts_for.get(ref)\n"
      "                                     or state.exclusive_for.get(ref)) else",
