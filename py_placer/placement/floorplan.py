@@ -1150,9 +1150,27 @@ class _Ctx:
         for name, refs in sorted(blocks.items()):
             for r in refs:
                 self.owner.setdefault(r, name)
+        self._decap_pops: Dict[float, tuple] = {}
 
     def sev(self, rule: str) -> str:
         return self.intent.severity_of(rule)
+
+    def decap_populations(self, radius: float):
+        """(near, beyond, orphans), memoised per radius (#794).
+
+        `decap_distance` and `decap_ungraded` divide ONE population between
+        them, so they must read one election -- otherwise "these two rules
+        partition the caps" is a claim about two calls agreeing rather than a
+        property of the code. Memoised because this class's own contract is
+        "built once; rules never re-derive geometry", and the two rules run
+        back to back over the same board.
+        """
+        key = round(float(radius), 6)
+        hit = self._decap_pops.get(key)
+        if hit is None:
+            hit = groups_mod.decap_populations(self.pcb, radius=radius)
+            self._decap_pops[key] = hit
+        return hit
 
 
 def _nearest_edge(rect, bounds) -> str:
@@ -1924,7 +1942,10 @@ def rule_decap_distance(ctx) -> Iterator[Violation]:
     limit = float(limit)
     exempt = tuple(spec.get('exempt') or ())
     radius = float(spec.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM))
-    tethers = groups_mod.decap_tethers(ctx.pcb, radius=radius)
+    # Read through `_Ctx` so this rule and `decap_ungraded` divide ONE
+    # election. `near` is byte-identical to `decap_tethers(radius)` and
+    # `tests/test_792_decap_predicate.py` asserts that on every tracked board.
+    tethers, _beyond, _orphans = ctx.decap_populations(radius)
     for ic in sorted(tethers):
         for cap, dist in tethers[ic]:
             if any(fnmatch.fnmatch(cap, pat) for pat in exempt):
@@ -1937,6 +1958,71 @@ def rule_decap_distance(ctx) -> Iterator[Violation]:
                              f"decouples (limit {limit:.2f}mm)"),
                     measured={'distance_mm': round(dist, 4), 'ic': ic},
                     expected={'max_distance_mm': limit})
+
+
+def rule_decap_ungraded(ctx) -> Iterator[Violation]:
+    """Caps your declared limit never looked at, because they left the horizon.
+
+    `groups.DECAP_RADIUS_MM` prunes the tether list at 5mm, and BOTH the #704
+    emitter and `decap_distance` call it at that same truncation. So a cap that
+    has left the radius is invisible to both: it does not set the limit, and it
+    is never graded against it. Measured on splitflap_driver -- the emitted
+    limit is 3.4618mm, `rules_run` goes up, the verdict is clean, and C3 sits
+    19.30mm from the IC it shares a rail with.
+
+    THE CLAIM IS COVERAGE, NOT COMPLIANCE, and the rule's name says so. It does
+    NOT say the cap violates the limit: at 19mm it is far likelier a bulk or
+    filter cap than a failed decoupler, and asserting a violation would
+    manufacture exactly the kind of finding `_decap_derivation` refuses a
+    percentile limit for. It says: your limit was derived from the caps INSIDE
+    the radius, so it says nothing about this one.
+
+    It names the IC with no hedge. That is safe because the election is
+    radius-free (`groups._elect_tethers`): `beyond` carries the same owner and
+    the same distance `decap_distance` would have reported at a wider radius.
+    The comment that used to sit in `decap_census` claimed otherwise; it was
+    wrong, and `test_792_decap_predicate` now pins the true relation.
+
+    WARN by default, and `severity_of(..., default=WARN)` rather than
+    `ctx.sev`, which hard-defaults to ERROR -- the same load-bearing bypass
+    `unresolved_keepout_allows` needed. Ten tracked boards newly emit this, and
+    on kit-dev it is 12 findings against a limit the emitter itself derived and
+    blessed; at ERROR, `--declare-decaps` would become a flag that fails its
+    own emitting board.
+
+    Armed by `decaps.max_distance_mm`, exactly as `decap_distance` is. A board
+    whose limit the emitter WITHHELD is not silently dropped: `_WITHHELD_RULE`
+    routes the withholding into BOTH rules' skip reasons, and that note already
+    carries the beyond count and the worst distance -- it says more than this
+    rule could, because it says the board cannot support a limit at all.
+    """
+    spec = ctx.intent.decaps or {}
+    limit = spec.get('max_distance_mm')
+    if limit is None:
+        return
+    limit = float(limit)
+    exempt = tuple(spec.get('exempt') or ())
+    radius = float(spec.get('search_radius_mm', groups_mod.DECAP_RADIUS_MM))
+    _near, beyond, _orphans = ctx.decap_populations(radius)
+    sev = ctx.intent.severity_of('decap_ungraded', default=WARN)
+    for cap, ic, dist in beyond:
+        # An author who waived a cap from the distance claim has already
+        # decided about it; telling them it is also ungraded is noise about
+        # their own decision.
+        if any(fnmatch.fnmatch(cap, pat) for pat in exempt):
+            continue
+        yield Violation(
+            rule='decap_ungraded', severity=sev,
+            ref=cap, block=ctx.owner.get(cap),
+            message=(f"{cap} is {dist:.2f}mm from {ic}, the IC it decouples "
+                     f"-- beyond the {radius:.2f}mm tether search radius, so "
+                     f"decap_distance never measured it against the "
+                     f"{limit:.2f}mm limit. That limit was derived from the "
+                     f"caps INSIDE the radius, so it says nothing about this "
+                     f"one"),
+            measured={'distance_mm': round(dist, 4), 'ic': ic,
+                      'search_radius_mm': round(radius, 4)},
+            expected={'max_distance_mm': limit})
 
 
 def rule_must_lock(ctx) -> Iterator[Violation]:
@@ -2005,6 +2091,7 @@ RULES = (
     ('keepout', rule_keepout),
     ('edge_connector', rule_edge_connector),
     ('decap_distance', rule_decap_distance),
+    ('decap_ungraded', rule_decap_ungraded),
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
 )
@@ -2034,6 +2121,7 @@ _SKIP_REASON = {
     'keepout': 'the intent declares no keepouts',
     'edge_connector': 'the intent declares no edge_connectors',
     'decap_distance': 'the intent declares no decaps.max_distance_mm',
+    'decap_ungraded': 'the intent declares no decaps.max_distance_mm',
     'must_lock': 'the intent declares no must_lock patterns',
     'legality': 'the intent declares no legality_budget',
 }
@@ -2050,15 +2138,22 @@ _SKIP_REASON = {
 #: derivable and blamed on no rule -- rather than being silently dropped. A
 #: typo'd withholding note is then visible, which is the whole point of the
 #: channel.
+#: The first element is a TUPLE of rule names since #794, because
+#: `decaps.max_distance_mm` now disarms two rules and a one-rule mapping
+#: would have attached the withholding note to only one of them -- leaving
+#: the other reading a bare skip reason that does not say the emitter tried.
+#: A second table entry under an invented key name would have been worse:
+#: `test_an_unmapped_withheld_key_still_abstains_and_blames_no_rule` exists
+#: to catch exactly that, and a made-up key would land in `budget_abstained`.
 _WITHHELD_RULE = {
-    'overlap_area': ('legality',
+    'overlap_area': (('legality',),
                      lambda i: 'overlap_area' in (i.legality_budget or {})),
-    'oob_count': ('legality',
+    'oob_count': (('legality',),
                   lambda i: 'oob_count' in (i.legality_budget or {})),
-    'oob_amount': ('legality',
+    'oob_amount': (('legality',),
                    lambda i: 'oob_amount' in (i.legality_budget or {})),
     'decaps.max_distance_mm': (
-        'decap_distance',
+        ('decap_distance', 'decap_ungraded'),
         lambda i: (i.decaps or {}).get('max_distance_mm') is not None),
 }
 
@@ -2083,7 +2178,10 @@ def _wants(intent: Intent, rule: str) -> bool:
         return bool(intent.keepouts)
     if rule == 'edge_connector':
         return bool(intent.edge_connectors)
-    if rule == 'decap_distance':
+    if rule in ('decap_distance', 'decap_ungraded'):
+        # ONE arm for both: they divide one population, so a board that
+        # arms one and not the other would report a partition with a
+        # missing half and no way to see that it was missing.
         return (intent.decaps or {}).get('max_distance_mm') is not None
     if rule == 'must_lock':
         return bool(intent.must_lock)
@@ -2193,7 +2291,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
             # that the emitter refused to DERIVE it, on whichever rule the
             # withheld key disarms -- not only on `legality` (#704).
             mine = {k: v for k, v in abstained.items()
-                    if (_WITHHELD_RULE.get(k) or (None,))[0] == name}
+                    if name in (_WITHHELD_RULE.get(k) or ((),))[0]}
             if mine:
                 reason += ('; the emitter WITHHELD ' + ', '.join(
                     f'{k} ({v})' for k, v in sorted(mine.items())))
@@ -2292,16 +2390,35 @@ def decap_census(pcb_data, radius: float = None) -> Dict:
     level down from `rules_run` / `rules_skipped`.
     """
     r = float(groups_mod.DECAP_RADIUS_MM if radius is None else radius)
-    near = groups_mod.decap_tethers(pcb_data, radius=r)
+    # ONE election, partitioned -- not two queries whose relationship has
+    # to be argued. The comment that used to stand here said the unbounded
+    # pass was "a second measurement rather than a superset" because
+    # "nearest chip carrying the rail" could elect a DIFFERENT chip without
+    # the prune. That was never true of this code: `radius` only ever
+    # appeared AFTER the argmin, and the chip list is built before any cap
+    # is considered. Measured, 0 of 357 tethers re-elect. Since #794 the
+    # radius does not reach the election at all, so it is a property of the
+    # code shape rather than a fact about a corpus -- pinned by
+    # `tests/test_792_decap_predicate.py`.
+    near, beyond, orphans = groups_mod.decap_populations(pcb_data, radius=r)
     dists = sorted(d for caps in near.values() for _c, d in caps)
-    # The same query with the radius prune removed. NOT equivalent to
-    # filtering the near result: without the prune, "nearest chip carrying the
-    # rail" can pick a DIFFERENT chip, so this is a second measurement rather
-    # than a superset.
-    far = groups_mod.decap_tethers(pcb_data, radius=float('inf'))
-    beyond = sorted((c, d) for caps in far.values() for c, d in caps
-                    if d > r)
     n = len(dists)
+    # `beyond_radius_refs` is cap-sorted for determinism (#457);
+    # `worst_beyond_mm` is the MAX. Those are two different orderings and
+    # conflating them was a real defect: this key used to read
+    # `beyond[-1][1]` off the ref-sorted list, so it reported the
+    # alphabetically LAST beyond cap rather than the farthest one.
+    # Measured, it understated on 7 of the 14 boards that have any --
+    # kit-dev 10.80 where the truth is 22.89, interf_u 8.39 where it is
+    # 19.82, flat_hierarchy 6.44 where it is 18.42. The number is quoted in
+    # `--declare-decaps` stdout, in the withholding reason, and in
+    # docs/floorplan-intent.md's censoring table, so all three understated
+    # the thing the census exists to disclose.
+    # Counted INDEPENDENTLY of the election, straight off the predicate, so
+    # `unaccounted` is a real subtraction rather than a restatement. A
+    # cap the election silently dropped would show up here as a non-zero.
+    scope = sum(1 for _r, _fp in (pcb_data.footprints or {}).items()
+                if groups_mod.is_decoupling_cap(_fp, _r))
     out = {
         'source': 'auto-tethers',
         'metric': ('cap footprint centroid to IC bounding box, clamped to 0 '
@@ -2310,8 +2427,22 @@ def decap_census(pcb_data, radius: float = None) -> Dict:
         'tethers': n,
         'ics': len(near),
         'beyond_radius': len(beyond),
-        'beyond_radius_refs': [c for c, _d in beyond],   # already sorted
-        'worst_beyond_mm': round(beyond[-1][1], 4) if beyond else None,
+        'beyond_radius_refs': sorted(c for c, _ic, _d in beyond),
+        'worst_beyond_mm': (round(max(d for _c, _ic, d in beyond), 4)
+                            if beyond else None),
+        # The third cause, which no issue named and which the doc used to
+        # blame on a predicate mismatch that does not exist: a cap whose
+        # rail NO chip carries. It has no IC to be far from, so the grader
+        # is right to ignore it -- ten of ulx3s's are bulk and filter caps
+        # upstream of an LC network. The SEEDER is not right to evict it.
+        'no_rail_chip': len(orphans),
+        'no_rail_chip_refs': sorted(orphans),
+        'population': scope,
+        # Whose only correct value is 0, emitted on EVERY board. It is what
+        # turns "the three arms are the whole scope" from a claim into a
+        # number a reader can check, so a future divergence shows up in
+        # every emitted document instead of as a silent set difference.
+        'unaccounted': scope - n - len(beyond) - len(orphans),
     }
     if n:
         # NOT rounded, unlike every other number here. This one is
@@ -2375,9 +2506,22 @@ def _decap_derivation(census: Dict) -> Tuple[Optional[float], Optional[str]]:
                          f"beyond it, worst {census['worst_beyond_mm']}mm)"
                          if census.get('beyond_radius') else ""))
     if n < DECAP_MIN_SAMPLE:
+        # The beyond-population clause is appended HERE too, not only on
+        # the zero-tether arm (#794). Without it `interf_u_unrouted` --
+        # withheld for having one sample, with FOUR caps beyond the radius
+        # and a 19.82mm worst -- abstains with a note that is silent about
+        # them. This channel is how a withholding board learns it has a
+        # horizon problem, since `decap_ungraded` cannot arm without a
+        # limit; a channel that covers one withholding reason and not the
+        # others only looks complete.
         return None, (f"only {n} tether(s) on the emitting board -- a max "
                       f"over {n} sample(s) is a coordinate, not a limit "
-                      f"(DECAP_MIN_SAMPLE={DECAP_MIN_SAMPLE})")
+                      f"(DECAP_MIN_SAMPLE={DECAP_MIN_SAMPLE})"
+                      + (f" ({census['beyond_radius']} rail-sharing cap(s) "
+                         f"lie beyond the {census['search_radius_mm']}mm "
+                         f"search radius, worst "
+                         f"{census['worst_beyond_mm']}mm)"
+                         if census.get('beyond_radius') else ""))
     beyond = int(census.get('beyond_radius', 0))
     total = n + beyond
     if total and beyond / total > DECAP_MAX_CENSORED:
@@ -2747,20 +2891,24 @@ def emit_intent(pcb_data, pcb_file: str, *,
             # from.
             _census['emitted_max_distance_mm'] = _limit
     # What declaring this key COSTS, measured, next to the number itself.
-    # `seeder.seed_from_intent` uses its presence to pull every 2-net-bearing
-    # -pad `C*` out of radial zone packing into stage 2.5, which seats one cap
-    # per supply pin -- a different population from the one graded here (the
-    # grouper tests "exactly two distinct net ids", the seeder "exactly two
-    # net-bearing pads") and a different metric. On ulx3s that is 70 caps
-    # moved to stage 2.5 against 53 graded, 17 of them never graded at all.
-    _scope = {r for r, fp in (pcb_data.footprints or {}).items()
-              if r[:1].upper() == 'C'
-              and len([p for p in fp.pads if p.net_id > 0]) == 2}
-    _census['seeder_scope'] = len(_scope)
-    _census['seeder_scope_ungraded'] = len(
-        _scope - {c for caps in
-                  groups_mod.decap_tethers(pcb_data).values()
-                  for c, _d in caps})
+    # `seeder.seed_from_intent` uses its presence to pull caps out of radial
+    # zone packing into stage 2.5, which seats one cap per supply pin -- a
+    # different question from the one graded here, and since #792 a
+    # different SET: the seeder takes the caps that elect a tether at any
+    # distance, because a cap no chip's rail touches has no pin to be
+    # seated at, ever.
+    #
+    # This used to compute a THIRD spelling of "is this a decap" inline --
+    # case-blind like the grouper, pad-counting like the seeder -- and
+    # report the gap as one number, `seeder_scope_ungraded`. Both are gone.
+    # The number conflated three causes and the doc explained it with a
+    # FOURTH that does not exist: measured over every tracked board, the
+    # three predicates name identical sets and the residue attributable to
+    # them is 0. ulx3s's famous 17 is 7 beyond the radius plus 10 whose
+    # rail no chip carries. The census now reports those separately, and
+    # `unaccounted` stays 0 to say the three arms are the whole scope.
+    _census['seeder_pin_scope'] = (_census['tethers']
+                                   + _census['beyond_radius'])
     return {
         'schema': SCHEMA_VERSION,
         'kind': KIND,

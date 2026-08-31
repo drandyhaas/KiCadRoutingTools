@@ -92,10 +92,13 @@ def build_parser():
                         'the search radius. SEPARATE from --declare-classes '
                         'on purpose -- this key is not a part CLASS, and '
                         'declaring it CHANGES PLACEMENT: place_seed reads it '
-                        'and moves every 2-pin C* out of zone packing into '
-                        'its per-supply-pin stage (ulx3s: 70 caps, of which '
-                        '53 are graded). The tether census is written to '
-                        'context.decap_census either way')
+                        'and moves the caps that elect a tether out of zone '
+                        'packing into its per-supply-pin stage (ulx3s: 60 of '
+                        '70, the other 10 having no rail-carrying chip to be '
+                        'seated at). It also arms decap_ungraded, which reports at WARN '
+                        'the caps beyond the search radius that the limit '
+                        'was never derived from. The tether census is '
+                        'written to context.decap_census either way')
     p.add_argument('--json', metavar='PATH',
                    help='write the full findings (every measurement) as JSON')
     p.add_argument('--group-by', default='auto', metavar='SOURCES',
@@ -184,18 +187,29 @@ def main(argv=None):
             if lim is not None:
                 print(f"  decaps: max_distance_mm {lim} from "
                       f"{cen.get('tethers')} tether(s) -- NOTE: place_seed "
-                      f"READS this key and will seat {cen.get('seeder_scope')}"
-                      f" cap(s) per supply pin instead of zone-packing them, "
-                      f"{cen.get('seeder_scope_ungraded')} of which this rule "
-                      f"never grades")
+                      f"READS this key and will seat "
+                      f"{cen.get('seeder_pin_scope')} cap(s) per supply pin "
+                      f"instead of zone-packing them")
             elif held:
                 print(f"  decaps: max_distance_mm WITHHELD -- {held}")
+            # The two causes are printed SEPARATELY (#792). One number
+            # used to carry both, and the doc explained it with a third
+            # cause -- a predicate mismatch -- that measurement says does
+            # not exist. A reader cannot act on a conflated count: the
+            # first is a grading hole to widen or accept, the second is a
+            # design fact about caps that have no IC at all.
             if cen.get('beyond_radius'):
                 print(f"  decap census: {cen['beyond_radius']} rail-sharing "
                       f"cap(s) lie beyond the {cen['search_radius_mm']}mm "
-                      f"search radius (worst {cen['worst_beyond_mm']}mm) and "
-                      f"are invisible to the rule -- see "
-                      f"context.decap_census")
+                      f"search radius (worst {cen['worst_beyond_mm']}mm), "
+                      f"so the limit was not derived from them -- "
+                      f"decap_ungraded reports them at WARN")
+            if cen.get('no_rail_chip'):
+                print(f"  decap census: {cen['no_rail_chip']} cap(s) have "
+                      f"NO chip carrying their rail "
+                      f"({', '.join(cen.get('no_rail_chip_refs') or [])}) "
+                      f"-- bulk or filter caps with no IC to be near; "
+                      f"graded by nothing, and correctly so")
         return 0
 
     try:
