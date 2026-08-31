@@ -529,6 +529,16 @@ class Corridor:
             # ball row (K11 SDQ13 sent to the bottom face by the order
             # model: refused by its own band, the band being the row).
             run_from = sp.xy(s_i - HEAD_RUN, o_i)
+            # NB a "direct B exit" branch was tried here (2026-08-31:
+            # dest_layer B -> check the straight arrival against real
+            # B copper instead of the F ball field) and measured a
+            # NO-OP: every south-face stub except the westernmost
+            # fails the UPSTREAM-STUB test above first -- face-line
+            # stubs share one offset, so the o-crowding check, not
+            # this pad-field check, is what decides the excursion.
+            # Removing the excursion for B-delivered stubs therefore
+            # needs a different head-on MODEL (arrival along the face
+            # line, ordered by s), not a different clearance test.
             return ctx.pad_obs.seg_clear(run_from, self.stubs[nm])
 
         self.heads_l = [nm for nm in M if head_launch(nm)]
