@@ -496,10 +496,15 @@ def test_stage_one_honours_the_same_declaration():
     frac = seeder.ladder_to_declared_frac(
         part, st.board, 'north', e_lo, e_hi, (px - x0) / (x1 - x0))
     off_mm = (frac - 0.5) * (e_hi - e_lo)
-    # 0.5, not 1.0. The battery caught the earlier bound being EXACTLY the
-    # answer: neutering stage 1's declared start moves J17 by 1.000mm, so
-    # `<= 1.0 + 1e-6` passed on the mutation it was meant to catch.
-    assert abs(off_mm) <= 0.5 + 1e-6, (frac, off_mm)
+    # ASSERT THE CENTRE, not the tolerance. Twice now the bound has BEEN the
+    # answer: `<= 1.0 + 1e-6` passed on a mutation that moved J17 exactly
+    # 1.000mm, and `<= 0.5 + 1e-6` then passed on one that moved it exactly
+    # 0.500mm -- because the window clamp pulls an undeclared start to the
+    # NEAR EDGE of the declared window, which is the tolerance by
+    # construction. What the declaration asks for is the centre, and the
+    # centre is what stage 1 delivers (measured: +0.000mm), so that is what
+    # this asserts, with margin.
+    assert abs(off_mm) <= 0.05, (frac, off_mm)
     # ...and it is NOT merely where the even distribution would have put it.
     assert abs(frac - 1.0 / 3.0) > 0.05 and abs(frac - 2.0 / 3.0) > 0.05, frac
     print(f"  PASS: stage 1 seated J17 with its courtyard centre at frac "

@@ -184,18 +184,22 @@ ROWS = [
      'own rotation {was_rot:g}deg',
      'own rotation {part.rot:g}deg',
      (T706,), KILLED),
-    # Stage 1 carries the declaration TWICE: `_dec` sets the preferred
-    # start, and the window clamp forces the result into the declared range.
-    # The clamp is what actually enforces it -- measured, neutering `_dec`
-    # alone changes nothing, because the clamp pulls the even-distribution
-    # fraction back into the window regardless. `_dec` is kept because it
-    # also arms the `_slide` ladder, and the redundancy is recorded rather
-    # than removed: a row that survives is a finding about the code, not a
-    # licence to delete the row.
+    # Stage 1 carries the declaration TWICE, and the two are not equivalent.
+    # `_dec` sets the preferred start; the window clamp bounds the result.
+    # Measured on splitflap_driver J17 with `center_on_edge {0.5}`: both live
+    # -> x 121.92, the declared CENTRE; `_dec` killed -> 121.42, the near
+    # EDGE of the window, 0.500mm out; the window killed -> 121.92 again,
+    # because `_dec` alone already names the centre; BOTH killed -> 91.44,
+    # frac 1/3, the even distribution.
+    #
+    # So the start is load-bearing and the window is the redundant one -- the
+    # opposite of what an earlier version of this comment recorded, which
+    # survived only because the test's bound was exactly the offset the
+    # mutation produced.
     ('stage-one-ignores-the-declared-start', 'sd',
      "            _dec = _declared_frac(c)",
      "            _dec = None",
-     (T706,), SURVIVED),
+     (T706,), KILLED),
     ('stage-one-drops-the-declared-window', 'sd',
      "            if _win is not None:",
      "            if False:",
