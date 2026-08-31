@@ -10,10 +10,19 @@ intent reserved and then exit 4 against the intent it was built from. That is
 
 WHAT THIS FILE TESTS, and what it deliberately cannot.
 
-The seat gate and the QUENCH gate are ONE implementation by construction: both
-resolve through `quench.build_zone_spec` (membership, the `z.side` filter, and
-the load-bearing `elif` that exempts a member) and both measure through
-`quench.intent_term_values`. So there is nothing to test between those two.
+The seat gate and the QUENCH gate share their resolution and their
+measurement -- both go through `quench.build_zone_spec` (membership, the
+`z.side` filter, and the load-bearing `elif` that exempts a member) and
+`quench.intent_term_values`.
+
+They are NOT identical, and the difference is deliberate: `exclusive_spec`
+drops a zone whose members did not resolve, and the quench's #702 channel does
+not. Measured, one zone: the quench channel binds 2 parts where the seat
+channel binds 0. That is a policy about which claims may STRAND a part, and the
+quench cannot strand one -- see `exclusive_spec`'s own docstring. The pair kept
+exactly in step is the seat gate and the GRADE, because their disagreement is
+an exit 4 on a board the seeder placed correctly, and that is the pair the pose
+lattice below measures.
 
 The GRADER still has its own copy -- `floorplan.rule_zone_exclusive` -- and
 that copy was left alone on purpose: moving its `> EPS` threshold into a shared
@@ -26,8 +35,17 @@ membership set is consulted, which side attribute, which rect, whether the zone
 is tolerance-inflated, and the threshold direction.
 
 What no agreement test can catch is a bug INSIDE a value both sides compute the
-same way. That is what `test_the_EPS_boundary_is_a_strict_gt_on_BOTH_sides`
-exists for, and it is the only assertion here that a `>` -> `>=` mutation fails.
+same way. `test_the_EPS_boundary_is_a_strict_gt_on_BOTH_sides` is what exists
+for that, and its limit must be stated rather than implied: it asserts on LOCAL
+floats and does not import either front's branch, so a `>` -> `>=` edit in
+`rule_zone_exclusive` SURVIVES it -- and survives every other assertion in this
+file. `tests/mutate_797.py` records that row as an expected survivor with the
+reason (no board can produce an overlap of exactly 1e-6 mm2, so the only
+sub-EPS value real geometry yields is 0.0, where every threshold in [0, EPS]
+agrees). The killable form of the same question is the `zero-area-touch` pair,
+which arm X's theorem lands on deliberately. An earlier draft of this paragraph
+claimed this arm was the one that fails such a mutation; it is not, and the
+battery says so.
 
 Every accepting arm is PAIRED with a refusing one over the same geometry. An
 assertion like "the B-side stranger is seated" is satisfied by a gate that is
@@ -113,7 +131,7 @@ def graded_exclusive(pcb, bpath, intent, ref=None, sources=()):
     """`rule_zone_exclusive`'s verdict on the poses CURRENTLY in `pcb`.
 
     In-memory: `floorplan.grade` builds its own QuenchState from `pcb_data`
-    (floorplan.py:1608) and reads `pcb_file` only for the outline and the
+    (floorplan.py:1637) and reads `pcb_file` only for the outline and the
     locked refs, so moving a footprint and re-grading needs no file write.
     """
     res = floorplan.grade(intent, pcb, bpath, group_sources=sources)

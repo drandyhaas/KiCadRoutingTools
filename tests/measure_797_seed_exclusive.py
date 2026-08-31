@@ -16,7 +16,7 @@ minutes, so `tests/run_all.py` must not collect it.
 THE FIXTURE, and its honest description. `floorplan.emit_intent` reads a
 starter intent OFF the board -- one block per derived group, each zone the
 members' bounding box padded 1mm, clamped to the envelope and KEPT ONLY WHERE
-DISJOINT from every other kept zone (floorplan.py:1890-1901). This script then
+DISJOINT from every other kept zone (floorplan.py:1919-1930). This script then
 sets `exclusive: true` on every block that has a zone, BY RULE and never on a
 hand-picked list: a fixture that named its own zones would be fitted to the
 arrangement it is measuring, which is the defect `test_placement_ab.py`'s

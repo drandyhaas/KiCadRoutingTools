@@ -4,7 +4,7 @@
 The boards are HAND-WRITTEN, for the reason `tests/test_701_keepout_seating.py`
 gives for its own: on a corpus board "where would this part have gone" is only
 answerable by re-running the seeder, which makes the control circular. Here a
-single-ref zone gets `jx, jy = (0.0, 0.0)` (seeder.py:1547 -- "a single-member
+single-ref zone gets `jx, jy = (0.0, 0.0)` (seeder.py:1710 -- "a single-member
 zone is the spec-coordinate pattern, so it gets the exact center"), so the seat
 target is the zone centre exactly and the nearest clear pose can be written
 down.

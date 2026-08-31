@@ -299,8 +299,18 @@ and `tests/test_698_reseat_acceptance.py` arm H parses `seeder.py` to keep it
 that way). `zone_exclusive` is a *must-be-outside* claim whose target is clean
 by definition, so it can be — and is — gated **absolutely**, through
 `QuenchState.exclusive_clear` over the `zone_exclusive` slice of the same
-`build_zone_spec` the quench gate reads. One resolution, one measurement, so
-the two gates cannot disagree about which rects bind a stranger.
+`build_zone_spec` the quench gate reads — one resolution and one measurement,
+so neither can invent its own idea of who is a member.
+
+They are not identical, and the one difference is deliberate. The seat slice
+drops a zone whose members did **not resolve**; the quench's per-move channel
+does not. "Stranger" means "not a member", so an unresolved block makes every
+part one, and a gate that can STRAND a part must not act on a claim it cannot
+attribute — while the quench only ever declines a move, so it cannot strand
+anything. `rule_zone_exclusive` carries the same filter, which is what keeps
+the pair that matters in step: a seat the search accepts and the grade then
+flags is an exit 4 on a correct board, and that is the round trip this table's
+`keepout` row records closing for #701.
 
 Enforcing is not free, and the price is recorded rather than described:
 `tests/test_placement_ab.py` carries four `intent-*` rows and
