@@ -92,7 +92,8 @@ def plane_fragility_score(board: str, specs: Sequence[Tuple[str, str]],
         idx = content.rindex(')')
         with open(staged, 'w', encoding='utf-8') as f:
             f.write(content[:idx] + '\n'.join(blocks) + '\n' + content[idx:])
-        for ext in ('.kicad_pro', '.kicad_dru'):
+        from copy_board import SIBLING_EXTS   # ONE list (#711)
+        for ext in SIBLING_EXTS:
             sib = os.path.splitext(board)[0] + ext
             if os.path.isfile(sib):
                 shutil.copyfile(sib, os.path.splitext(staged)[0] + ext)

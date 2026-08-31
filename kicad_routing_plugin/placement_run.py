@@ -122,7 +122,8 @@ def stage_inputs(workdir, snapshot_path, board_filename):
     shutil.copyfile(snapshot_path, staged)
     if board_filename:
         stem = os.path.splitext(os.path.abspath(board_filename))[0]
-        for ext in (".kicad_pro", ".kicad_dru"):
+        from copy_board import SIBLING_EXTS   # ONE list (#711)
+        for ext in SIBLING_EXTS:
             sibling = stem + ext
             if os.path.isfile(sibling):
                 shutil.copyfile(sibling, os.path.join(workdir, "input" + ext))

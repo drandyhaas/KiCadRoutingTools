@@ -32,7 +32,10 @@ from typing import Dict, List, Optional
 # Siblings that make a board mean what it means: the project carries the DRC
 # floor and the net classes, the rules file carries custom DRC. A store that
 # keeps only the .kicad_pcb hands back a board that grades differently.
-SIBLING_EXT = ('.kicad_pro', '.kicad_dru', '.kicad_prl')
+# ONE list, imported (#711). Every hand-written copy of this tuple is a
+# place a new sibling gets stranded; there were nine of them, and
+# tests/test_711_sibling_lists.py now refuses a tenth.
+from copy_board import SIBLING_EXTS as SIBLING_EXT  # noqa: E402
 
 
 def sha256_file(path: str) -> str:

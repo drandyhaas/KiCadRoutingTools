@@ -4949,7 +4949,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 try:
                     from copy_board import SIBLING_EXTS as _sib9
                 except Exception:
-                    _sib9 = ('.kicad_pro', '.kicad_prl', '.kicad_dru')
+                    _sib9 = ('.kicad_pro', '.kicad_prl', '.kicad_dru',
+                             '.design-brief.json')
                 for _q9 in (_p9,) + tuple(os.path.splitext(_p9)[0] + _e
                                           for _e in _sib9):
                     try:

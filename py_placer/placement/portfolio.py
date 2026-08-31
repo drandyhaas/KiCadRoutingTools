@@ -162,7 +162,8 @@ def copy_siblings(src_board: str, dst_board: str) -> None:
     siblings -- the probe routes and any later adoption read them."""
     src_base = os.path.splitext(src_board)[0]
     dst_base = os.path.splitext(dst_board)[0]
-    for ext in ('.kicad_pro', '.kicad_dru', '.kicad_prl'):
+    from copy_board import SIBLING_EXTS   # ONE list (#711)
+    for ext in SIBLING_EXTS:
         s = src_base + ext
         if os.path.isfile(s):
             shutil.copyfile(s, dst_base + ext)

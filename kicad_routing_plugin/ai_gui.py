@@ -84,7 +84,8 @@ def board_path_for_analysis(board_filename):
             # sibling left by an earlier snapshot of a DIFFERENT project
             # must be removed, not inherited.
             import shutil
-            for ext in ('.kicad_pro', '.kicad_dru'):
+            from copy_board import SIBLING_EXTS   # ONE list (#711)
+            for ext in SIBLING_EXTS:
                 sib = (os.path.splitext(board_filename)[0] + ext
                        if board_filename else None)
                 stale = os.path.splitext(snapshot)[0] + ext
