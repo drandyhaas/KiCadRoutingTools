@@ -2035,6 +2035,65 @@ class Corridor:
         self.sched = sched
         self.finish()
 
+    def run_free(self):
+        """A small CORNER corridor: no frame, no schedule -- the
+        machinery that knotted spines and routed the K32 corner group
+        0/5. Each member routes the way the last call routes refusals:
+        the real router, band-free, a wide window round its own chord,
+        margin and budget escalated, against every earlier corridor's
+        REAL copper; the unrouted members' chords ride along as
+        virtual copper (both layers) so the first lane cannot wall the
+        rest, and the widest retry drops even that and lets the
+        obstacle map adjudicate. Farthest member first (the most
+        constrained window)."""
+        ctx, log = self.ctx, self.log
+        M = self.members
+        log(f'\ncorridor {self.idx} ({len(M)}): {M}  FREE corner route')
+        self.build_spine()
+        self.lane_xy = {nm: [self.teeth[nm], self.stubs[nm]] for nm in M}
+        self.req_xy = {nm: [] for nm in M}
+        self.marks = []
+        self.out_segs, self.out_vias = {}, {}
+        self.refused = []
+        import copy as _copy
+        big = _copy.copy(ctx.cfg)
+        big.max_iterations = 4 * max(ctx.cfg.max_iterations, 50_000)
+        routed = set()
+        for nm in sorted(M, key=lambda n: -ts.d2(self.teeth[n],
+                                                 self.stubs[n])):
+            nid, _ = ctx.byname[nm]
+            virt = [(self.teeth[om], self.stubs[om], L)
+                    for om in M if om != nm and om not in routed
+                    for L in ('F.Cu', 'B.Cu')]
+            res = None
+            for cfg_, vv, mg in ((ctx.cfg, virt, 2.0), (big, virt, 2.0),
+                                 (big, None, 4.0)):
+                res = cn.connect(ctx.pcb, nid, self.teeth[nm],
+                                 ctx.tooth_layer[nm], self.stubs[nm],
+                                 ctx.dest_layer[nm], cfg_,
+                                 band=None, margin=mg, virtual=vv)
+                if res is not None:
+                    break
+            if res is None:
+                self.refused.append(nm)
+                self.out_segs[nm] = []
+                self.out_vias[nm] = []
+                log(f'    refused: {nm}')
+                continue
+            segs_o, vias_o = res
+            ctx.pcb.segments.extend(segs_o)
+            ctx.pcb.vias.extend(vias_o)
+            self.out_segs[nm] = segs_o
+            self.out_vias[nm] = vias_o
+            routed.add(nm)
+            log(f'    free-routed: {nm} ({len(vias_o)} via(s))')
+        log(f'    lanes: {len(routed)}/{len(M)} routed')
+        if self.refused:
+            log(f'  REFUSED lanes (left open): {sorted(self.refused)}')
+        ctx.base_segments = list(ctx.pcb.segments)
+        ctx.base_vias = list(ctx.pcb.vias)
+        ctx.laid.extend(self.lane_xy[nm] for nm in M)
+
     def run_short(self):
         """A corridor too short for a schedule: every lane a straight
         (s, o) line inside its own tube."""
@@ -2141,7 +2200,18 @@ def main():
     corridors = []
     for ci, members in enumerate(groups):
         c = Corridor(ci, members, ctx, log)
-        c.run()
+        if (2 <= len(members) <= 5
+                and os.environ.get('TWO_PAGE') == '1'
+                and os.environ.get('FREE_CORNER', '1') == '1'):
+            # small CORNER corridors skip the spine/schedule machinery
+            # entirely -- it is exactly where that machinery fails
+            # (K32's 5-net corner group routed 0/5 for a month; the
+            # 3-net K35 group knotted its spine). Single-net corridors
+            # keep run_short (recorded K28's SA0 baseline), big ones
+            # keep the full braid. FREE_CORNER=0 restores.
+            c.run_free()
+        else:
+            c.run()
         corridors.append(c)
     return write_out(a, ctx, corridors, names, log)
 
@@ -2243,8 +2313,20 @@ def setup(board, names, dest, log, cluster=6.0):
     # minimum (track + clearance = 0.227) plus 23 um. On a 0.05 grid the
     # cell nearest a lane's centreline can sit 25 um off it -- outside
     # the 23 um that clear the neighbours.
+    # BRAID_VIA_COST: re-price the length-for-vias trade. MEASURED A
+    # LOSER as a search knob (2026-08-31): at 2x and 4x the default
+    # (150/300 vs 75) the ladder is unchanged K4..K21 and K28 goes 50
+    # -> 54 vias, identical at both values -- the braid's vias are
+    # STRUCTURAL (page dive/surface, reserved weaves, legs), so a
+    # costlier via only buys worse detours that force more of them.
+    # The human's +24% length-for-vias trade lives at the PLAN level
+    # (which nets ride which layer end to end), not in the A*. Kept
+    # as a knob for study; unset = default, control re-verified 50/0
+    # exact.
+    _vc = os.environ.get('BRAID_VIA_COST')
     ctx.cfg = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
-                             grid_step=0.025)
+                             grid_step=0.025,
+                             **({'via_cost': float(_vc)} if _vc else {}))
     ctx.base_segments = list(pcb.segments)
     ctx.base_vias = list(pcb.vias)
     ctx.laid = []
