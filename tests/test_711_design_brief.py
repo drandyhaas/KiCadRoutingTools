@@ -22,40 +22,41 @@ What this file is written to hold down:
 The mutation battery that defends this file is `tests/mutate_711.py`. MEASURED,
 from the run:
 
-    35 rows: 33 killed, 2 survived, 0 broken, 0 disagreeing with expectation
+    35 rows: 34 killed, 1 survived, 0 broken, 0 disagreeing with expectation
 
-The two survivors are recorded findings, not conveniences. Stage 1 of
-`seed_from_intent` carries a declared position through TWO paths -- `_dec` sets
-the preferred start, and the window clamp forces the result into the declared
-range whatever the start was -- so disabling either alone changes nothing.
-Measured: both live, J17 lands at x 121.92 (the declared centre); BOTH
-disabled, x 91.44, which is frac 1/3, the even distribution. A third row
-disables both and KILLS, so the pair is load-bearing and the redundancy is
-stated rather than mistaken for coverage.
+The survivor is a recorded finding. Stage 1 of `seed_from_intent` carries a
+declared position through two paths -- `_dec` sets the preferred start, the
+window clamp bounds the result -- and measured on splitflap_driver J17 with
+`center_on_edge {0.5}`: both live -> x 121.92, the declared CENTRE; `_dec`
+killed -> 121.42, the near EDGE of the window; the window killed -> 121.92
+again, because the start alone names the centre; BOTH killed -> 91.44, frac
+1/3, the even distribution. So the start is load-bearing and the window is
+redundant, and a third row disabling both KILLS.
 
-It did not start there. The first run reported 26 killed and SIX rows
-disagreeing, and every one was a real hole:
+Getting there took four rounds, and every correction was to a claim of mine
+rather than to the code under test:
 
-  * four `#712` schema rows survived because the along-edge REFUSALS were
-    tested nowhere. `KEY_SETS` and the every-known-key fixture pin the two new
-    names, so the keys were covered and the validation was not -- pinning a
-    key is not testing what it refuses;
+  * the first run reported 26 killed and SIX disagreeing. Four `#712` schema
+    rows survived because the along-edge REFUSALS were tested nowhere --
+    `KEY_SETS` pins the two new names, so the keys were covered and the
+    validation was not. Pinning a key is not testing what it refuses;
   * `rotation-guard-deleted` survived because the three corpus parts it
     asserts on cannot seat at ANY rotation, so "they did not rotate" held with
     or without the guard;
-  * `rotation-gate-open-to-undeclared` survived because the sweep it was
-    checked against keeps the part overhanging, where a different gate blocks
-    first.
+  * the stage-1 fixture used a SINGLE declared connector, and the even
+    distribution for one entry is (0+1)/(1+1) = 0.5 -- exactly what
+    `center_on_edge` asks for -- so it could not tell the declaration from the
+    default;
+  * and THE BOUND WAS THE ANSWER, twice. `<= 1.0 + 1e-6` passed on a mutation
+    that moved the part exactly 1.000mm; tightened to 0.5 it passed on one
+    that moved it exactly 0.500mm, because the window clamp lands on the near
+    edge of the declared window, which IS the tolerance by construction. The
+    assertion is on the CENTRE now, which is what the declaration asks for.
 
-A later run found one more: the stage-1 fixture used a SINGLE declared
-connector, and the even distribution for one entry is (0+1)/(1+1) = 0.5 --
-exactly what `center_on_edge` asks for -- so it could not tell the declaration
-from the default. It uses two now.
-
-And the battery poisoned itself once: `READER_VERSION = 2` -> `= 1` is the SAME
-NUMBER OF BYTES, and CPython caches bytecode on (mtime, size), so a restore
-inside one timestamp tick left every later import reading the mutant. It now
-clears `__pycache__` around every row and restores byte-exactly.
+The battery also poisoned itself once: `READER_VERSION = 2` -> `= 1` is the
+SAME NUMBER OF BYTES, and CPython caches bytecode on (mtime, size), so a
+restore inside one timestamp tick left every later import reading the mutant.
+It clears `__pycache__` around every row and restores byte-exactly.
 """
 import copy
 import json
