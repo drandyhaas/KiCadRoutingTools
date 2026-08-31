@@ -1722,7 +1722,15 @@ class Corridor:
         # cheap. FREE_SWIM=0 restores the tube.
         free_swim = swim and os.environ.get('FREE_SWIM', '1') == '1'
         if free_swim:
-            margin = 2.0
+            # BRAID_SWIM_MARGIN: the obs-cache A/B accidentally
+            # measured that WINDOW SIZE is a completion constraint at
+            # K35 -- with corridor-wide windows the swimmer class
+            # closed 4 open -> 1 (at +22 vias and 2x time, via the
+            # cache's fence move). This decouples the window from the
+            # cache: widen just the free swimmers' search margin.
+            margin = float(os.environ.get('BRAID_SWIM_MARGIN', '2.0'))
+            if getattr(self, '_swim_boost', False):
+                margin = max(margin, 6.0)
         pieces = os.environ.get('LANE_PIECES') == '1'
         way = [(self.teeth[nm], ctx.tooth_layer[nm])]
         if pieces and nm in self.join_block:
@@ -1746,7 +1754,8 @@ class Corridor:
             res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg, band=band,
                              virtual=virt, margin=margin,
                              window_pts=self.lane_xy[nm],
-                             virtual_vias=virt_vias)
+                             virtual_vias=virt_vias,
+                             cache=getattr(self, '_obs_cache', None))
             if res is None:
                 # discard the partial copper
                 if added:
@@ -1822,6 +1831,21 @@ class Corridor:
         if self.reserved:
             log('  reserved: ' + ', '.join(f'[{a:.2f},{b:.2f}]' for a, b in self.reserved)
                 + f'  (free {self.L_free:.2f} of {self.s1 - self.s0:.2f} mm)')
+        self._obs_cache = None
+        if os.environ.get('BRAID_OBS_CACHE', '0') == '1':
+            # corridor-shared obstacle base (see cn.ObsCache): opt-in
+            # perf path -- the fence moves to the corridor's edge, so
+            # grades must be re-earned before any default flip
+            try:
+                self._obs_cache = cn.ObsCache(
+                    ctx.pcb, {ctx.byname[nm][0] for nm in M},
+                    [self.teeth[nm] for nm in M]
+                    + [self.stubs[nm] for nm in M]
+                    + list(self.spine.pts), ctx.cfg)
+                log('  obs-cache: corridor window + base map built')
+            except Exception as e:
+                log(f'  obs-cache: disabled ({e})')
+                self._obs_cache = None
         sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log,
                          dest_layer=ctx.dest_layer,
                          pages=getattr(ctx, 'pages', None))
@@ -1856,6 +1880,8 @@ class Corridor:
             ctx.pcb.segments = list(ctx.base_segments)
             ctx.pcb.vias = list(ctx.base_vias)
             self.out_segs, self.out_vias = {}, {}
+            if getattr(self, '_obs_cache', None) is not None:
+                self._obs_cache.reset()
             divers = set(sched.divers)
             if sched.two_page:
                 # RIBBON order: the rigid lanes first -- the pages, in
@@ -1895,11 +1921,18 @@ class Corridor:
                     big = _copy.copy(cfg0)
                     big.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
                     ctx.cfg = big
+                    # the retry also WIDENS a free swimmer's window:
+                    # the sm ladder measured window size as the
+                    # completion constraint (K35 margin 6.0: 4 open ->
+                    # 1, +22 vias) -- pay the wide search only on
+                    # refusal, so the cheap path stays cheap
+                    self._swim_boost = True
                     try:
                         res = self.route_lane(nm, self.virtual_of(unrouted),
                                               self.virtual_vias_of(unrouted))
                     finally:
                         ctx.cfg = cfg0
+                        self._swim_boost = False
                     if res is not None:
                         log(f'    rescued at x4 budget: {nm}')
                     else:
@@ -1918,6 +1951,8 @@ class Corridor:
                 segs_o, vias_o = res
                 self.out_segs[nm] = segs_o
                 self.out_vias[nm] = vias_o
+                if getattr(self, '_obs_cache', None) is not None:
+                    self._obs_cache.note(ctx.byname[nm][0], segs_o, vias_o)
             nv = sum(len(v) for v in self.out_vias.values())
             log(f'    lanes: {len(routed)}/{len(M)} routed, {nv} via(s)')
             # keep the BEST attempt, not the last: the feedback is a
@@ -2008,7 +2043,7 @@ class Corridor:
                     # BAND is walled (wc SA0: corridor 2's band under
                     # corridor 1's copper, 5-via detour at 2.0) may
                     # have a short path just outside the first window
-                    for mg in (2.0, 4.0):
+                    for mg in (2.0, 4.0, 6.0):
                         res = cn.connect(
                             ctx.pcb, nid, self.teeth[nm],
                             ctx.tooth_layer[nm],
@@ -2019,6 +2054,13 @@ class Corridor:
                             virtual_vias=self.virtual_vias_of(others))
                         if res is not None:
                             break
+                    if res is None and os.environ.get('RIP_CALL', '1') == '1':
+                        # RIP-ASSISTED LAST CALL: the final refusals
+                        # fail because ONE earlier lane took their
+                        # corridor. Try the routed lanes nearest the
+                        # refused chord as single rip victims; keep
+                        # only a rip where BOTH nets re-route.
+                        res = self._rip_assist(nm, others, log)
                     if res is None:
                         log(f'    last call: {nm} still refused')
                         continue
@@ -2034,6 +2076,80 @@ class Corridor:
                 ctx.cfg = cfg0
         self.sched = sched
         self.finish()
+
+    def _rip_assist(self, nm, others, log):
+        """One-victim rip for a lane the last call still refuses: the
+        routed lanes nearest the refused net's own chord, tried one at
+        a time -- pull the victim's copper, route the refused net wide
+        (the last call's own search, ctx.cfg is already the x4
+        budget), re-route the victim the same way; kept only when
+        BOTH land, restored exactly otherwise. The braid-native form
+        of what route.py's rip-up wins the same fights with. Returns
+        the refused net's (segs, vias) NOT yet on the board (the
+        caller's bookkeeping adds them), or None. RIP_CALL=0
+        disables; it can only fire where something already refused,
+        so a complete board is untouched by construction."""
+        ctx = self.ctx
+        a_, b_ = self.teeth[nm], self.stubs[nm]
+        nid, _ = ctx.byname[nm]
+
+        def chord_d(om):
+            segs = self.out_segs.get(om) or []
+            if not segs:
+                return 1e9
+            return min(ts.seg_seg_dist((s.start_x, s.start_y),
+                                       (s.end_x, s.end_y), a_, b_)
+                       for s in segs)
+        cands = sorted((om for om in self.members
+                        if om != nm and self.out_segs.get(om)),
+                       key=chord_d)[:3]
+        virt = self.virtual_of(others)
+        vv = self.virtual_vias_of(others)
+        for om in cands:
+            ids_s = {id(s) for s in self.out_segs[om]}
+            ids_v = {id(v) for v in self.out_vias[om]}
+            seg0 = list(ctx.pcb.segments)
+            via0 = list(ctx.pcb.vias)
+            ctx.pcb.segments = [s for s in seg0 if id(s) not in ids_s]
+            ctx.pcb.vias = [v for v in via0 if id(v) not in ids_v]
+            r1 = cn.connect(ctx.pcb, nid, a_, ctx.tooth_layer[nm],
+                            b_, ctx.dest_layer[nm], ctx.cfg,
+                            band=None, margin=2.5, virtual=virt,
+                            window_pts=self.lane_xy[nm],
+                            virtual_vias=vv)
+            if r1 is not None:
+                s1_, v1_ = r1
+                ctx.pcb.segments.extend(s1_)
+                ctx.pcb.vias.extend(v1_)
+                oid, _ = ctx.byname[om]
+                r2 = cn.connect(ctx.pcb, oid, self.teeth[om],
+                                ctx.tooth_layer[om], self.stubs[om],
+                                ctx.dest_layer[om], ctx.cfg,
+                                band=None, margin=2.5, virtual=virt,
+                                window_pts=self.lane_xy[om],
+                                virtual_vias=vv)
+                if r2 is not None:
+                    s2_, v2_ = r2
+                    ctx.pcb.segments.extend(s2_)
+                    ctx.pcb.vias.extend(v2_)
+                    self.out_segs[om], self.out_vias[om] = s2_, v2_
+                    # hand the refused net's copper back through the
+                    # caller's bookkeeping: remove the tentative add
+                    id1s = {id(x) for x in s1_}
+                    id1v = {id(x) for x in v1_}
+                    ctx.pcb.segments = [s for s in ctx.pcb.segments
+                                        if id(s) not in id1s]
+                    ctx.pcb.vias = [v for v in ctx.pcb.vias
+                                    if id(v) not in id1v]
+                    log(f'    rip-assist: ripped {om}; {nm} routed '
+                        f'({len(v1_)} via), {om} re-laid '
+                        f'({len(v2_)} via)')
+                    return s1_, v1_
+            ctx.pcb.segments = seg0
+            ctx.pcb.vias = via0
+        log(f'    rip-assist: no viable victim for {nm} '
+            f'(tried {[c for c in cands]})')
+        return None
 
     def run_free(self):
         """A small CORNER corridor: no frame, no schedule -- the
@@ -2067,7 +2183,7 @@ class Corridor:
                     for L in ('F.Cu', 'B.Cu')]
             res = None
             for cfg_, vv, mg in ((ctx.cfg, virt, 2.0), (big, virt, 2.0),
-                                 (big, None, 4.0)):
+                                 (big, None, 4.0), (big, None, 6.0)):
                 res = cn.connect(ctx.pcb, nid, self.teeth[nm],
                                  ctx.tooth_layer[nm], self.stubs[nm],
                                  ctx.dest_layer[nm], cfg_,

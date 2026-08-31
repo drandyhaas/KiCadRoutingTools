@@ -36,6 +36,8 @@ from obstacle_map import (build_base_obstacle_map,  # noqa: E402
                           add_same_net_via_clearance,
                           add_same_net_pad_drill_via_clearance,
                           same_net_pad_via_keepout_cells)
+from obstacle_cache import (precompute_net_obstacles,  # noqa: E402
+                            add_net_obstacles_from_cache)
 from routing_context import _add_free_via_positions  # noqa: E402
 from net_rescue import _fence_window, _result_escapes_window  # noqa: E402
 from single_ended_routing import route_net_with_obstacles  # noqa: E402
@@ -55,6 +57,65 @@ def make_config(pcb: PCBData, track: float, clearance: float,
     return GridRouteConfig(track_width=track, clearance=clearance,
                            via_size=via_size, via_drill=via_drill,
                            grid_step=grid_step, layers=layers, **kw)
+
+
+class ObsCache:
+    """Corridor-shared obstacle state (BRAID_OBS_CACHE=1). ONE window
+    over the whole corridor and ONE base obstacle map (fence included,
+    every member's copper excluded), built once; per connect() call
+    the base is CLONED and the other members' cached cells batch-added
+    -- the profile's biggest sink was 193 connect calls each
+    rebuilding window+map from scratch (29 s of the 62 s K28 braid).
+    Routed copper is noted incrementally; reset() at attempt start.
+    NOT bit-identical to the uncached path: the fence sits at the
+    corridor's edge instead of each lane's own box, so searches see a
+    larger legal area -- grades must be re-earned, hence the gate."""
+
+    def __init__(self, pcb, member_ids, pts, cfg, margin=3.0):
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        half = max(max(xs) - min(xs), max(ys) - min(ys)) / 2 + margin
+        self.cfg = cfg
+        self.members = set(member_ids)
+        self.window = make_local_window(pcb, cx, cy, half)
+        self.base = build_base_obstacle_map(self.window, cfg,
+                                            list(self.members))
+        _fence_window(self.base, self.window, cfg)
+        self.static = {nid: precompute_net_obstacles(self.window, nid, cfg)
+                       for nid in self.members}
+        self.extra = {}
+        self._box = (cx - half, cy - half, cx + half, cy + half)
+
+    def covers(self, pts):
+        x0, y0, x1, y1 = self._box
+        return all(x0 + 0.4 <= p[0] <= x1 - 0.4
+                   and y0 + 0.4 <= p[1] <= y1 - 0.4 for p in pts)
+
+    def reset(self):
+        self.extra = {}
+
+    def note(self, nid, segs, vias):
+        import copy as _c
+        shell = _c.copy(self.window)
+        shell.segments = list(segs)
+        shell.vias = list(vias)
+        shell.footprints = {}
+        self.extra.setdefault(nid, []).append(
+            precompute_net_obstacles(shell, nid, self.cfg))
+
+    def virtual_data(self, virt, virt_vias, layer_map):
+        import copy as _c
+        shell = _c.copy(self.window)
+        shell.segments = [Segment(p[0], p[1], q[0], q[1],
+                                  self.cfg.track_width, layer, VIRTUAL_NET)
+                          for (p, q, layer) in (virt or [])
+                          if layer in layer_map]
+        shell.vias = [Via(p[0], p[1], self.cfg.via_size,
+                          self.cfg.via_drill, list(self.cfg.layers),
+                          VIRTUAL_NET) for p in (virt_vias or [])]
+        shell.footprints = {}
+        return precompute_net_obstacles(shell, VIRTUAL_NET, self.cfg)
 
 
 def tube_mask(xs: np.ndarray, ys: np.ndarray, pieces, layer: str
@@ -159,7 +220,8 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             track_width: Optional[float] = None,
             verbose: bool = False,
             window_pts: Optional[List[Point]] = None,
-            virtual_vias: Optional[List[Point]] = None
+            virtual_vias: Optional[List[Point]] = None,
+            cache: Optional['ObsCache'] = None
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """Route `net_id` from the copper end at `a` (on `a_layer`) to the
     copper end at `b` (on `b_layer`).
@@ -187,41 +249,68 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         raise ValueError(f'layer not routable: {a_layer} / {b_layer}')
 
     pts = [a, b] + list(window_pts or [])
-    bx0, bx1 = min(p[0] for p in pts), max(p[0] for p in pts)
-    by0, by1 = min(p[1] for p in pts), max(p[1] for p in pts)
-    cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
-    half = max(bx1 - bx0, by1 - by0) / 2 + margin
-    window = make_local_window(pcb, cx, cy, half)
-    if not window.board_info.board_bounds:
-        return None
-    if virtual:
-        w = track_width if track_width is not None else cfg.track_width
-        window.segments = list(window.segments) + [
-            Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
-            for (p, q, layer) in virtual if layer in layer_map]
-    if virtual_vias:
-        # vias that do not exist yet but will: a point a later lane
-        # must change layer at (the corner where it turns onto its exit
-        # leg), stamped as a foreign via so this connection keeps a
-        # via's clearance from it -- a track's band edge is exactly a
-        # via's clearance from the neighbour's centreline, so a lane
-        # hugging its band edge there left the neighbour's corner no
-        # legal via site (K19 SCAS)
-        window.vias = list(window.vias) + [
-            Via(p[0], p[1], cfg.via_size, cfg.via_drill, list(cfg.layers),
-                VIRTUAL_NET) for p in virtual_vias]
+    if cache is not None and net_clearances is None \
+            and track_width is None and cache.covers(pts):
+        # CACHED PATH (BRAID_OBS_CACHE=1): clone the corridor's base
+        # map, batch-add the other members' cached copper (static
+        # stubs + lanes routed so far this attempt), stamp the
+        # virtual copper from a shell, then the per-net extras.
+        window = cache.window
+        obstacles = cache.base.clone()
+        for oid in cache.members:
+            if oid == net_id:
+                continue
+            add_net_obstacles_from_cache(obstacles, cache.static[oid])
+            for d in cache.extra.get(oid, ()):
+                add_net_obstacles_from_cache(obstacles, d)
+        if virtual or virtual_vias:
+            add_net_obstacles_from_cache(
+                obstacles, cache.virtual_data(virtual, virtual_vias,
+                                              layer_map))
+        _add_free_via_positions(obstacles, window, [net_id], cfg)
+        add_same_net_via_clearance(obstacles, window, net_id, cfg)
+        add_same_net_pad_drill_via_clearance(obstacles, window, net_id,
+                                             cfg)
+        keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
+        if len(keep):
+            obstacles.add_blocked_vias_batch(keep)
+    else:
+        bx0, bx1 = min(p[0] for p in pts), max(p[0] for p in pts)
+        by0, by1 = min(p[1] for p in pts), max(p[1] for p in pts)
+        cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+        half = max(bx1 - bx0, by1 - by0) / 2 + margin
+        window = make_local_window(pcb, cx, cy, half)
+        if not window.board_info.board_bounds:
+            return None
+        if virtual:
+            w = track_width if track_width is not None else cfg.track_width
+            window.segments = list(window.segments) + [
+                Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
+                for (p, q, layer) in virtual if layer in layer_map]
+        if virtual_vias:
+            # vias that do not exist yet but will: a point a later lane
+            # must change layer at (the corner where it turns onto its
+            # exit leg), stamped as a foreign via so this connection
+            # keeps a via's clearance from it -- a track's band edge is
+            # exactly a via's clearance from the neighbour's
+            # centreline, so a lane hugging its band edge there left
+            # the neighbour's corner no legal via site (K19 SCAS)
+            window.vias = list(window.vias) + [
+                Via(p[0], p[1], cfg.via_size, cfg.via_drill,
+                    list(cfg.layers), VIRTUAL_NET) for p in virtual_vias]
 
-    obstacles = build_base_obstacle_map(window, cfg, [net_id],
-                                        net_clearances=net_clearances)
-    _fence_window(obstacles, window, cfg)
-    # the net's own barrels are free layer changes, and its own via/drill
-    # spacing still applies (the rescue recipe, #470 and the h2h guard)
-    _add_free_via_positions(obstacles, window, [net_id], cfg)
-    add_same_net_via_clearance(obstacles, window, net_id, cfg)
-    add_same_net_pad_drill_via_clearance(obstacles, window, net_id, cfg)
-    keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
-    if len(keep):
-        obstacles.add_blocked_vias_batch(keep)
+        obstacles = build_base_obstacle_map(window, cfg, [net_id],
+                                            net_clearances=net_clearances)
+        _fence_window(obstacles, window, cfg)
+        # the net's own barrels are free layer changes, and its own
+        # via/drill spacing still applies (the rescue recipe, #470 and
+        # the h2h guard)
+        _add_free_via_positions(obstacles, window, [net_id], cfg)
+        add_same_net_via_clearance(obstacles, window, net_id, cfg)
+        add_same_net_pad_drill_via_clearance(obstacles, window, net_id, cfg)
+        keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
+        if len(keep):
+            obstacles.add_blocked_vias_batch(keep)
     if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
         cells = _band_cells(coord, window, band, list(cfg.layers),
