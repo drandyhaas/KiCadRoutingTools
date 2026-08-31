@@ -218,11 +218,35 @@ ROWS = [
      "        try:",
      (T_SNAP, T_RESEAT), 'KILLED'),
 
+    # The half of the reseat fix that is easy to get subtly wrong, and did not
+    # have a row until a review pointed it out: keep the anchor-relative VALUE
+    # but key the dedup on the absolute pose. Every slot still satisfies "on
+    # the anchor's lattice", so the phase assertion cannot see it -- what it
+    # loses is SLOTS, silently, at half-cell anchor phases.
+    ('the-reseat-dedup-key-is-not-injective', 'rs',
+     "        kx = round((x - ax) / grid_step)\n"
+     "        ky = round((y - ay) / grid_step)\n"
+     "        key = (kx, ky, round(rot, 3))",
+     "        kx = round((x - ax) / grid_step)\n"
+     "        ky = round((y - ay) / grid_step)\n"
+     "        key = (round((ax + kx * grid_step) / grid_step),\n"
+     "               round((ay + ky * grid_step) / grid_step),\n"
+     "               round(rot, 3))",
+     (T_SNAP,), 'KILLED'),
+
     ('the-reseat-slot-snaps-the-absolute-point', 'rs',
-     "        sx = ax + snap_to_grid(x - ax, grid_step)\n"
-     "        sy = ay + snap_to_grid(y - ay, grid_step)",
-     "        sx = snap_to_grid(x, grid_step)\n"
-     "        sy = snap_to_grid(y, grid_step)",
+     "        kx = round((x - ax) / grid_step)\n"
+     "        ky = round((y - ay) / grid_step)\n"
+     "        key = (kx, ky, round(rot, 3))\n"
+     "        if key not in seen:\n"
+     "            seen.add(key)\n"
+     "            out.append((ax + kx * grid_step, ay + ky * grid_step, rot))",
+     "        kx = round(x / grid_step)\n"
+     "        ky = round(y / grid_step)\n"
+     "        key = (kx, ky, round(rot, 3))\n"
+     "        if key not in seen:\n"
+     "            seen.add(key)\n"
+     "            out.append((kx * grid_step, ky * grid_step, rot))",
      (T_SNAP, T_RESEAT), 'KILLED'),
 ]
 

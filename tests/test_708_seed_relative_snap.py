@@ -473,6 +473,37 @@ def t_the_two_repair_sites_are_seed_relative_but_not_coarsened():
         report('reseat: the identity poses are the members\' own, untouched',
                identity == [(st.parts[m].x, st.parts[m].y, st.parts[m].rot)
                             for m in c.members], str(identity[:1]))
+    # The dedup KEY has to be injective on what it emits, and none of the
+    # assertions above can see that it isn't. A key taken on the ABSOLUTE pose
+    # while the value is anchor-relative collapses two adjacent steps whenever
+    # `anchor / grid_step` sits at a half cell (banker's rounding:
+    # round(1.5) == round(2.5) == 2). The collapsed slots are simply ABSENT, so
+    # "every slot is distinct" and "every slot is on the anchor's lattice" both
+    # stay true. Only a COUNT catches it, and it has to be a count the broken
+    # key cannot produce.
+    #
+    # orangecrab_ext_pll U4 sits at (174.0500, 102.4000) -- both coordinates at
+    # a half cell of the 0.1 raster. Measured: 5576 ring slots with the
+    # injective key, 5280 with the absolute one.
+    name2 = 'orangecrab_ext_pll'
+    pcb2 = parse_kicad_pcb(board(name2))
+    with contextlib.redirect_stdout(io.StringIO()):
+        st2 = Q.QuenchState(pcb2, board(name2), 0.2, 0.55, 10.0, 0.5, 0.25,
+                            2.0, 2.0, 2.0, grid, 1.0)
+        cl2 = [c for c in RS.clusters_from_tethers(pcb2, st2, 2.0)
+               if c.anchor == 'U4']
+    report('reseat: the half-cell anchor fixture is present', bool(cl2),
+           'U4 at (%.4f, %.4f)' % (st2.parts['U4'].x, st2.parts['U4'].y)
+           if 'U4' in st2.parts else 'absent')
+    if cl2:
+        c2 = cl2[0]
+        with contextlib.redirect_stdout(io.StringIO()):
+            pool2 = RS.slot_pool(st2, c2, grid_step=grid,
+                                 max_positions=100000)
+        ring2 = pool2[:-len(c2.members)]
+        report('reseat: a half-cell anchor loses no slots to the dedup key',
+               len(ring2) == 5576, '%d ring slots (5576 injective, 5280 if '
+               'the key is taken on the absolute pose)' % len(ring2))
 
 
 def t_the_reseat_accepts_on_the_seated_cost_not_the_prediction():
