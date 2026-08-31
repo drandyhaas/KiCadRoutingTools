@@ -826,6 +826,63 @@ impl GridObstacleMap {
         }
     }
 
+    /// SPAN form of remove_blocked_cells_batch (shape: N x 4: gx, y_lo, y_hi, layer).
+    ///
+    /// The unstamp twin of add_blocked_cell_spans_batch, and it must expand to
+    /// the SAME cell multiset that add did -- the per-net obstacle cache stamps
+    /// a net's capsules on entry and unstamps the identical arrays on exit, so
+    /// any asymmetry leaves cells stuck blocked and the router silently loses
+    /// routable space (the invariant route.py asserts:
+    /// working_obstacles == base_obstacles + sum(net_obstacles_cache)).
+    /// Each span lists each of its cells exactly once, so refcounts land
+    /// identically whether the caller used the cell form or this one.
+    pub fn remove_blocked_cell_spans_batch(&mut self, spans: PyReadonlyArray2<i32>) {
+        let arr = spans.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let lo = row[1];
+            let hi = row[2];
+            let layer = row[3] as usize;
+            if layer >= self.num_layers || hi < lo {
+                continue;
+            }
+            for gy in lo..=hi {
+                let key = pack_xy(gx, gy);
+                if let Some(count) = self.blocked_cells[layer].get_mut(&key) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        self.blocked_cells[layer].remove(&key);
+                        self.blocked_bitmap.clear(gx, gy, layer); // S2: 1->0 transition
+                    }
+                }
+            }
+        }
+    }
+
+    /// SPAN form of remove_blocked_vias_batch (shape: N x 3: gx, y_lo, y_hi).
+    pub fn remove_blocked_via_spans_batch(&mut self, spans: PyReadonlyArray2<i32>) {
+        let arr = spans.as_array();
+        for row in arr.rows() {
+            let gx = row[0];
+            let lo = row[1];
+            let hi = row[2];
+            if hi < lo {
+                continue;
+            }
+            for gy in lo..=hi {
+                let key = pack_xy(gx, gy);
+                if let Some(count) = self.blocked_vias.get_mut(&key) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        self.blocked_vias.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
     /// Set stub proximity cost
     pub fn set_stub_proximity(&mut self, gx: i32, gy: i32, cost: i32) {
         let key = pack_xy(gx, gy);

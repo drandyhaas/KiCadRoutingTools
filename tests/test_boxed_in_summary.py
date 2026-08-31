@@ -189,11 +189,23 @@ def _rip_victim_board():
                           layer=lay, locked=True),
                  make_seg(0.6, 3.6, 0.6, 6.4, net_id=WALL, width=0.4,
                           layer=lay, locked=True)]
-    # Right wall: a one-track gap (copper edges 4.6..5.4) on F.Cu; sealed on
-    # B.Cu so a via cannot escape either.
-    segs += [make_seg(3.4, 3.6, 3.4, 4.4, net_id=WALL, width=0.4,
+    # Right wall: a one-track gap on F.Cu; sealed on B.Cu so a via cannot
+    # escape either.
+    #
+    # The wall ends sit at 4.45 / 5.55, NOT 4.4 / 5.6 (#816). With a 0.4-wide
+    # wall, a 0.2 track and 0.2 clearance, a track centre must clear a wall
+    # centreline by 0.2/2 + 0.2 + 0.4/2 = 0.5 exactly -- so at 4.4 / 5.6 the
+    # gap's edge cells land EXACTLY on the keep-out boundary at y = 4.9 and
+    # 5.1, and whether they were open was decided by float rounding. That made
+    # the width of this gap -- the entire point of the fixture -- a boundary
+    # convention rather than a geometry fact, and it changed under #816's tie
+    # epsilon: the gap widened from one cell to three and the race for it
+    # flipped winners. Offsetting by 0.05 puts the limits at 4.95 / 5.05, which
+    # are not grid points at grid_step 0.1, so exactly one cell (y = 5.0) fits
+    # and no rounding rule can change that.
+    segs += [make_seg(3.4, 3.6, 3.4, 4.45, net_id=WALL, width=0.4,
                       layer='F.Cu', locked=True),
-             make_seg(3.4, 5.6, 3.4, 6.4, net_id=WALL, width=0.4,
+             make_seg(3.4, 5.55, 3.4, 6.4, net_id=WALL, width=0.4,
                       layer='F.Cu', locked=True),
              make_seg(3.4, 3.6, 3.4, 6.4, net_id=WALL, width=0.4,
                       layer='B.Cu', locked=True)]
@@ -254,12 +266,21 @@ def case_rip_victim_reroute():
           'path, not the first-pass loop)',
           0 <= i_rip < i_rer < i_box,
           f'rip@{i_rip} reroute@{i_rer} boxed@{i_box}')
+    # B is left BROKEN -- which bucket it lands in is not the invariant. Per
+    # CLAUDE.md a verdict is failed_single + open_single + pad deficit:
+    # `failed_single` means no result at all, `open_single` means a KEPT result
+    # whose pads are still disconnected. Pinning the bucket made this brittle to
+    # geometry: #816's tie epsilon (and the gap-offset above) moved B from
+    # shipping open copper to failing outright, which is if anything the better
+    # outcome and says nothing about victim-priority restore. What #622 is
+    # asserted to do is restore the VICTIM and requeue the RIPPER, so that is
+    # what is checked.
+    _broken = sorted((summary.get('open_single') or [])
+                     + (summary.get('failed_single') or []))
     check('the victim A was restored and the ripper B requeued, so B is the '
           'net left broken (#622 victim-priority restore, default since '
           '31004f43)',
-          summary.get('routed_single') == ['A']
-          and summary.get('open_single') == ['B']
-          and summary.get('failed_single') == []
+          summary.get('routed_single') == ['A'] and _broken == ['B']
           and summary.get('successful') == 1,
           f"routed={summary.get('routed_single')} "
           f"failed={summary.get('failed_single')} "

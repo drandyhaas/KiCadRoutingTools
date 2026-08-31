@@ -413,21 +413,70 @@ _SEG_SPAN_ROWS = 0
 
 
 def _seg_span_row_budget() -> int:
-    # 12 bytes per (gx, lo, hi) int32 row, 40% of the shared raster budget.
-    return int(env_knobs.RASTER_CACHE_MB * 0.40 * 1e6 / 12)
+    # 12 bytes per (gx, lo, hi) int32 row.
+    #
+    # #815: 65% of the shared raster budget, up from 40%. A call-site census on
+    # glasgow_revC put 7,433,001 of 7,585,865 capsule calls (98.0%) in the span
+    # form once the plane builder's two loops migrated, so the cell memo below
+    # no longer needs a large slice -- and the span memo was the one starved,
+    # sitting at 100% of its old budget all run.
+    #
+    # The three raster memos SUM TO 100% of KICAD_RASTER_CACHE_MB and must keep
+    # doing so -- spans 65% + cells 5% + polygons 30% (obstacle_map.
+    # _poly_raster_byte_budget). The polygon share pays for the increase: #818
+    # measured it 58x oversubscribed at 40%, where DOUBLING it bought 1.0 point
+    # of hit rate, so budget moved out of it costs almost nothing and budget
+    # moved into the span memo -- the one starved at exactly 100% all run --
+    # buys the working set outright.
+    return int(env_knobs.RASTER_CACHE_MB * 0.65 * 1e6 / 12)
 
 
 def _seg_capsule_row_budget() -> int:
-    # 8 bytes per (N,2) int32 row. Now 10% of the shared budget, not 50%:
-    # the stamping consumers moved to segment_blocked_spans (40%), and what is
-    # left here serves only the few consumers that iterate cells. LRU-evicted, never wholesale-cleared: profiling showed the old
-    # 64MB clear-all cap cycling ~40x on orangecrab (69% hit rate where the
-    # keyspace supports ~99%).
-    return int(env_knobs.RASTER_CACHE_MB * 0.10 * 1e6 / 8)
+    # 8 bytes per (N,2) int32 row. 5% of the shared budget (#815), down from
+    # 10% and originally 50%: every stamping consumer now takes spans, and what
+    # is left here is the ~2% of traffic that genuinely ITERATES cells --
+    # _add_segment_obstacle_with_exclusion (tests each cell against an
+    # exclusion set) and blocking_analysis. Those have a small keyspace, so the
+    # slice they need is small; the memory belongs to the span memo, which is
+    # where the working set actually lives.
+    #
+    # LRU-evicted, never wholesale-cleared: profiling showed the old 64MB
+    # clear-all cap cycling ~40x on orangecrab (69% hit rate where the keyspace
+    # supports ~99%).
+    return int(env_knobs.RASTER_CACHE_MB * 0.05 * 1e6 / 8)
 
 
 _SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
 _CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
+
+
+# Tie epsilon for every grid keep-out boundary (mm). A cell centre whose
+# distance to the blocking geometry is within this of the threshold is treated
+# as OPEN. Shared by the capsule (here), the polygon rasterizer's consumers and
+# the drill discs (obstacle_map), so the three cannot drift apart.
+#
+# Why this exists: cell centres are computed in ABSOLUTE board coordinates
+# (`gx * grid_step`), and grid_step has no exact binary form, so the same
+# geometry rounds differently at different board positions. Where a cell sits
+# EXACTLY on the boundary the strict `<` is then decided by the last bit --
+# and the repo's own defaults put it there (track 0.3/2 + clearance 0.25 = 0.4
+# = exactly 4 x a 0.1 grid; ~20% of realistic track/clearance/grid combinations
+# do). Measured before this epsilon: the IDENTICAL capsule shape produced up to
+# 25 different cell sets depending only on where it sat on the board, 115 to
+# 138 cells for one shape. That is not a correctness bug -- a cell at exactly
+# `margin` is at exactly the clearance, which DRC passes either way -- but it
+# is arbitrary, and it is why the memo cannot key on shape (identical shapes
+# genuinely disagreed).
+#
+# 1e-6 mm = 1 nm = KiCad's own internal resolution, chosen with headroom
+# measured on both sides:
+#   * float noise to swamp, over a 600 mm board:      0.000034 nm  (29,000x smaller)
+#   * nearest GENUINE non-tie cell to the boundary:    1,498 nm    (1,498x larger)
+# so it deterministically resolves every tie and can never open a cell that is
+# really inside. Opening (rather than blocking) the tie is the safe direction:
+# the resulting gap is exactly the clearance, which passes DRC, and KiCad
+# stores nm integers so a sub-nm violation is not even representable.
+GRID_TIE_EPS = 1e-6
 
 
 def _capsule_mask(x1: float, y1: float, x2: float, y2: float,
@@ -437,6 +486,9 @@ def _capsule_mask(x1: float, y1: float, x2: float, y2: float,
     THE predicate, in one place: both segment_blocked_cells_array and
     segment_blocked_spans derive from this, so the cell form and the span form
     can never disagree about membership.
+
+    Boundary cells are resolved OPEN via `GRID_TIE_EPS` (see above), which
+    makes membership independent of where the capsule sits on the board.
     """
     inv = 1.0 / grid_step
     glo_x = int(math.floor((min(x1, x2) - margin) * inv))
@@ -457,7 +509,11 @@ def _capsule_mask(x1: float, y1: float, x2: float, y2: float,
         np.clip(t, 0.0, 1.0, out=t)
     ddx = cx - (x1 + t * dx)
     ddy = cy - (y1 + t * dy)
-    mask = (ddx * ddx + ddy * ddy) < margin * margin
+    # Shrink by the tie epsilon rather than comparing `< margin` exactly, so a
+    # cell sitting on the boundary is OPEN at every board position instead of
+    # being decided by float rounding.
+    m_eff = margin - GRID_TIE_EPS
+    mask = (ddx * ddx + ddy * ddy) < m_eff * m_eff
     return xs, ys, gxg, gyg, mask
 
 

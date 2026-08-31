@@ -29,6 +29,7 @@ from routing_config import GridRouteConfig, GridCoord
 from obstacle_map import (add_rule_area_keepout_obstacles, _rasterize_polygon,
                           _points_inside_polygon, _points_edge_distance,
                           _block_cells_on_layers, build_base_obstacle_map)
+from routing_utils import GRID_TIE_EPS
 from grid_router import GridObstacleMap
 
 
@@ -71,8 +72,13 @@ def _dense_reference(obstacles, pcb, config):
             poly, coord, margin, clip_bounds=clip)
         if gx_flat is None:
             continue
-        track_mask = inside | (edge_dist < track_clear)
-        via_mask = inside | (edge_dist < via_clear)
+        # Same boundary convention as production (#816): a cell centre sitting
+        # EXACTLY at the clearance resolves OPEN, so the reference models the
+        # same predicate. Without this the reference and the production path
+        # disagree only on tie cells -- which is what the via legs below hit,
+        # since clearance + via_size/2 lands on an exact grid multiple here.
+        track_mask = inside | (edge_dist < track_clear - GRID_TIE_EPS)
+        via_mask = inside | (edge_dist < via_clear - GRID_TIE_EPS)
         for hole in ko.get('holes') or []:
             hp = np.asarray(hole, dtype=np.float64)
             if hp.shape[0] < 3:
@@ -83,8 +89,8 @@ def _dense_reference(obstacles, pcb, config):
             hx2, hy2 = np.roll(hp[:, 0], -1), np.roll(hp[:, 1], -1)
             h_inside = _points_inside_polygon(px, py, hx1, hy1, hx2, hy2)
             h_edge = _points_edge_distance(px, py, hx1, hy1, hx2, hy2)
-            track_mask &= ~(h_inside & (h_edge >= track_clear))
-            via_mask &= ~(h_inside & (h_edge >= via_clear))
+            track_mask &= ~(h_inside & (h_edge >= track_clear - GRID_TIE_EPS))
+            via_mask &= ~(h_inside & (h_edge >= via_clear - GRID_TIE_EPS))
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, track_mask,
                                range(len(layer_list)))
         if via_mask.any():

@@ -65,6 +65,24 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #:
 #: MEASURED, from the run recorded in the pull request. Never predicted.
 #:
+#: RE-RECORDED 2026-08-30 (second time this day). `truth.quality` moved on TWO
+#: of the four rows, and the cause is named rather than assumed: #816's
+#: `GRID_TIE_EPS`, which resolves a keep-out boundary cell OPEN instead of
+#: letting float rounding decide it. esp_prog's geometry sits on such a tie
+#: (track 0.2/2 + clearance 0.2 = 0.3 = 3 x a 0.1 grid), so the router gets a
+#: slightly different -- and now position-INDEPENDENT -- set of legal cells.
+#:
+#:   esp_prog:authored     vias 28 -> 31, copper 320.71 -> 336.35, segs 229 -> 236
+#:   esp_prog:portfolio-1  vias 30 -> 28, copper 303.26 -> 299.93, segs 252 -> 231
+#:   esp_prog:perturb-scatter-d1, splitflap_driver:authored  -- unchanged
+#:
+#: The direction is MIXED (one worse, one better, two flat) and `truth.blocking`
+#: is unchanged on all four -- no net became unrouted or broken. That is what a
+#: boundary-convention change should look like: it perturbs which cells are
+#: legal without making the board harder to route. Recorded here rather than
+#: smoothed over, because "quality moved both ways by a few vias" is the finding.
+#:
+#: PREVIOUS RE-RECORD, same day:
 #: RE-RECORDED 2026-08-30. `truth.quality` moved on all four rows; both causes
 #: were BISECTED before re-recording, because a baseline re-recorded without a
 #: named cause hides whatever moved it:
@@ -91,7 +109,7 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=8.2,
         truth={'headline': 0,
-               'quality': {'vias': 28, 'copper_mm': 320.71, 'segments': 229}},
+               'quality': {'vias': 31, 'copper_mm': 336.35, 'segments': 236}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 125.4377644075392, 'overlap_area': 1.1400451712000104,
@@ -121,7 +139,7 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=23.8,
         truth={'headline': 3,
-               'quality': {'vias': 30, 'copper_mm': 303.26, 'segments': 252}},
+               'quality': {'vias': 28, 'copper_mm': 299.93, 'segments': 231}},
         predictors={
             'crossings': 23, 'hpwl': 236.74883999999992,
             'halo': 113.8065780241933, 'overlap_area': 1.0,

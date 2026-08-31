@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.21.3**
+**Current Version: 0.21.4**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -310,6 +310,22 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+### 0.21.4 (2026-08-30)
+
+- The UNSTAMP twins of 0.21.3's span adds: `remove_blocked_cell_spans_batch`
+  (N x 4) and `remove_blocked_via_spans_batch` (N x 3), same inclusive-bounds
+  row layout, expanded in Rust.
+
+  0.21.3 could only ADD spans, which is why only `build_base_obstacle_map`
+  (build-once, never unstamped) could use them. The per-net obstacle cache --
+  the consumer carrying most of the traffic -- stamps a net's capsules on entry
+  and removes the identical arrays on exit, so it needed a remove that expands
+  to exactly the same cell multiset. Without symmetry cells stay blocked after
+  their net is ripped and the router silently loses routable space, breaking
+  the invariant `working_obstacles == base_obstacles + sum(net_obstacles_cache)`
+  that `run_obstacle_audit`, `tests/test_obstacle_addremove_parity.py` and
+  `tests/test_obstacle_map_balance.py` defend. See #815.
 
 ### 0.21.3 (2026-08-30)
 
