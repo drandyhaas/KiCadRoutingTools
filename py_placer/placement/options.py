@@ -295,7 +295,8 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
     """
     from placement.escape import escape_ledger, lane_pitch  # noqa: F401
     try:
-        from fab_tiers import count_copper_layers_in_file, fab_floor_min
+        from fab_tiers import (count_copper_layers_in_file, fab_floor_bucket,
+                               fab_floor_min)
     except ImportError as e:
         return _skip(f'fab_tiers unavailable: {e}')
 
@@ -307,6 +308,13 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
         more = fab_floor_min(n + step)
     except Exception as e:                       # noqa: BLE001
         return _skip(f'no fab floor for {n} or {n + step} layers: {e}')
+
+    # WHY the two floors are the same, when they are. `same_floor` below says
+    # they match; only the bucket says whether that is a measurement or a
+    # modelling limit, and this option printed the first while meaning the
+    # second on every board above 2 copper layers (#700).
+    b_now, b_more = fab_floor_bucket(n), fab_floor_bucket(n + step)
+    layer_blind = (b_now.bucket == b_more.bucket)
 
     def _deficit(clr, tw):
         return deficit_totals(escape_ledger(pcb_data, pcb_file=pcb_file,
@@ -353,10 +361,24 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
             'deficit_lanes_at_board_clearance': d_board['lanes'],
             'floors_differ': not same_floor,
             'fine_pitch_parts': d_now['examined'],
+            # WHY the floors are the same, when they are. `floors_differ` is
+            # the observation; these say whether it is a fact about fabs or
+            # about this table. `fab_floor_layer_blind` is the headline and is
+            # forced into the text digest.
+            'fab_bucket_now': b_now.bucket,
+            'fab_bucket_at_more': b_more.bucket,
+            'fab_floor_layer_blind': layer_blind,
+            'fab_bucket_saturated': b_now.saturated,
+            'fab_buckets_modelled': list(b_now.buckets),
         },
         'expected': {'deficit_lanes': 0},
-        'not_modelled': 'nets that would escape on the new layers instead of '
-                        'through a face -- that needs a routing attempt',
+        'not_modelled': (
+            'nets that would escape on the new layers instead of through a '
+            'face -- that needs a routing attempt'
+            + ('' if not layer_blind else
+               f"; AND, above {b_now.buckets[-1]} copper layers, any fab-floor "
+               f"difference at all -- fab_tiers models buckets "
+               f"{list(b_now.buckets)} and nothing finer")),
     }
     # The BRANCHES moved to the board clearance; the prose must move with
     # them. Quoting d_now (the fab floor) inside a branch chosen by d_board
@@ -364,7 +386,28 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
     # measured on esp_prog at clearance 0.6, the else-branch printed "0
     # deficit lane(s) remain" while d_board['lanes'] was 1.
     gain = d_now['lanes'] - d_more['lanes']
-    if same_floor:
+    if layer_blind:
+        # NOT `same_floor`. The two coincide on today's table, but they are
+        # different claims: `same_floor` compares two dicts, while this asks
+        # whether the comparison was CAPABLE of differing. Saying "more layers
+        # buy NO extra lanes" off the first is how a 6-layer board 121 escape
+        # lanes short was told to stop asking (#700).
+        out['action'] = (
+            f"this comparison is STRUCTURALLY BLIND above {b_now.bucket} "
+            f"copper layers. fab_tiers models {len(b_now.buckets)} layer "
+            f"bucket(s) ({', '.join(str(x) for x in b_now.buckets)}); both {n} "
+            f"and {n + step} land in bucket {b_now.bucket}, so fab_floor_min "
+            f"returns the SAME dict "
+            f"({now.get('track_width')} / {now.get('clearance')} mm) for both "
+            f"and this option cannot see a difference between them. That is a "
+            f"limit of the table, NOT a measurement that more layers buy "
+            f"nothing: JLC publishes one multilayer capability column and this "
+            f"repo does not invent the rest. What more layers would actually "
+            f"buy is nets escaping on the new layers, which needs a routing "
+            f"attempt to measure.")
+    elif same_floor:
+        # Reachable only if a future table gains a bucket whose floors happen
+        # to match its neighbour's. Then "identical floors" IS the measurement.
         out['action'] = (
             f"the fab floor is identical at {n} and {n + step} copper layers "
             f"({now.get('track_width')} / {now.get('clearance')} mm), so more "
@@ -630,12 +673,18 @@ def format_text(opts: Dict) -> str:
 # pushed `deficit_lanes_at_more` -- the "would more layers help" number the
 # whole option exists to answer -- off the end, and `parts=92` off grow_board.
 # A digest that drops the headline is not a digest.
+#
+# `fab_floor_layer_blind` is here and `fab_buckets_modelled` deliberately is
+# NOT: the second is a non-empty list, so forcing it would spend a slot
+# rendering the useless `fab_buckets_modelled[2]` and evict a real number --
+# the same eviction the `containers_excluded` comment in `_digest` records.
 _DIGEST_ALWAYS = ('deficit_lanes_now', 'deficit_lanes_at_more',
                   'deficit_lanes_at_fab_floor', 'utilisation',
                   'busiest_side_area_mm2', 'usable_area_mm2',
                   'parts', 'shortfall_mm2_at_least',
                   'proposed_square_side_mm', 'faces_in_deficit',
-                  'deficit_lanes', 'containers_excluded')
+                  'deficit_lanes', 'containers_excluded',
+                  'fab_floor_layer_blind')
 
 
 def _digest(measured: Dict, limit: int = 5) -> str:

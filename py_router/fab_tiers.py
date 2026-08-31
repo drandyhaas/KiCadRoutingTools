@@ -25,12 +25,21 @@ import it without pulling in the PCB parser. ``list_nets`` re-exports the public
 so ``from list_nets import fab_floors`` keeps working.
 """
 
+import collections
 import os
 import re
 
 # Flat floor keys every tier dict carries. Also the set an override file may set.
 FLOOR_KEYS = ('clearance', 'track_width', 'via_diameter', 'via_drill',
               'hole_to_hole', 'pad_hole_to_hole', 'annular', 'board_edge')
+
+# Which layer BUCKET a floor came from -- see fab_floor_bucket. Deliberately a
+# separate object from the floor dict: a floor and its provenance must not be
+# confusable, and FLOOR_KEYS is a written-out public contract.
+FabBucket = collections.namedtuple(
+    'FabBucket',
+    ('bucket', 'requested', 'bucketed', 'saturated', 'buckets',
+     'fine_via_rung'))
 
 # _FAB_FLOORS[layer_count][tier] -> flat floor dict. Layer count is bucketed to
 # 2 (1-2 layer) vs 4 (multilayer). 'standard' preserves the historical floors so a
@@ -94,8 +103,84 @@ def get_default_fab_tier():
     return (_DEFAULT_TIER, dict(_DEFAULT_OVERRIDES))
 
 
+def _layer_bucket(copper_layer_count):
+    """The ``_FAB_FLOORS`` key a copper-layer count resolves to.
+
+    THE ONE statement of the bucketing rule, so the bucket
+    ``fab_floor_bucket`` reports can never disagree with the floor
+    ``_layer_floors`` returns. Derived from the table's own keys rather than
+    restating 2/4, so adding a rung to ``_FAB_FLOORS`` re-buckets by itself
+    instead of needing a second edit somebody has to remember.
+
+    Byte-identical to the ``(n or 2) <= 2`` rule it replaces for the keys the
+    table actually has: 1->2, 2->2, 3->4, 4->4, 6->4, 8->4. Pinned by
+    ``tests/test_768_cap_clearance_ceiling.py:580-591``, which must keep
+    passing unmodified.
+    """
+    n = copper_layer_count or 2
+    keys = sorted(_FAB_FLOORS)
+    return next((k for k in keys if n <= k), keys[-1])
+
+
 def _layer_floors(copper_layer_count):
-    return _FAB_FLOORS[2] if (copper_layer_count or 2) <= 2 else _FAB_FLOORS[4]
+    return _FAB_FLOORS[_layer_bucket(copper_layer_count)]
+
+
+def fab_floor_bucket(copper_layer_count):
+    """WHICH layer bucket a count lands in -- the provenance the floor dict
+    deliberately does not carry.
+
+    ``fab_floor_min(4)``, ``(6)`` and ``(8)`` return byte-identical dicts,
+    because ``_FAB_FLOORS`` has exactly two rungs. That is a MODELLING LIMIT,
+    not a fab fact: JLC publishes one multilayer capability column (see the
+    module docstring's source line) and this module does not invent the rest.
+
+    A consumer that COMPARES two layer counts cannot otherwise tell "the floor
+    genuinely does not move" from "this table cannot see the difference", and
+    `placement.options.add_layers` -- the only such consumer -- printed the
+    first while meaning the second on every board above 2 copper layers. On a
+    6-layer board 121 escape lanes short it said "more layers buy NO extra
+    lanes on a face" (issue #700).
+
+    A SEPARATE FUNCTION, not a key on the floor dict: the floor dicts contain
+    exactly ``FLOOR_KEYS`` and are written out as-is --
+    ``list_nets.effective_floors`` returns one under ``'fab'`` and
+    ``read_design_rules`` embeds that whole structure as a documented public
+    return -- so a key added there silently joins that contract. Several
+    consumers also index the dict directly.
+
+    TAKES ONE ARGUMENT ON PURPOSE. No ``tier``, no ``overrides``: an override
+    file must not be able to forge provenance, and giving it no channel is the
+    only way to guarantee that rather than promise it. (``fab_floor_ladder``
+    can today only REPLACE keys already present, but "cannot today" and
+    "cannot by construction" are different guarantees.)
+
+    Returns a ``FabBucket`` -- a NamedTuple rather than a dict so a mistyped
+    field raises instead of returning ``None``, which is the silent-default
+    failure this whole function exists to end (see ``options.deficit_totals``
+    for the one that cost "38 faces are short" -> "0").
+
+        bucket        int    the ``_FAB_FLOORS`` key used (2 or 4 today)
+        requested     int    the count asked for, after the ``or 2`` default
+        bucketed      bool   requested != bucket: the floor is a PROXY
+        saturated     bool   bucket is the table's LAST, so every higher layer
+                             count returns this identical floor
+        buckets       tuple  every bucket the table models, ascending
+        fine_via_rung bool   whether the STANDARD ladder carries its 0.30/0.15
+                             intermediate via rung at this count -- the one
+                             other layer-count branch in this module. Derived
+                             by asking ``fab_floor_ladder`` rather than
+                             restating its condition, and pinned to the
+                             standard tier with no overrides, which is what the
+                             one-argument signature buys. Read
+                             ``len(fab_floor_ladder(n))`` for the ACTIVE ladder.
+    """
+    n = copper_layer_count or 2
+    keys = tuple(sorted(_FAB_FLOORS))
+    bucket = _layer_bucket(n)
+    return FabBucket(bucket=bucket, requested=n, bucketed=(n != bucket),
+                     saturated=(bucket == keys[-1]), buckets=keys,
+                     fine_via_rung=len(fab_floor_ladder(n, 'standard')) > 2)
 
 
 def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
