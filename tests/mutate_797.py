@@ -150,14 +150,24 @@ ROWS = [
      "                           for r in rects if r is not None))",
      (T797P,), 'KILLED'),
 
-    ('the-gate-threshold-flags-zero-area-contact', 'q',
+    # The two rows below are NECESSARILY blunt, and the reason is the finding
+    # that produced them. On real geometry the ONLY value either front can see
+    # below `legality.EPS` is exactly 0.0 -- a zero-area touch, which arm X's
+    # theorem lands on deliberately. Every threshold in (0, smallest real
+    # overlap) therefore behaves identically, which is why the first draft of
+    # this row (`v <= t.threshold` -> `v <= 0.0`) SURVIVED: `0.0 <= 0.0` is
+    # still clean, so the edit changed nothing a board can produce. Moving the
+    # threshold BELOW zero is the only edit that flips the touch verdict, and
+    # it necessarily refuses everything else too. Kept because the question it
+    # answers -- does a zero-area touch seat -- is the one arm X depends on.
+    ('the-gate-refuses-a-zero-area-touch', 'q',
      "        return all(v <= t.threshold\n"
      "                   for v, t in zip(intent_term_values(spec, rects), spec))",
-     "        return all(v <= 0.0\n"
+     "        return all(v < 0.0\n"
      "                   for v, t in zip(intent_term_values(spec, rects), spec))",
      (T797S,), 'KILLED'),
 
-    ('the-grade-threshold-flags-zero-area-contact', 'fp',
+    ('the-grade-flags-a-zero-area-touch', 'fp',
      "            area = legality.rect_overlap_area(part.rect, z.rect)\n"
      "            if area > legality.EPS:",
      "            area = legality.rect_overlap_area(part.rect, z.rect)\n"
@@ -227,11 +237,29 @@ ROWS = [
     # `test_797_zone_exclusive_predicate.py`'s EPS arm pins the direction
     # ARITHMETICALLY (it asserts what `> EPS` and `<= EPS` answer at that
     # input) but does not import this branch, so it cannot observe the edit.
-    # The `flags-zero-area-contact` rows above are the killable form of the
-    # same question, and they are what actually guards the boundary.
+    # The `zero-area-touch` rows above are the killable form of the same
+    # question, and they are what actually guards the boundary.
+    #
+    # The anchor is the two-line form: `if area > legality.EPS:` alone appears
+    # TWICE in floorplan.py, and the battery reported the one-line version
+    # BROKEN rather than applying it to whichever site came first -- which is
+    # the whole point of checking the count before the write.
     ('the-grade-threshold-is-ge-not-gt', 'fp',
+     "            area = legality.rect_overlap_area(part.rect, z.rect)\n"
      "            if area > legality.EPS:",
+     "            area = legality.rect_overlap_area(part.rect, z.rect)\n"
      "            if area >= legality.EPS:",
+     (T797P, T797S), 'SURVIVED'),
+
+    # The GATE's threshold at the same input, and inert for the same reason:
+    # `0.0 <= 0.0` is clean, so replacing EPS with zero changes nothing a
+    # board can produce. Recorded from the run rather than predicted -- this
+    # row was written expecting KILLED and the battery said otherwise.
+    ('the-gate-threshold-is-zero-not-EPS', 'q',
+     "        return all(v <= t.threshold\n"
+     "                   for v, t in zip(intent_term_values(spec, rects), spec))",
+     "        return all(v <= 0.0\n"
+     "                   for v, t in zip(intent_term_values(spec, rects), spec))",
      (T797P, T797S), 'SURVIVED'),
 
     # The `or auto` fallback on the RE-SEAT path's block resolution. Resolving
