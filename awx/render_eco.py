@@ -31,6 +31,8 @@ ap.add_argument('out')
 ap.add_argument('--nets', default='',
                 help='comma-separated short names to highlight')
 ap.add_argument('--view', default='116,52,152,80')
+ap.add_argument('--no-plan', action='store_true',
+                help='copper only: skip the Eco plan overlay')
 a = ap.parse_args()
 X0, Y0, X1, Y1 = map(float, a.view.split(','))
 W = 1800
@@ -141,15 +143,24 @@ for v in pcb.vias:
 
 # spines (pale blue, wide, under everything of the plan), targets
 # (yellow), planned UNDER-PASS windows (orange, the other-layer
-# stretches) above them, lane centerlines (white) on top
-for (x1, y1, x2, y2) in spine:
-    dr.line([px(x1, y1), px(x2, y2)], fill=(150, 170, 255, 110), width=9)
-for (x1, y1, x2, y2) in eco2:
-    dr.line([px(x1, y1), px(x2, y2)], fill=(255, 210, 40, 235), width=2)
-for (x1, y1, x2, y2) in cmts:
-    dr.line([px(x1, y1), px(x2, y2)], fill=(255, 120, 0, 255), width=3)
-for (x1, y1, x2, y2) in eco1:
-    dr.line([px(x1, y1), px(x2, y2)], fill=(255, 255, 255, 220), width=4)
+# stretches) above them, lane centerlines (white) on top.
+# --no-plan skips all of it: at a saturated K the plan overlay is a
+# white scribble-ball (a heavily relaxed spine bends every lane's
+# straight (s,o) line into a board-space curl, x35 lanes), and the
+# free-swim/last-call copper no longer follows the plan anyway.
+if not a.no_plan:
+    for (x1, y1, x2, y2) in spine:
+        dr.line([px(x1, y1), px(x2, y2)],
+                fill=(150, 170, 255, 110), width=9)
+    for (x1, y1, x2, y2) in eco2:
+        dr.line([px(x1, y1), px(x2, y2)],
+                fill=(255, 210, 40, 235), width=2)
+    for (x1, y1, x2, y2) in cmts:
+        dr.line([px(x1, y1), px(x2, y2)],
+                fill=(255, 120, 0, 255), width=3)
+    for (x1, y1, x2, y2) in eco1:
+        dr.line([px(x1, y1), px(x2, y2)],
+                fill=(255, 255, 255, 220), width=4)
 
 img.save(a.out)
 print(f"render_eco: {a.out} spine={len(spine)} eco1(lanes)={len(eco1)} "

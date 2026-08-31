@@ -639,6 +639,19 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
         if not bad:
             break
         sp = simplify([p for j, p in enumerate(sp) if j not in set(bad)], 0.08)
+    # a spine with MANY near-right-angle corners is not a corridor
+    # axis -- it is the elastic band OSCILLATING between pushes, which
+    # the fold filter (>120 deg) never catches (K35 corridor
+    # SA6/SA4/SBA1: 56 mean pts -> 1023 relaxed -> 34 vertices with 32
+    # corners, 47 mm of spine for a ~20 mm run -- rendered as a white
+    # scribble-ball, and every lane's frame-mapped centreline curled
+    # with it). The frame is a coordinate AXIS, not a route: fall back
+    # to the straight chord and let the lanes morph.
+    if sum(1 for _i, _s, t in Spine(sp).corners() if abs(t) > 80.0) > 4:
+        if log:
+            log(f'    spine DEGENERATE ({len(sp)} vertices, '
+                f'{polyline_len(sp):.1f} mm) -- straight-chord fallback')
+        sp = simplify([a, b], 0.08)
     if log:
         log(f'    spine: {len(init)} mean pts -> {len(pts)} relaxed -> '
             f'{len(sp)} vertices, {polyline_len(sp):.2f} mm, '
