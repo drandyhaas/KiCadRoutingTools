@@ -105,8 +105,36 @@ class Obstacles:
             for gx in range(int(x0 / self.cell), int(x1 / self.cell) + 1):
                 for gy in range(int(y0 / self.cell), int(y1 / self.cell) + 1):
                     self._cgrid.setdefault((gx, gy), []).append(i)
+        # merged 3x3 neighbourhoods, precomputed ONCE. Point queries
+        # used to re-concatenate nine cell lists (discs) and build a
+        # set (caps) PER CALL -- 760k point_violation calls put 23 s
+        # of the K28 braid's 79 s profile in that churn. The disc
+        # sequence reproduces the old per-call concatenation order
+        # exactly (same dx/dy nesting), so disc results are
+        # bit-identical; caps become an order-stable dedupe (the old
+        # set had no defined order for equal-depth ties).
+        self._near_d = {}
+        self._near_c = {}
+        centers = {(gx + dx_, gy + dy_)
+                   for k in (set(self._grid) | set(self._cgrid))
+                   for gx, gy in (k,)
+                   for dx_ in (-1, 0, 1) for dy_ in (-1, 0, 1)}
+        for (gx, gy) in centers:
+            dd, cc = [], []
+            for dx_ in (-1, 0, 1):
+                for dy_ in (-1, 0, 1):
+                    dd.extend(self._grid.get((gx + dx_, gy + dy_), ()))
+                    cc.extend(self._cgrid.get((gx + dx_, gy + dy_), ()))
+            if dd:
+                self._near_d[(gx, gy)] = tuple(dd)
+            if cc:
+                self._near_c[(gx, gy)] = tuple(dict.fromkeys(cc))
 
     def near_discs(self, p):
+        nd = getattr(self, '_near_d', None)
+        if nd is not None:
+            return nd.get((int(p[0] / self.cell),
+                           int(p[1] / self.cell)), ())
         key = (int(p[0] / self.cell), int(p[1] / self.cell))
         out = []
         for dx_ in (-1, 0, 1):
@@ -115,6 +143,10 @@ class Obstacles:
         return out
 
     def near_caps(self, p):
+        nc = getattr(self, '_near_c', None)
+        if nc is not None:
+            return nc.get((int(p[0] / self.cell),
+                           int(p[1] / self.cell)), ())
         cg = getattr(self, '_cgrid', None)
         if cg is None:
             return range(len(self.caps))
