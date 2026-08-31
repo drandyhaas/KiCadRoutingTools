@@ -416,6 +416,37 @@ def generate_underpad_escape(footprint: Footprint,
                              # nobody had chosen.
                              escape_line_hints: Optional[Dict[
                                  Tuple[float, float], float]] = None,
+                             # Per-pad escape LAYER from a caller's plan
+                             # (#622), same key. Tried FIRST at every site
+                             # that picks a layer (phase gating, the dogbone
+                             # inner-run ladder, Phase D's layer set); never
+                             # costs a ball its escape -- the unrestricted
+                             # search stays as fallback and a miss is
+                             # recorded, not swallowed.
+                             escape_layer_hints: Optional[Dict[
+                                 Tuple[float, float], str]] = None,
+                             # Per-pad exit SLOT (#622): (side, lo, hi)
+                             # -- an INTERVAL along the side's axis (y
+                             # for left/right, x for up/down) the stub
+                             # must exit within. The interval is the
+                             # abstraction level measured to survive:
+                             # a bare side under-specifies the order,
+                             # an exact line over-specifies (LINES=1
+                             # broken; K15 one-gap). Rides the existing
+                             # astar line acceptance as (centre,
+                             # half-width). Slot-first over
+                             # escape_line_hints; misses recorded.
+                             # DEBT (#622): this side-keyed shape is a
+                             # QUANTIZATION of the real contract (a
+                             # cyclic arc on the boundary loop) -- a
+                             # corner-spanning slot is inexpressible
+                             # and gets pinned to one side. Fix shape:
+                             # accept one-or-two side-windows OR'd in
+                             # the astar acceptance (an L for a corner
+                             # arc).
+                             escape_slot_hints: Optional[Dict[
+                                 Tuple[float, float],
+                                 Tuple[str, float, float]]] = None,
                              # progress_callback(current, total, label); the
                              # per-ball A* is where a large array's minutes go,
                              # so each escape loop reports its count through
@@ -1116,8 +1147,22 @@ def generate_underpad_escape(footprint: Footprint,
         """(cell coordinate, tolerance in cells) for this pad's exit line
         hint, or None. Half a pitch of slack: the plan names a row GAP,
         and landing anywhere in that gap preserves the order, while
-        demanding an exact cell would just fail the search."""
-        if not escape_line_hints or not side:
+        demanding an exact cell would just fail the search.
+
+        A SLOT hint (#622) outranks a line hint: the slot's interval
+        maps directly onto the same (centre, tol) acceptance -- the
+        tolerance IS the slot half-width instead of the fixed 0.3
+        pitch."""
+        if not side:
+            return None
+        sl = (escape_slot_hints or {}).get((round(p.global_x, 3),
+                                            round(p.global_y, 3)))
+        if sl is not None and sl[0] == side:
+            _c = (sl[1] + sl[2]) / 2.0
+            ix, iy = occ.cell(_c, _c)
+            tol = max(1.0, ((sl[2] - sl[1]) / 2.0) / occ.res)
+            return ((iy if side in ('left', 'right') else ix), tol)
+        if not escape_line_hints:
             return None
         v = escape_line_hints.get((round(p.global_x, 3),
                                    round(p.global_y, 3)))
@@ -1247,6 +1292,26 @@ def generate_underpad_escape(footprint: Footprint,
                             and not (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
                             and not _left_on(side, nx, ny):
                         continue
+                    # The LINE-restricted sibling of the fix above
+                    # (#622, root-caused off plan_full2): an outside
+                    # cell on the ACCEPTED side is a goal for a
+                    # side-only search (which therefore stops at its
+                    # first outside step) -- but under a line window a
+                    # wrong-line outside cell is NOT a goal, expansion
+                    # still allowed it, and outside the bbox the
+                    # occupancy test below never runs. So the search
+                    # exited anywhere on its side and rode the
+                    # UNCHECKED outside margin along the edge to the
+                    # window, through every other net's exit stubs
+                    # (SA8: an 8.4 mm rail at x=127.03, in-contact
+                    # with 3 neighbours -- the long-standing "LINES=1
+                    # broken at the fanout" disease). A line-restricted
+                    # search may leave the bbox only THROUGH its
+                    # window, where it immediately terminates as goal.
+                    if side is not None and line is not None \
+                            and not (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
+                            and abs((ny if _lax else nx) - line[0]) > line[1]:
+                        continue
                     if (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
                             and _gL[nx * _ony + ny] \
                             and not exempt(L, (nx, ny)):
@@ -1361,6 +1426,30 @@ def generate_underpad_escape(footprint: Footprint,
     # is worse than one that says which half did not fit.
     _hint_missed: List[str] = []
     _line_missed: List[str] = []
+    _slot_missed: List[str] = []
+    # #622 layer hints: hinted layer index per pad key, tried FIRST at
+    # every layer-choosing site below; delivered layers recorded here
+    # and published to bga_fanout.LAST_LAYER_HINT_REPORT at the end.
+    _got_layer: Dict = {}
+
+    def _lhint_idx(p):
+        h = (escape_layer_hints or {}).get((round(p.global_x, 3),
+                                            round(p.global_y, 3)))
+        if h is None or h not in layers:
+            return None
+        return layers.index(h)
+
+    def _lh_order(p, Ls):
+        _o = sorted(Ls)
+        _h = _lhint_idx(p)
+        if _h in Ls:
+            _o = [_h] + [L for L in _o if L != _h]
+        return _o
+
+    def _rec_got(p, L_idx):
+        _got_layer[(round(p.global_x, 3),
+                    round(p.global_y, 3))] = (layers[L_idx], p.net_name)
+
     nvia = 0
     n_fcu = 0
 
@@ -1824,6 +1913,12 @@ def generate_underpad_escape(footprint: Footprint,
         if dogbone and _ek.FANOUT_PAIR_DIVE:
             remaining_pairs.append((base, pp, nn))
             continue
+        _lhp = _lhint_idx(pp)
+        _lhn = _lhint_idx(nn)
+        if ((_lhp is not None and _lhp != top_idx)
+                or (_lhn is not None and _lhn != top_idx)):
+            remaining_pairs.append((base, pp, nn))
+            continue
         if (try_coupled(pp, nn, [(top_idx, False)])
                 or try_coupled_endon(pp, nn, [(top_idx, False)])):
             n_coupled += 1
@@ -1999,6 +2094,14 @@ def generate_underpad_escape(footprint: Footprint,
                 # Untried balls are NOT pushed into inner_pads: they were never
                 # attempted, so they must not reach the failure ledger either.
                 break
+            _lhA = _lhint_idx(p)
+            if _lhA is not None and _lhA != top_idx:
+                # #622: hinted off the top layer -- the surface phase
+                # can only deliver top, so this ball goes straight to
+                # the inner machinery (whose ladder ends at
+                # all-layers: the hint cannot cost the escape)
+                inner_pads.append(p)
+                continue
             if depth(p) > outer_depth:
                 # deeper than the rim phase tries -- but a straight lane
                 # run may still reach the boundary (the human's escape for
@@ -2007,6 +2110,7 @@ def generate_underpad_escape(footprint: Footprint,
                 if pts is not None:
                     _commit_lane_run(p, pts)
                     n_lane_run += 1
+                    _rec_got(p, top_idx)
                 else:
                     inner_pads.append(p)
                 continue
@@ -2031,7 +2135,9 @@ def generate_underpad_escape(footprint: Footprint,
                              net_id=p.net_id, carve=carve, side=_side,
                              line=_line)
                 if path is None:
-                    _line_missed.append(p.net_name)
+                    ((_slot_missed if (escape_slot_hints or {}).get(
+                        (round(p.global_x, 3), round(p.global_y, 3)))
+                      else _line_missed).append(p.net_name))
             # The lane run on the PLANNED side comes before the side-
             # restricted raster A*, not after it: that A* accepts ANY
             # point of the planned face, so when the raster's inflated
@@ -2045,8 +2151,12 @@ def generate_underpad_escape(footprint: Footprint,
             # is the fallback.
             lane = None
             if path is None and _side and _lane_on:
-                _lv = (escape_line_hints or {}).get(
+                _sl = (escape_slot_hints or {}).get(
                     (round(p.global_x, 3), round(p.global_y, 3)))
+                _lv = ((_sl[1] + _sl[2]) / 2.0
+                       if _sl is not None and _sl[0] == _side else
+                       (escape_line_hints or {}).get(
+                           (round(p.global_x, 3), round(p.global_y, 3))))
                 lane = _lane_run_escape(p, only_side=_side, line=_lv)
             if path is None and lane is None and _side:
                 path = astar(sx, sy, home, {top_idx}, allow_via=False,
@@ -2061,9 +2171,11 @@ def generate_underpad_escape(footprint: Footprint,
             if lane is not None:
                 _commit_lane_run(p, lane)
                 n_lane_run += 1
+                _rec_got(p, top_idx)
             elif path is not None:
                 commit(p, path, carve)
                 n_fcu += 1
+                _rec_got(p, path[-1][2])
             else:
                 inner_pads.append(p)
         if n_lane_run:
@@ -2266,8 +2378,15 @@ def generate_underpad_escape(footprint: Footprint,
         if cancel_check and cancel_check():    # #621
             break
         _prog(_ci + 1, len(remaining_pairs), f"inner coupled pair {base}")
-        if (try_coupled(pp, nn, inner_cands)
-                or try_coupled_endon(pp, nn, inner_cands)):
+        _lhp = _lhint_idx(pp)
+        if _lhp is None:
+            _lhp = _lhint_idx(nn)
+        _cands = inner_cands
+        if _lhp is not None and _lhp != top_idx:
+            _cands = ([(_lhp, True)]
+                      + [c for c in inner_cands if c[0] != _lhp])
+        if (try_coupled(pp, nn, _cands)
+                or try_coupled_endon(pp, nn, _cands)):
             n_coupled += 1
         else:
             inner_pads.extend((pp, nn))
@@ -2335,7 +2454,7 @@ def generate_underpad_escape(footprint: Footprint,
                 # cheapest total (pour charge included); ties keep the lowest
                 # layer index (the old deterministic order).
                 best = None
-                for _L in sorted(inner_layers):
+                for _L in _lh_order(p, inner_layers):
                     _co = []
                     _pth = astar(vsx, vsy, home, {_L}, allow_via=False,
                                  net_id=p.net_id, carve=carve, start_layer=_L,
@@ -2345,13 +2464,14 @@ def generate_underpad_escape(footprint: Footprint,
                 if best is not None:
                     path = best[1]
             else:
-                for _L in sorted(inner_layers):
+                for _L in _lh_order(p, inner_layers):
                     path = astar(vsx, vsy, home, {_L}, allow_via=False,
                                  net_id=p.net_id, carve=carve, start_layer=_L)
                     if path is not None:
                         break
             if path is not None:
                 commit_dogbone(p, _site, path, carve)
+                _rec_got(p, path[-1][2])
                 continue
         sx, sy = occ.cell(p.global_x, p.global_y)
         home = home_of(p)
@@ -2410,8 +2530,28 @@ def generate_underpad_escape(footprint: Footprint,
         _side = (escape_dir_hints or {}).get(
             (round(p.global_x, 3), round(p.global_y, 3)))
         path = None
+        # #622: the plan's LAYER is the contract-critical hint -- try
+        # it first, jointly with the side when one is named, then
+        # alone; the existing line/side/free ladder stays as the
+        # fallback so the hint can never cost the ball its escape.
+        _lhD = _lhint_idx(p)
         _line = _line_of(p, _side)
-        if _side and _line:
+        # most-constrained FIRST: (layer+side+slot/line) leads, or a
+        # local (layer+side) exit satisfies the ladder before the
+        # slot is ever tried (measured: SA8 committed at y69.1 with
+        # its slot at y59.4 -- the whole wild-escape class)
+        if _lhD is not None and _side and _line:
+            path = astar(sx, sy, home, {_lhD}, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                         side=_side, line=_line)
+        if _lhD is not None and path is None and _side:
+            path = astar(sx, sy, home, {_lhD}, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                         side=_side)
+        if _lhD is not None and path is None:
+            path = astar(sx, sy, home, {_lhD}, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve)
+        if path is None and _side and _line:
             path = astar(sx, sy, home, inner_layers, allow_via=True,
                          via_ok=_via_ok, net_id=p.net_id, carve=carve,
                          side=_side, line=_line)
@@ -2420,7 +2560,9 @@ def generate_underpad_escape(footprint: Footprint,
                              via_ok=_via_ok, net_id=p.net_id, carve=carve,
                              side=_side, line=_line)
             if path is None:
-                _line_missed.append(p.net_name)
+                ((_slot_missed if (escape_slot_hints or {}).get(
+                    (round(p.global_x, 3), round(p.global_y, 3)))
+                  else _line_missed).append(p.net_name))
         if _side and path is None:
             path = astar(sx, sy, home, inner_layers, allow_via=True,
                          via_ok=_via_ok, net_id=p.net_id, carve=carve,
@@ -2441,6 +2583,7 @@ def generate_underpad_escape(footprint: Footprint,
             failed.append(p.net_name)
             continue
         commit(p, path, carve)
+        _rec_got(p, path[-1][2])
 
     # Plane-ball drops (#424 D2): stub + via for the skipped plane-net balls,
     # placed while the under-package space is still claimable. Runs after every
@@ -2756,6 +2899,37 @@ def generate_underpad_escape(footprint: Footprint,
     from fab_notes import print_via_in_pad_note
     print_via_in_pad_note(vias_to_add, pcb_data.pads_by_net,
                           context="BGA under-pad escape")
+    # #622: publish per-pad layer-hint obedience. Entries only for
+    # audited pads; a hinted pad with no _got_layer entry either
+    # failed (recorded as such) or escaped through an unaudited path
+    # (coupled pairs) and is left for the wrapper to count as
+    # unaudited rather than guessed.
+    if escape_layer_hints:
+        import bga_fanout as _bf
+        _eng = 'dogbone' if dogbone else 'underpad'
+        _fs = set(failed)
+        for _k, (_got, _nm) in _got_layer.items():
+            _h = escape_layer_hints.get(_k)
+            if _h is None:
+                continue
+            _bf.LAST_LAYER_HINT_REPORT[_k] = {
+                'net': _nm, 'hint': _h, 'got': _got,
+                'obeyed': _got == _h, 'engine': _eng, 'failed': False}
+        _key_net = {(round(_p.global_x, 3), round(_p.global_y, 3)):
+                    _p.net_name for _p in footprint.pads}
+        for _k, _h in escape_layer_hints.items():
+            _nm = _key_net.get(_k)
+            if _nm in _fs and _k not in _got_layer:
+                _bf.LAST_LAYER_HINT_REPORT[_k] = {
+                    'net': _nm, 'hint': _h, 'got': None,
+                    'obeyed': False, 'engine': _eng, 'failed': True}
+
+    if _slot_missed and verbose:
+        print(f"  Under-pad: {len(_slot_missed)} ball(s) could not exit "
+              f"inside the SLOT asked for and took another gap "
+              f"[{', '.join(sorted(_slot_missed)[:6])}"
+              + (f", +{len(_slot_missed) - 6} more"
+                 if len(_slot_missed) > 6 else "") + "]")
     if _line_missed and verbose:
         print(f"  Under-pad: {len(_line_missed)} ball(s) could not reach "
               f"the exit LINE asked for and took another gap on the same "

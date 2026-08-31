@@ -2417,6 +2417,32 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         # does, and the permutation is the via floor.
                         escape_line_hints: Optional[Dict[
                             Tuple[float, float], float]] = None,
+                        # Per-pad escape LAYER from a caller's PLAN (#622):
+                        # the layer this ball's stub must be ON when it
+                        # crosses the fanout boundary. Same key as
+                        # escape_dir_hints. Semantics follow the hint
+                        # invariant every consumer here obeys: the hinted
+                        # layer is tried FIRST and is never allowed to cost
+                        # a ball its escape -- when it cannot be honoured
+                        # the engines fall back to their own choice and the
+                        # miss is RECORDED (LAST_LAYER_HINT_REPORT, printed
+                        # per pad), never swallowed. This exists because
+                        # the escape engines optimise "escaped", not
+                        # "delivered on L": told layers=['B.Cu'] they laid
+                        # every escape on F with 0 vias and reported
+                        # success (4x-measured; the whole TP_SRC_B /
+                        # verbatim-apply bolt-on family compensated for it).
+                        # None/{} is exactly today's behaviour.
+                        escape_layer_hints: Optional[Dict[
+                            Tuple[float, float], str]] = None,
+                        # Per-pad exit SLOT (side, lo, hi) -- see
+                        # underpad.generate_underpad_escape. NOT yet
+                        # re-keyed in the rotated-frame branch (the
+                        # side+coords remap; same latent gap as
+                        # escape_line_hints, noted there).
+                        escape_slot_hints: Optional[Dict[
+                            Tuple[float, float],
+                            Tuple[str, float, float]]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False,
@@ -2575,6 +2601,23 @@ def _generate_bga_fanout_core(footprint: Footprint,
                          + (_vec[k][1] - ry) ** 2)
                 _moved[(round(q.global_x, 3), round(q.global_y, 3))] = nd
             _hints = _moved
+        # layer hints need RE-KEYING only (rotation does not change
+        # layers). NB escape_line_hints is NOT re-keyed here -- a
+        # pre-existing latent gap, not widened by this change.
+        _lhints = escape_layer_hints
+        if _lhints:
+            _rot2 = {p.pad_number: p for p in rp.footprints[
+                footprint.reference].pads}
+            _moved2 = {}
+            for p in footprint.pads:
+                lv = _lhints.get((round(p.global_x, 3),
+                                  round(p.global_y, 3)))
+                q = _rot2.get(p.pad_number)
+                if lv is None or q is None:
+                    continue
+                _moved2[(round(q.global_x, 3),
+                         round(q.global_y, 3))] = lv
+            _lhints = _moved2
         tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
             rp.footprints[footprint.reference], rp,
             net_filter=net_filter, diff_pair_patterns=diff_pair_patterns, layers=layers,
@@ -2586,6 +2629,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
             grid_step=grid_step, layer_costs=layer_costs,
             escape_dir_hints=_hints,
             escape_line_hints=escape_line_hints,
+            escape_layer_hints=_lhints,
+            escape_slot_hints=escape_slot_hints,
             same_net_pad_clearance=same_net_pad_clearance,
             cancel_check=cancel_check,
             progress_callback=progress_callback)
@@ -2685,6 +2730,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 escape_method=escape_method, grid_step=grid_step,
                 layer_costs=layer_costs, escape_dir_hints=escape_dir_hints,
                 escape_line_hints=escape_line_hints,
+                escape_layer_hints=escape_layer_hints,
+                escape_slot_hints=escape_slot_hints,
                 same_net_pad_clearance=same_net_pad_clearance,
                 cancel_check=cancel_check,
                 progress_callback=progress_callback)
@@ -3063,6 +3110,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                            and same_net_pad_clearance > 0),  # #581
             escape_dir_hints=escape_dir_hints,
             escape_line_hints=escape_line_hints,
+            escape_layer_hints=escape_layer_hints,
+            escape_slot_hints=escape_slot_hints,
             # Rides _up_kw so the shrink rescue's re-run reports too.
             progress_callback=progress_callback,
             cancel_check=cancel_check,
@@ -3425,7 +3474,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
 
         # Smart layer assignment (keeps diff pairs together, avoids existing tracks)
         _prog(f"assigning layers to {len(routes)} route(s)...")
-        assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks, no_inner_top_layer)
+        assign_layers_smart(routes, layers, track_width, clearance, diff_pair_gap, existing_tracks, no_inner_top_layer,
+                            layer_hints=escape_layer_hints)
 
         # Calculate jog length = distance from BGA edge to first pad row/col
         # This is half the pitch (since edge is pitch/2 from first pad)
@@ -3709,6 +3759,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 no_inner_top_layer=no_inner_top_layer, escape_method=method,
                 grid_step=grid_step, escape_dir_hints=escape_dir_hints,
                 escape_line_hints=escape_line_hints,
+                escape_layer_hints=escape_layer_hints,
+                escape_slot_hints=escape_slot_hints,
                 _pad_filter=_pad_filter,
                 _ignore_prefanned=_ignore_prefanned, _single_pass=_single_pass,
                 same_net_pad_clearance=same_net_pad_clearance,
@@ -3813,12 +3865,39 @@ def _generate_bga_fanout_core(footprint: Footprint,
               f"dead via-in-pad: "
               f"{sorted({_names_by_net[r.net_id] for r in _orphans})}")
 
+    # #622 layer-hint obedience audit -- ONE comparison after every
+    # layer mutation (assignment, reroute repairs, rebalance, pad
+    # crossings): the route's FINAL layer vs the plan's hint, per pad.
+    # Entries are per-pad and each engine run overwrites its own pads,
+    # so a losing auto-retry's entries are corrected here (execution
+    # reaches this audit only when the incumbent is kept; a winning
+    # retry returned above with its own audit in place).
+    if escape_layer_hints:
+        _fs = set(failed_nets)
+        for _r in best_routes:
+            _h = getattr(_r, '_layer_hint', None)
+            if _h is None:
+                continue
+            _k = (round(_r.pad_pos[0], 3), round(_r.pad_pos[1], 3))
+            LAST_LAYER_HINT_REPORT[_k] = {
+                'net': _r.pad.net_name, 'hint': _h, 'got': _r.layer,
+                'obeyed': _r.layer == _h, 'engine': 'channel',
+                'failed': (_r.pad.net_name in _fs)}
+
     return tracks, vias_to_add, vias_to_remove, failed_nets
 
 
 # Per-call report of the plane-ball drop pass (#424 D2), for JSON_SUMMARY /
 # the GUI results panel. Refreshed by every top-level generate_bga_fanout call.
 LAST_PLANE_DROP_REPORT: Dict = {}
+
+# #622: per-pad layer-hint obedience, refreshed by every top-level
+# generate_bga_fanout call. Key = (round(x,3), round(y,3)); value =
+# {net, hint, got, obeyed, engine, failed}. A hinted pad with NO entry
+# was never audited (its engine does not consume layer hints yet, or
+# the ball was dropped before assignment) -- the wrapper summary
+# counts those as 'unaudited' rather than pretending either way.
+LAST_LAYER_HINT_REPORT: Dict = {}
 
 # #621: balls whose escape was never ATTEMPTED because this run's own
 # `cancel_check` stopped it -- in practice the GUI's Cancel button or the plan
@@ -4028,6 +4107,20 @@ def generate_bga_fanout(footprint: Footprint,
                         # does, and the permutation is the via floor.
                         escape_line_hints: Optional[Dict[
                             Tuple[float, float], float]] = None,
+                        # Per-pad escape LAYER from a caller's PLAN (#622):
+                        # tried first, never costs a ball its escape,
+                        # misses recorded in LAST_LAYER_HINT_REPORT.
+                        # See _generate_bga_fanout_core.
+                        escape_layer_hints: Optional[Dict[
+                            Tuple[float, float], str]] = None,
+                        # Per-pad exit SLOT (side, lo, hi) -- see
+                        # underpad.generate_underpad_escape. NOT yet
+                        # re-keyed in the rotated-frame branch (the
+                        # side+coords remap; same latent gap as
+                        # escape_line_hints, noted there).
+                        escape_slot_hints: Optional[Dict[
+                            Tuple[float, float],
+                            Tuple[str, float, float]]] = None,
                         _pad_filter: Optional[Set[Tuple[float, float]]] = None,
                         _ignore_prefanned: bool = False,
                         _single_pass: bool = False,
@@ -4118,6 +4211,7 @@ def generate_bga_fanout(footprint: Footprint,
                 return True
             return False
 
+    LAST_LAYER_HINT_REPORT.clear()
     tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
         footprint, pcb_data, net_filter=net_filter,
         diff_pair_patterns=diff_pair_patterns, layers=layers,
@@ -4132,6 +4226,8 @@ def generate_bga_fanout(footprint: Footprint,
         grid_step=grid_step, layer_costs=layer_costs, cancel_check=_cc,
         escape_dir_hints=escape_dir_hints,
         escape_line_hints=escape_line_hints,
+        escape_layer_hints=escape_layer_hints,
+        escape_slot_hints=escape_slot_hints,
         progress_callback=progress_callback,
         _pad_filter=_pad_filter, _ignore_prefanned=_ignore_prefanned,
         _single_pass=_single_pass,
@@ -4168,6 +4264,27 @@ def generate_bga_fanout(footprint: Footprint,
         LAST_CANCEL_SKIPPED.extend(
             n for n in fanout_candidate_nets(footprint, pcb_data, net_filter)
             if n not in _live_names and n not in _failed_names)
+
+    # #622 layer-hint obedience summary. Per-pad detail is in
+    # LAST_LAYER_HINT_REPORT; a hinted pad with no entry was never
+    # audited (engine without layer-hint support, or dropped before
+    # assignment) and is DISCLOSED as such, not guessed.
+    if escape_layer_hints:
+        _n_hint = len(escape_layer_hints)
+        _ob = sum(1 for v in LAST_LAYER_HINT_REPORT.values()
+                  if v['obeyed'] and not v['failed'])
+        _miss = sum(1 for v in LAST_LAYER_HINT_REPORT.values()
+                    if not v['obeyed'] and not v['failed'])
+        _fail = sum(1 for v in LAST_LAYER_HINT_REPORT.values()
+                    if v['failed'])
+        _unaud = _n_hint - len(LAST_LAYER_HINT_REPORT)
+        print(f"  Layer hints: {_ob}/{_n_hint} obeyed, {_miss} missed, "
+              f"{_fail} failed, {_unaud} unaudited")
+        for _k, _v in sorted(LAST_LAYER_HINT_REPORT.items()):
+            if not _v['obeyed'] and not _v['failed']:
+                print(f"    layer hint MISSED: {_v['net']} at {_k}: "
+                      f"wanted {_v['hint']}, got {_v['got']} "
+                      f"({_v['engine']})")
 
     LAST_PLANE_DROP_REPORT.clear()
     _knob = (env_knobs.FANOUT_PLANE_DROP or '').strip().lower()

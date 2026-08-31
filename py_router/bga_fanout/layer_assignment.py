@@ -59,7 +59,9 @@ def assign_layers_smart(routes: List[FanoutRoute],
                         clearance: float,
                         diff_pair_spacing: float = 0.0,
                         existing_tracks: List[Dict] = None,
-                        no_inner_top_layer: bool = False) -> None:
+                        no_inner_top_layer: bool = False,
+                        layer_hints: Dict[Tuple[float, float],
+                                          str] = None) -> None:
     """
     Assign layers to routes to avoid all collisions.
 
@@ -78,15 +80,33 @@ def assign_layers_smart(routes: List[FanoutRoute],
     if existing_tracks is None:
         existing_tracks = []
 
+    # Per-pad escape-LAYER hints from the caller's plan (#622). The
+    # hint is tried FIRST everywhere a layer is chosen here; it never
+    # costs a route its escape (the normal candidates remain as
+    # fallback) and the final obedience audit lives in the caller --
+    # this function just prefers, stamps route._layer_hint, and lets
+    # the collision machinery veto.
+    def _hint_of(route):
+        h = (layer_hints or {}).get((round(route.pad_pos[0], 3),
+                                     round(route.pad_pos[1], 3)))
+        if h is not None and h not in available_layers:
+            h = None
+        route._layer_hint = h
+        return h
+
     # For diff pairs, we need to consider pair spacing when checking collisions
     # Two traces from the same pair use 2*track_width + diff_pair_spacing
     pair_width = 2 * track_width + diff_pair_spacing
 
-    # Edge routes stay on first layer
+    # Edge routes stay on first layer -- unless the plan hints them
+    # elsewhere: a hinted edge route takes its hinted layer (the via
+    # materialises in manage_vias, which handles any route whose
+    # layer != top), and still participates in edge-conflict pricing.
     edge_routes = []
     for route in routes:
         if route.is_edge:
-            route.layer = available_layers[0]
+            h = _hint_of(route)
+            route.layer = h if h is not None else available_layers[0]
             edge_routes.append(route)
 
     # Build lookup from pair_id to routes
@@ -101,9 +121,13 @@ def assign_layers_smart(routes: List[FanoutRoute],
     for pair_id, routes_in_pair in pair_routes.items():
         if any(r.is_edge for r in routes_in_pair):
             half_edge_pairs.add(pair_id)
-            # Set ALL routes in this pair to F.Cu
+            # Set ALL routes in this pair to F.Cu -- or to the pair's
+            # hinted layer when the plan named one (first hinted leg
+            # wins; a pair routes as one object)
+            ph = next((h for h in (_hint_of(r) for r in routes_in_pair)
+                       if h is not None), None)
             for r in routes_in_pair:
-                r.layer = available_layers[0]
+                r.layer = ph if ph is not None else available_layers[0]
                 if r not in edge_routes:
                     edge_routes.append(r)
 
@@ -162,6 +186,14 @@ def assign_layers_smart(routes: List[FanoutRoute],
                 candidate_layers = available_layers[1:] if len(available_layers) > 1 else available_layers
             else:
                 candidate_layers = available_layers
+
+            # the plan's layer hint goes FIRST in the ladder; the
+            # rest stay as fallback so the hint can never cost the
+            # escape (it can only be vetoed by a real conflict)
+            _h = _hint_of(route)
+            if _h is not None:
+                candidate_layers = [_h] + [L for L in candidate_layers
+                                           if L != _h]
 
             for layer in candidate_layers:
                 conflict = False
