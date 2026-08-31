@@ -85,10 +85,18 @@ def t_occupancy_counts_what_it_says():
            '%.4f' % BG.occupancy(vals, 0.3175))
     report('a degenerate step scores 0 rather than dividing by it',
            BG.occupancy(vals, 0.0) == 0.0 and BG.occupancy([], 0.1) == 0.0)
-    # The tolerance is absolute in mm, not relative to the step.
-    report('the 1um tolerance is absolute',
-           BG.occupancy([0.0009], 1.0) == 1.0
-           and BG.occupancy([0.0011], 1.0) == 0.0)
+    # The tolerance is absolute in mm, not relative to the step. Both arms
+    # need a step != 1.0, or `* step` is a no-op and the assertion cannot see
+    # the difference -- the first draft used 1.0 and the mutation battery
+    # caught it as a survivor.
+    report('the 1um tolerance is absolute, not a fraction of the step',
+           BG.occupancy([0.0009], 0.05) == 1.0,     # relative form: 0.018, miss
+           'fine step')
+    report('and it does not widen with a coarse step',
+           BG.occupancy([0.002], 2.54) == 0.0,      # relative form: 0.0008, hit
+           'coarse step')
+    report('a plain miss is still a miss',
+           BG.occupancy([0.0011], 1.0) == 0.0)
 
 
 def t_finest_within_slack_not_argmax():
