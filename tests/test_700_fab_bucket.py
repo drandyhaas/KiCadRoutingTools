@@ -40,7 +40,19 @@ def t_the_reported_bucket_is_the_one_the_floor_came_from():
         for tier in ft.TIERS:
             assert (ft.fab_floor_ladder(n, tier)[-1]
                     == ft.fab_floor_ladder(b.bucket, tier)[-1]), (n, tier)
-    print("  PASS: bucket and floor agree for 0..12 copper layers, both tiers")
+
+    # The loop above routes BOTH sides through `_layer_bucket`, so any
+    # idempotent function satisfies it -- `_layer_bucket = lambda n: 4` passes
+    # every line of it. So also pin the RULE, against the expression this
+    # replaced, over the same range: `_FAB_FLOORS[2] if (n or 2) <= 2 else
+    # _FAB_FLOORS[4]`. That is what makes this a regression test rather than a
+    # restatement.
+    for n in list(range(0, 13)) + [None, 1000]:
+        want = 2 if (n or 2) <= 2 else 4
+        assert ft.fab_floor_bucket(n).bucket == want, (n, want)
+        assert ft._layer_floors(n) is ft._FAB_FLOORS[want], n
+    print("  PASS: bucket and floor agree for 0..12 copper layers, both "
+          "tiers, and match the rule this replaced")
 
 
 def t_bucketed_and_saturated_say_which_answers_are_proxies():
@@ -128,7 +140,22 @@ def t_fine_via_rung_is_asked_not_restated():
     for n in (3, 4, 6, 8):
         assert ft.fab_floor_bucket(n).fine_via_rung is True, n
         assert len(ft.fab_floor_ladder(n, 'standard')) == 3, n
-    print("  PASS: fine-via rung tracks the standard ladder at 1,2 vs 3,4,6,8")
+
+    # Value agreement at those six counts is satisfied by a RESTATEMENT
+    # (`n > 2` passes every line above), so also check the field tracks the
+    # ladder when the ladder MOVES -- which a restatement cannot do. Removing
+    # the fine-via rung from the standard ladder must take the field with it.
+    _real = ft.fab_floor_ladder
+    try:
+        ft.fab_floor_ladder = lambda n, tier=None, overrides=None: [
+            {}, {}] if (n or 2) > 2 else [{}, {}]
+        assert ft.fab_floor_bucket(6).fine_via_rung is False, (
+            'fine_via_rung restates `n > 2` instead of asking the ladder')
+    finally:
+        ft.fab_floor_ladder = _real
+    assert ft.fab_floor_bucket(6).fine_via_rung is True, 'restore failed'
+    print("  PASS: fine-via rung tracks the standard ladder at 1,2 vs 3,4,6,8, "
+          "and follows it when the ladder moves")
 
 
 def t_add_layers_stops_claiming_a_result_it_could_not_measure():

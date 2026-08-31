@@ -135,15 +135,27 @@ class FaceLedger:
     def supply_bound(self) -> str:
         """WHICH term binds -- the actionable half, and the honest one.
 
-        `via_slots` is layer-INDEPENDENT by construction, so the `min` above
-        saturates almost at once: on every in-repo board the answer at 2
-        signal layers equals the answer at 6. Hiding that inside a `min()`
-        would reproduce #700 one level up -- a number that does not move with
-        the layer count. Naming the binding term turns it into the finding:
-        "six layers do not help this face because the via row binds at 9, not
-        because the layers are not there", and the action follows from that
-        (via geometry, underpad fanout, freeing span) in a way that "add
-        layers" never did.
+        And it is ALWAYS `via_slots` for `signal_layers >= 2` -- by
+        ARITHMETIC, not by corpus accident, which is a stronger and less
+        comfortable statement than "it saturates on the boards we have":
+
+            layer_lanes binds  <=>  floor(span/via) > (L-1)*floor(span/lane)
+            which for L >= 2 needs  via_pitch < lane_pitch
+            i.e.  max(via_dia + clr, drill + h2h) < track + clr
+            i.e.  via_diameter < track_width
+
+        A via narrower than a track. Not a thing. Checked over all 27 in-repo
+        boards at their own declared floors: zero.
+
+        So the layer count enters every published number as exactly ONE BIT --
+        `L == 1` (no other layer at all) versus `L >= 2` (the via row is the
+        constraint). Naming the binding term is what makes that visible
+        instead of hiding it inside a `min()`, which would reproduce #700 one
+        level up: a number that does not move with the layer count and does
+        not say why. Named, it is the finding, and the action follows from it
+        -- "six layers do not help this face because the via row binds at 9"
+        points at via geometry, underpad fanout or freeing span, none of which
+        "add layers" ever did.
         """
         if self.signal_layers <= 1:
             return 'no_other_layer'
@@ -308,9 +320,15 @@ def fine_pitch_parts(pcb_data, min_pads: int = MIN_PADS) -> List[str]:
 #: 0.95), while lvds_converter_dualclk's B.Cu zone -- which carries an EMPTY
 #: net name -- covers 0.0002. Nothing in the corpus sits between, so any
 #: threshold in (0.001, 0.94) separates them; 0.5 is "covers most of the
-#: board", which is what the word plane means. Erring high costs a signal
-#: layer, which is the conservative direction here (fewer layers -> smaller
-#: supply bound -> larger deficit_floor).
+#: board", which is what the word plane means.
+#:
+#: OVER-counting planes is the UNSOUND direction, not the safe one. Fewer
+#: signal layers -> smaller `supply_other_max` -> LARGER `deficit_floor`, and
+#: `deficit_floor` is a lower bound, so inflating it pushes it past the truth
+#: and prints a structural finding that is not there. (`via_slots` errs the
+#: other way on purpose and can afford to: over-stating supply keeps a lower
+#: bound valid.) That asymmetry is why `_pour_layers` measures the polygon's
+#: own area rather than its bounding box.
 MIN_PLANE_AREA_FRACTION = 0.5
 
 
@@ -324,11 +342,22 @@ def via_pitch(pcb_data, pcb_file: Optional[str] = None,
     The via-side twin of `lane_pitch`, and resolved by the SAME policy for the
     same reason -- board Default netclass, then the repo defaults, and NO fab
     wrap. Fab-flooring one half while the other stays board-first is not a
-    conservative choice, it is an incommensurate one: measured, a fab-floored
-    via pitch against this module's board-first lane pitch takes the ledger's
-    summed deficit to ZERO on four of six real boards (tigard 41->0,
-    rp2350 121->0, ulx3s 19->0, watchy 25->0). A supply term that erases the
-    finding it is annotating is not a supply term.
+    conservative choice, it is an incommensurate one. Measured, summed
+    `deficit_floor` over each whole board, shipped resolution against a
+    fab-floored via pitch:
+
+        tigard      10 -> 0     watchy       3 -> 0
+        rp2350      39 -> 0     glasgow      3 -> 0
+        orangecrab  17 -> 1     ulx3s        0 -> 0  (already zero)
+
+    Four of the five boards with a non-zero floor collapse to nothing. A
+    supply term that erases the finding it is annotating is not a supply term.
+
+    (The numbers to compare are `deficit_floor`, not `deficit`: the own-layer
+    deficit is `demand - supply` and no via-pitch change can move it. An
+    earlier draft of this docstring quoted 41/121/19/25 -- the own-layer
+    figures -- which overstated the collapse and, by including ulx3s, counted
+    a board that was already at zero.)
 
     The rule itself is `fab_tiers.min_via_center_distance` -- the #491
     arithmetic, `max(via_diameter + clearance, via_drill + hole_to_hole)`,
@@ -395,7 +424,12 @@ def signal_layer_count(pcb_data, *, signal_layers: Optional[int] = None,
                            OPTIMISTIC and every consumer must print it.
       ``unknown``          no copper-layer list at all. Returns 1, so the
                            layer term contributes exactly ZERO and the ledger
-                           reports today's numbers unchanged.
+                           reports today's numbers unchanged. Note this is
+                           tested BEFORE ``plane_layers``, so a declared plane
+                           list on a board with no copper-layer list is
+                           ignored rather than subtracted from nothing --
+                           deliberate, and the only place the stated order
+                           does not hold literally.
 
     There is deliberately no heuristic: `route.py`'s own docstring states that
     this toolchain "cannot auto-detect which layers are ground planes vs
@@ -458,15 +492,32 @@ def _pour_layers(pcb_data, copper) -> Tuple[str, ...]:
         poly = getattr(z, 'polygon', None) or ()
         if len(poly) < 3:
             continue
-        xs = [p[0] for p in poly]
-        ys = [p[1] for p in poly]
-        # Bounding box of the outline, not its exact area: this is a
-        # "does it cover most of the board" test with a 500x margin between
-        # the two populations, not an area measurement.
-        if ((max(xs) - min(xs)) * (max(ys) - min(ys)) / board_area
-                >= MIN_PLANE_AREA_FRACTION):
+        # The polygon's OWN area (shoelace), not its bounding box. A bbox
+        # over-reports a non-convex pour, and over-reporting coverage is the
+        # UNSOUND direction here: it drops a signal layer, which shrinks
+        # `supply_other_max`, which RAISES `deficit_floor` -- a lower bound
+        # pushed past the truth. Demonstrated on tigard with an injected
+        # L-shaped GND pour covering 0.190 of the board whose bbox covers
+        # 1.000: the bbox form declared In1.Cu a plane and took the board from
+        # 4 signal layers to 3. No corpus board triggers it (the worst real
+        # area/bbox ratio is 0.965), which is exactly why it had to be found
+        # by construction rather than by fixture.
+        if _polygon_area(poly) / board_area >= MIN_PLANE_AREA_FRACTION:
             out.add(layer)
     return tuple(sorted(out))
+
+
+def _polygon_area(poly) -> float:
+    """Absolute area of a closed polygon, by the shoelace formula."""
+    n = len(poly)
+    if n < 3:
+        return 0.0
+    total = 0.0
+    for i in range(n):
+        x1, y1 = poly[i][0], poly[i][1]
+        x2, y2 = poly[(i + 1) % n][0], poly[(i + 1) % n][1]
+        total += x1 * y2 - x2 * y1
+    return abs(total) / 2.0
 
 
 def lane_pitch_parts(pcb_data, pcb_file: Optional[str] = None,

@@ -407,8 +407,15 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
             # own clearance, so the layer count is the only thing that moves.
             'deficit_floor_lanes_now': f_now['lanes'],
             'deficit_floor_lanes_at_more': f_more['lanes'],
-            'signal_layers_now': n,
-            'signal_layers_at_more': n + step,
+            # COPPER layers, and named so. `add_layers` asks about a stackup
+            # this board does not have, so it hands the ledger the copper
+            # count as the signal count -- which OVER-states on a poured
+            # board (kit-dev-coldfire: 4 copper layers, 1 signal). Safe for a
+            # LOWER bound, since more assumed layers can only shrink
+            # `deficit_floor`, but it is not the ledger's own `signal_layers`
+            # and must not borrow its name.
+            'copper_layers_assumed_signal_now': n,
+            'copper_layers_assumed_signal_at_more': n + step,
         },
         'expected': {'deficit_lanes': 0},
         'not_modelled': (
@@ -447,10 +454,11 @@ def add_layers(pcb_data, pcb_file: str, *, clearance: float,
             f"nothing: JLC publishes one multilayer capability column and this "
             f"repo does not invent the rest. What more layers would actually "
             f"buy is nets escaping on the new layers, and THAT is now "
-            f"bounded: {f_now['lanes']} lane(s) are short even using every "
-            f"one of this board's {n} signal layers, against "
-            f"{f_more['lanes']} at {n + step}. Those are LOWER bounds -- a "
-            f"drop to 0 does not mean the board routes.")
+            f"bounded: {f_now['lanes']} lane(s) are short even if all {n} "
+            f"copper layers carried signal, against {f_more['lanes']} at "
+            f"{n + step}. Those are LOWER bounds -- a drop to 0 does not mean "
+            f"the board routes, and a board whose inner layers are poured has "
+            f"fewer signal layers than this assumes.")
     elif same_floor:
         # Reachable only if a future table gains a bucket whose floors happen
         # to match its neighbour's. Then "identical floors" IS the measurement.
@@ -735,7 +743,15 @@ _DIGEST_ALWAYS = ('deficit_lanes_now', 'deficit_lanes_at_more',
                   'parts', 'shortfall_mm2_at_least',
                   'proposed_square_side_mm', 'faces_in_deficit',
                   'deficit_lanes', 'containers_excluded',
-                  'fab_floor_layer_blind',
+                  # #700. `copper_layers` joins the forced set rather than
+                  # riding in on the unforced remainder: `_digest` returns
+                  # `out[:max(limit, len(forced))]`, so once add_layers' forced
+                  # count passed the limit of 5 NO unforced key could appear at
+                  # all, and the layer count -- the subject of the whole
+                  # option -- silently left the text channel. The forced list
+                  # IS add_layers' digest now, so it has to be the curated
+                  # headline rather than a supplement to one.
+                  'fab_floor_layer_blind', 'copper_layers',
                   'deficit_floor_lanes_now', 'deficit_floor_lanes_at_more')
 
 

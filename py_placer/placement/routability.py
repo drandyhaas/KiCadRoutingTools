@@ -743,9 +743,14 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
         # `via_slots` is layer-independent, so this is usually 'via_slots' --
         # which is the finding, not a defect: more layers do not help a face
         # whose via row is full.
+        # `max(set(...), key=count)` would be PYTHONHASHSEED-dependent on a
+        # tie -- set iteration over strings is randomised, so a published key
+        # would differ run to run. Unreachable today (every board yields one
+        # bound value) and fixed anyway: a nondeterministic output is a bug
+        # whether or not a fixture reaches it.
         bounds = [f.supply_bound for p in led for f in p.faces if f.deficit]
         out['escape_supply_bound'] = (
-            max(set(bounds), key=bounds.count) if bounds else None)
+            max(sorted(set(bounds)), key=bounds.count) if bounds else None)
         # WHO to move, deduped across parts in face order. This is the field
         # that turns "a face is short" into an action.
         blockers: List[str] = []

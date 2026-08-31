@@ -294,6 +294,156 @@ def t_worst_floor_is_a_property_not_only_a_dict_key():
           f"the floor")
 
 
+def t_worst_floor_selects_by_the_FLOOR_deficit_not_the_own_layer_one():
+    """M20 survived the first version of this file.
+
+    `worst_floor` picking `max(..., key=f.deficit)` instead of
+    `f.deficit_floor` passed every assertion, because they were tautologies --
+    `to_dict()['worst_deficit_floor'] == p.worst_floor.deficit_floor` holds
+    whichever face is selected. Measured, the wrong field moves the published
+    `worst_face_floor` / `worst_deficit_floor` on 40 of 109 corpus parts, and
+    both are board_brief POSITION_DEPENDENT keys.
+    """
+    seen = 0
+    for name in BOARDS:
+        pcb, path = _board(name)
+        if pcb is None:
+            continue
+        for pe in escape.escape_ledger(pcb, pcb_file=path):
+            live = [f for f in pe.faces if f.deficit_floor > 0]
+            if not live:
+                assert pe.worst_floor is None, (name, pe.ref)
+                continue
+            best = max(f.deficit_floor for f in live)
+            assert pe.worst_floor.deficit_floor == best, (
+                name, pe.ref, pe.worst_floor.face,
+                [(f.face, f.deficit, f.deficit_floor) for f in pe.faces])
+            seen += 1
+    assert seen, 'no part is short at the floor anywhere; fixtures went missing'
+    # ...and the two fields really can disagree, or the check above is vacuous.
+    split = [(n, pe.ref) for n in BOARDS
+             for pe in (escape.escape_ledger(_board(n)[0], pcb_file=_board(n)[1])
+                        if _board(n)[0] is not None else [])
+             if pe.worst_floor and pe.worst
+             and pe.worst.face != pe.worst_floor.face]
+    assert split, ('no part has a different worst face by the two fields, so '
+                   'this test cannot tell them apart')
+
+    # The VALUE assertion above is not enough on its own: where two faces TIE
+    # on deficit_floor, selecting by the own-layer `deficit` returns the same
+    # value and a DIFFERENT face -- and `worst_face_floor` is a published
+    # board_brief key. tigard RN5 is that case, concretely:
+    #     north  deficit 2  deficit_floor 1
+    #     east   deficit 3  deficit_floor 1
+    # so the floor rule (value, then face name) gives `north`, and the
+    # own-layer rule gives `east`. Pinned by its answer, not by re-deriving
+    # the selection expression, which would only compare the code with itself.
+    pcb, path = _board('tigard')
+    if pcb is not None:
+        rn5 = [q for q in escape.escape_ledger(pcb, pcb_file=path)
+               if q.ref == 'RN5']
+        if rn5:
+            d = rn5[0].to_dict()
+            faces = {f.face: (f.deficit, f.deficit_floor) for f in rn5[0].faces}
+            assert (faces.get('north') == (2, 1)
+                    and faces.get('east') == (3, 1)), (
+                f'the RN5 fixture moved: {faces}')
+            assert d['worst_face_floor'] == 'north', d['worst_face_floor']
+            assert d['worst_deficit_floor'] == 1, d['worst_deficit_floor']
+
+    print(f"  PASS: {seen} parts selected by deficit_floor; {len(split)} "
+          f"disagree with the own-layer worst face, and a tie resolves by "
+          f"face name")
+
+
+def t_a_declared_plane_list_reaches_the_ledger_through_health():
+    """M24 survived: severing `plane_layers` at the routability call site was
+    invisible. It is a user-facing intent key whose only wiring is that one
+    argument -- the "a param only one side passes silently does nothing" shape
+    from CLAUDE.md, one layer up."""
+    import routing_defaults as defaults
+    from placement import routability
+    from placement.quench import QuenchState
+    pcb, path = _board('rp2350_fpga_eensy_prePlane')
+    if pcb is None:
+        print("  SKIP: rp2350 not in kicad_files/")
+        return
+    state = QuenchState(pcb, path, clearance=defaults.CLEARANCE,
+                        board_edge_clearance=0.55, crossing_penalty=10.0,
+                        halo_base=0.5, halo_coef=0.15, halo_weight=2.0,
+                        edge_halo=2.0, edge_weight=2.0,
+                        grid_step=defaults.GRID_STEP, length_weight=1.0)
+    bare = routability.health(state, pcb, {}, {})
+    declared = routability.health(state, pcb, {}, {
+        'plane_layers': ['In1.Cu', 'In2.Cu', 'In3.Cu', 'In4.Cu']})
+    assert bare['escape_signal_layers'] == 6, bare['escape_signal_layers']
+    assert bare['escape_signal_layers_source'] == 'copper_layers', bare
+    assert declared['escape_signal_layers'] == 2, declared
+    assert declared['escape_signal_layers_source'] == 'declared_planes', declared
+    # Fewer signal layers can only make the LOWER bound larger or equal.
+    assert (declared['escape_worst_deficit_floor']
+            >= bare['escape_worst_deficit_floor']), (bare, declared)
+    print(f"  PASS: health.plane_layers 6 -> 2 signal layers, floor "
+          f"{bare['escape_worst_deficit_floor']} -> "
+          f"{declared['escape_worst_deficit_floor']}")
+
+
+def t_each_pour_guard_is_pinned_on_its_own():
+    """M7, M16 and M17 all survived: the area threshold, the in_footprint
+    guard and the net_name guard were only ever killed as a conjunction.
+
+    The corpus cannot separate them -- it has 10 zones, none footprint-owned,
+    and every named one covers >= 0.94 of the board -- so the fixture is
+    synthetic and each guard is exercised alone. Without this,
+    MIN_PLANE_AREA_FRACTION could be 0.0 and nothing would notice.
+    """
+    class _Z:
+        def __init__(self, layer, net_name, poly, in_footprint=False):
+            self.layer, self.net_name = layer, net_name
+            self.polygon, self.in_footprint = poly, in_footprint
+
+    class _BI:
+        copper_layers = ['F.Cu', 'In1.Cu', 'B.Cu']
+        board_bounds = (0.0, 0.0, 100.0, 100.0)
+
+    class _Pcb:
+        footprints = {}
+        source_path = None
+        board_info = _BI()
+
+        def __init__(self, zones):
+            self.zones = zones
+
+    full = [(0, 0), (100, 0), (100, 100), (0, 100)]           # 1.00 of board
+    sliver = [(0, 0), (2, 0), (2, 2), (0, 2)]                 # 0.0004
+    # An L: bbox covers the whole board, area is 0.19 of it.
+    ell = [(0, 0), (100, 0), (100, 10), (10, 10), (10, 100), (0, 100)]
+
+    def sig(zones):
+        return escape.signal_layer_count(_Pcb(zones))
+
+    assert sig([_Z('In1.Cu', 'GND', full)])[2] == ('In1.Cu',), 'a real plane'
+    # M7: the AREA test, alone. A named, board-level sliver is not a plane.
+    assert sig([_Z('In1.Cu', 'GND', sliver)])[2] == (), 'a sliver is not a plane'
+    # M17: the NET NAME test, alone. Board-sized, unnamed -> a keep-out.
+    assert sig([_Z('In1.Cu', '', full)])[2] == (), 'an unnamed pour'
+    assert sig([_Z('In1.Cu', '   ', full)])[2] == (), 'whitespace is not a name'
+    # M16: the IN_FOOTPRINT test, alone. Board-sized and named, but local.
+    assert sig([_Z('In1.Cu', 'GND', full, in_footprint=True)])[2] == (), (
+        "a footprint's own pour is not a board plane")
+    # S8: bbox vs area. The L covers the board's bbox and 19% of its area.
+    assert sig([_Z('In1.Cu', 'GND', ell)])[2] == (), (
+        'an L-shaped pour must be measured by AREA, not by its bbox')
+    # ...and the L really does fool a bbox test, or the row proves nothing.
+    xs = [p[0] for p in ell]
+    ys = [p[1] for p in ell]
+    bbox = (max(xs) - min(xs)) * (max(ys) - min(ys)) / 10000.0
+    assert bbox >= escape.MIN_PLANE_AREA_FRACTION > (
+        escape._polygon_area(ell) / 10000.0), bbox
+    print("  PASS: area, net name, in_footprint and bbox-vs-area each pinned "
+          "alone")
+
+
 def t_deficit_totals_can_sum_either_field_and_refuses_a_third():
     """An allowlist, not a getattr with a default -- the silent 0 is the exact
     failure this function's docstring is about."""
@@ -354,6 +504,9 @@ def t_the_health_block_reports_both_and_gates_on_neither():
 
 
 TESTS = (t_supply_and_deficit_are_untouched_on_every_board,
+         t_worst_floor_selects_by_the_FLOOR_deficit_not_the_own_layer_one,
+         t_a_declared_plane_list_reaches_the_ledger_through_health,
+         t_each_pour_guard_is_pinned_on_its_own,
          t_the_layer_term_never_tightens_a_verdict,
          t_a_fully_poured_two_layer_board_clamps_instead_of_going_negative,
          t_a_tiny_unnamed_zone_is_not_a_plane,

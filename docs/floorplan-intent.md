@@ -139,7 +139,7 @@ source, suspect, suspect_reason
 | `edge_connectors[].overhang_mm` | `min`, `max` |
 | `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
-| `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids` |
+| `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
 | `severity` | any of the 13 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |

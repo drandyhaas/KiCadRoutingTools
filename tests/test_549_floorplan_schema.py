@@ -16,6 +16,7 @@ name the thing that was wrong.
 
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -167,8 +168,45 @@ def test_the_key_sets_are_exactly_what_is_documented():
     undocumented = sorted({k for keys in KEY_SETS.values() for k in keys
                            if f'`{k}`' not in text})
     assert not undocumented, undocumented
+
+    # ...and the ACCEPTED-KEYS TABLE, not merely a mention somewhere in the
+    # file. `plane_layers` (#700) went into _HEALTH_KEYS, into this test and
+    # into a new prose section, while the table a reader actually consults
+    # still listed eight keys where the set had nine -- because "is the name
+    # backticked anywhere in this document" cannot tell a table row from a
+    # paragraph, and nothing else kept the two in sync.
+    rows = {}
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.split('|')]
+        if len(cells) < 4 or not cells[1].startswith('`'):
+            continue
+        rows[cells[1].strip('`')] = set(re.findall(r'`([a-z_]+)`', cells[2]))
+    # Named explicitly rather than derived from the constant's name: a
+    # derivation matched `_EDGE_CONNECTOR_KEYS` against an unrelated
+    # `edge_connector` row and failed on twelve keys that are documented
+    # perfectly well one row further down. A short honest map beats a clever
+    # rule that is wrong in a way the failure message hides.
+    TABLE_ROWS = {
+        '_HEALTH_KEYS': 'health',
+        '_CORRIDOR_KEYS': 'health.bus_corridors[]',
+        '_DECAP_KEYS': 'decaps',
+        '_BUDGET_KEYS': 'legality_budget',
+        '_WAIVER_KEYS': 'overlap_waivers[]',
+        '_OVERHANG_KEYS': 'edge_connectors[].overhang_mm',
+        '_EDGE_CONNECTOR_KEYS': 'edge_connectors[]',
+    }
+    checked = 0
+    for name, row in sorted(TABLE_ROWS.items()):
+        listed = rows.get(row)
+        assert listed is not None, f'no `{row}` row in the accepted-keys table'
+        missing = sorted(KEY_SETS[name] - listed)
+        assert not missing, (
+            f'{name} and its `{row}` table row have drifted; the row is '
+            f'missing {missing}')
+        checked += 1
     print(f"  PASS: {len(KEY_SETS)} key sets pinned exactly; "
-          f"{sum(len(v) for v in KEY_SETS.values())} names all documented")
+          f"{sum(len(v) for v in KEY_SETS.values())} names all documented, "
+          f"{checked} of them against their table row")
 
 
 def test_an_intent_using_every_known_key_loads():
