@@ -1563,11 +1563,13 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # keep-outs alone -- so identical geometry cost the connector its
             # declared edge when declared one way and not the other. Measured
             # on a 20x14 fixture with a rect over the WEST HALF of the south
-            # band: as a keep-out J1 slid to (13.0, 12.5), still on the south
+            # band: as a keep-out J1 slid to (14.0, 12.5), still on the south
             # edge; as an exclusive zone it got one fraction, was refused, and
             # fell through to the ordinary stages, which parked it at
             # (7.489, 8.34) -- the board interior. Same rect, same free strip
-            # to the east, two different answers.
+            # to the east, two different answers. (Both numbers are arm E2's
+            # own output; an earlier draft of this comment said 13.0, which
+            # was never measured anywhere.)
             _slide = ((0.0,) if not (state.keepouts_for.get(ref)
                                      or state.exclusive_for.get(ref)) else
                       (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
@@ -3309,20 +3311,6 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     # (the unrepairable filter, and reseat's refusal list) pick it up for free.
     _extra_locked = {r for pat in (lock_globs or [])
                      for r in fnmatch.filter(sorted(pcb_data.footprints), pat)}
-    # Hoisted above `make_state` (#797), resolved with the caller's OWN
-    # sources -- the same ones `place_seed` grades with, so the gate and the
-    # grade cannot disagree about who is a member.
-    #
-    # An earlier draft used `group_sources or auto` here, to stop a
-    # `group:`-shaped block resolving to nothing. That was the wrong place and
-    # the wrong mechanism, on two counts a blind review measured: this state is
-    # never consulted by the seat gate at all (`reseat_scope` re-enters through
-    # `seed_from_intent`, which builds its own), and guessing a source the
-    # GRADE will not use trades one round-trip break for its mirror image. The
-    # real guard is in `quench.exclusive_spec`, where a zone with no resolved
-    # members binds nobody.
-    _rs_blocks, _rs_probs = floorplan.resolve_blocks(
-        intent, pcb_data, group_sources)
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
@@ -3330,17 +3318,17 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         # #701: the declared keep-outs reach the SEAT PREDICATE (see
         # `seed_from_intent`). `intent` is optional on this path, so the
         # inert default is what a caller without one gets.
-        keepouts=intent.keepouts if intent else (),
-        # #797: and the exclusive zones. This is NOT the case
-        # `pose_score.make_state`'s asymmetry forbids -- that one is about
-        # `zone_containment`, a must-be-INSIDE claim whose repair must start
-        # from a violating pose, and the gate it withholds is MONOTONE.
-        # `zone_exclusive` is must-be-OUTSIDE, its target is clean by
-        # definition, and this gate is ABSOLUTE, so it cannot refuse a re-seat
-        # its own target. #701 set the precedent by handing this same path its
-        # keep-outs, which are the identical shape.
-        exclusive_zones=(floorplan.zone_entries(intent, _rs_blocks)
-                         if intent else ()))
+        keepouts=intent.keepouts if intent else ())
+    # NO `exclusive_zones=` here, and that is measured rather than assumed.
+    # A draft of #797 passed one, with a paragraph explaining why it was safe.
+    # A blind review showed this state is never consulted by a seat predicate
+    # at all -- `reseat_scope` seats through `seed_from_intent`, which builds
+    # its own -- so the channel was inert, and setting it to `()` changed
+    # nothing across all three of this area's batteries. It also cost a second
+    # `resolve_blocks` per call, whose `block_unresolved` problems were then
+    # discarded unread. Dead code carrying a comment that asserts it matters is
+    # worse than no code: anyone adding a seat call here must think about the
+    # channel, and an inert kwarg would tell them it was already handled.
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock

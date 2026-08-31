@@ -172,9 +172,17 @@ def exclusive_spec(zones, parts, refs=None
 
     A SLICE rather than a second walk, so membership, the `z.side` filter and
     the load-bearing `elif` that exempts a block's own members are resolved in
-    exactly ONE place. The seat gate and the quench gate therefore cannot come
-    to disagree about which rects bind a stranger -- they are reading the same
-    construction, not two that happen to agree today.
+    exactly ONE place, and the seat gate and the quench gate read the same
+    construction rather than two that happen to agree today.
+
+    ONE DELIBERATE DIVERGENCE, stated because the sentence above used to claim
+    there were none: the unresolved-zone filter below applies to the SEAT gate
+    and not to the quench's #702 channel. It is a policy about which claims may
+    STRAND a part, and the quench cannot strand one -- it only declines moves.
+    Widening it to `build_zone_spec` would change #702's admitted-move set
+    inside the wrong issue. `floorplan.rule_zone_exclusive` carries the SAME
+    filter, so the seat gate and the GRADE -- the pair whose disagreement is an
+    exit 4 on a correct board -- still agree exactly.
 
     THE `zone_containment` TERMS ARE DROPPED HERE, AND MUST NEVER REACH A SEAT
     GATE. `pose_score.make_state` withholds `intent_zones` from every seat
@@ -209,8 +217,16 @@ def exclusive_spec(zones, parts, refs=None
     # Applied HERE rather than in `build_zone_spec`, so the quench's #702 gate
     # is untouched -- this is a SEAT-gate policy, and widening it would be a
     # behaviour change shipped inside the wrong issue.
+    # Membership is tested against the PARTS THIS WALK CAN SEE, not against
+    # the mere presence of a ref string. A first version asked only
+    # `z.get('refs')`, and a blind review found the hole: `QuenchState.parts`
+    # drops a footprint with no pads and no courtyard, so a block whose only
+    # member is one of those RESOLVES non-empty, keeps its zone, and then
+    # finds no member here -- the same inversion one step further along, and
+    # with no `block_unresolved` finding to point at it.
     zones = tuple(z for z in (zones or ())
-                  if z.get('refs') or not z.get('exclusive'))
+                  if not z.get('exclusive')
+                  or any(r in parts for r in (z.get('refs') or ())))
     full = build_zone_spec(zones, parts, refs)
     out: Dict[str, Tuple[_IntentTerm, ...]] = {}
     for _ref, _terms in full.items():

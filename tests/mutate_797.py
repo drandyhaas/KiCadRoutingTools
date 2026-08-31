@@ -247,6 +247,12 @@ ROWS = [
      (T797P,), 'KILLED'),
 
     # ---- the two guards a blind review added ---------------------------
+    ('the-grade-has-no-unresolved-zone-guard', 'fp',
+     "        if not (members & set(ctx.parts)):\n"
+     "            continue\n",
+     "",
+     (T797P,), 'KILLED'),
+
     ('the-unresolved-zone-guard-is-removed', 'q',
      "    zones = tuple(z for z in (zones or ())\n"
      "                  if z.get('refs') or not z.get('exclusive'))\n",

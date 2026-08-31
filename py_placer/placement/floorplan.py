@@ -1242,6 +1242,20 @@ def rule_zone_exclusive(ctx) -> Iterator[Violation]:
         if z.rect is None or not z.exclusive:
             continue
         members = set(ctx.blocks.get(z.name, ()))
+        # #797: a zone with no member VISIBLE HERE cannot tell a member from a
+        # stranger, so it grades nobody. Without this the rule flags every
+        # part on the board -- including the ones the block was drawn around --
+        # which is the rule inverted rather than applied.
+        #
+        # It is not enough to leave this to `block_unresolved`, and that was
+        # measured rather than assumed: `block_unresolved` is a SETTABLE
+        # severity, so an intent that downgrades it to `warn` produced a run
+        # whose ONLY error was `zone_exclusive`, against a part the seat gate
+        # had deliberately declined to bind and therefore could not repair.
+        # The seat gate (`quench.exclusive_spec`) skips the same zones, so the
+        # two agree at every severity.
+        if not (members & set(ctx.parts)):
+            continue
         for ref, part in sorted(ctx.parts.items()):
             if ref in members:
                 continue

@@ -537,8 +537,32 @@ def test_a_zone_whose_members_did_not_resolve_binds_nobody(wd):
     assert st_b.exclusive_for, "the resolved control bound nobody either"
     assert refused(st_b, 'U1', *RF_CENTRE), \
         "the resolved control did not refuse, so (a) proves nothing"
+
+    # (c) THE GRADE MUST AGREE, at every severity. It is not enough for the
+    # seat gate alone to decline: `block_unresolved` is a SETTABLE severity,
+    # and an intent that downgrades it to `warn` used to leave a run whose
+    # ONLY error was `zone_exclusive` -- against a part the gate had
+    # deliberately declined to bind and therefore could not repair, which is
+    # verbatim the failure #797 exists to close. Measured before the grade
+    # carried the same filter; found by a blind review.
+    pcb_a = parse_kicad_pcb(b)
+    for sev in (None, 'warn'):
+        doc = intent_doc(blocks=[
+            {"name": "rf", "group": "sheet:nope", "zone": list(RF),
+             "exclusive": True, "tolerance_mm": 0.5}])
+        if sev:
+            doc['severity'] = {'block_unresolved': sev}
+        it_c = load(doc, wd, f'unres_c_{sev}')
+        errs = [v.rule for v in floorplan.grade(it_c, pcb_a, b).errors]
+        assert 'zone_exclusive' not in errs, (
+            f"at block_unresolved severity {sev!r} the GRADE flags "
+            f"zone_exclusive on a zone with no resolved members, while the "
+            f"seat gate declines to bind it -- a part nothing can repair and "
+            f"an exit 4 on a board the seeder placed correctly. errors={errs}")
     print("  PASS: an unresolved exclusive zone binds 0 parts and refuses "
-          "none; the same zone with explicit refs binds and refuses")
+          "none, and the GRADE flags none either at default or `warn` "
+          "block_unresolved severity; the same zone with explicit refs binds "
+          "and refuses")
 
 
 # --------------------------------------------------------------------------
@@ -704,10 +728,20 @@ def test_the_seat_enforced_tuple_matches_the_doc_column_and_an_arm(wd):
             if s.startswith('|') else []
         if len(cells) != 5:
             continue                      # not the 5-column search table
-        if 'seat search' in s.lower() and 'quench' in s.lower():
+        if (header is None
+                and cells[0].strip().lower() == 'rule'
+                and 'seat search' in s.lower()
+                and 'quench' in s.lower()):
+            # The FIRST such row, and only one whose first cell is literally
+            # `rule`. A blind review hijacked the earlier version with a later
+            # 5-cell row mentioning "seat search" in its fourth cell: the scan
+            # kept the LAST match, `seat_ix` moved to the QUENCH column, and
+            # the arm passed with the seat cell reverted to "no" -- the same
+            # failure the header lookup was written to prevent, reached by a
+            # doc addition instead of a reorder.
             header = [c.lower() for c in cells]
             continue
-        if s.startswith('| `'):
+        if header is not None and s.startswith('| `'):
             rows[cells[0].strip('`')] = cells
     assert header is not None, (
         "the 'Which rules the SEARCH can see' table has no recognisable "
