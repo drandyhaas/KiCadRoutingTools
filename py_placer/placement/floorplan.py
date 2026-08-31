@@ -411,8 +411,8 @@ def _along_edge_claim(c: Dict, i: int) -> None:
     """Validate `center_on_edge` / `along_edge_band` on one entry (#712).
 
     WHERE the part sits along its edge. The rule already grades the overhang
-    band, the nearest-edge identity and a setback, so a seat 2.35mm off the
-    centreline of a 14.5mm edge is satisfied exactly as well as a centred one.
+    band, the nearest-edge identity and a setback, so a seat well off the
+    centreline of its edge is satisfied exactly as well as a centred one.
 
     Refused HERE, at load, rather than in `validate_intent`, and that is a
     deliberate deviation from the issue's own text. `validate_intent` has
@@ -1541,8 +1541,13 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                     expected={'max_setback_mm': float(setback)})
 
         # #712: WHERE ALONG the edge. The three conjuncts above are all
-        # satisfied anywhere along it, so a receptacle 2.35mm off the
-        # centreline of a 14.5mm edge grades exactly as well as a centred one.
+        # satisfied anywhere along it, so a receptacle well off the centre of
+        # its edge grades exactly as well as a centred one. Measured on the
+        # tracked corpus: esp_prog's USB1 sits 1.75mm off the centre of its
+        # 14.50mm east edge -- 12.07% -- and no conjunct could say so.
+        # (#712's own report cites 2.35mm on a 14.5mm edge, from a board
+        # revision that is not in this repo; the number measurable HERE is
+        # 1.75mm, and that is the one this code is checked against.)
         #
         # MEASURED ALWAYS, GRADED ONLY WHEN DECLARED. The offset reaches
         # `edge_seating` on every entry naming an edge, because a number
@@ -1553,7 +1558,17 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # percent off their edge centres, so any threshold this tool chose
         # would fail a good human board 3 times out of 3. The author writes
         # the number or there is no claim.
-        yield from _grade_along_edge(ctx, c, ref, part, _sev)
+        # `ctx.sev(...)`, NOT `_sev`. `_sev` is forced to WARN for an entry
+        # the EMITTER classed `connector_affinity`, and that forcing is about
+        # the interior-proximity conjunct above: a generic connector sitting
+        # mid-board is a flag for the boundary review, never an error. Letting
+        # it reach here would let an INFERRED class silently downgrade an
+        # author's EXPLICIT along-edge claim -- "declared outranks inferred"
+        # inverting. Measured on esp_prog: with the class set, the same
+        # violation went [ERROR] -> [warn ], errors 6 -> 4, and had it been
+        # the only finding the exit would have flipped 4 -> 0.
+        yield from _grade_along_edge(ctx, c, ref, part,
+                                     ctx.sev('edge_connector'))
 
 
 def _grade_along_edge(ctx, c, ref, part, sev) -> Iterator[Violation]:

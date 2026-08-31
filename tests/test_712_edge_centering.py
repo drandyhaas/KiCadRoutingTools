@@ -1,9 +1,9 @@
 """WHERE ALONG the edge: the `edge_connector` centring conjunct (#712).
 
 `rule_edge_connector` graded the overhang band, the nearest-edge identity and a
-setback, and all three are satisfied ANYWHERE along the edge. A receptacle
-2.35 mm off the centreline of a 14.5 mm edge graded exactly as well as a
-centred one.
+setback, and all three are satisfied ANYWHERE along the edge. Measured on the
+tracked corpus: esp_prog's USB1 sits 1.75 mm off the centre of its 14.50 mm
+east edge -- 12.07 % -- and graded exactly as well as a centred one.
 
 Two things this file is written to hold down, because both are easy to lose:
 

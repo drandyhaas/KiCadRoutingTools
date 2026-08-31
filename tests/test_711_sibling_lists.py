@@ -7,8 +7,8 @@ not fail -- it silently reverts the next step to inferring what the sibling
 declared.
 
 This is a test because the drift already happened, measured on `upstream/main`
-before this change: **nine** independent hand-written copies of the same
-tuple, three of them narrower than the others, and the one the placement CLIs
+before this change: **nine** independent hand-written copies of the same tuple,
+**four** of them narrower than the rest, and the one the placement CLIs
 actually go through (`portfolio.copy_siblings`) was NOT the one anybody would
 think to edit.
 

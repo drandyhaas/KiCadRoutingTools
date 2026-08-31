@@ -725,10 +725,12 @@ and its lexical rules "miss house libraries entirely". It is the **second** pass
 The spec is the first.
 
 **Where the spec goes so a tool can read it.** A `<board>.design-brief.json`
-sibling is the declared channel (#711): it is auto-discovered by every step
-that takes `--intent`, carried down a chain with the board's other siblings,
-and compiled into `edge_connectors` and `keepouts` — the constructs the grade
-and the seat search already act on. Read what a board already declares with
+sibling is the declared channel (#711). `check_floorplan.py` auto-discovers it
+and `--emit-intent` COMPILES it into `edge_connectors` and `keepouts` — the
+constructs the grade and the seat search already act on — so the placement
+CLIs receive it through the `--intent` they already take, not through a flag
+of their own. It travels with the board's other siblings down a chain. Read
+what a board already declares with
 
 ```bash
 python3 -X utf8 py_tools/board_brief.py board.kicad_pcb --json wk/brief0.json

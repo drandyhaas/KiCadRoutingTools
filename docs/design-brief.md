@@ -216,10 +216,11 @@ forced WARN, and that is a decision to take deliberately rather than in passing.
 
 `.design-brief.json` is in `copy_board.SIBLING_EXTS`, and **every** other site
 that copies a board's siblings imports that one list. There were nine
-independent hand-written copies of it before this change, three of them
-narrower than the others, and the one the placement CLIs actually go through —
-`placement/portfolio.copy_siblings` — was not the one anybody would think to
-edit. `tests/test_711_sibling_lists.py` refuses a tenth.
+independent hand-written copies of it before this change — **four** of them the
+narrower `('.kicad_pro', '.kicad_dru')` form (`ai_gui.py`, `plane_score.py`,
+`check_join.py`, `placement_run.py`) — and the one the placement CLIs actually
+go through, `placement/portfolio.copy_siblings`, was not the one anybody would
+think to edit. `tests/test_711_sibling_lists.py` refuses a tenth.
 
 Stranding it does not fail: it silently reverts the next step to inferring what
 the sibling declared, which is the whole class of bug `.kicad_pro` and

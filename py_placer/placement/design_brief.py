@@ -458,9 +458,15 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
             # refuses to name one for an implausible pose. "I do not know"
             # reaches machinery that knows what to do with it.
             unknown.append(f"interfaces[{ref}].edge")
+            # DROP an inferred edge rather than leaving it. "I do not know"
+            # is an answer, and an entry that keeps the emitter's
+            # `_nearest_edge` guess is graded against a pose-derived edge the
+            # author explicitly declined to name -- the inversion this whole
+            # channel exists to prevent. `merge_into_intent` reads this key.
+            ctx['edge_declared_unknown'] = True
             entry['note'] = ('the brief declares this connector with edge '
-                             '"unknown" -- no edge is claimed, and none is '
-                             'inferred here')
+                             '"unknown" -- no edge is claimed, and any edge '
+                             'the emitter inferred is dropped')
 
         if _known(c.get('user_facing')) and c.get('user_facing') is True:
             # An edge class is what the placement ENGINES read (via
@@ -606,12 +612,20 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
         merged_ctx = dict(base.get('context') or {})
         merged_ctx.update(c.get('context') or {})
         base.update({k: v for k, v in c.items() if k != 'context'})
+        if merged_ctx.get('edge_declared_unknown'):
+            base.pop('edge', None)
         base['context'] = merged_ctx
         # An entry that gains a declared edge must not keep an inferred
         # `class` of connector_affinity: that class is exactly "no edge claim",
         # and `Intent.edge_claims()` drops it, so the engines would ignore the
         # very declaration the author wrote.
-        if base.get('edge') and base.get('class') == 'connector_affinity':
+        # `c.get('edge')` -- the BRIEF's edge, not `base`'s. Reading the
+        # merged entry would let an emitter-INFERRED edge promote a row into
+        # `Intent.edge_claims()`, which locks it in the quench and grants it
+        # the 2.0mm off-outline allowance. Unreachable today (the emitter
+        # never writes `edge` on a `connector_affinity` entry) and one
+        # emitter change away from being a silent placement change.
+        if c.get('edge') and base.get('class') == 'connector_affinity':
             base['class'] = 'edge_receptacle'
             merged_ctx['was_class'] = 'connector_affinity'
         by_ref[ref] = base

@@ -85,8 +85,10 @@ is not a bug in the emitter; it is the only thing it can do with no spec.
    Everything else -- including `mechanical` -- is inference. If it says
    NONE DECLARED, that sentence is the finding.
 
-2. If a `<board>.design-brief.json` sibling exists, it is discovered
-   automatically by every step below and you do not need a flag.
+2. If a `<board>.design-brief.json` sibling exists, `check_floorplan.py` and
+   `board_brief.py` discover it without a flag, and `--emit-intent` COMPILES
+   it into the intent every later step already reads through `--intent`. You
+   do not hand it to the placement CLIs directly; they have no `--brief`.
 
 3. If none exists, ASK -- and ask only what cannot be inferred. In priority
    order, because these are the questions whose answers change a placement:

@@ -1168,6 +1168,91 @@ def _declared_frac_window(entry: Dict, span: float):
     return None
 
 
+def _declared_edge_span(state, bounds, edge: str):
+    """(lo, hi, basis) for the edge a DECLARED fraction is a fraction OF.
+
+    The grade resolves this with `floorplan.edge_span`, which prefers the
+    outline RING because the bounding box is wrong on a notched board -- on
+    `interf_u_unrouted_placed` the bbox south side spans 115.57mm where the
+    board's real south edge spans 81.28mm. If the seat search kept using the
+    bbox the two would target centres 5.715mm apart on that board, and the
+    seeder would deterministically place what the grade then flags. So both
+    sides call the SAME function; a grader with its own idea of the geometry
+    grades the reimplementation.
+
+    Falls back to the bounding box when the outline cannot be resolved, which
+    is what the ladder used before any of this and is correct wherever the
+    grade abstains (there is then no declared verdict to disagree with).
+    """
+    x0, y0, x1, y1 = bounds
+    bbox = ((x0, x1) if edge in ('north', 'south') else (y0, y1))
+    try:
+        from placement import floorplan as _fp
+        outline = {'simple_rectangle': True, 'cutouts': 0, 'edge_segments': 0}
+        gate = state.edge_gate
+        if getattr(gate, 'rings', None):
+            outline = {'simple_rectangle': False, 'cutouts': 0,
+                       'edge_segments': 0}
+        lo, hi, basis = _fp.edge_span(gate, bounds, edge, outline)
+    except Exception:                                           # noqa: BLE001
+        return bbox[0], bbox[1], 'bbox'
+    if lo is None:
+        return bbox[0], bbox[1], 'bbox'
+    return lo, hi, basis
+
+
+def _axis_of(edge: str) -> int:
+    return 0 if edge in ('north', 'south') else 1
+
+
+def _centre_offset_mm(part, edge: str) -> float:
+    """(rect centre - origin) along `edge`, in MILLIMETRES.
+
+    Turns with the part, so it must be read at the rotation in use.
+    """
+    lx0, ly0, lx1, ly1 = part.rect(0.0, 0.0, part.rot)
+    a, b = ((lx0, lx1) if _axis_of(edge) == 0 else (ly0, ly1))
+    return (a + b) / 2.0
+
+
+def declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, declared):
+    """A DECLARED fraction -> the fraction the seat ladder works in.
+
+    TWO conversions, and both are needed or the seat lands somewhere the
+    grade did not ask for:
+
+      * the declaration is about the part's courtyard CENTRE (what
+        `rule_edge_connector` measures) and `_edge_pose` positions its
+        ORIGIN -- 2.54mm apart on splitflap_driver's J17;
+      * the declaration is a fraction of the EDGE's span, which on a notched
+        board is not the bounding box -- 81.28mm against 115.57mm on
+        `interf_u_unrouted_placed` -- while `_edge_pose` interpolates the
+        bounding box.
+
+    Everything meets in millimetres along the edge axis, which is the only
+    currency both sides can state without ambiguity.
+    """
+    ax = _axis_of(edge)
+    bb_lo, bb_hi = ((bounds[0], bounds[2]) if ax == 0
+                    else (bounds[1], bounds[3]))
+    centre_pos = e_lo + declared * (e_hi - e_lo)
+    origin_pos = centre_pos - _centre_offset_mm(part, edge)
+    return (origin_pos - bb_lo) / max(1e-9, bb_hi - bb_lo)
+
+
+def ladder_to_declared_frac(part, bounds, edge, e_lo, e_hi, frac):
+    """The inverse, so a refusal can report the legal window in the SAME
+    currency as the declaration it is refusing. Two numbers in one sentence
+    that mean different things is how the first version of this message read.
+    """
+    ax = _axis_of(edge)
+    bb_lo, bb_hi = ((bounds[0], bounds[2]) if ax == 0
+                    else (bounds[1], bounds[3]))
+    origin_pos = bb_lo + frac * (bb_hi - bb_lo)
+    centre_pos = origin_pos + _centre_offset_mm(part, edge)
+    return (centre_pos - e_lo) / max(1e-9, e_hi - e_lo)
+
+
 def _centre_offset_frac(part, bounds, edge: str) -> float:
     """(rect centre - origin) along `edge`, as a fraction of the edge span.
 
@@ -1198,28 +1283,32 @@ def _already_on_its_edge(state, part) -> bool:
     """Is this part already crossing the boundary it was declared on?
 
     Then its ORIENTATION is right and its refusal is a band, keep-out or
-    neighbour problem -- turning it is guaranteed to be the wrong answer.
+    neighbour problem -- turning it is the wrong answer.
 
-    Thresholdless: `> EPS` is the module's own zero. Measured on the tracked
-    corpus, three parts have `_edge_frac_bounds` refusing at their current
-    rotation while already overhanging their boundary --
+    MEASURED, and the measurement is J17 on splitflap_driver rather than the
+    three parts an earlier version of this docstring named. With a declared
+    `along_edge_band` of 0.10-0.20, J17 at its home pose (overhanging its
+    north edge by 0.40mm) is refused at rot 0 WITH this guard and rotates to
+    90 without it -- so the guard is what keeps it upright, and
+    `tests/test_706_seat_edge_target.py` pins exactly that counterfactual.
 
-        ulx3s   J1  (f_lo, f_hi) = (0.034, 0.015)  overhang 11.99mm  rot 270
-        ulx3s   J2                (0.985, 0.966)   overhang 11.99mm  rot  90
-        sonde_u J1                (0.626, 0.374)   overhang 26.55mm  rot 270
+    THE EARLIER CLAIM HERE WAS WRONG, and it is worth recording rather than
+    quietly replacing. It said a bare gate would turn ulx3s J1/J2 and sonde_u
+    J1 -- three full board-width connectors overhanging 11.99, 11.99 and
+    26.55mm. Those numbers are real, but the consequence is not: all three
+    return at `_seat_edge`'s `f_lo > f_hi` refusal ("is wider than the east
+    edge"), which is BEFORE the ladder and therefore before this guard is
+    ever consulted. They are kept upright by the frac-bounds check, not by
+    this. The error came from calling this function directly and reading the
+    True as if it had been reached through `_seat_edge`.
 
-    -- all three full board-width connectors. A bare "no seat at the current
-    rotation, so try 90/180/270" gate would turn every one of them sideways,
-    which is a worse answer than today's honest refusal. With this guard the
-    rotation loop is INERT on every tracked board.
-
-    NO `try/except` here, and that is the point. The first version of this
-    function wrapped the measurement in a bare `except Exception: return
-    False`, and `legality` is not imported in this module -- so `legality.EPS`
-    raised `NameError`, the except swallowed it, and the guard answered "not
-    on its edge" for every part on every board. It read exactly like a guard
-    and never fired once. A measurement that cannot be taken must raise, not
-    return the permissive answer.
+    NO `try/except` here, and that is the point. The first version wrapped the
+    measurement in a bare `except Exception: return False`, and `seeder` has
+    no module-level `legality` binding -- so `legality.EPS` raised NameError,
+    the except swallowed it, and the guard answered "not on its edge" for
+    EVERY part on EVERY board. It read exactly like a guard and never fired
+    once. A measurement that cannot be taken must raise, not return the
+    permissive answer.
     """
     return state.edge_gate.rect_outside_amount(part.rect()) > _ON_EDGE_EPS_MM
 
@@ -1250,49 +1339,88 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     # coordinate is the damaged pose's own, carried verbatim into the output.
     declared = _declared_frac(entry)
     # A declared fraction is about the part's COURTYARD CENTRE, which is what
-    # the grade measures; the ladder below positions its ORIGIN. Convert once,
-    # here, so every use downstream is in the ladder's own currency.
-    _c_off = _centre_offset_frac(part, state.board, edge)
-    if declared is not None:
-        cur = declared - _c_off
-    else:
-        ax, ay = target if target is not None else (part.x, part.y)
-        if edge in ('north', 'south'):
-            cur = (ax - x0) / max(1e-9, (x1 - x0))
-        else:
-            cur = (ay - y0) / max(1e-9, (y1 - y0))
-
-    # Clamp by the part's OWN half-extent, not a bare [0.05, 0.95]. A part
-    # wider than its edge has no legal fraction at all; say so rather than
-    # sliding it off the end and reporting a seat.
-    f_lo, f_hi = _edge_frac_bounds(part, state.board, edge)
-    if f_lo > f_hi:
-        notes.append(f"{ref}: is wider than the {edge} edge "
-                     f"({f_lo:.2f} > {f_hi:.2f} of its span), so no along-edge "
-                     f"position keeps it on the board")
-        return False
-    # A DECLARED window narrows the legal one. Without this the +/-0.4 ladder
-    # could find a seat OUTSIDE the declared band, which `rule_edge_connector`
-    # would then flag -- the search accepting a pose the grade refuses is the
-    # round-trip break `edge_seat_ok` and `keepout_hit` both exist to prevent.
+    # the grade measures; the ladder below positions its ORIGIN. The
+    # conversion lives in `_geometry` rather than here because it TURNS WITH
+    # THE PART -- computing it once, at the incoming rotation, is what made
+    # the rotation branch validate one rectangle and apply another.
     span = ((x1 - x0) if edge in ('north', 'south') else (y1 - y0))
     win = _declared_frac_window(entry, span)
-    if win is not None:
-        # Same conversion as `cur`: the declared window is about the rect
-        # centre, `f_lo`/`f_hi` are about the origin.
-        w_lo, w_hi = win[0] - _c_off, win[1] - _c_off
-        n_lo, n_hi = max(f_lo, w_lo), min(f_hi, w_hi)
-        if n_lo > n_hi:
-            notes.append(
-                f"{ref}: the declared along-edge window "
-                f"[{win[0]:.3f}, {win[1]:.3f}] does not intersect the legal one "
-                f"[{f_lo + _c_off:.3f}, {f_hi + _c_off:.3f}] for this part "
-                f"on the {edge} edge -- "
-                f"widen the declaration, or the part is too wide for the "
-                f"position it is declared at")
-            return False
-        f_lo, f_hi = n_lo, n_hi
-    cur = min(f_hi, max(f_lo, cur))
+
+    def _geometry(rot, complain):
+        """(cur, f_lo, f_hi, step) at rotation `rot`, or None.
+
+        EVERY quantity here depends on the rotation, which is why it is a
+        function of one rather than four values computed once. `part.rect`
+        turns with the part, so its half-extent (`_edge_frac_bounds`), the
+        offset from its origin to its courtyard centre (`_centre_offset_frac`)
+        and therefore the window intersection are all different at 90 degrees.
+
+        `complain` is True only for the part's OWN rotation: a refusal note is
+        about the pose the caller asked for, and the rotation loop would
+        otherwise append the same sentence up to four times.
+        """
+        e_lo, e_hi, _ = _declared_edge_span(state, state.board, edge)
+
+        def to_ladder(f):
+            return declared_to_ladder_frac(part, state.board, edge,
+                                           e_lo, e_hi, f)
+
+        def to_declared(f):
+            return ladder_to_declared_frac(part, state.board, edge,
+                                           e_lo, e_hi, f)
+
+        # Clamp by the part's OWN half-extent, not a bare [0.05, 0.95]. A part
+        # wider than its edge has no legal fraction at all; say so rather than
+        # sliding it off the end and reporting a seat.
+        f_lo, f_hi = _edge_frac_bounds(part, state.board, edge)
+        if f_lo > f_hi:
+            if complain:
+                notes.append(f"{ref}: is wider than the {edge} edge "
+                             f"({f_lo:.2f} > {f_hi:.2f} of its span), so no "
+                             f"along-edge position keeps it on the board")
+            return None
+        # A DECLARED window narrows the legal one. Without this the +/-0.4
+        # ladder could find a seat OUTSIDE the declared band, which
+        # `rule_edge_connector` would then flag -- the search accepting a pose
+        # the grade refuses is the round-trip break `edge_seat_ok` and
+        # `keepout_hit` both exist to prevent.
+        if win is not None:
+            w_lo, w_hi = to_ladder(win[0]), to_ladder(win[1])
+            n_lo, n_hi = max(f_lo, w_lo), min(f_hi, w_hi)
+            if n_lo > n_hi:
+                if complain:
+                    notes.append(
+                        f"{ref}: the declared along-edge window "
+                        f"[{win[0]:.3f}, {win[1]:.3f}] does not intersect the "
+                        f"legal one [{to_declared(f_lo):.3f}, "
+                        f"{to_declared(f_hi):.3f}] "
+                        f"for this part on the {edge} edge -- "
+                        f"widen the declaration, or the part is too wide for "
+                        f"the position it is declared at")
+                return None
+            f_lo, f_hi = n_lo, n_hi
+        if declared is not None:
+            cur = to_ladder(declared)
+        else:
+            ax, ay = target if target is not None else (part.x, part.y)
+            if edge in ('north', 'south'):
+                cur = (ax - x0) / max(1e-9, (x1 - x0))
+            else:
+                cur = (ay - y0) / max(1e-9, (y1 - y0))
+        cur = min(f_hi, max(f_lo, cur))
+        # The ladder's steps are fractions of the WHOLE edge, which is the
+        # right scale when it is sliding a part along a free edge and much too
+        # coarse when it is searching inside a declared window. Measured: with
+        # a declared band of 0.85-0.95 on splitflap_driver's 198.12mm north
+        # edge, the +/-0.05 rungs are 9.9mm apart and clamp to the window's
+        # two ends, so the ladder tries THREE distinct positions in the band
+        # and misses the one legal seat between them -- the feature reported
+        # "no seat" on every band of that board. Scaling the rungs to the
+        # window searches it at the same relative resolution the ladder gives
+        # a whole edge. 0.8 is the ladder's own full sweep (+/-0.4), so an
+        # undeclared seat has scale exactly 1.0 and is unchanged.
+        step = ((f_hi - f_lo) / 0.8) if win is not None else 1.0
+        return cur, f_lo, f_hi, step
 
     # The declared band. `hi` None means "no stated maximum" -- allow twice the
     # midpoint target, which is what `overhang` was derived from, rather than
@@ -1329,37 +1457,42 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         return edge_seat_ok(state, part, px, py, edge, lo, hi_eff,
                             reasons=refused)
 
-    # The ladder's steps are fractions of the WHOLE edge, which is the right
-    # scale when it is sliding a part along a free edge and much too coarse
-    # when it is searching inside a declared window. Measured: with a declared
-    # band of 0.85-0.95 on splitflap_driver's 198.12mm north edge, the +/-0.05
-    # rungs are 9.9mm apart and clamp to the window's two ends, so the ladder
-    # tries THREE distinct positions in the band and misses the one legal seat
-    # between them -- the feature reported "no seat" on every band of that
-    # board. Scaling the rungs to the window searches it at the same relative
-    # resolution the ladder gives a whole edge. 0.8 is the ladder's own full
-    # sweep (+/-0.4), so an undeclared seat has scale exactly 1.0 and is
-    # unchanged.
-    _step = ((f_hi - f_lo) / 0.8) if win is not None else 1.0
-
     def try_rot(rot):
         """The seat ladder at one rotation. (x, y) or None.
 
-        Extracted verbatim so the rotation loop below can re-run it; at the
-        part's own rotation this executes exactly the statements the inline
-        version did, against the same state, so a board that seats today
-        seats identically.
+        `part.rot` is SET for the duration, and that is the whole point rather
+        than a shortcut. `_edge_pose`, `_edge_correct` and `edge_seat_ok` all
+        read `part.rot` internally -- the first version of this threaded the
+        trial rotation into `conflict_free` alone, so the overhang band, the
+        convergence walk and the pads-on-board check were all measured on the
+        rectangle the part had BEFORE the turn, and then the turn was applied.
+        Measured on the fixture this file's own rotation test uses: the seat
+        checked 0.50mm of overhang at rot 0 and delivered 1.92mm at rot 90 --
+        0.92mm past the declared maximum, `edge_seat_ok` False at the pose
+        actually written, and an along-edge fraction outside the declared band
+        as well. Exactly the "search accepts what the grade refuses" break the
+        window intersection exists to prevent.
         """
-        for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
-                   0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
-            frac = min(f_hi, max(f_lo, cur + df * _step))
-            x, y = _edge_pose(part, state.board, edge, frac, overhang)
-            x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
-            if not converged or not on_board(x, y):
-                continue
-            if conflict_free(x, y, rot):
-                return x, y
-        return None
+        saved = part.rot
+        part.rot = rot
+        try:
+            geom = _geometry(rot, complain=(rot == saved))
+            if geom is None:
+                return None
+            cur, f_lo, f_hi, step = geom
+            for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
+                       0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
+                frac = min(f_hi, max(f_lo, cur + df * step))
+                x, y = _edge_pose(part, state.board, edge, frac, overhang)
+                x, y, converged = _edge_correct(state, ref, edge, x, y,
+                                                overhang)
+                if not converged or not on_board(x, y):
+                    continue
+                if conflict_free(x, y, rot):
+                    return x, y
+            return None
+        finally:
+            part.rot = saved
 
     seat = try_rot(part.rot)
     if seat is not None:
@@ -1602,22 +1735,43 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # exit 4 grading its own output against the intent it was built
             # from. Inert when nothing is declared: `_declared_frac` is None.
             _dec = _declared_frac(c)
-            frac = _dec if _dec is not None else (k + 1) / (len(specs) + 1)
+            # THE SAME TWO CONVERSIONS `_seat_edge` MAKES, and stage 1 needs
+            # both for the same reasons. Without them this path seats a
+            # declared claim wrong and `place_seed` exits 4 grading its own
+            # output -- the very failure the comment above is about.
+            #
+            #  * the declared fraction is about the courtyard CENTRE and this
+            #    ladder positions the ORIGIN. Measured on splitflap_driver
+            #    J17 with `center_on_edge {tolerance_mm: 1.0}`: origin at
+            #    frac 0.5 puts the rect centre at 0.51282, i.e. +2.54mm, a
+            #    violation of any tolerance under 2.54mm;
+            #  * the fraction is of the EDGE's span, and on a notched board
+            #    that is not the bounding box -- the reason `edge_span`
+            #    exists at all.
+            _e_lo, _e_hi, _ = _declared_edge_span(state, bounds, edge)
+            frac = ((declared_to_ladder_frac(part, bounds, edge,
+                                             _e_lo, _e_hi, _dec))
+                    if _dec is not None else (k + 1) / (len(specs) + 1))
             if f_lo > f_hi:
                 notes.append(f"edge connector {ref}: wider than the {edge} "
                              f"edge, so stage 1 leaves it to the later stages")
                 continue
-            _win = _declared_frac_window(
-                c, (bounds[2] - bounds[0]) if edge in ('north', 'south')
-                else (bounds[3] - bounds[1]))
+            _win = _declared_frac_window(c, _e_hi - _e_lo)
             if _win is not None:
-                _n_lo, _n_hi = max(f_lo, _win[0]), min(f_hi, _win[1])
+                _w_lo = declared_to_ladder_frac(part, bounds, edge,
+                                                _e_lo, _e_hi, _win[0])
+                _w_hi = declared_to_ladder_frac(part, bounds, edge,
+                                                _e_lo, _e_hi, _win[1])
+                _n_lo, _n_hi = max(f_lo, _w_lo), min(f_hi, _w_hi)
                 if _n_lo > _n_hi:
                     notes.append(
                         f"edge connector {ref}: the declared along-edge window "
-                        f"[{_win[0]:.3f}, {_win[1]:.3f}] does not intersect the "
-                        f"legal one [{f_lo:.3f}, {f_hi:.3f}] on the {edge} "
-                        f"edge, so stage 1 leaves it to the later stages")
+                        f"[{_win[0]:.3f}, {_win[1]:.3f}] does not intersect "
+                        f"the legal one ["
+                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_lo):.3f}, "
+                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_hi):.3f}] "
+                        f"on the {edge} edge, so stage 1 leaves it to the "
+                        f"later stages")
                     continue
                 f_lo, f_hi = _n_lo, _n_hi
             frac = min(f_hi, max(f_lo, frac))

@@ -268,11 +268,17 @@ def test_the_seat_and_the_grade_agree_over_a_lattice():
 
 
 def test_the_rotation_gate_is_closed_on_the_corpus():
-    """The three parts a bare gate would have turned sideways.
+    """No tracked board rotates, and WHY is not what I first claimed.
 
-    `_edge_frac_bounds` refuses at their current rotation while they already
-    overhang their boundary by 11.99 / 11.99 / 26.55mm -- full board-width
-    connectors, correctly oriented, refused for a different reason.
+    The three parts below are full board-width connectors that overhang their
+    boundary by 11.99 / 11.99 / 26.55mm while `_edge_frac_bounds` refuses at
+    their current rotation. An earlier version of this test asserted they do
+    not rotate and read that as the guard working. It is not: all three
+    return at `_seat_edge`'s `f_lo > f_hi` refusal ("is wider than the east
+    edge"), BEFORE the ladder and therefore before `_already_on_its_edge` is
+    consulted at all. So this asserts the outcome AND the reason -- the
+    refusal note -- and the guard's own load-bearing case is the
+    counterfactual below it, which is where the guard actually decides.
     """
     cases = [('ulx3s', 'J1', 11.99), ('ulx3s', 'J2', 11.99),
              ('sonde_u', 'J1', 26.55)]
@@ -292,6 +298,9 @@ def test_the_rotation_gate_is_closed_on_the_corpus():
                            'center_on_edge': {'tolerance_mm': 1.0}},
                           set(), notes)
         assert st.parts[ref].rot == rot0, (board, ref, rot0, st.parts[ref].rot)
+        # THE REASON, not just the outcome. Without this the assertion above
+        # passes for a reason the docstring gets wrong.
+        assert any('is wider than the' in n for n in notes), (board, ref, notes)
 
     # THE COUNTERFACTUAL, and without it this test proves nothing about the
     # guard. The three parts above cannot seat at ANY rotation, so "they did
@@ -318,10 +327,10 @@ def test_the_rotation_gate_is_closed_on_the_corpus():
     finally:
         seeder._already_on_its_edge = real
     assert ok2 and st2.parts['J17'].rot == 90.0, (ok2, st2.parts['J17'].rot)
-    print(f"  PASS: {len(cases)} corpus parts overhang 11.99/11.99/26.55mm "
-          f"with guard True and none rotated; and on J17 the guard is shown "
-          f"CHANGING the outcome -- refused at rot 0 with it, rotated to 90 "
-          f"without it")
+    print(f"  PASS: {len(cases)} corpus parts refused by frac-bounds BEFORE "
+          f"the guard is reached (so their not-rotating is not evidence about "
+          f"it); and on J17 the guard IS shown changing the outcome -- "
+          f"refused at rot 0 with it, rotated to 90 without")
 
 
 def test_the_rotation_loop_fires_only_where_declared_and_only_on_failure():
@@ -425,23 +434,46 @@ def test_the_rotation_loop_needs_a_declaration_structurally():
 
 
 def test_stage_one_honours_the_same_declaration():
-    """The from-scratch path never calls `_seat_edge`.
+    """Stage 1 RUN, not grepped.
 
-    Its even distribution gives splitflap_driver's north connectors
-    (k+1)/(n+1), none of which is 0.5 -- so without this a declared
-    `center_on_edge` is seated wrong from scratch and `place_seed` exits 4
-    grading its own output against the intent it was built from.
+    The first version of this asserted three literal strings were present in
+    `inspect.getsource(seed_from_intent)`. That is not a test of behaviour:
+    it stayed green while stage 1 fed a CENTRE fraction straight into
+    `_edge_pose`, which positions the ORIGIN -- measured on splitflap_driver
+    J17, a declared centre of 0.5 put the courtyard centre at 0.51282, i.e.
+    +2.54mm, violating any tolerance under that. `place_seed` would then exit
+    4 grading its own output against the intent it was built from, which is
+    the exact failure stage 1's declaration handling exists to prevent.
+
+    So this seeds from scratch and measures where the part landed, in the
+    currency the GRADE uses.
     """
-    import inspect
-    src = inspect.getsource(seeder.seed_from_intent)
-    assert '_declared_frac(c)' in src, \
-        "stage 1 does not consult the declaration"
-    assert 'frac = _dec if _dec is not None else (k + 1) / (len(specs) + 1)' \
-        in src, "stage 1's even distribution is not overridden by a declaration"
-    assert '_declared_frac_window(' in src, \
-        "stage 1 does not clamp to the declared window"
-    print("  PASS: stage 1 reads the declaration, overrides its even "
-          "distribution and clamps to the declared window")
+    import random
+    board = SPLIT
+    pcb = parse_kicad_pcb(board)
+    doc = fp.emit_intent(pcb, board, declare_classes=True)
+    doc['edge_connectors'] = [{'ref': 'J17', 'edge': 'north',
+                               'overhang_mm': {'min': 0.0, 'max': 1.0},
+                               'center_on_edge': {'tolerance_mm': 1.0}}]
+    intent = fp.intent_from_dict(doc, board)
+    out = seeder.seed_from_intent(pcb, board, intent, random.Random(0))
+    assert out, out
+
+    st = _state(board)
+    rows = {r['reference']: r for r in (out.get('placements') or [])}
+    assert 'J17' in rows, sorted(rows)[:8]
+    px, prot = rows['J17']['new_x'], rows['J17']['new_rotation']
+    part = st.parts['J17']
+    part.rot = prot
+    e_lo, e_hi, _ = seeder._declared_edge_span(st, st.board, 'north')
+    x0, _, x1, _ = st.board
+    frac = seeder.ladder_to_declared_frac(
+        part, st.board, 'north', e_lo, e_hi, (px - x0) / (x1 - x0))
+    off_mm = (frac - 0.5) * (e_hi - e_lo)
+    assert abs(off_mm) <= 1.0 + 1e-6, (frac, off_mm)
+    print(f"  PASS: stage 1 seated J17 with its courtyard centre at frac "
+          f"{frac:.4f} ({off_mm:+.3f}mm), inside the declared 1.00mm "
+          f"tolerance -- measured, not grepped")
 
 
 #: Recorded from `upstream/main`'s `_seat_edge`, three connectors x eleven

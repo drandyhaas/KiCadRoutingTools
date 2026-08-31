@@ -225,10 +225,12 @@ whose only job is to be true.
 ### WHERE ALONG the edge: `center_on_edge` and `along_edge_band`
 
 `edge_connector` grades the overhang band, the nearest-edge identity and a
-setback. All three are satisfied *anywhere along* the edge — so a seat 2.35 mm
-off the centreline of a 14.5 mm edge grades exactly as well as a centred one.
-On a stick-shaped board where the PCB is the plug body, that is the difference
-between a product and something a human rejects on sight.
+setback. All three are satisfied *anywhere along* the edge — so a receptacle
+well off the centre of its edge grades exactly as well as a centred one. On a
+stick-shaped board where the PCB is the plug body, that is the difference
+between a product and something a human rejects on sight. Measured on this
+repo's own `esp_prog`: USB1 sits **1.75 mm off the centre of its 14.50 mm east
+edge**, 12.07 %, and no conjunct could say so.
 
 ```jsonc
 { "ref": "USB1", "edge": "east", "center_on_edge": { "tolerance_mm": 0.5 } }

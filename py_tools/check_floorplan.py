@@ -145,6 +145,20 @@ def build_parser():
     return p
 
 
+def _brief_absence_reason(args, brief):
+    """Why `--require-brief` is unsatisfied. Three distinct cases.
+
+    Saying "no design brief was found" when the caller passed `--no-brief`
+    blames the board for the caller's own flag.
+    """
+    if getattr(args, 'no_brief', False):
+        return ("--no-brief was passed, so any sibling design brief was "
+                "deliberately not read")
+    if brief is None:
+        return "no design brief was found beside this board"
+    return "the brief found declares nothing gradable"
+
+
 def intent_doc_for_drift(path):
     """The intent as a plain dict, for the drift diff. `{}` if unreadable --
     the loader has already refused a bad file by the time this runs, so a
@@ -206,6 +220,7 @@ def main(argv=None):
         # not-found branch says what is filling the gap instead.
         print(_db.format_absent_note(args.board))
 
+    _require_brief_failed = False
     if args.emit_intent:
         try:
             doc = emit_intent(pcb, args.board, group_sources=sources or (),
@@ -223,14 +238,15 @@ def main(argv=None):
                 for line in brief_report['contradictions']:
                     print(f"  CONTRADICTION {line}")
         if args.require_brief and not brief_fragment:
-            print(f"  FAIL: --require-brief, but "
-                  + ("no design brief was found beside this board"
-                     if brief is None else
-                     "the brief found declares nothing gradable")
+            print(f"  FAIL: --require-brief, but " + _brief_absence_reason(
+                args, brief)
                   + ". The emitted intent describes the board as it is, "
                     "including its damage.", file=sys.stderr)
-            if not args.exit_zero:
-                return VIOLATIONS_EXIT
+            _require_brief_failed = True
+        # The file is written BEFORE the --require-brief verdict: the flag
+        # says "exit 4 when nothing was declared", not "produce nothing".
+        # Returning early left `--emit-intent X --require-brief` with no X at
+        # all, so a caller could not even see what it was refusing.
         with open(args.emit_intent, 'w', encoding='utf-8') as fh:
             json.dump(doc, fh, indent=1, sort_keys=True)
             fh.write('\n')
@@ -262,6 +278,9 @@ def main(argv=None):
                       f"search radius (worst {cen['worst_beyond_mm']}mm) and "
                       f"are invisible to the rule -- see "
                       f"context.decap_census")
+        # AFTER the document is written, not instead of it (see above).
+        if _require_brief_failed and not args.exit_zero:
+            return VIOLATIONS_EXIT
         return 0
 
     try:
@@ -330,10 +349,8 @@ def main(argv=None):
     # (`rules_run` / `rules_skipped`); the exit code could not. Opt-in, so the
     # pinned default contract is untouched.
     if args.require_brief and not brief_fragment:
-        print(f"  FAIL: --require-brief, but "
-              + ("no design brief was found beside this board"
-                 if brief is None else
-                 "the brief found declares nothing gradable")
+        print(f"  FAIL: --require-brief, but " + _brief_absence_reason(
+            args, brief)
               + ". Every `edge` in this intent is then an INFERENCE from a "
                 "part's current pose, not a declaration.", file=sys.stderr)
         if not args.exit_zero:
