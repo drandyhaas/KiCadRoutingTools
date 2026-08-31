@@ -36,6 +36,7 @@ Key options:
 | `--ignore-nets` | – | Net patterns excluded from airwire scoring (plane-routed power nets) |
 | `--lock` | – | Reference patterns to pin in place (connectors, mounting-critical parts) |
 | `--halo-coef` | 0.25 | Extra whitespace per √(pin count); keep modest (~0.15) on dense boards |
+| `--brief` / `--no-brief` | the sibling `<board>.design-brief.json`, auto-discovered | The DECLARED design intent (#711): which connectors are user-facing, which edge each belongs on and where along it, what the enclosure forbids. Compiled into `edge_connectors` / `keepouts` by `check_floorplan --emit-intent`, so nothing downstream needs a second channel. A declared claim OUTRANKS the edge `_nearest_edge` would infer from a part's current pose. `--no-brief` is the OFF arm. See [docs/design-brief.md](../../docs/design-brief.md) |
 | `--intent` | – | Floorplan intent JSON. Its declared zones, keep-outs and exclusive zones become HARD per-move gates; its `must_lock` globs and `edge_connectors` edge claims are locked. MONOTONE: it prevents a part being walked out of a zone, it does not walk one back in. Omitted, the run is bit-identical to one built before the flag existed (#702) |
 | `--no-rotate` / `--no-swap` | off | Disable rotation / swap moves. `--no-rotate` freezes every part's angle: nudges keep the current rotation, and same-footprint swaps are restricted to pairs that already share one, since a swap exchanges full poses and a mixed-angle pair would rotate both parts |
 

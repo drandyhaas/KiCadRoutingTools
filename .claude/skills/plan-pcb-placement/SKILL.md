@@ -681,6 +681,16 @@ order:
    that plainly, tell the user to place the parts in KiCad, and offer to
    show them the current state.
 
+   Before concluding this, check whether the board carries a **declared
+   design brief** — a `<board>.design-brief.json` sibling, discovered
+   automatically, holding the facts the board file cannot contain (which
+   connectors are user-facing, which edge each belongs on and where along
+   it, what the enclosure forbids). `check_floorplan --emit-intent` compiles
+   it into the intent, so branch 2 applies after all. If there is none, ASK
+   for one — three fields and one row per connector is a useful brief, and
+   `"unknown"` is a legal answer that is reported rather than guessed. See
+   `docs/design-brief.md` and the driver's `P-brief` stage.
+
 **Then copy the `.kicad_pro` and `.kicad_dru` onto its output yourself.** A
 seeder writes a `.kicad_pcb` and, like `place_optimize.py`, usually nothing else
 — and it is the FIRST thing that touches the board, so a missing sibling there
@@ -713,6 +723,20 @@ make the board physically not fit, which no routing metric will ever tell you.
 footprint names and reference prefixes; it cannot read a requirements document,
 and its lexical rules "miss house libraries entirely". It is the **second** pass.
 The spec is the first.
+
+**Where the spec goes so a tool can read it.** A `<board>.design-brief.json`
+sibling is the declared channel (#711): it is auto-discovered by every step
+that takes `--intent`, carried down a chain with the board's other siblings,
+and compiled into `edge_connectors` and `keepouts` — the constructs the grade
+and the seat search already act on. Read what a board already declares with
+
+```bash
+python3 -X utf8 py_tools/board_brief.py board.kicad_pcb --json wk/brief0.json
+```
+
+whose `design_brief` section is the only DECLARED one in that document; every
+other section, `mechanical` included, is inference. `docs/design-brief.md` is
+the reference.
 
 **1. List what the spec fixes, and cite the requirement next to each ref.**
 Read the board's requirements/spec before touching placement. Anything with a

@@ -411,6 +411,41 @@ def test_the_sibling_reaches_the_grade_and_no_brief_reproduces_the_old_doc():
           "the pre-brief document exactly")
 
 
+def test_board_brief_reports_the_declaration_and_says_so_when_there_is_none():
+    """#711's third ask: the channel reaches an instrument a placed board hits.
+
+    `test_board_brief.py`'s own fixture passes `requirements='x'`, so its
+    "every emitted section names its producer" check never sees this section.
+    Asserted here instead, in both branches.
+    """
+    import board_brief as bb
+    pcb = parse_kicad_pcb(BOARD)
+
+    none = bb.build_brief(pcb, BOARD)
+    assert 'design_brief' in none, sorted(none)
+    assert none['design_brief']['path'] is None
+    assert 'NONE DECLARED' in none['design_brief']['note']
+    assert 'INFERENCE' in none['design_brief']['note']
+    txt = bb.format_text(none)
+    assert 'NONE DECLARED' in txt, txt[-400:]
+
+    with_b = bb.build_brief(pcb, BOARD, design_brief=db.load_brief(FIXTURE),
+                            design_brief_path=FIXTURE)
+    d = with_b['design_brief']
+    assert d['counts']['interfaces'] == 3 and d['counts']['keepouts'] == 1
+    assert d['unknown'] and d['declared']
+    txt = bb.format_text(with_b)
+    # Unknowns FIRST: an unknown is the thing an author must go resolve.
+    assert 'design brief UNKNOWN' in txt, txt[-600:]
+
+    # Every emitted section must name its producer, with a `[requires:`
+    # clause -- the rule test_board_brief enforces for the other sections.
+    assert 'design_brief' in bb.SOURCES_NOTE
+    assert '[requires:' in bb.SOURCES_NOTE['design_brief']
+    print("  PASS: board_brief emits `design_brief` in both branches, sourced, "
+          "unknowns first, and says NONE DECLARED when nothing is")
+
+
 TESTS = [
     test_a_board_brief_document_is_refused_by_kind,
     test_the_undeclarable_keys_are_refused_by_name_with_the_reason,
@@ -428,6 +463,7 @@ TESTS = [
     test_the_cli_says_so_when_there_is_no_brief,
     test_require_brief_refuses_when_none_was_declared,
     test_the_sibling_reaches_the_grade_and_no_brief_reproduces_the_old_doc,
+    test_board_brief_reports_the_declaration_and_says_so_when_there_is_none,
 ]
 
 
