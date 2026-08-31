@@ -361,6 +361,45 @@ def test_the_rotation_loop_fires_only_where_declared_and_only_on_failure():
           f"declared+seatable keeps its rotation")
 
 
+def test_the_rotation_loop_needs_a_declaration_structurally():
+    """The third gate, pinned in the SOURCE, and here is why.
+
+    `_seat_edge` rotates only when (1) the ladder failed at the part's own
+    rotation, (2) the part is not already on its edge, and (3) the intent
+    DECLARED a position. Gates (1) and (2) are asserted behaviourally above.
+    Gate (3) cannot be, on this corpus, and that is a measurement rather than
+    a shrug:
+
+      * removing it changes the answer only for a part that is INTERIOR (or
+        (2) blocks first) AND cannot seat at its own rotation;
+      * an UNDECLARED search runs the full 13-rung ladder over the whole
+        edge, and measured on splitflap_driver an interior J17 seats at
+        rot 0 for every overhang band tried (0-1.0, 2.0-2.2, 5.0-5.2), so
+        the loop is never reached;
+      * exhibiting it would need a synthesised board built to make an
+        undeclared full-edge search fail, which would be a fixture proving a
+        property of the fixture.
+
+    The mutation battery reported this honestly (`rotation-gate-open-to-
+    undeclared` SURVIVED), so the conjunct is pinned structurally instead --
+    deletion is detected, and the reason it is not a behavioural assertion is
+    written down rather than left as an unexplained gap.
+
+    It is kept, not dropped, because an interior misplaced connector is
+    exactly the repair case, and nothing in this tree knows which way a
+    mating face must point.
+    """
+    import inspect
+    src = inspect.getsource(seeder._seat_edge)
+    assert 'if declared is not None and not _already_on_its_edge(state, part):'         in src, "the rotation loop no longer requires a declaration"
+    # And the two gates it composes with are really both there.
+    assert 'seat = try_rot(part.rot)' in src
+    assert src.index('seat = try_rot(part.rot)') < src.index(
+        'if declared is not None and not _already_on_its_edge'),         "the rotation loop must run AFTER the ladder at the current rotation"
+    print("  PASS: the declared-position conjunct is pinned in the source, "
+          "with the measurement showing why it cannot be pinned behaviourally")
+
+
 def test_stage_one_honours_the_same_declaration():
     """The from-scratch path never calls `_seat_edge`.
 
@@ -394,6 +433,7 @@ TESTS = [
     test_the_seat_and_the_grade_agree_over_a_lattice,
     test_the_rotation_gate_is_closed_on_the_corpus,
     test_the_rotation_loop_fires_only_where_declared_and_only_on_failure,
+    test_the_rotation_loop_needs_a_declaration_structurally,
     test_stage_one_honours_the_same_declaration,
 ]
 

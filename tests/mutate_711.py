@@ -89,19 +89,19 @@ ROWS = [
     ('both-along-edge-forms-allowed', 'fp',
      "    if centre is not None and band is not None:",
      "    if False:",
-     (TSCH, T711), KILLED),
+     (TSCH, T712, T711), KILLED),
     ('tolerance_mm-gets-a-default', 'fp',
      "        if 'tolerance_mm' not in centre:",
      "        centre.setdefault('tolerance_mm', 1.0)\n        if False:",
-     (TSCH,), KILLED),
+     (TSCH, T712), KILLED),
     ('inverted-band-accepted', 'fp',
      "        if not f0 < f1:",
      "        if False:",
-     (TSCH, T711), KILLED),
+     (TSCH, T712, T711), KILLED),
     ('reader-version-not-bumped', 'fp',
      "READER_VERSION = 2",
      "READER_VERSION = 1",
-     (TSCH,), KILLED),
+     (TSCH, T712), KILLED),
 
     # ---- #711: the brief -------------------------------------------------
     ('board-brief-accepted-as-a-design-brief', 'db',
@@ -259,16 +259,23 @@ def main(argv=None):
     results = {}
     for name, tgt, old, new, tests, expected in rows:
         path = TARGETS[tgt]
+        # `raw` restores byte-exactly; `src` is universal-newline TEXT, so a
+        # multi-line anchor written with a bare newline matches a CRLF file.
+        # Matching on the raw byte decode silently found NOTHING in three
+        # rows -- which the battery reported as BROKEN rather than as three
+        # surviving mutations, and that is exactly why an anchor which misses
+        # is an error here and not a skip.
         raw = open(path, 'rb').read()
-        src = raw.decode('utf-8')
+        with open(path, encoding='utf-8') as _fh:
+            src = _fh.read()
         n = src.count(old)
         if n != 1:
             results[name] = (BROKEN, f"anchor matched {n} times, expected 1")
             print(f"  {name:42s} BROKEN  (anchor matched {n} times)")
             continue
         try:
-            open(path, 'wb').write(
-                src.replace(old, new, 1).encode('utf-8'))
+            with open(path, 'w', encoding='utf-8') as _fh:
+                _fh.write(src.replace(old, new, 1))
             _clear_pycache()
             verdict, why = _run(tests)
         finally:
