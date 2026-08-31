@@ -50,7 +50,7 @@ MEASURED MUTATION TABLE, from `python3 -X utf8 tests/mutate_797.py`. The edits
 are in that file; these are the verdicts, recorded FROM THE RUN and not
 predicted here:
 
-    28 rows: 26 killed, 2 survived, 0 broken, 0 disagreeing with expectation
+    31 rows: 29 killed, 2 survived, 0 broken, 0 disagreeing with expectation
 
     the two survivors, recorded rather than deleted:
       the-grade-threshold-is-ge-not-gt     `> EPS` and `>= EPS` differ on
@@ -71,12 +71,21 @@ Two rows exist because the RUN corrected a prediction, not the engine:
 (see above), and `the-grade-threshold-is-ge-not-gt` was reported BROKEN rather
 than applied, because its one-line anchor matched twice in floorplan.py.
 
-Four more exist because a BLIND REVIEW of this branch found what they name:
-`the-unresolved-zone-guard-is-removed` and
-`the-edge-slide-is-armed-for-keepouts-only` are engine defects this branch had
-introduced; `the-edge-seat-has-no-exclusive-conjunct` and
+Seven more exist because TWO ROUNDS of blind review found what they name.
+`the-edge-seat-has-no-exclusive-conjunct` and
 `the-repair-list-drops-zone_exclusive` guard the two paths that bypass
-`pose_ok`.
+`pose_ok`. The rest are engine defects this branch had introduced and the
+reviews measured: `the-edge-slide-is-armed-for-keepouts-only`,
+`the-repair-moves-a-locked-part` (it moved two of glasgow_revC's fiducials),
+`the-unresolved-zone-guard-is-removed`,
+`the-unresolved-zone-guard-only-checks-for-a-ref-string` (the first version of
+that guard, falsified by a padless footprint), and
+`the-grade-has-no-unresolved-zone-guard` (the seat gate declining while the
+grade still flagged -- #797's own failure shape, re-created by the fix for it).
+
+THE COUNT IN THIS TABLE HAS BEEN WRONG TWICE, both times because a row was
+added after the run that produced it, so: re-run the battery and re-read this
+number whenever `mutate_797.py` gains a row.
 
 NOT COVERED HERE, and why rather than silently: the courtyard-only measurement
 (a stranger whose LEADS cross a reserved zone is a pose the grade calls clean).
