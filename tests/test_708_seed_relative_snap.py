@@ -244,6 +244,29 @@ def t_group_offsets_probes_the_pose_it_emits():
     report('and every offset is a whole number of the lattice',
            all(on_grid(dx, lat) and on_grid(dy, lat) for dx, dy in offs))
 
+    # The board above has NO inferable lattice, so its lattice IS the 0.1
+    # raster and "snapped to the lattice" and "snapped to the raster" are the
+    # same statement there. A second fixture on a real imperial pitch is what
+    # makes the block move's lattice assertion able to fail -- without it the
+    # battery's `group-offset-snaps-the-absolute-pose` row survives.
+    name2 = 'interf_u_unrouted'
+    path2 = board(name2)
+    lat2, _ev2 = lattice_of(name2)
+    with contextlib.redirect_stdout(io.StringIO()):
+        st2 = Q.QuenchState(parse_kicad_pcb(path2), path2, 0.2, 0.55, 10.0,
+                            0.5, 0.25, 2.0, 2.0, 2.0, 0.1, 1.0)
+    refs2 = sorted(st2.parts)[:3]
+    offs2 = list(Q._group_offsets(st2, refs2, max_disp, step, lat2))
+    report('a block on an imperial board moves by whole lattice units, not '
+           'raster units',
+           bool(offs2) and all(on_grid(dx, lat2) and on_grid(dy, lat2)
+                               for dx, dy in offs2),
+           '%s lattice %g, %d offsets' % (name2, lat2, len(offs2)))
+    report('and those offsets are NOT all raster multiples, so the two '
+           'statements are distinguishable',
+           any(not on_grid(dx, 0.1) for dx, _dy in offs2),
+           str([round(d, 4) for d, _ in offs2[:3]]))
+
 
 def t_the_run_discloses_which_branch_it_took():
     for name, want in BOARDS:

@@ -79,10 +79,24 @@ T_FANOUT = os.path.join(_TESTS, 'test_fanout_clearance.py')
 #: (name, target, old, new, tests, expect)
 ROWS = [
     # ---- the inference: which rung wins -------------------------------
+    # EXPECTED SURVIVOR, and the reason is a finding rather than a gap.
+    # A plain argmax is not WRONG here, it is UNDEFINED -- and CPython's `max`
+    # resolves it the safe way by accident: it returns the FIRST maximal
+    # element, `profile` is built in ladder order, and monotonicity along a
+    # divisibility chain forbids a coarser rung from strictly exceeding a finer
+    # divisor. So argmax picks the finest tied rung, which is what `ties[0]`
+    # picks deliberately. The two can only diverge where TIE_SLACK bites, and
+    # the slack is inert on this corpus (worst margin 0.075).
+    #
+    # Kept rather than deleted because it is a live detector: it starts failing
+    # the day someone reorders the ladder, builds `profile` from a set, or
+    # widens the slack past a real margin -- at which point the issue's own
+    # proposed rule silently starts choosing a different grid.
+    # `the-tie-break-takes-the-coarsest` below is the killable form.
     ('the-tie-break-takes-the-argmax', 'bg',
      "    out['step'] = ties[0]",
      "    out['step'] = max(out['profile'], key=lambda s: out['profile'][s])",
-     (T_GRID,), 'KILLED'),
+     (T_GRID,), 'SURVIVED'),
 
     ('the-tie-break-takes-the-coarsest', 'bg',
      "    out['step'] = ties[0]",
@@ -189,14 +203,14 @@ ROWS = [
      "            if math.hypot(cx - cap.seed_x,\n"
      "                          cy - cap.seed_y) > max_disp + 1e-9:\n"
      "                continue",
-     (T_FANOUT,), 'KILLED'),
+     (T_SNAP, T_FANOUT), 'KILLED'),
 
     ('the-reseat-slot-snaps-the-absolute-point', 'rs',
      "        sx = ax + snap_to_grid(x - ax, grid_step)\n"
      "        sy = ay + snap_to_grid(y - ay, grid_step)",
      "        sx = snap_to_grid(x, grid_step)\n"
      "        sy = snap_to_grid(y, grid_step)",
-     (T_RESEAT,), 'KILLED'),
+     (T_SNAP, T_RESEAT), 'KILLED'),
 ]
 
 
