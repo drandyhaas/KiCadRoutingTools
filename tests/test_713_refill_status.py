@@ -219,12 +219,81 @@ check("a TIMEOUT says so, with the elapsed time",
 check("it still says which geometry it fell back to",
       'using zone outlines' in out, out.strip()[:200])
 
+def _force_empty_fill():
+    """The SIXTH outcome: the refill ran and KiCad poured nothing. Several
+    callers test truthiness rather than `is None`, so this used to be the one
+    path that printed nothing at all before substituting outlines."""
+    kef._KICAD_PYTHON_MEMO.append(sys.executable)
+    pf_real = kef.refill_islands_ex
+    kef.refill_islands_ex = lambda *a, **k: (
+        {}, RefillStatus('ok', 'the refill ran and produced no islands', 1.0))
+    _force_empty_fill.restore = lambda: setattr(
+        kef, 'refill_islands_ex', pf_real)
+
+
+out = _fragility_notice(_force_empty_fill)
+_force_empty_fill.restore()
+check("an EMPTY fill is announced, not silently swapped for outlines",
+      'produced no islands' in out, out.strip()[:200] or '(printed nothing)')
+check("an empty fill is not reported as unavailable -- the refill DID run",
+      'exact fill unavailable' not in out,
+      out.strip()[:200] or '(printed nothing)')
+
 out = _fragility_notice(lambda: kef._KICAD_PYTHON_MEMO.append(None))
 check("a missing interpreter still names the env var (the #647 contract)",
       'no python with pcbnew found' in out and 'KICAD_PYTHON' in out,
       out.strip()[:200])
 check("no NoneType traceback leaks through either arm (#647)",
       'NoneType' not in out, out.strip()[:200])
+
+print("\n--- the GUI provider warns on the QUIET path too")
+# `_live_fill` is a closure over a live pcbnew board, so it cannot be called
+# here without one. Pin the STRUCTURE instead, via the AST rather than a text
+# grep: a grep is satisfied by a comment that happens to quote the call, which
+# has produced a green test over deleted code in this repo before.
+import ast  # noqa: E402
+
+_kp = os.path.join(ROOT, 'py_router', 'kicad_parser.py')
+with open(_kp, encoding='utf-8') as _f:
+    _tree = ast.parse(_f.read())
+
+
+def _find_func(tree, name):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+_lf = _find_func(_tree, '_live_fill')
+check("_live_fill still exists to be checked", _lf is not None)
+
+
+def _warn_calls(node, inside_except):
+    """Calls to the fallback warner, split by whether an `except` guards them."""
+    out = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.Try):
+            for h in child.handlers:
+                out += _warn_calls(h, True)
+            for sub in (child.body, child.orelse, child.finalbody):
+                for s in sub:
+                    out += _warn_calls(s, inside_except)
+            continue
+        if (isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == '_warn_live_fill_fallback'):
+            out.append(inside_except)
+        out += _warn_calls(child, inside_except)
+    return out
+
+
+_calls = _warn_calls(_lf, False) if _lf else []
+check("the fallback warning is reachable WITHOUT an exception",
+      False in _calls,
+      f"guarded-by-except flags: {_calls}")
+check("it is still reachable FROM an exception too",
+      True in _calls, f"guarded-by-except flags: {_calls}")
 
 print("\n--- plane_score forwards the reason, and classifies it")
 import plane_score as psc  # noqa: E402
