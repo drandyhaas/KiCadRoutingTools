@@ -278,10 +278,24 @@ ROWS = [
      "",
      (T797S,), 'KILLED'),
 
+    # RE-ANCHORED after #797 and #706 landed together. Both PRs extended this
+    # one condition, for independent reasons -- #701 arms the ladder on a
+    # declared KEEP-OUT, #706 on a DECLARED POSITION, #797 on a declared
+    # EXCLUSIVE ZONE -- and the merge resolved to the disjunction of all
+    # three. The anchor here still described the two-clause form, so it
+    # matched 0 times and the battery reported BROKEN rather than applying the
+    # edit somewhere it did not belong. That is the count-before-write check
+    # doing its job across a merge, and it is why this row is worth having.
+    #
+    # The mutation still removes ONLY the exclusive clause: a row that also
+    # dropped #706's would be testing that PR's feature rather than this one,
+    # and would go red for a reason #797 has nothing to do with.
     ('the-edge-slide-is-armed-for-keepouts-only', 's',
      "            _slide = ((0.0,) if not (state.keepouts_for.get(ref)\n"
+     "                                     or _dec is not None\n"
      "                                     or state.exclusive_for.get(ref)) else",
-     "            _slide = ((0.0,) if not state.keepouts_for.get(ref) else",
+     "            _slide = ((0.0,) if not (state.keepouts_for.get(ref)\n"
+     "                                     or _dec is not None) else",
      (T797S,), 'KILLED'),
 
     # ---- rows kept as EXPECTED SURVIVORS, with the reason ---------------
