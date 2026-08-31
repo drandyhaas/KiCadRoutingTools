@@ -58,6 +58,7 @@ KNOWN_MODULES = (
     'bga_fanout.py', 'qfn_fanout.py',
     'check_drc.py', 'check_connected.py', 'check_floorplan.py',
     'check_impedance.py', 'check_orphan_stubs.py', 'check_pads.py',
+    'check_pockets.py', 'place_seed.py',
     'kicad_unconnected.py', 'net_forensics.py', 'copy_board.py',
     'make_movie.py', 'render_placement.py', 'list_nets.py', 'route_summary.py',
 )

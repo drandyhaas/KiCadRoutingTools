@@ -76,7 +76,7 @@ def deficit_totals(ledgers) -> Dict[str, int]:
 HOSTS_FRACTION = 0.30
 
 
-def _hosts_the_design(ref, gx0, gy0, gx1, gy1, fp, footprints) -> bool:
+def hosts_the_design(ref, gx0, gy0, gx1, gy1, fp, footprints) -> bool:
     """Is this big footprint a frame around the design, or just a big part?
 
     Area alone is not enough, and getting that wrong is worse than not
@@ -120,6 +120,13 @@ def _hosts_the_design(ref, gx0, gy0, gx1, gy1, fp, footprints) -> bool:
     # separates the two, and it is exactly what a pile does not have.
     spots = {(round(o.x, 3), round(o.y, 3)) for o in hosted}
     return len(spots) >= max(4, 0.5 * len(hosted))
+
+
+#: Public since #709: the pocket census excludes the same frames from its
+#: area-weighted centroid, and `board_brief` records the repo's rule that an
+#: artifact must not sit behind a private cross-module name. The old spelling
+#: stays so nothing in-tree has to change in the same commit.
+_hosts_the_design = hosts_the_design
 
 
 def grow_board(pcb_data, pcb_file: str, *, clearance: float,

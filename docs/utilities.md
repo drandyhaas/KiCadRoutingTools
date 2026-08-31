@@ -1193,6 +1193,137 @@ See [Fab Tier Options](configuration.md#fab-tier-options) for the full floor
 tables and how the CLIs enforce these floors (they **error** if a size/clearance
 param is set below the active floor).
 
+## Pocket Census (`check_pockets.py`)
+
+The **aggregate** pre-route instrument: the board binned into windows, each
+window's distinct demanding nets against its free copper area, plus the empty
+regions and the arrangement statistic that belong beside them.
+
+It exists because the per-net gates are blind to *simultaneous* routability by
+construction. On run 23's board `check_channels` reported 0 starved faces,
+`check_reachability` called every failing pad PASSABLE, and crossings sat below
+the damaged baseline — and two nets then died across ~20 route laps in one
+pocket, where committed copper wrapped RN7 at 0.095 mm against a 0.45 mm
+corridor need. No instrument had printed that window's demand against its free
+area, because no instrument computed one.
+
+**REPORT-ONLY.** Exit code is 0 on any board it can read (2 on a parse or usage
+error). Nothing gates on these numbers, and there is deliberately no threshold
+by default: a young metric mis-thresholded is noise.
+
+```bash
+python3 -X utf8 py_tools/check_pockets.py <board> [OPTIONS]
+```
+
+### Options
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--nets GLOB...` | `*` | the DEMAND set (`route.py` glob syntax, `!` excludes). Pass the set the route step will carry, so the census asks the same question. |
+| `--bin MM` | `2.0` | window size. **Floored at 0.25 mm**; a smaller value is reported as the floor it was raised to, never silently accepted. |
+| `--top N` | `8` | how many hot windows and cold regions to print. |
+| `--threshold NETS_PER_MM2` | none | print only windows above this demand/free-area ratio. |
+| `--no-cold` | off | suppress the cold-region census. |
+| `--cold-cover FRAC` | `0.0` | largest share of a window a part courtyard may cover and still count COLD. The default is the strict end: a false COLD becomes a bad reseat target. |
+| `--outline-samples K` | `4` | K×K sub-samples used to measure how much of an outline-CUT window is on the board. Ignored where the outline is the bounding box. |
+| `--no-arrangement` | off | suppress the arrangement census. |
+| `--json PATH` | none | write the full census document. |
+
+### What it reports
+
+Four buckets that **partition** the in-outline windows, and the distinctions
+between them are the point:
+
+- **demand** — at least one selected net has a terminal here.
+- **under a part** — covered by a courtyard. A window under a part is not a
+  pocket, and this is normally the largest bucket.
+- **part-free but carrying copper** — on a routed board, or under a narrow
+  `--nets` set, a window with no *selected* demand can still be full of another
+  net's copper. Part-free is not empty.
+- **cold** — in-outline, no demand, no copper, no courtyard.
+
+Cold windows are grouped into 4-connected regions and ranked by **contiguous
+area**, not by window count, so a band outranks scattered singles. Each region
+reports its `bbox`, its largest all-cold rectangle (`band_rect`, with
+`band_mm` and `band_area_mm2`), its `fill`, whether it touches the outline, and
+the parts that bound it.
+
+The arrangement census then joins mass to demand: the part centroid's offset
+from the board centre, **weighted by courtyard area**, per side, with per-quadrant
+part counts, courtyard area, demand and cold windows. The quadrant numbering is
+`perturb._region_unit`'s, so `region:qN` names a block a placer can act on.
+
+**The centroid is area-weighted on purpose, and the count-weighted form is
+printed beside it as a labelled control.** The count form is the intuitive one
+and it disagrees on most boards — on `esp_prog` it reads 13.7 % of span where
+the area form reads 1.3 %.
+
+### Reading the numbers
+
+- **`outline.source`** says whether "in-outline" meant the real Edge.Cuts rings
+  or the bounding box. `extract_board_contours` deliberately returns no rings
+  for a plain axis-aligned rectangle, so most boards report `bounding_box` and
+  that is correct rather than a parse failure.
+- **`parts.from_courtyard` / `from_pads`** is the provenance of the area
+  weight. A footprint that draws no courtyard falls back to its pad bbox, which
+  is real copper; only a footprint with neither is excluded as `synthetic`.
+- **`free_area_mm2` is floored at 5 % of the bin.** At `--bin 0.25` that floor
+  saturates on most windows (a segment is charged wholly to its midpoint bin),
+  so ask the demand/free-area *ratio* question at the 2 mm default. The COLD
+  test does not rest on it: midpoint accounting misses a track that crosses a
+  window without its midpoint inside, so cold additionally requires that no
+  swept copper -- segment width, via barrel or pad -- touches the window.
+- The window lattice is the **router's own** absolute-mm lattice, shared with
+  the congestion-v2 A\* cost, so a window this names is a window the router
+  bins the same way. Windows the outline cuts are reported with their
+  in-outline area fraction rather than being aligned away.
+
+### The reseat target
+
+The census ends by naming the largest cold region as a landing site:
+
+```
+reseat target: largest landing site is the 31.75 x 1mm band at [114,91]-[145.75,92]; the mass wants to move NE
+  This is a DESTINATION, not a scope. A cold band holds no part by construction,
+  so `--reseat-region` over it resolves to an empty scope on every board.
+  use:   declare it as an intent block zone -- the one thing in the stack that
+         AIMS a re-seat at a rectangle: {"name": "cold_114_91", "refs": [...],
+         "zone": [114, 91, 145.75, 92]}
+  scope: the parts bounding this pocket are C1, CON2, U1, U2, USB1 -- name them,
+         or a CROWDED rectangle, to --reseat-region
+```
+
+**A cold band is a DESTINATION, and it cannot be a scope.** A cold window can
+never contain a pad centre: a pad's area is charged to its bin, so a window
+holding one is classified as carrying copper, never as cold. Measured over
+428 060 cold windows on 29 boards, exactly zero contained a pad centre — so
+`--reseat-region <a cold band>` resolves to an empty scope on every board, every
+time. The census names the parts *bounding* the pocket instead, and the `zone`
+it prints is clipped to the outline, because the band is lattice-aligned and its
+outer edge otherwise overhangs the board.
+
+The rectangle's real use is as an intent block `zone`, the one thing in the
+stack that aims a re-seat at a rectangle. `place_seed --reseat-region` lifts the
+parts *in* a rectangle and does not move anything *into* it: a lifted part is
+seated at its declared zone, its edge band, its owner's pin cluster if it is a
+decoupling cap, else its net centroid — else the board centre, when it has no
+placed partner — never at the rectangle you named.
+
+Both sides resolve a rectangle through the same `placement.utility.refs_in_rect`
+(half-open on the far edges), so the rectangle the census prints and the
+rectangle the mover lifts cannot mean two different sets of parts.
+
+### Example
+
+```bash
+# The handoff question, at the net set the route step will carry
+python3 -X utf8 py_tools/check_pockets.py placed.kicad_pcb \
+    --nets "Net-*" "/SDRAM_*" --json pockets.json
+
+# Every window, including the empty ones, at a finer bin
+python3 -X utf8 py_tools/check_pockets.py placed.kicad_pcb --bin 1.0 --top 16
+```
+
 ## Common Workflows
 
 ### Route and Verify

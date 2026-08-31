@@ -133,9 +133,38 @@ CHECKLIST_SCALARS = (
     ('courtyard_overlap_mm2', ('b_courtyard_overlap_mm2',), ()),
 )
 
+#: Pocket-census scalars (#709), computed by `check_pockets.pocket_census`
+#: rather than by the placement model, so they are their own family.
+#:
+#: They are here because #703's comment asked the right question of them: a
+#: congestion census has to EARN its place against legality counts already
+#: sitting at median rho +0.785 on 6/6 boards, and the cheap way to know is a
+#: column in the study rather than an argument.
+#:
+#: On which scalars: the HOT ranking is bounded below by the >= 2-net rule and
+#: can empty out, where the COLD ones are defined on every board. Stated that
+#: way deliberately -- `rank_stats` asserts an empty ranked list on three of
+#: five real boards but names none of them and cites no committed measurement,
+#: and re-measured at HEAD the ranked list is NON-empty on all 8
+#: study/calibration boards (esp_prog 15 rows, glasgow_revC 242), so the
+#: causal clause is not one to repeat.
+#:
+#: No recorded handoff carries these, so on harvested rows they land as
+#: `schema_gaps` and `board_rho` drops them by name with its count. That is
+#: correct and is left visible: those documents genuinely do not contain a
+#: pocket census, and a STUDY_ONLY escape hatch would add a second class of
+#: key to a table whose whole value is having one.
+POCKET_SCALARS = (
+    ('cold_area_frac', ('pockets', 'cold_area_frac'), ()),
+    ('cold_top_area_mm2', ('pockets', 'cold_top_area_mm2'), ()),
+    ('cold_regions', ('pockets', 'cold_regions'), ()),
+    ('centroid_offset_frac', ('pockets', 'centroid_offset_frac'), ()),
+)
+
 PREDICTOR_KEYS = tuple(METRIC_KEYS
                        + tuple(n for n, _p, _a in CHECKLIST_COUNTS)
-                       + tuple(n for n, _p, _a in CHECKLIST_SCALARS))
+                       + tuple(n for n, _p, _a in CHECKLIST_SCALARS)
+                       + tuple(n for n, _p, _a in POCKET_SCALARS))
 
 TRUTH_BY_KEYS = ('unrouted', 'broken', 'drc', 'undersized', 'floorplan',
                  'assembly', 'impedance', 'length', 'net_widths')
@@ -441,6 +470,24 @@ def predictors_from_handoff(handoff):
         if not found:
             pred[name] = None
             gaps.append('checklist.' + '.'.join(path))
+        else:
+            pred[name] = val
+    #: #709. A recorded handoff has no `pockets` block -- render_placement does
+    #: not compute one -- so these land as gaps and `board_rho` drops the row
+    #: for them BY NAME with the resulting n. That is the honest reading: the
+    #: document does not contain the measurement. The dig is written anyway so
+    #: a future handoff that DOES carry one is read rather than ignored.
+    for name, path, legacy in POCKET_SCALARS:
+        val, found = _dig(handoff, path)
+        if not found:
+            for alt in legacy:
+                val, found = _dig(handoff, (alt,) + tuple(path[1:]))
+                if found:
+                    aliases[name] = alt
+                    break
+        if not found:
+            pred[name] = None
+            gaps.append('.'.join(path))
         else:
             pred[name] = val
     return pred, gaps, aliases, unknown

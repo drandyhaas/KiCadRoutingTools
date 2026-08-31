@@ -217,9 +217,20 @@ The instruments this skill decides with, all report-only until you accept:
 python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # on the COPPER-FREE board
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb [--baseline before.kicad_pcb]
 python3 -X utf8 py_tools/check_channels.py board.kicad_pcb [--baseline before.kicad_pcb --gate]
+python3 -X utf8 py_tools/check_pockets.py board.kicad_pcb [--nets <the route step's set>]
 python3 -X utf8 check_rigid_consistency.py before.kicad_pcb after.kicad_pcb
 python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent fp.json [--health]
 ```
+
+`check_pockets` is the only one of these that is AGGREGATE rather than
+per-part or per-net, and it answers the two questions the others structurally
+cannot: **where is the board empty**, ranked by contiguous area, and **does the
+part mass sit where the demand sits** (per quadrant, with the centroid weighted
+by courtyard area — the count-weighted form is printed as a control and
+disagrees on most boards). Pass it the net set the route step will carry. It
+also prints a ready-made `place_seed --reseat-region` command for its largest
+cold region; read the `aim:` line before running it, because a re-seat lands
+each part at its own net centroid and does not move anything INTO the region.
 
 Shared doctrine lives with the routing skill and applies here unchanged --
 read it when the step below points at it:
