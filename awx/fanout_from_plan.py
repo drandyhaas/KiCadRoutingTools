@@ -267,6 +267,7 @@ if TWO_PAGE_PLAN and choice:
                        if o != me))
     unresolved = set()
     repicked = set()          # berths actually moved by this block
+    relay_cand = {}           # surgical scope: net -> ranked B moves
     # ONE round, not a fixed point: iterating re-picks against the
     # re-shifted orders converged to WORSE pages (K28 sw3 -> sw5, K21
     # split into two corridors as de-conflict moved faces). Instead
@@ -299,6 +300,16 @@ if TWO_PAGE_PLAN and choice:
               + f'two-page plan round {_round}: pages F {n_f} / B '
               f'{len(sched.b_page)} / swimmers {len(sched.swimmers)}')
         re_d = re_s = 0
+        # TP_RELAY_NETS (surgical scope): re-lay THESE nets' escapes
+        # instead of the plan-predicted B page. The plan's orders are
+        # not the braid's (measured: at K21 the plan's B set shares 3
+        # of 6 members with the braid's own page B), so the honest
+        # target set is the braid's round-1 derivation, grepped from
+        # its log by the driver and passed here for round 2.
+        _tp_env = os.environ.get('TP_RELAY_NETS')
+        relay_targets = (set(_tp_env.split(',')) & set(grp) if _tp_env
+                         else {n for n in grp
+                               if sched.page.get(n) == 'B.Cu'})
         # TP_SCOPE=swim: re-pick ONLY the predicted SWIMMERS' escapes,
         # to the smaller page's layer, and leave every page net on the
         # plain plan. Rationale: no page POLICY completes K28 (lis/
@@ -317,10 +328,43 @@ if TWO_PAGE_PLAN and choice:
                 if P is not None:
                     continue
                 P = minor
+            elif scope == 'surgical':
+                # the target set may include nets the plan's own
+                # Schedule called swimmers: with TP_RELAY_NETS the
+                # braid's round-1 page B is the authority, not the
+                # plan's projection
+                if n not in relay_targets:
+                    continue
+                P = 'B.Cu'
             elif not P:
                 continue
             m0 = choice[n]
-            if m0.layer != P:
+            if scope == 'surgical':
+                # ENGINE-FIRST SURGICAL RE-LAY. `choice` is left alone:
+                # the engine lays EVERY net from the plain plan first
+                # (the all-verbatim apply was the confound in every
+                # escapes-by-page loss -- it starved the flank the
+                # engine routes fine). Only the B-page nets' B-layer
+                # menu moves are RECORDED here, ranked; the apply rips
+                # each such net's engine escape and lays the first
+                # candidate that clears the engine's REAL copper.
+                if P == 'B.Cu':
+                    # EVERY B-page net is a re-lay target -- also one
+                    # whose plain move is already B-layer: the engine
+                    # never honours a layer, so its real copper is F
+                    # regardless of what the plan chose
+                    cand = [m for m in dmenu.get(n, ()) if m.layer == P]
+                    if cand:
+                        relay_cand[n] = sorted(cand, key=lambda m: (
+                            m.direction != m0.direction,
+                            m.kind != 'dogbone', m.vias,
+                            abs(m.exit_pt[0] - m0.exit_pt[0])
+                            + abs(m.exit_pt[1] - m0.exit_pt[1])))
+                    else:
+                        print(f'    surgical: {n} is B-page but its menu '
+                              f'holds NO B move '
+                              f'({len(dmenu.get(n, ()))} move(s) total)')
+            elif m0.layer != P:
                 # lanes_free re-checked STRICTLY against the WHOLE
                 # choice: the re-pick happens after plan_ends, and an
                 # unchecked gap via landed in the street a kept
@@ -369,7 +413,7 @@ if TWO_PAGE_PLAN and choice:
             moved_any = False
             for a_, b_ in itertools.combinations(
                     [n for n in names if n in choice], 2):
-                if scope == 'swim' and a_ not in repicked \
+                if scope in ('swim', 'surgical') and a_ not in repicked \
                         and b_ not in repicked:
                     # swim scope: un-re-picked nets go to the ENGINE,
                     # which resolves its own geometry -- de-conflicting
@@ -409,9 +453,20 @@ if TWO_PAGE_PLAN and choice:
         print(f'  UNRESOLVED lane conflict: {a_} vs {b_}')
     import json
     pages_path = os.path.splitext(out_path)[0] + '.pages.json'
-    with open(pages_path, 'w', encoding='utf-8') as f:
-        json.dump({n: sched.page.get(n) for n in grp}, f)
-    print(f'  pages -> {os.path.basename(pages_path)}')
+    if scope == 'surgical':
+        # NO sidecar: the plan's orders are not the braid's (t15: 7 of
+        # 25 planned page members crossed their own page under the
+        # braid's real orders and were demoted -- 46v/5 vs plain 49/3).
+        # The braid derives its own pages, and its ends weighting
+        # (schedule.on) adopts whichever teeth actually arrive on B.
+        if os.path.exists(pages_path):
+            os.remove(pages_path)
+        print(f'  surgical: {len(relay_cand)} B-page escape(s) to re-lay '
+              f'after the engine: {sorted(relay_cand)} (no pages sidecar)')
+    else:
+        with open(pages_path, 'w', encoding='utf-8') as f:
+            json.dump({n: sched.page.get(n) for n in grp}, f)
+        print(f'  pages -> {os.path.basename(pages_path)}')
 # only the nets the plan actually MOVED are re-fanned: a move of the
 # same kind, side, layer and gap as the stub already on the board IS
 # that stub (the menu's exit x differs from the tooth's by the array
@@ -597,7 +652,184 @@ fp = pcb.footprints[dref]
 print(f'\nfanning out {dref} ({len(fp.pads)} pads), method {METHOD}'
       + ('  WITHOUT hints (negative control)' if NO_HINTS else
          '  with the plan\'s directions'))
-if TWO_PAGE_PLAN and not NO_HINTS:
+if TWO_PAGE_PLAN and not NO_HINTS \
+        and os.environ.get('TP_SCOPE') == 'surgical':
+    # ENGINE-FIRST SURGICAL RE-LAY. Pass 1 is the production fanout for
+    # EVERY net, hints and lines from the PLAIN choice (the re-lay
+    # candidates never touched `choice`), so the engine's world is the
+    # plain arm's world, flank included. Pass 2 rips ONLY the B-page
+    # nets' engine escapes and lays their planned B moves, each
+    # candidate checked against the engine's REAL copper (own net
+    # excluded -- its escape is what is being ripped) and against the
+    # moves already re-laid this pass.
+    #
+    # VERDICT (2026-08-30, fresh chains, paired vs plain 49/3, 32/0,
+    # 22/1 at K28/21/15): MEASURED OUT. Best form (verbatim emission +
+    # braid-owned TP_RELAY_NETS + skip-engine-B + engine-exit ranking)
+    # grades 55/1, 32/0, 27/0 -- the same completion the braid's own
+    # LAST CALL pass reaches alone (52/1, 32/0, 24/0), at +3 vias.
+    # The page decision cannot live in escape copper: moving an exit
+    # shifts the very permutation the pages came from (sg6: SDQM1's
+    # own re-lay demoted it). Kept opt-in for future study.
+    import shutil
+    stem2 = os.path.splitext(out_path)[0]
+    relay_cand = globals().get('relay_cand', {})
+    pcb_e = parse_kicad_pcb(board)
+    fp_e = pcb_e.footprints[dref]
+    tracks, vias_add, vias_rm, failed = generate_bga_fanout(
+        fp_e, pcb_e, net_filter=names, layers=['F.Cu', 'B.Cu'],
+        track_width=0.1, clearance=0.1, via_size=0.45, via_drill=0.25,
+        exit_margin=0.5, escape_method=METHOD,
+        plane_drop=('off' if NO_DROP else 'auto'),
+        escape_dir_hints=hints,
+        escape_line_hints=(None if NO_LINES else lines) or None)
+    failed = set(failed)
+    eng = f'{stem2}_dst_engine.kicad_pcb'
+    if tracks:
+        add_tracks_and_vias_to_pcb(
+            board, eng, tracks, vias_add, vias_rm,
+            net_id_to_name={i: n.name for i, n in pcb_e.nets.items()})
+    else:
+        shutil.copy(board, eng)
+    copy_pro(board, eng)
+    print(f'  engine (all {len(names)} nets): {len(tracks)} tracks, '
+          f'{len(vias_add)} vias, {len(failed)} failed')
+    pcb_w = parse_kicad_pcb(eng)
+    wobs = {}
+    rip_now = set()
+
+    def obs_w(nid, L):
+        k = (nid, L, tuple(sorted(rip_now)))
+        if k not in wobs:
+            wobs[k] = te.build_obstacles(pcb_w, nid, set(rip_now), L)
+        return wobs[k]
+
+    laid = {}
+
+    def _emit_legs(m):
+        # TP_EMIT=whisker: emit only the DOGBONE UNIT (pad->site stub,
+        # via, 0.35mm whisker) and leave the run through the array to
+        # the braid's lane router. Measured WORSE than the full run in
+        # BOTH target regimes (sg4 K28 38v/9 open, sg5 K21 23v/6 vs
+        # plain 49/3, 32/0): a berth deep in the array is a structural
+        # perturbation -- endpoints move, corridor clustering resplits
+        # (sg4 K28 split SA8/SA6 off and stranded SA0), pages scramble
+        # -- and the lanes cannot reach it. Default: the move's own
+        # full geometry, whose defect is merely local (it walls the
+        # flank when the TARGETS are wrong -- sg2).
+        if os.environ.get('TP_EMIT', 'full') == 'full':
+            return m.legs
+        legs = [m.legs[0]] if m.kind == 'dogbone' else []
+        sx, sy = m.site
+        dx, dy = _DIRV[m.direction]
+        legs.append(((sx, sy), (sx + 0.35 * dx, sy + 0.35 * dy), m.layer))
+        return legs
+
+    # the engine's REAL delivery per target: the far end of its emitted
+    # copper and the layer there. A target the engine already delivers
+    # on B keeps its engine escape (sg6 K21: SRAS's engine dogbone WAS
+    # on B; ripping it for a planned via-in-pad broke SRAS and SCAS),
+    # and candidates are ranked by closeness to the engine's exit so
+    # the re-lay preserves the round-1 permutation the pages were
+    # computed from (sg6 K28: SDQM1's moved exit demoted it to a
+    # swimmer of its own page).
+    eng_far, eng_lay = {}, {}
+    for n in relay_cand:
+        _nid = byname[n][0]
+        p = dst_pad[n]
+        pts = [(t['end'], t['layer']) for t in tracks if t['net_id'] == _nid]
+        pts += [(t['start'], t['layer']) for t in tracks if t['net_id'] == _nid]
+        if pts:
+            (fx, fy), fl_ = max(
+                pts, key=lambda q: (q[0][0] - p.global_x) ** 2
+                + (q[0][1] - p.global_y) ** 2)
+            eng_far[n] = (fx, fy)
+            eng_lay[n] = fl_
+    pend = []
+    for x in names:
+        if x not in relay_cand:
+            continue
+        if eng_lay.get(x) == 'B.Cu':
+            print(f'    surgical: {x} already delivered on B by the '
+                  'engine -- kept')
+            continue
+        pend.append(x)
+    fails = []
+    for _phase in (0, 1):
+        # phase 0 checks against the WHOLE engine board; phase 1
+        # retries the failures with the already-ripped nets' engine
+        # segments excluded (phase 0 conservatively kept them as
+        # obstacles, and a failed candidate may only have collided
+        # with copper that is coming out anyway)
+        rip_now = {byname[x][0] for x in laid}
+        fails = []
+        for n in pend:
+            nid = byname[n][0]
+            got, why = None, []
+            ef = eng_far.get(n)
+            cands = relay_cand[n] if ef is None else sorted(
+                relay_cand[n], key=lambda m: (
+                    m.kind != 'dogbone',
+                    abs(m.exit_pt[0] - ef[0]) + abs(m.exit_pt[1] - ef[1])))
+            for m in cands:
+                # the emitted via is 0.45 (0.35 in-pad), wider than
+                # the TRACK the obstacle margins were built for: pad
+                # the check out to the real barrel radius, both layers
+                pad_r = ((0.35 if m.kind == 'via_in_pad' else 0.45)
+                         - te.TRACK) / 2
+                if not all(obs_w(nid, L_).seg_clear(a_, b_)
+                           for (a_, b_, L_) in _emit_legs(m)):
+                    why.append('leg')
+                    continue
+                if m.site is not None and any(
+                        obs_w(nid, L_).point_violation(m.site, pad=pad_r)
+                        for L_ in LAYERS):
+                    why.append('site')
+                    continue
+                if not sm_mod.lanes_free(m, laid, n, strict=True) or any(
+                        _legs_cross(m, om) for om in laid.values()):
+                    why.append('move')
+                    continue
+                got = m
+                break
+            if got is not None:
+                laid[n] = got
+            else:
+                fails.append((n, why))
+        pend = [n for n, _ in fails]
+        if not pend or not laid:
+            break
+    for n, why in fails:
+        print(f'    surgical: NO clear B move for {n} -- engine kept '
+              f'(candidates refused: {",".join(why)})')
+    if laid:
+        rip = {byname[n][0] for n in laid}
+        tracks = [t for t in tracks if t['net_id'] not in rip]
+        vias_add = [v for v in vias_add if v['net_id'] not in rip]
+        for n, m in laid.items():
+            nid = byname[n][0]
+            for (a_, b_, L_) in _emit_legs(m):
+                tracks.append({'start': a_, 'end': b_, 'width': 0.127,
+                               'layer': L_, 'net_id': nid})
+            if m.site is not None:
+                in_pad = m.kind == 'via_in_pad'
+                vias_add.append({'x': m.site[0], 'y': m.site[1],
+                                 'size': 0.35 if in_pad else 0.45,
+                                 'drill': 0.2 if in_pad else 0.25,
+                                 'layers': ['F.Cu', 'B.Cu'],
+                                 'net_id': nid})
+        print(f'  surgical re-lay: {len(laid)} of {len(relay_cand)} '
+              'B-page escape(s) ripped and re-laid on B: '
+              + ', '.join(f'{n}({laid[n].kind[0]}/{laid[n].direction[0]})'
+                          for n in sorted(laid)))
+    if tracks:
+        add_tracks_and_vias_to_pcb(
+            board, out_path, tracks, vias_add, vias_rm,
+            net_id_to_name={i: n.name for i, n in pcb_e.nets.items()})
+    else:
+        shutil.copy(board, out_path)
+    copy_pro(board, out_path)
+elif TWO_PAGE_PLAN and not NO_HINTS:
     # apply the plan's KIND per net, like the source apply: dogbones
     # and via-in-pads first (short stubs against the pad), channel
     # escapes last, routing round whatever copper is there
