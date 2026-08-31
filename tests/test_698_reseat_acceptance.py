@@ -531,6 +531,27 @@ def arm_H_seat_gate_stays_disarmed(wd):
           seen.get('probe_spec', {}).get('U1') == 1,
           str(seen.get('probe_spec')))
 
+    # #797 gave the seat state a SECOND zone-shaped channel, `exclusive_for`.
+    # It is deliberately allowed here where `_intent_spec` is not, because it
+    # carries only the must-be-OUTSIDE slice and is gated ABSOLUTELY -- so it
+    # cannot refuse a re-seat its own target, which is the entire argument
+    # this arm protects. Asserted on the RESULT rather than on the source,
+    # because the tempting "simplification" is to widen
+    # `quench.exclusive_spec`'s filter back to every term, which would quietly
+    # re-arm containment through the new door.
+    _st = seen.get('state_obj')
+    _terms = [t for v in getattr(_st, 'exclusive_for', {}).values() for t in v]
+    check("the exclusive channel carries ONLY zone_exclusive terms -- no "
+          "containment term reached the seat state by the new route",
+          all(t.rule == 'zone_exclusive' for t in _terms),
+          f"{sorted({t.rule for t in _terms}) or 'no terms bound'}")
+    # And its own membership exemption survives the trip: U1 is a member of
+    # the fixture's block, so it must bind NOTHING here. A channel that bound
+    # members would refuse every part its own zone.
+    check("and a MEMBER of the block binds none of them",
+          not getattr(_st, 'exclusive_for', {}).get('U1'),
+          f"U1 -> {getattr(_st, 'exclusive_for', {}).get('U1')}")
+
     # A source guard, because the tempting "simplification" is to hand
     # `intent_zones=` to make_state and re-open the bug pose_score describes.
     #

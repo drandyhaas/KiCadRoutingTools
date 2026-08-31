@@ -108,6 +108,24 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # loop, two policies, both named.
     if not state.keepout_clear(ref, (r, tht)):
         return False
+    # #797, the FOURTH conjunct. `rule_zone_exclusive` graded a reserved
+    # rectangle that the seat search walked STRANGERS into: `place_seed` could
+    # seat an unrelated part in the middle of a region the intent reserved and
+    # then exit 4 against the intent it was built from. That is the round trip
+    # the keep-out conjunct above closed, one rule over.
+    #
+    # ABSOLUTE, for the reason the paragraph above gives, and BEFORE
+    # `candidate_valid` for the reason the keep-out one is: a handful of float
+    # compares against a usually-empty dict, where `candidate_valid` ends in
+    # the neighbour loop.
+    #
+    # BOTH rects are handed over and the answer is nonetheless COURTYARD ONLY.
+    # `intent_term_values` takes `rects[0]` for a zone_exclusive term because
+    # `rule_zone_exclusive` reads `part.rect` and never `tht_rect`; passing
+    # `(r,)` here would put a SECOND copy of that decision in this file, and
+    # the two would drift the first time one of them was revisited.
+    if not state.exclusive_clear(ref, (r, tht)):
+        return False
     return state.candidate_valid(ref, x, y, rot, exclude=exclude)
 
 
@@ -419,7 +437,8 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
                       max_disp: Optional[float] = None,
                       rotations: Optional[Sequence[float]] = None,
                       constraint=None, tol: float = 0.5,
-                      without_keepouts: Sequence[str] = ()) -> int:
+                      without_keepouts: Sequence[str] = (),
+                      without_exclusive: Sequence[str] = ()) -> int:
     """How many legal poses `ref` has near (tx, ty), counting at most `cap`.
 
     This is issue #629's measurement. Three consecutive sweeps in run 19
@@ -452,6 +471,12 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
     static "does the zone intersect a keep-out" test computed some other way.
     A verdict derived from a different question is the reported-field trap
     one level up.
+
+    `without_exclusive` is the same lever for declared EXCLUSIVE zones (#797),
+    naming BLOCKS rather than keep-outs. Same argument: "this reserved zone is
+    what refuses the part" has to be a NUMBER from the seat predicate, not a
+    static "does the part's feasible region intersect the rect" test computed
+    some other way.
     """
     from pose_score import _offsets
     part = state.parts[ref]
@@ -481,6 +506,26 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
             state.keepouts_for[ref] = kept
         else:
             del state.keepouts_for[ref]
+    # #797: the same lift for exclusive zones, as a SECOND independent
+    # save/restore rather than a shared one -- the two channels are lifted by
+    # different callers for different questions, and one `saved` sentinel
+    # covering both would restore a channel that was never swapped.
+    #
+    # No `_inc_intent.clear()` here, unlike the keep-out lift above, and the
+    # difference is not an oversight: that cache holds the incumbent vector for
+    # `intent_spec_for`, whose ARITY changes when a keep-out is lifted.
+    # `exclusive_for` feeds no cached incumbent at all -- `exclusive_clear` is
+    # absolute and reads the candidate rects only -- so clearing it here would
+    # be harmless but would falsely signal that the two channels are coupled.
+    lift_z = set(without_exclusive or ())
+    saved_z = None
+    if lift_z and state.exclusive_for.get(ref):
+        saved_z = state.exclusive_for[ref]
+        kept_z = tuple(t for t in saved_z if t.name not in lift_z)
+        if kept_z:
+            state.exclusive_for[ref] = kept_z
+        else:
+            del state.exclusive_for[ref]
     try:
         n = 0
         for dx, dy in offsets:
@@ -501,6 +546,8 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
         if saved is not None:
             state.keepouts_for[ref] = saved
             state._inc_intent.clear()
+        if saved_z is not None:
+            state.exclusive_for[ref] = saved_z
 
 
 #: The verdicts a part with no legal pose can be given (#699). Two of them
@@ -523,6 +570,13 @@ NO_POSE_VERDICTS = (
     # own size refuses it, not a neighbour" -- false, and the reader's next
     # move is different: move the keep-out, or add the part to its `allow`.
     'keepout_blocks',
+    # #797, the same story one rule over. Before it, a part a declared
+    # EXCLUSIVE zone refuses reported `no_movable_neighbour` (or, once
+    # neighbours were censused, `no_single_lift_frees` -- "lifting any ONE of
+    # them frees no pose", about a board where no neighbour was ever the
+    # problem). The reader's next move is different again: there is no `allow`
+    # list for an exclusive zone, because MEMBERSHIP is the allow list.
+    'zone_exclusive_blocks',
 )
 
 
@@ -546,7 +600,13 @@ def _empty_census() -> Dict:
             # empty on every part, per this function's whole rationale --
             # a consumer must never need a defaulting `.get` to tell "no
             # keep-out is in the way" from "keep-outs were not considered".
-            'keepouts_freeing': {}}
+            'keepouts_freeing': {},
+            # #797: the same pair for declared EXCLUSIVE zones. Named after
+            # the RULE rather than `zones_*`, which would collide with the
+            # other zone in this file -- the part's OWN zone, which is the
+            # per-call `constraint` and is not a census channel at all.
+            'zone_exclusive_joint': 0,
+            'zone_exclusive_freeing': {}}
 
 
 def _verdict_for(cands: Sequence[str], census: Dict) -> str:
@@ -558,6 +618,21 @@ def _verdict_for(cands: Sequence[str], census: Dict) -> str:
         # and it sits below `blocker_available` for free -- this function is
         # only reached when no trade was chosen.
         v = 'keepout_blocks'
+    elif (census.get('zone_exclusive_freeing')
+          or census.get('zone_exclusive_joint')):
+        # #797, and BELOW `keepout_blocks` on purpose rather than by accident.
+        # When both explain the refusal, name the one the reader CANNOT
+        # change: a keep-out is usually a mechanical fact (a boss, a shell, an
+        # enclosure wall), while an exclusive zone is a policy its author can
+        # relax with one key. Telling someone to drop `exclusive` while a
+        # heatsink boss also covers the pocket sends them to do work that will
+        # not seat the part.
+        #
+        # Above `no_movable_neighbour` / `immovable_given_frozen` /
+        # `no_single_lift_frees` for #701's reason: all three describe
+        # NEIGHBOURS, and on a board where a declared claim is what refuses,
+        # their prose is not merely unhelpful but false.
+        v = 'zone_exclusive_blocks'
     elif not cands:
         v = ('immovable_given_frozen' if census.get('frozen')
              else 'no_movable_neighbour')
@@ -611,6 +686,28 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
         return (f"{ref}: no legal pose, and {what}, and not this rung's to "
                 f"lift. Move a keep-out, or add {ref} to an `allow` list if "
                 f"it is the part that owns one")
+    if verdict == 'zone_exclusive_blocks':
+        freeing = census.get('zone_exclusive_freeing') or {}
+        if freeing:
+            who = ', '.join(f"{n!r} (frees {c})"
+                            for n, c in sorted(freeing.items()))
+            what = (f"the EXCLUSIVE ZONE(S) of block(s) {who} are what refuse "
+                    f"it -- {ref} is not a member of them, and no neighbour "
+                    f"is involved")
+        else:
+            # The JOINT case, as `keepout_blocks` has: naming one here would
+            # be false of every individual one, which is why the sentence does
+            # not.
+            what = (f"the declared exclusive zones are JOINTLY what refuse it "
+                    f"-- no single one frees a pose, lifting all of them frees "
+                    f"{census.get('zone_exclusive_joint', 0)}, and no "
+                    f"neighbour is involved")
+        # The reader's next move is NOT a keep-out's. There is no `allow` list
+        # for an exclusive zone -- membership IS the allow list -- so all three
+        # options are edits to the intent file and all three are named.
+        return (f"{ref}: no legal pose, and {what}. Add {ref} to the block "
+                f"that owns the zone, move the zone, or drop its `exclusive` "
+                f"flag")
     if verdict == 'no_movable_neighbour':
         return (f"{ref}: no legal pose, and NOTHING seated is near enough to "
                 f"be in the way -- the outline, the zone or its own size "
@@ -1300,19 +1397,29 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     import pose_score
     from placement import floorplan
 
+    # Hoisted above `make_state` (#797): the exclusive zones the seat predicate
+    # gates on are built from these blocks, and `resolve_blocks` needs no
+    # state. `notes` is filled from `block_problems` below, unchanged.
+    blocks, block_problems = floorplan.resolve_blocks(
+        intent, pcb_data, group_sources)
+
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
         # #701: the declared keep-outs reach the SEAT PREDICATE here, and
         # every `_try_place` / `count_legal_poses` / `_evict_trade` site in
         # this module inherits them through `pose_ok`.
-        keepouts=intent.keepouts if intent else ())
+        keepouts=intent.keepouts if intent else (),
+        # #797: and the declared EXCLUSIVE zones, the same way. Stage 3 is the
+        # STRANGER path -- it passes no `constraint` at all, so before this
+        # nothing asked whether the region it was aiming at belonged to
+        # somebody else.
+        exclusive_zones=(floorplan.zone_entries(intent, blocks)
+                         if intent else ()))
     bounds = state.board
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
 
-    blocks, block_problems = floorplan.resolve_blocks(
-        intent, pcb_data, group_sources)
     for v in block_problems:
         notes.append(v.message)
     zones_by_name = {z.name: z for z in intent.blocks if z.rect is not None}
@@ -1831,6 +1938,42 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         state, ref, tx, ty, base_excl,
                         without_keepouts=tuple(k['name'] for k in _bound),
                         **zkw)
+            # #797: which declared EXCLUSIVE zone is refusing this part,
+            # measured the same way. A SIBLING of the keep-out sweep above and
+            # never nested inside it: a stranger can be refused by a reserved
+            # zone on a board that declares no keep-out anywhere, and nesting
+            # would make this channel depend on that one being non-empty.
+            #
+            # Same cost model, and the same reasons it is affordable: only for
+            # a part with no pose at all, only over the zones that BIND it, and
+            # every census is already capped at CENSUS_CAP.
+            zx_freeing: Dict[str, int] = {}
+            zx_joint = 0
+            if not baseline:
+                _zb = state.exclusive_for.get(ref, ())
+                for _t in _zb:
+                    _n = count_legal_poses(state, ref, tx, ty, base_excl,
+                                           without_exclusive=(_t.name,),
+                                           **zkw)
+                    if _n > baseline:
+                        zx_freeing[_t.name] = _n
+                # JOINTLY blocked, exactly as the keep-out side: two zones
+                # that each cross the part's whole feasible region free
+                # NOTHING alone, so the per-zone sweep reports {} and the
+                # verdict would fall back to a sentence about neighbours.
+                #
+                # KNOWN GAP, disclosed rather than silently accepted: this
+                # joint sweep is per-RULE. A part refused by a keep-out AND an
+                # exclusive zone over the same pocket frees nothing under
+                # either one, so both channels report {} and the verdict falls
+                # back to `no_movable_neighbour`. Closing it needs a
+                # cross-rule joint census and a fourth verdict tier, which is
+                # disproportionate for a case needing both declarations over
+                # one pocket. Filed rather than fixed here.
+                if not zx_freeing and len(_zb) > 1:
+                    zx_joint = count_legal_poses(
+                        state, ref, tx, ty, base_excl,
+                        without_exclusive=tuple(t.name for t in _zb), **zkw)
             cinfo: Dict = {}
             cands = _evict_candidates(state, ref, tx, ty, placed, immovable,
                                       constraint=constraint, tol=tol,
@@ -1849,7 +1992,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                            'truncated': cinfo.get('truncated', 0),
                            'baseline': baseline,
                            'keepouts_freeing': keepouts_freeing,
-                           'keepouts_joint': keepouts_joint})
+                           'keepouts_joint': keepouts_joint,
+                           'zone_exclusive_freeing': zx_freeing,
+                           'zone_exclusive_joint': zx_joint})
             no_pose_census[ref] = census
             useful = sorted((n, b) for b, n in freed.items() if n > baseline)
             if not evict_depth:
@@ -2119,6 +2264,10 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # (the unrepairable filter, and reseat's refusal list) pick it up for free.
     _extra_locked = {r for pat in (lock_globs or [])
                      for r in fnmatch.filter(sorted(pcb_data.footprints), pat)}
+    # Hoisted above `make_state` (#797), as in `seed_from_intent`; the
+    # `ref_zone` join below reads the same `blocks`.
+    blocks, _probs = floorplan.resolve_blocks(intent, pcb_data, group_sources) \
+        if intent else ({}, [])
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
@@ -2126,7 +2275,17 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         # #701: the declared keep-outs reach the SEAT PREDICATE (see
         # `seed_from_intent`). `intent` is optional on this path, so the
         # inert default is what a caller without one gets.
-        keepouts=intent.keepouts if intent else ())
+        keepouts=intent.keepouts if intent else (),
+        # #797: and the exclusive zones. Arming the REPAIR path is what lets
+        # `--repair` fix a zone_exclusive breach at all -- without it the
+        # repair's own `_try_place` is free to re-seat the stranger straight
+        # back into the zone it was moved out of. Safe here because
+        # `_try_place` is a nearest-first RING search, not a bounded nudge: it
+        # finds the nearest fully clear pose directly and never needs a
+        # partly-still-inside stepping stone, which is exactly the property
+        # the quench lacks and why the quench's gate has to be monotone.
+        exclusive_zones=(floorplan.zone_entries(intent, blocks)
+                         if intent else ()))
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock
@@ -2139,8 +2298,6 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             edge_band[_c['ref']] = float(
                 (_c.get('overhang_mm') or {}).get('max') or 0.0)
 
-    blocks, _probs = floorplan.resolve_blocks(intent, pcb_data, group_sources) \
-        if intent else ({}, [])
     ref_zone: Dict[str, object] = {}
     if intent:
         for z in intent.blocks:
@@ -3098,6 +3255,16 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
     # (the unrepairable filter, and reseat's refusal list) pick it up for free.
     _extra_locked = {r for pat in (lock_globs or [])
                      for r in fnmatch.filter(sorted(pcb_data.footprints), pat)}
+    # Hoisted above `make_state` (#797), and resolved with the SAME `or auto`
+    # rule the acceptance probe below uses. Resolving the seat gate at a bare
+    # `()` would make every `group:`-shaped block resolve to nothing, which is
+    # not a quiet no-op here: a block with no members has no members to exempt,
+    # so its own parts become STRANGERS to its own exclusive zone and the seat
+    # search refuses them the region they were declared to occupy.
+    from placement.groups import parse_sources as _parse_sources_seat
+    _rs_srcs = tuple(group_sources) or _parse_sources_seat('auto')
+    _rs_blocks, _rs_probs = floorplan.resolve_blocks(
+        intent, pcb_data, _rs_srcs)
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
@@ -3105,7 +3272,17 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         # #701: the declared keep-outs reach the SEAT PREDICATE (see
         # `seed_from_intent`). `intent` is optional on this path, so the
         # inert default is what a caller without one gets.
-        keepouts=intent.keepouts if intent else ())
+        keepouts=intent.keepouts if intent else (),
+        # #797: and the exclusive zones. This is NOT the case
+        # `pose_score.make_state`'s asymmetry forbids -- that one is about
+        # `zone_containment`, a must-be-INSIDE claim whose repair must start
+        # from a violating pose, and the gate it withholds is MONOTONE.
+        # `zone_exclusive` is must-be-OUTSIDE, its target is clean by
+        # definition, and this gate is ABSOLUTE, so it cannot refuse a re-seat
+        # its own target. #701 set the precedent by handing this same path its
+        # keep-outs, which are the identical shape.
+        exclusive_zones=(floorplan.zone_entries(intent, _rs_blocks)
+                         if intent else ()))
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock

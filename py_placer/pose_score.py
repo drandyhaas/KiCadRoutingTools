@@ -60,7 +60,8 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
                halo_weight: float = 2.0, edge_halo: float = 2.0,
                edge_weight: float = 2.0,
                ignore_net_ids=None, net_weights=None, move_refs=None,
-               extra_locked_refs=None, keepouts=None, intent_zones=None):
+               extra_locked_refs=None, keepouts=None, intent_zones=None,
+               exclusive_zones=None):
     """A QuenchState used purely as an oracle -- built, queried, thrown away.
 
     Defaults mirror the placement guidance rather than quench's own library
@@ -88,7 +89,14 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
         # that is ALREADY violating back where it belongs, and the zone gate is
         # monotone against the pose the part is in, so handing it over would
         # make the repair refuse its own target and quietly stop repairing.
-        intent_zones=intent_zones)
+        intent_zones=intent_zones,
+        # #797: the EXCLUSIVE slice, which every seat path DOES take -- note
+        # this is not the asymmetry above being quietly undone. That one is
+        # about `zone_containment`, a must-be-INSIDE claim whose repair has to
+        # start from a violating pose; this is a must-be-OUTSIDE claim whose
+        # target is clean by definition, so an absolute gate on it cannot
+        # refuse a repair its own target. See `quench.exclusive_spec`.
+        exclusive_zones=exclusive_zones)
 
 
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,

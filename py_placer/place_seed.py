@@ -575,6 +575,8 @@ Examples:
             if broke:
                 import pose_score
                 pcb_cur = parse_kicad_pcb(args.output_file)
+                blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
+                                                       sources)
                 st = pose_score.make_state(
                     pcb_cur, args.output_file, clearance=args.clearance,
                     board_edge_clearance=args.board_edge_clearance,
@@ -583,9 +585,14 @@ Examples:
                     # seeder.py. Without this the re-seat below would be free
                     # to put the part back into a declared keep-out while
                     # fixing its zone.
-                    keepouts=intent.keepouts)
-                blocks2, _p = floorplan.resolve_blocks(intent, pcb_cur,
-                                                       sources)
+                    keepouts=intent.keepouts,
+                    # #797: and the same for a declared exclusive zone --
+                    # without it this repair could move a part out of its
+                    # containment breach and straight into somebody's reserved
+                    # region, so `place_seed` would exit 4 on a board it had
+                    # just repaired. Resolved with `sources`, the same blocks
+                    # the grade below uses.
+                    exclusive_zones=floorplan.zone_entries(intent, blocks2))
                 zone_of = {}
                 for z in intent.blocks:
                     if z.rect is None:

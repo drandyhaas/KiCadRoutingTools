@@ -166,6 +166,42 @@ def build_zone_spec(zones, parts, refs=None
     return spec
 
 
+def exclusive_spec(zones, parts, refs=None
+                   ) -> Dict[str, Tuple[_IntentTerm, ...]]:
+    """The `zone_exclusive` slice of `build_zone_spec`, and NOTHING else (#797).
+
+    A SLICE rather than a second walk, so membership, the `z.side` filter and
+    the load-bearing `elif` that exempts a block's own members are resolved in
+    exactly ONE place. The seat gate and the quench gate therefore cannot come
+    to disagree about which rects bind a stranger -- they are reading the same
+    construction, not two that happen to agree today.
+
+    THE `zone_containment` TERMS ARE DROPPED HERE, AND MUST NEVER REACH A SEAT
+    GATE. `pose_score.make_state` withholds `intent_zones` from every seat
+    state, and `tests/test_698_reseat_acceptance.py` arm H parses `seeder.py`
+    to enforce that, because a MONOTONE containment gate would make a repair
+    refuse its own target: the re-seat's whole job is to move a part that is
+    already outside its zone back into it. `zone_exclusive` is the opposite
+    shape -- a must-be-OUTSIDE claim, whose target is clean by definition --
+    which is why it can be gated absolutely and containment cannot. The
+    seeder's containment channel remains `zone_gate` plus the per-call
+    `constraint`, which is anchor-aware and per-part.
+
+    This filter is the one line that keeps that argument true. Widening it back
+    to every term would re-open the bug arm H exists to prevent, so
+    `test_698`'s runtime half asserts on the RESULT -- every term here is a
+    `zone_exclusive` one, and a member binds none -- rather than on this
+    source.
+    """
+    full = build_zone_spec(zones, parts, refs)
+    out: Dict[str, Tuple[_IntentTerm, ...]] = {}
+    for _ref, _terms in full.items():
+        _keep = tuple(t for t in _terms if t.rule == 'zone_exclusive')
+        if _keep:
+            out[_ref] = _keep
+    return out
+
+
 def intent_spec(zone_spec, keepouts_for, ref) -> Tuple[_IntentTerm, ...]:
     """The claims binding `ref` right now: frozen zone terms, plus keep-out
     terms derived LIVE from `keepouts_for`.
@@ -690,7 +726,18 @@ class QuenchState:
                  # `floorplan.grade` builds a state of its own that has to keep
                  # measuring independently of whatever the optimizer was gated
                  # on (tests/test_701_keepout_predicate.py:395).
-                 intent_zones: Optional[Sequence[Dict]] = None):
+                 intent_zones: Optional[Sequence[Dict]] = None,
+                 # --- #797 declared EXCLUSIVE zones, for the SEAT predicate.
+                 # A SEPARATE parameter from `intent_zones` on purpose, and not
+                 # merely a different spelling of it: this one carries the
+                 # must-be-OUTSIDE slice alone, so it can be gated ABSOLUTELY
+                 # without arming the monotone containment gate that
+                 # `pose_score.make_state` and test_698 arm H exist to keep off
+                 # the seat paths. Same plain data (`floorplan.zone_entries`),
+                 # same empty-by-default bit-identity, and the quench itself
+                 # never passes it -- its zone_exclusive enforcement stays
+                 # where #702 put it, in `intent_ok`.
+                 exclusive_zones: Optional[Sequence[Dict]] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -790,6 +837,29 @@ class QuenchState:
         self._intent_spec: Dict[str, Tuple[_IntentTerm, ...]] = build_zone_spec(
             self.intent_zones, self.parts)
         self._intent_active = bool(self._intent_spec or self.keepouts_for)
+
+        # --- #797 declared EXCLUSIVE zones, for the SEAT predicate ----------
+        # Resolved once per state, like `keepouts_for`, and for the same
+        # reason: membership and the side filter are pose-invariant, and
+        # `_try_place` evaluates thousands of poses per part.
+        #
+        # DELIBERATELY NOT FOLDED INTO `_intent_spec`, and not counted in
+        # `_intent_active`. Those drive `candidate_valid`'s MONOTONE
+        # `intent_ok`, which admits any pose termwise no worse than the one the
+        # part is IN -- and before a part is seated, that is its generator
+        # pile coordinate. A stranger whose pile coordinate already sits inside
+        # a reserved zone would then be admitted to every pose no worse than
+        # that, i.e. seated inside it: #797's own bug, back through the door
+        # `pose_ok`'s docstring names for keep-outs. Folding it in would also
+        # change `intent_spec_for`'s arity, which is the coupling
+        # `seeder.count_legal_poses` clears `_inc_intent` for.
+        #
+        # Empty on every board that declares no exclusive zone -- which is
+        # every board in the corpus today -- and `exclusive_clear` guards on
+        # that emptiness, so the channel is inert unless asked for.
+        self.exclusive_zones = tuple(exclusive_zones or ())
+        self.exclusive_for: Dict[str, Tuple[_IntentTerm, ...]] = exclusive_spec(
+            self.exclusive_zones, self.parts)
         # ref -> the incumbent pose's term vector. Cleared beside
         # `_inc_violation` on every move, for the same reason. Never computed
         # on a compliant board: `intent_ok` returns on its absolute branch.
@@ -1428,6 +1498,37 @@ class QuenchState:
         return [str(k.get('name') or '<unnamed>')
                 for k in self.keepouts_for.get(ref, ())
                 if _fp.keepout_hit(k, rects)]
+
+    def exclusive_clear(self, ref, rects) -> bool:
+        """The zone_exclusive slice of `intent_clear`, ABSOLUTE (#797).
+
+        `keepout_clear`'s policy, one rule over, and for the same reason:
+        placement from scratch has no incumbent worth improving on, so a seat
+        search demands cleanliness rather than non-worsening. See
+        `seeder.pose_ok`, which states the two-policies-one-loop split.
+
+        Measured through `intent_term_values`, never a local `rect_overlap_area`
+        call: that function's `zone_exclusive` branch is where the decision to
+        read the COURTYARD ONLY lives ("matching the grade includes matching
+        what it declines to measure"), and a second copy here is how the seat
+        gate would come to grade a through-hole part's leads that
+        `rule_zone_exclusive` does not.
+        """
+        spec = self.exclusive_for.get(ref) if self.exclusive_for else None
+        if not spec:
+            return True
+        return all(v <= t.threshold
+                   for v, t in zip(intent_term_values(spec, rects), spec))
+
+    def exclusive_blockers(self, ref, rects) -> List[str]:
+        """Names of the BLOCKS whose exclusive zone `ref` intrudes on at this
+        pose. #701's doctrine one rule over: a claim that strands a part is a
+        NAMED verdict, not a silent missing pose."""
+        spec = self.exclusive_for.get(ref) if self.exclusive_for else None
+        if not spec:
+            return []
+        return [t.name for v, t in zip(intent_term_values(spec, rects), spec)
+                if v > t.threshold]
 
     def _incumbent_intent(self, ref) -> Tuple[float, ...]:
         """The term vector of the pose `ref` is IN, cached until it moves.
