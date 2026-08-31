@@ -139,7 +139,15 @@ class Schedule:
                 rest = [nm for i, nm in enumerate(self.launch)
                         if i not in keep]
                 if len(rest) >= 2:
-                    if os.environ.get('TWO_PAGE_B') == 'wmax':
+                    # TWO_PAGE_B default is 'worst' (2026-08-31): with
+                    # the diamond reservation + free swimmers, the
+                    # worst-crosser B page ties 'lis' at every K below
+                    # 28 (4/10/24/32 vias, all complete) and beats it
+                    # at K28 (50/0 vs 56/0, human 46) -- the demoted
+                    # risers it strands are exactly the class the last
+                    # call rescues at 2 vias. 'lis' selects the old
+                    # length-first page, 'wmax' the weighted middle.
+                    if os.environ.get('TWO_PAGE_B', 'worst') == 'wmax':
                         # MAX-WEIGHT increasing subsequence of the rest,
                         # weight = 1 + inversions: between 'lis' (length
                         # first -- keeps the mutually-increasing risers,
@@ -167,7 +175,7 @@ class Schedule:
                         while i >= 0:
                             self.page[rest[i]] = 'B.Cu'
                             i = prev[i]
-                    elif os.environ.get('TWO_PAGE_B') == 'worst':
+                    elif os.environ.get('TWO_PAGE_B', 'worst') == 'worst':
                         # the B-page RESCUES THE WORST CROSSERS first
                         # -- the human's constant-layer SWE idiom. On
                         # an all-F-escape fanout this measured WORSE
