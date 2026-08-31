@@ -209,8 +209,10 @@ ROWS = [
     # say WHICH redundancy exists, and this row says the redundancy is not
     # dead code.
     ('stage-one-ignores-the-declaration-entirely', 'sd',
-     "            _win = _declared_frac_window(c, _e_hi - _e_lo)",
-     "            _win = None; _dec = None",
+     "            _dec = _declared_frac(c)",
+     "            c = {k: v for k, v in c.items() "
+     "if k not in ('center_on_edge', 'along_edge_band')}; "
+     "_dec = _declared_frac(c)",
      (T706,), KILLED),
 ]
 
