@@ -44,6 +44,9 @@ def main():
     ap.add_argument('--net', default=None)
     ap.add_argument('--o-span', type=float, default=None,
                     help='half-width of the cut in o (default: from the lanes)')
+    ap.add_argument('--diamonds', action='store_true',
+                    help='census the via DIAMONDS (both-layer-clear via '
+                    'spots) along each layer-changing net\'s strip')
     a = ap.parse_args()
     nets = subprocess.run([sys.executable,
                            os.path.join(HERE, 'coherent_nets.py'), str(a.k)],
@@ -157,6 +160,48 @@ def main():
     else:
         print('\nevery cut fits: the plan is not refusable for cross-'
               'section space on the spine stations sampled')
+
+    if not a.diamonds:
+        return
+    # ---- the resource the cuts DON'T see: a layer change needs a via
+    # DIAMOND, a spot clear on BOTH layers at barrel radius. Census the
+    # static supply along each layer-changing net's strip. Every
+    # refusal this campaign measured stood where a swimmer had no
+    # diamond at its run boundary -- and the last-call pass works by
+    # widening the search to where the diamonds are.
+    pad_r = (te.VIA_SIZE - te.TRACK) / 2
+    chg = []
+    for nm in grp:
+        if two:
+            P = sched.page.get(nm)
+            e0, e1 = ctx.tooth_layer[nm], ctx.dest_layer[nm]
+            if P is None:
+                chg.append((nm, f'swimmer ends {e0[0]}{e1[0]}'))
+            else:
+                n_ch = (e0 != P) + (e1 != P)
+                if n_ch:
+                    chg.append((nm, f'page {P[0]} ends {e0[0]}{e1[0]}'))
+        elif nm in sched.divers:
+            chg.append((nm, 'diver'))
+    print(f'\nVIA-DIAMOND supply (barrel {te.VIA_SIZE}, static copper '
+          f'only, strip o +-1.5 about each net\'s own line, step 0.1):')
+    print(f'  {"net":>7} {"why":>16}  total  by s-quarter (tooth->stub)')
+    for nm, why in chg:
+        ms = np.array([p[0] for p in c.mid[nm]])
+        mo = np.array([p[1] for p in c.mid[nm]])
+        s_a, s_b = float(ms[0]), float(ms[-1])
+        qs = [0, 0, 0, 0]
+        for s in np.arange(s_a, s_b, 0.1):
+            o0 = float(np.interp(s, ms, mo))
+            for do in np.arange(-1.5, 1.51, 0.1):
+                x, y = sp.xy(s, o0 + do)
+                if obs['F.Cu'].point_violation((x, y), pad=pad_r) is None \
+                        and obs['B.Cu'].point_violation(
+                            (x, y), pad=pad_r) is None:
+                    qs[min(3, int(4 * (s - s_a) / max(s_b - s_a, 1e-9)))] += 1
+        tot = sum(qs)
+        print(f'  {nm:>7} {why:>16}  {tot:5d}  {qs}'
+              + ('   <-- STARVED quarter' if 0 in qs else ''))
 
 
 if __name__ == '__main__':
