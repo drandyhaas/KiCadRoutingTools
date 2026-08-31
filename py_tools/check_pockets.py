@@ -719,8 +719,12 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
                              'n_parts': _bg['n_parts'],
                              'ties': list(_bg['ties']),
                              'reason': _bg['reason']}
-    except Exception:                                           # noqa: BLE001
-        doc['board_grid'] = None
+    except ImportError as exc:
+        # Named, not swallowed: a missing module and a board that declares no
+        # lattice must not produce the same shape, which is the whole point of
+        # carrying `reason` beside `step`.
+        doc['board_grid'] = {'step': None, 'occupancy': None, 'n_parts': None,
+                             'ties': [], 'reason': 'unavailable: %s' % exc}
 
     doc['reseat_target'] = _reseat_target(doc, bounds) if cold else None
     return doc, hot

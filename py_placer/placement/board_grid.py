@@ -38,18 +38,29 @@ pins that as a property of the ladder.
 authored by hand are round by construction rather than by a design grid. Below
 `MIN_PARTS` there is no answer to give and the caller gets `None`.
 
-`OCCUPANCY_FLOOR` is the MIDPOINT of a real population gap, and it is not a
-round number for a reason worth keeping. Sorted best-occupancy over the tracked
-corpus (parts >= MIN_PARTS), the widest gap by a factor of two is
+`OCCUPANCY_FLOOR` is 0.67 because 0.70 -- the round number the population
+first suggests -- sits EXACTLY on a corpus board. `interf_u_unrouted` scores
+0.700000, so at a 0.70 floor `>=` admits it and `>` rejects it on a float
+equality, which is the most fragile place a threshold can be. 0.67 is 0.0276
+clear of it and 0.0276 clear of the nearest rejected board.
 
-    0.700000  interf_u_unrouted            <- admitted
-    0.642424  orangecrab_ext_pll           <- rejected
+An earlier version of this paragraph claimed the 0.642424 -> 0.700000 gap was
+"the widest by a factor of two". That is false and a review caught it. Sorted
+best-occupancy over the tracked corpus (parts >= MIN_PARTS), the adjacent gaps
+are:
 
-and every other adjacent pair differs by at most 0.05. A floor of 0.70 would
-therefore sit EXACTLY on a corpus board: `>=` admits `interf_u_unrouted` and
-`>` rejects it, on a float equality, which is the most fragile place a
-threshold can be. 0.67 is 0.030 clear of the nearest admitted board and 0.028
-clear of the nearest rejected one. The floor is far above the chance rate at
+    0.2235  tigard 0.592391 -> rp2350 0.368852
+    0.1189  rp2350 0.368852 -> kit-dev-coldfire 0.250000
+    0.0800  sonde_u 0.780000 -> interf_u_unrouted 0.700000
+    0.0769  splitflap 0.923077 -> lvds 0.846154
+    0.0576  interf_u_unrouted 0.700000 -> orangecrab 0.642424   <- the floor
+    0.0500  orangecrab 0.642424 -> tigard 0.592391
+
+so this is the FIFTH widest gap, not the first. The floor is placed here on the
+boundary argument above, not on a separation argument. Putting it at the widest
+gap instead (~0.48) would admit `tigard` (0.592) and `orangecrab_ext_pll`
+(0.642) at 0.05 -- a defensible alternative that changes behaviour on two
+boards, and one nobody should make by accident. The floor is far above the chance rate at
 every rung --
 with a 1 um tolerance a uniformly random coordinate lands on a multiple of `g`
 with probability `2e-3/g`, i.e. 4.0% at 0.05 falling to 0.08% at 2.54 -- so a
@@ -117,8 +128,12 @@ def infer_board_grid(pcb_data, *, ladder: Sequence[float] = GRID_LADDER,
         if s <= 0:
             raise ValueError("board grid ladder must be positive: %r" % (s,))
     values, n_parts = board_coordinates(pcb_data)
+    # `n_values` is the REAL denominator: `n_parts` counts footprints, but a
+    # non-finite coordinate is dropped from the sample, so 2*n_parts overstates
+    # it whenever a board has one.
     out: Dict = {'step': None, 'occupancy': None, 'n_parts': n_parts,
-                 'profile': {}, 'ties': (), 'reason': ''}
+                 'n_values': len(values), 'profile': {}, 'ties': (),
+                 'reason': ''}
     if not values:
         out['reason'] = 'no footprints'
         return out
@@ -176,7 +191,7 @@ def describe(evidence: Dict) -> str:
     return ("placement lattice %g mm (inferred, %.0f%% of %d footprint "
             "coordinates%s)"
             % (evidence['step'], 100.0 * evidence['occupancy'],
-               2 * evidence['n_parts'],
+               evidence.get('n_values', 2 * evidence['n_parts']),
                '' if len(evidence.get('ties', ())) < 2
                else '; ties with ' + ', '.join('%g' % t
                                                for t in evidence['ties'][1:])))

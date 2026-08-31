@@ -2510,7 +2510,14 @@ def _candidate_positions(part: _Part, max_disp: float, step: float,
         raster offsets are {0, +/-1.0, +/-2.0, ...} and 1.0 is not a multiple
         of 0.3175, so only the zero offset lands back on the board's lattice.
         Snapping to the lattice gives {0, +/-0.9525, +/-1.905, ...} and every
-        candidate stays on it, at 325 candidates against the raster's 317.
+        candidate stays on the seed's coset of it.
+
+    Reach is comparable but NOT uniformly better, and the honest bound is worth
+    stating: sweeping max_disp 0.5..19.5 at step=1.0 on a 0.3175 lattice, 12
+    values gain candidates, 17 tie and 10 LOSE -- worst 81 -> 69 at
+    max_disp=5.0, because an offset the raster admitted at exactly the cap can
+    snap UP past it. That is the price of the exact cap below, paid knowingly.
+    At the shipped default (10.0 / 1.0) it is 317 -> 325.
 
     `lattice` is the board's own pitch when one can be read off it and the
     `grid_step` raster otherwise, so a board with no inferable lattice keeps
@@ -2704,11 +2711,25 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         keepouts=(intent_gate or {}).get('keepouts'),
                         intent_zones=(intent_gate or {}).get('zones'))
     # #708: the lattice candidate OFFSETS are multiples of. The board's own
-    # pitch when one can be read off it, the `grid_step` raster otherwise --
-    # which is exactly the granularity offsets have always had, so a board with
-    # no inferable lattice is unaffected by the choice. There is deliberately
-    # no flag: the fallback IS the off state and the board picks it.
+    # pitch when one can be read off it, the `grid_step` raster otherwise.
+    # There is deliberately no flag: the fallback IS the off state and the
+    # board picks it. Note the fallback restores the OFFSET GRANULARITY, not
+    # the old poses -- the seed-relative half applies either way, which is the
+    # bug fix.
     lattice, lattice_evidence = resolve_snap_lattice(pcb_data, grid_step)
+    # A lattice COARSER than the search step would quantize the search rather
+    # than merely phase it: `snap(0.1, 0.3175)` is 0.0, so at `--step 0.1` on an
+    # imperial board every +/-1 offset collapses onto the zero offset and
+    # `_group_offsets` discards it as "no move at all". The finest rung of the
+    # search would vanish silently. `--step` is a plain float on three CLIs with
+    # nothing relating it to the board, so the guard lives here.
+    if lattice > step + 1e-9:
+        lattice_evidence = dict(lattice_evidence, source='grid_step',
+                                resolved=grid_step,
+                                reason='inferred %g mm is coarser than --step '
+                                       '%g mm, which would quantize the search'
+                                       % (lattice, step))
+        lattice = grid_step
     print(describe_lattice(lattice_evidence))
 
     # Unchanged, and now conservative rather than exact: the offsets are

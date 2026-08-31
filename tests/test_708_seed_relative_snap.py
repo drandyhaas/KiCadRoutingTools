@@ -9,12 +9,19 @@ where one can be read off it.
 The two theorems below are stated so they need no baseline and no golden file:
 
   RESIDUE     every reported move is seed + an exact multiple of the lattice.
-  CONSERVATION the multiset of poses-modulo-lattice is PRESERVED across a whole
-              run, swaps included. A nudge maps on-lattice to on-lattice, and a
-              swap permutes poses among same-footprint parts, so the count of
-              on-lattice poses cannot change -- not merely "not get worse".
-              Today's count falls 120 -> 35 on splitflap, so this is a real
-              assertion and not a restatement of the code.
+  CONSERVATION the count of on-lattice poses is PRESERVED across a run with
+              nudges and group moves, because each maps a part inside its own
+              seed coset. Today's count falls 120 -> 35 on splitflap, so this
+              is a real assertion and not a restatement of the code.
+
+              NOT with swaps, and the first draft of this file claimed
+              otherwise. A swap hands part A the pose of part B, but A's
+              candidates are generated from A's OWN seed, so if A's seed is off
+              the lattice the next accepted nudge takes it back off and the
+              count moves. `t_a_swap_can_move_the_on_lattice_count` pins the
+              counterexample (glasgow_revC C3/C9). With swaps on, the invariant
+              that IS true is the weaker one asserted here: every pose still
+              lies on some part's seed coset.
 
 Both are properties of the mechanism rather than of a board, which is why they
 are asserted on an imperial board, a metric-fine one, and one with no
@@ -39,12 +46,15 @@ MEASURED, `tests/mutate_708.py`, third run: 15 rows, 14 killed, 1 survived
     the-fanout-snap-goes-back-to-absolute           KILLED   4
     the-reseat-slot-snaps-the-absolute-point        KILLED   3
 
-The first run killed only 9 of 15, and all six survivors were holes in THESE
-arms rather than in the engine -- an assertion at `step=1.0` where the mutated
-factor is a no-op, a lattice sweep that never rounded UP past the cap, a
-block-move fixture whose lattice was the raster, a probe fixture whose parts
-were already on-lattice, and two sites whose owning suites never look at phase.
-The rows and the reasons are in `mutate_708.py`.
+The first run killed only 9 of 15. Five of its six survivors were holes in
+THESE arms rather than in the engine: an assertion at `step=1.0` where the
+mutated factor is a no-op, a lattice sweep that never rounded UP past the cap,
+a probe fixture whose parts were already on-lattice, and two sites whose owning
+suites never look at phase. The sixth, `the-tie-break-takes-the-argmax`, is an
+EQUIVALENT MUTANT and is recorded as an expected survivor with its reason. A
+seventh row (`the-group-offset-snaps-the-absolute-pose`) was killed in run 1
+and only surfaced as a hole in run 2, once the probe fixture moved to a board
+whose lattice is the raster. The rows and the reasons are in `mutate_708.py`.
 """
 
 import math
@@ -129,8 +139,9 @@ def t_the_residue_theorem():
     """Every reported move is the seed plus an exact multiple of the lattice.
 
     Nudges and group moves only: a swap hands a part ANOTHER part's pose, which
-    is on that part's lattice offset, not on this one's. Conservation below is
-    the statement that covers swaps.
+    is on that part's coset, not on this one's. `t_conservation_of_the_lattice`
+    states what survives with swaps on, and
+    `t_a_swap_can_move_the_on_lattice_count` pins why it is weaker.
     """
     for name, want in BOARDS:
         lat, ev = lattice_of(name)
@@ -149,29 +160,89 @@ def t_the_residue_theorem():
 
 
 def t_conservation_of_the_lattice():
-    """The count of on-lattice poses is PRESERVED across a whole run.
+    """The count of on-lattice poses is preserved -- WITHOUT swaps.
 
-    Swaps on, which is the case the per-part residue statement cannot make.
-    Equality, not `>=`: a nudge maps on-lattice to on-lattice and a swap is a
-    permutation, so nothing can add or remove one.
+    The first draft of this case asserted equality with swaps ON, reasoning
+    that a swap merely permutes poses. That reasoning is wrong, and a review
+    produced the counterexample: `_candidate_positions` generates from
+    `part.seed_x`, so a part's residue is a property of its SEED, not of where
+    it currently sits. A swap hands part A the pose of part B; if A's seed is
+    off-lattice, every candidate A is offered afterwards is off-lattice, and
+    the next accepted nudge moves the count. On `glasgow_revC` there are five
+    same-footprint pairs inside the 3mm swap cap with one member on-lattice and
+    one off (C3 <-> C9, 1.985mm apart, is the smallest).
+
+    The equality held on the three boards here only by accident of board
+    choice: `interf_u_unrouted` has ZERO same-footprint pairs within the swap
+    cap, so its swap phase never fires at all. So the arm is stated where it is
+    actually a theorem -- nudges and group moves, which map each part inside
+    its own seed coset -- and the swaps-on run gets the weaker statement that
+    IS true of it.
     """
     for name, want in BOARDS:
         lat, _ev = lattice_of(name)
-        seeds, moved, _m = run(name)
+        seeds, moved, _m = run(name, allow_swaps=False)
         before = sum(1 for (x, y) in seeds.values()
                      for v in (x, y) if on_grid(v, lat))
         after = 0
         for r, (sx, sy) in seeds.items():
             x, y = moved.get(r, (sx, sy))
             after += sum(1 for v in (x, y) if on_grid(v, lat))
-        report('%s: on-%g count preserved (%d -> %d over %d coords)'
-               % (name, lat, before, after, 2 * len(seeds)),
+        report('%s: on-%g count preserved with no swaps (%d -> %d over %d '
+               'coords)' % (name, lat, before, after, 2 * len(seeds)),
                after == before, 'lost %d' % (before - after))
         if want is not None:
             report('%s: and that count is most of the board, so the '
                    'assertion has something to lose' % name,
                    before >= 0.6 * 2 * len(seeds),
                    '%d/%d' % (before, 2 * len(seeds)))
+
+        # Swaps ON: the true invariant is that every pose still lies on SOME
+        # part's seed coset -- no pose is invented off every lattice the board
+        # offers. That is what the fix guarantees and what a return to the
+        # absolute snap would break.
+        _s2, moved2, _m2 = run(name)
+        cosets = {round((sx / lat) % 1.0, 6) for sx, _sy in seeds.values()}
+        cosets |= {round((sy / lat) % 1.0, 6) for _sx, sy in seeds.values()}
+        stray = [(r, x, y) for r, (x, y) in moved2.items()
+                 if round((x / lat) % 1.0, 6) not in cosets
+                 or round((y / lat) % 1.0, 6) not in cosets]
+        report('%s: with swaps, every pose is still on some seed coset of %g'
+               % (name, lat), not stray, str(stray[:2]))
+
+
+def t_a_swap_can_move_the_on_lattice_count():
+    """The counterexample, pinned so the weaker statement above is not read as
+    a retreat from a theorem that was true.
+
+    glasgow_revC C3 and C9 are the same footprint, 1.985mm apart (inside the
+    default swap cap), C3 on the board's 0.05 lattice and C9 off it. Whichever
+    one ends up being nudged afterwards is anchored to ITS OWN seed, so the
+    count moves. This is a property of the engine, not of the fix -- it was
+    equally true before -- and it is the reason conservation is asserted
+    without swaps.
+    """
+    name = 'glasgow_revC'
+    lat, ev = lattice_of(name)
+    report('%s resolves the 0.05 lattice' % name, ev['step'] == 0.05,
+           str(ev['step']))
+    pcb = parse_kicad_pcb(board(name))
+    fps = pcb.footprints
+    a, b = fps.get('C3'), fps.get('C9')
+    report('the pair exists and shares a footprint',
+           a is not None and b is not None
+           and a.footprint_name == b.footprint_name,
+           '%s / %s' % (getattr(a, 'footprint_name', None),
+                        getattr(b, 'footprint_name', None)))
+    if a is None or b is None:
+        return
+    d = math.hypot(a.x - b.x, a.y - b.y)
+    report('and sits inside the default swap cap', d <= 3.0,
+           '%.3f mm apart' % d)
+    on_a = on_grid(a.x, lat) and on_grid(a.y, lat)
+    on_b = on_grid(b.x, lat) and on_grid(b.y, lat)
+    report('with exactly one of the two on the lattice', on_a != on_b,
+           'C3 on=%s, C9 on=%s' % (on_a, on_b))
 
 
 def t_the_generator_offers_only_on_lattice_poses():
@@ -194,12 +265,22 @@ def t_the_generator_offers_only_on_lattice_poses():
                '(lattice %g)' % lat,
                all(math.hypot(dx, dy) <= 3.0 + 1e-9 for dx, dy in off),
                'max %.4f' % max(math.hypot(dx, dy) for dx, dy in off))
-    # The measured claim the fix rests on: the lattice does not cost reach at
-    # the step this tool ships.
+    # Reach, stated as the bounded claim it is rather than the absolute one
+    # the first draft made. At the shipped default the lattice gains
+    # candidates; across the max_disp range it sometimes loses a few, because
+    # the exact cap rejects an offset that snapped UP past it.
     n_raster = len(Q._candidate_positions(_P(), 10.0, 1.0, 0.1))
     n_lat = len(Q._candidate_positions(_P(), 10.0, 1.0, 0.3175))
-    report('a 0.3175 lattice costs no candidates at step=1.0',
+    report('at the shipped default a 0.3175 lattice costs no candidates',
            n_lat >= n_raster, 'raster %d, lattice %d' % (n_raster, n_lat))
+    worst = 1.0
+    for i in range(1, 40):
+        md = i * 0.5
+        a = len(Q._candidate_positions(_P(), md, 1.0, 0.1))
+        b = len(Q._candidate_positions(_P(), md, 1.0, 0.3175))
+        worst = min(worst, b / a if a else 1.0)
+    report('and never loses more than 20% of them anywhere in max_disp '
+           '0.5..19.5', worst >= 0.80, 'worst ratio %.3f' % worst)
 
 
 def t_a_board_with_no_lattice_keeps_the_raster_granularity():
@@ -394,12 +475,61 @@ def t_the_two_repair_sites_are_seed_relative_but_not_coarsened():
                             for m in c.members], str(identity[:1]))
 
 
+def t_the_reseat_accepts_on_the_seated_cost_not_the_prediction():
+    """The reseat's prediction is blind to a member's UNSCORED nets.
+
+    `reseat_cluster` overrides the members' pads on the SCORED nets, but
+    `other_aw` comes from the live board, so a member's other nets are priced
+    at the pose it is leaving. On `ulx3s`'s `tether:B0`, C60 carries net 1
+    (`GND`, unscored) and net 278 (`PWRBTn`, scored): the prediction said
+    1214.28 and the seated board measures 1274.28. That is 60.0 at the
+    fixture's `crossing_penalty=30.0` -- two crossings -- and the cluster used
+    to be ACCEPTED on the number that did not describe it.
+
+    This was pre-existing; the #708 slot change only moved C60 to the pose that
+    exposes it. Kept here rather than in `test_reseat.py` because that suite
+    asserts the property (`never accepts a worse cluster cost`) while this
+    asserts the MECHANISM, including the dry-run contract, which nothing else
+    exercises.
+    """
+    import test_reseat as TR
+    from placement import reseat as R
+    pcb, st = TR._state()
+    clusters = TR._clusters(pcb, st, limit=3)
+    target = [c for c in clusters if c.name == 'tether:B0']
+    report('the ulx3s fixture still has tether:B0', bool(target),
+           str([c.name for c in clusters]))
+    if not target:
+        return
+    c = target[0]
+    before_state = {r: (p.x, p.y, p.rot) for r, p in st.parts.items()}
+    res = R.reseat_cluster(st, c, apply=False)
+    report('a cluster whose seated cost is worse is REFUSED',
+           not res.accepted, 'accepted=%s' % res.accepted)
+    report('and the refusal names the mechanism rather than a bare verdict',
+           'does not score' in (res.reason or ''), (res.reason or '')[:70])
+    report('the reported `after` is the SEATED cost, not the prediction',
+           abs(res.after - 1274.2793) < 0.01, '%.4f' % res.after)
+    report('apply=False leaves every part exactly where it was',
+           all((st.parts[r].x, st.parts[r].y, st.parts[r].rot) == v
+               for r, v in before_state.items()))
+    # A cluster that IS an improvement must still be accepted -- otherwise this
+    # guard would read as "working" while refusing everything.
+    accepted = [R.reseat_cluster(st, k, apply=False).accepted
+                for k in clusters]
+    report('and a genuinely improving cluster is still accepted',
+           any(accepted), str(accepted))
+
+
 TESTS = [
     ('residue', t_the_residue_theorem),
     ('conservation', t_conservation_of_the_lattice),
+    ('a swap can move the count', t_a_swap_can_move_the_on_lattice_count),
     ('the generator', t_the_generator_offers_only_on_lattice_poses),
     ('no lattice -> the raster', t_a_board_with_no_lattice_keeps_the_raster_granularity),
     ('group offsets probe what they emit', t_group_offsets_probes_the_pose_it_emits),
+    ('reseat accepts on the seated cost',
+     t_the_reseat_accepts_on_the_seated_cost_not_the_prediction),
     ('the repair sites take half the fix',
      t_the_two_repair_sites_are_seed_relative_but_not_coarsened),
     ('disclosure', t_the_run_discloses_which_branch_it_took),

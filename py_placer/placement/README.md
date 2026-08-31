@@ -744,8 +744,19 @@ enough, and this is worth stating because it is the obvious fix and it does not
 work: the offsets are multiples of `--grid-step` 0.1, and 1.0 is not a multiple
 of 0.3175, so only the *zero* offset lands back on an imperial lattice.
 Snapping the offset to the board's own pitch gives `{0, ±0.9525, ±1.905,
-±2.8575}`, every candidate stays on the lattice, and the count goes 317 → 325 —
-so it costs nothing either.
+±2.8575}`, and every candidate stays on the seed's coset of the lattice.
+(Coset, not lattice: a part whose own seed is off-lattice keeps its residue
+rather than acquiring the board's — the fix preserves phase, it does not impose
+one. `splitflap_driver` has 8% of its coordinates off its own pitch.)
+
+Reach is comparable but not uniformly better. At the shipped default
+(`--max-displacement 10 --step 1.0`) the count goes 317 → 325; sweeping
+`max_displacement` from 0.5 to 19.5 at `--step 1.0`, 12 values gain candidates,
+17 tie and **10 lose** — worst 81 → 69 at 5.0 mm, because an offset the raster
+admitted at exactly the cap can snap *up* past it and is then correctly
+rejected. That is the price of making the displacement cap exact, and
+`place_route_loop` widens `--max-displacement` ×1.5 per rejected round, so it
+does reach those values.
 
 Measured, one quench pass, fraction of footprint coordinates on the board's own
 lattice:
@@ -756,14 +767,21 @@ lattice:
 | `flat_hierarchy` | 0.3175 | 0.828 | 0.273 | **0.828** | 40 |
 | `sonde_u` | 0.3175 | 0.780 | 0.200 | **0.780** | 24 |
 
-The same parts still move. They now move by whole grid units.
+The `parts moved` column is the new arm. The quench keeps moving comparably
+many parts — old vs new: 43/43 on splitflap, 45/40 on flat_hierarchy, 20/24 on
+sonde_u — but it is **not the same set**: splitflap swaps `U6` for `R8`, and
+flat_hierarchy drops six and gains one. That is expected, since the candidate
+set is genuinely different; what does not change is that the search is still
+free to move parts, and every move it makes is now a whole number of grid
+units.
 
 ### There is no flag
 
 `resolve_snap_lattice` returns the board's inferred pitch, or `--grid-step`
 when the board declares none — which is exactly the granularity offsets have
 always had. The fallback **is** the off state, and the board reaches it rather
-than a flag. Ten of the 22 tracked boards take it, each with a stated reason,
+than a flag. Eleven of the 22 tracked boards take it, each with a stated
+reason,
 and `metrics_out['board_grid']` records which branch ran so "no lattice" and
 "never measured" cannot be confused.
 
@@ -790,8 +808,12 @@ construction. Below `MIN_PARTS` there is no answer to give.
 
 `OCCUPANCY_FLOOR` is 0.67 and not the rounder 0.70 for a reason worth keeping:
 `interf_u_unrouted` scores **exactly** 0.700000, so a 0.70 floor would rest on
-a corpus board where `>=` and `>` disagree on a float equality. 0.67 is the
-midpoint of the widest gap in the distribution (0.642424 → 0.700000).
+a corpus board where `>=` and `>` disagree on a float equality. 0.67 clears it
+by 0.0276. It sits in a real gap (0.642424 → 0.700000) but **not the widest** —
+that is 0.2235, between `tigard` 0.592 and `rp2350` 0.369, and putting the
+floor there instead would admit `tigard` and `orangecrab_ext_pll` at 0.05. The
+module docstring has the full gap table; the floor rests on the boundary
+argument, not on a separation one.
 
 ### Where the lattice deliberately does NOT apply
 
@@ -1149,10 +1171,8 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `parser.py` | Courtyard boundary and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation) |
-| `board_grid.py`
-  The pitch a board was laid out on, inferred from its footprint origins (#708). Pure; no engine imports.
-
-`utility.py` | Shared utilities (bbox from pads, grid snapping) |
+| `board_grid.py` | The pitch a board was laid out on, inferred from its footprint origins (#708). Pure; no engine imports |
+| `utility.py` | Shared utilities (bbox from pads, grid snapping) |
 
 ## Legality model (`legality.py`, #456)
 

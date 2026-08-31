@@ -12,7 +12,7 @@ grid degenerates to the seed point only (n = int(max_disp/1000) = 0), which
 is skipped as the current pose, so ANY movement must come from the swap
 block. The final test runs the full optimizer on a real board and checks the
 headline #430 invariant: no returned part ends up further than
-max_displacement (+ grid snap slop) from where it started.
+max_displacement from where it started (exactly, since #708).
 """
 
 import math
@@ -182,8 +182,8 @@ def test_swap_cap_validation():
 
 def test_no_stranding_after_full_run():
     """Headline #430 invariant on a real board: a full quench run (nudges,
-    rotations AND swaps) leaves every reported part within max_displacement
-    (plus the grid_step snap slop) of its input position."""
+    rotations AND swaps) leaves every reported part within max_displacement of
+    its input position -- EXACTLY, with no snap slop, since #708."""
     pcb = parse_kicad_pcb(INTERF_U)
     orig = {ref: (fp.x, fp.y) for ref, fp in pcb.footprints.items()}
     max_disp = 3.0

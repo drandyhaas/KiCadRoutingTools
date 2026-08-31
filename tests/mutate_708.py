@@ -18,8 +18,8 @@ checks the first would pass with the fix half-applied. The row
 arms tell those two apart: with it applied, every offset is still a clean
 multiple of `grid_step` and the residue is still preserved -- and the board's
 0.3175mm lattice is still destroyed. Measured before writing any of this: at
-step=1.0 the raster offsets are {0, +/-1.0, +/-2.0} and only the ZERO offset
-lands back on a 0.3175 lattice.
+step=1.0 and max_displacement=3.0 the raster offsets are {0, +/-1.0, +/-2.0,
++/-3.0} and only the ZERO offset lands back on a 0.3175 lattice.
 
 Every row carries an EXPECTATION. An inert row recorded as an expected survivor
 is a finding; an inert row quietly deleted is a hole. A row whose verdict does
@@ -44,9 +44,9 @@ skipped -- `str.replace(old, new, 1)` of an absent needle returns the file
 unchanged, so a stale anchor would report its row as a survivor, which reads as
 a catastrophic test failure and is really a typo.
 
-`_uncache` is carried over from `tests/mutate_797.py` and is NOT hygiene: two
-rows here are single-token edits (`ties[0]` -> `ties[-1]`, `0.67` -> `0.70`)
-that leave the file the SAME SIZE, and CPython validates a `.pyc` on
+`_uncache` is carried over from `tests/mutate_797.py` and is NOT hygiene: the
+`0.67` -> `0.70` row is a size-preserving edit, and CPython validates a `.pyc`
+on
 (mtime seconds, size) alone. Mutate, run and restore inside one second and
 every later import in this checkout reads the mutant.
 
@@ -204,6 +204,27 @@ ROWS = [
      "                          cy - cap.seed_y) > max_disp + 1e-9:\n"
      "                continue",
      (T_SNAP, T_FANOUT), 'KILLED'),
+
+    # The pre-existing acceptance defect #708's slot change exposed: decide on
+    # the PREDICTION again instead of the seated cost.
+    ('the-reseat-accepts-on-the-prediction', 'rs',
+     "        keep = False
+"
+     "        try:",
+     "        keep = apply
+"
+     "        res.accepted = True
+"
+     "        if True:
+"
+     "            for m in moved:
+"
+     "                state.apply_move(m, *poses[m])
+"
+     "            return res
+"
+     "        try:",
+     (T_SNAP, T_RESEAT), 'KILLED'),
 
     ('the-reseat-slot-snaps-the-absolute-point', 'rs',
      "        sx = ax + snap_to_grid(x - ax, grid_step)\n"

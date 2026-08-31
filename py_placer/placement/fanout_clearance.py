@@ -776,8 +776,8 @@ def _candidate_positions(cap, max_disp, step, grid_step):
     sub-millimetre pose that clears a foreign via. At `step=0.2` the candidate
     count is 81 on the raster, 29 on a 0.3175mm lattice and 9 on 0.635 -- so a
     coarse lattice would starve exactly the search that must not be starved,
-    and the #313 via nudge downstream of it moves parts by as little as 0.6mm,
-    which a 1.27 lattice could not express at all.
+    and the #313 nudge downstream of it relocates VIAS inside a 0.6mm budget --
+    a fraction of a millimetre, which a 1.27 lattice could not express at all.
 
     The radius test now runs AFTER the snap, so `max_disp` is an exact cap. The
     `grid_step*sqrt(2)/2` overshoot the via- and track-prune margins budget for

@@ -6,9 +6,11 @@ board grids" and proposes inferring the board's pitch from a ladder. Two of the
 three tables below say the mechanism is something else, and the third says the
 proposed cure would have been bolted onto a line that buys nothing:
 
-  A. THE DAMAGE IS REAL. One quench pass takes splitflap_driver from 59 of 65
-     parts on its own 0.3175mm lattice to a small fraction of that. This is the
-     claim the issue makes and it holds.
+  A. THE DAMAGE IS REAL. One quench pass takes splitflap_driver from 0.923 of
+     its footprint COORDINATES on its own 0.3175mm lattice to 0.269. (#708
+     states the same measurement per PART, 59 of 65 = 0.908; this file counts
+     x and y separately throughout, so its denominator is 2n. Both are true and
+     the tables below are all coordinates.)
 
   B. THE SNAP REMOVES NO CANDIDATES. `_candidate_positions` builds candidates as
      `seed + ix*step` and then snaps the ABSOLUTE result. Every shipped `step`

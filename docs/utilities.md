@@ -1356,9 +1356,11 @@ engine does not use.
 real answer rather than a missing one -- `board_grid_reason` says which test it
 failed (`best occupancy 0.226 < floor 0.67`, `n_parts 4 < 8`), so "no lattice"
 and "never measured" stay distinguishable from the summary line alone. Measured
-over the tracked corpus, 12 of 22 boards resolve: four imperial at 0.3175 mm
+over the tracked corpus, 11 of 22 boards resolve: four imperial at 0.3175 mm
 (`splitflap_driver` 0.92, `flat_hierarchy` 0.83, `sonde_u` 0.78,
-`interf_u_unrouted` 0.70) and eight metric-fine at 0.05 mm.
+`interf_u_unrouted` 0.70) and seven metric-fine at 0.05 mm (`glasgow_revC`,
+`interf_u_unrouted_placed`, `haasoscope_pro_max_test`, `routed_output`,
+`lvds_converter_dualclk`, `lvds_converter_dualclk_gnd`, `esp_prog`).
 
 ### Example
 

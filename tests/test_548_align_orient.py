@@ -182,13 +182,15 @@ def test_twelve_positional_args_still_bind():
 
 
 def test_metrics_stay_inside_before_and_after():
-    """test_504_ratsnest_metrics.py:46 asserts the EXACT top-level key set
-    {before, after, legality}. New numbers go inside, never alongside."""
+    """test_504_ratsnest_metrics.py asserts the EXACT top-level key set.
+    New NUMBERS go inside `before`/`after`, never alongside. `board_grid`
+    (#708) is provenance rather than a number -- which lattice this run
+    resolved and why -- so it sits at the top level like `intent_gate`."""
     p = os.path.join(KF, 'interf_u_unrouted.kicad_pcb')
     m = {}
     quench(parse_kicad_pcb(p), p, max_displacement=1.0, step=1.0, max_passes=1,
            align_weight=5.0, orient_weight=1.0, metrics_out=m)
-    assert set(m) == {'before', 'after', 'legality'}, sorted(m)
+    assert set(m) == {'before', 'after', 'legality', 'board_grid'}, sorted(m)
     for phase in ('before', 'after'):
         for k in ('total', 'length', 'crossings', 'halo', 'edge', 'hpwl',
                   'align', 'orient'):
