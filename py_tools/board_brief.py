@@ -596,6 +596,10 @@ def fit_section(pcb, pcb_file, extents, step, clearance, edge, skipped):
 # tell which half of a brief for an unplaced board to believe -- and every
 # section here used to read alike.
 SOURCES_NOTE = {
+    'design_brief': 'placement.design_brief.load_brief + compile_brief '
+                    '[requires: a sibling <board>.design-brief.json, or '
+                    '--brief. This is the only DECLARED section: every other '
+                    'one is measured or inferred from the board]',
     'board': 'kicad_parser.parse_kicad_pcb + list_nets.board_floor_knobs + '
              'board_brief._shoelace '
              '[requires: an outline. Independent of part positions]',
@@ -638,7 +642,7 @@ SOURCES_NOTE = {
 
 def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
                 requirements=None, fit=(), fit_step=DEFAULT_FIT_STEP_MM,
-                render_doc=None):
+                render_doc=None, design_brief=None, design_brief_path=''):
     skipped = {}
     # Board-first: an unset knob resolves from this board's own Default
     # netclass / min_copper_edge_clearance, and the returned `knobs` records
@@ -681,11 +685,47 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
             'panels': render_doc.get('panels'),
             'describe': render_doc.get('describe'),
         }
+    if design_brief is not None:
+        # #711. The DECLARED section, and the only one that is. Every other
+        # section here is measured or inferred, and `mechanical`'s own note
+        # has been telling the reader to "state real mechanical constraints
+        # with --requirements" -- a channel nothing reads. This is where that
+        # advice now lands, structured.
+        from placement import design_brief as _db
+        _frag, _rep = _db.compile_brief(
+            design_brief, board_refs=sorted(pcb.footprints or {}))
+        brief['design_brief'] = {
+            'path': design_brief_path,
+            'declared': _rep['declared'],
+            'unknown': _rep['unknown'],
+            'absent': _rep['absent'],
+            'not_graded': _rep['not_graded'],
+            'unmatched': _rep['unmatched'],
+            'product': _rep['product'],
+            'fixed': _rep['fixed'],
+            'counts': _rep['counts'],
+            'note': ('DECLARED, not measured. Read this beside `mechanical`, '
+                     'which is INFERENCE from part class: where the two '
+                     'disagree the declaration is the authority, and '
+                     '`unknown` names what the author could not say.'),
+        }
+    elif not requirements:
+        # A silent absence is the failure. `mechanical`'s rows are inference,
+        # and without either channel nothing on this board is declared at all.
+        brief['design_brief'] = {
+            'path': None,
+            'note': ('NONE DECLARED. No sibling design brief and no '
+                     '--requirements, so every mechanical fact in this '
+                     'document is INFERENCE -- `mechanical` from part class, '
+                     'and any connector edge from the current pose. '
+                     'See docs/design-brief.md.'),
+        }
     if requirements:
         # Verbatim. These are the constraints that live nowhere in the board
         # file -- enclosure fit, connector positions, thermal and EMI zoning,
         # datasheet layout intent -- and paraphrasing them here would be this
-        # tool inventing mechanical geometry.
+        # tool inventing mechanical geometry. Kept as the free-text escape
+        # hatch beside the structured `design_brief` section (#711).
         brief['requirements'] = requirements
     # The board already told us it is a pile; act on it. This runs AFTER
     # every section so there is one table of position-dependent paths rather
@@ -837,6 +877,21 @@ def format_text(b):
         else:
             L.append(f"  fit {w}x{h}mm: NOWHERE on this board at "
                      f"{row['step_mm']}mm")
+    db = b.get('design_brief') or {}
+    if db.get('path'):
+        c = db.get('counts') or {}
+        L.append(f"  design brief {os.path.basename(db['path'])}: "
+                 f"{c.get('interfaces', 0)} interface(s), "
+                 f"{c.get('keepouts', 0)} keep-out(s)")
+        # Unknowns first: an unknown is the thing an author must go resolve.
+        for k in (db.get('unknown') or ()):
+            L.append(f"  !! design brief UNKNOWN: {k}")
+        for k in (db.get('absent') or ()):
+            L.append(f"  !! design brief NOT DECLARED: {k}")
+        for k in (db.get('unmatched') or ()):
+            L.append(f"  !! design brief names {k}, which is not on this board")
+    elif db.get('note'):
+        L.append(f"  !! {db['note']}")
     if b.get('requirements'):
         L.append(f"  requirements (verbatim): {b['requirements']}")
     if b.get('skipped'):
@@ -870,6 +925,8 @@ def main(argv=None):
                         "(enclosure, connector edges, thermal, EMI). Carried "
                         "VERBATIM")
     p.add_argument("--requirements-file", default=None)
+    from placement.cli_gates import add_brief_arg
+    add_brief_arg(p)
     p.add_argument("--fit", action="append", metavar="WxH",
                    help="Also report where a part of this extent fits at all "
                         "(repeatable)")
@@ -902,6 +959,14 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
 
+    # #711. The DECLARED channel, beside the inferred `mechanical` section
+    # whose own note has been telling readers to state mechanical constraints
+    # somewhere nothing read them.
+    from placement.cli_gates import load_brief_or_exit
+    dbrief, dbrief_path, _rc = load_brief_or_exit(a, a.board)
+    if _rc:
+        return _rc
+
     render_doc = None
     if a.render_json:
         try:
@@ -915,7 +980,8 @@ def main(argv=None):
     brief = build_brief(pcb, a.board, clearance=a.clearance,
                         board_edge_clearance=a.board_edge_clearance,
                         requirements=req, fit=_parse_fit(a.fit),
-                        fit_step=a.fit_step, render_doc=render_doc)
+                        fit_step=a.fit_step, render_doc=render_doc,
+                        design_brief=dbrief, design_brief_path=dbrief_path)
     if not a.quiet:
         print(format_text(brief))
     if a.json:

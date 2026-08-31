@@ -125,6 +125,30 @@ Validate routed boards against the *real* spec, with the right checker — most
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
     `list_nets.board_constraint`), else the fixed default.
+- **A board may DECLARE what it is for (#711), in a sibling
+  `<board>.design-brief.json`.** Placement otherwise infers everything from the
+  board: `emit_intent` is "a starter intent READ OFF the board", and every
+  connector's edge is guessed from its current pose by `_nearest_edge`, which is
+  the only source of an edge in the toolchain. The brief is the channel for the
+  facts a board file cannot contain -- which connectors are user-facing, which
+  edge each belongs on and **where along it**, what the enclosure forbids. It is
+  auto-discovered by `check_floorplan.py` and `board_brief.py` the way
+  `kicad_dru` discovers a `.kicad_dru`, carried by `copy_board.SIBLING_EXTS`
+  (which every other sibling-copy site now imports), and **compiled** into the
+  existing intent by `check_floorplan --emit-intent` rather than being a second
+  constraint system -- so it adds no intent key, and the placement CLIs receive
+  it through the `--intent` they already take rather than through a flag of
+  their own. (Unlike `.kicad_dru`, which EVERY routing step reads, the brief is
+  read by those two tools and reaches the rest as a compiled intent.)
+  `--brief PATH` overrides, `--no-brief` is the OFF arm,
+  `--require-brief` refuses a grade with nothing declared behind it. On the
+  `--intent` path it reports DRIFT instead of merging, because the graded
+  document must be the file the caller pointed at. "I do not know" is a first-
+  class value: `"unknown"` (the author looked) is reported apart from an absent
+  key (nobody looked), and neither is ever guessed. `envelope`, `outline` and
+  `height` are refused BY NAME -- the outline is not ours to change, and nothing
+  in the placement stack measures z, so a declared height limit would grade
+  nothing at all. See `docs/design-brief.md`.
 - **Protected nets (#521): matched groups and routed diff pairs are recorded in
   the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
   to the DRC-floor writeback, carried down chains by the project copy) and later

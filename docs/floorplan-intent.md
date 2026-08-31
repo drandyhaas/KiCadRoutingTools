@@ -104,7 +104,10 @@ knowingly.)
   ],
 
   "edge_connectors": [
-    { "ref": "J1", "edge": "north", "overhang_mm": { "min": 0.0, "max": 1.5 } }
+    { "ref": "J1", "edge": "north", "overhang_mm": { "min": 0.0, "max": 1.5 },
+      "center_on_edge": { "tolerance_mm": 1.0 } },     // WHERE ALONG the edge...
+    { "ref": "J2", "edge": "east",
+      "along_edge_band": { "from": 0.10, "to": 0.35 } } // ...either form, never both
   ],
 
   "decaps": { "max_distance_mm": 2.5, "exempt": ["C99"] },
@@ -135,8 +138,10 @@ source, suspect, suspect_reason
 | `defaults` | `zone_tolerance_mm` |
 | `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `note`, `context` |
 | `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `note`, `context` |
-| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
+| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
+| `edge_connectors[].center_on_edge` | `tolerance_mm` (required — see below) |
+| `edge_connectors[].along_edge_band` | `from`, `to` |
 | `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm`, `max_pin_distance_mm`, `pin_functions`, `same_side` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
@@ -190,7 +195,7 @@ inside it are yours.
 intent file at once — far too blunt for "this build learned a new field".
 
 So field-level compatibility is a second number. `READER_VERSION` (currently
-`1`) is what this build can act on, and an intent sets `min_reader` when a
+`2`) is what this build can act on, and an intent sets `min_reader` when a
 claim must not be silently ignored:
 
 ```jsonc
@@ -217,6 +222,66 @@ What refusal cannot see is a key an older build *does* know:
 Those are what `min_reader` is for, and the file's author is the only one who
 can know it applies. `READER_VERSION` bumps in the commit that makes such a
 change, and files depending on it declare `min_reader`.
+
+**Reader 2 arrived with [#712](https://github.com/drandyhaas/KiCadRoutingTools/issues/712):**
+`edge_connectors[].center_on_edge` and `.along_edge_band`. By the paragraph
+above the bump was not needed for *safety* — a reader-1 build refuses the file
+outright with `unknown key(s) center_on_edge`, which is loud and automatic. It
+was needed because `READER_VERSION` is the number an author copies into
+`min_reader`, and at `1` a document could have claimed a reader-1 build acts on
+a claim it has never heard of. That would be a false statement in the one field
+whose only job is to be true.
+
+### WHERE ALONG the edge: `center_on_edge` and `along_edge_band`
+
+`edge_connector` grades the overhang band, the nearest-edge identity and a
+setback. All three are satisfied *anywhere along* the edge — so a receptacle
+well off the centre of its edge grades exactly as well as a centred one. On a
+stick-shaped board where the PCB is the plug body, that is the difference
+between a product and something a human rejects on sight. Measured on this
+repo's own `esp_prog`: USB1 sits **1.75 mm off the centre of its 14.50 mm east
+edge**, 12.07 %, and no conjunct could say so.
+
+```jsonc
+{ "ref": "USB1", "edge": "east", "center_on_edge": { "tolerance_mm": 0.5 } }
+{ "ref": "CON2", "edge": "south", "along_edge_band": { "from": 0.30, "to": 0.45 } }
+```
+
+`along_edge_band` is the general form — `from` and `to` are fractions of that
+edge's own span, so a declaration survives an outline resize. `center_on_edge`
+is sugar for a symmetric band around the midpoint. **Both on one entry is
+refused at load**, because it is two bands on one claim with no rule for which
+wins. (The issue proposed refusing this in `validate_intent`; it is refused in
+`intent_from_dict` instead, because `validate_intent` has exactly one caller —
+`grade()` — while `place_seed` and `place_reconstruct` load an intent and never
+call it, and those are the tools that *act* on this field.)
+
+**`tolerance_mm` is required and has no default.** Measured on this repo's own
+tracked boards, tigard's three connectors sit at **+16.1 %, −25.4 % and
+−28.7 %** off their edge centres, and ulx3s's `J1`/`J2` sit at ±0.0 %. A
+threshold this tool picked would fail a good human board three times out of
+three. The author supplies the number or there is no claim.
+
+**The offset is measured on every entry that names an `edge`, declared or not**,
+and reported as `edge_seating` in `--json` and in the text output — mm and
+percent of the span. Only a *declared* `center_on_edge` / `along_edge_band`
+produces a violation. An `--emit-intent` document never carries either field,
+so every intent written before this change grades identically.
+
+**The span comes from the outline ring, and abstains rather than guess.** The
+edge's span is resolved from the board's own Edge.Cuts ring when one parsed —
+the contiguous run lying on that side. Only when there are no rings *and* the
+outline is a simple rectangle (where the bounding box **is** the outline
+exactly) is the bbox used. Anything else abstains with the reason, in the same
+"declared value(s) NOT DERIVABLE — not graded, not passed" channel as a
+withheld budget. The measurement that forced this: on `interf_u_unrouted_placed`
+the bbox south edge spans 115.57 mm while the board's real south edge spans
+81.28 mm, and `BUS1` — which sits *exactly* on the real centre — reads
+**5.715 mm off** against the bounding box. A silently wrong centring number is
+worse than none. Note the converse, also measured: `watchy` is not a simple
+rectangle, yet its east and west ring spans are identical to the bbox on all 13
+of its entries, so abstaining per *board* rather than per *edge* would throw
+away 13 correct measurements.
 
 ### `refs` is the primitive, not `group`
 

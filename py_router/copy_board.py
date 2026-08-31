@@ -13,7 +13,8 @@ Use this instead of ``cp`` whenever you rename/duplicate a board mid-chain:
 
     python3 copy_board.py src.kicad_pcb dst.kicad_pcb
 
-It copies ``.kicad_pcb`` and every sibling that exists (``.kicad_pro``,
+It copies ``.kicad_pcb`` and every sibling in ``SIBLING_EXTS``
+(``.kicad_pro``, ``.kicad_prl``, ``.kicad_dru``, ``.design-brief.json``)
 ``.kicad_prl``), so the DRC floor travels with the board. It also self-records into
 the stress redo manifest (``REDO_MANIFEST``) like the routing tools, so a replayed
 manifest reproduces the full copy (not just the board) -- no more floor drop.
@@ -24,9 +25,14 @@ import sys
 
 # Sibling extensions that must travel with a board. .kicad_pro is the DRC floor
 # (the whole point); .kicad_prl is per-board local state (harmless to carry);
+# .design-brief.json is the DECLARED design intent (#711: which connectors
+# are user-facing, which edge each belongs on and where along it, what the
+# enclosure forbids). Stranding it drops every declared claim and the next
+# step silently falls back to inferring an edge from the current pose.
 # .kicad_dru carries the board's custom rules (#498: per-layer clearances the
 # router honors and kicad-cli grades -- stranding it silently drops them).
-SIBLING_EXTS = (".kicad_pro", ".kicad_prl", ".kicad_dru")
+SIBLING_EXTS = (".kicad_pro", ".kicad_prl", ".kicad_dru",
+                ".design-brief.json")
 
 
 def copy_board(src_pcb: str, dst_pcb: str) -> list:

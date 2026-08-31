@@ -64,6 +64,56 @@ def err(text):
 # the stages
 # --------------------------------------------------------------------------
 
+def p_brief(a):
+    """Read what was DECLARED before measuring what is there (#711)."""
+    return f'''<stage_instructions stage="P-brief" name="what the board is FOR" of="8">
+Every other stage here MEASURES the board. This one asks what the board is
+supposed to be, because the two most consequential placement facts -- which
+edge a connector belongs on, and where along it -- are not in the board file
+and never will be.
+
+Without a declaration the toolchain infers them. `check_floorplan --emit-intent`
+reads each connector's edge off its CURRENT POSE (`_nearest_edge`), so an
+intent emitted from a damaged board records the damage as the requirement. That
+is not a bug in the emitter; it is the only thing it can do with no spec.
+
+1. READ what is already declared, and what is not:
+
+     python3 -X utf8 py_tools/board_brief.py {a.board} --json wk/brief0.json
+
+   The `design_brief` section is the only DECLARED one in that document.
+   Everything else -- including `mechanical` -- is inference. If it says
+   NONE DECLARED, that sentence is the finding.
+
+2. If a `<board>.design-brief.json` sibling exists, `check_floorplan.py` and
+   `board_brief.py` discover it without a flag, and `--emit-intent` COMPILES
+   it into the intent every later step already reads through `--intent`. You
+   do not hand it to the placement CLIs directly; they have no `--brief`.
+
+3. If none exists, ASK -- and ask only what cannot be inferred. In priority
+   order, because these are the questions whose answers change a placement:
+
+     a. For each connector: which EDGE, and is it centred on that edge?
+        (Every connector-shaped defect a human has flagged on this toolchain's
+        output was one of these two facts being wrong.)
+     b. What is this board physically, and how is it held or mounted?
+        (`product.form_factor`, `primary_axis` -- without a datum, "off
+        centre" has no meaning.)
+     c. Are there zones nothing may enter? (`keepouts` -- an enclosure rib, a
+        battery, an antenna clearance. These are GRADED and the seat search
+        honours them, and nothing but a human can state one.)
+
+   Write the answers to `<board>.design-brief.json`. See docs/design-brief.md;
+   the minimum is three fields and one row per connector, and "unknown" is a
+   legal answer that is reported rather than guessed.
+
+4. If nobody can answer, say so on the record and continue:
+   `--waive brief:<why>`. A waived stage is a stated gap, not a silent one.
+
+Next: python3 -X utf8 {sys.argv[0]} --stage P0 --board {a.board}
+</stage_instructions>'''
+
+
 def p0(a):
     """Decide whether to touch the placement at all."""
     return f'''<stage_instructions stage="P0" name="gate" of="7">
@@ -1053,10 +1103,12 @@ def _guard_congestion(a):
 
 
 STAGES = {
+    'P-brief': p_brief,
     'P0': p0, 'P1': p1, 'P2': p2, 'P3': p3, 'P4': p4, 'P5': p5, 'P6': p6,
     'P-close': p_close,
 }
 TITLES = {
+    'P-brief': 'what the board is FOR -- the declared design brief',
     'P0': 'gate -- should the placement be touched at all',
     'P1': 'unplaced ladder',
     'P2': 'the parts whose position is a mechanical fact',

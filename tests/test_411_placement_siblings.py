@@ -33,7 +33,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_placer'))  # placement split
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SIBLINGS = ('.kicad_pro', '.kicad_dru')
+# ONE list, imported (#711). This tuple used to be a TENTH hand-written copy
+# of the sibling set -- narrower than the canonical one -- so this test would
+# have stayed green while every placement CLI stranded the new
+# `.design-brief.json`. A guard that restates the thing it guards cannot
+# detect a change to it; see tests/test_711_sibling_lists.py.
+from copy_board import SIBLING_EXTS as SIBLINGS  # noqa: E402
 
 
 def _stage(tmp, board_name):
@@ -58,6 +63,16 @@ def _stage(tmp, board_name):
         elif ext == '.kicad_pro':
             with open(stem_dst + ext, 'w', encoding='utf-8') as fh:
                 json.dump({'board': {'design_settings': {}}}, fh)
+        elif ext == '.design-brief.json':
+            # #711. Minimal but VALID: a brief that fails to load would make
+            # the carry assertion pass on a file the next step refuses.
+            with open(stem_dst + ext, 'w', encoding='utf-8') as fh:
+                json.dump({'schema': 1, 'kind': 'design-brief', 'units': 'mm',
+                           'product': {'form_factor': 'test-fixture'},
+                           'interfaces': []}, fh)
+        elif ext == '.kicad_prl':
+            with open(stem_dst + ext, 'w', encoding='utf-8') as fh:
+                json.dump({'board': {}}, fh)
     return dst
 
 
@@ -67,7 +82,9 @@ def _assert_siblings(out_board, label):
     assert not missing, (
         f"{label}: wrote {os.path.basename(out_board)} without {missing}. "
         f"The next step will resolve its DRC floor from the stock netclass "
-        f"(#441) and grade correct copper as phantom clearance violations.")
+        f"(#441) and grade correct copper as phantom clearance violations, "
+        f"and -- for a stranded .design-brief.json (#711) -- fall back to "
+        f"INFERRING every edge it declared from the current pose.")
 
 
 def test_place_optimize_carries_siblings():

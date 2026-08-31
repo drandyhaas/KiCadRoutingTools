@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "kind": "design-brief",
+  "units": "mm",
+  "board": "esp_prog.kicad_pcb",
+
+  "product": {
+    "form_factor": "usb_stick",
+    "primary_axis": "east-west",
+    "held_by": "hand; plugs directly into a host USB-A port",
+    "user_top_side": "F"
+  },
+
+  "interfaces": [
+    { "ref": "USB1", "role": "host_uplink", "user_facing": true,
+      "edge": "east", "along_edge": "center", "along_edge_tolerance_mm": 0.5,
+      "overhang_mm": { "min": 0.0, "max": 0.65 },
+      "mount_mode": "edge_mount", "cable_entry": "in_plane",
+      "requirement": "PROG-CONN01",
+      "why": "the board IS the plug body; off-axis reads as a defect on sight" },
+
+    { "ref": "CON2", "role": "target_debug_header", "user_facing": true,
+      "edge": "south", "along_edge": { "from": 0.25, "to": 0.75 },
+      "mount_mode": "through_edge", "cable_entry": "perpendicular_top",
+      "requirement": "PROG-CONN02",
+      "why": "7 x 2.54 = 15.24mm, 48% of the 31.75mm board length; a mid-board row is not reachable" },
+
+    { "ref": "CON1", "role": "aux_io", "user_facing": "unknown",
+      "edge": "unknown", "along_edge": "unknown" }
+  ],
+
+  "keepouts": [
+    { "name": "usb-shell-shadow", "rect": [143.0, 96.0, 145.75, 100.5],
+      "sides": ["F", "B"], "allow": ["USB1"], "kind": "cable_shadow",
+      "why": "the host receptacle body overlaps the board here" }
+  ],
+
+  "fixed": [],
+  "unknown": ["mounting_datum", "panel"]
+}
