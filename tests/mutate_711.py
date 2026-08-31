@@ -181,14 +181,37 @@ ROWS = [
      "    if declared is not None:",
      (T706,), KILLED),
     ('rotation-note-reads-the-new-angle', 'sd',
-     "        was_rot = part.rot",
-     "        was_rot = part.rot\n        _ = was_rot",
-     (T706,), SURVIVED),   # see the note in the header this feeds
+     'own rotation {was_rot:g}deg',
+     'own rotation {part.rot:g}deg',
+     (T706,), KILLED),
     ('stage-one-ignores-the-declaration', 'sd',
      "            _dec = _declared_frac(c)\n            frac = _dec if _dec is not None else (k + 1) / (len(specs) + 1)",
      "            _dec = None\n            frac = (k + 1) / (len(specs) + 1)",
      (T706,), KILLED),
 ]
+
+
+def _clear_pycache():
+    """Delete every `__pycache__` under the repo.
+
+    NOT optional, and not paranoia. Measured on this battery's own first run:
+    the `reader-version-not-bumped` row rewrites `READER_VERSION = 2` as
+    `READER_VERSION = 1` -- the SAME NUMBER OF BYTES -- and CPython's import
+    cache keys on (mtime, size). Restoring the original within the same
+    filesystem timestamp granularity left a `.pyc` compiled from the MUTANT,
+    and every later import in the session read `READER_VERSION == 1` from a
+    tree whose source said 2. A row can then be "killed" by the previous
+    row's leftovers rather than by its own edit, which makes the whole table
+    a fiction.
+    """
+    import shutil
+    for dirpath, dirnames, _ in os.walk(REPO):
+        if '.git' in dirpath:
+            continue
+        for d in list(dirnames):
+            if d == '__pycache__':
+                shutil.rmtree(os.path.join(dirpath, d), ignore_errors=True)
+                dirnames.remove(d)
 
 
 def _dirty(paths):
@@ -236,17 +259,24 @@ def main(argv=None):
     results = {}
     for name, tgt, old, new, tests, expected in rows:
         path = TARGETS[tgt]
-        src = open(path, encoding='utf-8').read()
+        raw = open(path, 'rb').read()
+        src = raw.decode('utf-8')
         n = src.count(old)
         if n != 1:
             results[name] = (BROKEN, f"anchor matched {n} times, expected 1")
             print(f"  {name:42s} BROKEN  (anchor matched {n} times)")
             continue
         try:
-            open(path, 'w', encoding='utf-8').write(src.replace(old, new, 1))
+            open(path, 'wb').write(
+                src.replace(old, new, 1).encode('utf-8'))
+            _clear_pycache()
             verdict, why = _run(tests)
         finally:
-            open(path, 'w', encoding='utf-8').write(src)
+            # BYTE-EXACT, from the bytes read: a text round trip normalises
+            # line endings and leaves every target permanently "modified",
+            # which then trips this battery's own dirty-tree refusal.
+            open(path, 'wb').write(raw)
+            _clear_pycache()
         results[name] = (verdict, why)
         mark = 'ok ' if verdict == expected else 'DISAGREES'
         print(f"  {name:42s} {verdict:9s} {mark}  {why}")

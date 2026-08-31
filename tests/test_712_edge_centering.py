@@ -316,6 +316,63 @@ def test_the_emitter_never_writes_either_field():
           f"carrying either field")
 
 
+def test_the_loader_refuses_every_malformed_along_edge_claim():
+    """The refusals, which nothing else in this repo exercised.
+
+    Added because the mutation battery found the hole: `KEY_SETS` and the
+    every-known-key fixture in test_549_floorplan_schema.py mention both new
+    names, so the keys are PINNED -- but four mutations that gutted the
+    validation (accept both forms on one entry, default `tolerance_mm`,
+    accept an inverted band, leave READER_VERSION at 1) all SURVIVED the whole
+    suite. Pinning a key is not testing what it refuses.
+    """
+    base = {'schema': fp.SCHEMA_VERSION, 'kind': fp.KIND, 'units': 'mm'}
+
+    def ec(**kw):
+        return dict(base, edge_connectors=[dict(kw, ref='J1', edge='north')])
+
+    def rejects(raw, why):
+        try:
+            fp.intent_from_dict(raw)
+        except fp.IntentError as exc:
+            return str(exc)
+        raise AssertionError(f"NOT rejected: {why}")
+
+    cases = [
+        (ec(center_on_edge={'tolerance_mm': 1.0},
+            along_edge_band={'from': 0.1, 'to': 0.3}),
+         'declares BOTH center_on_edge and along_edge_band'),
+        (ec(center_on_edge={}), 'needs `tolerance_mm`'),
+        (ec(center_on_edge={'tolerence_mm': 1.0}), 'unknown key(s) tolerence_mm'),
+        (ec(center_on_edge={'tolerance_mm': True}), 'expected a number'),
+        (ec(center_on_edge={'tolerance_mm': -1}), 'expected >= 0.0'),
+        (ec(center_on_edge=[1.0]), 'center_on_edge expects'),
+        (ec(along_edge_band={'from': 0.9, 'to': 0.1}), 'is not less than to'),
+        (ec(along_edge_band={'from': 0.1, 'to': 0.1}), 'is not less than to'),
+        (ec(along_edge_band={'from': 0.1, 'to': 1.5}), 'expected [0.0, 1.0]'),
+        (ec(along_edge_band={'from': 0.1}), 'needs `to`'),
+        (ec(along_edge_band={'form': 0.1, 'to': 0.3}), 'unknown key(s) form'),
+        (ec(along_edge_band=[0.1, 0.3]), 'along_edge_band expects'),
+    ]
+    for raw, want in cases:
+        msg = rejects(raw, want)
+        assert want in msg, (want, msg)
+
+    # Both forms load individually, or the refusals above would be vacuous.
+    assert fp.intent_from_dict(ec(center_on_edge={'tolerance_mm': 0.5}))
+    assert fp.intent_from_dict(ec(along_edge_band={'from': 0.1, 'to': 0.3}))
+
+    # READER_VERSION is the number an author copies into `min_reader`. At 1 a
+    # document could claim a reader-1 build acts on a claim it has never heard
+    # of, which is a false statement in the one field whose job is to be true.
+    assert fp.READER_VERSION == 2, fp.READER_VERSION
+    assert fp.intent_from_dict(dict(base, min_reader=2))
+    msg = rejects(dict(base, min_reader=3), 'a claim this build cannot act on')
+    assert 'this build is reader 2' in msg, msg
+    print(f"  PASS: {len(cases)} malformed along-edge claims refused by "
+          f"reason; both forms load alone; READER_VERSION 2")
+
+
 def test_rules_run_bookkeeping_is_untouched():
     """A conjunct, not a rule. `RULES` / `_wants` / `_SKIP_REASON` unchanged."""
     plain = _grade('ulx3s')
@@ -342,6 +399,7 @@ TESTS = [
     test_the_abstain_names_its_reason_and_is_not_a_pass,
     test_a_claim_with_no_edge_abstains_rather_than_inferring_one,
     test_the_emitter_never_writes_either_field,
+    test_the_loader_refuses_every_malformed_along_edge_claim,
     test_rules_run_bookkeeping_is_untouched,
 ]
 

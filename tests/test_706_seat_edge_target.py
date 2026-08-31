@@ -268,8 +268,36 @@ def test_the_rotation_gate_is_closed_on_the_corpus():
                            'center_on_edge': {'tolerance_mm': 1.0}},
                           set(), notes)
         assert st.parts[ref].rot == rot0, (board, ref, rot0, st.parts[ref].rot)
-    print(f"  PASS: {len(cases)} corpus parts overhang 11.99/11.99/26.55mm, "
-          f"guard True on all, none rotated")
+
+    # THE COUNTERFACTUAL, and without it this test proves nothing about the
+    # guard. The three parts above cannot seat at ANY rotation, so "they did
+    # not rotate" holds whether the guard exists or not -- measured: with
+    # `_already_on_its_edge` forced False they still return False, unrotated.
+    # The mutation battery found exactly that hole (`rotation-guard-deleted`
+    # SURVIVED). So the guard has to be shown CHANGING an outcome.
+    st = _state()
+    part = st.parts['J17']
+    entry = {'ref': 'J17', 'edge': 'north',
+             'overhang_mm': {'min': 0.0, 'max': 1.0},
+             'along_edge_band': {'from': 0.10, 'to': 0.20}}
+    assert seeder._already_on_its_edge(st, part) is True
+    notes = []
+    assert seeder._seat_edge(st, 'J17', dict(entry), set(), notes) is False
+    assert st.parts['J17'].rot == 0.0
+
+    real = seeder._already_on_its_edge
+    try:
+        seeder._already_on_its_edge = lambda *a, **k: False
+        st2 = _state()
+        notes2 = []
+        ok2 = seeder._seat_edge(st2, 'J17', dict(entry), set(), notes2)
+    finally:
+        seeder._already_on_its_edge = real
+    assert ok2 and st2.parts['J17'].rot == 90.0, (ok2, st2.parts['J17'].rot)
+    print(f"  PASS: {len(cases)} corpus parts overhang 11.99/11.99/26.55mm "
+          f"with guard True and none rotated; and on J17 the guard is shown "
+          f"CHANGING the outcome -- refused at rot 0 with it, rotated to 90 "
+          f"without it")
 
 
 def test_the_rotation_loop_fires_only_where_declared_and_only_on_failure():
@@ -283,6 +311,22 @@ def test_the_rotation_loop_fires_only_where_declared_and_only_on_failure():
     for r in _sweep(base):
         assert r['rot'] == 0.0, r
         assert not any('rotation' in n for n in r['notes']), r
+
+    # ...and on the INTERIOR pose, which is the only place the loop is
+    # reachable at all. Over the sweep above J17 always overhangs, so
+    # `_already_on_its_edge` blocks the loop and the declared-gate is never
+    # the thing doing the work -- the mutation battery found that hole
+    # (`rotation-gate-open-to-undeclared` SURVIVED). Same fixture as (b)
+    # below, with the declaration removed: it must still not rotate.
+    st_u = _state()
+    p_u = st_u.parts['J17']
+    st_u.apply_move('J17', p_u.x,
+                    round((st_u.board[1] + st_u.board[3]) / 2.0, 3), p_u.rot)
+    assert not seeder._already_on_its_edge(st_u, st_u.parts['J17'])
+    notes_u = []
+    seeder._seat_edge(st_u, 'J17', dict(base), set(), notes_u)
+    assert st_u.parts['J17'].rot == 0.0, (st_u.parts['J17'].rot, notes_u)
+    assert not any('CHECK THIS' in n for n in notes_u), notes_u
 
     # (b) DECLARED, INTERIOR, and the current rotation cannot seat: it
     # rotates, and says so with BOTH angles.
