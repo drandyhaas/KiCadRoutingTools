@@ -254,7 +254,62 @@ def test_a_compound_no_connect_pintype_is_refused_by_name():
         f"the fixture moved: U30.B10 is now "
         f"{getattr(pad, 'pintype', '')!r}. Re-measure before relaxing this")
     assert is_supply_pintype(pad.pintype) is False
-    print("  PASS: U30.B10 power_in+no_connect is refused, by name")
+
+    # THE GENERAL PROPERTY, asserted because the corpus cannot show it.
+    # A mutation replacing the token split with `pintype in ('power_in',
+    # 'power_out')` SURVIVED the battery: measured, the two forms agree
+    # on all 9488 corpus pads, because every compound spelling here is
+    # `X+no_connect` and both forms reject those. So the case for token
+    # splitting is a claim about spellings KiCad can emit and this
+    # corpus does not contain, and it has to be asserted directly or it
+    # is not asserted at all.
+    assert is_supply_pintype('power_in+standby') is True, (
+        'a compound that is not +no_connect must still be a supply pin; '
+        'equality-matching would drop it')
+    assert is_supply_pintype('power_out+standby') is True
+    assert is_supply_pintype('no_connect+power_in') is False, (
+        'token order must not matter')
+    print("  PASS: U30.B10 power_in+no_connect is refused by name, and "
+          "a compound that is NOT +no_connect is still a supply pin -- "
+          "the case equality-matching gets wrong and no board shows")
+
+
+def test_an_unconnected_net_is_refused_even_when_the_pad_says_power_in():
+    """The `unconnected-` filter guards 220 REAL pads and nothing tested it.
+
+    A battery row deleting the filter SURVIVED, because the only boards that
+    carry such pads -- `haasoscope_pro_max_test` and `routed_output` -- have no
+    capacitors at all, so the pin rule abstains on them and the filter's effect
+    is invisible to every end-to-end arm. Measured: 220 pads across the two,
+    including `U3` pads on `unconnected-(U3H-VDDQ_PHY-...)`, `...-VCC-...` and
+    `...-VCCIO*-...`, every one typed `power_in`.
+
+    Asserted at the PREDICATE, not through a grade, so it does not depend on
+    the board being gradeable.
+    """
+    board = os.path.join(ROOT, 'kicad_files', 'haasoscope_pro_max_test.kicad_pcb')
+    if not os.path.exists(board):
+        print("  SKIP: haasoscope_pro_max_test absent")
+        return
+    pcb = parse_kicad_pcb(board)
+    from placement import floorplan as fp
+    from net_queries import is_supply_pintype
+    victims = [(ref, q) for ref, f in pcb.footprints.items() for q in f.pads
+               if is_supply_pintype(getattr(q, 'pintype', '') or '')
+               and ((pcb.nets[q.net_id].name if q.net_id in pcb.nets else '')
+                    or '').startswith('unconnected-')]
+    assert len(victims) >= 100, len(victims)
+    recs = fp.supply_pins(pcb)
+    graded = {(ref, id(q)) for ref, r in recs.items() for q, _n in r['pins']}
+    leaked = [(ref, q.pad_number) for ref, q in victims
+              if (ref, id(q)) in graded]
+    assert not leaked, leaked[:5]
+    # ANTI-VACUITY: the refusal must come from the NET, not from the chip being
+    # out of scope -- so at least one victim's chip must be a candidate.
+    assert any(ref in recs for ref, _q in victims), (
+        'no victim sits on a candidate IC, so this arm proves nothing')
+    print(f"  PASS: {len(victims)} power_in pad(s) on unconnected- nets, none "
+          f"graded, and their chips ARE candidates")
 
 
 TESTS = [
@@ -265,6 +320,7 @@ TESTS = [
     test_the_unbounded_pass_is_a_SUPERSET_with_the_same_ICs,
     test_the_lifted_power_pin_predicate_did_not_change_any_pad,
     test_a_compound_no_connect_pintype_is_refused_by_name,
+    test_an_unconnected_net_is_refused_even_when_the_pad_says_power_in,
 ]
 
 

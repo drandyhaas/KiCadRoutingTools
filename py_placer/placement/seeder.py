@@ -1738,6 +1738,21 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         f"{ref}: no legal pose at {cluster[0][1]}'s {net} pin "
                         f"cluster ({cx2}, {cy2}) -- falls through to the "
                         f"zone/centroid stages")
+            # ...and the caps NO CLUSTER WANTED. `zip` truncates to the
+            # shorter list, so a cap past the cluster count is never reached
+            # by the loop above and was dropped without a word -- a SECOND
+            # silent path, distinct from the `_seat` failure, and the one the
+            # comment below has always described as reporting honestly.
+            # Measured on a three-caps-two-pins fixture: the third cap is
+            # seated by the generic stage and nothing said the pin stage had
+            # passed it over.
+            for ref in caps_r[len(clusters):]:
+                if ref in avail:
+                    net = getattr(pcb_data.nets.get(rail), 'name', rail)
+                    notes.append(
+                        f"{ref}: no {net} pin cluster left for it "
+                        f"({len(clusters)} cluster(s), {len(caps_r)} cap(s)) "
+                        f"-- falls through to the zone/centroid stages")
             # pins beyond the cap supply, and caps no pin wanted, fall
             # through to the generic stage, which reports honestly
 

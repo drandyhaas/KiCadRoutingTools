@@ -72,10 +72,23 @@ ROWS = [
      (T794,), 'KILLED'),
 
     # ---- the single election ----------------------------------------------
+    # EXPECTED SURVIVOR, measured, and predicted KILLED. `unaccounted` is a
+    # TRIPWIRE: its correct value is 0 on every board, so no test can tell a
+    # computed 0 from a literal one without a board where the partition
+    # actually leaks. Recorded rather than deleted, and paired with the row
+    # below -- which breaks the ELECTION so the tripwire has something to
+    # catch, and is what proves the key is not decoration.
     ('the-partition-does-not-add-up', 'fp',
      "        'unaccounted': scope - n - len(beyond) - len(orphans),\n",
      "        'unaccounted': 0,\n",
-     (T704,), 'KILLED'),
+     (T704,), 'SURVIVED'),
+
+    ('the-election-drops-a-cap-so-the-tripwire-must-fire', 'grp',
+     "        out.append((ref, best, best_d))\n",
+     "        if ref.endswith('1'):\n"
+     "            continue\n"
+     "        out.append((ref, best, best_d))\n",
+     (T704, T792P), 'KILLED'),
 
     # EXPECTED SURVIVOR, and it is the finding. Re-inserting the recheck that
     # `_elect_tethers` deleted changes nothing, which is the PROOF it was dead:
@@ -145,10 +158,15 @@ ROWS = [
      "_ARM = {}\n",
      (T705,), 'KILLED'),
 
+    # EXPECTED SURVIVOR, and the reason lives one level up in the design:
+    # channel 3 only admits a pin whose net ALREADY carries a decoupling cap,
+    # so an inferred pin's rail can never BE uncovered and this guard cannot
+    # fire either way. Belt-and-braces, not load-bearing. Predicted KILLED;
+    # kept so it starts failing the day that conjunct is relaxed.
     ('the-uncovered-rail-is-emitted-for-an-INFERRED-pin-too', 'fp',
      "                if not inferred:\n",
      "                if True:\n",
-     (T705,), 'KILLED'),
+     (T705,), 'SURVIVED'),
 
     ('inferred-findings-share-the-declared-rule-name', 'fp',
      "            if inferred:\n"
@@ -177,13 +195,22 @@ ROWS = [
      "        for ref in []:\n",
      (T792S,), 'KILLED'),
 
-    # The seat still happens; only the note is suppressed. That IS the silent
-    # loss path, and T3 asserts the note COUNT rather than "all seated", so it
-    # must die. Expected SURVIVED in the first draft, which was reasoning about
-    # the seat rather than about what the arm measures.
+    # The seat still happens; only the note is suppressed. It SURVIVED the
+    # first run, because in the arm that names it the declined cap has a
+    # declared zone and the 2.6 put-back emits its own note -- the pass-2 note
+    # was masked by the fix that follows it. A no-zone arm now covers it.
     ('the-declined-cap-is-silent-again', 'sdr',
      "                if not _seat(ref, cx2, cy2, cluster[0][1], rail):\n",
      "                if _seat(ref, cx2, cy2, cluster[0][1], rail) and False:\n",
+     (T792S,), 'KILLED'),
+
+    # The SECOND silent path, found by writing the arm that kills the first:
+    # `zip` truncates to the shorter list, so a cap past the cluster count is
+    # never reached by the loop at all and vanished without a note -- while the
+    # comment below it claimed the fall-through "reports honestly".
+    ('the-cap-no-cluster-wanted-is-silent-again', 'sdr',
+     "            for ref in caps_r[len(clusters):]:\n",
+     "            for ref in []:\n",
      (T792S,), 'KILLED'),
 
     ('the-owner-test-drops-the-collinear-guard', 'grp',

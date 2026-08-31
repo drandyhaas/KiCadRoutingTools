@@ -275,6 +275,52 @@ def test_a_cap_the_pin_stage_DECLINES_is_put_back_and_named():
           f"a note, none unseated")
 
 
+def test_a_declined_cap_with_NO_zone_is_still_named_by_the_pin_stage():
+    """The pass-2 note, on the only path where it is the ONLY report.
+
+    A battery row suppressing that note SURVIVED: in T3 the declined cap has a
+    declared zone, so the 2.6 put-back catches it and emits its own note, and
+    the arm's count is satisfied either way. The pass-2 note is therefore
+    untested by T3 -- it is masked by the very fix that follows it.
+
+    Here the three VCC caps are declared into NO zone, so the put-back has
+    nothing to put them back INTO and skips them. The cap the pin stage
+    passes over then reaches the generic stage, and a pass-2 note is the only
+    thing that says so.
+
+    Writing this arm found a SECOND silent path, distinct from the `_seat`
+    failure: `zip(clusters, caps_r)` truncates to the shorter list, so a cap
+    past the cluster count is never reached by the loop at all and was
+    dropped without a word. Both are named now, which is what the
+    surrounding comment has always claimed ("caps no pin wanted fall through
+    to the generic stage, which reports honestly") and did not deliver.
+    """
+    with tempfile.TemporaryDirectory() as wd:
+        zones = [{"name": "u", "refs": ["U1"], "zone": [24, 14, 36, 26]}]
+        res, poses, _p = _seed(wd, {'max_distance_mm': 3.0}, zones)
+        claimed = {n.split(':')[0] for n in _notes(res, 'decap for')}
+        declined = ({n.split(':')[0] for n in _notes(res, 'no legal pose at')}
+                    | {n.split(':')[0] for n in
+                       _notes(res, 'pin cluster left for it')})
+        put_back = {n.split(':')[0] for n in _notes(res, 'zone-packed into')}
+        scope = {'C1', 'C2', 'C5'}
+        # Two pins, three caps: one is left over, and it has no zone to be put
+        # back into, so the pin stage's own note must name it.
+        assert len(claimed) == 2, (claimed, res['notes'])
+        assert not put_back, (put_back, "these caps have no zone; nothing "
+                                        "should have been put back")
+        left = scope - claimed
+        assert len(left) == 1, left
+        assert left <= declined, (left, declined, res['notes'])
+        # And it is still SEATED, by the generic stage, not lost.
+        for ref in scope:
+            assert ref in poses, ref
+        assert not (res.get('unseated') or []), res['unseated']
+    print(f"  PASS: {sorted(left)} is declined by the pin stage with no zone "
+          f"to fall back to, is NAMED by pass 2 rather than dropped silently, "
+          f"and is still seated")
+
+
 def test_the_owner_test_is_the_GROUPERS_answer_not_a_ref_prefix():
     """T4, both directions in one arm, which is what stops the fix being
     "delete the U test":
@@ -319,6 +365,7 @@ TESTS = [
     test_the_pin_stage_runs_and_seats_ONE_cap_PER_PIN,
     test_a_cap_with_no_rail_carrying_chip_is_NOT_evicted_from_its_zone,
     test_a_cap_the_pin_stage_DECLINES_is_put_back_and_named,
+    test_a_declined_cap_with_NO_zone_is_still_named_by_the_pin_stage,
     test_the_owner_test_is_the_GROUPERS_answer_not_a_ref_prefix,
     test_the_control_arm_is_untouched_when_no_decap_key_is_declared,
 ]
