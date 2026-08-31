@@ -1168,6 +1168,32 @@ def _declared_frac_window(entry: Dict, span: float):
     return None
 
 
+def _centre_offset_frac(part, bounds, edge: str) -> float:
+    """(rect centre - origin) along `edge`, as a fraction of the edge span.
+
+    THE TWO SIDES SPEAK DIFFERENT CURRENCIES, and this is the conversion.
+    `_edge_pose` positions the part's ORIGIN, while `rule_edge_connector`
+    measures the courtyard RECT CENTRE -- and a footprint origin is usually
+    not the centre of its own courtyard.
+
+    Measured, and this is why the conversion exists rather than being assumed
+    unnecessary: seating splitflap_driver's J17 into a declared band of
+    0.80-0.90 put its origin at exactly frac 0.900 and its rect centre at
+    0.9128 -- 2.54mm out -- so the seat search accepted a pose the grade then
+    flagged as "91% along the edge, outside the declared band 80%-90%". That
+    is the seeder placing to a rule the grader does not have, which is the
+    failure #701 and #702 both exist to prevent, and it was caught by the
+    seat-versus-grade agreement sweep rather than by reading the code.
+    """
+    lx0, ly0, lx1, ly1 = part.rect(0.0, 0.0, part.rot)
+    x0, y0, x1, y1 = bounds
+    if edge in ('north', 'south'):
+        span, a, b = (x1 - x0), lx0, lx1
+    else:
+        span, a, b = (y1 - y0), ly0, ly1
+    return ((a + b) / 2.0) / max(1e-9, span)
+
+
 def _already_on_its_edge(state, part) -> bool:
     """Is this part already crossing the boundary it was declared on?
 
@@ -1223,8 +1249,12 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     # along-edge coordinate you came in with" -- and on a repaired board that
     # coordinate is the damaged pose's own, carried verbatim into the output.
     declared = _declared_frac(entry)
+    # A declared fraction is about the part's COURTYARD CENTRE, which is what
+    # the grade measures; the ladder below positions its ORIGIN. Convert once,
+    # here, so every use downstream is in the ladder's own currency.
+    _c_off = _centre_offset_frac(part, state.board, edge)
     if declared is not None:
-        cur = declared
+        cur = declared - _c_off
     else:
         ax, ay = target if target is not None else (part.x, part.y)
         if edge in ('north', 'south'):
@@ -1248,13 +1278,16 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     span = ((x1 - x0) if edge in ('north', 'south') else (y1 - y0))
     win = _declared_frac_window(entry, span)
     if win is not None:
-        w_lo, w_hi = win
+        # Same conversion as `cur`: the declared window is about the rect
+        # centre, `f_lo`/`f_hi` are about the origin.
+        w_lo, w_hi = win[0] - _c_off, win[1] - _c_off
         n_lo, n_hi = max(f_lo, w_lo), min(f_hi, w_hi)
         if n_lo > n_hi:
             notes.append(
                 f"{ref}: the declared along-edge window "
-                f"[{w_lo:.3f}, {w_hi:.3f}] does not intersect the legal one "
-                f"[{f_lo:.3f}, {f_hi:.3f}] for this part on the {edge} edge -- "
+                f"[{win[0]:.3f}, {win[1]:.3f}] does not intersect the legal one "
+                f"[{f_lo + _c_off:.3f}, {f_hi + _c_off:.3f}] for this part "
+                f"on the {edge} edge -- "
                 f"widen the declaration, or the part is too wide for the "
                 f"position it is declared at")
             return False
@@ -1296,6 +1329,19 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         return edge_seat_ok(state, part, px, py, edge, lo, hi_eff,
                             reasons=refused)
 
+    # The ladder's steps are fractions of the WHOLE edge, which is the right
+    # scale when it is sliding a part along a free edge and much too coarse
+    # when it is searching inside a declared window. Measured: with a declared
+    # band of 0.85-0.95 on splitflap_driver's 198.12mm north edge, the +/-0.05
+    # rungs are 9.9mm apart and clamp to the window's two ends, so the ladder
+    # tries THREE distinct positions in the band and misses the one legal seat
+    # between them -- the feature reported "no seat" on every band of that
+    # board. Scaling the rungs to the window searches it at the same relative
+    # resolution the ladder gives a whole edge. 0.8 is the ladder's own full
+    # sweep (+/-0.4), so an undeclared seat has scale exactly 1.0 and is
+    # unchanged.
+    _step = ((f_hi - f_lo) / 0.8) if win is not None else 1.0
+
     def try_rot(rot):
         """The seat ladder at one rotation. (x, y) or None.
 
@@ -1306,7 +1352,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         """
         for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                    0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
-            frac = min(f_hi, max(f_lo, cur + df))
+            frac = min(f_hi, max(f_lo, cur + df * _step))
             x, y = _edge_pose(part, state.board, edge, frac, overhang)
             x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
             if not converged or not on_board(x, y):
