@@ -27,6 +27,7 @@ for _d in ('py_router', 'py_placer', 'py_tools'):
 
 from kicad_parser import parse_kicad_pcb                       # noqa: E402
 import check_pockets as CP                                     # noqa: E402
+from placement import board_grid as BG                         # noqa: E402
 
 FAILURES = []
 
@@ -471,6 +472,31 @@ def t_the_side_rule_is_max_not_sum():
            doc['cold_windows'] > 0, str(doc['cold_windows']))
 
 
+
+def t_the_board_grid_scalars_travel_with_the_census():
+    """#708. The lattice a board was laid out on is an arrangement fact, and
+    the ROADMAP puts #708 behind this census for exactly that reason. A board
+    that declares no lattice must say WHY, or "no lattice" and "never
+    measured" are the same reading of a null.
+    """
+    d, _hot = census('splitflap_driver')
+    sc = CP.census_scalars(d)
+    report('an imperial board reports its pitch',
+           sc.get('board_grid_step') == 0.3175, str(sc.get('board_grid_step')))
+    report('with the occupancy it was read off',
+           round(sc.get('board_grid_occupancy') or 0, 3) == 0.923,
+           str(sc.get('board_grid_occupancy')))
+    d2, _hot2 = census('ulx3s')
+    sc2 = CP.census_scalars(d2)
+    report('a board with no lattice reports None',
+           sc2.get('board_grid_step') is None, str(sc2.get('board_grid_step')))
+    report('and says which test it failed, so the null is an answer',
+           'floor' in (sc2.get('board_grid_reason') or ''),
+           str(sc2.get('board_grid_reason')))
+    report('the census agrees with the engine resolver, not a second copy',
+           sc.get('board_grid_step')
+           == BG.infer_board_grid(parse_kicad_pcb(board('splitflap_driver')))['step'])
+
 TESTS = [
     ('area weighting vs the count control',
      t_area_weighting_and_the_count_control_disagree),
@@ -493,6 +519,7 @@ TESTS = [
     ('the side rule is max, not sum',
      t_the_side_rule_is_max_not_sum),
     ('the reseat target', t_the_reseat_target_is_a_target_not_a_weight),
+    ('#708 board-grid scalars', t_the_board_grid_scalars_travel_with_the_census),
 ]
 
 

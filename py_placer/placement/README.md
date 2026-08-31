@@ -719,6 +719,89 @@ At `0.0` both hooks return before touching any geometry and the peer index is
 empty, so a default run is **bit-identical**, verified on `interf_u_unrouted` and
 `splitflap_driver` rather than argued.
 
+## The board's placement lattice (`board_grid.py`, #708)
+
+A board is laid out on a pitch. `splitflap_driver` puts 92% of its footprint
+coordinates on 0.3175 mm (12.5 mil), `glasgow_revC` 97% on 0.05 mm. The quench
+used to destroy that: `_candidate_positions` built candidates as
+`seed + ix*step` and then snapped the **absolute** result to a lattice through
+board origin, which discards the seed's residue. One pass took
+`splitflap_driver` from 0.923 of its coordinates on its own lattice to 0.269.
+
+Two things had to change, and the second is the one that does the work.
+
+**Snap the offset, not the position.** `seed + ix*step` already carries the
+board's phase; snapping the sum throws it away, because `seed_x` is not
+generally a multiple of anything. This half is free: measured, the absolute
+snap removed **zero** candidates at every step the tool ships (317/317 at
+`--step 1.0`, 49/49 at 0.5, 81/81 at 0.2) — the two sets are a pure
+translation of each other. `_group_offsets` had always snapped the offset,
+which is why block moves never had this defect and is the existence proof for
+the form.
+
+**Snap it to the board's lattice, not the raster.** Seed-relative alone is not
+enough, and this is worth stating because it is the obvious fix and it does not
+work: the offsets are multiples of `--grid-step` 0.1, and 1.0 is not a multiple
+of 0.3175, so only the *zero* offset lands back on an imperial lattice.
+Snapping the offset to the board's own pitch gives `{0, ±0.9525, ±1.905,
+±2.8575}`, every candidate stays on the lattice, and the count goes 317 → 325 —
+so it costs nothing either.
+
+Measured, one quench pass, fraction of footprint coordinates on the board's own
+lattice:
+
+| board | lattice | before | after (old) | after (now) | parts moved |
+|---|---|---|---|---|---|
+| `splitflap_driver` | 0.3175 | 0.923 | 0.269 | **0.923** | 43 |
+| `flat_hierarchy` | 0.3175 | 0.828 | 0.273 | **0.828** | 40 |
+| `sonde_u` | 0.3175 | 0.780 | 0.200 | **0.780** | 24 |
+
+The same parts still move. They now move by whole grid units.
+
+### There is no flag
+
+`resolve_snap_lattice` returns the board's inferred pitch, or `--grid-step`
+when the board declares none — which is exactly the granularity offsets have
+always had. The fallback **is** the off state, and the board reaches it rather
+than a flag. Ten of the 22 tracked boards take it, each with a stated reason,
+and `metrics_out['board_grid']` records which branch ran so "no lattice" and
+"never measured" cannot be confused.
+
+### Two rules in the inference that are not the obvious ones
+
+Both come from `tests/measure_708_lattice.py`, and both contradict the
+mechanism #708 proposes.
+
+**The tie-break is the finest rung within tolerance of the maximum, not the
+argmax.** The ladder contains divisibility chains (0.3175 | 0.635 | 1.27 |
+2.54), and occupancy is monotone along one — if `d` divides `s`, every on-`s`
+point is on-`d`. Ties are therefore structural, not accidental:
+`splitflap_driver` ties at 0.3175 *and* 0.635, `sonde_u` at 0.3175, 0.635 *and*
+1.27. An argmax has no defined answer there, and taking the coarsest would
+infer a 1.27 mm grid for `sonde_u` off a tie. A consequence worth knowing
+before simplifying this: only 0.05 and 0.3175 lack a ladder divisor, so they
+are the **only two values the function can return** — the issue's worry that a
+2.54 mm inference would quantize the search into uselessness cannot happen, and
+not because anything clamps it.
+
+**A rate needs a denominator.** `cap_chain` (4 parts) and the `qfn_*` fixtures
+(1–2) score 1.00 at six rungs, because hand-authored coordinates are round by
+construction. Below `MIN_PARTS` there is no answer to give.
+
+`OCCUPANCY_FLOOR` is 0.67 and not the rounder 0.70 for a reason worth keeping:
+`interf_u_unrouted` scores **exactly** 0.700000, so a 0.70 floor would rest on
+a corpus board where `>=` and `>` disagree on a float equality. 0.67 is the
+midpoint of the widest gap in the distribution (0.642424 → 0.700000).
+
+### Where the lattice deliberately does NOT apply
+
+`place_fanout_clearance` and `reseat.slot_pool` take the seed-relative half and
+keep the **raster**. Both searches *are* sub-millimetre clearance repair, and
+coarsening them starves exactly the search that must not be starved: at the cap
+repair's `step=0.2` the candidate count falls 81 → 29 on a 0.3175 lattice and
+81 → 9 on 0.635. `perturb` needed no change at all — it already snapped deltas,
+so it never had the defect, notwithstanding #708 naming it.
+
 ## Placement blocks (`groups.py`, #459)
 
 The per-part nudge cannot express "these parts need to travel together": an IC
@@ -1066,7 +1149,10 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
 | `parser.py` | Courtyard boundary and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation) |
-| `utility.py` | Shared utilities (bbox from pads, grid snapping) |
+| `board_grid.py`
+  The pitch a board was laid out on, inferred from its footprint origins (#708). Pure; no engine imports.
+
+`utility.py` | Shared utilities (bbox from pads, grid snapping) |
 
 ## Legality model (`legality.py`, #456)
 

@@ -709,6 +709,19 @@ def pocket_census(pcb, board_path, *, nets=('*',), bin_mm=2.0, top=8,
         doc['cold_area_mm2'] = None
         doc['cold_area_frac'] = None
         doc['skipped'] = 'cold census disabled'
+    # #708: the lattice this board was laid out on, if it declares one. Read
+    # off the same function the placer resolves its candidate offsets with, so
+    # the census cannot report a pitch the engine does not use.
+    try:
+        from placement.board_grid import infer_board_grid
+        _bg = infer_board_grid(pcb)
+        doc['board_grid'] = {'step': _bg['step'], 'occupancy': _bg['occupancy'],
+                             'n_parts': _bg['n_parts'],
+                             'ties': list(_bg['ties']),
+                             'reason': _bg['reason']}
+    except Exception:                                           # noqa: BLE001
+        doc['board_grid'] = None
+
     doc['reseat_target'] = _reseat_target(doc, bounds) if cold else None
     return doc, hot
 
@@ -811,6 +824,13 @@ def census_scalars(doc):
         'centroid_offset_frac_y': off[1],
         'centroid_count_control_frac': ctl[0],
         'outline_source': (doc.get('outline') or {}).get('source'),
+        # #708. `board_grid_step` is None for a board that declares no lattice,
+        # which is a real answer and not a missing one -- `board_grid_reason`
+        # says which test it failed, so "no lattice" and "never measured" stay
+        # distinguishable in the summary line alone.
+        'board_grid_step': (doc.get('board_grid') or {}).get('step'),
+        'board_grid_occupancy': (doc.get('board_grid') or {}).get('occupancy'),
+        'board_grid_reason': (doc.get('board_grid') or {}).get('reason'),
     }
     return {k: v for k, v in out.items()
             if not (isinstance(v, float) and not math.isfinite(v))}
