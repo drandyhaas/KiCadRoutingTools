@@ -60,6 +60,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from placement.utility import snap_to_grid
+
 # Slot lattice. Deliberately coarse: this is a RE-SEAT, choosing which side of
 # an anchor a part sits on, not a sub-grid polish -- the quench does that after.
 DEFAULT_RING_STEP_MM = 0.5
@@ -160,12 +162,30 @@ def slot_pool(state, cluster, ring_step=DEFAULT_RING_STEP_MM,
     seen = set()
     out: List[Tuple[float, float, float]] = []
 
+    # #708: snap the OFFSET FROM THE ANCHOR, not the absolute position, and
+    # through the shared primitive rather than a second spelling of it.
+    #
+    # The phase to preserve is the ANCHOR's, not the pad's: these rings are
+    # generated around `_anchor_pin_points`, and a pad sits at its footprint
+    # origin plus a package pitch (0.5mm, 0.65mm) that is on no board lattice.
+    # The anchor's own origin is what the designer placed, so an offset that is
+    # a whole number of raster units from it lands a member on the same pitch
+    # the anchor sits on. Snapping the absolute point instead quantized to a
+    # lattice through board origin and threw that away.
+    #
+    # The RASTER, not the board's inferred lattice: like the fanout cap repair,
+    # this pool is a proximity constraint satisfied by construction, and a
+    # coarse lattice would both thin it and inflate the `snap` shrink below.
+    anchor_part = state.parts[cluster.anchor]
+    ax, ay = anchor_part.x, anchor_part.y
+
     def add(x, y, rot):
-        key = (round(x / grid_step), round(y / grid_step), round(rot, 3))
+        sx = ax + snap_to_grid(x - ax, grid_step)
+        sy = ay + snap_to_grid(y - ay, grid_step)
+        key = (round(sx / grid_step), round(sy / grid_step), round(rot, 3))
         if key not in seen:
             seen.add(key)
-            out.append((round(x / grid_step) * grid_step,
-                        round(y / grid_step) * grid_step, rot))
+            out.append((sx, sy, rot))
 
     # Snapping to the grid moves a point by up to half a cell on each axis, so
     # a ring generated AT the radius lands outside it. Shrink by the snap
@@ -446,10 +466,34 @@ def reseat_cluster(state, cluster, *, ring_step=DEFAULT_RING_STEP_MM,
     res = ReseatResult(cluster=cluster.name, moved=moved, before=before,
                        after=after, slots=len(slots), repairs=repairs)
     if after < before - EPS_IMPROVE and moved:
-        res.accepted = True
-        if apply:
+        # `after` above is a PREDICTION, and it is blind in one direction: it
+        # overrides the members' pads on the SCORED nets, but `other_aw` is
+        # built from the live board, so the move's effect on a member's
+        # UNSCORED nets is not in it. A decap on GND and one signal has its GND
+        # airwire priced at the pose it is leaving. Measured on splitflap's
+        # tether:B0 (C60, nets 1 and 278, only 278 scored): predicted 1214.28,
+        # actual 1274.28 -- six crossings, 60.0 of cost, all of it invisible.
+        # So seat it and ASK, rather than predict and hope. The contract this
+        # restores is the one `test_reseat` states: acceptance is on the exact
+        # objective, re-evaluated with all members in place.
+        prior = {m: (state.parts[m].x, state.parts[m].y, state.parts[m].rot)
+                 for m in moved}
+        for m in moved:
+            state.apply_move(m, *poses[m])
+        seated = cluster_cost(state, cluster, involved=involved)
+        if seated < before - EPS_IMPROVE:
+            res.accepted = True
+            res.after = seated
+            if not apply:
+                for m in moved:
+                    state.apply_move(m, *prior[m])
+        else:
             for m in moved:
-                state.apply_move(m, *poses[m])
+                state.apply_move(m, *prior[m])
+            res.after = seated
+            res.reason = ('the seated cost is worse than the prediction '
+                          '(%.4f vs %.4f): the members carry nets this '
+                          'cluster does not score' % (seated, after))
     else:
         res.reason = ('no improvement on the exact objective'
                       if moved else 'assignment returned the incumbent')
