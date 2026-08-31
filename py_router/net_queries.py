@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import difflib
 import fnmatch
+import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Set, Union
 
@@ -949,9 +950,103 @@ def _gnd_base(name: str) -> str:
 
 def is_ground_net_name(name: str) -> bool:
     """True if a net name is in the GND family (GND, /GND, GNDA, AGND, DGND,
-    PGND, GND_D, GND1, ...); the sheet-path prefix is stripped first (#379)."""
+    PGND, GND_D, GND1, ...); the sheet-path prefix is stripped first (#379).
+
+    KNOWN and deliberately not widened: this does NOT match `VSS`, while
+    `list_nets.find_power_nets` calls VSS ground. No tracked board names a net
+    `VSS*`, so the divergence is structurally untestable here -- and widening a
+    predicate five other call sites already depend on, to fix a case no fixture
+    can exercise, is how the "second copy drifts" lesson gets earned rather than
+    read. Consumers that care must say which spelling they mean.
+    """
     b = _gnd_base(name)
     return b.startswith('GND') or b in _GND_SUFFIX_NAMES
+
+
+#: Pin-FUNCTION names that mean "supply" (#705). Lifted verbatim from the
+#: closure that used to live inside `analyze_power_paths.get_power_net_
+#: recommendations`, where it was unreachable to every other caller -- so the
+#: placement side had no pin-level power predicate at all and issue #705's
+#: channel 2 would have had to copy it. It is a power-AND-GROUND table: it was
+#: written for a current-summing tool that wanted both sides of the supply, and
+#: a caller that means "rail, not return" must exclude ground itself.
+POWER_PIN_KEYWORDS = ('VCC', 'VDD', 'VSS', 'GND', 'VCCA', 'VSSA', 'VDDA',
+                      'VDDPLL', 'VCCPLL', 'GNDPLL', 'VRH', 'VRL', 'AVDD',
+                      'AVSS')
+
+
+def is_supply_pintype(pintype: str) -> bool:
+    """Is this pad's `pintype` a supply pin the tool should grade?
+
+    Token-split, and BOTH halves are load-bearing. KiCad writes compound
+    pintypes, and every compound spelling in the tracked corpus is
+    `X+no_connect` -- 557 `passive+no_connect`, 63 `tri_state+no_connect`, 3
+    `power_in+no_connect`. So:
+
+    * `pintype in ('power_in', 'power_out')` DROPS `power_in+no_connect`, which
+      is the right answer for the wrong reason -- it would drop a
+      `power_in+anything_else` too;
+    * `pintype.startswith('power_in')` GRADES it, which is wrong: a pin the
+      designer marked no-connect is uncovered by definition and would be
+      reported forever.
+
+    Measured, that one pad is the whole difference between "12 of 12 covered"
+    and "1 uncovered" on `glasgow_revC` U30 (pad B10, `VPP_FAST`), the cleanest
+    board in the corpus -- so the decision deserves a named predicate rather
+    than being a side effect of `in` versus `startswith`.
+    """
+    tokens = (pintype or '').split('+')
+    return (('power_in' in tokens or 'power_out' in tokens)
+            and 'no_connect' not in tokens)
+
+
+def is_supply_pinfunction(pinfunction: str, keywords=None) -> bool:
+    """Is this pad's `pinfunction` a supply name? Exact match or prefix.
+
+    Prefix is load-bearing: real boards spell the pin `VCC_14`, `GND_7`,
+    `VCC_16`. `keywords` overrides the default table wholesale (the intent's
+    `decaps.pin_functions`), because the failure mode is a DEFAULT entry that is
+    wrong for a board and an add-only override cannot remove one.
+    """
+    fn = (pinfunction or '').upper()
+    if not fn:
+        return False
+    kws = POWER_PIN_KEYWORDS if keywords is None else tuple(keywords)
+    return any(fn == kw or fn.startswith(kw) for kw in kws)
+
+
+def is_power_pin(pinfunction: str, pintype: str, keywords=None) -> bool:
+    """Either channel says supply. The form `analyze_power_paths` re-exports.
+
+    Behaviour-preserving against the closure this replaces on every pad of
+    every tracked board: the old form tested `pintype in ('power_in',
+    'power_out')`, and the two disagree only on a compound pintype that is not
+    `X+no_connect`, of which the corpus has none.
+    """
+    return (is_supply_pintype(pintype)
+            or is_supply_pinfunction(pinfunction, keywords))
+
+
+#: Net-NAME shapes that mean power or ground. Moved here from
+#: `placement.groups._POWER_NET`, unchanged, so the pin rule's rail-net fallback
+#: and the block-prefix grouper cannot drift apart.
+#:
+#: It is a PREFIX test on the sheet-path leaf, and it is loose on purpose for
+#: its original job (rejecting a net as a block-name source). Read as a supply
+#: test it over-matches -- the `\\d` and `pwr` and `vref` alternatives make
+#: `40M_P`, `32K_N`, `2V5_3V3` and `VREF` all "power" -- and it UNDER-matches
+#: the rails that matter most: it does not match `RAM_VDD`, `RAM_VDDQ` or
+#: `IOVDD`, because those do not START with a supply token. Measured, that
+#: under-match is why `orangecrab_ext_pll` abstains instead of grading 17 chips
+#: on ground, which is the true answer -- so it is disclosed, not widened.
+_POWER_NET_RE = re.compile(r'^(a?gnd|dgnd|pgnd|vcc|vdd|vss|vee|vbus|vin|vout|'
+                           r'vref|pwr|\+|-|\d)', re.I)
+
+
+def is_power_net_name(name: str) -> bool:
+    """True if a net name LOOKS like a rail or a return, by its leaf."""
+    leaf = (name or '').split('/')[-1]
+    return bool(leaf) and bool(_POWER_NET_RE.match(leaf))
 
 
 def resolve_gnd_net_id(pcb_data: PCBData,

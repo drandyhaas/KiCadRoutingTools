@@ -45,7 +45,8 @@ from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
 from placement.legality import (BoardOutlineGate, PadClearanceModel, PadFloor,
                                 _pad_carries_copper, format_required_clause,
-                                point_to_seg_dist, rect_gap, ring_is_rect,
+                                pad_half_extents, point_to_seg_dist,
+                                rect_gap, ring_is_rect,
                                 rotate_local_bounds)
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
@@ -644,11 +645,7 @@ class _Cap:
                 continue  # paste/mask-only aperture, not copper
             off_x = p.global_x - fp.x
             off_y = p.global_y - fp.y
-            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-            c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
-            hx, hy = p.size_x / 2, p.size_y / 2
-            half_x = hx * c + hy * s
-            half_y = hx * s + hy * c
+            half_x, half_y = pad_half_extents(p)
             self.pads.append((off_x, off_y, half_x, half_y, p.net_id))
             # The GEOMETRY filter above stays loose on purpose (see the
             # comment), but a FLOOR must not: PadClearanceModel.pad_floor
@@ -1221,11 +1218,7 @@ class _Repair:
                 through = (p.drill or 0) > 0
                 pside = None if through else (
                     'B' if any(str(l).startswith('B') for l in copper) else 'F')
-                tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-                c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
-                hx, hy = p.size_x / 2, p.size_y / 2
-                half_x = hx * c + hy * s
-                half_y = hx * s + hy * c
+                half_x, half_y = pad_half_extents(p)
                 self.foreign_pads.append(
                     (p.global_x - half_x, p.global_y - half_y,
                      p.global_x + half_x, p.global_y + half_y,
@@ -3137,10 +3130,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # by (sqrt(2)-1)*half along the board axes -- 0.14mm on glasgow's
             # 45-degree R9. Converting the clearance term and leaving the shape
             # would be exactly the half-conversion this change is about.
-            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-            _c, _s = abs(math.cos(tilt)), abs(math.sin(tilt))
-            _hx, _hy = p.size_x / 2.0, p.size_y / 2.0
-            ex, ey = _hx * _c + _hy * _s, _hx * _s + _hy * _c
+            ex, ey = pad_half_extents(p)
             rect = (p.global_x - ex, p.global_y - ey,
                     p.global_x + ex, p.global_y + ey)
             # Graded at the pair's REAL requirement, like everything else.
