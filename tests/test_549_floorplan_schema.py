@@ -138,7 +138,8 @@ KEY_SETS = {
         'note', 'suspect', 'suspect_reason', 'overhang_capped',
         'observed_overhang_mm', 'context'},
     '_OVERHANG_KEYS': {'min', 'max'},
-    '_DECAP_KEYS': {'max_distance_mm', 'exempt', 'search_radius_mm'},
+    '_DECAP_KEYS': {'max_distance_mm', 'exempt', 'search_radius_mm',
+                    'max_pin_distance_mm', 'pin_functions', 'same_side'},
     '_HEALTH_KEYS': {'bus_corridors', 'classes', 'zoned_blocks',
                      'affinity_exempt_nets', 'affinity_exempt_net_ids',
                      'ignore_net_ids', 'max_fanout', 'block_displacement_mm',
@@ -238,7 +239,8 @@ def test_an_intent_using_every_known_key_loads():
             'suspect': True, 'suspect_reason': 'r', 'overhang_capped': True,
             'observed_overhang_mm': 9.0, 'context': {'why': 'w'}}],
         'decaps': {'max_distance_mm': 2.5, 'exempt': ['C99'],
-                   'search_radius_mm': 6.0},
+                   'search_radius_mm': 6.0, 'max_pin_distance_mm': 1.5,
+                   'pin_functions': ['VCC', 'VDD'], 'same_side': False},
         'must_lock': ['MH*'],
         'legality_budget': {'overlap_area': 1.0, 'oob_count': 2,
                             'oob_amount': 3.0},
@@ -270,6 +272,9 @@ def test_an_intent_using_every_known_key_loads():
     i = intent_from_dict(raw)
     assert i.blocks[0].tolerance_mm == 0.7 and i.blocks[0].exclusive
     assert i.decaps['search_radius_mm'] == 6.0
+    assert i.decaps['max_pin_distance_mm'] == 1.5
+    assert i.decaps['pin_functions'] == ['VCC', 'VDD']
+    assert i.decaps['same_side'] is False
     assert i.health['max_fanout'] == 30
     assert i.legality_budget['oob_amount'] == 3.0
     assert i.keepouts[0]['allow'] == ('MH1',)
@@ -494,12 +499,16 @@ def test_an_entry_carries_its_own_context_slot():
 def test_severity_keys_are_checked_against_the_rule_names():
     """#710: `severity` validated its VALUES and never its keys.
 
-    The vocabulary is 14 names, not the 9 in `RULES`: five findings are
+    The vocabulary is 18 names, not the 11 in `RULES`: five findings are
     raised outside the rules loop (`validate_intent` raises two,
     `resolve_blocks` one, `resolve_intent_gate` raises `intent_zone_in_keepout`
     since #702, and BOTH `grade` and `resolve_intent_gate` raise
-    `keepout_allow_unresolved` since #793) and an intent has always been
-    allowed to set their severity. Validating against `RULES` alone would refuse
+    `keepout_allow_unresolved` since #793), and TWO more are raised by a rule
+    that is itself in `RULES`: `rule_decap_pin_distance` yields
+    `decap_pin_distance_inferred` and `decap_pin_uncovered` beside its own
+    name (#705), because one measurement can support several claims whose
+    severities an author must be able to set apart. An intent has always been
+    allowed to set these. Validating against `RULES` alone would refuse
     `{"block_unresolved": "warn"}`, which is legal today -- so the test
     asserts every name in the real vocabulary still loads, not just that a
     typo is refused.
@@ -518,7 +527,9 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'intent_zone_overlap',
                                         'block_unresolved',
                                         'intent_zone_in_keepout',
-                                        'keepout_allow_unresolved'}
+                                        'keepout_allow_unresolved',
+                                        'decap_pin_distance_inferred',
+                                        'decap_pin_uncovered'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         i = intent_from_dict(_base(severity={name: WARN}))

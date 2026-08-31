@@ -137,20 +137,27 @@ source, suspect, suspect_reason
 | `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `note`, `context` |
 | `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
-| `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm` |
+| `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm`, `max_pin_distance_mm`, `pin_functions`, `same_side` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 14 rule names below |
+| `severity` | any of the 18 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `must_lock` | a list of reference globs (no nested keys) |
 
-`severity` keys are checked too. The settable names are the nine rules —
+`severity` keys are checked too. The settable names are the eleven rules —
 `envelope`, `zone_containment`, `zone_side`, `zone_exclusive`, `keepout`,
-`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the five
-findings raised outside the rule loop: `intent_zone_outside_envelope`,
-`intent_zone_overlap`, `block_unresolved`, `intent_zone_in_keepout`,
-`keepout_allow_unresolved`. All but the last default to **error**;
+`edge_connector`, `decap_distance`, `decap_ungraded`, `decap_pin_distance`,
+`must_lock`, `legality` — plus the five findings raised outside the rule
+loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
+`block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
+plus two more that `rule_decap_pin_distance` raises BESIDE its own name —
+`decap_pin_distance_inferred` and `decap_pin_uncovered` (#705). One
+measurement can support several claims, and an author must be able to set
+their severities apart: a pin inferred from a net name and a pin the pad
+declares are not the same evidence. `decap_ungraded`,
+`decap_pin_distance_inferred` and `decap_pin_uncovered` default to
+**warn**; all but those and the last of the five default to **error**;
 `keepout_allow_unresolved` defaults to **warn** and is upgraded by writing
 `{"keepout_allow_unresolved": "error"}`.
 `{"decap_distanc": "warn"}` is a
@@ -279,7 +286,11 @@ for it, and the reason is printed:
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
 | `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
-| `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_tethers` |
+| `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
+| `decap_ungraded` | a cap in scope lies BEYOND the tether search radius, so `decap_distance` never measured it against the declared limit — a claim about COVERAGE, not compliance. **warn** by default ([#794](https://github.com/drandyhaas/KiCadRoutingTools/issues/794)) | `groups.decap_populations` (`beyond`) |
+| `decap_pin_distance` | a DECLARED supply pin is further than `max_pin_distance_mm` from the nearest decoupling cap on its own rail, pad edge to pad edge ([#705](https://github.com/drandyhaas/KiCadRoutingTools/issues/705)) | `floorplan.supply_pins`, `legality.pad_rect` + `rect_gap` |
+| `decap_pin_distance_inferred` | the same measurement for a pin inferred from a net NAME rather than from a `pintype` or `pinfunction`. **warn** by default, because the pin set is the inference | same |
+| `decap_pin_uncovered` | a declared supply pin's rail carries no decoupling cap at all, anywhere. A design fact, not a placement failure, so **warn** and per (IC, rail) rather than per pin | same |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
 | `block_unresolved` | a block matched no footprint | — |
@@ -290,8 +301,11 @@ for it, and the reason is printed:
 Every one of them measures with the geometry the **optimizer itself gates on**.
 A grader with its own idea of what "legal" means grades the reimplementation
 rather than the board — so where re-deriving was plausible, a test asserts the
-two agree exactly (all 34 of ulx3s's cap distances identical to the grouper's,
-all five legality numbers identical to the quench's).
+two agree exactly (all 39 of ulx3s's NON-ZERO cap distances identical to
+the grouper's — of 53 tethers; the other 14 clamp to 0 inside their IC's
+bounding box and a 0 mm limit does not flag them — and all five legality
+numbers identical to the quench's). The count read **34** here until #705
+re-derived it; the test never asserted a number, so nothing caught it.
 
 ### Which rules the SEARCH can see
 
@@ -320,6 +334,7 @@ reports the whole picture in `accept_basis`.
 | `edge_connector` | yes | anchor tier | **by freezing** | two of its three sub-claims are bounds on being *off* the board, so a per-pose term would fight the containment gate rather than complement it |
 | `zone_side` | yes | — | no | **vacuous, not conservative**: the quench never flips a side, so the term is invariant under every move it can make. Reported once at load instead |
 | `envelope` | yes | — | no | a claim about the intent FILE against the board, not about any pose |
+| `decap_ungraded`, `decap_pin_*` | yes | — | no | `decap_ungraded` is a claim about what the GRADE covers rather than about any pose, so there is nothing for a search to refuse. The pin rules are a THIRD currency — pad edge to pad edge on one net — and the objection below applies to them more strongly, not less |
 | `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |
 | `legality` | yes | — | no | a whole-board aggregate against a BUDGET, so a per-pose form is non-local: whether A's move is admissible would depend on B's violation |
 
@@ -691,11 +706,48 @@ flag, so a reader of the document can tell "no cap is far from its IC" from
 counts, the max and median, and — the point of it — `beyond_radius`,
 `beyond_radius_refs` and `worst_beyond_mm`.
 
-That last group is a **known, unfixed hole**, disclosed rather than closed: the
-emitter and the rule both call `decap_tethers` at the same 5 mm truncation, so
-`splitflap_driver` emits a limit of 3.4618 while a rail-sharing cap sits
-**19.30 mm** from its IC, invisible to both. `rules_run` goes up; that cap is
+That last group was a **known, unfixed hole** until
+[#794](https://github.com/drandyhaas/KiCadRoutingTools/issues/794): the emitter
+and the rule both call `decap_tethers` at the same 5 mm truncation, so
+`splitflap_driver` emitted a limit of 3.4618 while a rail-sharing cap sat
+**19.30 mm** from its IC, invisible to both. `rules_run` went up; that cap was
 still ungraded.
+
+`decap_ungraded` closes it, and **not by widening the radius** — that path is
+closed by measurement. Widen the rule alone and the emitter's `ceil(max)` no
+longer covers the newly visible caps, so the round trip stops grading clean on
+its own board; widen both and splitflap's limit goes 3.4618 → 19.30 and ulx3s's
+4.7149 → 12.24, which is a limit that says nothing. So the caps beyond the
+horizon get their own finding, at **warn**, whose claim is COVERAGE rather than
+compliance: *your limit was derived from the caps inside the radius, so it says
+nothing about this one.* Ten tracked boards emit 32 such findings; none becomes
+an error, and `board_score`'s `blocking` is unmoved.
+
+It names the IC with no hedge. The comment that used to stand in
+`decap_census` claimed the unbounded pass was "a second measurement rather
+than a superset" because the election could pick a different chip without the
+prune — that was never true of the code (the radius only ever applied *after*
+the argmin), and since #794 the radius does not reach the election at all.
+Measured: 0 of 357 tethers re-elect.
+
+A board whose limit is WITHHELD cannot arm either decap rule, so the horizon
+reaches it through the abstention channel instead: `_WITHHELD_RULE` maps the
+key to **both** rules, and the withholding reason names the beyond count and
+the worst distance. That reason now carries the horizon on the
+`DECAP_MIN_SAMPLE` arm too, not only the zero-tether one — without it
+`interf_u_unrouted`, withheld for having one sample while carrying four caps
+beyond the radius and a 19.82 mm worst, abstained with a note that said nothing
+about them.
+
+**`worst_beyond_mm` used to understate.** It read the last element of a list
+sorted by cap REFERENCE, so it reported the alphabetically last beyond-cap
+rather than the farthest — on 7 of the 14 boards that have any: kit-dev 10.80
+where the truth is 22.89, interf_u 8.39 where it is 19.82, flat_hierarchy 6.44
+where it is 18.42. The number appears in `--declare-decaps` stdout, in the
+withholding reason and in the censoring table below, so all three understated
+the thing the census exists to disclose. It survived because splitflap_driver —
+the board every other census arm is written against — has exactly ONE
+beyond-cap, where last and farthest are the same cap.
 
 ### Declaring this key CHANGES PLACEMENT
 
@@ -704,18 +756,199 @@ its own flag rather than folded into `--declare-classes`. `place_seed` reads
 `decaps.max_distance_mm` and, when it is set, pulls every two-net-bearing-pad
 `C*` out of radial zone packing into its per-supply-pin stage. Measured:
 
-| board | seeder scope | graded tethers | in scope, never graded |
-|---|---|---|---|
-| ulx3s | 70 | 53 | 17 |
-| glasgow_revC | 92 | 87 | 5 |
-| watchy | 28 | 24 | 4 |
-| splitflap_driver | 12 | 11 | 1 |
+| board | in scope | graded | beyond the radius | no rail-carrying chip | predicate |
+|---|---|---|---|---|---|
+| ulx3s | 70 | 53 | 7 | **10** | **0** |
+| glasgow_revC | 92 | 87 | 5 | 0 | **0** |
+| watchy | 28 | 24 | 2 | 2 | **0** |
+| splitflap_driver | 12 | 11 | 1 | 0 | **0** |
 
-The two populations differ because the two "is this a decap" predicates
-differ — the grouper tests *exactly two distinct net ids*, the seeder *exactly
-two net-bearing pads* — and the metrics differ too. `context.decap_census`
-carries `seeder_scope` and `seeder_scope_ungraded`, and `--emit-intent` prints
-the same warning. Reconciling the predicates is a separate change.
+**This table used to blame the gap on the predicates, and that was wrong.** The
+text said the two populations differ "because the two 'is this a decap'
+predicates differ — the grouper tests *exactly two distinct net ids*, the
+seeder *exactly two net-bearing pads*". There were in fact THREE spellings (a
+hybrid also lived in `emit_intent`), and measured over every tracked board all
+three name **identical** sets: the residue attributable to them is **zero**, on
+every board, and no tracked board even has a lowercase `c*` reference for the
+case difference to bite on. `tests/test_792_decap_predicate.py` is the standing
+measurement.
+
+The gap is two other things, and the census now reports them separately
+(`beyond_radius` and `no_rail_chip`, with `unaccounted` staying 0 so a reader
+can check that the three arms are the whole scope):
+
+* **beyond the 5 mm radius** — a real grading hole, and `decap_ungraded`'s
+  business since #794;
+* **no chip carries the cap's rail at all.** Ten of ulx3s's seventeen: `C3 C4
+  C22` on `/power/P1V1`, `C7 C8 C24` on `/power/P3V3`, `C11 C12 C23` on
+  `/power/P2V5`, `C14` on `/power/SHUT`. Those rails are owned only by two-pad
+  passives — the caps themselves plus `L1`–`L3` and `RA*`/`RP*` — so they are
+  bulk and filter caps upstream of an LC network, not decouplers. **The grader
+  is right to ignore all ten**; there is no IC for them to be far from.
+
+**The seeder was not right about them**, and that is what #792 actually fixes.
+`place_seed`'s pin stage seats a cap AT A CHIP'S PIN, so a cap with no such pin
+can never be claimed — yet the old scope evicted all ten from radial zone
+packing anyway, and they fell through to the centroid stage and landed near the
+board middle. The scope is now the caps that **elect a tether at any distance**
+(`seeder_pin_scope`, 60 of ulx3s's 70), and anything the pin stage declines at
+run time is put back into its declared zone with a note rather than dropped.
+
+So the two predicates were never the story. One predicate was being asked two
+different questions — *is this cap graded against an IC?* and *is there a pin
+to seat it at?* — and those have different right answers for exactly this
+population.
+
+## Grading the pin, not the package (#705)
+
+`decap_distance` measures the cap's **centroid** to the IC's pad bounding box
+inflated 0.5 mm, clamped to 0 inside. The requirement it stands in for is about
+the **pin**: a 100 nF sitting 1.7 mm from a QFN and 9 mm from the IOVDD pin it
+decouples satisfies that rule and fails the spec. A downstream project using
+this toolchain hit exactly that and wrote its own checker.
+
+`decaps.max_pin_distance_mm` grades the pin. It is **opt-in with no default** —
+at 3 mm the tracked corpus produces **127** findings — 44 declared, 77 inferred,
+6 uncovered — with the worst gaps at 37.47 mm (`interf_u_unrouted_placed`),
+34.08 mm (`interf_u_unrouted`) and 30.77 mm (`flat_hierarchy`), so a shipped
+default would flood every board on day one.
+
+**The invariant.** Compute a SUPERSET of the caps that could serve a pin, and
+violate only when the MINIMUM over that superset exceeds the limit. Every cap
+added can only lower the number, so the only way to manufacture a violation is
+to have MISSED a cap — which turns "is this finding real?" into one auditable
+question. The answer is forced: every two-net `C*` carrying the pin's exact net,
+either side, any distance, whoever else it also serves.
+
+That is also why the cap set is **derived rather than taken from
+`decap_tethers`**. The tether map is a cap→one-IC assignment truncated at 5 mm
+that discards the net that matched, so it cannot answer a per-rail question.
+Measured over 271 typed supply pins on 8 boards, a tether-derived set reports a
+larger distance on 11 and a spurious "uncovered" on 56 — it manufactures
+findings in both currencies. What stays shared is the *cap* predicate, so the
+two rules disagree about assignment (deliberately) and agree about what a decap
+is.
+
+### Which pads are supply pins, and on what evidence
+
+Three channels, tried **per chip**, and keyed on whether the channel YIELDS
+pins rather than on whether its field is populated:
+
+| # | channel | test |
+|---|---|---|
+| 1 | `pintype` | token-split on `+`; `power_in`/`power_out` present, `no_connect` absent |
+| 2 | `pinfunction` | exact or prefix match against `decaps.pin_functions`, else the built-in table |
+| 3 | rail net | the net NAME looks like a rail **and** already carries a decoupling cap |
+
+**Per chip**, because on the 85 corpus chips where channels 1 and 2 both yield
+they disagree about the pin SET on 31 (36%) — the order materially decides the
+answer, so it must be decided somewhere a reader can see. Per *pin* would mix
+channels inside one chip and produce a set no channel asserts; per *board* would
+grade half of watchy on the wrong evidence (glasgow_revC wins 33 chips on
+`pintype` and 1 on the fallback; watchy 5 and 5).
+
+**Yield-keyed**, because `lvds_converter_dualclk` carries `pintype` on 76 of 76
+pads and **zero** are `power_in`/`power_out` — IC2/IC3/IC4's supply pins are
+typed `passive` and named `VCC_14` / `GND_7` / `VCC_16`. A ladder that asked
+"does this board carry `pintype`?" would stop at channel 1 with an empty set,
+grade nothing, and record that channel 1 fired: a vacuous pass that no
+naturally-written test catches, because the field IS there.
+
+**"Channel N fired" is not "channel N is right."** A board whose supply pins are
+all typed `bidirectional` yields nothing at channel 1 and falls through, and no
+tool can tell that from a correct board. So every channel's count is recorded
+for every chip, fired or not, in `decap_pin_evidence` (and in `JSON_SUMMARY` as
+`decap_pins_by_channel`); the chips where a lower channel would have named a
+different set are listed as `order_decided`; and channel 3's findings carry
+their own rule name at warn.
+
+**Ground is not graded.** On `lvds_converter_dualclk` the three VCC pins sit
+2.100 / 2.100 / 1.925 mm from their rail's nearest cap while the three GND pins
+on the *same* ICs sit 8.043 / 7.425 / 6.941 mm — what a ground arm measures is a
+SOIC-14's opposite corners, not a placement. Half of every `power_in` population
+is ground (580 of 1163 corpus pins), so grading it would make the pass rate a
+statement about pin numbering.
+
+### Three findings, because they are three claims
+
+| finding | default | granularity |
+|---|---|---|
+| `decap_pin_distance` | error | per pin, for a pin channel 1 or 2 declared |
+| `decap_pin_distance_inferred` | warn | per pin, for a pin inferred from a net NAME |
+| `decap_pin_uncovered` | warn | per (IC, rail) — no decoupling cap on that rail at all |
+
+At a 3 mm limit corpus-wide the split is 44 declared, 77 inferred, 6 uncovered.
+One name would make `ulx3s` — which carries no `pintype` at all — **fail** on 39
+inferences. `decap_pin_uncovered` is per (IC, rail) rather than per pin because
+`haasoscope_pro_max_test` is an 8-footprint fixture with 98 typed supply pins
+and zero capacitors, which per-pin would be 98 findings saying one thing.
+
+### When the board cannot answer, the rule abstains
+
+`_wants` reads only the intent; nothing read the board. A rule the intent asked
+for and the board cannot answer used to land in `rules_run` and print "N rule(s)
+ran, no violations" — which makes `--require-rules` *easier* to satisfy, the
+vacuous pass that flag exists to catch, arriving through the mechanism that
+implements it. A per-rule `_ARM` table now runs after `_wants` and feeds the same
+`rules_skipped` dict, with a reason that names the pad census:
+`orangecrab_ext_pll` has 28 candidate ICs and zero supply pins on any channel,
+and says so.
+
+This is deliberately **not** the `budget_abstained` channel, which means "the
+emitter could not derive this key" — a property of the intent, computed with no
+board. This is the opposite, and overloading one key with both would make
+`budget_abstained_keys` mean two things.
+
+### `same_side` is a manufacturing claim, and it is expensive
+
+Default **false**, and it must be: 43% of corpus decap tethers (152 of 357) put
+the cap on the opposite side from its IC — glasgow_revC 61 of 87, orangecrab 44
+of 74 — because a decap directly under its pin on the back side, connected by a
+via, is standard practice. On the very board #705 offers as its proof that the
+rule is safe, `glasgow_revC` U30 is on F.Cu with **all 15** of its tethered
+decaps on B.Cu.
+
+`same_side: true` is therefore not an electrical assertion but a **fab** one:
+the author is saying the back side is not available — single-sided assembly, a
+shielding can or heatsink over it, an enclosure wall or thermal pad. It is
+authored, never inferred, and no emitter path can set it.
+
+### What the rule does NOT claim
+
+* It does not claim the pin **needs** a local cap. A `power_in` pad may be an
+  LDO's input, a sense pin, or a rail a plane already handles. It grades the pin
+  the file declares; it cannot read a datasheet.
+* It does not claim each pin has its **own** cap. The metric is a minimum, so
+  one cap may satisfy every pin on its rail. Over 353 corpus (chip, rail) pairs
+  only 2 have fewer caps than pins; `caps_on_rail` and `pins_on_rail` ride in
+  every finding so a reader can see it.
+* It does not measure the **return path**, loop inductance, via count or plane
+  stitching. It measures a gap in millimetres.
+* `decap_pin_distance_inferred` does not claim the pad **is** a supply pin.
+* `decap_pin_uncovered` does not claim the rail is undecoupled — only that no
+  two-net `C*` on this board carries that net.
+* A **clean** result does not mean the board is decoupled. It means every pin
+  the rule could identify had a cap on its own net within the limit. When it can
+  identify none, it says so in `rules_skipped` and does not report a pass.
+* It does not claim its number equals `decap_distance`'s. They answer different
+  questions, in different currencies, over different populations.
+* `is_ground_net_name` does not match `VSS`, so a board that spells its ground
+  `VSS` will have ground pins graded. No tracked board does, so the case is
+  structurally untestable here — disclosed rather than fixed with a tenth
+  power/ground predicate.
+
+### The emitter derives no pin limit, and `min_reader` does not move
+
+`ceil(max)` over pin gaps is censored by construction — an uncovered pin
+contributes no distance, so the max is taken over survivors, which is the exact
+censoring failure `--declare-decaps` spends a table on — and a limit derived
+from a board and then graded against that board is vacuous. The distribution
+goes to `context.decap_census` instead, which has no key set to grow.
+
+`READER_VERSION` stays 1. `_reject_unknown` already refuses an unknown `decaps`
+key loudly and automatically, and `min_reader` exists for what refusal *cannot*
+see: a widened value set, a changed meaning, a changed default. Adding keys is
+none of those.
 
 ### `keepouts` stays empty, and says so
 

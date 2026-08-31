@@ -195,7 +195,11 @@ def test_the_summary_reports_what_did_not_run():
     s = _summary(out)
     assert s['pass'] is True and s['violations'] == 0
     assert s['rules_run'] == 0, s['rules_run']
-    assert s['rules_skipped'] == 9, s['rules_skipped']
+    # A hand-stated literal, deliberately: deriving it from `len(RULES)`
+    # would make this arm agree with whatever the module currently says
+    # and stop being a change detector. 9 before #794 added
+    # `decap_ungraded` and #705 added `decap_pin_distance`.
+    assert s['rules_skipped'] == 11, s['rules_skipped']
     print(f"  PASS: an empty intent passes with rules_run=0, "
           f"rules_skipped={s['rules_skipped']} -- visibly vacuous")
 

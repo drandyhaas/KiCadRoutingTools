@@ -79,6 +79,50 @@ def rect_overlap_shortfall(a, b, clearance):
     return max(0.0, clearance - rect_gap(a, b))
 
 
+def pad_half_extents(pad):
+    """(half_x, half_y) of a pad's axis-aligned bbox, honouring `rect_rotation`.
+
+    `pad.size_x/size_y` are already resolved to board space for an orthogonal
+    pad; `rect_rotation` is the residual tilt for one on a non-orthogonal angle
+    (in (-90, 90]), and ignoring it UNDER-sizes the pad. THREE copies lived in
+    `fanout_clearance` alone -- `_Cap`'s pad list, its via pass, and its rect
+    builder -- so it lives here now, beside the gap function its callers pair
+    it with.
+
+    Two near neighbours are deliberately NOT folded in, and naming them is the
+    point of this paragraph: `reachability._point_rect_dist` rotates the query
+    POINT into the pad frame instead, which is an exact rotated-rect distance
+    rather than a bbox; and `py_router/check_drc._pad_half_extents` computes
+    the same numbers but lives across the package boundary and also handles
+    custom-pad polygons. A first draft of this docstring listed `reachability`
+    as one of the three and did not mention `check_drc` at all -- which is
+    exactly the map a later reader hunting duplicates would have trusted.
+
+    The bbox OVER-states a tilted pad, so a gap computed from it UNDER-states
+    the true clearance: the safe direction for a proximity rule, and the same
+    convention `reachability` already records -- modelling one pad two ways puts
+    the naming and the number in different geometries.
+    """
+    tilt = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
+    c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
+    hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+    return hx * c + hy * s, hx * s + hy * c
+
+
+def pad_rect(pad, margin: float = 0.0):
+    """A pad's axis-aligned copper rect in BOARD coordinates, plus `margin`.
+
+    `global_x/global_y` is always the copper centre even when the drill is
+    offset from it, so this is the right anchor for a clearance question and the
+    wrong one for a drill question.
+    """
+    hx, hy = pad_half_extents(pad)
+    hx += margin
+    hy += margin
+    return (pad.global_x - hx, pad.global_y - hy,
+            pad.global_x + hx, pad.global_y + hy)
+
+
 def rect_overlap_area(a, b):
     """Area of the intersection of two rects (0 when disjoint).
 
