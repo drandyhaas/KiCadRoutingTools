@@ -255,8 +255,20 @@ ROWS = [
 
     ('the-unresolved-zone-guard-is-removed', 'q',
      "    zones = tuple(z for z in (zones or ())\n"
-     "                  if z.get('refs') or not z.get('exclusive'))\n",
+     "                  if not z.get('exclusive')\n"
+     "                  or any(r in parts for r in (z.get('refs') or ())))\n",
      "",
+     (T797P,), 'KILLED'),
+
+    # The WEAKER form of the same guard, which a blind review falsified: it
+    # asks whether a ref STRING exists, not whether any member is visible to
+    # this walk. `QuenchState.parts` drops a padless, courtyard-less
+    # footprint, so a block whose only member is one of those resolves
+    # non-empty and slips through.
+    ('the-unresolved-zone-guard-only-checks-for-a-ref-string', 'q',
+     "                  if not z.get('exclusive')\n"
+     "                  or any(r in parts for r in (z.get('refs') or ())))",
+     "                  if z.get('refs') or not z.get('exclusive'))",
      (T797P,), 'KILLED'),
 
     ('the-repair-moves-a-locked-part', 'ps',

@@ -184,6 +184,20 @@ def test_the_channel_exists_and_carries_only_zone_exclusive_terms(wd):
 RF = (16.0, 8.0, 24.0, 16.0)
 RF_CENTRE = (20.0, 12.0)
 
+#: A footprint with NO pads and NO courtyard -- a logo or a graphic. It parses,
+#: it resolves as a block member, and `QuenchState.parts` drops it
+#: (`quench.py`: "if not fp.pads ... continue"), which is what makes it the
+#: counterexample to a membership guard that only checks for a ref string.
+_GHOST = '''\t(footprint "test:G"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-G1")
+\t\t(at 34.0 20.0)
+\t\t(property "Reference" "G1"
+\t\t\t(at 0 0)
+\t\t)
+\t)
+'''
+
 
 def test_a_stranger_is_refused_where_a_member_is_seated(wd):
     """The pair is the point. Asserting only the refusal is satisfied by a gate
@@ -537,6 +551,30 @@ def test_a_zone_whose_members_did_not_resolve_binds_nobody(wd):
     assert st_b.exclusive_for, "the resolved control bound nobody either"
     assert refused(st_b, 'U1', *RF_CENTRE), \
         "the resolved control did not refuse, so (a) proves nothing"
+
+    # (b2) RESOLVED, but to a part this walk cannot SEE. `QuenchState.parts`
+    # drops a footprint with no pads and no courtyard, so a block whose only
+    # member is one of those resolves NON-empty -- a guard that merely asks
+    # "is there a ref string?" keeps the zone and then finds no member, which
+    # is the same inversion one step along, and with no `block_unresolved`
+    # finding to point at it. Found by a blind review of the first guard.
+    b2 = os.path.join(wd, 'ghost.kicad_pcb')
+    board(b2, [_part('U1', 20.0, 12.0, 1.0, 1.0), _GHOST])
+    it_b2 = load(intent_doc(blocks=[
+        {"name": "rf", "refs": ["G1"], "zone": list(RF),
+         "exclusive": True, "tolerance_mm": 0.5}]), wd, 'ghost')
+    st_b2, gate_b2, pcb_b2 = seat_state(b2, it_b2)
+    assert gate_b2['zones'][0]['refs'] == ('G1',), \
+        (f"the ghost block did not RESOLVE ({gate_b2['zones'][0]['refs']}); "
+         f"this case needs a resolved-but-invisible member")
+    assert 'G1' not in st_b2.parts, \
+        "G1 is visible to the walk, so this case tests nothing"
+    assert not st_b2.exclusive_for, (
+        f"a zone whose only member is invisible to the walk bound "
+        f"{sorted(st_b2.exclusive_for)}: the guard is testing for a ref "
+        f"STRING, not for a member it can actually exempt")
+    assert not refused(st_b2, 'U1', *RF_CENTRE), \
+        "U1 was refused by a zone that can exempt nobody"
 
     # (c) THE GRADE MUST AGREE, at every severity. It is not enough for the
     # seat gate alone to decline: `block_unresolved` is a SETTABLE severity,
