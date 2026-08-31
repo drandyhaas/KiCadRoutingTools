@@ -944,7 +944,17 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
     laid_b, b_tracks, b_vias = [], [], []
     hx, hy = dgrid.pitch_x / 2.0, dgrid.pitch_y / 2.0
     pad_r = (te.VIA_SIZE - te.TRACK) / 2
-    for n in [x for x in names if x in set(split_targets)]:
+    used_exit = []          # B stub ends already landed on a face
+    fail1 = []              # nets no dest-side lay could serve
+    # TWO ROUNDS: the plain pass first for everybody (bit-identical to
+    # the pre-rescue arm), then far sites + slot spread ONLY for its
+    # refusals. Measured all-at-once (q4, 0831): the slot cascade
+    # re-landed even the healthy nets (a newly-landed net buried SA1's
+    # base exit before its turn) and the braid got WORSE -- K35 87v/3
+    # -> 107v/4, K32 86v/4 -> 99v/6+1drc. Additive-only is the honest
+    # form: the baseline's copper lays first and identically.
+    queue = [[x, False] for x in names if x in set(split_targets)]
+    for n, rescue in queue:
         nid = byname[n][0]
         p = dst_pad[n]
         m0 = choice.get(n)
@@ -952,45 +962,132 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
             continue
         bx, by = p.global_x, p.global_y
         dv = _DIRV[m0.direction]
-        sites = sorted([(sx, sy) for sx in (-1, 1) for sy in (-1, 1)],
-                       key=lambda s: -(s[0] * dv[0] + s[1] * dv[1]))
-        # every clear diagonal gets its RUN tried (the first-clear
-        # site's run refusing does not mean the others' would), each
-        # at two margins -- the last call's own lesson
-        res, got = None, None
-        for sx, sy in sites:
+        # candidate via sites, nearest first: the four diagonal cells
+        # (exit-aligned first -- the original menu), then the HUMAN's
+        # far-via idiom: walk the escape gap outward in the planned
+        # direction, one cell corner at a time, out to the face line.
+        # The human's own DU1 fanout puts 12 of its 35 vias 1.1-3.8 mm
+        # from the ball (census 0831); the diagonals are the menu's
+        # first page, not the menu.
+        cands = []
+        for sx, sy in sorted([(sx, sy) for sx in (-1, 1) for sy in (-1, 1)],
+                             key=lambda s: -(s[0] * dv[0] + s[1] * dv[1])):
             site = (bx + sx * hx, by + sy * hy)
-            if any(obs_w(nid, L_).point_violation(site, pad=pad_r)
-                   is not None for L_ in LAYERS):
+            cands.append((site, [((bx, by), site)]))
+        if rescue:
+            gx0, gy0, gx1, gy1 = dgrid.bbox
+            for side in (-1, 1):
+                if dv[0]:
+                    gate = (bx + dv[0] * hx, by + side * hy)
+                else:
+                    gate = (bx + side * hx, by + dv[1] * hy)
+                for k in range(1, 12):
+                    if dv[0]:
+                        site = (bx + dv[0] * (2 * k + 1) * hx, gate[1])
+                        if not (gx0 - hx - 1e-6 <= site[0]
+                                <= gx1 + hx + 1e-6):
+                            break
+                    else:
+                        site = (gate[0], by + dv[1] * (2 * k + 1) * hy)
+                        if not (gy0 - hy - 1e-6 <= site[1]
+                                <= gy1 + hy + 1e-6):
+                            break
+                    cands.append((site, [((bx, by), gate), (gate, site)]))
+        # exit SLOTS: the diagnosed failure mode (TP_DEBUG, 0831) is
+        # not the site menu -- it is the LANDING. Same-gap nets get
+        # near-identical face exit points, and the first-laid B run
+        # buries every later one (backward frontier stillborn: "8/8
+        # neighbors blocked" by an earlier split net's tracks). So the
+        # exact exit point is negotiable and the face is not: shift
+        # along the face tangent to the nearest slot >= 0.35 mm from
+        # every landed stub end.
+        ex0 = m0.exit_pt
+        if rescue:
+            tang = (0.0, 1.0) if dv[0] else (1.0, 0.0)
+            exits = []
+            for t_ in (0.0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2):
+                ex = (ex0[0] + tang[0] * t_, ex0[1] + tang[1] * t_)
+                if all(math.hypot(ex[0] - u[0], ex[1] - u[1]) >= 0.35
+                       for u in used_exit):
+                    exits.append(ex)
+            exits = exits[:4] or [ex0]
+        else:
+            exits = [ex0]
+        # every geometrically-clear site gets its RUN tried (the
+        # first-clear site's run refusing does not mean the others'
+        # would), each at two margins -- the last call's own lesson
+        res, got, legs_got, ex_got = None, None, None, None
+        dbg = os.environ.get('TP_DEBUG')
+        for site, legs in cands:
+            bad = next((L_ for L_ in LAYERS
+                        if obs_w(nid, L_).point_violation(site, pad=pad_r)
+                        is not None), None)
+            if bad is not None:
+                if dbg:
+                    print(f'      {n} site ({site[0] - bx:+.2f},'
+                          f'{site[1] - by:+.2f}): via blocked on {bad}')
                 continue
-            if not obs_w(nid, 'F.Cu').seg_clear((bx, by), site):
+            if not all(obs_w(nid, 'F.Cu').seg_clear(a_, b_)
+                       for a_, b_ in legs):
+                if dbg:
+                    print(f'      {n} site ({site[0] - bx:+.2f},'
+                          f'{site[1] - by:+.2f}): F leg blocked')
                 continue
-            pcb_w.segments.append(Segment(bx, by, site[0], site[1],
-                                          te.TRACK, 'F.Cu', nid))
+            for a_, b_ in legs:
+                pcb_w.segments.append(Segment(a_[0], a_[1], b_[0], b_[1],
+                                              te.TRACK, 'F.Cu', nid))
             pcb_w.vias.append(Via(site[0], site[1], te.VIA_SIZE,
                                   te.VIA_DRILL, ['F.Cu', 'B.Cu'], nid))
-            for mg in (1.2, 2.5):
-                res = te.cn.connect(pcb_w, nid, site, 'B.Cu',
-                                    m0.exit_pt, 'B.Cu', cfg_w,
-                                    band=None, margin=mg)
+            for ex in exits:
+                for mg in (1.2, 2.5):
+                    res = te.cn.connect(pcb_w, nid, site, 'B.Cu',
+                                        ex, 'B.Cu', cfg_w,
+                                        band=None, margin=mg)
+                    if res is not None:
+                        break
                 if res is not None:
+                    ex_got = ex
                     break
             if res is not None:
-                got = site
+                got, legs_got = site, legs
                 break
-            pcb_w.segments.pop()
+            if dbg:
+                print(f'      {n} site ({site[0] - bx:+.2f},'
+                      f'{site[1] - by:+.2f}): B run refused')
+            for _ in legs:
+                pcb_w.segments.pop()
             pcb_w.vias.pop()
         if got is None:
-            print(f'    split: no site/B run for {n} -- engine keeps it')
+            if not rescue and os.environ.get('TP_FAR'):
+                # dest-side far-site + slot rescue: measured WORSE in
+                # both forms (q4 all-at-once K35 87v/3 -> 107v/4; q5
+                # additive-only 87v/8 + 11 drc) -- the extra dest-B
+                # cohort is the regression, not the lay order. Kept as
+                # a knob; the mechanism itself works (no-site 11 -> 3).
+                queue.append([n, True])
+                continue
+            fail1.append(n)
+            print(f'    split: no site/B run for {n} '
+                  '-- engine keeps it')
             continue
+        if math.hypot(got[0] - bx, got[1] - by) > 2 * hx + 1e-6:
+            print(f'    split: far site for {n} at '
+                  f'({got[0] - bx:+.2f},{got[1] - by:+.2f})')
+        if ex_got is not None and (abs(ex_got[0] - ex0[0]) > 1e-6
+                                   or abs(ex_got[1] - ex0[1]) > 1e-6):
+            print(f'    split: {n} lands at a shifted slot '
+                  f'({ex_got[0] - ex0[0]:+.2f},{ex_got[1] - ex0[1]:+.2f})')
+        if ex_got is not None:
+            used_exit.append(ex_got)
         segs_o, vias_o = res
         pcb_w.segments.extend(segs_o)
         pcb_w.vias.extend(vias_o)
         n_laid[0] += 1
         laid_b.append(n)
-        b_tracks.append({'start': (bx, by), 'end': got,
-                         'width': te.TRACK, 'layer': 'F.Cu',
-                         'net_id': nid})
+        for a_, b_ in legs_got:
+            b_tracks.append({'start': a_, 'end': b_,
+                             'width': te.TRACK, 'layer': 'F.Cu',
+                             'net_id': nid})
         for s_ in segs_o:
             b_tracks.append({'start': (s_.start_x, s_.start_y),
                              'end': (s_.end_x, s_.end_y),
@@ -1003,6 +1100,68 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
             b_vias.append({'x': v_.x, 'y': v_.y, 'size': v_.size,
                            'drill': v_.drill,
                            'layers': ['F.Cu', 'B.Cu'], 'net_id': nid})
+    if os.environ.get('TP_SRC_B') and fail1:
+        # SOURCE-SIDE SPLIT: a net whose berth cannot reach B at the
+        # destination gets its layer change at the SOURCE instead --
+        # the human's own idiom for exactly this class (census 0831:
+        # SA8/SBA1 dive inside the U1 window, ride B end-to-end,
+        # surface past the array; 2 vias, constant layer between).
+        # The stub is EXTENDED: via on the tooth line toward the
+        # field, then a short B whisker, because endpoint discovery
+        # requires a free end OUTSIDE every barrel -- the whisker is
+        # what makes the B end discoverable. The lane is then born on
+        # B with its one required change already paid.
+        cx = (dgrid.bbox[0] + dgrid.bbox[2]) / 2.0
+        cy = (dgrid.bbox[1] + dgrid.bbox[3]) / 2.0
+        laid_s = []
+        for n in fail1:
+            nid = byname[n][0]
+            t0 = launch[n]
+            tl = tooth0.get(n, 'F.Cu')
+            if tl == 'B.Cu':
+                continue
+            h = math.hypot(cx - t0[0], cy - t0[1]) or 1.0
+            u = ((cx - t0[0]) / h, (cy - t0[1]) / h)
+            done = False
+            for j in range(4):
+                site = (t0[0] + 0.4 * j * u[0], t0[1] + 0.4 * j * u[1])
+                bend = (site[0] + 0.6 * u[0], site[1] + 0.6 * u[1])
+                if any(obs_w(nid, L_).point_violation(site, pad=pad_r)
+                       is not None for L_ in LAYERS):
+                    continue
+                if j and not obs_w(nid, tl).seg_clear(t0, site):
+                    continue
+                if not obs_w(nid, 'B.Cu').seg_clear(site, bend):
+                    continue
+                add_t = ([{'start': t0, 'end': site, 'width': te.TRACK,
+                           'layer': tl, 'net_id': nid}] if j else []) \
+                    + [{'start': site, 'end': bend, 'width': te.TRACK,
+                        'layer': 'B.Cu', 'net_id': nid}]
+                for t_ in add_t:
+                    pcb_w.segments.append(Segment(
+                        t_['start'][0], t_['start'][1], t_['end'][0],
+                        t_['end'][1], t_['width'], t_['layer'], nid))
+                pcb_w.vias.append(Via(site[0], site[1], te.VIA_SIZE,
+                                      te.VIA_DRILL, ['F.Cu', 'B.Cu'],
+                                      nid))
+                b_tracks.extend(add_t)
+                b_vias.append({'x': site[0], 'y': site[1],
+                               'size': te.VIA_SIZE,
+                               'drill': te.VIA_DRILL,
+                               'layers': ['F.Cu', 'B.Cu'],
+                               'net_id': nid})
+                n_laid[0] += 1
+                laid_s.append(n)
+                print(f'    split: {n} tooth taken to B at '
+                      f'({site[0]:.2f},{site[1]:.2f})'
+                      + (f' +{0.4 * j:.1f} along' if j else ''))
+                done = True
+                break
+            if not done:
+                print(f'    split: no source-side site for {n}')
+        if laid_s:
+            print(f'  split SOURCE pass: {len(laid_s)} tooth(s) '
+                  'taken to B: ' + ','.join(laid_s))
     print(f'  split B pass: {len(laid_b)} of {len(split_targets)} '
           'berth(s) via-and-routed on B: ' + ','.join(laid_b))
     binter = f'{stem2}_dst_bsplit.kicad_pcb'
