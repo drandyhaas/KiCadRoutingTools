@@ -37,7 +37,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import kicad_locate
 from swig_compat import patch_swig_iterators as _patch_swig_iterators
@@ -406,10 +407,85 @@ def _refill_memo_key(board_file: str, project_from: str = None):
         return None
 
 
+#: Why an exact fill produced no islands. A CLOSED vocabulary (#713 item 4):
+#: before this, FIVE distinct causes all returned a bare `None`, so no caller
+#: could tell "this machine has no pcbnew" from "this board is too slow for a
+#: 300 s subprocess" -- and exactly one of the five, `timeout`, is a fact about
+#: the MACHINE rather than about the board. `plane_fragility` reported that one
+#: to the user as "the KiCad refill failed", which is the wrong repair.
+REFILL_REASONS = ('ok', 'no_kicad_python', 'memoised_failure',
+                  'refill_failed', 'timeout', 'error')
+
+
+class RefillStatus(NamedTuple):
+    """Why `refill_islands_ex` returned the islands it did (or did not).
+
+    `reason` is one of `REFILL_REASONS`; `ok` is the only one carrying
+    islands. `detail` is a short free-text clause for the human line, never
+    parsed. `elapsed_s` is filled on the timeout arm so a caller can say how
+    long it waited rather than only that it gave up.
+
+    The module docstring already asks callers to "print the reason (not just
+    the symptom) when falling back" -- this is the channel that makes that
+    possible. It is a return value rather than a module-global precisely
+    because a module-global would reintroduce the run-history dependence
+    #713 is about.
+    """
+    reason: str
+    detail: str = ''
+    elapsed_s: Optional[float] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.reason == 'ok'
+
+    @property
+    def is_timeout(self) -> bool:
+        """The one arm that is a property of THIS MACHINE and this run.
+
+        A caller may legitimately treat every other reason as a stable fact
+        about the board or the install -- the same answer next run -- and must
+        NOT treat this one that way. It is the arm that makes an output depend
+        on CPU speed, which is the whole of #713.
+        """
+        return self.reason == 'timeout'
+
+    def why(self) -> str:
+        """One clause naming the real cause, for a fallback notice."""
+        base = {
+            'ok': 'the KiCad refill succeeded',
+            'no_kicad_python': ('no python with pcbnew found; set KICAD_PYTHON '
+                                'to KiCad\'s bundled interpreter'),
+            'memoised_failure': ('the KiCad refill already failed on these '
+                                 'exact board+project bytes in this process'),
+            'refill_failed': 'the KiCad refill failed',
+            'timeout': 'the KiCad refill TIMED OUT',
+            'error': 'the KiCad refill could not be attempted',
+        }.get(self.reason, self.reason)
+        if self.reason == 'timeout' and self.elapsed_s is not None:
+            base += f' after {self.elapsed_s:.0f}s'
+        return f'{base} ({self.detail})' if self.detail else base
+
+
 def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
                    verbose: bool = False, project_from: str = None
                    ) -> Optional[Dict[Tuple[str, str],
                                       List[List[Tuple[float, float]]]]]:
+    """The islands alone. See `refill_islands_ex` for why there are none.
+
+    Kept at its original signature and return type so the existing call sites
+    are untouched; a caller that makes a DECISION on the absence should use
+    `refill_islands_ex` instead.
+    """
+    return refill_islands_ex(board_file, timeout=timeout, verbose=verbose,
+                             project_from=project_from)[0]
+
+
+def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
+                      verbose: bool = False, project_from: str = None
+                      ) -> Tuple[Optional[Dict[Tuple[str, str],
+                                               List[List[Tuple[float, float]]]]],
+                                 RefillStatus]:
     """{(net_name, layer): [island_polygon, ...]} from a KiCad refill of
     `board_file`, or None when pcbnew is unavailable / the refill fails.
 
@@ -428,7 +504,7 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     """
     kpy = find_kicad_python()
     if kpy is None:
-        return None
+        return None, RefillStatus('no_kicad_python')
     _mk = _refill_memo_key(board_file, project_from)
     # FAILURES are memoized too (audit finding): the memo used to store only
     # successes, so a board whose refill fails re-spawned a pcbnew subprocess
@@ -436,11 +512,12 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     # learn the same "no" repeatedly. Keyed on content like the success path,
     # so the next edit to the board retries for real.
     if _mk is not None and _mk in _REFILL_FAILED:
-        return None
+        return None, RefillStatus('memoised_failure')
     if _mk is not None and _mk in _REFILL_MEMO:
         import copy as _copy
-        return _copy.deepcopy(_REFILL_MEMO[_mk])
+        return _copy.deepcopy(_REFILL_MEMO[_mk]), RefillStatus('ok', 'memo hit')
     tmpdir = tempfile.mkdtemp(prefix='exact_fill_')
+    _t0 = time.monotonic()
     try:
         stem = os.path.splitext(os.path.basename(board_file))[0]
         staged = os.path.join(tmpdir, stem + '.kicad_pcb')
@@ -464,23 +541,27 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
                             os.path.dirname(os.path.abspath(__file__))],
                            capture_output=True, text=True, timeout=timeout)
         if 'REFILL_OK' not in (r.stdout or '') or not os.path.isfile(filled):
+            _why = (r.stderr or '').strip()[-200:]
             if verbose:
-                print(f"  (exact-fill refill failed: rc={r.returncode} "
-                      f"{(r.stderr or '').strip()[-200:]})")
+                print(f"  (exact-fill refill failed: rc={r.returncode} {_why})")
             if _mk is not None:
                 if len(_REFILL_FAILED) >= _REFILL_MEMO_CAP:
                     _REFILL_FAILED.clear()
                 _REFILL_FAILED.add(_mk)
-            return None
+            return None, RefillStatus('refill_failed',
+                                      f'rc={r.returncode} {_why}'.strip(),
+                                      time.monotonic() - _t0)
         with open(filled, 'r', encoding='utf-8') as f:
             text = f.read()
     except subprocess.TimeoutExpired:
         # A TIMEOUT is not remembered as a failure: it is a budget verdict,
         # not a property of the board, and a later step may legitimately have
         # more headroom. (The kicad-cli twin has _ORACLE_TIMED_OUT for that.)
+        _dt = time.monotonic() - _t0
         if verbose:
-            print("  (exact-fill refill timed out)")
-        return None
+            print(f"  (exact-fill refill timed out after {_dt:.0f}s)")
+        return None, RefillStatus('timeout',
+                                  f'limit {timeout}s', _dt)
     except Exception as e:
         if verbose:
             print(f"  (exact-fill unavailable: {e})")
@@ -488,7 +569,8 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
             if len(_REFILL_FAILED) >= _REFILL_MEMO_CAP:
                 _REFILL_FAILED.clear()
             _REFILL_FAILED.add(_mk)
-        return None
+        return None, RefillStatus('error', f'{type(e).__name__}: {e}',
+                                  time.monotonic() - _t0)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     _out = parse_filled_islands(text)
@@ -497,7 +579,13 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
             _REFILL_MEMO.pop(next(iter(_REFILL_MEMO)))
         import copy as _copy
         _REFILL_MEMO[_mk] = _copy.deepcopy(_out)
-    return _out
+    # An EMPTY dict is a sixth outcome that several callers treat exactly like
+    # None (they test truthiness, not `is None`), so it gets its own detail
+    # rather than reading as an ordinary success: the refill ran and KiCad
+    # poured nothing, which is a real answer about the board.
+    return _out, RefillStatus(
+        'ok', '' if _out else 'the refill ran and produced no islands',
+        time.monotonic() - _t0)
 
 
 def parse_filled_islands(text: str
