@@ -445,6 +445,17 @@ class Footprint:
     # (#481); None for a reference-less footprint or an unparseable node.
     # APPENDED (never mid-insert): positional Footprint(...) constructions
     # exist across the tree and a mid-list field would silently shift them.
+    owns_edge_cuts: bool = False    # draws Edge.Cuts geometry of its own (#829)
+    owns_board_outline: bool = False
+    # #829. `owns_edge_cuts` is the FACT (this footprint's pose transforms a
+    # piece of Edge.Cuts); `owns_board_outline` is the DECISION that follows
+    # from it -- True only when that geometry lies outside every ring the
+    # board-level Edge.Cuts forms, i.e. it IS part of the board boundary.
+    # A milled relief or a window parented to a part so it travels with the
+    # part (crkbd's 184 per-LED windows; #628's owned rings) is
+    # owns_edge_cuts=True, owns_board_outline=False, and stays movable.
+    # Movers must gate on `owns_board_outline`; see kicad_parser.
+    # footprint_outline_owners. Also APPENDED, for the reason above.
 
 
 @dataclass
@@ -1433,6 +1444,32 @@ def _mask_pad_primitives(content: str) -> str:
     return ''.join(out)
 
 
+def _footprint_reference(fp_text: str):
+    """`(reference, came_from_a_property_node, the_match_or_None)`.
+
+    The match itself is returned because `_parse_ref_label` needs its offset to
+    scope the Reference sub-node (#481); returning only the string quietly
+    broke that call site the first time this was factored out.
+
+    Factored out of `extract_footprints_and_pads` so the #829 owner scan keys
+    footprints exactly the way the footprints dict does. Three spellings, and
+    getting any of them wrong is a silent collapse rather than an error: KiCad
+    8+ `(property "Reference" "R1")`, KiCad 6/7 `(fp_text reference "R1")`
+    (issue #78 -- without it every 6/7 footprint became "?" and the whole board
+    parsed as ONE footprint), and a reference-less footprint keyed by uuid
+    (thunderscope's 86 NPTH drill dots).
+    """
+    ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+    ref_is_property = ref_match is not None
+    if not ref_match:
+        ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
+    if ref_match:
+        return ref_match.group(1), ref_is_property, ref_match
+    uid_match = re.search(r'\(uuid\s+"([^"]+)"', fp_text)
+    return (("#" + uid_match.group(1) if uid_match else "?"),
+            ref_is_property, None)
+
+
 def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
     """GLOBAL points of footprint-embedded Edge.Cuts shapes (fp_line/fp_rect/
     fp_arc/fp_circle/fp_poly), transformed by each footprint's (at x y rot).
@@ -1442,15 +1479,35 @@ def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
     board-level gr_* scan alone reports no bounds, which silently disables
     the routing edge keep-out. KiCad's own edges bounding box includes
     footprint shapes, so these points belong in board_bounds."""
-    pts: List[Tuple[float, float]] = []
+    return [p for pts in _footprint_edge_points_by_ref(content).values()
+            for p in pts]
+
+
+def _footprint_edge_points_by_ref(
+        content: str) -> Dict[str, List[Tuple[float, float]]]:
+    """The SAME scan as `_footprint_edge_points`, keyed by owning ref (#829).
+
+    The scan always had the reference in hand and threw it away, so nothing
+    downstream could ask "which footprint owns this piece of the outline?" --
+    and the placement movable set, gated on pads alone, would happily move it.
+    One scan and one predicate feed both callers deliberately: the tree already
+    carries FOUR disagreeing answers to "which fp shapes are Edge.Cuts
+    geometry" (this scan, `_collect_footprint_edge_segments`, and the two
+    pcbnew mirrors, whose class filters differ), and a fifth written by hand
+    would drift from all of them.
+
+    A footprint appears here only if it contributed at least one point.
+    """
+    owners: Dict[str, List[Tuple[float, float]]] = {}
     if '"Edge.Cuts"' not in content:
-        return pts
+        return owners
     for m in re.finditer(r'\(footprint\s+"', content):
         start = m.start()
         end = find_matching_paren(content, start)
         fp_text = content[start:end]
         if '"Edge.Cuts"' not in fp_text:
             continue
+        pts: List[Tuple[float, float]] = []
         at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
         if not at_match:
             continue
@@ -1503,7 +1560,95 @@ def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
             for xm in re.finditer(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', poly_text):
                 pts.append(local_to_global(fx, fy, frot,
                                            float(xm.group(1)), float(xm.group(2))))
-    return pts
+        if pts:
+            owners.setdefault(_footprint_reference(fp_text)[0], []).extend(pts)
+    return owners
+
+
+# #829: tolerance for "does this point extend the board?". A point on the
+# board-level boundary is CARRIED, not structural -- a shape flush with the
+# edge did not move the edge.
+_OUTLINE_EPS = 1e-6
+
+
+def _mask_footprint_blocks(content: str) -> str:
+    """`content` with every `(footprint ...)` block blanked to spaces.
+
+    Length-preserving, so any offset computed against the masked text still
+    lines up with the original. Used to ask what the board's Edge.Cuts would
+    say if no footprint contributed any.
+    """
+    out = list(content)
+    for m in re.finditer(r'\(footprint\s+"', content):
+        end = find_matching_paren(content, m.start())
+        for i in range(m.start(), end):
+            if out[i] != '\n':
+                out[i] = ' '
+    return ''.join(out)
+
+
+def footprint_outline_owners(content: str) -> Dict[str, bool]:
+    """`{ref: owns_board_outline}` for every footprint that draws Edge.Cuts.
+
+    #829. A footprint's pose transforms its Edge.Cuts shapes, so moving one
+    moves board geometry. But that is only a DEFECT for some of them, and the
+    split is what this function computes:
+
+    * **Structural** (`True`) -- the shape lies outside every ring the
+      BOARD-LEVEL Edge.Cuts forms, so it is part of the board's own boundary.
+      Moving it resizes the board, which is never a placement decision. A board
+      whose outline lives entirely in footprints (Adiuvo's rp2350_fpga_eensy)
+      has no board-level rings at all, so every owner is structural.
+    * **Carried** (`False`) -- the shape sits inside the board outline: a
+      milled relief or a window the designer PARENTED to the part precisely so
+      it would travel with it. crkbd draws 184 per-LED cutout windows this way
+      (see `_collect_edge_cuts_segments`), and #628 measured that freezing such
+      a part costs it every legal pose it has (run 20's SW2: 0 of 14884). These
+      must keep moving.
+
+    Deciding by containment rather than by "does it own Edge.Cuts at all" is
+    the whole point: parentage is the designer's statement about which of the
+    two a shape is, and the first draft of this fix read it backwards.
+
+    Costs nothing on a board with no footprint-embedded Edge.Cuts (which is
+    every board in this repo's corpus): the owner scan short-circuits and the
+    second contour pass never runs.
+    """
+    owners = _footprint_edge_points_by_ref(content)
+    if not owners:
+        return {}
+    board_only = _mask_footprint_blocks(content)
+    board_bounds = extract_board_bounds(board_only)
+    if board_bounds is None:
+        # The board-level Edge.Cuts draws nothing at all, so the footprints ARE
+        # the outline (rp2350_fpga_eensy). Every owner is structural.
+        return {ref: True for ref in owners}
+
+    outers, _cutouts = extract_board_contours(board_only)
+    rings = [r for r in outers if len(r) >= 3]
+
+    if rings:
+        def inside(px, py):
+            return any(_pt_in_ring(px, py, r) for r in rings)
+    else:
+        # Bounds but no CLOSED ring. This is not an exotic case and it is not
+        # the same as "no outline": splitflap_driver has a perfectly good
+        # board-level outline whose segments never chain into a closed
+        # contour, so `extract_board_contours` returns 0 outers while
+        # `extract_board_bounds` returns the right rectangle. Treating that as
+        # "the footprints are the outline" marked a window drawn under a part's
+        # own body as structural -- the exact misclassification this function
+        # exists to avoid. Fall back to the board-level bounding box, which is
+        # weaker than a ring test (it cannot see a concave notch) but is right
+        # about the question being asked: does this geometry extend the board?
+        x0, y0, x1, y1 = board_bounds
+
+        def inside(px, py):
+            return (x0 - _OUTLINE_EPS <= px <= x1 + _OUTLINE_EPS
+                    and y0 - _OUTLINE_EPS <= py <= y1 + _OUTLINE_EPS)
+
+    return {ref: not all(inside(px, py) for px, py in pts)
+            for ref, pts in owners.items()}
 
 
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
@@ -2459,21 +2604,13 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         # 6/7 use (fp_text reference "R1" ...). Without the fallback every 6/7
         # footprint got reference "?" and collapsed onto one dict key, so a
         # whole board parsed as a single footprint (issue #78).
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        ref_is_property = ref_match is not None
-        if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
-        if ref_match:
-            reference = ref_match.group(1)
-        else:
-            # Reference-less footprint (e.g. a locked NPTH drill dot). The
-            # footprints dict is keyed by reference, so a shared '' / '?' key
-            # would collapse them all onto one entry and lose the rest's pads
-            # (86 NPTH holes on thunderscope). Key by the footprint's uuid --
-            # build_pcb_data_from_board synthesizes the same key, so the GUI
-            # and file models stay comparable.
-            uid_match = re.search(r'\(uuid\s+"([^"]+)"', fp_text)
-            reference = "#" + uid_match.group(1) if uid_match else "?"
+        # Reference-less footprints key by uuid, because the footprints dict is
+        # keyed by reference and a shared '' / '?' key would collapse them all
+        # onto one entry and lose the rest's pads (86 NPTH holes on
+        # thunderscope). build_pcb_data_from_board synthesizes the same key, so
+        # the GUI and file models stay comparable. Shared with the #829 owner
+        # scan via `_footprint_reference` so the two cannot key differently.
+        reference, ref_is_property, ref_match = _footprint_reference(fp_text)
 
         # Extract value (component part number or value)
         value_match = re.search(r'\(property\s+"Value"\s+"([^"]+)"', fp_text)
@@ -3771,6 +3908,15 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     board_info = extract_layers(content)
     nets, name_to_id = extract_nets(content, kicad_version)
     footprints, pads_by_net = extract_footprints_and_pads(content, nets, name_to_id)
+    # #829: which footprints draw Edge.Cuts, and which of those are drawing the
+    # BOARD's boundary rather than a relief that travels with the part. Stamped
+    # here because it needs the footprints and the board-level contours
+    # together, and neither extractor sees both.
+    for _ref, _structural in footprint_outline_owners(content).items():
+        _fp = footprints.get(_ref)
+        if _fp is not None:
+            _fp.owns_edge_cuts = True
+            _fp.owns_board_outline = _structural
     vias = extract_vias(content, name_to_id)
     segments = extract_segments(content, name_to_id)
     zones = extract_zones(content, name_to_id)
