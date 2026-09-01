@@ -1,111 +1,64 @@
-31004f43 2026-08-30 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
-Audit 722ea1cc..31004f43 on main. ONE REAL GAP FOUND AND FIXED -- the first time
-this ledger has caught a live routing break rather than confirming its absence.
-Twelve gates green after the fix.
+166255d0 2026-09-01 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit 31004f43..166255d0 on main (129 commits, the whole v0.21.4..v0.21.5
+range). NO GAP FOUND. Six gates green, run live -- not carried.
 
-THE GAP: a pure-Python change inside a SHARED engine function still split the
-fronts, because the fronts run DIFFERENT INTERPRETERS.
+THE SURFACE, checked mechanically, not assumed:
 
-  CLI python    3.14.0   PEP 649 -- annotations lazy, never evaluated
-  KiCad python  3.9.13   annotations evaluated at `def` time
-
-f2100875 ported the #666 guard's helpers from bus622-take2's bus_terminal.py and
-carried their `pcb_data: PCBData` annotations without the import that backed
-them (net_rescue imports Segment/Via lazily INSIDE a function, to dodge a
-cycle). On 3.14 the annotation is never evaluated. On KiCad's 3.9 it raises
-NameError at import, so `import net_rescue` failed, the GUI's step 1 routed ZERO
-copper, and the plan executor still reported the step "done" -- no traceback
-reached the harness.
-
-  test_gui_engine_parity   before  CLI 1267 segs/128 vias  GUI 3 segs/0 vias
-                           after   CLI 1267/128            GUI 1267/128, IDENTICAL
-
-Fixed in 66e60fb2 with STRING annotations (a top-level import could reintroduce
-the cycle the lazy import avoids), verified importable under both interpreters.
-
-HOW IT WAS FOUND, because the method matters more than the fix: the divergence
-was bisected across 16 commits with 9 gate runs, INCLUDING a same-SHA
-reproducibility control (bab42184 PARITY twice, f2100875 DIVERGENT twice) before
-the split was trusted. The decisive evidence was never in the source --
-gui_step01.kicad_pcb came out byte-identical to the input board (322706 bytes)
-and the guard printed ZERO declines, so it had RAISED, not fired. Reproducing
-_leg_clear against a build_pcb_data_from_board PCBData under KiCad's python
-surfaced the NameError in one run.
-
-TWO STANDING RULES THIS ADDS:
-  * `import <module>` passing on the CLI proves NOTHING about the GUI. That
-    exact check was run when porting and the port was called sound; it ran on
-    3.14, where the defect cannot manifest. Import-time behaviour must be
-    checked under KiCad's python.
-  * "It is in a shared engine function, so both fronts get it for free" is NOT
-    a parity argument. It was the reasoning that shipped this. Shared code runs
-    on two interpreters; run the gate.
-
-THE SURFACE. 90 commits since 722ea1cc, ~16k lines, in three groups: this
-session's routing/obstacle work (#805/#671/#309 + three bus622-take2 ports), the
-placement PRs #802 (#553 diagnosis target-select) and #804 (#554 bounded
-relocation), and #801. Checked mechanically, not assumed:
-
-  * NEW CLI FLAGS: seven, ALL placement (--target-select, --relocate,
-    --relocate-block, --relocate-refs, --relocate-max-corridor,
-    --reseat-min-gain, --diagnosis-top-k). Zero routing flags.
-  * ENGINE KWARG at a front-end boundary: NONE. All five routing boundaries
-    byte-unchanged -- batch_route 99, batch_route_diff_pairs 88, create_plane
-    46, generate_bga_fanout 27, generate_qfn_fanout 16. (The AST scan first
-    returned None for both fanout entries -- they live in bga_fanout/__init__.py,
-    not bga_fanout.py -- and was re-run until it FOUND all five before its "no
-    change" was believed. Same non-vacuity trap the last entry recorded.)
-  * DEFAULT DRIFT: ZERO. routing_defaults.py is untouched in the whole range.
+  * NEW CLI FLAGS: none on any routing CLI. Every add_argument in the range
+    lands in test harnesses (mutation batteries, #788/#789 study tools) or
+    placement analysis (check_floorplan --require-brief / --brief / --no-brief,
+    board_brief). The #711 design brief reaches the placement CLIs through the
+    --intent they already take, BY DESIGN (it compiles into the intent rather
+    than adding a flag), so there is nothing to mirror in placement_gui.
+  * ENGINE KWARG at a front-end boundary: NONE. No routing entry-point
+    signature changed (batch_route / batch_route_diff_pairs / create_plane /
+    generate_bga_fanout / generate_qfn_fanout).
+  * DEFAULT DRIFT: ZERO. routing_defaults.py diff is empty over the range.
   * NEW results_data KEY: none.
-  * NEW DIALOG CONTROL: none -- kicad_routing_plugin/ has ZERO changed lines.
-  * CLASS-2 POST-PASS DRIFT: none. test_cli_postpass_coverage reads 8 / 15 / 1 /
-    0 / 0 / 0, identical to the previous entry.
+  * NEW DIALOG CONTROL: one -- fanout_bga_cap_default_via_size (#742,
+    --default-via-size gets its own key instead of riding via_size). Present in
+    BOTH settings_persistence paths (save + restore); settings roundtrip gate
+    re-run green at 190 keys.
+  * NEW POST-PASS: #811 merge_collinear_segments. Placed INSIDE the shared
+    run_post_route_cleanup (pass 11, after joint close, moves no copper), so
+    both fronts get it; test_cli_postpass_coverage re-run green, counts
+    unchanged (8 registered / 15 active / 1 acknowledged CLI-only / 0 / 0).
+  * NEW ENV KNOB: one, KICAD_MERGE_COLLINEAR (default ON), read in the shared
+    cleanup pipeline, not a CLI main(). Class-free, nothing to mirror.
+  * WRITER: #817's per-block strip-matcher dialect fix is inside kicad_writer,
+    shared by both fronts.
+  * ROUTING BEHAVIOUR CHANGES (#815/#816/#818 position-independent keep-out
+    boundaries, capsule-span perf, #811): all inside shared engine/Rust code.
+    Per the standing rule "shared code is NOT a parity argument", the engine
+    parity gate was RUN, not reasoned about (below).
 
-SIX NEW ENV KNOBS, ALL CLASS-FREE, each resolved to its enclosing function:
-KICAD_POCKET_RIP (single_ended_loop) and KICAD_VICTIM_RESTORE (reroute_loop) are
-opt-in ports awaiting a corpus arm; KICAD_CELL_WATCH, KICAD_CELL_WATCH_GRID
-(obstacle_cache), KICAD_VIA_BIRTH_WATCH (kicad_parser) and KICAD_VIA_REUSE_DEBUG
-(single_ended_routing) are debug instruments. Not one is read in a CLI main().
-
-KNOWN GAP, RECORDED NOT FIXED: #802 and #804 add --target-select diagnosis and
---relocate as CLI-only; placement_gui.py offers neither, and FLAG_PARAMS is
-routing-only so they were never expected there. By the rule of thumb that is
-Class-1 drift. Left alone deliberately: both are opt-in experiments and #804's
-own PR states its routed A/B does not support the feature, so surfacing them in
-the GUI would expose features their authors say are not earned yet.
-
-GATES, on a tree verified clean, with KiCad python 10.0.0-103 + wx 4.2.2a1
-probed live first (the ledger's standing instruction -- it passed again, so "no
-wx in this session" would once more have been false):
+GATES, on a clean tree, KiCad python 10.0.0-103 + wx 4.2.2a1 probed live first
+(the standing instruction; it passed, so "no wx in this session" would again
+have been false):
 
   test_manifest_plan_parity      flags survive into plan steps; placement-block
                                  flags OK, placement tools refused loudly
-  test_cli_postpass_coverage     8 registered, 15 in active CLI use, 1 CLI-only
-                                 acknowledged, 0 unreachable, 0 failures
-  test_live_drc_floors_gated     all 5 update_live_drc_floors sites gated (#693)
-  test_settings_roundtrip        save / restore / legacy / re-save clean
+  test_cli_postpass_coverage     8 / 15 / 1 / 0 unreachable / 0 failures
+  test_settings_roundtrip        save / restore / legacy / re-save clean, 190
+                                 keys (covers the #742 control)
   test_fanout_rotated_gui        10/10 rotated-QFN parity checks
-  test_ui_thread_save            #688 guard: times out rather than hanging
-  test_751_via_protection_readback  as-installed + blind wrapper, neg control
-  test_746_cap_summary_gui       cap summary delegates, unchanged where nothing
-                                 changed
-  test_gui_engine_parity         PARITY; copper sets IDENTICAL (1267/1267 segs,
-                                 128/128 vias) -- AFTER 66e60fb2; DIVERGENT
-                                 before it
+  test_rotated_footprint_frame   28/28 invariants
+  test_gui_engine_parity         PARITY; copper sets IDENTICAL (1257/1257 segs,
+                                 128/128 vias). NOTE the count moved from the
+                                 last audit's 1267/128 -- expected, this range
+                                 changes routing (#815/#816/#818 tie epsilon,
+                                 #811 collinear merge shrinks the segment
+                                 count); what the gate asserts is that BOTH
+                                 fronts moved together, and they did.
 
-CARRIED FORWARD UNCHANGED: test_gui_engine_parity is still vacuous for #549/#498
-(its board has no sibling .kicad_dru) and still blind to diff-pair/impedance
-params (its plan is signal+plane). A copper-level fanout-clearance parity gate
-still does not exist. Nothing in this range addresses any of them.
+CORPUS: sets 1-5 replay at 6eb2a450 (75 boards, 74/75 chains complete, mean
+completion 98.71%, 31 real DRC, 1 failed) graded fine against the recorded
+baselines. The 85 commits after 6eb2a450 are the placement PRs #819..#824,
+whose py_router/ touches were verified behaviour-identical (fab_tiers kernel
+extraction with the same arithmetic, sibling-list addition) -- so the sweep
+screens this HEAD's routing.
 
-NOT COVERED BY THIS AUDIT: none of the routing changes in this range has a
-corpus A/B yet. Three opt-in arms are owed (KICAD_POCKET_RIP,
-KICAD_VICTIM_RESTORE, and the fix stack itself), each separately, because one
-combined run cannot attribute a regression.
-
-ADDENDUM (31004f43): 31004f43 flipped KICAD_VICTIM_RESTORE to default ON after the
-sets 1-5 corpus A/B. That is a py_router/ change AND a routing-behaviour change,
-so the engine parity gate was RE-RUN rather than carried: PARITY, copper sets
-IDENTICAL (1267/1267 segs, 128/128 vias). The knob is read in reroute_loop -- a
-shared engine module, not a CLI main() -- so it stays class-free with nothing to
-mirror on the GUI side. No other parity surface moved.
+CARRIED FORWARD UNCHANGED: test_gui_engine_parity is still vacuous for
+#549/#498 (no sibling .kicad_dru on its board) and still blind to
+diff-pair/impedance params (signal+plane plan). A copper-level fanout-clearance
+parity gate still does not exist. Nothing in this range addresses them.
