@@ -2446,9 +2446,11 @@ _FP_START_RE = re.compile(r'\(footprint\s+"')
 #: Separator between a duplicated reference and its file-order ordinal (#726).
 #: `~` is NOT an fnmatch metacharacter (those are `*?[]`), so `--lock 'TP4*'`
 #: still covers both twins and no existing literal reference is newly shadowed:
-#: measured over the tracked corpus, ZERO of 545 distinct references contain
-#: `~` or `#`. `#` is not free -- it is already the reference-less prefix and
-#: `placement/labels.py` keys its skip off `ref.startswith('#')`.
+#: measured over the tracked corpus, the parser produced 547 distinct keys
+#: before this change, and ZERO of them contain `~`. `#` is NOT free, and the
+#: same measurement says why -- 3 of those 547 begin with it, because it is
+#: already the reference-less key prefix and `placement/labels.py` keys its
+#: skip off `ref.startswith('#')`.
 #:
 #: A SUFFIX rather than a prefix because `placement/part_class._PREFIX_RE` is
 #: `^([A-Za-z]+)`, which a prefix destroys. Measured honestly, that costs
@@ -2560,12 +2562,24 @@ def iter_footprint_blocks(content: str):
     `end` comes from the shipped string-aware `find_matching_paren`, so a lone
     paren inside a property value (an MPN like "TCR2EF115,LM(CT") cannot run
     the scan into the next footprint (#113).
+
+    A match that starts INSIDE the block already accepted is skipped. The
+    block-END scan is string-aware and the block-START scan is a plain regex,
+    so a property value containing the literal `(footprint "` matches -- and
+    where that used to produce a phantom entry that last-wins quietly
+    swallowed, it would now be a first-class key that SHIFTS every later
+    ordinal and splits the two parse paths. Contrived, and #113 exists because
+    parens in property values are not.
     """
     spans = []
     raw = []
+    reach = -1
     for m in _FP_START_RE.finditer(content):
         start = m.start()
+        if start < reach:
+            continue
         end = find_matching_paren(content, start)
+        reach = end
         text = content[start:end]
         spans.append((start, end, text))
         raw.append(footprint_raw_reference(text))
@@ -3946,9 +3960,11 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     footprints, pads_by_net = extract_footprints_and_pads(
         content, nets, name_to_id, duplicates=_dups)
     if _dups:
-        # ON STDERR, not stdout: six shipped tools emit bare JSON on stdout
-        # (`--json-out`), where a WARNING line in front is a JSONDecodeError at
-        # char 0. Said at all because a duplicated reference is a schematic
+        # ON STDERR, not stdout: 9 shipped call sites across 4 files emit bare
+        # JSON on stdout (`route.py`, `converge.py`, `check_reachability.py`,
+        # `krt_capabilities.py`), where a WARNING line in front is a
+        # JSONDecodeError at char 0. Said at all because a duplicated
+        # reference is a schematic
         # fact the operator has to decide about -- the parser keeps every
         # block, but two parts answering to one name is still something only
         # the human can resolve.
@@ -5591,15 +5607,31 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
     # #726: name the duplicate-reference disagreement DIRECTLY. Both paths
     # derive their keys with `disambiguate_references` over their own ordered
     # footprint list, so a KiCad whose `GetFootprints()` no longer iterates in
-    # file order shows up here as a `~n`-shaped key diff plus a pile of
-    # position mismatches -- true, but it reads as a parser bug rather than as
-    # the ordering change it is. Say which it is.
+    # file order shows up below as a pile of position mismatches -- true, but it
+    # reads as a parser bug rather than as the ordering change it is.
+    #
+    # Compared as a key -> uuid MAP, not as `duplicate_references`. That dict is
+    # order-INVARIANT -- a permutation of the twins leaves it byte-identical --
+    # so the obvious version of this check cannot fire on the one thing it
+    # exists to name. (Measured: swapping two twins produced 8 footprint diffs
+    # and 0 duplicate-reference lines.)
     if from_board.duplicate_references != from_file.duplicate_references:
         diffs.append(
             f"Duplicate references disagree: board={from_board.duplicate_references} "
-            f"file={from_file.duplicate_references}. The two parse paths ordered "
-            f"the footprints differently, so their ordinal suffixes do not "
-            f"match (see disambiguate_references).")
+            f"file={from_file.duplicate_references}")
+    _dup_names = set(from_board.duplicate_references) | set(from_file.duplicate_references)
+    if _dup_names:
+        def _twin_uuids(pcb):
+            return {k: getattr(f, 'uuid', '') for k, f in pcb.footprints.items()
+                    if k.split(DUP_REF_SEP)[0] in _dup_names}
+        bu, fu = _twin_uuids(from_board), _twin_uuids(from_file)
+        moved = sorted(k for k in set(bu) & set(fu) if bu[k] != fu[k])
+        if moved:
+            diffs.append(
+                f"Duplicate-reference ORDINALS name different blocks: {moved[:6]}. "
+                f"The two parse paths enumerated the footprints in different "
+                f"orders, so their `{DUP_REF_SEP}n` suffixes landed on different "
+                f"parts (see disambiguate_references).")
 
     board_refs = set(from_board.footprints.keys())
     file_refs = set(from_file.footprints.keys())

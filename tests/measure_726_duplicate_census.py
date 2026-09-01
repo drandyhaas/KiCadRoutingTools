@@ -30,6 +30,13 @@ Four tables:
   D  collision surface -- the proposed key for every duplicate block, and
      whether it survives `part_class`'s `^([A-Za-z]+)` prefix classifier.
 
+Plus an agreement check: this script carries its own copies of the block
+scan, the raw-reference rule, the uuid read and the key scheme, so that the
+BEFORE tree -- which has no shipped resolver -- can be measured at all. Where
+the shipped functions DO exist they are compared against the local ones over
+the whole corpus, and the result is printed. A measurement that quietly uses
+its own definition of the thing it measures proves nothing.
+
 The board set comes from `run_utils.corpus_boards()` (git ls-files), never a
 directory glob: `kicad_files/` accumulates gitignored GENERATED boards, so a
 glob returns 22 entries on a clean clone and 33+ on a worn one.
@@ -342,10 +349,18 @@ def iter_blocks_with_keys(path):
 def disambiguate(refs):
     """The proposed key scheme, standalone -- file-order ordinal suffix.
 
-    This is a MEASUREMENT copy so the table can be produced before the engine
-    change exists. Phase 1 puts the real one in `kicad_parser`; when it lands,
-    this function is deleted and the import replaces it (a second permanent
-    implementation is exactly the fork the verifier is told to grep for).
+    A MEASUREMENT copy, kept DELIBERATELY and not a fork. An earlier draft of
+    this docstring promised to delete it once the engine version landed; that
+    was wrong, and a fact-check caught the promise still standing. This script
+    exists to compare a BEFORE tree against an AFTER one, and a version that
+    imports `kicad_parser.disambiguate_references` cannot run on the before
+    tree at all -- the symbol is not there. The table would then only ever be
+    measurable on the side that already has the fix.
+
+    What a fork would cost is real, so `agreement_check()` runs on every
+    invocation: where the shipped functions exist, these four helpers are
+    compared against them over the whole tracked corpus and the result is
+    printed. Divergence is reported, not assumed away.
     """
     taken = set(refs)
     issued = set()
@@ -431,6 +446,42 @@ def table_c(paths, want):
     return True
 
 
+def agreement_check(paths):
+    """Do this script's four local helpers agree with the shipped ones?
+
+    Absent on a pre-fix tree, which is the whole reason the local copies exist
+    (see `disambiguate`). Where they are present, disagreement is a finding
+    about one side or the other and is printed either way -- a measurement that
+    quietly uses its own definition of the thing it is measuring proves
+    nothing.
+    """
+    try:
+        from kicad_parser import (disambiguate_references,
+                                  footprint_raw_reference, footprint_uuid,
+                                  iter_footprint_blocks)
+    except ImportError as exc:
+        print('\n== helper agreement: NOT CHECKED (%s) ==' % exc)
+        print('   This tree has no shipped resolver, so the local copies are '
+              'the only implementation. Expected on a pre-fix tree.')
+        return None
+    bad = []
+    for p in paths:
+        content = _read(p)
+        mine = [(s, e, raw_reference(t), fp_uuid(t))
+                for s, e, t in blocks(content)]
+        mine_keys = disambiguate([m[2] for m in mine])
+        theirs = [(s, e, r, footprint_uuid(t))
+                  for s, e, t, r, _k in iter_footprint_blocks(content)]
+        their_keys = [k for _s, _e, _t, _r, k in iter_footprint_blocks(content)]
+        if mine != theirs or mine_keys != their_keys:
+            bad.append(os.path.basename(p))
+    print('\n== helper agreement: the local copies vs the shipped resolver ==')
+    print('   %d board(s) compared (spans, raw references, uuids, keys); '
+          '%d disagreement(s)%s'
+          % (len(paths), len(bad), (': ' + ', '.join(bad)) if bad else ''))
+    return not bad
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--pcbnew', action='store_true',
@@ -449,6 +500,7 @@ def main():
     table_b(paths)
     table_d(paths)
     table_c(paths, args.pcbnew)
+    agreement_check(paths)
     return 0
 
 

@@ -55,6 +55,50 @@ SIX THINGS THIS FILE PINS, each easy to get wrong:
    handed those keys out and the writer could never act on one, so the placer
    believed it had moved a part the file disagreed about.
 
+WHAT THE BATTERY MEASURED (`python3 -X utf8 tests/mutate_726.py`, 18 rows over
+`kicad_parser.py`, `placement/writer.py`, `placement/parser.py`,
+`placement/seeder.py`, `check_assembly.py` and `gui_utils.py`):
+
+    text-path-reverts-to-last-wins                       KILLED
+    pcbnew-path-reverts-to-last-wins                     KILLED
+    only-the-text-path-disambiguates                     KILLED
+    the-ordinal-starts-at-the-wrong-block                KILLED
+    duplicate-references-counts-extras-not-occurrences   KILLED
+    the-key-is-uuid-sorted-not-file-ordered              KILLED
+    the-ordinal-can-shadow-a-real-name                   KILLED
+    the-warning-goes-to-stdout                           KILLED
+    the-key-never-reaches-pad-component_ref              KILLED
+    writer-matches-by-name-again                         KILLED
+    writer-resolves-every-duplicate-to-block-zero        KILLED
+    writer-counts-blocks-not-placements                  KILLED
+    writer-drops-an-unmatched-placement-in-silence       KILLED
+    the-label-writer-keeps-its-own-ref-lookup            KILLED
+    side-maps-keep-the-last-block                        KILLED
+    stamp_locked-locks-every-namesake                    KILLED
+    footprint-blocks-uses-the-old-formula                KILLED
+    gui-sync-matches-by-bare-reference                   KILLED
+
+    18 rows: 18 killed, 0 survived, 0 broken, 0 disagreeing with expectation
+
+The FIRST run was 16 killed and 2 survived, and both non-kills were real:
+
+  * `the-key-never-reaches-pad-component_ref` rebound the key AFTER the value
+    had been taken from it, so the row mutated nothing and could only survive.
+    A hole in the battery, not in the tests -- and one a declared expectation
+    launders, since it read as a deliberate non-kill.
+  * `gui-sync-matches-by-bare-reference` survived because NOTHING covered
+    `gui_utils.sync_footprint_positions_from_board` on a board with duplicate
+    references. `tests/gui_parity/test_footprint_position_sync.py` covers that
+    function and stays GREEN through the mutation, because it runs on a
+    61-block board with 61 distinct references -- a passing gate on a board
+    that cannot express the defect. `tests/gui_parity/test_726_gui_sync.py`
+    exists because that row said so.
+
+`--verify-anchors` checks each anchor repo-wide rather than only in its target,
+and caught three of the eighteen before the first run: `file=sys.stderr)` alone
+reaches 31 tracked files, `matched.add(key)` appears in both writers, and the
+ordinal's `while` line is also in the measurement script's copy of the scheme.
+
 `RUN_ALL_TIMEOUT` is generous because the identity-write arm writes all 22
 tracked boards; there is no chain run here.
 
