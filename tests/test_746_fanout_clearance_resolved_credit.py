@@ -202,10 +202,25 @@ FORCING = dict(max_displacement=0.0, max_displacement_cap=0.0, max_passes=1,
                via_clear_fallback=False)
 
 REAL_BOARD = os.path.join(_ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
-REAL_RESOLVED = ['C19', 'C44', 'C45', 'C67']
-REAL_VIA_RESOLVED = ['C19', 'C44', 'C45']       # C67 is the SWEEP's one credit
-REAL_LINE = ('Moved 18 cap(s); resolved 4/14 initial violations '
-             '(3 freed by via-nudge); 10 unresolved.')
+# RE-PINNED AT #708, and the reason is the point rather than a chore.
+# `FORCING` sets max_displacement=0.0 AND max_displacement_cap=0.0: the caller
+# is saying no cap may move. The old `_candidate_positions` snapped the
+# ABSOLUTE candidate, so even at a zero budget the one candidate it produced
+# was `snap(seed, grid_step)` rather than the cap's own pose -- measured, a
+# 0.054mm displacement on a real cap under a 0.0mm cap. The pass therefore
+# reported 18 caps MOVED on a board it was forbidden to move anything on, and
+# C67 -- "the SWEEP's one credit" in the old comment here -- was resolved by
+# one of those moves.
+#
+# Snapping the OFFSET makes the only candidate at a zero budget the cap's own
+# pose, so the sweep moves nothing and claims nothing. What remains is the
+# three the VIA NUDGE freed, which is the credit this file exists to check,
+# and it is unchanged. The new summary line is also self-consistent in a way
+# the old one was not: every resolution it reports is attributed to the nudge.
+REAL_RESOLVED = ['C19', 'C44', 'C45']
+REAL_VIA_RESOLVED = ['C19', 'C44', 'C45']       # and now the ONLY credits
+REAL_LINE = ('Moved 0 cap(s); resolved 3/14 initial violations '
+             '(3 freed by via-nudge); 11 unresolved.')
 REAL_LINE_BEFORE = 'Moved 18 cap(s); resolved 1/14 initial violations; 10 unresolved.'
 
 
@@ -709,13 +724,13 @@ class TestOnARealTrackedBoard(unittest.TestCase):
         # called, and every assertion below would be about nothing.
         self.assertEqual(len(self.res['via_moves']), 9)
         self.assertEqual(len(self.res['new_segments']), 17)
-        self.assertEqual(len(self.res['placements']), 18)
+        self.assertEqual(len(self.res['placements']), 0)
 
     def test_three_real_caps_were_freed_by_the_nudge_and_credited_nowhere(self):
         self.assertEqual(_summary(self.out), REAL_LINE)
         self.assertEqual(self.res['resolved'], REAL_RESOLVED)
         self.assertEqual(self.res['via_resolved'], REAL_VIA_RESOLVED)
-        self.assertEqual(len(self.res['unresolved']), 10)
+        self.assertEqual(len(self.res['unresolved']), 11)
     # MUTATION: drop the `resolved` half of the refresh -> the line reverts to
     # REAL_LINE_BEFORE ("resolved 1/14"), losing C19, C44 and C45.
 

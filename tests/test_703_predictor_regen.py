@@ -134,17 +134,29 @@ EXPECTED = {
     # miniature: this placement scores 23 crossings against the authored
     # board's 53 -- the best on the slate -- and routes to blocking 3 where the
     # authored board routes to 0.
+    # RE-RECORDED for #708 (the seed-relative candidate snap). This row is the
+    # detector the header describes -- "a change to the placement engine ...
+    # silently moving the numbers the study measured" -- and it fired, which is
+    # it working. The quench now offers candidates on the board's own lattice,
+    # so this candidate's poses genuinely differ; `poses_sha256`, the four
+    # geometry predictors and the routed `quality` moved with them, and the
+    # values below are from the run, reproduced twice.
+    #
+    # What did NOT move, and is why the commentary above still stands:
+    # `truth.headline` is still 3 and `predictors.crossings` is still 23. The
+    # routed board is in fact slightly better -- vias 28 -> 23, copper
+    # 299.93 -> 263.91mm, segments 231 -> 203 -- at the same blocking.
     'esp_prog:portfolio-1': dict(
-        poses_sha256='4c299873cd66c843dc6b27fcadf99c9782a7e7e1a3b51328a5b5cee9ca6593d8',
+        poses_sha256='aa84f6b468eae8f04ef72cc2ff02d4e0eead818463289e7328bce162f9dd3364',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=23.8,
+        seconds=9.5,
         truth={'headline': 3,
-               'quality': {'vias': 28, 'copper_mm': 299.93, 'segments': 231}},
+               'quality': {'vias': 23, 'copper_mm': 263.91, 'segments': 203}},
         predictors={
-            'crossings': 23, 'hpwl': 236.74883999999992,
-            'halo': 113.8065780241933, 'overlap_area': 1.0,
+            'crossings': 23, 'hpwl': 236.44943999999998,
+            'halo': 114.29726291832301, 'overlap_area': 1.0,
             'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 11.574407139199987, 'total': 582.4219077763819,
+            'edge': 11.327191579199937, 'total': 582.4363161985618,
             'oob_count': 0,
         }),
     # A SECOND board, so a change that only moves one board's numbers cannot

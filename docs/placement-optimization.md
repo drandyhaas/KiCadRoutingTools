@@ -805,7 +805,11 @@ is implemented, the rest are documented targets.
    snapping a ring to the placement grid moves a point by up to half a cell per
    axis, so slots generated *at* the radius land outside it — the pool shrinks
    by the snap diagonal, or the by-construction claim is false at exactly the
-   outer ring where a re-seat wants to look.
+   outer ring where a re-seat wants to look. Since #708 that snap is taken on
+   the offset **from the anchor**, not on the absolute point, so the pool
+   inherits the anchor's own phase instead of a lattice through board origin;
+   the shrink argument is unchanged, because the snap error per axis is still
+   half a cell.
 
 3. **The #411 undo-a-known-good-placement harness — BUILT.** See "What the
    #411 harness measured" below. `placement/perturb.py` manufactures the bad

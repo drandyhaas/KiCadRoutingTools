@@ -59,7 +59,12 @@ def test_metrics_out_is_populated_and_matches_total_cost():
     m = {}
     quench(parse_kicad_pcb(BOARD), pcb_file=BOARD, max_displacement=2.0,
            step=1.0, max_passes=1, metrics_out=m)
-    assert set(m) == {'before', 'after', 'legality'}, f"keys: {sorted(m)}"
+    # `board_grid` joined this set in #708. The rule the set enforces is that
+    # new NUMBERS go inside `before`/`after`, never alongside them; this key is
+    # PROVENANCE -- which lattice the run resolved and how -- in the same
+    # category as the `intent_gate` key that has always been allowed to sit at
+    # the top level. Extended deliberately, not quietly.
+    assert set(m) == {'before', 'after', 'legality', 'board_grid'},         f"keys: {sorted(m)}"
     for phase in ('before', 'after'):
         for key in ('total', 'length', 'crossings', 'halo', 'edge', 'hpwl'):
             assert key in m[phase], f"{phase} missing {key}"

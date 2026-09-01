@@ -60,6 +60,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from placement.utility import snap_to_grid
+
 # Slot lattice. Deliberately coarse: this is a RE-SEAT, choosing which side of
 # an anchor a part sits on, not a sub-grid polish -- the quench does that after.
 DEFAULT_RING_STEP_MM = 0.5
@@ -154,18 +156,48 @@ def slot_pool(state, cluster, ring_step=DEFAULT_RING_STEP_MM,
 
     Generated on rings around the anchor's relevant pins out to `radius_mm`, so
     membership in the pool IS the constraint -- there is nothing to gate and no
-    proximity term to weight. Snapped to `grid_step` and de-duplicated in a
-    deterministic order.
+    proximity term to weight. Snapped to `grid_step` FROM THE ANCHOR (#708, so
+    the pool inherits the anchor's phase rather than a lattice through board
+    origin) and de-duplicated in a deterministic order.
     """
     seen = set()
     out: List[Tuple[float, float, float]] = []
 
+    # #708: snap the OFFSET FROM THE ANCHOR, not the absolute position, and
+    # through the shared primitive rather than a second spelling of it.
+    #
+    # The phase to preserve is the ANCHOR's, not the pad's: these rings are
+    # generated around `_anchor_pin_points`, and a pad sits at its footprint
+    # origin plus a package pitch (0.5mm, 0.65mm) that is on no board lattice.
+    # The anchor's own origin is what the designer placed, so an offset that is
+    # a whole number of raster units from it lands a member on the same pitch
+    # the anchor sits on. Snapping the absolute point instead quantized to a
+    # lattice through board origin and threw that away.
+    #
+    # The RASTER, not the board's inferred lattice: like the fanout cap repair,
+    # this pool is a proximity constraint satisfied by construction, and a
+    # coarse lattice would both thin it and inflate the `snap` shrink below.
+    anchor_part = state.parts[cluster.anchor]
+    ax, ay = anchor_part.x, anchor_part.y
+
     def add(x, y, rot):
-        key = (round(x / grid_step), round(y / grid_step), round(rot, 3))
+        # The KEY counts lattice steps FROM THE ANCHOR, matching the value.
+        # Keying `round(sx / grid_step)` on the absolute pose would not be
+        # injective once the emitted pose moved to an anchor-relative lattice:
+        # when `ax / grid_step` has a fractional part of exactly 0.5, banker's
+        # rounding sends two adjacent steps to one key (round(1.5) == round(2.5)
+        # == 2) and the second slot is silently dropped. Measured on
+        # orangecrab_ext_pll U4, 325 of 3334 distinct poses lost; 327 of 3166
+        # footprint coordinates across the tracked corpus sit at a colliding
+        # phase. Invisible to a length check, because MAX_POSITIONS truncates
+        # the pool afterwards -- only the CONTENTS change, near slots being
+        # replaced by farther ones.
+        kx = round((x - ax) / grid_step)
+        ky = round((y - ay) / grid_step)
+        key = (kx, ky, round(rot, 3))
         if key not in seen:
             seen.add(key)
-            out.append((round(x / grid_step) * grid_step,
-                        round(y / grid_step) * grid_step, rot))
+            out.append((ax + kx * grid_step, ay + ky * grid_step, rot))
 
     # Snapping to the grid moves a point by up to half a cell on each axis, so
     # a ring generated AT the radius lands outside it. Shrink by the snap
@@ -446,10 +478,43 @@ def reseat_cluster(state, cluster, *, ring_step=DEFAULT_RING_STEP_MM,
     res = ReseatResult(cluster=cluster.name, moved=moved, before=before,
                        after=after, slots=len(slots), repairs=repairs)
     if after < before - EPS_IMPROVE and moved:
-        res.accepted = True
-        if apply:
+        # `after` above is a PREDICTION, and it is blind in one direction: it
+        # overrides the members' pads on the SCORED nets, but `other_aw` is
+        # built from the live board, so the move's effect on a member's
+        # UNSCORED nets is not in it. A decap on GND and one signal has its GND
+        # airwire priced at the pose it is leaving. Measured on ulx3s's
+        # tether:B0 (C60, on nets 1 `GND` and 278 `PWRBTn`, only 278 scored):
+        # predicted 1214.28, actual 1274.28. That gap is 60.0 at the fixture's
+        # `crossing_penalty=30.0`, i.e. TWO crossings, and it was invisible to
+        # the decision. So seat it and ASK, rather than predict and hope. The
+        # contract this restores is the one `test_reseat` states: acceptance is
+        # on the exact objective, re-evaluated with all members in place.
+        #
+        # try/finally because a raise between the apply and the revert would
+        # otherwise leave the moves applied -- and under `apply=False` that
+        # silently mutates a state the caller asked not to be touched.
+        prior = {m: (state.parts[m].x, state.parts[m].y, state.parts[m].rot)
+                 for m in moved}
+        keep = False
+        try:
             for m in moved:
                 state.apply_move(m, *poses[m])
+            seated = cluster_cost(state, cluster, involved=involved)
+            # `after` is ALWAYS the measured cost from here on, never the
+            # prediction, so `to_dict()['gain']` means one thing on every row
+            # that reached this branch.
+            res.after = seated
+            if seated < before - EPS_IMPROVE:
+                res.accepted = True
+                keep = apply
+            else:
+                res.reason = ('the seated cost is worse than the prediction '
+                              '(%.4f vs %.4f): the members carry nets this '
+                              'cluster does not score' % (seated, after))
+        finally:
+            if not keep:
+                for m in moved:
+                    state.apply_move(m, *prior[m])
     else:
         res.reason = ('no improvement on the exact objective'
                       if moved else 'assignment returned the incumbent')
