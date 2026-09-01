@@ -19,9 +19,21 @@ lean on; the rotation gate (`chain_rot.sh`) is the other.
 
 ## Run it
 
+Every driver writes its outputs (boards, `.kicad_pro` siblings, logs,
+plan/contract json) under `awx/tmp/` (gitignored) — a TAG containing a
+slash writes elsewhere. `awx/` itself stays scripts-only.
+
 ```bash
 bash chain_k.sh TAG 4 11 15 19 21 -- --no-plane-drop        # the chain, plan free to use every face
-DIRS=left,down bash chain_k.sh TAG 4 11 15 19 21 -- --no-plane-drop   # the A/B arm: plan restricted
+                                                            # (DIRS=left,down still exists but is no longer
+                                                            #  needed for completion: the plan prices ride length)
+bash run_ladder.sh 4 8 15 28                                # PLANNER ladder: solve -> oracle fanout -> both chain arms
+python3 plan_global.py solve --k 28 --out-prefix tmp/s28    # the three-market solver -> contract + pages + du1 ask
+python3 plan_global.py ledger PLAN.json BOARD.kicad_pcb     # via arithmetic vs routed truth (--emit-pages for the sidecar)
+python3 plan_global.py verify CONTRACT.json                 # do these asks fit the gap lattice? names each blocker
+python3 plan_global.py menus SWE,SA8                        # priced escape options per net
+python3 plan_fanout.py 28 --contract-json C.json --out B    # the obedience oracle: contract -> engine hints -> grade -> rescue
+bash run_pinpages.sh FO_BOARD OUT [K]                       # schedule-pin post-pass (dump own plan, re-braid pinned)
 bash chain_rot.sh 15 19 -- --no-plane-drop                  # the rotation gate
 bash braid_k.sh FO_BOARD TAG K                              # braid stage alone on a fanout board
 bash ladder_n.sh TAG 4 11 15 19 21                          # braid stage over the ladder (FO=prefix)
@@ -57,6 +69,58 @@ bus. Checkpoints 4 / 11 / 15 / 19 / 21 / 32 / 47 / 51.
 Grading is `grade_k.py`: `check_connected.py` scoped to the run's nets,
 whole-board `check_drc.py --clearance 0.1 --clearance-margin 0.1`, and a
 via/segment census from the parsed board. Never a program's own tally.
+
+## The global planner (2026-09-01: `plan_lattice.py` + `plan_global.py` + `plan_fanout.py`)
+
+The layer above the chain: a solver that owns all three via markets —
+U1 exit order/layer, DU1 berth, ride pages — on ONE ledger, then asks
+the fanout for the comb it chose. Three pieces:
+
+- **Gap lattice** (`plan_lattice.py`): a BGA's escape space as its gap
+  lines (0.65 pitch = 0.37 mm gaps = exactly ONE 0.1/0.1 track per gap
+  per layer). Menus by Dijkstra over (diamond × layer); a via is a
+  layer-change edge that reserves its diamond; exits are resources
+  (two teeth cannot share a boundary node+layer); foreign copper is
+  rasterized in first. Far travel is PRICED by the cells it reserves,
+  never forbidden — achievability of an ask-set is edge-disjointness.
+  Deliberately ~11% conservative vs reality (verified against the
+  physical bench comb, 25/28).
+- **Ledger** (`plan_global.py ledger`): per-net via arithmetic. Order
+  cost = 2 × a vertex cover of same-ride crossing pairs (one dive
+  covers ALL a net's conflicts — the braid's swimmers ARE its greedy
+  cover). Control comb: model-optimum 44 vs braid 48 (~8% heuristic
+  slack). All via/length trades at the router's own rate: a via = 75
+  units on the 0.1 mm grid = **7.5 mm** (`VIA_MM`, `select_moves.py`).
+- **Solver** (`plan_global.py solve`): coordinate descent over
+  (U1 exit × DU1 berth × ride) with chord-parity crossings (2-corner
+  detours around MARGIN-padded arrays — rides may not skim the
+  boundary strip that belongs to exit stubs), ride length at VIA_MM,
+  eviction seating, board-read fallback poses. Emits the contract the
+  obedience oracle (`plan_fanout.py`) executes through the engine's
+  `escape_layer_hints`/`escape_slot_hints`, plus a pages sidecar.
+
+Ladder, fully unrestricted (no DIRS, no face flags — the plan prices
+ride length so far-face berths pay their wrap; `plan_ends` judged
+objective = floor + ride_mm/VIA_MM):
+
+| K | control chain | solver arm | human |
+|---|---|---|---|
+| 4 | 4 vias | 4 (one draw: **2**) | 4 |
+| 8 | 10 | **4** | 10 |
+| 15 | 26 | **16** | — |
+| 28 | 58 (was 61 + 2 open pre-length-term) | 54 / **44 with pin post-pass** | 46 |
+
+The **44** (0 open / 0 DRC, first sub-human K28) = solver comb + free
+berth + the braid's own attempt-1 pages pinned back through the
+`.pages.json` sidecar (`run_pinpages.sh`; TWO_PAGE=1 required — the
+sidecar is silently ignored without it, which cost a whole
+false-conclusion arc). Known debts: chord frame still diverges from
+the braid's corridor orders at K28 (the ledger's pages lose to the
+braid's own, 46 vs 44); chain draws wobble on hash-order plateau
+ties, swamping one-net experiments; the K8 control regressed 6→10 on
+the length term (crossings-vs-vias units question, open); the solver
+is signal-only — power in the same search is the unbuilt half of the
+retired WES design.
 
 ## Results (2026-08-30, corridor braid, restricted-plan boards `r_fo_k*`)
 
