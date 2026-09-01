@@ -210,7 +210,7 @@ def in_rip(x, y):
     return RW[0] <= x <= RW[2] and RW[1] <= y <= RW[3]
 
 
-def strip_region(txt, token, nid, full_name):
+def strip_region(txt, token, nid, full_name, collect=None):
     out, i = [], 0
     while True:
         j = txt.find('(' + token, i)
@@ -236,6 +236,8 @@ def strip_region(txt, token, nid, full_name):
                          block)
         if hit and pts and all(in_rip(float(x), float(y))
                                for x, y in pts):
+            if collect is not None:
+                collect.append(block)
             out.append(txt[i:j].rstrip(' \t'))
             e = k + 1
             if e < len(txt) and txt[e] == '\n':
@@ -248,10 +250,12 @@ def strip_region(txt, token, nid, full_name):
 
 
 txt = open(a.base).read()
+ripped_blocks = {}
 for nm in sorted(strip_set):
     nid, net = bby[nm]
+    blocks = ripped_blocks.setdefault(nm, [])
     for token in ('segment', 'via'):
-        txt = strip_region(txt, token, nid, net.name)
+        txt = strip_region(txt, token, nid, net.name, collect=blocks)
 stripped = a.out + '.bare.tmp'
 open(stripped, 'w').write(txt)
 pcb = parse_kicad_pcb(stripped)
@@ -654,3 +658,22 @@ if not a.no_rescue:
         print('DRC after rescue: '
               + (('pairs: ' + ','.join(sorted(left)))
                  if left else 'clean among contract nets'))
+
+# ---- a ripped net that NOTHING re-laid (engine refused, rescue
+# exhausted -- K51's SDQ6) gets its bench copper BACK: only rip what
+# you re-lay, the same rule the strip scope follows. Shipped bare, the
+# net has no stub end for any downstream consumer to walk.
+pcb_f = parse_kicad_pcb(a.out)
+by_f = {n.name.split('/')[-1]: i for i, n in pcb_f.nets.items()}
+bare = [nm for nm in sorted(ripped_blocks)
+        if ripped_blocks[nm]
+        and not any(s.net_id == by_f[nm] for s in pcb_f.segments)]
+if bare:
+    out_txt = open(a.out).read()
+    j = out_txt.rfind(')')
+    ins = ''.join('\t' + b + '\n' for nm in bare
+                  for b in ripped_blocks[nm])
+    open(a.out, 'w').write(out_txt[:j] + ins + out_txt[j:])
+    print('RESTORED bench copper for net(s) nothing re-laid: '
+          + ','.join(bare))
+    ach = grade(a.out, 'engine + A* rescue + bench restore')
