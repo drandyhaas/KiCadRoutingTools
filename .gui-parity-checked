@@ -109,3 +109,61 @@ so the engine parity gate was RE-RUN rather than carried: PARITY, copper sets
 IDENTICAL (1267/1267 segs, 128/128 vias). The knob is read in reroute_loop -- a
 shared engine module, not a CLI main() -- so it stays class-free with nothing to
 mirror on the GUI side. No other parity surface moved.
+
+ADDENDUM (#713, branch fix/713-wallclock-decision-sites, base f3484551):
+THE FIRST TOKEN IS DELIBERATELY NOT MOVED. This branch audited its OWN diff, not
+the range 31004f43..f3484551, and advancing the SHA would claim an audit nobody
+ran. The ledger stays where the last full audit left it.
+
+WHY AN ENTRY AT ALL: #713 items 3 and 4 both reach GUI-only code, and the issue
+says they do not. It greps kicad_routing_plugin/ for "deadline", which is the
+wrong word. The two real surfaces:
+
+  * kicad_routing_plugin/gui_utils.py -- run_kicad_oracle_on_live_board never
+    inspected `available`, so an oracle that COULD NOT RUN was byte-identical
+    here to one that ran and found everything connected: both an empty results
+    dict, both silent. It now says the clean result is UNBACKED. This is a
+    changed line in kicad_routing_plugin/, which the previous entry could
+    record as "ZERO changed lines".
+  * py_router/kicad_parser.py _live_fill -- the GUI's exact_fill_provider. Its
+    LOUD stale-clearance warning fired only from `except`, so a refill that
+    RETURNED nothing (a 300 s timeout above all) fell through to the in-process
+    fill in silence, on the routing WORKER thread. Both arrivals now share one
+    warning function.
+
+Also GUI-relevant: py_router/kicad_oracle.py's timeout memo was a MODULE-GLOBAL
+keyed on a fill-cost signature. pcbnew is a long-lived process and the GUI
+stages each board to a fresh temp path, so that key is exactly what would have
+made one slow board poison every board opened afterwards in a session. It is
+call-scoped now.
+
+NO NEW CLI FLAG, NO NEW ENGINE KWARG, NO NEW DIALOG CONTROL, NO NEW
+results_data KEY. Two flags REMOVED (--plane-score-budget, --route-timeout),
+both on placement mains that manifest_to_plan already refuses by name, so
+FLAG_PARAMS needs no entry. No new CLI-only post-pass.
+
+GATES RUN (KiCad python 10.0.0 + wx 4.2.2 probed live first -- it passed, so
+"no wx in this session" would again have been false):
+
+  test_gui_engine_parity      PARITY; copper sets IDENTICAL
+                              (1257/1257 segs, 128/128 vias, 0 cli-only,
+                              0 gui-only)
+  test_settings_roundtrip     clean (save, restore, legacy, re-save)
+  test_ui_thread_save         PASS under KiCad python. NOTE: it SELF-SKIPS
+                              under the CLI interpreter ("no python with
+                              pcbnew + wx found"), so running it the ordinary
+                              way asserts nothing -- run it with KiCad's
+                              python explicitly.
+  test_manifest_plan_parity   OK
+  test_cli_postpass_coverage  8 / 15 / 1 / 0 / 0 / 0 -- identical to the
+                              previous entry
+  test_cli_defaults_parity    100 defaults across 6 CLIs, 0 disagreements
+  test_engine_kwarg_parity    OK (no CLI-only kwargs, no dead controls)
+
+KNOWN GAP THIS BRANCH ADDS AND DOES NOT CLOSE: py_router/ui_thread.py's
+save_board_on_ui_thread is a 120 s hang detector whose expiry returns a bare
+False a caller cannot distinguish from a wx save exception -- the shape #713
+spends five items forbidding. It is now REGISTERED in
+tests/test_713_wallclock_census.py with that weakness named, rather than left
+invisible: the census could not even see it before, because its timeout is
+passed positionally. Changing the GUI save path is its own change.
