@@ -773,7 +773,17 @@ for sweep in range(_a.num_improve):
                 cur_pages = trial
                 flips[n] = v
                 shutil.copy(TAG + '_try.kicad_pcb', TAG + '_best.kicad_pcb')
-                shutil.copy(TAG + '_try.kicad_pro', TAG + '_best.kicad_pro')
+                # a chain board always has its .kicad_pro sibling;
+                # a hand-supplied pro-less fanout board must not
+                # crash the run mid-sweep -- but the missing DRC
+                # floor is the #441 hazard, so say it loudly
+                if os.path.exists(TAG + '_try.kicad_pro'):
+                    shutil.copy(TAG + '_try.kicad_pro',
+                                TAG + '_best.kicad_pro')
+                else:
+                    print('  WARNING: no .kicad_pro sibling on the '
+                          'accepted board -- DRC floor not carried '
+                          '(#441); grade at the routed clearance')
                 best_board = TAG + '_best.kicad_pcb'
                 improved = True
                 fixed.add(n)

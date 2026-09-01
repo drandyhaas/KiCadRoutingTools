@@ -147,10 +147,16 @@ def net_connected(nid):
     def union(x, y):
         parent[find(x)] = find(y)
 
+    # pad anchors are LAYER-AWARE (audit #5, same hole as braid's
+    # net_walks): an SMD pad connects only copper on its own layer.
     anchors = []
     for i2, p in enumerate(net.pads):
+        if (p.drill or 0) > 0 or not p.layers or '*.Cu' in p.layers:
+            plays = None                   # every copper layer
+        else:
+            plays = {l for l in p.layers if l.endswith('.Cu')}
         anchors.append((('P', i2), p.global_x, p.global_y,
-                        max(p.size_x, p.size_y) / 2 + 0.02, None))
+                        max(p.size_x, p.size_y) / 2 + 0.02, plays))
     for i2, v in enumerate(pcb.vias):
         if v.net_id == nid:
             anchors.append((('V', i2), v.x, v.y, v.size / 2 + 0.02,
@@ -164,8 +170,18 @@ def net_connected(nid):
         pts.append((a2, s.start_x, s.start_y, s.layer))
         pts.append((b2, s.end_x, s.end_y, s.layer))
     for (ka, xa, ya, la) in pts:
-        for (kb, xb, yb, ra, _l) in anchors:
-            if math.hypot(xa - xb, ya - yb) <= ra:
+        for (kb, xb, yb, ra, lays) in anchors:
+            if (lays is None or la in lays) \
+                    and math.hypot(xa - xb, ya - yb) <= ra:
+                union(ka, kb)
+    # anchors union with EACH OTHER on copper overlap (via-in-pad),
+    # same as braid.net_walks -- see audit #5
+    for i3 in range(len(anchors)):
+        ka, xa, ya, ra, la = anchors[i3]
+        for j3 in range(i3 + 1, len(anchors)):
+            kb, xb, yb, rb, lb = anchors[j3]
+            if (la is None or lb is None or (la & lb)) \
+                    and math.hypot(xa - xb, ya - yb) <= ra + rb:
                 union(ka, kb)
     for i2 in range(len(pts)):
         for j2 in range(i2 + 1, len(pts)):

@@ -2227,6 +2227,13 @@ class Corridor:
                             '(path crosses foreign copper -- '
                             'engine-window bug, reproducer kept)')
                         continue
+                    hit = via_hits_foreign(ctx.pcb, nid, vias_o)
+                    if hit:
+                        ctx.pcb.segments = seg0
+                        ctx.pcb.vias = via0
+                        log(f'    econ re-lay: {nm} REJECTED '
+                            f'({hit})')
+                        continue
                     log(f'    econ re-lay: {nm} '
                         f'{len(self.out_vias[nm])} -> {len(vias_o)} '
                         'via(s)')
@@ -2490,6 +2497,55 @@ def lane_crosses_foreign(pcb, nid, new_segs):
     return False
 
 
+def via_hits_foreign(pcb, nid, new_vias):
+    """A re-laid via must not LAND ON foreign copper (audit #7 -- the
+    econ guard checked re-laid SEGMENTS against foreign crossings but
+    placed the re-laid VIAS unchecked; same belt-and-suspenders
+    rationale as lane_crosses_foreign). Contact class only -- overlap
+    plus a hair, NOT a DRC clearance pass, so legal tight spacing is
+    never refused. A via barrel spans every layer, so foreign
+    segments and pads count on ANY layer; NPTH pads count by their
+    HOLE (they have no copper)."""
+    M = 0.01
+    for v in new_vias:
+        vr = v.size / 2
+        for t in pcb.vias:
+            if t.net_id == nid or t is v:
+                continue
+            if math.hypot(t.x - v.x, t.y - v.y) < vr + t.size / 2 + M:
+                return (f'via ({v.x:.2f},{v.y:.2f}) on foreign via '
+                        f'({t.x:.2f},{t.y:.2f})')
+        for s in pcb.segments:
+            if s.net_id == nid:
+                continue
+            ax, ay, bx, by = s.start_x, s.start_y, s.end_x, s.end_y
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            t_ = 0 if L2 == 0 else max(0.0, min(1.0, (
+                (v.x - ax) * dx + (v.y - ay) * dy) / L2))
+            d = math.hypot(v.x - (ax + t_ * dx), v.y - (ay + t_ * dy))
+            if d < vr + s.width / 2 + M:
+                return (f'via ({v.x:.2f},{v.y:.2f}) on foreign seg '
+                        f'{s.layer}@({ax:.2f},{ay:.2f})')
+        for fp in pcb.footprints.values():
+            for p in fp.pads:
+                if p.net_id == nid:
+                    continue
+                if p.pad_type == 'np_thru_hole':
+                    hx = p.hole_x if p.hole_x is not None else p.global_x
+                    hy = p.hole_y if p.hole_y is not None else p.global_y
+                    if math.hypot(hx - v.x, hy - v.y) \
+                            < vr + (p.drill or 0) / 2 + M:
+                        return (f'via ({v.x:.2f},{v.y:.2f}) on NPTH '
+                                f'hole {fp.reference}.{p.pad_number}')
+                    continue
+                if abs(p.global_x - v.x) < vr + p.size_x / 2 + M \
+                        and abs(p.global_y - v.y) < vr + p.size_y / 2 + M:
+                    return (f'via ({v.x:.2f},{v.y:.2f}) on pad '
+                            f'{fp.reference}.{p.pad_number}')
+    return None
+
+
 def net_walks(pcb, nid, net):
     """Union-find over the net's copper + pads + vias: True when every
     pad sits in one component. The acceptance guard for re-lays -- a
@@ -2514,15 +2570,39 @@ def net_walks(pcb, nid, net):
         union(('s', i, 0), ('s', i, 1))
         pts.append((('s', i, 0), s.start_x, s.start_y, s.layer))
         pts.append((('s', i, 1), s.end_x, s.end_y, s.layer))
-    anch = [(('v', i), v.x, v.y, v.size / 2 + 0.02)
+    # pad anchors are LAYER-AWARE (audit #5): an SMD pad connects only
+    # copper on its own layer -- a B whisker END under an F ball is
+    # NOT contact, and treating it as contact let a barrel-removing
+    # re-lay pass this guard while severing the net (reproduced:
+    # SA9/SA6 under-pad via removed, guard still said connected).
+    # Vias anchor every layer (through vias on this stack); a
+    # through-hole/'*.Cu' pad does too.
+    def _pad_lays(p):
+        if (p.drill or 0) > 0 or not p.layers or '*.Cu' in p.layers:
+            return None                    # every copper layer
+        return {l for l in p.layers if l.endswith('.Cu')}
+
+    anch = [(('v', i), v.x, v.y, v.size / 2 + 0.02, None)
             for i, v in enumerate(pcb.vias) if v.net_id == nid] + \
         [(('p', i), p.global_x, p.global_y,
-          max(p.size_x, p.size_y) / 2 + 0.02)
+          max(p.size_x, p.size_y) / 2 + 0.02, _pad_lays(p))
          for i, p in enumerate(net.pads)]
     for (k, x, y, _l) in pts:
-        for (k2, x2, y2, r) in anch:
-            if math.hypot(x - x2, y - y2) <= r:
+        for (k2, x2, y2, r, lays) in anch:
+            if (lays is None or _l in lays) \
+                    and math.hypot(x - x2, y - y2) <= r:
                 union(k, k2)
+    # anchors union with EACH OTHER on copper overlap (via-in-pad:
+    # the barrel sits in the pad copper with no same-layer segment
+    # endpoint involved -- the old blind rule got this union only by
+    # the same accident that was the bug)
+    for i in range(len(anch)):
+        k1, x1, y1, r1, l1 = anch[i]
+        for j in range(i + 1, len(anch)):
+            k2, x2, y2, r2, l2 = anch[j]
+            if (l1 is None or l2 is None or (l1 & l2)) \
+                    and math.hypot(x1 - x2, y1 - y2) <= r1 + r2:
+                union(k1, k2)
     for i in range(len(pts)):
         for j in range(i + 1, len(pts)):
             ka, xa, ya, la = pts[i]
