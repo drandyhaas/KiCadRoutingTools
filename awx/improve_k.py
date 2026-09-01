@@ -76,10 +76,15 @@ ENV = dict(os.environ, TWO_PAGE='1')
 OPENS = {}     # score board path -> open net names of the last grade
 
 
-def braid(out):
+def braid(out, smooth=False):
+    # trials skip #536 smoothing: it is 23s of a 52s braid (measured,
+    # K35 cProfile) and the lexicographic key (open, drc, vias) is
+    # smoothing-INVARIANT (verified: identical tuple, only segs
+    # differ). The final winner is re-braided smoothed once.
     r = subprocess.run(
         [sys.executable, 'braid.py', '--board', FO, '--dest', 'DU1',
-         '--nets', NETS, '--out', out], env=ENV,
+         '--nets', NETS, '--out', out]
+        + ([] if smooth else ['--no-smooth']), env=ENV,
         capture_output=True, text=True)
     g = subprocess.run(
         [sys.executable, 'grade_k.py', out + '.kicad_pcb', NETS],
@@ -244,8 +249,10 @@ def relay_try(nets_arg, largs, label, screen=False, rescue=False,
                 relay_try.last_dup = True
                 return False
         dedupe.append((dside, dlay, dcoord))
-    if screen and ',' not in nets_arg and screen_relay(nets_arg, out):
-        print(f'  {label}: screened out (single-net)')
+    if screen and ',' not in nets_arg and screen_relay(
+            nets_arg, out, strict=(screen == 'strict')):
+        print(f'  {label}: screened out (single-net'
+              + (', strict' if screen == 'strict' else '') + ')')
         return False
     fo0, side0 = FO, SIDECAR
     FO = out
@@ -408,11 +415,15 @@ def _swap_stub(board, relayed_fo, n, out):
     open(out, 'w', encoding='utf-8').write(txt)
 
 
-def screen_relay(n, relayed_fo):
+def screen_relay(n, relayed_fo, strict=False):
     """Single-net screen for a position relay: swap n's copper for
     the relayed stub, braid n ALONE (free -- the braid picks the ride)
     against the frozen rest. Rejects only a routable-and-no-cheaper
-    result; a frozen-world refusal pays the honest full braid."""
+    result; a frozen-world refusal pays the honest full braid.
+    strict=True (the blind geometric face sweep -- measured: 2/3 of
+    its screen survivors died at the 30-52s whole-board braid): the
+    single-net gain must be >= 2 vias (a dive pair, the channel's own
+    trigger unit) AND the lane must add no DRC to the frozen world."""
     try:
         scr = TAG + '_scr.kicad_pcb'
         _swap_stub(best_board, relayed_fo, n, scr)
@@ -428,7 +439,16 @@ def screen_relay(n, relayed_fo):
             return False
         scr_v = actual_vias(b1).get(n, 99)
         cur_v = actual_vias(best_board).get(n, 0)
-        return scr_v >= cur_v
+        if scr_v >= cur_v - (1 if strict else 0):
+            return True
+        if strict:
+            g = subprocess.run(
+                [sys.executable, 'grade_k.py', b1, NETS],
+                capture_output=True, text=True).stdout
+            m = re.search(r'drc=(\d+)', g)
+            if m and int(m.group(1)) > best_score[1]:
+                return True
+        return False
     except Exception:
         return False
 
@@ -549,8 +569,70 @@ def face_candidates(n, ref, fo):
 FACE_BUDGET = int(os.environ.get('IMPROVE_FACE_ASKS', '30'))
 _face_spent = 0
 
+NEST_TOP = 3
 
-def face_sweep(n, label, screen=True):
+
+def nest_channel(sweep):
+    """The HOMOTOPY channel: 'you can nest even more if the homotopy
+    is adjusted at either the source or berth'. The nest model
+    (plan_nest.analyze, cyclic boundary chords from the board's own
+    escape crossings) recommends which nets to WRAP around which
+    array; each recommendation, best solo crossing-reduction first,
+    becomes a face-relay ask toward that array's BACK -- delivered
+    by the same relay + screen + whole-board-confirm acceptance as
+    every other channel. General: the back face and wrap side come
+    from the model and the arrays' geometry, never from the bench."""
+    if os.environ.get('IMPROVE_NEST', '1') != '1':
+        return False
+    try:
+        from plan_nest import analyze
+        nr = analyze(best_board, NETS.split(','), _a.src_ref, 'DU1')
+    except Exception as e:
+        print(f'  nest model unavailable ({e})')
+        return False
+    if not nr['moves']:
+        return False
+    cand = sorted(nr['moves'].items(),
+                  key=lambda kv: (-kv[1][2], kv[1][1]))
+    print(f'  nest model: {nr["as_is"]} -> {nr["minimum"]} '
+          f'interleavings reachable; trying '
+          f'{[m for m, _ in cand[:NEST_TOP]]}')
+    got = False
+    for m, (tag, mm, solo) in cand[:NEST_TOP]:
+        if solo <= 0:
+            continue
+        end, wrap = tag.split('-')          # 'src'/'dst', 'wrapN/S'
+        ref = _a.src_ref if end == 'src' else 'DU1'
+        g = _geom(FO).get(ref)
+        if not g:
+            continue
+        W = g['W']
+        w = W[2] - W[0]
+        # the wrap leaves around the array's north or south, on the
+        # BACK third of that face (back = away from the other array;
+        # src sits west of dst on an analyze()-accepted layout)
+        coord = W[0] + 0.25 * w if end == 'src' else W[2] - 0.25 * w
+        side = 'up' if wrap == 'wrapN' else 'down'
+        ride = rides.get(m)
+        layers = ([ride, 'B.Cu' if ride == 'F.Cu' else 'F.Cu']
+                  if ride else ['F.Cu', 'B.Cu'])
+        cur_end = _geom(FO).get(ref, {}).get('end', {}).get(m)
+        delivered = [cur_end] if cur_end else []
+        for L in layers:
+            largs = ((['--ref', 'DU1'] if ref == 'DU1' else [])
+                     + ['--side', side, '--coord', f'{coord:.2f}',
+                        '--layer', L])
+            if relay_try(m, largs,
+                         f's{sweep}nest{m}_{end}{side[0]}{L[0]}',
+                         screen=True, rescue=True, dedupe=delivered):
+                got = True
+                break
+        if got:
+            break
+    return got
+
+
+def face_sweep(n, label, screen='strict'):
     """The POSITION channel: the fanout chose this net's escape face
     once (dest-anchored clustering) and no layer flip can fix a face
     that forces same-page crossings later. Offer the geometric
@@ -831,9 +913,27 @@ for sweep in range(_a.num_improve):
             # same-page crossings no in-place layer flip can undo
             ok = face_sweep(n, f's{sweep}face{n}')
         improved = improved or ok
+    # the homotopy channel LAST: it is model-aimed (joint), so give
+    # the targeted per-net channels first shot at their own diagnosis
+    improved = nest_channel(sweep) or improved
     if not improved:
         break
 
+# trials braided --no-smooth; re-braid the WINNER once with #536
+# smoothing (bit-deterministic braid -> the tuple must reproduce;
+# kept unsmoothed with a warning if it ever does not)
+if best_board.endswith('_free.kicad_pcb'):
+    if os.path.exists(SIDECAR):
+        os.remove(SIDECAR)
+else:
+    put_pages(cur_pages)
+_s = braid(TAG + '_smooth', smooth=True)
+if _s == best_score:
+    best_board = TAG + '_smooth.kicad_pcb'
+else:
+    print(f'  final smooth re-braid diverged (open={_s[0]} '
+          f'drc={_s[1]} vias={_s[2]} vs {best_score}); '
+          'keeping the unsmoothed best')
 if os.path.exists(SIDECAR):
     os.remove(SIDECAR)
 print(f'\nBEST: {best_board} open={best_score[0]} drc={best_score[1]} '

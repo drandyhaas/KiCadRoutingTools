@@ -2853,9 +2853,50 @@ def setup(board, names, dest, log, cluster=6.0):
             f'({sum(1 for v in ctx.pages.values() if v)} paged)')
 
     # ---- corridors: taut paths, grouped by where they arrive and
-    # whether one spine can reach them all
+    # whether one spine can reach them all. CACHED to a sidecar: the
+    # relax is a pure function of (board, net ends) and costs 11.6s
+    # of a 25s braid, recomputed identically by every trial braid on
+    # the same fanout board (measured, K35 cProfile). Key = the
+    # board file's (mtime_ns, size) + a version bumped whenever the
+    # relax algorithm changes; per-net entries so a different K
+    # fills in only what is missing. json round-trips floats exactly
+    # (repr), so the cached run stays bit-identical.
+    TAUT_CACHE_VERSION = 1
     log('taut paths...')
-    ctx.paths = db.taut_paths(names, ends, lambda nm: obs_for(nm, 'F.Cu'))
+    import json as _json
+    _tc_path = os.path.splitext(board)[0] + '.taut.json'
+    _tc_key = None
+    try:
+        _st = os.stat(board)
+        _tc_key = [int(_st.st_mtime_ns), int(_st.st_size),
+                   TAUT_CACHE_VERSION]
+    except OSError:
+        pass
+    _cached = {}
+    if _tc_key is not None and os.path.exists(_tc_path):
+        try:
+            with open(_tc_path, encoding='utf-8') as _f:
+                _tc = _json.load(_f)
+            if _tc.get('key') == _tc_key:
+                _cached = _tc.get('paths', {})
+        except (OSError, ValueError):
+            _cached = {}
+    ctx.paths = {nm: [tuple(p) for p in _cached[nm]]
+                 for nm in names if nm in _cached}
+    _missing = [nm for nm in names if nm not in _cached]
+    if _missing:
+        fresh = db.taut_paths(_missing, ends,
+                              lambda nm: obs_for(nm, 'F.Cu'))
+        ctx.paths.update(fresh)
+        if _tc_key is not None:
+            _cached.update({nm: [list(p) for p in fresh[nm]]
+                            for nm in fresh})
+            _tmp = _tc_path + '.tmp'
+            with open(_tmp, 'w', encoding='utf-8') as _f:
+                _json.dump({'key': _tc_key, 'paths': _cached}, _f)
+            os.replace(_tmp, _tc_path)
+    else:
+        log(f'  taut cache: {len(names)} path(s) reused')
     pad_obs = array_pad_obstacles(pcb, set(ctx.src_ref.values())
                                   | {ends[nm][2] for nm in names})
     ctx.pad_obs = pad_obs

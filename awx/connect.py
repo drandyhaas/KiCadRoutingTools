@@ -152,8 +152,13 @@ def _band_cells(coord: GridCoord, window: PCBData, band,
         if not parts:
             return np.zeros((0, 3), dtype=np.int32)
         return np.concatenate(parts).astype(np.int32)
-    rows = []
+    # vectorized over gy (the pure-Python double loop was 3.5s of an
+    # 18s braid); the per-gx fn(x) and to_grid calls are kept
+    # CALL-FOR-CALL identical to the loop they replace, so the cell
+    # SET is bit-identical -- only the assembly is numpy
     per_layer = isinstance(band, dict)
+    gys = np.arange(gy0, gy1 + 1, dtype=np.int32)
+    parts = []
     for gx in range(gx0, gx1 + 1):
         x = coord.to_float(gx, 0)[0]
         for L, lname in enumerate(layers):
@@ -169,17 +174,20 @@ def _band_cells(coord: GridCoord, window: PCBData, band,
                 hi = hi_fn(x) if hi_fn is not None else 1e9
             lo, hi = lo - slack, hi + slack
             if lo > hi:
-                for gy in range(gy0, gy1 + 1):
-                    rows.append((gx, gy, L))
-                continue
-            glo = coord.to_grid(0.0, lo)[1]
-            ghi = coord.to_grid(0.0, hi)[1]
-            for gy in range(gy0, gy1 + 1):
-                if gy < glo or gy > ghi:
-                    rows.append((gx, gy, L))
-    if not rows:
+                bad = gys
+            else:
+                glo = coord.to_grid(0.0, lo)[1]
+                ghi = coord.to_grid(0.0, hi)[1]
+                bad = gys[(gys < glo) | (gys > ghi)]
+            if len(bad):
+                arr = np.empty((len(bad), 3), dtype=np.int32)
+                arr[:, 0] = gx
+                arr[:, 1] = bad
+                arr[:, 2] = L
+                parts.append(arr)
+    if not parts:
         return np.zeros((0, 3), dtype=np.int32)
-    return np.asarray(rows, dtype=np.int32)
+    return np.concatenate(parts)
 
 
 VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
@@ -273,8 +281,13 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
                 Via(p[0], p[1], cfg.via_size, cfg.via_drill,
                     list(cfg.layers), VIRTUAL_NET) for p in virtual_vias]
 
+        # static_base: the #422 static-bitmap stamp path -- engine-
+        # documented byte-identical, hasattr-guarded, and measured
+        # ~2x on the cold/large windows the margin-escalated retries
+        # build (19.9 -> 10.5 ms; warm small windows equal)
         obstacles = build_base_obstacle_map(window, cfg, [net_id],
-                                            net_clearances=net_clearances)
+                                            net_clearances=net_clearances,
+                                            static_base=True)
         _fence_window(obstacles, window, cfg)
         # the net's own barrels are free layer changes, and its own
         # via/drill spacing still applies (the rescue recipe, #470 and
