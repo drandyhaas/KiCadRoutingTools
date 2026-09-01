@@ -284,7 +284,19 @@ def _build_tap_spatial_index(pcb_data: PCBData):
 
 
 def _tap_spatial_index(pcb_data: PCBData):
-    sig = (len(pcb_data.segments), len(pcb_data.vias),
+    # The signature must catch a MUTATED board, not just a resized
+    # one. Counts alone are not enough: an in-run consumer (the #622
+    # braid) rips N segments and lays M new ones over and over, and
+    # any state whose counts collide with a cached state was served a
+    # STALE index -- copper laid since became INVISIBLE to the window
+    # and the router returned paths that hard-cross real segments
+    # (measured: two econ re-lays crossing foreign copper). List
+    # identity catches rebinds (rips build new lists), length catches
+    # grow/shrink, and the last element's identity catches the
+    # del-then-extend-to-the-same-length pattern on one list.
+    segs, vias = pcb_data.segments, pcb_data.vias
+    sig = (id(segs), len(segs), id(segs[-1]) if segs else 0,
+           id(vias), len(vias), id(vias[-1]) if vias else 0,
            sum(len(v) for v in pcb_data.pads_by_net.values()))
     cached = getattr(pcb_data, '_tap_spatial_index_cache', None)
     if cached is not None and cached[0] == sig:

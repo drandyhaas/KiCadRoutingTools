@@ -1963,6 +1963,25 @@ class Corridor:
                         failed_rescues += 1
                 if res is None:
                     self.refused.append(nm)
+                    # STRUCTURED refusal (#622 plan communication):
+                    # the reason used to die in this log line, and
+                    # retry drivers answered a bare net name with
+                    # blunt force knobs. This is what the braid knows
+                    # at refusal time.
+                    sc_ = getattr(self, 'sched_cur', None)
+                    ctx.refusal_info[nm] = {
+                        'stage': 'attempt',
+                        'corridor': self.idx,
+                        'page': (sc_.page.get(nm) if sc_ is not None
+                                 else None),
+                        'swimmer': bool(sc_ is not None
+                                        and sc_.page.get(nm) is None),
+                        'tooth_layer': ctx.tooth_layer[nm],
+                        'dest_layer': ctx.dest_layer[nm],
+                        'tooth': list(self.teeth[nm]),
+                        'berth': list(self.stubs[nm]),
+                        'failed_rescues': failed_rescues,
+                    }
                     log(f'    refused: {nm}')
                     if os.environ.get('LANE_DEBUG') == nm:
                         self.debug_lane(nm)
@@ -2083,6 +2102,11 @@ class Corridor:
                         # only a rip where BOTH nets re-route.
                         res = self._rip_assist(nm, others, log)
                     if res is None:
+                        info = ctx.refusal_info.setdefault(nm, {})
+                        info.update(stage='last_call',
+                                    margins=[2.0, 4.0, 6.0],
+                                    rip_assist=os.environ.get(
+                                        'RIP_CALL', '1') == '1')
                         log(f'    last call: {nm} still refused')
                         continue
                     segs_o, vias_o = res
@@ -2194,6 +2218,14 @@ class Corridor:
                         ctx.pcb.vias = via0
                         log(f'    econ re-lay: {nm} REJECTED '
                             '(net would disconnect)')
+                        continue
+                    if lane_crosses_foreign(ctx.pcb, nid,
+                                            res[0]):
+                        ctx.pcb.segments = seg0
+                        ctx.pcb.vias = via0
+                        log(f'    econ re-lay: {nm} REJECTED '
+                            '(path crosses foreign copper -- '
+                            'engine-window bug, reproducer kept)')
                         continue
                     log(f'    econ re-lay: {nm} '
                         f'{len(self.out_vias[nm])} -> {len(vias_o)} '
@@ -2414,6 +2446,39 @@ class Corridor:
                    if abs(self.launch_o[om] - self.launch_o[nm]) < 0.8 and om != nm]))
 
 
+def _orient(ax, ay, bx, by, cx, cy):
+    v = (by - ay) * (cx - bx) - (bx - ax) * (cy - by)
+    return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+
+
+def lane_crosses_foreign(pcb, nid, new_segs):
+    """A re-laid lane must not CROSS foreign same-layer copper. The
+    router should make this impossible, yet two econ accepts measured
+    otherwise (K32 SDQM1 x SDQ9 at (127.55,61.30); K15 SA7 x SRAS) --
+    an engine-window bug still under study. Until it is found, the
+    acceptance refuses crossing paths outright."""
+    for s in new_segs:
+        for t in pcb.segments:
+            if t.net_id == nid or t.layer != s.layer:
+                continue
+            if max(s.start_x, s.end_x) < min(t.start_x, t.end_x) - 0.01 \
+                    or min(s.start_x, s.end_x) > max(t.start_x, t.end_x) + 0.01 \
+                    or max(s.start_y, s.end_y) < min(t.start_y, t.end_y) - 0.01 \
+                    or min(s.start_y, s.end_y) > max(t.start_y, t.end_y) + 0.01:
+                continue
+            o1 = _orient(s.start_x, s.start_y, s.end_x, s.end_y,
+                         t.start_x, t.start_y)
+            o2 = _orient(s.start_x, s.start_y, s.end_x, s.end_y,
+                         t.end_x, t.end_y)
+            o3 = _orient(t.start_x, t.start_y, t.end_x, t.end_y,
+                         s.start_x, s.start_y)
+            o4 = _orient(t.start_x, t.start_y, t.end_x, t.end_y,
+                         s.end_x, s.end_y)
+            if o1 != o2 and o3 != o4 and 0 not in (o1, o2, o3, o4):
+                return True
+    return False
+
+
 def net_walks(pcb, nid, net):
     """Union-find over the net's copper + pads + vias: True when every
     pad sits in one component. The acceptance guard for re-lays -- a
@@ -2602,6 +2667,7 @@ def setup(board, names, dest, log, cluster=6.0):
     ctx.dest_chain = {}
     ctx.dest_alts = {}
     ctx.trim_spans = {}
+    ctx.refusal_info = {}
     for nm in names:
         nid, net = byname[nm]
         segs_n = [s for s in pcb.segments if s.net_id == nid]
@@ -2750,6 +2816,14 @@ def write_out(a, ctx, corridors, names, log):
     refused = sorted(nm for c in corridors for nm in c.refused)
     if refused:
         log(f'\nREFUSED nets (left open): {refused}')
+    if refused and a.out != os.devnull:
+        import json as _json
+        rp = a.out + '_refusals.json'
+        with open(rp, 'w') as _f:
+            _json.dump({nm: ctx.refusal_info.get(nm, {})
+                        for nm in refused}, _f, indent=1,
+                       sort_keys=True)
+        log(f'refusal reasons -> {rp}')
     # deferred berth trim: each successfully-routed net's FINAL lane
     # decides its joint; a refused net's stub stays whole
     for nm in names:

@@ -70,12 +70,17 @@ for K in "${KS[@]}"; do
   if [ ! -f "${TAG}_fo_k${K}.kicad_pcb" ]; then
     echo "  NO FANOUT BOARD"; continue
   fi
-  # ROUNDTRIP=1: close the fanout/braid page mismatch -- braid
-  # PLAN-ONLY on the first fanout (seconds, no lanes) gives the
-  # braid's OWN pages; the fanout re-runs with them as the escape
-  # layer source and PINS the sidecar, so a tooth never starts a net
-  # off the layer its lane will ride.
-  if [ -n "$ROUNDTRIP" ]; then
+  # ROUNDTRIP=src: SOURCE-side round-trip -- teeth whose layer
+  # disagrees with the braid's page are relayed in place onto it
+  # (the smallest source move: same position, layer only), then the
+  # pages are re-derived and pinned. ROUNDTRIP=1: the DEST-side
+  # version (measured inert on this bench -- dest pages already
+  # agree -- kept as insurance).
+  if [ "$ROUNDTRIP" = "src" ]; then
+    python3 src_roundtrip.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
+      >> "${TAG}_fo_k${K}.log" 2>&1
+    grep -h "SRC-RT" "${TAG}_fo_k${K}.log" | sed 's/^/  /'
+  elif [ -n "$ROUNDTRIP" ]; then
     python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
       --dest "$DEST" --nets "$NETS" --out /dev/null \
       --plan-json "${TAG}_rt_plan_k${K}.json" \
