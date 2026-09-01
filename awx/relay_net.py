@@ -204,4 +204,36 @@ for nm in nets:
     print(f'{nm}: layer hint '
           + (('OBEYED' if rep['obeyed']
               else f"MISSED -> {rep['got']}") if rep else 'unaudited'))
+
+# ---- DELIVERED-face audit (audit #4): the layer report above says
+# nothing about the FACE/slot -- the engine may slide along the face
+# or fall back to another gap and still read OBEYED. Verify delivery
+# GEOMETRICALLY from the written board: recompute each net's stub end
+# and name the face it actually landed on, so a caller (face_sweep)
+# can tell an undelivered face from a slid slot.
+out_pcb = parse_kicad_pcb(a.out)
+oby = {n.name.split('/')[-1]: i for i, n in out_pcb.nets.items()}
+for nm in nets:
+    deg2, lay2 = {}, {}
+    for s in out_pcb.segments:
+        if s.net_id != oby.get(nm) or not in_rip(s.start_x, s.start_y):
+            continue
+        for pt in ((round(s.start_x, 3), round(s.start_y, 3)),
+                   (round(s.end_x, 3), round(s.end_y, 3))):
+            deg2[pt] = deg2.get(pt, 0) + 1
+            lay2[pt] = s.layer
+    free2 = [p for p, c in deg2.items() if c == 1]
+    if not free2:
+        print(f'{nm}: DELIVERED unknown (no stub end)')
+        continue
+    cx, cy = (BB[0] + BB[2]) / 2, (BB[1] + BB[3]) / 2
+    p2 = max(free2, key=lambda q: (q[0] - cx) ** 2 + (q[1] - cy) ** 2)
+    dside, dcoord = side_coord(p2)
+    ask_side = asks[nm][0]
+    # deliberately NOT the string 'MISSED' -- improve_k's refusal
+    # gate keys on that substring and an off-target delivery is a
+    # real board, not a refusal
+    print(f'{nm}: DELIVERED {dside}/{lay2[p2]}@{dcoord:.2f}'
+          + ('' if dside == ask_side
+             else f'  face OFFTARGET (asked {ask_side})'))
 print(f'wrote {a.out}: {len(tracks)} track(s), {len(vias_add)} via(s)')

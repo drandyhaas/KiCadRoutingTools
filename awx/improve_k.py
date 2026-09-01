@@ -24,7 +24,18 @@ braid-only rerun, no comb/berth redraw):
        berth: same decision at the DU1 end (--ref DU1);
        swap:  the net's corridor order inverts against a neighbour
               (launch_idx vs target_rank from the braid's own plan)
-              -- exchange the two proven teeth (--swap).
+              -- exchange the two proven teeth (--swap);
+       face:  a net still paying 2+ vias over its model floor is
+              diving mid-ride -- the escape FACE the fanout chose
+              (dest-anchored clustering, decided once) forces
+              same-page crossings no in-place flip can undo. Offer
+              the OTHER window faces at each end, coord = the
+              ball->other-end line's crossing of that face (clamped;
+              the engine negotiates the real slot), model's ride
+              layer first. Pure geometry, net-name-free; each ask is
+              screened by a swapped-stub single-net braid before
+              paying the full one. IMPROVE_FACES=0 disables,
+              IMPROVE_FACE_ASKS caps the budget (default 30).
      Accept-and-build: an accepted relay SWITCHES the fanout board
      every later trial builds on. Trials stay SERIAL by design.
 
@@ -163,7 +174,7 @@ def group_try(flip_net, flip_val, stranded, label, depth=2):
         FO = out
         SIDECAR = os.path.splitext(FO)[0] + '.pages.json'
     plan2 = dump_plan(f'{TAG}_{label}_plan.json')
-    own2 = {k: d.get('page') for k, d in plan2.items()}
+    own2 = {k: d['page'] for k, d in plan2.items() if 'page' in d}
     trial = dict(own2)
     trial.update(flips)
     trial[flip_net] = flip_val
@@ -191,13 +202,21 @@ def group_try(flip_net, flip_val, stranded, label, depth=2):
     return False
 
 
-def relay_try(nets_arg, largs, label):
+def relay_try(nets_arg, largs, label, screen=False, rescue=False,
+              dedupe=None):
     """One relay trial, accept-and-build: relay the fanout, re-dump
     the plan FROM THE RELAYED BOARD, pin its own pages plus every
     accepted flip, braid, keep strictly better. On accept the relayed
-    board becomes the base every later trial builds on."""
+    board becomes the base every later trial builds on. With
+    screen=True (single net only) a cheap swapped-stub single-net
+    braid filters clear losers before the full braid. With
+    rescue=True a via-saving trial that STRANDS 1-2 nets gets the
+    group move before dying: re-page each stranded net on the relayed
+    board (free, one braid -- the same pages-first rescue group_try
+    uses for flips)."""
     global FO, SIDECAR, best_score, best_board, plan, own, cur_pages
     global rides, divers, model
+    relay_try.last_dup = False
     tk = tried_key(('relay', nets_arg, tuple(largs)))
     if tk in TRIED:
         return False                        # a hit is always a reject
@@ -209,11 +228,30 @@ def relay_try(nets_arg, largs, label):
     if not os.path.exists(out) or 'MISSED' in r.stdout:
         print(f'  {label}: relay refused')
         return False
+    # DELIVERED-geometry dedupe (audit #4): the engine may slide the
+    # slot or fall back to another gap, so distinct asks can deliver
+    # the SAME escape -- relay_net now reports the delivered face
+    # geometrically; skip the screen/braid when this delivery was
+    # already tried (distance match, never a rounded key)
+    mdel = re.search(r'DELIVERED (\w+)/([\w.]+)@([-\d.]+)', r.stdout)
+    if dedupe is not None and mdel:
+        dside, dlay = mdel.group(1), mdel.group(2)
+        dcoord = float(mdel.group(3))
+        for s0_, l0_, c0_ in dedupe:
+            if s0_ == dside and l0_ == dlay and abs(c0_ - dcoord) < 0.3:
+                print(f'  {label}: duplicate delivery '
+                      f'({dside}/{dlay}@{dcoord:.2f})')
+                relay_try.last_dup = True
+                return False
+        dedupe.append((dside, dlay, dcoord))
+    if screen and ',' not in nets_arg and screen_relay(nets_arg, out):
+        print(f'  {label}: screened out (single-net)')
+        return False
     fo0, side0 = FO, SIDECAR
     FO = out
     SIDECAR = os.path.splitext(FO)[0] + '.pages.json'
     plan2 = dump_plan(f'{TAG}_{label}_plan.json')
-    own2 = {m: d.get('page') for m, d in plan2.items()}
+    own2 = {m: d['page'] for m, d in plan2.items() if 'page' in d}
     trial = dict(own2)
     trial.update(flips)
     put_pages(trial)
@@ -226,6 +264,34 @@ def relay_try(nets_arg, largs, label):
         rides, divers, model = opt_rides(plan)
         return True
     print(f'  {label}: open={s[0]} drc={s[1]} vias={s[2]}')
+    if rescue and s[0] > 0 and s[1] <= best_score[1] \
+            and s[2] < best_score[2]:
+        gb = subprocess.run(
+            [sys.executable, 'grade_k.py', best_board, NETS],
+            capture_output=True, text=True).stdout
+        mb = re.search(r'open: ([A-Za-z0-9_,]+)', gb)
+        base_open = set(mb.group(1).split(',')) if mb else set()
+        newly = [m for m in OPENS.get(f'{TAG}_{label}_pin', [])
+                 if m not in base_open]
+        if 1 <= len(newly) <= 2:
+            trial2 = dict(trial)
+            for m in newly:
+                trial2[m] = None if trial2.get(m) is not None else \
+                    (plan2.get(m) or {}).get('tooth_layer')
+            put_pages(trial2)
+            s2 = braid(f'{TAG}_{label}_r')
+            if s2 < best_score:
+                print(f'  {label}r: open={s2[0]} drc={s2[1]} '
+                      f'vias={s2[2]}   ACCEPT')
+                best_score = s2
+                best_board = f'{TAG}_{label}_r.kicad_pcb'
+                for m in newly:
+                    flips[m] = trial2[m]
+                plan, own, cur_pages = plan2, own2, trial2
+                rides, divers, model = opt_rides(plan)
+                return True
+            print(f'  {label}r: open={s2[0]} drc={s2[1]} '
+                  f'vias={s2[2]}')
     if os.path.exists(SIDECAR):
         os.remove(SIDECAR)
     FO, SIDECAR = fo0, side0
@@ -280,6 +346,249 @@ def _walk_strip(txt, token, match):
             out.append(txt[i:k + 1])
             i = k + 1
     return ''.join(out)
+
+
+def _collect_blocks(txt, token, match):
+    """The matching blocks themselves (same walk as _walk_strip)."""
+    out, i = [], 0
+    pat = '(' + token
+    while True:
+        j = txt.find(pat, i)
+        while j >= 0 and j + len(pat) < len(txt) \
+                and txt[j + len(pat)] not in ' \n\t(':
+            j = txt.find(pat, j + 1)
+        if j < 0:
+            break
+        k, depth = j, 0
+        while True:
+            ch = txt[k]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        if match(txt[j:k + 1]):
+            out.append(txt[j:k + 1])
+        i = k + 1
+    return out
+
+
+def _net_matcher(nid, netname):
+    def net_match(block):
+        m = re.search(r'\(net (\d+)\)', block)
+        if m:
+            return int(m.group(1)) == nid
+        m = re.search(r'\(net "([^"]+)"\)', block)
+        return bool(m and m.group(1) == netname)
+    return net_match
+
+
+def _swap_stub(board, relayed_fo, n, out):
+    """Screen world for a POSITION relay: `board` with ALL of net n's
+    copper replaced by the relayed fanout board's copper for n (its
+    stubs at both arrays -- a fanout board has no lanes, so its net-n
+    blocks ARE the new stubs)."""
+    sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+    from kicad_parser import parse_kicad_pcb
+    fo_p = parse_kicad_pcb(relayed_fo)
+    by = {net.name.split('/')[-1]: (i, net)
+          for i, net in fo_p.nets.items()}
+    nid, netname = by[n][0], by[n][1].name
+    net_match = _net_matcher(nid, netname)
+    fo_txt = open(relayed_fo, encoding='utf-8').read()
+    blocks = (_collect_blocks(fo_txt, 'segment', net_match)
+              + _collect_blocks(fo_txt, 'via', net_match))
+    txt = open(board, encoding='utf-8').read()
+    txt = _walk_strip(txt, 'segment', net_match)
+    txt = _walk_strip(txt, 'via', net_match)
+    pos = txt.rfind(')')
+    txt = txt[:pos] + '\n'.join(blocks) + '\n' + txt[pos:]
+    open(out, 'w', encoding='utf-8').write(txt)
+
+
+def screen_relay(n, relayed_fo):
+    """Single-net screen for a position relay: swap n's copper for
+    the relayed stub, braid n ALONE (free -- the braid picks the ride)
+    against the frozen rest. Rejects only a routable-and-no-cheaper
+    result; a frozen-world refusal pays the honest full braid."""
+    try:
+        scr = TAG + '_scr.kicad_pcb'
+        _swap_stub(best_board, relayed_fo, n, scr)
+        side = os.path.splitext(scr)[0] + '.pages.json'
+        if os.path.exists(side):
+            os.remove(side)
+        r = subprocess.run(
+            [sys.executable, 'braid.py', '--board', scr,
+             '--dest', 'DU1', '--nets', n, '--out', TAG + '_scr1'],
+            env=ENV, capture_output=True, text=True)
+        b1 = TAG + '_scr1.kicad_pcb'
+        if not os.path.exists(b1) or 'REFUSED' in r.stdout:
+            return False
+        scr_v = actual_vias(b1).get(n, 99)
+        cur_v = actual_vias(best_board).get(n, 0)
+        return scr_v >= cur_v
+    except Exception:
+        return False
+
+
+_GEOM = {}
+
+
+def _geom(fo):
+    """Escape geometry of a fanout board, cached per path: per array
+    ref, the relay window bbox (pads + 0.25, relay_net's W), each
+    net's ball position, and each net's CURRENT stub face (degree-1
+    stub end in the rip window farthest from centre -- relay_net's
+    own derivation)."""
+    if fo in _GEOM:
+        return _GEOM[fo]
+    sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(fo)
+    id2s = {i: net.name.split('/')[-1] for i, net in pcb.nets.items()}
+    out = {}
+    for ref in (_a.src_ref, 'DU1'):
+        fp = pcb.footprints.get(ref)
+        if fp is None:
+            continue
+        xs = [p.global_x for p in fp.pads]
+        ys = [p.global_y for p in fp.pads]
+        W = (min(xs) - 0.25, min(ys) - 0.25,
+             max(xs) + 0.25, max(ys) + 0.25)
+        RW = (min(xs) - 1.6, min(ys) - 1.6,
+              max(xs) + 1.6, max(ys) + 1.6)
+        balls = {}
+        for p in fp.pads:
+            nm = p.net_name.rsplit('/', 1)[-1] if p.net_name else ''
+            if nm:
+                balls[nm] = (p.global_x, p.global_y)
+        deg, seglay = {}, {}
+        for s in pcb.segments:
+            nm = id2s.get(s.net_id)
+            if nm not in balls:
+                continue
+            if not (RW[0] <= s.start_x <= RW[2]
+                    and RW[1] <= s.start_y <= RW[3]):
+                continue
+            for pt in ((round(s.start_x, 3), round(s.start_y, 3)),
+                       (round(s.end_x, 3), round(s.end_y, 3))):
+                deg[(nm, pt)] = deg.get((nm, pt), 0) + 1
+                seglay[(nm, pt)] = s.layer
+        cx, cy = (W[0] + W[2]) / 2, (W[1] + W[3]) / 2
+        stub_face = {}
+        stub_end = {}
+        ends = {}
+        for (nm, pt), c in deg.items():
+            if c != 1:
+                continue
+            d2 = (pt[0] - cx) ** 2 + (pt[1] - cy) ** 2
+            if nm not in ends or d2 > ends[nm][0]:
+                ends[nm] = (d2, pt)
+        for nm, (_, pt) in ends.items():
+            d = {'up': abs(pt[1] - W[1]), 'right': abs(pt[0] - W[2]),
+                 'down': abs(pt[1] - W[3]), 'left': abs(pt[0] - W[0])}
+            side = min(d, key=d.get)
+            stub_face[nm] = side
+            stub_end[nm] = (side, seglay[(nm, pt)],
+                            pt[1] if side in ('left', 'right')
+                            else pt[0])
+        out[ref] = {'W': W, 'balls': balls, 'face': stub_face,
+                    'end': stub_end}
+    _GEOM[fo] = out
+    return out
+
+
+_NORMAL = {'up': (0.0, -1.0), 'down': (0.0, 1.0),
+           'left': (-1.0, 0.0), 'right': (1.0, 0.0)}
+
+
+def face_candidates(n, ref, fo):
+    """General alternative escape faces for net n's end at `ref`: the
+    three window faces it does NOT currently use, each with the coord
+    where the straight line ball -> other-end crosses that face
+    (clamped into the face span; the engine still negotiates the real
+    slot), ordered by alignment with that line. Pure geometry -- no
+    board knowledge."""
+    g = _geom(fo)
+    other_ref = 'DU1' if ref == _a.src_ref else _a.src_ref
+    if ref not in g or other_ref not in g:
+        return []
+    ge, go = g[ref], g[other_ref]
+    if n not in ge['balls'] or n not in go['balls']:
+        return []
+    bx, by = ge['balls'][n]
+    ox, oy = go['balls'][n]
+    dx, dy = ox - bx, oy - by
+    W = ge['W']
+    cur = ge['face'].get(n)
+    cands = []
+    for side, (nx, ny) in _NORMAL.items():
+        if side == cur:
+            continue
+        # ray ball->other against this face's line
+        if side in ('left', 'right'):
+            edge = W[0] if side == 'left' else W[2]
+            t = (edge - bx) / dx if abs(dx) > 1e-9 else -1
+            raw = by + t * dy if t > 1e-9 else oy
+            span = (W[1], W[3])
+        else:
+            edge = W[1] if side == 'up' else W[3]
+            t = (edge - by) / dy if abs(dy) > 1e-9 else -1
+            raw = bx + t * dx if t > 1e-9 else ox
+            span = (W[0], W[2])
+        coord = min(max(raw, span[0] + 0.3), span[1] - 0.3)
+        norm = (dx * dx + dy * dy) ** 0.5 or 1.0
+        align = (nx * dx + ny * dy) / norm
+        cands.append((align, side, coord))
+    cands.sort(reverse=True)
+    return [(side, coord) for _, side, coord in cands]
+
+
+FACE_BUDGET = int(os.environ.get('IMPROVE_FACE_ASKS', '30'))
+_face_spent = 0
+
+
+def face_sweep(n, label, screen=True):
+    """The POSITION channel: the fanout chose this net's escape face
+    once (dest-anchored clustering) and no layer flip can fix a face
+    that forces same-page crossings later. Offer the geometric
+    alternatives at both ends, model's ride layer first; every ask
+    goes through the same screen + whole-board-confirm acceptance."""
+    global _face_spent
+    if os.environ.get('IMPROVE_FACES', '1') != '1':
+        return False
+    ride = rides.get(n)
+    layers_pref = ([ride, 'B.Cu' if ride == 'F.Cu' else 'F.Cu']
+                   if ride else ['F.Cu', 'B.Cu'])
+    for ref in (_a.src_ref, 'DU1'):
+        # seed the delivery dedupe with the CURRENT stub end -- an
+        # ask the engine walks back to today's geometry is a no-op
+        cur_end = _geom(FO).get(ref, {}).get('end', {}).get(n)
+        delivered = [cur_end] if cur_end else []
+        for side, coord in face_candidates(n, ref, FO)[:2]:
+            for L in layers_pref:
+                largs = ((['--ref', 'DU1'] if ref == 'DU1' else [])
+                         + ['--side', side, '--coord', f'{coord:.2f}',
+                            '--layer', L])
+                # a memo hit costs nothing -- don't spend budget on it
+                # (audit finding #6: later sweeps re-offer identical
+                # asks and exhausted the budget on instant rejects)
+                if tried_key(('relay', n, tuple(largs))) in TRIED:
+                    continue
+                if _face_spent >= FACE_BUDGET:
+                    return False
+                _face_spent += 1
+                ok = relay_try(n, largs,
+                               f'{label}_{ref[0]}{side[0]}{L[0]}',
+                               screen=screen, rescue=True,
+                               dedupe=delivered)
+                if getattr(relay_try, 'last_dup', False):
+                    _face_spent -= 1    # a duplicate cost ~nothing
+                if ok:
+                    return True
+    return False
 
 
 def _strip_lane(board, fo_board, n, out):
@@ -374,7 +683,7 @@ if os.path.exists(SIDECAR):
 best_score = braid(TAG + '_free')
 best_board = TAG + '_free.kicad_pcb'
 plan = dump_plan(TAG + '_plan.json')
-own = {n: d.get('page') for n, d in plan.items()}
+own = {n: d['page'] for n, d in plan.items() if 'page' in d}
 best_pages = None
 print(f'free draw: open={best_score[0]} drc={best_score[1]} '
       f'vias={best_score[2]}')
@@ -410,8 +719,13 @@ for sweep in range(_a.num_improve):
         ok = relay_try(n, ['--keep-pos', '--layer', oth],
                        f's{sweep}open_tooth{n}')
         if not ok:
-            relay_try(n, ['--ref', 'DU1', '--keep-pos',
-                          '--layer', oth], f's{sweep}open_berth{n}')
+            ok = relay_try(n, ['--ref', 'DU1', '--keep-pos',
+                               '--layer', oth], f's{sweep}open_berth{n}')
+        if not ok:
+            # an open net whose layer relays failed may be FACE-walled
+            # (K35's chronic refusal was B/B with no force move) --
+            # unscreened: closing an open pays vias by design
+            face_sweep(n, f's{sweep}openface{n}', screen=False)
     act = actual_vias(best_board)
     waste = sorted((n for n in plan
                     if act.get(n, 0) > model.get(n, 99)),
@@ -466,12 +780,24 @@ for sweep in range(_a.num_improve):
                 break
             print(f'  {n} -> {tagv}: open={s[0]} drc={s[1]} '
                   f'vias={s[2]}')
-    # the group move: the best via-saving flip that stranded nets
-    if near_miss is not None and 1 <= len(near_miss[3]) <= 3:
-        gain, n0, v0, stranded = near_miss
-        ok = group_try(n0, v0, stranded,
-                       f's{sweep}grp{n0}_{"_".join(stranded)}')
-        improved = improved or ok
+    # the group move: the best via-saving flip that stranded nets.
+    # STRANDED = the trial's opens MINUS the current best board's own
+    # opens -- without the base subtraction any pre-existing open (the
+    # normal state at high K) counts against the 1..3 gate and aims
+    # the rescue at nets the flip never touched (audit finding #1:
+    # K41 entered improve with 5 opens and this channel never fired)
+    if near_miss is not None:
+        gain, n0, v0, trial_opens = near_miss
+        gb_ = subprocess.run(
+            [sys.executable, 'grade_k.py', best_board, NETS],
+            capture_output=True, text=True).stdout
+        mb_ = re.search(r'open: ([A-Za-z0-9_,]+)', gb_)
+        base_open = set(mb_.group(1).split(',')) if mb_ else set()
+        stranded = [m for m in trial_opens if m not in base_open]
+        if 1 <= len(stranded) <= 3:
+            ok = group_try(n0, v0, stranded,
+                           f's{sweep}grp{n0}_{"_".join(stranded)}')
+            improved = improved or ok
     # relay channels: the worst waste nets the pages sweep left
     for n in [w for w in waste if w not in fixed][:RELAY_TOP]:
         d = plan.get(n) or {}
@@ -489,6 +815,11 @@ for sweep in range(_a.num_improve):
             if p:
                 ok = relay_try(f'{n},{p}', ['--swap', '--layer', 'keep'],
                                f's{sweep}swap{n}_{p}')
+        if not ok and act.get(n, 0) - model.get(n, 99) >= 2:
+            # a net paying 2+ vias over its own model floor is diving
+            # mid-ride: the escape FACE the fanout chose forces
+            # same-page crossings no in-place layer flip can undo
+            ok = face_sweep(n, f's{sweep}face{n}')
         improved = improved or ok
     if not improved:
         break

@@ -144,7 +144,12 @@ def opt_rides(plan):
     turns into targeted pages edits."""
     corrs = collections.defaultdict(list)
     for nmn, d in plan.items():
-        corrs[d['corridor']].append(nmn)
+        # a plan-only corridor failure dumps "orders only" entries
+        # (no launch_idx/target_rank/page); those nets cannot be
+        # modelled -- skip them instead of KeyError-ing the whole
+        # improve stage (audit finding #2)
+        if 'launch_idx' in d and 'target_rank' in d:
+            corrs[d['corridor']].append(nmn)
     rides, divers, model = {}, set(), {}
     for ci, nms in sorted(corrs.items()):
         li = {n: plan[n]['launch_idx'] for n in nms}

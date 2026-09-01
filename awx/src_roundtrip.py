@@ -79,7 +79,7 @@ for n in mis:
     print(f'SRC-RT: {n} tooth -> {want}')
 if relaid:
     plan2 = dump_plan('r1')
-    pages = {n: d.get('page') for n, d in plan2.items()}
+    pages = {n: d['page'] for n, d in plan2.items() if 'page' in d}
     with open(STEM + '.pages.json', 'w') as f:
         json.dump(pages, f, indent=1)
     left = sorted(n for n, d in plan2.items()
