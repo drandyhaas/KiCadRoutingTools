@@ -2448,10 +2448,17 @@ _FP_START_RE = re.compile(r'\(footprint\s+"')
 #: still covers both twins and no existing literal reference is newly shadowed:
 #: measured over the tracked corpus, ZERO of 545 distinct references contain
 #: `~` or `#`. `#` is not free -- it is already the reference-less prefix and
-#: `placement/labels.py` keys its skip off `ref.startswith('#')`. A PREFIX
-#: would be worse than either: `placement/part_class._PREFIX_RE` is
-#: `^([A-Za-z]+)`, so prefixing silently reclassifies test points and fiducials
-#: out of the marker classes.
+#: `placement/labels.py` keys its skip off `ref.startswith('#')`.
+#:
+#: A SUFFIX rather than a prefix because `placement/part_class._PREFIX_RE` is
+#: `^([A-Za-z]+)`, which a prefix destroys. Measured honestly, that costs
+#: nothing on THIS corpus: a prefix scheme reclassifies 0 of the 18 duplicate
+#: blocks, because `classify_part` matches the footprint NAME
+#: (`Fiducial1x3_transp`, `TestPoint_Pad_D1.0mm`) before it ever reads the
+#: prefix. The suffix is still the right choice -- for a part whose footprint
+#: name carries no class keyword, the prefix is the only channel there is --
+#: but this corpus does not demonstrate the harm, and an earlier version of
+#: this comment claimed it did.
 DUP_REF_SEP = '~'
 
 

@@ -39,6 +39,8 @@ glob returns 22 entries on a clean clone and 33+ on a worn one.
 """
 import argparse
 import collections
+import shutil
+import tempfile
 import glob as _glob
 import os
 import re
@@ -199,7 +201,9 @@ def table_b(paths):
             lay = _LAYER_RE.search(t)
             name = _FPNAME_RE.search(t)
             # Footprint-level (locked yes) only: bound to the header so a
-            # locked PAD does not read as a locked footprint (parser :2489-2497).
+            # locked PAD does not read as a locked footprint. Bounded by
+            # `_header_end` (5 tokens), which is at least as tight as the
+            # parser's own 3-token footprint-lock bound.
             locked = bool(re.search(r'\(locked\s+yes\)', t[:_header_end(t)]))
             print('%-20s %-7s %4d %9.3f %9.3f %6.1f %-5s %-6s %-5s %-4s %3d  %s'
                   % (os.path.basename(p).replace('.kicad_pcb', '')[:20], ref,
@@ -235,9 +239,12 @@ class _StubPad:
 
     def __init__(self, pad_type):
         self.pad_type = pad_type
-        # Not read from the block: a duplicate-reference part in this corpus
-        # has at most one pad and no pinfunction. Stated rather than faked --
-        # the receptacle rules below are therefore inert for this table.
+        # NOT read from the block. An earlier version of this comment claimed
+        # a duplicate-reference part carries no pinfunction, which is false --
+        # watchy's TP4 and TP5 both carry `(pinfunction "1")`. The stub is
+        # justified by MEASUREMENT instead: `table_d` classifies every
+        # footprint on every tracked board through both this stub and the real
+        # parsed `Footprint`, and prints the disagreement count. It is 0.
         self.pinfunction = ''
 
 
@@ -275,17 +282,61 @@ def table_d(paths):
                   % (os.path.basename(p).replace('.kicad_pcb', '')[:20], ref,
                      idx, key, a.group(1) if a else '-',
                      b.group(1) if b else '-', note))
-    # The other half of the claim: a UNIQUE key must be byte-identical.
+    # The other half of the claim: a UNIQUE key must be byte-identical. Print
+    # the DENOMINATOR this loop actually walks -- unique-reference BLOCKS --
+    # rather than leaving a reader to supply one. (The count of distinct
+    # reference STRINGS is a different, smaller number, and quoting it here
+    # would misstate what was checked.)
     moved = 0
+    unique_blocks = 0
+    distinct_unique = set()
     for p in paths:
         refs = [raw_reference(t) for _, _, t in blocks(_read(p))]
         counts = collections.Counter(refs)
         for ref, key in zip(refs, disambiguate(refs)):
-            if counts[ref] == 1 and key != ref:
+            if counts[ref] != 1:
+                continue
+            unique_blocks += 1
+            distinct_unique.add(ref)
+            if key != ref:
                 moved += 1
-    print('\nUnique references whose key would change: %d '
-          '(must be 0 -- the scheme must not perturb a non-colliding name).'
-          % moved)
+    print('\nUnique-reference BLOCKS whose key would change: %d of %d '
+          '(%d distinct reference strings). Must be 0 -- the scheme must not '
+          'perturb a non-colliding name.'
+          % (moved, unique_blocks, len(distinct_unique)))
+
+    # Is `_StubFp` a faithful input, or is this table classifying a fiction?
+    # Compare it against the REAL parsed Footprint on every footprint of every
+    # board. This replaces a claim about pinfunctions that turned out to be
+    # false; a measured 0 is the justification the stub actually has.
+    disagree = 0
+    total = 0
+    for p in paths:
+        pcb = parse_kicad_pcb(p)
+        by_key = {}
+        for _s, _e, t, _r, key in iter_blocks_with_keys(p):
+            by_key[key] = t
+        for key, fp in pcb.footprints.items():
+            t = by_key.get(key)
+            if t is None:
+                continue
+            total += 1
+            if classify_part(_StubFp(t), key).name != classify_part(fp, key).name:
+                disagree += 1
+    print('_StubFp vs the REAL parsed Footprint, classify_part on both: '
+          '%d footprints compared, %d disagreements (must be 0).'
+          % (total, disagree))
+
+
+def iter_blocks_with_keys(path):
+    """(start, end, text, raw_ref, key) per block, using THIS script's own
+    standalone `disambiguate` -- the measurement must not depend on the engine
+    change it exists to justify."""
+    content = _read(path)
+    bs = blocks(content)
+    raw = [raw_reference(t) for _, _, t in bs]
+    for (s_, e_, t_), r_, k_ in zip(bs, raw, disambiguate(raw)):
+        yield s_, e_, t_, r_, k_
 
 
 def disambiguate(refs):
@@ -321,6 +372,7 @@ import os, re, sys
 sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, os.path.join(sys.argv[1], "py_router"))
 sys.path.insert(0, os.path.join(sys.argv[1], "tests"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcbnew
 from measure_726_duplicate_census import blocks, raw_reference, fp_uuid, _read
 print("KiCad build: %s" % pcbnew.GetBuildVersion())
@@ -357,14 +409,17 @@ def table_c(paths, want):
     if not want:
         print('(skipped; pass --pcbnew to run. Found: %s)' % kp)
         return False
-    probe = os.path.join(TESTS_DIR, '_726_pcbnew_probe.py')
+    # Written OUTSIDE the tracked tests/ directory: a measurement must not
+    # make the working tree dirty, even for the moment it runs.
+    _pd = tempfile.mkdtemp(prefix='m726probe_')
+    probe = os.path.join(_pd, 'measure_726_duplicate_census_probe.py')
     with open(probe, 'w', encoding='utf-8') as fh:
         fh.write(_PCBNEW_PROBE)
     try:
         r = subprocess.run([kp, '-X', 'utf8', probe, ROOT] + list(paths),
                            capture_output=True, text=True)
     finally:
-        os.remove(probe)
+        shutil.rmtree(_pd, ignore_errors=True)
     # pcbnew's wx image-handler chatter is unconditional; drop it.
     for line in (r.stdout or '').splitlines():
         if 'duplicate image handler' in line:
