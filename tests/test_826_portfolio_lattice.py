@@ -324,12 +324,20 @@ def t_the_seed_board_the_quench_parses_still_declares_the_lattice():
         report('at EXACTLY the input occupancy, not merely above the floor',
                seed_ev['occupancy'] == in_ev['occupancy'],
                '%s vs %s' % (seed_ev['occupancy'], in_ev['occupancy']))
-        report("and the candidate's quench saw the same lattice as the "
-               'baseline',
-               cands[0].metrics.get('board_grid_step')
-               == res['baseline'].metrics.get('board_grid_step'),
-               '%s vs %s' % (cands[0].metrics.get('board_grid_step'),
-                             res['baseline'].metrics.get('board_grid_step')))
+        # Against the INPUT's lattice, not merely against each other. The
+        # first draft compared candidate to baseline, and the mutation that
+        # nulls the whole disclosure made BOTH None -- so `None == None`
+        # passed and the row survived. Two things that vanish together are not
+        # an agreement.
+        cand_step = cands[0].metrics.get('board_grid_step')
+        base_step = res['baseline'].metrics.get('board_grid_step')
+        report('the disclosure carries a real lattice, not a null',
+               cand_step == in_ev['step'] and base_step == in_ev['step'],
+               'candidate %s / baseline %s / input %s'
+               % (cand_step, base_step, in_ev['step']))
+        report('the candidate reports the occupancy it was read off',
+               cands[0].metrics.get('board_grid_reason') == 'inferred',
+               str(cands[0].metrics.get('board_grid_reason')))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
