@@ -28,6 +28,11 @@
 cd "$(dirname "$0")"
 TAG=${1:-chain}
 shift
+# every run's outputs (boards, logs, sidecars) live under tmp/
+# (gitignored) so awx/ stays scripts-only; pass a TAG containing a
+# slash to write elsewhere
+mkdir -p tmp
+case "$TAG" in */*) ;; *) TAG="tmp/$TAG";; esac
 # BASE: the bare bench to chain on (default fb_t2q_base). The rotation
 # proof sets it to a rotated copy -- the whole chain must then come out
 # with the same grade, or something is leaning on the board's axes.

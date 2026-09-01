@@ -6,6 +6,9 @@ cd "$(dirname "$0")"
 FO=$1
 OUT=$2
 K=${3:-28}
+# outputs under tmp/ (gitignored) unless the caller passes a path
+mkdir -p tmp
+case "$OUT" in */*) ;; *) OUT="tmp/$OUT";; esac
 NETS=$(python3 coherent_nets.py "$K")
 TWO_PAGE=1 python3 braid.py --board "$FO" --dest DU1 --nets "$NETS" \
   --out /dev/null --plan-json "${OUT}_plan.json" > /dev/null 2>&1
