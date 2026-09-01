@@ -115,6 +115,18 @@ def main():
               + (f'  refused: {",".join(refused)}' if refused else ''))
         return grade, refused, board
 
+    def refusal_info(atag):
+        """The braid's structured refusal reasons for this arm --
+        stage, corridor, page, tooth/dest layers per refused net
+        (#622 plan communication). Empty when the braid predates the
+        channel or nothing was refused."""
+        try:
+            import json as _json
+            return _json.load(open(os.path.join(
+                HERE, f'{atag}_k{K}_refusals.json')))
+        except OSError:
+            return {}
+
     print(f'retry_chain K={K}: round 0 (plain arm)')
     g0, refused, b0 = run_arm(f'{tag}r0', {})
     if g0 is None:
@@ -128,6 +140,46 @@ def main():
         force = ','.join(sorted(best[3]))
         print(f'round {rnd}: forcing refused [{force}]')
         improved = False
+        # AIMED arm first: split the refused set by what the braid
+        # said, instead of shoving every net through both blanket
+        # arms -- a net whose TOOTH sits on crowded F goes source-B,
+        # one whose BERTH is on F goes dest-B, in ONE run. The
+        # blanket arms below stay as the fallback; the lexicographic
+        # keep makes the addition monotone.
+        info = refusal_info(best[4])
+        aim_s = sorted(n for n in best[3]
+                       if info.get(n, {}).get('tooth_layer') == 'F.Cu')
+        aim_d = sorted(n for n in best[3]
+                       if info.get(n, {}).get('dest_layer') == 'F.Cu')
+        if info and (aim_s or aim_d):
+            env = dict(best[2])
+            env['TP_SRC_B'] = '1'
+            for knob, add in (('TP_SRC_B_NETS', aim_s),
+                              ('TP_SPLIT_NETS', aim_d)):
+                if not add:
+                    continue
+                prev = env.get(knob, '')
+                env[knob] = ','.join(sorted(set(
+                    [x for x in prev.split(',') if x] + add)))
+            print(f'  aimed: src-B {",".join(aim_s) or "-"} / '
+                  f'dest-B {",".join(aim_d) or "-"}')
+            g, ref, b = run_arm(f'{tag}aim{rnd}', env)
+            if g is not None and g < best[0]:
+                best = (g, b, env, ref, f'{tag}aim{rnd}')
+                improved = True
+        # blanket arms are B-WARD forces; when every refused net's
+        # record says it is ALREADY B at both ends, they are provably
+        # useless -- measured twice at K35: 2 full chains each run to
+        # re-learn that forcing made things worse (2->5, 1->4 open)
+        if info and all(info.get(n, {}).get('tooth_layer') == 'B.Cu'
+                        and info.get(n, {}).get('dest_layer') == 'B.Cu'
+                        for n in best[3] if n in info) \
+                and all(n in info for n in best[3]):
+            print('  blanket arms skipped: every refusal is B/B '
+                  '(nothing to force toward B)')
+            if not improved:
+                break
+            continue
         for kind, knob in (('sB', 'TP_SRC_B_NETS'),
                            ('dB', 'TP_SPLIT_NETS')):
             env = dict(best[2])
