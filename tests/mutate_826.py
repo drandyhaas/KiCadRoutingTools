@@ -25,8 +25,9 @@ measured before the arms were written:
     all eleven lattice boards at radius 4.0 AND 2.0, first firing at 1.0. So
     `a-zero-offset-counts-as-a-perturbation` is killed by a SCRIPTED rng, not
     by a board.
-  * an outward-snapping draw is 1-6 per board -- likely, not guaranteed. An arm
-    resting on one being drawn goes quietly vacuous the day a fixture moves, so
+  * an outward-snapping draw is 0-6 per board and is ZERO on six of the eleven,
+    including esp_prog and routed_output. An arm resting on one being drawn
+    would be vacuous on most of the corpus, so
     `the-radius-test-goes-back-before-the-snap` is scripted too.
 
 AND ONE ROW EXISTS BECAUSE THE OBVIOUS FIXTURE CANNOT KILL IT.
@@ -118,12 +119,22 @@ ROWS = [
 
     # ---- the resolver -------------------------------------------------
     ('the-lattice-falls-back-to-the-grid-step-raster', 'pf',
-     "    return step, dict(ev, source='inferred' if step is not None "
-     "else 'none',\n"
+     "    return step, dict(ev, step=step, inferred_step=ev['step'],\n"
+     "                      source='inferred' if step is not None else 'none',\n"
      "                      resolved=step)",
      "    if step is None:\n"
-     "        return 0.1, dict(ev, source='grid_step', resolved=0.1)\n"
-     "    return step, dict(ev, source='inferred', resolved=step)",
+     "        return 0.1, dict(ev, step=0.1, inferred_step=ev['step'],\n"
+     "                         source='grid_step', resolved=0.1)\n"
+     "    return step, dict(ev, step=step, inferred_step=ev['step'],\n"
+     "                      source='inferred', resolved=step)",
+     (T_PF,), 'KILLED'),
+
+    # The B1 defect itself, as a row: report what was INFERRED instead of
+    # what the quench USED. Killed only by the `--step 0.25` arm, where the
+    # two differ -- at the default step they are equal and it is invisible.
+    ('the-disclosure-reports-the-inference-not-what-was-used', 'pf',
+     "            'board_grid_step': (m.get('board_grid') or {}).get('resolved'),",
+     "            'board_grid_step': (m.get('board_grid') or {}).get('step'),",
      (T_PF,), 'KILLED'),
 
     ('the-radius-guard-is-dropped', 'pf',
@@ -154,7 +165,7 @@ ROWS = [
 
     # ---- the disclosure ----------------------------------------------
     ('the-disclosure-drops-the-board-grid', 'pf',
-     "            'board_grid_step': (m.get('board_grid') or {}).get('step'),",
+     "            'board_grid_step': (m.get('board_grid') or {}).get('resolved'),",
      "            'board_grid_step': None,",
      (T_PF,), 'KILLED'),
 ]
