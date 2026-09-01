@@ -54,6 +54,13 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do KS+=("$1"); shift; done
 FO_OPTS=("$@")
 for K in "${KS[@]}"; do
   echo "=== K$K  $(date +%H:%M:%S)"
+  # fresh outputs per run: a reused tag otherwise re-reads its own
+  # previous .kicad_pro DRC floor (the documented pseudo-wobble), and
+  # a crashed stage would grade LAST run's board as this run's. The
+  # chain itself is bit-deterministic (measured: fresh tags, two hash
+  # seeds -> identical copper), so any draw variance IS staleness.
+  rm -f "${TAG}_fo_k${K}.kicad_pcb" "${TAG}_fo_k${K}.kicad_pro" \
+        "${TAG}_k${K}.kicad_pcb" "${TAG}_k${K}.kicad_pro"
   NETS=$(python3 coherent_nets.py "$K")
   python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
     --board="$BASE" $DIRS_OPT $SRC_OPT $LINES_OPT $PLAN_OPTS "${FO_OPTS[@]}" \
