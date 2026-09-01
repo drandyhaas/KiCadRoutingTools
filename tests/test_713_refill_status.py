@@ -399,6 +399,29 @@ with _Reset():
     check("an empty fill is no score at all, not the best possible one",
           _sc is None and _st.reason == 'empty_fill',
           f"score={_sc} reason={_st.reason}")
+
+# THE boundary, which the stub above does NOT reach: a refill that poured
+# copper for some OTHER zone but nothing for the wanted net. `fills` is then
+# non-empty, so a guard on `fills` passes it through with islands=0 -- the
+# rank optimum -- and neck_sum priced over the other net's copper. 29 boards
+# in this repo carry pre-existing zones, so this is the common case, not the
+# corner one. Found by adversarial review after the first fix shipped.
+with _Reset():
+    kef._KICAD_PYTHON_MEMO.append(sys.executable)
+    _real = kef.refill_islands_ex
+    kef.refill_islands_ex = lambda *a, **k: (
+        {('SOME_OTHER_NET', 'B.Cu'): [[(0, 0), (1, 0), (1, 1)]]},
+        RefillStatus('ok', '', 1.0))
+    try:
+        _sc2, _st2 = psc.plane_fragility_score_ex(BOARD, [('GND', 'B.Cu')])
+    finally:
+        kef.refill_islands_ex = _real
+    check("a fill with copper for ANOTHER net only is still no score",
+          _sc2 is None and _st2.reason == 'empty_fill',
+          f"score={_sc2} reason={_st2.reason} -- islands=0 would be the "
+          f"OPTIMUM of a term that sorts before hpwl")
+    check("and it names the nets it wanted",
+          'GND:B.Cu' in _st2.why(), _st2.why())
     check("and it is not uniform -- what KiCad pours is what moving parts "
           "changes", not _st.uniform)
 

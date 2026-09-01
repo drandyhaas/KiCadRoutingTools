@@ -559,7 +559,14 @@ def main():
                      'out_dir': args.out_dir}, sort_keys=True))
                 return 3
         else:
+            # SAME KEY SET as the failure shapes below. The first draft gave
+            # the ok arm only {status, reason, scored, of}, so a consumer
+            # reading plane_score['why'] got a KeyError on the happy path --
+            # in a change whose headline is that a probe row's keys must not
+            # depend on its outcome.
             plane_status = {'status': 'ok', 'reason': 'ok',
+                            'why': 'every contender scored',
+                            'at': None,
                             'scored': scored, 'of': len(contenders)}
 
     # Rule 1 of the acceptance conjunction, K-way (run-7 S6): annotate every
@@ -690,8 +697,25 @@ def main():
             who = 'baseline' if c.index == 0 else f'cand {c.index}'
             print(f"[probe/full] {who}: failures={c.route_full['failures']} "
                   f"({c.route_full['note']})")
+        # The full probe is the tier that OUTRANKS the window one, so losing a
+        # verdict here is worse than losing one there: if both drop,
+        # `ranking_primary = ranking_full or ranking_routed` falls back to the
+        # very ranking the full probe existed to overrule, silently. The first
+        # draft warned on the window leg only.
+        for c in contenders:
+            if c.route_full and c.route_full.get('failures') is None:
+                who = 'baseline' if c.index == 0 else f'cand {c.index}'
+                print(f"[probe/full] WARNING {who} produced NO VERDICT "
+                      f"({c.route_full.get('status')}: "
+                      f"{c.route_full.get('note')}) -- excluded from the "
+                      f"FULL ranking, which outranks the window one",
+                      file=sys.stderr)
         probed_f = [c for c in contenders
                     if c.route_full and c.route_full.get('failures') is not None]
+        if not probed_f and contenders:
+            print("[probe/full] WARNING no full-board verdict at all -- the "
+                  "slate falls back to the WINDOW ranking, which this tier "
+                  "exists to overrule", file=sys.stderr)
         probed_f.sort(key=lambda c: (c.route_full['failures'],
                                      c.route_full.get('iterations') or 0,
                                      c.index))

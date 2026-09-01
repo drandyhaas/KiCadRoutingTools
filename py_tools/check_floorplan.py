@@ -378,8 +378,11 @@ def main(argv=None):
               file=sys.stderr)
         if not args.exit_zero:
             return VIOLATIONS_EXIT
-    if result.errors and not args.exit_zero:
-        return VIOLATIONS_EXIT
+    # Reported BEFORE the errors return, not after. The first draft put this
+    # block below it, so a board that both had errors and left a declared
+    # channel ungraded exited 4 for the errors and never said the grade was
+    # incomplete -- the reader then fixes the errors, sees a clean run, and
+    # still has not measured what was never measured.
     if not result.complete:
         # #713 item 5: an ungraded DECLARED channel is not a pass, and the exit
         # code is what most callers actually branch on -- board_score,
@@ -396,6 +399,8 @@ def main(argv=None):
                 "is an absent verdict, not a clean one.", file=sys.stderr)
         if not args.exit_zero:
             return VIOLATIONS_EXIT
+    if result.errors and not args.exit_zero:
+        return VIOLATIONS_EXIT
     return 0
 
 

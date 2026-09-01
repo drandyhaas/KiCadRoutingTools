@@ -199,6 +199,12 @@ check("the wire says ok and how many were scored",
       s is not None and s['plane_score']['status'] == 'ok'
       and s['plane_score']['scored'] == s['plane_score']['of'],
       str(s and s.get('plane_score')))
+_OK_KEYS = {'status', 'reason', 'why', 'at', 'scored', 'of'}
+check("the OK arm carries the SAME keys as a failure arm",
+      s is not None and set(s['plane_score']) == _OK_KEYS,
+      f"missing {sorted(_OK_KEYS - set((s or {}).get('plane_score', {})))} -- "
+      f"a consumer reading plane_score['why'] must not KeyError on the happy "
+      f"path, in a change whose headline is uniform key sets")
 check("scored == of, i.e. every contender was covered",
       s is not None and s['plane_score']['scored'] > 0, str(s))
 

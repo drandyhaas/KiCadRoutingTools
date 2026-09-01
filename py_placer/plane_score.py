@@ -189,22 +189,31 @@ def plane_fragility_score_ex(
             # second opinion that can drift from the first.
             return None, PlaneScoreStatus(_rst.reason, _rst.detail,
                                           _rst.elapsed_s)
-        if not fills:
-            # The refill RAN and poured nothing. Scoring it would report
-            # `islands: 0` -- which is the OPTIMUM of a term that sorts before
-            # hpwl -- while `neck_sum` came from drawn zone outlines via
-            # compute_plane_fragility_cells' own fallback. This module's
-            # docstring says the score is "never guessed from drawn outlines",
-            # so an empty fill is no score at all rather than the best one.
-            return None, PlaneScoreStatus('empty_fill', _rst.detail,
-                                          _rst.elapsed_s)
-
         wanted = {(net, layer) for net, layer in specs}
         per_net = {}
         for (net, layer), polys in fills.items():
             if (net, layer) in wanted:
                 per_net[f'{net}:{layer}'] = len(polys)
         islands = sum(per_net.values())
+        if not per_net:
+            # The refill RAN and poured nothing FOR THE NETS WE ASKED ABOUT.
+            # Scoring it would report `islands: 0` -- the OPTIMUM of a term
+            # that sorts before hpwl -- while `neck_sum` was priced over
+            # whatever OTHER copper the board happens to carry. So the
+            # candidate that could not be scored would outrank every candidate
+            # that could.
+            #
+            # The guard used to be `if not fills` and sat above this loop,
+            # testing the WHOLE fill dict. That only catches a board with no
+            # poured copper at all; 29 boards in this repo carry pre-existing
+            # zones, so `fills` is non-empty regardless of whether the
+            # --plane-score nets poured anything. `per_net` is what actually
+            # feeds the rank, so `per_net` is what has to be guarded.
+            return None, PlaneScoreStatus(
+                'empty_fill',
+                'no copper poured for ' + ', '.join(f'{n}:{l}'
+                                                    for n, l in specs),
+                _rst.elapsed_s)
 
         # The #424 field over the poured board. The staged pcb_data gets the
         # ALREADY-COMPUTED fill as its provider so the field prices the exact

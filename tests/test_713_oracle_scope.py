@@ -47,13 +47,22 @@ _src = open(os.path.join(ROOT, 'py_router', 'kicad_oracle.py'),
 _tree = ast.parse(_src)
 # Module-level assignments to a mutable container are how run history leaks in.
 _globals = {}
+_CONTAINERISH = (ast.Call, ast.Dict, ast.List, ast.Set, ast.DictComp,
+                 ast.ListComp, ast.SetComp, ast.Name)
 for node in _tree.body:
-    if isinstance(node, ast.Assign) and isinstance(node.value,
-                                                   (ast.Call, ast.Dict,
-                                                    ast.List, ast.Set)):
+    # AnnAssign as well as Assign. `_UNCONNECTED_MEMO: Dict[...] = {}` is an
+    # AnnAssign and was not collected at all by the first version -- so a new
+    # `_ORACLE_TIMED_OUT_2: set = set()`, which is the exact style
+    # kicad_exact_fill._REFILL_FAILED already uses, would have passed this
+    # gate. Comprehensions and a bare alias (`_D = _B`) were missed too.
+    if isinstance(node, ast.Assign) and isinstance(node.value, _CONTAINERISH):
         for t in node.targets:
             if isinstance(t, ast.Name):
                 _globals[t.id] = ast.dump(node.value)[:40]
+    elif (isinstance(node, ast.AnnAssign) and node.value is not None
+            and isinstance(node.value, _CONTAINERISH)
+            and isinstance(node.target, ast.Name)):
+        _globals[node.target.id] = ast.dump(node.value)[:40]
 # Declared, with the reason each is allowed to persist across boards.
 _ALLOWED = {
     'KICAD_CLI_CANDIDATES': 'a PATH probe, not a verdict about any board',

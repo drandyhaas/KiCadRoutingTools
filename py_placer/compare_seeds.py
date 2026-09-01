@@ -11,9 +11,10 @@ step as one command instead of an afternoon of bookkeeping.
 
 Per seed: place_seed subprocess (the seed must GRADE CLEAN against its own
 intent -- a seed failing its gate is recorded but never ranked) -> one
-full-board probe via converge.scoped_route, every seed routed with the SAME
-net patterns and the SAME route args, verdicts via route_verdict (which
-counts routed-but-OPEN nets). Output: a ranked table, seeds.json in
+full-board probe via converge.probe_route, every seed routed with the SAME
+net patterns and the SAME route args and with NO timeout (#713: a verdict a
+clock erased was dropped from the ranking, not ranked worse). A seed that
+produces no verdict carries a `status` naming why. Output: a ranked table, seeds.json in
 --out-dir, and a JSON_SUMMARY line with best_seed.
 
     python compare_seeds.py board.kicad_pcb --intent floorplan.json \\
@@ -135,7 +136,6 @@ def main():
     except Exception:
         pass
 
-    from converge import route_verdict, scoped_route
 
     full_nets = ['*'] + [f'!{p}' for p in (args.ignore_nets or [])]
     rows = []

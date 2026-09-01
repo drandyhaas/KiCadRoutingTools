@@ -130,14 +130,98 @@ REGISTRY = {
         'the reporting rule.'),
     'kicad_routing_plugin/swig_gui.py': (
         'reporting', 'wall_time reported after a routing run'),
+    'py_router/plane_region_connector.py': (
+        'reporting',
+        '_total_route_time, via `import time as _time`. Invisible to the '
+        'first discovery regex, whose \\b before `time.time` is killed by the '
+        'leading underscore.'),
+    'py_router/history_congestion.py': (
+        'reporting',
+        'record_s / rows_s, via `from time import perf_counter as _perf`. '
+        'Invisible to the first discovery regex, and its ACCUMULATORS are '
+        '`+=`, which the comparison visitor also could not see.'),
+
+    # --- the hang detector the first census could not see -------------------
+    'py_router/ui_thread.py': (
+        'hang_detector',
+        'SAVE_BOARD_UI_TIMEOUT_S = 120 on `done.wait(timeout_s)`, marshalling '
+        'a SaveBoard onto the wx main thread (#688). The timeout is passed '
+        'POSITIONALLY, so `timeout=` never matched it. NOTE, and it is a real '
+        'weakness rather than a clean pass: its expiry returns a bare False '
+        'that a caller cannot tell from a wx save exception -- the shape this '
+        'category exists to forbid. Left as-is here because changing the GUI '
+        'save path is outside #713; filed as the follow-up named in the PR.'),
+
+    # --- filesystem timestamps, not our elapsed time ------------------------
+    'py_router/animate_route.py': (
+        'file_mtime', 'orders movie frames by st_mtime'),
+    'py_router/route_planes.py': (
+        'file_mtime',
+        'compares the output file st_mtime before/after to detect that a '
+        'post-pass rewrote it'),
+    'kicad_routing_plugin/placement_run.py': (
+        'file_mtime',
+        'strftime run-directory name, and picks the newest artifact by mtime'),
+
+    # --- an event-loop yield ------------------------------------------------
+    'kicad_routing_plugin/differential_gui.py': (
+        'throttle', 'time.sleep(0.01) yielding to the wx event loop'),
+    'kicad_routing_plugin/planes_gui.py': (
+        'throttle', '_time.sleep(0.01) yielding to the wx event loop'),
+
+    # --- a render cap, not a routing decision -------------------------------
+    'py_router/make_movie.py': (
+        'harness',
+        '--camera-budget caps a RENDER, which produces no board'),
+
+    # --- no clock at all ----------------------------------------------------
+    'py_router/routing_common.py': (
+        'unused_import',
+        'a bare `import time` with no call anywhere; every other "time" here '
+        'is time_matching, a propagation delay, which is physics not a clock'),
 }
 
 #: Categories whose clock may legitimately reach a comparison.
-MAY_COMPARE = {'throttle', 'time_claim', 'hang_detector', 'harness', 'record'}
+MAY_COMPARE = {'throttle', 'time_claim', 'hang_detector', 'harness', 'record',
+               'file_mtime', 'unused_import'}
 
+#: A clock CALL, as opposed to a mere import or a constant. Used to hold the
+#: `unused_import` category honest: a file registered that way must contain no
+#: call at all, or the registration is a lie the moment someone uses it.
+_CLOCK_CALL = re.compile(
+    r'(?:\w*\.)?(?:time|monotonic|perf_counter|process_time)\s*\(')
+
+#: DISCOVERY. Deliberately looser than it looks like it needs to be, because
+#: the first version missed three real files and an adversarial review found
+#: them, not this gate:
+#:
+#:   `_time.time()`      -- `\btime\.time` does not match: the leading
+#:                          underscore kills the word boundary
+#:                          (plane_region_connector.py)
+#:   `_perf()` after `from time import perf_counter as _perf`
+#:                       -- the call site carries none of the real names
+#:                          (history_congestion.py)
+#:   `done.wait(timeout_s)` -- a timeout passed POSITIONALLY, with a 120 s
+#:                          constant beside it (ui_thread.py, a live hang
+#:                          detector whose expiry returns a bare False)
+#:
+#: The alias fix that shipped first went into the AST visitor, which only ever
+#: runs on files DISCOVERY already found -- so it could not have caught the
+#: third of those. Discovery is the layer that has to be generous; the
+#: registry is where precision belongs.
 _CLOCK = re.compile(
-    r'\b(time\.time|time\.monotonic|time\.perf_counter|perf_counter|monotonic)'
-    r'\s*\(|\btimeout\s*=|\bTimeoutExpired\b')
+    # a clock call, however the module or function was aliased
+    r'(?:\w*\.)?(?:time|monotonic|perf_counter|process_time)\s*\(|'
+    # any import OF a clock, which is what an alias must go through
+    r'from\s+time\s+import|'
+    r'\bimport\s+time\b|'
+    # a timeout, by keyword or as a named constant, and the exception
+    r'\btimeout\w*\s*=|'
+    r'\b[A-Z_]*TIMEOUT[A-Z_]*\b|'
+    r'\bTimeoutExpired\b|'
+    # the other stdlib clocks, so a future site cannot arrive unseen
+    r'\bdatetime\.now\s*\(|\bsignal\.alarm\s*\(|\bthreading\.Timer\b|'
+    r'\basyncio\.wait_for\b|\bsettimeout\s*\(')
 
 passed = failed = 0
 
@@ -272,14 +356,37 @@ class _Decides(ast.NodeVisitor):
             return self._is_clock(node.value)
         return False
 
+    def _bind(self, target):
+        if isinstance(target, ast.Name):
+            self.clock_names.add(target.id)
+        elif isinstance(target, ast.Subscript) and isinstance(target.value,
+                                                              ast.Name):
+            self.clock_names.add(target.value.id)
+        elif isinstance(target, ast.Attribute):
+            self.clock_names.add(target.attr)
+
     def visit_Assign(self, node):
         if self._is_clock(node.value):
             for t in node.targets:
-                if isinstance(t, ast.Name):
-                    self.clock_names.add(t.id)
-                elif isinstance(t, ast.Subscript) and isinstance(t.value,
-                                                                 ast.Name):
-                    self.clock_names.add(t.value.id)
+                self._bind(t)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node):
+        if node.value is not None and self._is_clock(node.value):
+            self._bind(node.target)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node):
+        """`spent += time.time() - t0` -- the ACCUMULATOR shape.
+
+        This is the literal definition of the `reporting` category, and the
+        first version of this visitor could not see it: only `visit_Assign`
+        bound clock names, so `spent` was never a clock and `if spent >
+        budget` was invisible. `history_congestion.record_s` and
+        `plane_fragility.refresh_s` are both live `+=` accumulators.
+        """
+        if self._is_clock(node.value):
+            self._bind(node.target)
         self.generic_visit(node)
 
     def visit_Compare(self, node):
@@ -302,16 +409,46 @@ for rel, src in sorted(found.items()):
 check("the reporting check actually ran on the reporting files",
       _checked >= 10, f"{_checked} file(s) checked")
 
+for rel, (cat, _why) in sorted(REGISTRY.items()):
+    if cat == 'unused_import':
+        check(f"{rel}: registered as an unused import, and really has no call",
+              not _CLOCK_CALL.search(SOURCES[rel][1]),
+              "the registration stops being true the moment someone uses it")
+
 print("\n--- the deleted budgets stay deleted")
 _GONE = {
     '--deadline': 'the #621 facility',
     '--plane-score-budget': '#713 item 1: it picked the winning candidate',
     '--route-timeout': '#713 item 2: it erased a probe verdict',
 }
+# `add_argument\s*\(` then the flag anywhere in the call, not the two literal
+# spellings the first version matched: `add_argument(` followed by a newline is
+# the prevailing style at 5 sites in these directories, and
+# `add_argument( "--flag"` with a space evaded it too. The repo already ships
+# this idiom in tests/test_doc_flag_liveness.py.
+_ADD_ARG_CALL = re.compile(r'add_argument\s*\(')
+
+
+def _flag_is_registered(code, flag):
+    """Does any add_argument(...) call in `code` name `flag`?"""
+    for m in _ADD_ARG_CALL.finditer(code):
+        depth, i = 0, m.end() - 1
+        while i < len(code):
+            if code[i] == '(':
+                depth += 1
+            elif code[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if flag in code[m.end():i]:
+            return True
+    return False
+
+
 for flag, why in _GONE.items():
     live = [rel for rel, (_raw, code) in SOURCES.items()
-            if f'add_argument("{flag}"' in code
-            or f"add_argument('{flag}'" in code]
+            if _flag_is_registered(code, flag)]
     check(f"{flag} is not re-added ({why})", not live, ', '.join(live))
 
 check("no wall-clock budget env knob",

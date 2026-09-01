@@ -294,7 +294,14 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
     the oracle rewrites the board between rounds the memo misses and a fresh
     DRC runs; there is no staleness window. refill_islands memoizes the same
     way for the same reason."""
-    if timed_out is not None and _fill_cost_key(board_file) in timed_out:
+    # `if timed_out and` -- truthiness, not `is not None`. The deleted
+    # cross-call skip was criticised in this very change for evaluating
+    # `_fill_cost_key` as its LEFT operand and parsing the whole board for a
+    # test that could not matter. `timed_out is not None` is ALWAYS true
+    # from oracle_reconnect, so the first draft of the replacement paid that
+    # same parse on all three calls -- more of the cost it named, not less.
+    # An EMPTY set short-circuits for free.
+    if timed_out and _fill_cost_key(board_file) in timed_out:
         print(f"  KiCad-oracle recheck: kicad-cli DRC already timed out on "
               f"this board earlier in THIS call; not re-paying {timeout}s")
         return None

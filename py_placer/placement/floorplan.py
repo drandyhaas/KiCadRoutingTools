@@ -2941,8 +2941,8 @@ _ARM = {'decap_pin_distance': _arm_decap_pins}
 _WITHHELD_MARK = 'the emitter WITHHELD'
 
 
-def _is_not_asked(reason: str) -> bool:
-    """Is this `rules_skipped` reason the honest kind -- nobody declared it?
+def _is_not_asked(rule: str, reason: str) -> bool:
+    """Is this `rules_skipped` entry the honest kind -- nobody declared it?
 
     ONE home for the distinction, because `rules_skipped` carries two opposite
     things and reading it as one number is how the #713 census first reported
@@ -2950,8 +2950,20 @@ def _is_not_asked(reason: str) -> bool:
     declared nothing, which must not make a verdict incomplete; anything else
     is an `_ARM` reason ("the intent asked, this board cannot answer") or a
     withholding note, both of which must.
+
+    Keyed on the RULE, not on the reason string alone. Matching against
+    `_SKIP_REASON.values()` meant an `_ARM` reason that ever happened to equal
+    some OTHER rule's skip reason would read as "nobody asked" -- a real
+    abstention silently downgraded to a pass, which is the dangerous
+    direction. The strings are distinct today; this makes them not have to be.
+
+    The `_WITHHELD_MARK` conjunct is belt over brace: `grade()` builds a
+    withheld reason by APPENDING to `_SKIP_REASON[name]`, so the decorated
+    string can never equal the bare one and the first test already fails. It
+    is kept because if it ever does fire, it fires toward "abstention", which
+    is the safe direction.
     """
-    return reason in _SKIP_REASON.values() and _WITHHELD_MARK not in reason
+    return reason == _SKIP_REASON.get(rule) and _WITHHELD_MARK not in reason
 
 
 def _declared_by_hand(intent: Intent, key: str) -> bool:
@@ -3051,8 +3063,8 @@ class GradeResult:
         out = {}
         if self.budget_abstained:
             out['budget_abstained'] = len(self.budget_abstained)
-        _armed = sum(1 for r in self.rules_skipped.values()
-                     if not _is_not_asked(r))
+        _armed = sum(1 for k, r in self.rules_skipped.items()
+                     if not _is_not_asked(k, r))
         if _armed:
             out['rules_skipped_armed'] = _armed
         _edge = sum(1 for e in self.edge_seating
@@ -3904,6 +3916,15 @@ def format_text(r: GradeResult) -> str:
     ol = r.outline
     lines.append(f"  outline: {ol['outlines']} ring(s), {ol['cutouts']} cutout(s), "
                  f"{ol['edge_contours']} milled contour(s)")
+    if r.violations and not r.complete:
+        # A board can be BOTH wrong and incompletely graded, and the second
+        # fact does not stop mattering because the first is true. The first
+        # draft printed the incompleteness only on the no-violation branch,
+        # so a board with a single warning lost the disclosure entirely.
+        lines.append(
+            "  ALSO NOT FULLY GRADED: " + ', '.join(
+                f'{n} {k}' for k, n in sorted(r.not_graded.items()))
+            + " -- the violations below are what WAS measured, not all of it")
     if not r.violations and not r.complete:
         # NOT "PASS". A clean sweep of the channels that ran says nothing
         # about the ones that did not, and this line used to print 26 lines

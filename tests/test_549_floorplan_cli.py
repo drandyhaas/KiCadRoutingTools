@@ -123,8 +123,21 @@ def test_violations_exit_4_and_exit_zero_overrides():
     code, out, _ = _run(BOARD, '--intent', p, '-q', '--exit-zero')
     assert code == 0, code
     assert _summary(out)['pass'] is False, "the verdict changed with --exit-zero"
+
+    # A board can be BOTH wrong and incompletely graded, and the second fact
+    # must not be swallowed by the first. ulx3s is exactly that case here: a
+    # must_lock violation AND a withheld overlap_area. The first draft of
+    # #713 item 5 returned on `errors` before it reached the completeness
+    # block, and printed the INCOMPLETE line only on the no-violation branch,
+    # so this board reported the errors and said nothing about what it never
+    # measured.
+    code, out, err = _run(BOARD, '--intent', p)
+    s2 = _summary(out)
+    assert s2['errors'] >= 1 and s2['complete'] is False, s2
+    assert 'ALSO NOT FULLY GRADED' in out, out[-600:]
+    assert 'NOT FULLY GRADED' in err, err
     print("  PASS: 4 on violations; --exit-zero returns 0 without lying "
-          "about `pass`")
+          "about `pass`; a wrong board still discloses what went ungraded")
 
 
 def test_argparse_failures_all_exit_2():

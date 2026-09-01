@@ -588,7 +588,9 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     except subprocess.TimeoutExpired:
         # A TIMEOUT is not remembered as a failure: it is a budget verdict,
         # not a property of the board, and a later step may legitimately have
-        # more headroom. (The kicad-cli twin has _ORACLE_TIMED_OUT for that.)
+        # more headroom. (The kicad-cli twin used to keep a module-global
+        # _ORACLE_TIMED_OUT for that; #713 replaced it with a call-scoped
+        # set, for the same reason this arm records nothing.)
         _dt = time.monotonic() - _t0
         if verbose:
             print(f"  (exact-fill refill timed out after {_dt:.0f}s)")
