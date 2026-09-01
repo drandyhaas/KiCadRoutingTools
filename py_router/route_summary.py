@@ -358,8 +358,14 @@ def write_summary_file(path: str, merged: Optional[Dict]) -> None:
     truthy dict carrying none of the failure keys as `(0, 'clean')`, so an
     ``{'complete': false}`` placeholder would rank a broken candidate FIRST.
     Failing closed -- no file -- lands every caller in the `summary = {}` /
-    "no summary" case they all already handle, where a candidate without a
-    verdict ranks last and never best.
+    "no summary" case they all already handle. Stated precisely, because the
+    three handle it differently: compare_seeds ranks such a row last and never
+    picks it as `best`; cmd_poses only annotates; place_portfolio DROPS it from
+    the routed ranking and falls through to the static one, so with every probe
+    unreadable it still names a best on crossings/HPWL alone (`probe_kind:
+    null` is the only tell). That last one is pre-existing and is not made
+    worse here -- but it is not "ranks last", and saying so would be the
+    comfortable version.
 
     FAILING CLOSED MEANS DELETING THE DESTINATION, and that is not fussiness.
     An atomic publish that merely declines to overwrite leaves the PREVIOUS
@@ -376,9 +382,10 @@ def write_summary_file(path: str, merged: Optional[Dict]) -> None:
     If the destination cannot be removed either -- the same lock that blocked
     the rename -- the stale file survives and the raised message SAYS SO, so
     the caller's warning is true rather than reassuring. Note the in-repo
-    precedent at predictor_study.py:266 CATCHES this PermissionError instead;
-    it can, because there the surviving file provably carries the same content.
-    Here it does not.
+    precedent at predictor_study.py:270 CATCHES this PermissionError instead.
+    It can, because it then RE-READS the survivor and compares its argv_sha,
+    raising SystemExit on disagreement -- it verifies rather than assumes.
+    Nothing here can verify a route summary that way, so it re-raises.
     """
     tmp = f'{path}.{os.getpid()}.tmp'   # several routes can share a directory
     try:
