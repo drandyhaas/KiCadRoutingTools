@@ -1571,16 +1571,20 @@ def _footprint_edge_points_by_ref(
 _OUTLINE_EPS = 1e-6
 
 
-def _mask_footprint_blocks(content: str) -> str:
-    """`content` with every `(footprint ...)` block blanked to spaces.
+def _mask_footprint_blocks(content: str, only_refs=None) -> str:
+    """`content` with `(footprint ...)` blocks blanked to spaces.
 
     Length-preserving, so any offset computed against the masked text still
-    lines up with the original. Used to ask what the board's Edge.Cuts would
+    lines up with the original. With `only_refs`, mask just those references;
+    otherwise mask every footprint, which asks what the board's Edge.Cuts would
     say if no footprint contributed any.
     """
     out = list(content)
     for m in re.finditer(r'\(footprint\s+"', content):
         end = find_matching_paren(content, m.start())
+        if only_refs is not None:
+            if _footprint_reference(content[m.start():end])[0] not in only_refs:
+                continue
         for i in range(m.start(), end):
             if out[i] != '\n':
                 out[i] = ' '
@@ -1621,6 +1625,59 @@ def footprint_outline_owners(content: str) -> Dict[str, bool]:
     outers, _cutouts = extract_board_contours(board_only)
     return classify_outline_owners(owners, extract_board_bounds(board_only),
                                    outers)
+
+
+def outline_fingerprint(board_info) -> Tuple:
+    """A canonical, comparable summary of a board's Edge.Cuts geometry (#829).
+
+    `board_bounds` alone is NOT a sufficient detector and this is the reason
+    this helper exists: an interior cutout moving never touches the bounding
+    box, and `_footprint_edge_points` treats an `fp_circle` as rotation-
+    invariant about its moved centre, so rotating a footprint that owns a
+    circular window changes nothing in the bbox. Rings and cutouts catch what
+    bounds cannot; bounds catch an open stub that never chains into a ring,
+    which rings cannot. Both are needed -- measured: the #829 repro changed
+    `board_bounds` while `board_outlines` stayed identical.
+
+    Rounded to 1 nm, and rings are compared as SETS of rounded vertices so a
+    chainer that happens to start or wind a ring differently is not reported as
+    a moved outline.
+    """
+    def ring(r):
+        return tuple(sorted((round(x, 6), round(y, 6)) for x, y in r))
+
+    b = board_info.board_bounds
+    return (
+        tuple(round(v, 6) for v in b) if b else None,
+        tuple(sorted(ring(r) for r in (board_info.board_outlines or []))),
+        tuple(sorted(ring(r) for r in (board_info.board_cutouts or []))),
+        len(getattr(board_info, 'board_edge_contours', None) or []),
+    )
+
+
+def structural_outline_fingerprint(content: str) -> Tuple:
+    """`outline_fingerprint` of the board's STRUCTURAL outline only (#829).
+
+    The board-level Edge.Cuts plus the footprints that draw the boundary --
+    with every CARRIED owner masked out. That distinction is the whole reason
+    this exists rather than a plain whole-board fingerprint: a relief parented
+    to a part is *supposed* to travel with it, so a run that legitimately moves
+    one changes `board_cutouts`, and comparing the full outline would refuse
+    exactly the move #829's fix is careful to permit. Measured while writing
+    this: the naive version fired on the carried case on its first run.
+
+    Invariant under any permitted placement move, by construction. A change
+    means something moved a footprint that draws the board.
+    """
+    owners = footprint_outline_owners(content)
+    carried = {ref for ref, structural in owners.items() if not structural}
+    if carried:
+        content = _mask_footprint_blocks(content, only_refs=carried)
+    outers, cutouts = extract_board_contours(content)
+    return outline_fingerprint(BoardInfo(
+        layers={}, copper_layers=[],
+        board_bounds=extract_board_bounds(content),
+        board_outlines=outers, board_cutouts=cutouts))
 
 
 def classify_outline_owners(owners, board_only_bounds, board_only_outers):

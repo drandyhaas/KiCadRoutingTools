@@ -139,6 +139,56 @@ def test_the_writer_refuses_rather_than_skipping():
           == parse_kicad_pcb(out2).board_info.board_bounds)
 
 
+def test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed():
+    """The per-ref gates answer "may this footprint move". The tripwire answers
+    the question the contract actually makes -- "is the outline the same board
+    it was" -- so it has to hold even when the per-ref gate is defeated.
+
+    Defeat it deliberately, which is the only way to reach the tripwire: with
+    the gates working, no placement list can contain an outline owner.
+    """
+    from placement import writer as W
+    board = FIX.write()
+    pcb = parse_kicad_pcb(board)
+    fp = pcb.footprints['U_STRUCT']
+    out = os.path.join(os.path.dirname(board), 'bypass.kicad_pcb')
+    mv = [{'reference': 'U_STRUCT', 'new_x': fp.x + 2.0, 'new_y': fp.y,
+           'new_rotation': fp.rotation or 0}]
+
+    orig = W._draws_board_outline
+    W._draws_board_outline = lambda *a, **k: False   # bypass the per-ref gate
+    try:
+        raised = False
+        try:
+            W.write_placed_output(board, out, mv)
+        except W.OutlineOwnerMove as exc:
+            raised = True
+            msg = str(exc)
+        check("the tripwire catches an outline change the gates missed", raised)
+        check("and it says the outline changed, not just 'refused'",
+              raised and 'CHANGED THE BOARD OUTLINE' in msg,
+              msg if raised else '')
+    finally:
+        W._draws_board_outline = orig
+
+    # ...and it does NOT fire for a carried relief, whose whole point is that
+    # it travels with the part. This is the half a naive whole-outline
+    # fingerprint gets wrong -- moving a window changes board_cutouts.
+    W._draws_board_outline = lambda *a, **k: False
+    try:
+        c = pcb.footprints['U_CARRY']
+        out2 = os.path.join(os.path.dirname(board), 'bypass_carry.kicad_pcb')
+        ok = W.write_placed_output(board, out2, [
+            {'reference': 'U_CARRY', 'new_x': c.x + 2.0, 'new_y': c.y,
+             'new_rotation': c.rotation or 0}])
+        check("a carried relief still writes with the gate bypassed", bool(ok))
+        moved = parse_kicad_pcb(out2).footprints['U_CARRY']
+        check("and it really did move", abs(moved.x - c.x) > 1.0,
+              f"{c.x} -> {moved.x}")
+    finally:
+        W._draws_board_outline = orig
+
+
 def test_a_pure_rotation_is_covered_too():
     """`local_to_global` transforms Edge.Cuts by the footprint's ANGLE, so a
     rotation moves the outline with the part standing still."""
@@ -225,6 +275,7 @@ TESTS = [
     test_the_movable_set_refuses_the_owner_and_says_why,
     test_the_quench_locks_the_owner_and_discloses_it,
     test_the_writer_refuses_rather_than_skipping,
+    test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed,
     test_a_pure_rotation_is_covered_too,
     test_a_board_with_no_owners_is_untouched,
     test_no_tracked_board_carries_footprint_edge_cuts,

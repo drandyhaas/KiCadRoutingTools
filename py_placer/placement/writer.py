@@ -29,28 +29,34 @@ _OWNS_OUTLINE_RE = re.compile(r'"Edge\.Cuts"')
 _OUTLINE_OWNER_CACHE: Dict[str, Dict[str, bool]] = {}
 
 
+def _outline_owner_map(input_file: str) -> Dict[str, bool]:
+    """`{ref: draws_the_board_outline}` for `input_file`, memoised.
+
+    Memoised because `write_placed_output` is called once per board, not once
+    per ref, and the classifier re-reads the file.
+    """
+    if input_file not in _OUTLINE_OWNER_CACHE:
+        try:
+            from kicad_parser import footprint_outline_owners
+            with open(input_file, encoding='utf-8') as fh:
+                _OUTLINE_OWNER_CACHE[input_file] = footprint_outline_owners(
+                    fh.read())
+        except (OSError, ValueError):
+            # Cannot decide -> do not invent a refusal. The movable-set gates
+            # are the primary defence; a backstop that failed closed on an
+            # unreadable file would break every ordinary run.
+            _OUTLINE_OWNER_CACHE[input_file] = {}
+    return _OUTLINE_OWNER_CACHE[input_file]
+
+
 def _draws_board_outline(input_file: str, ref: str) -> bool:
     """Does `ref` draw geometry OUTSIDE the board-level outline (#829)?
 
     Answered by the parser's own classifier, never by a second predicate here:
     `owns_edge_cuts` is not the question -- a relief parented to a part travels
     with it and must keep moving (crkbd's 184 per-LED windows, #628).
-
-    Memoised per input file because `write_placed_output` is called once per
-    board, not once per ref, and the classifier re-reads the file.
     """
-    try:
-        if input_file not in _OUTLINE_OWNER_CACHE:
-            from kicad_parser import footprint_outline_owners
-            with open(input_file, encoding='utf-8') as fh:
-                _OUTLINE_OWNER_CACHE[input_file] = footprint_outline_owners(
-                    fh.read())
-        return bool(_OUTLINE_OWNER_CACHE[input_file].get(ref))
-    except (OSError, ValueError):
-        # Cannot decide -> do not invent a refusal. The movable-set gates are
-        # the primary defence; this is a backstop, and a backstop that fails
-        # closed on an unreadable file would break every ordinary run.
-        return False
+    return bool(_outline_owner_map(input_file).get(ref))
 
 
 def _fmt_mm(v: float) -> str:
@@ -444,6 +450,38 @@ def write_placed_output(input_file: str, output_file: str,
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(content)
+
+    # #829 tripwire: did this write change the board OUTLINE? The per-ref gate
+    # above answers "may this footprint move"; this answers the question the
+    # placement stack's contract actually makes -- "is the outline the same
+    # board it was" -- and it catches a route no gate anticipated.
+    #
+    # It compares a FINGERPRINT, not `board_bounds`. Bounds are blind to an
+    # interior cutout moving and to a rotated circular window (fp_circle bounds
+    # are rotation-invariant about the moved centre), and rings are blind to an
+    # open stub that never chains -- the #829 repro moved bounds while
+    # board_outlines stayed identical, so either alone would have missed it.
+    #
+    # Armed ONLY when the input board has footprint-embedded Edge.Cuts, which
+    # is 0 of the 27 tracked boards: on an ordinary board the owner map is
+    # already memoised and empty, so this costs one dict lookup and never
+    # re-parses anything.
+    # Armed off the BOARD, not off which refs the per-ref gate happened to
+    # check. Using the gate's cache made the tripwire depend on a side
+    # effect: it silently disarmed whenever the moved footprints were not
+    # the ones carrying Edge.Cuts. Caught by the bypass test.
+    if _outline_owner_map(input_file):
+        from kicad_parser import structural_outline_fingerprint
+        with open(input_file, encoding='utf-8') as _fh:
+            _before = structural_outline_fingerprint(_fh.read())
+        with open(output_file, encoding='utf-8') as _fh:
+            _after = structural_outline_fingerprint(_fh.read())
+        if _before != _after:
+            raise OutlineOwnerMove(
+                f"writing {output_file} CHANGED THE BOARD OUTLINE. The "
+                f"placement stack does not resize boards: size, cutouts and "
+                f"slots are mechanical decisions the user owns. This is a bug "
+                f"in whatever produced the placement list (#829).")
 
     provenance.commit_write(output_file)
 
