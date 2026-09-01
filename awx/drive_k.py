@@ -75,3 +75,22 @@ r2 = subprocess.run(
      os.path.basename(tag), '--num-improve', str(a.num_improve)],
     capture_output=True, text=True)
 sys.stdout.write(r2.stdout)
+
+# closing stage: via-pair collapse on the evolved best -- eats the
+# tooth-layer/ride mismatches (a B dogbone whose lane rides F pays
+# the dogbone via + an immediate return via; K15 measured 26 -> 20v)
+m2 = re.search(r'^BEST: (\S+)', r2.stdout, re.M)
+if m2 and os.path.exists(m2.group(1)):
+    best = m2.group(1)
+    out_cd = f'{tag}_final.kicad_pcb'
+    r3 = subprocess.run(
+        [sys.executable, 'collapse_dives.py', best, '--out', out_cd],
+        capture_output=True, text=True)
+    sys.stdout.write(r3.stdout)
+    nets = subprocess.run(
+        [sys.executable, 'coherent_nets.py', a.k],
+        capture_output=True, text=True).stdout.strip()
+    g = subprocess.run(
+        [sys.executable, 'grade_k.py', out_cd, nets],
+        capture_output=True, text=True)
+    sys.stdout.write(g.stdout)
