@@ -66,9 +66,36 @@ ROWS = [
      (T829,), 'KILLED'),
 
     ('every-owner-is-structural', 'pa',
-     "    return {ref: not all(inside(px, py) for px, py in pts)\n"
-     "            for ref, pts in owners.items()}\n",
-     "    return {ref: True for ref, pts in owners.items()}\n",
+     "        if not _segments_close_on_themselves(segs):\n"
+     "            out[ref] = True\n            continue\n",
+     "        if True:\n"
+     "            out[ref] = True\n            continue\n",
+     (T829,), 'KILLED'),
+
+    # The rule the FIRST classifier used, and the reason it was replaced:
+    # decide on containment alone and an open path drawing the real board edge
+    # on a panelised board reads as carried, because it does sit inside the
+    # panel frame. Killed by the panel board in REVIEW_BOARDS.
+    ('closedness-is-dropped-decide-on-containment-alone', 'pa',
+     "        if not _segments_close_on_themselves(segs):\n"
+     "            out[ref] = True\n            continue\n",
+     "        pass\n",
+     (T829,), 'KILLED'),
+
+    # Euler's condition is the whole test. Accepting any vertex parity makes
+    # every open path look closed, which is the same defect one step down.
+    ('closedness-accepts-odd-degree', 'pa',
+     "    return all(d % 2 == 0 for d in deg.values())\n",
+     "    return True\n",
+     (T829,), 'KILLED'),
+
+    # The classifier must read SEGMENTS, not the bounds scan's points: a
+    # circle's points there are bounding-box CORNERS, and a corner of a round
+    # window escapes a round board while the circle does not (#628 over-lock).
+    ('the-classifier-reads-bounds-points-not-segments', 'pa',
+     "    segs_by_ref = _collect_footprint_edge_segments_by_ref(content)\n",
+     "    segs_by_ref = {r: [(p, p) for p in pts] for r, pts in\n"
+     "                   _footprint_edge_points_by_ref(content).items()}\n",
      (T829,), 'KILLED'),
 
     ('no-owner-is-structural', 'pa',
@@ -152,9 +179,29 @@ ROWS = [
      (T829,), 'KILLED'),
 
     ('the-writer-backstop-is-gone', 'wr',
-     "        if _OWNS_OUTLINE_RE.search(fp_text) and _draws_board_outline(\n"
-     "                input_file, ref):\n",
-     "        if False:\n",
+     "        if (_OWNS_OUTLINE_RE.search(fp_text)\n",
+     "        if (False and _OWNS_OUTLINE_RE.search(fp_text)\n",
+     (T829,), 'KILLED'),
+
+    # Drop the "did the pose actually change?" qualifier and the backstop
+    # refuses a write in which nothing moved -- which is exactly
+    # `perturb._all_at_current`, and its dose-0 CONTROL board.
+    ('the-writer-refuses-a-zero-move-write', 'wr',
+     "                and (abs(new_x - float(at_match.group(1))) > _POSE_EPS\n"
+     "                     or abs(new_y - float(at_match.group(2))) > _POSE_EPS\n"
+     "                     or abs((new_rot - old_rot + 180) % 360 - 180) "
+     "> _POSE_EPS)\n",
+     "                and True\n",
+     (T829,), 'KILLED'),
+
+    # Compare the fingerprint against the OUTPUT file instead of the in-memory
+    # content and the tripwire becomes structurally inert when input is output
+    # -- route.py:4074, the #666 cap move, the call site it exists for.
+    ('the-tripwire-reads-back-the-output-file', 'wr',
+     "        if _before != structural_outline_fingerprint(content):\n",
+     "        _tmp = open(output_file, encoding='utf-8').read() "
+     "if os.path.exists(output_file) else content\n"
+     "        if _before != structural_outline_fingerprint(_tmp):\n",
      (T829,), 'KILLED'),
 
     ('the-tripwire-is-gone', 'wr',

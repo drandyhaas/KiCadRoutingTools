@@ -35,9 +35,13 @@ _HDR = ('(kicad_pcb (version 20240108) (generator pcbnew)\n'
 
 _STROKE = '(stroke (width 0.1) (type default))'
 
-# A closed board-level rectangle, so the RING arm of the containment ladder is
-# what the fixture exercises (splitflap_driver, by contrast, has bounds but no
-# closed ring, which is the other arm).
+# A board-level rectangle. NOTE it does NOT exercise the ring arm of the
+# containment ladder, and the comment here used to claim it did:
+# `extract_board_contours` short-circuits a 4-segment axis-aligned rectangle to
+# NO rings (see its "Simple rectangle, use bounding box" branch), so this board
+# takes the BOUNDS arm -- as does splitflap_driver, for a different reason.
+# `REVIEW_BOARDS` below carries the boards that reach the ring arm, and
+# `test_both_arms_of_the_containment_ladder_are_exercised` asserts both are hit.
 BOARD_RECT = (0.0, 0.0, 40.0, 30.0)
 
 
@@ -114,6 +118,80 @@ def write(dirpath=None, **kw):
     with open(p, 'w', encoding='utf-8') as f:
         f.write(board_text(**kw))
     return p
+
+
+
+# --- boards a blind review found the first classifier got wrong -------------
+# Kept here rather than inline in the test so the parity gate can use them too.
+
+def _gr(x1, y1, x2, y2, tag):
+    return (f'  (gr_line (start {x1} {y1}) (end {x2} {y2}) {_STROKE} '
+            f'(layer "Edge.Cuts") (uuid "{tag}"))')
+
+
+def _fp_pads(ref, x, y, body):
+    return (f'  (footprint "t:{ref}" (layer "F.Cu") (at {x} {y})\n'
+            f'    (uuid "u-{ref}")\n'
+            f'    (property "Reference" "{ref}" (at 0 0 0) '
+            f'(layer "F.SilkS") (uuid "r-{ref}"))\n'
+            f'{_pads()}\n{body}\n  )')
+
+
+def panel_board():
+    """A PANELISED board: the real outline nests inside the panel frame, so
+    `_classify_contours` calls it a CUTOUT and the only OUTER ring is the
+    frame. `J1` draws the real board's fourth edge -- an open path -- and
+    `LED1` carries a window. Containment alone called J1 carried, because it
+    does sit inside the frame."""
+    parts = [_gr(0, 0, 100, 0, 'p0'), _gr(100, 0, 100, 50, 'p1'),
+             _gr(100, 50, 0, 50, 'p2'), _gr(0, 50, 0, 0, 'p3'),
+             _gr(20, 10, 60, 10, 'r0'), _gr(60, 10, 60, 40, 'r1'),
+             _gr(60, 40, 20, 40, 'r2'),
+             _fp_pads('J1', 20, 25,
+                      f'    (fp_line (start 0 -15) (end 0 15) {_STROKE} '
+                      f'(layer "Edge.Cuts"))'),
+             _fp_pads('LED1', 40, 25, _window(1.0))]
+    return _HDR + '\n'.join(parts) + '\n)\n', {'J1': True, 'LED1': False}
+
+
+def rect_board(segments=4):
+    """The same physical geometry spelled with 4 or 8 board-level segments.
+    `extract_board_contours` short-circuits a 4-segment axis-aligned rectangle
+    to NO rings, so the two spellings used to classify DIFFERENTLY."""
+    if segments == 4:
+        edge = [_gr(0, 0, 40, 0, 'a'), _gr(40, 0, 40, 30, 'b'),
+                _gr(40, 30, 0, 30, 'c'), _gr(0, 30, 0, 0, 'd')]
+    else:
+        edge = [_gr(0, 0, 20, 0, 'a'), _gr(20, 0, 40, 0, 'a2'),
+                _gr(40, 0, 40, 15, 'b'), _gr(40, 15, 40, 30, 'b2'),
+                _gr(40, 30, 20, 30, 'c'), _gr(20, 30, 0, 30, 'c2'),
+                _gr(0, 30, 0, 15, 'd'), _gr(0, 15, 0, 0, 'd2')]
+    jf = _fp_pads('JF', 40, 15,
+                  f'    (fp_line (start 0 -5) (end 0 5) {_STROKE} '
+                  f'(layer "Edge.Cuts"))')
+    return _HDR + '\n'.join(edge) + '\n' + jf + '\n)\n', {'JF': True}
+
+
+def round_board():
+    """A round relief entirely ON a round board. The bounds scan represents a
+    circle by its bounding-box CORNERS, and a corner of this window falls
+    outside the board while every point of the circle is inside -- so it was
+    classified structural and frozen: the #628 over-lock, produced by the fix
+    meant to avoid it."""
+    board = (f'  (gr_circle (center 20 20) (end 40 20) {_STROKE} '
+             f'(layer "Edge.Cuts") (uuid "c0"))')
+    ur = _fp_pads('U_R', 32.45, 32.45,
+                  f'    (fp_circle (center 0 0) (end 2 0) {_STROKE} '
+                  f'(layer "Edge.Cuts"))')
+    return _HDR + board + '\n' + ur + '\n)\n', {'U_R': False}
+
+
+REVIEW_BOARDS = {
+    'panelised (open path inside the panel frame)': panel_board,
+    'rectangle spelled with 4 segments': lambda: rect_board(4),
+    'rectangle spelled with 8 segments': lambda: rect_board(8),
+    'round window on a round board': round_board,
+}
 
 
 if __name__ == '__main__':

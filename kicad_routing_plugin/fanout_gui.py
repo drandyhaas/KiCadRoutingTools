@@ -2199,6 +2199,10 @@ class FanoutTab(wx.Panel):
             # but this loop applies poses to the live board directly, without
             # `write_placed_output`, so it is the CLI's raise-on-refusal
             # backstop that is missing on this front and this is where it goes.
+            # It PRINTS, because the summary below is built from the engine's
+            # `result['placements']` rather than from what was applied, so a
+            # silent skip would be reported as a move.
+            _outline_skipped = []
             for p in result.get('placements', []):
                 fp = board.FindFootprintByReference(p['reference'])
                 if fp is None:
@@ -2206,10 +2210,16 @@ class FanoutTab(wx.Panel):
                 _pd = (pcb_data.footprints.get(p['reference'])
                        if pcb_data is not None else None)
                 if getattr(_pd, 'owns_board_outline', False):
+                    _outline_skipped.append(p['reference'])
                     continue
                 fp.SetOrientationDegrees(p['new_rotation'])
                 fp.SetPosition(pcbnew.VECTOR2I(
                     mm_to_iu(p['new_x']), mm_to_iu(p['new_y'])))
+            if _outline_skipped:
+                print(f"  NOT MOVED (#829): {', '.join(_outline_skipped)} -- "
+                      f"draws the board outline; moving it would resize the "
+                      f"board. The summary below counts the engine's proposal, "
+                      f"not what was applied.")
 
             # Via-nudge with reconnect (#313): the shared engine also moves a
             # boxed-in cap's offending fanout via off the pad and adds connector

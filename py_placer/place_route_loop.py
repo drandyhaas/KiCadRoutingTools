@@ -498,12 +498,23 @@ def _locked_out(pcb_data, locked_patterns):
     to move, and the reader is left looking for a lock that is not in the file.
     """
     import fnmatch
-    out = {r for r, fp in (pcb_data.footprints or {}).items()
-           if getattr(fp, 'owns_board_outline', False)}
     if not locked_patterns:
-        return out
-    return out | {r for r in (pcb_data.footprints or {})
-                  if any(fnmatch.fnmatch(r, p) for p in locked_patterns)}
+        return set()
+    return {r for r in (pcb_data.footprints or {})
+            if any(fnmatch.fnmatch(r, p) for p in locked_patterns)}
+
+
+def _outline_owners(pcb_data):
+    """Refs excluded because they draw the board outline (#829).
+
+    A SEPARATE set from `_locked_out`, deliberately. Folding the two together
+    made the caller's message -- "every one of the N diagnosed part(s) matches
+    --lock" -- lie on a run with no `--lock` at all, sending the reader hunting
+    for a flag that was never passed. This addition is about honesty; spending
+    it on a wrong message would be self-defeating.
+    """
+    return {r for r, fp in (pcb_data.footprints or {}).items()
+            if getattr(fp, 'owns_board_outline', False)}
 
 
 def block_census(pcb_data) -> str:
@@ -1037,7 +1048,8 @@ def main():
             # ONCE per round -- putting the call in a comprehension condition
             # re-scans every footprint against every glob per selected ref.
             locked = _locked_out(pcb_data, args.lock)
-            picked = {r for r in diag.selected if r not in locked}
+            owners = _outline_owners(pcb_data)
+            picked = {r for r in diag.selected if r not in locked | owners}
             why = ''
             if diag.degenerate:
                 why = diag.fallback_reason()
@@ -1048,8 +1060,24 @@ def main():
                 # reported rounds_diagnosis=1 and rounds_fallback=0 -- the run
                 # where the flag did the most damage reading as the run where
                 # it worked.
-                why = (f'every one of the {len(diag.selected)} diagnosed '
-                       f'part(s) matches --lock')
+                #
+                # NAME THE SOURCE (#829). The two exclusions are reported
+                # apart because the reader's next move differs: a --lock hit is
+                # theirs to change, a board-outline owner is not, and blaming
+                # --lock on a run that passed none sends them looking for a
+                # flag that was never there.
+                _byl = [r for r in diag.selected if r in locked]
+                _byo = [r for r in diag.selected if r in owners
+                        and r not in locked]
+                parts = []
+                if _byl:
+                    parts.append(f'{len(_byl)} match --lock')
+                if _byo:
+                    parts.append(f"{len(_byo)} draw the board outline and are "
+                                 f"not this tool's to move (#829): "
+                                 f"{', '.join(sorted(_byo))}")
+                why = (f'all {len(diag.selected)} diagnosed part(s) are '
+                       f'excluded -- ' + '; '.join(parts))
             if why:
                 fallback_rounds += 1
                 fallback_reasons.append(f'round {rnd}: {why}')

@@ -123,13 +123,20 @@ def test_the_writer_refuses_rather_than_skipping():
                  'new_rotation': fp.rotation or 0}]
 
     out = os.path.join(os.path.dirname(board), 'w1.kicad_pcb')
-    raised = False
+    raised, msg = False, ''
     try:
         write_placed_output(board, out, move('U_STRUCT'))
-    except OutlineOwnerMove:
-        raised = True
+    except OutlineOwnerMove as exc:
+        raised, msg = True, str(exc)
     check("moving the outline owner RAISES", raised)
     check("and writes no output file", not os.path.exists(out))
+    # WHICH guard fired matters. The tripwire also catches this, so asserting
+    # only "it raised" let the per-ref backstop be deleted with the suite still
+    # green -- the mutation battery caught exactly that. The per-ref refusal
+    # names the ref and the offer; the tripwire says the outline changed.
+    check("and it is the PER-REF backstop that refused, naming the ref",
+          raised and 'U_STRUCT draws the board outline' in msg
+          and 'CHANGED THE BOARD OUTLINE' not in msg, msg[:160])
 
     out2 = os.path.join(os.path.dirname(board), 'w2.kicad_pcb')
     ok = write_placed_output(board, out2, move('U_CARRY'))
@@ -165,6 +172,10 @@ def test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed():
             raised = True
             msg = str(exc)
         check("the tripwire catches an outline change the gates missed", raised)
+        # The refusal must be a refusal, not a description of a file it
+        # already helped produce: raising AFTER the write left the resized
+        # board at `out` with provenance.commit_write skipped.
+        check("and NOTHING was written", not os.path.exists(out))
         check("and it says the outline changed, not just 'refused'",
               raised and 'CHANGED THE BOARD OUTLINE' in msg,
               msg if raised else '')
@@ -185,6 +196,110 @@ def test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed():
         moved = parse_kicad_pcb(out2).footprints['U_CARRY']
         check("and it really did move", abs(moved.x - c.x) > 1.0,
               f"{c.x} -> {moved.x}")
+    finally:
+        W._draws_board_outline = orig
+
+
+def test_the_classifier_on_the_boards_a_review_broke_it_with():
+    """Four boards a blind review used to falsify the FIRST classifier, which
+    decided on containment alone. Each is a separate way for "is this geometry
+    inside the board?" to be the wrong question:
+
+    * panelised -- the real outline nests inside the panel frame, so it is a
+      CUTOUT and an open path drawing the real board edge sits "inside";
+    * 4- vs 8-segment rectangle -- `extract_board_contours` short-circuits the
+      4-segment form to NO rings, so the same geometry classified differently
+      depending on how the outline happened to be spelled;
+    * round window on a round board -- a circle's bounding-box CORNER escapes
+      the board while the circle itself does not.
+
+    Closedness answers all four without consulting containment: an open path is
+    not a cut-out, and a closed one is measured on its real points.
+    """
+    for name, build in FIX.REVIEW_BOARDS.items():
+        text, want = build()
+        d = tempfile.mkdtemp(prefix='fix829rv_')
+        p = os.path.join(d, 'b.kicad_pcb')
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        run_utils.evidence(p, name)
+        pcb = parse_kicad_pcb(p)
+        got = {r: f.owns_board_outline for r, f in pcb.footprints.items()
+               if f.owns_edge_cuts}
+        check(f"{name}: {want}", got == want, f"got {got}")
+
+
+def test_both_arms_of_the_containment_ladder_are_exercised():
+    """A guard nobody reaches is not a guard. The main fixture's board is a
+    4-segment rectangle, which yields NO closed ring, so on its own it
+    exercises only the bounds arm -- the ring arm went untested while four
+    docstrings described it as the rule."""
+    from kicad_parser import extract_board_contours, _mask_footprint_blocks
+    seen = set()
+    boards = [FIX.write()]
+    for _n, build in FIX.REVIEW_BOARDS.items():
+        text, _w = build()
+        d = tempfile.mkdtemp(prefix='fix829arm_')
+        p = os.path.join(d, 'b.kicad_pcb')
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        boards.append(p)
+    for b in boards:
+        with open(b, encoding='utf-8') as fh:
+            content = fh.read()
+        outers, _c = extract_board_contours(_mask_footprint_blocks(content))
+        seen.add('ring' if [r for r in outers if len(r) >= 3] else 'bounds')
+    check("the RING arm is reached by at least one fixture", 'ring' in seen,
+          str(seen))
+    check("the BOUNDS arm is reached by at least one fixture",
+          'bounds' in seen, str(seen))
+
+
+def test_a_zero_move_write_is_not_a_move():
+    """`perturb._all_at_current` hands the writer EVERY part at its CURRENT
+    pose -- deliberately, so the moved set cannot be read off the six-decimal
+    `(at)` formatting -- and its dose-0 CONTROL board is that call with no
+    moves at all. A backstop gating on presence in `placements` refused to
+    write the control board of every perturbation run on such a board."""
+    from placement.writer import write_placed_output, OutlineOwnerMove
+    board = FIX.write()
+    pcb = parse_kicad_pcb(board)
+    every = [{'reference': r, 'new_x': f.x, 'new_y': f.y,
+              'new_rotation': f.rotation or 0}
+             for r, f in sorted(pcb.footprints.items())]
+    out = os.path.join(os.path.dirname(board), 'nomove.kicad_pcb')
+    ok, why = True, ''
+    try:
+        write_placed_output(board, out, every)
+    except OutlineOwnerMove as exc:
+        ok, why = False, str(exc)[:120]
+    check("handing EVERY part its current pose is not a move", ok, why)
+    check("and the control board is written", os.path.exists(out))
+
+
+def test_the_tripwire_works_on_an_in_place_write():
+    """`route.py:4074` is `write_placed_output(out, out, ...)` -- the #666
+    scoped cap move, and the very call site the backstop cites as its reason to
+    exist. Reading the fingerprint back from `output_file` made the check
+    structurally incapable of firing there: both sides read the same bytes."""
+    from placement import writer as W
+    d = tempfile.mkdtemp(prefix='fix829ip_')
+    board = FIX.write(d)
+    before = parse_kicad_pcb(board).board_info.board_bounds
+    fp = parse_kicad_pcb(board).footprints['U_STRUCT']
+    orig = W._draws_board_outline
+    W._draws_board_outline = lambda *a, **k: False   # per-ref gate only
+    try:
+        raised = False
+        try:
+            W.write_placed_output(board, board, [
+                {'reference': 'U_STRUCT', 'new_x': fp.x + 5.0, 'new_y': fp.y,
+                 'new_rotation': fp.rotation or 0}])
+        except W.OutlineOwnerMove:
+            raised = True
+        check("the tripwire fires on an IN-PLACE write", raised)
+        check("and the board on disk is unchanged",
+              parse_kicad_pcb(board).board_info.board_bounds == before)
     finally:
         W._draws_board_outline = orig
 
@@ -276,6 +391,10 @@ TESTS = [
     test_the_quench_locks_the_owner_and_discloses_it,
     test_the_writer_refuses_rather_than_skipping,
     test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed,
+    test_the_classifier_on_the_boards_a_review_broke_it_with,
+    test_both_arms_of_the_containment_ladder_are_exercised,
+    test_a_zero_move_write_is_not_a_move,
+    test_the_tripwire_works_on_an_in_place_write,
     test_a_pure_rotation_is_covered_too,
     test_a_board_with_no_owners_is_untouched,
     test_no_tracked_board_carries_footprint_edge_cuts,

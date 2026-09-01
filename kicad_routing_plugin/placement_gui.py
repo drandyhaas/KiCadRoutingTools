@@ -948,6 +948,15 @@ class PlacementTab(wx.Panel):
             if len(moves) > 30:
                 refs += ", ..."
             lines.append(refs)
+        # #829: say what was NOT applied. A skip the dialog does not mention is
+        # a live board that silently disagrees with the result board.
+        _skipped = getattr(self, '_outline_skipped', None)
+        if _skipped:
+            lines.append(
+                f"NOT applied: {', '.join(_skipped)} -- these draw the board "
+                f"outline, so moving them would resize the board. Their poses "
+                f"in the result board are left alone here; edit part and "
+                f"outline together in KiCad if one really must move (#829).")
         if with_copper:
             lines.append("Place + Route additionally REPLACES ALL tracks and "
                          "vias on the live board with the run's routing. "
@@ -1005,8 +1014,16 @@ class PlacementTab(wx.Panel):
         inspection recovers.
         """
         moves = []
+        self._outline_skipped = []
         for ref, parsed in sorted(result_pcb.footprints.items()):
             if getattr(parsed, 'owns_board_outline', False):
+                # DISCLOSED, not silent. The confirmation dialog is built from
+                # `moves`, so a footprint dropped here would otherwise appear
+                # nowhere at all and the live board would diverge from the
+                # result board the user can open beside it. The CLI writer
+                # raises for the same reason; this front cannot raise mid-apply
+                # without leaving the board half-updated, so it reports.
+                self._outline_skipped.append(ref)
                 continue
             fp = board.FindFootprintByReference(ref)
             if fp is None:

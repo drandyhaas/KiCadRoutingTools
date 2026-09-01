@@ -6,6 +6,7 @@ to update the (at X Y [rotation]) of each footprint block.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import List, Dict
 
@@ -26,7 +27,11 @@ class OutlineOwnerMove(Exception):
 # (parsing) check below never runs.
 _OWNS_OUTLINE_RE = re.compile(r'"Edge\.Cuts"')
 
-_OUTLINE_OWNER_CACHE: Dict[str, Dict[str, bool]] = {}
+_OUTLINE_OWNER_CACHE: Dict[tuple, Dict[str, bool]] = {}
+
+# A pose the caller asked for that differs from the current one by less
+# than this is not a move. 1 nm, KiCad's own quantum.
+_POSE_EPS = 1e-6
 
 
 def _outline_owner_map(input_file: str) -> Dict[str, bool]:
@@ -35,18 +40,28 @@ def _outline_owner_map(input_file: str) -> Dict[str, bool]:
     Memoised because `write_placed_output` is called once per board, not once
     per ref, and the classifier re-reads the file.
     """
-    if input_file not in _OUTLINE_OWNER_CACHE:
+    try:
+        st = os.stat(input_file)
+        key = (os.path.abspath(input_file), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    # Keyed by (path, mtime, size), NOT by path alone. `place_seed` writes a
+    # temp board and `os.replace`s it over the output, and `route.py` writes in
+    # place, so a path-keyed memo answers for a file that no longer exists --
+    # measured: after the file changed on disk the writer still reported the
+    # old owners. In a long-lived plugin process a path-keyed dict also grows
+    # without bound.
+    if key not in _OUTLINE_OWNER_CACHE:
         try:
             from kicad_parser import footprint_outline_owners
             with open(input_file, encoding='utf-8') as fh:
-                _OUTLINE_OWNER_CACHE[input_file] = footprint_outline_owners(
-                    fh.read())
+                _OUTLINE_OWNER_CACHE[key] = footprint_outline_owners(fh.read())
         except (OSError, ValueError):
             # Cannot decide -> do not invent a refusal. The movable-set gates
             # are the primary defence; a backstop that failed closed on an
             # unreadable file would break every ordinary run.
-            _OUTLINE_OWNER_CACHE[input_file] = {}
-    return _OUTLINE_OWNER_CACHE[input_file]
+            _OUTLINE_OWNER_CACHE[key] = {}
+    return _OUTLINE_OWNER_CACHE[key]
 
 
 def _draws_board_outline(input_file: str, ref: str) -> bool:
@@ -253,31 +268,6 @@ def write_placed_output(input_file: str, output_file: str,
         if ref not in placement_by_ref:
             continue
 
-        # #829 backstop. RAISES, and does not skip: this function returns True
-        # unconditionally, so a skip would be indistinguishable from success --
-        # and `route.py`'s #666 cap move gates its IN-MEMORY mirror on that
-        # return, advancing pcb_data's footprint and pad coordinates while the
-        # file kept the old pose, after which oracle_reconnect welds copper to
-        # pad coordinates that exist nowhere on the board. `converge` would
-        # write N byte-identical candidate boards and report them as N distinct
-        # poses, and `provenance.record_write` would assert a `refs_moved` the
-        # file does not contain. A skip also re-opens the leak
-        # `perturb._all_at_current` exists to close: this writer rewrites `(at)`
-        # in six decimals for exactly the refs it is handed, so a
-        # silently-dropped ref becomes the ONE footprint not in six-decimal
-        # form -- the moved set readable straight off the output text.
-        #
-        # It should never fire: the movable-set gates keep such a ref out of
-        # `placements`. A fired backstop is a bug report, not a degraded mode.
-        if _OWNS_OUTLINE_RE.search(fp_text) and _draws_board_outline(
-                input_file, ref):
-            raise OutlineOwnerMove(
-                f"{ref} draws the board outline (Edge.Cuts geometry outside "
-                f"the board-level outline), so moving it would resize the "
-                f"board. Refusing to write {output_file}. This is a bug in "
-                f"whatever produced the placement list -- the movable-set "
-                f"gates should never have offered {ref} (#829).")
-
         placement = placement_by_ref[ref]
 
         # Find the footprint's (at X Y [rotation]) - it's the first (at ...) in the block
@@ -291,6 +281,34 @@ def write_placed_output(input_file: str, output_file: str,
         new_y = placement['new_y']
         new_rot = placement['new_rotation']
         old_rot = float(at_match.group(3)) if at_match.group(3) else 0.0
+
+        # #829 backstop. RAISES, and does not skip: this function returns True
+        # unconditionally, so a skip would be indistinguishable from success --
+        # and `route.py`'s #666 cap move gates its IN-MEMORY mirror on that
+        # return, advancing pcb_data's footprint and pad coordinates while the
+        # file kept the old pose, after which oracle_reconnect welds copper to
+        # pad coordinates that exist nowhere on the board.
+        #
+        # ON AN ACTUAL POSE CHANGE ONLY, and that qualifier is not a nicety.
+        # `perturb._all_at_current` deliberately hands this writer EVERY part,
+        # at its current pose, so the moved set cannot be read off the
+        # six-decimal `(at)` formatting -- and its dose-0 CONTROL board is
+        # exactly that call with no moves at all. Gating on presence in
+        # `placements` therefore refused to write the control board of every
+        # perturbation run on a board with an outline owner, with a message
+        # blaming a mover that had not moved anything. Measured before this
+        # qualifier existed.
+        if (_OWNS_OUTLINE_RE.search(fp_text)
+                and (abs(new_x - float(at_match.group(1))) > _POSE_EPS
+                     or abs(new_y - float(at_match.group(2))) > _POSE_EPS
+                     or abs((new_rot - old_rot + 180) % 360 - 180) > _POSE_EPS)
+                and _draws_board_outline(input_file, ref)):
+            raise OutlineOwnerMove(
+                f"{ref} draws the board outline (Edge.Cuts geometry outside "
+                f"the board-level outline), so moving it would resize the "
+                f"board. Refusing to write {output_file}. This is a bug in "
+                f"whatever produced the placement list -- the movable-set "
+                f"gates should never have offered {ref} a NEW pose (#829).")
 
         # :.6f, NOT :.4g. `%g` counts SIGNIFICANT digits, so a coordinate past
         # 100mm -- most of a real board -- was quantised to 0.1mm: a cap moved to
@@ -444,17 +462,24 @@ def write_placed_output(input_file: str, output_file: str,
     # pcbnew (`ai_plan._run_place_plan`, `fanout_gui`, `placement_gui`) and
     # does NOT come through here, so a GUI-driven placement leaves no row.
     # See provenance.record_write for what that means for a verdict.
-    from placement import provenance
-    provenance.record_write(input_file, output_file, placements,
-                            pending=True)
-
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(content)
-
-    # #829 tripwire: did this write change the board OUTLINE? The per-ref gate
-    # above answers "may this footprint move"; this answers the question the
-    # placement stack's contract actually makes -- "is the outline the same
+    # #829 tripwire: would this write change the board OUTLINE? The per-ref
+    # gate above answers "may this footprint move"; this answers the question
+    # the placement stack's contract actually makes -- "is the outline the same
     # board it was" -- and it catches a route no gate anticipated.
+    #
+    # BEFORE THE WRITE, comparing the ORIGINAL text against the in-memory
+    # `content`. Both halves of that matter and the first draft got both wrong:
+    #
+    #  * Raising after `f.write` left the resized board sitting at
+    #    `output_file` with `commit_write` skipped -- a board with a changed
+    #    outline on disk, no ledger row for it, and an orphaned _PENDING entry.
+    #    `provenance.py` documents that exact shape as the defect its
+    #    pending/commit split was introduced to fix; doing it here reinstated
+    #    it.
+    #  * Re-reading `output_file` made the check STRUCTURALLY INERT when
+    #    `input_file is output_file` -- which is `route.py:4074`, the #666
+    #    scoped cap move, the very call site this backstop cites as its reason
+    #    to exist. Both paths read the same bytes, so it could never fire.
     #
     # It compares a FINGERPRINT, not `board_bounds`. Bounds are blind to an
     # interior cutout moving and to a rotated circular window (fp_circle bounds
@@ -462,26 +487,29 @@ def write_placed_output(input_file: str, output_file: str,
     # open stub that never chains -- the #829 repro moved bounds while
     # board_outlines stayed identical, so either alone would have missed it.
     #
-    # Armed ONLY when the input board has footprint-embedded Edge.Cuts, which
-    # is 0 of the 27 tracked boards: on an ordinary board the owner map is
-    # already memoised and empty, so this costs one dict lookup and never
-    # re-parses anything.
     # Armed off the BOARD, not off which refs the per-ref gate happened to
-    # check. Using the gate's cache made the tripwire depend on a side
-    # effect: it silently disarmed whenever the moved footprints were not
-    # the ones carrying Edge.Cuts. Caught by the bypass test.
+    # check: using the gate's cache made the tripwire depend on a side effect,
+    # so it disarmed whenever the moved footprints were not the ones carrying
+    # Edge.Cuts. Only a board with footprint-embedded Edge.Cuts arms it, which
+    # is 0 of the 27 tracked boards.
     if _outline_owner_map(input_file):
         from kicad_parser import structural_outline_fingerprint
         with open(input_file, encoding='utf-8') as _fh:
             _before = structural_outline_fingerprint(_fh.read())
-        with open(output_file, encoding='utf-8') as _fh:
-            _after = structural_outline_fingerprint(_fh.read())
-        if _before != _after:
+        if _before != structural_outline_fingerprint(content):
             raise OutlineOwnerMove(
-                f"writing {output_file} CHANGED THE BOARD OUTLINE. The "
-                f"placement stack does not resize boards: size, cutouts and "
-                f"slots are mechanical decisions the user owns. This is a bug "
-                f"in whatever produced the placement list (#829).")
+                f"this write would have CHANGED THE BOARD OUTLINE of "
+                f"{output_file}. The placement stack does not resize boards: "
+                f"size, cutouts and slots are mechanical decisions the user "
+                f"owns. Nothing was written. This is a bug in whatever "
+                f"produced the placement list (#829).")
+
+    from placement import provenance
+    provenance.record_write(input_file, output_file, placements,
+                            pending=True)
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(content)
 
     provenance.commit_write(output_file)
 
