@@ -106,6 +106,33 @@ class Lattice:
             if x0 < v.x < x1 and y0 < v.y < y1:
                 for lay in ('F.Cu', 'B.Cu'):
                     mark(v.x, v.y, lay, 'via:' + n)
+        # foreign PADS -- the passives around a dest array (decoupling
+        # caps, termination resistors) were invisible, so a berth ask
+        # could land under a cap. A through pad (or NPTH drill) blocks
+        # both layers; an SMD pad its own. The array's own balls fall
+        # outside mark()'s TOL band by construction (gap lines run
+        # between them), so this adds only true foreigners.
+        for fp2 in pcb.footprints.values():
+            for q in fp2.pads:
+                n = nm.get(q.net_id, '')
+                if n and n in skip_nets:
+                    continue
+                if not (x0 < q.global_x < x1 and y0 < q.global_y < y1):
+                    continue
+                lays = ('F.Cu', 'B.Cu') if q.drill > 0 else \
+                    tuple(l_ for l_ in q.layers
+                          if l_ in ('F.Cu', 'B.Cu'))
+                sx = max(q.size_x, 0.05)
+                sy = max(q.size_y, 0.05)
+                nx = int(sx / 0.1) + 2
+                ny = int(sy / 0.1) + 2
+                who = 'pad:' + (n or fp2.reference)
+                for ix in range(nx):
+                    for iy in range(ny):
+                        px_ = q.global_x - sx / 2 + ix * sx / max(nx - 1, 1)
+                        py_ = q.global_y - sy / 2 + iy * sy / max(ny - 1, 1)
+                        for lay in lays:
+                            mark(px_, py_, lay, who)
 
     # ---- Dijkstra from a ball over (i, j, layer); via edge = layer
     # change at a node (requires the diamond's 4 cells free on BOTH
@@ -169,33 +196,66 @@ class Lattice:
             return [(i, 0) for i in range(self.R + 1)]
         return [(i, self.C) for i in range(self.R + 1)]
 
+    def _lv(self, lines, t):
+        """Line coordinate at index t; a HALF index (midpoint exit)
+        interpolates between its two lines."""
+        i0 = int(t)
+        return lines[i0] if t == i0 else (lines[i0] + lines[i0 + 1]) / 2
+
     def node_coord(self, face, node):
         i, j = node
-        return self.vl[j] if face in ('up', 'down') else self.hl[i]
+        return self._lv(self.vl, j) if face in ('up', 'down') \
+            else self._lv(self.hl, i)
 
     def exit_pt(self, face, node):
         i, j = node
         m = 0.35
         if face == 'up':
-            return (self.vl[j], self.hl[0] - m)
+            return (self._lv(self.vl, j), self.hl[0] - m)
         if face == 'down':
-            return (self.vl[j], self.hl[-1] + m)
+            return (self._lv(self.vl, j), self.hl[-1] + m)
         if face == 'left':
-            return (self.vl[0] - m, self.hl[i])
-        return (self.vl[-1] + m, self.hl[i])
+            return (self.vl[0] - m, self._lv(self.hl, i))
+        return (self.vl[-1] + m, self._lv(self.hl, i))
 
-    # menu: cheapest (vias, cells) to every rim node, per exit layer
+    def _exit_owned(self, key, net):
+        own = self.exit_at.get(key)
+        return own is not None and own != net and own not in self.ignore
+
+    def reachable(self, nd, par):
+        """Whether commit(net, par, nd) can walk a path -- a midpoint
+        exit rides either of its two adjacent rim nodes."""
+        i, j, lay = nd
+        if i == int(i) and j == int(j):
+            return nd in par
+        if j != int(j):
+            return (i, int(j), lay) in par or (i, int(j) + 1, lay) in par
+        return (int(i), j, lay) in par or (int(i) + 1, j, lay) in par
+
+    # menu: cheapest (vias, cells) to every rim node AND every rim
+    # cell midpoint, per exit layer. Midpoints exist because the
+    # engine legalizes teeth at SLOT_W=0.40 along a face while rim
+    # nodes sit one pitch (0.65/0.8) apart -- node-only quantization
+    # under-offered ~a third of real rim capacity. A midpoint is
+    # 0.325 < SLOT_W from both neighbours, so it EXCLUDES foreign
+    # exits at both adjacent nodes and vice versa.
     def menu(self, net, faces=('up', 'down', 'left', 'right')):
         dist, par = self.dijkstra(net)
         out = []
         for face in faces:
-            for node in self.rim_nodes(face):
+            rim = self.rim_nodes(face)
+            horiz = face in ('up', 'down')
+            for node in rim:
                 for lay in ('F.Cu', 'B.Cu'):
-                    own = self.exit_at.get((node[0], node[1], lay))
-                    if own is not None and own != net \
-                            and own not in self.ignore:
+                    i, j = node
+                    if self._exit_owned((i, j, lay), net):
                         continue
-                    nd = (node[0], node[1], lay)
+                    mids = ([(i, j - 0.5, lay), (i, j + 0.5, lay)]
+                            if horiz else
+                            [(i - 0.5, j, lay), (i + 0.5, j, lay)])
+                    if any(self._exit_owned(m, net) for m in mids):
+                        continue
+                    nd = (i, j, lay)
                     if nd in dist:
                         d = dist[nd]
                         out.append({'face': face, 'node': node,
@@ -204,6 +264,32 @@ class Lattice:
                                     'vias': d // self.VIA_W,
                                     'cells': d % self.VIA_W,
                                     'nd': nd})
+            for n1, n2 in zip(rim, rim[1:]):
+                for lay in ('F.Cu', 'B.Cu'):
+                    mid = ((n1[0] + n2[0]) / 2, (n1[1] + n2[1]) / 2,
+                           lay)
+                    cell = (('h', n1[0], min(n1[1], n2[1])) if horiz
+                            else ('v', n1[1], min(n1[0], n2[0])))
+                    if not self._cell_free(cell[0], cell[1], cell[2],
+                                           lay, net):
+                        continue
+                    if self._exit_owned(mid, net) or any(
+                            self._exit_owned((n[0], n[1], lay), net)
+                            for n in (n1, n2)):
+                        continue
+                    ds = [dist[(n[0], n[1], lay)] for n in (n1, n2)
+                          if (n[0], n[1], lay) in dist]
+                    if not ds:
+                        continue
+                    d = min(ds) + self.CELL_W
+                    out.append({'face': face,
+                                'node': (mid[0], mid[1]),
+                                'layer': lay,
+                                'coord': self.node_coord(
+                                    face, (mid[0], mid[1])),
+                                'vias': d // self.VIA_W,
+                                'cells': d % self.VIA_W,
+                                'nd': mid})
         return out, par
 
     def extract(self, par, nd):
@@ -222,7 +308,21 @@ class Lattice:
         return cells, vias
 
     def commit(self, net, par, nd):
-        cells, vias = self.extract(par, nd)
+        i, j, lay = nd
+        walk, midcell = nd, None
+        if i != int(i) or j != int(j):
+            # midpoint exit: the path walks to an adjacent rim node,
+            # then spends the rim cell to reach the tooth site
+            if j != int(j):
+                cands = [(i, int(j), lay), (i, int(j) + 1, lay)]
+                midcell = ('h', int(i), int(j), lay)
+            else:
+                cands = [(int(i), j, lay), (int(i) + 1, j, lay)]
+                midcell = ('v', int(j), int(i), lay)
+            walk = next((c for c in cands if c in par), cands[0])
+        cells, vias = self.extract(par, walk)
+        if midcell is not None:
+            cells = cells + [midcell]
         for cl in cells:
             self.used[cl] = net
         # a via consumes its diamond on the ARRIVAL layer (same rule

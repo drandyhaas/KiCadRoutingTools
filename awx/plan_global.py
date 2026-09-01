@@ -596,14 +596,33 @@ def solve(base_path, out_prefix, nets=None, src='U1', dst='DU1',
         chords = {n: chord(*pts(n), rects) for n in st}
         x = collections.defaultdict(set)
         ns = sorted(st)
-        axis = {'up': 0, 'down': 0, 'left': 1, 'right': 1}
         face = {n: st[n]['du']['face'] for n in ns}
+        proj = {}
+        if fr == 'braid':
+            # SPINE-projected order: both ends on the axis
+            # PERPENDICULAR to the group's own mean launch->berth
+            # direction. The first cut compared launch-x to berth-x on
+            # the face axis, which manufactures phantom inversions on
+            # any corridor that turns (K47 cover 21 vs chord 11).
+            grp = collections.defaultdict(list)
+            for n in ns:
+                grp[face[n]].append(n)
+            for _f, mem in grp.items():
+                ls = [pts(n)[0] for n in mem]
+                bs = [pts(n)[1] for n in mem]
+                mx = (sum(p[0] for p in bs) - sum(p[0] for p in ls)) \
+                    / len(mem)
+                my = (sum(p[1] for p in bs) - sum(p[1] for p in ls)) \
+                    / len(mem)
+                t = (-my, mx)
+                for n in mem:
+                    lp_, bp_ = pts(n)
+                    proj[n] = (lp_[0] * t[0] + lp_[1] * t[1],
+                               bp_[0] * t[0] + bp_[1] * t[1])
         for i, a in enumerate(ns):
             for b in ns[i + 1:]:
                 if fr == 'braid' and face[a] == face[b]:
-                    ax = axis.get(face[a], 0)
-                    la, lb = pts(a)[0][ax], pts(b)[0][ax]
-                    ca, cb = st[a]['du']['coord'], st[b]['du']['coord']
+                    (la, ca), (lb, cb) = proj[a], proj[b]
                     hit = (la != lb and ca != cb
                            and (la < lb) != (ca < cb))
                 else:
@@ -694,7 +713,9 @@ def solve(base_path, out_prefix, nets=None, src='U1', dst='DU1',
                     (e for e in m if e['nd'] == keep['nd']), keep)
                 st[n][key] = e
                 nd = e['nd']
-                if nd not in par:      # keep unreachable: re-pick best
+                # keep unreachable: re-pick best (reachable() resolves
+                # a MIDPOINT exit through its adjacent rim nodes)
+                if not lat.reachable(nd, par):
                     e2 = min(m, key=lambda q: (q['vias'], q['cells']))
                     st[n][key] = e2
                     nd = e2['nd']

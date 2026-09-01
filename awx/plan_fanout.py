@@ -39,6 +39,11 @@ ap.add_argument('--no-rescue', action='store_true',
 ap.add_argument('--contract-json', default=None,
                 help='load the contract (net -> side/coord/layer) '
                 'from a PLAN file instead of extracting the human''s')
+ap.add_argument('--ach-json', default=None,
+                help='dump the ACHIEVED contract (per net: layer/'
+                     'side/coord actually delivered) -- feed back to '
+                     'plan_global solve --anchor for the feasibility '
+                     'round-trip')
 ap.add_argument('--dump-contract', default=None,
                 help='write the extracted contract as JSON and exit')
 a = ap.parse_args()
@@ -709,3 +714,8 @@ if bare:
         # because a downstream chain grades these as its own drc
         print('  RESTORED copper grazes: ' + ','.join(sorted(left2)))
     ach = grade(a.out, 'engine + A* rescue + bench restore')
+
+if a.ach_json:
+    import json as _json
+    _json.dump(ach, open(a.ach_json, 'w'), indent=1, sort_keys=True)
+    print(f'wrote achieved contract: {a.ach_json} ({len(ach)} nets)')
