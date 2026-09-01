@@ -85,6 +85,27 @@ poses3 = portfolio.perturb_jitter(state, free, random.Random("u"), RADIUS)
 restore()
 check("different rng seed produces different jitter", poses != poses3)
 
+# #826: the DEFAULT is continuous, and that is a contract rather than an
+# accident. `placement/perturb.py`'s `scatter` damage kind calls this function
+# with four positional arguments and no lattice, and its own comment calls it
+# "the POSITIVE CONTROL ... the arm that MUST recover". A snapped offset would
+# land the part exactly on the coset the quench generates from -- one nudge
+# reaches it -- which makes the control easier to pass, the one direction a
+# positive control must not move.
+#
+# Every other jitter arm above (radius, freeness, legality, determinism) stays
+# green if the default silently became "snap to the inferred lattice", so
+# without this check nothing in the repo detects that change.
+from placement.board_grid import infer_board_grid            # noqa: E402
+_lat = infer_board_grid(pcb)['step']
+check("the board under test declares a lattice, so this check can fail",
+      _lat is not None, f"{_lat}")
+check("without an explicit lattice the sampler stays CONTINUOUS",
+      any(abs((p['new_x'] - origin[p['reference']][0]) / _lat
+              - round((p['new_x'] - origin[p['reference']][0]) / _lat)) * _lat
+          > 1e-6 for p in poses),
+      f"lattice {_lat}, {len(poses)} poses")
+
 # ---- poses -----------------------------------------------------------------
 n_variants = 0
 while True:
