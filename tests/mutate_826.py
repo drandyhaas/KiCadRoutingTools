@@ -10,11 +10,13 @@ That battery scores each row by counting FAIL lines from the suites in the
 row's own `tests` tuple, and its seventeen counts are frozen in
 `test_708_seed_relative_snap.py`'s header, recorded from a run and never edited
 to match. #826's arms call `jitter_lattice`, which calls `infer_board_grid`, so
-adding them to #708's suites would make its `bg` rows (the occupancy floor, the
-tie-break, MIN_PARTS) newly fail them and MOVE EIGHT of the seventeen recorded
-counts. On a branch stacked on the open #825 that would force a re-record of
-the parent's evidence in order to land a child. One battery per issue is also
-this repo's own convention -- twenty `mutate_<issue>.py` files.
+adding them to #708's suites would make its seven `bg` rows (the occupancy
+floor, the tie-break, MIN_PARTS, the sample, the tolerance) newly fail them,
+plus any quench row the #826 end-to-end arm also detects -- moving counts #708
+froze. On a branch stacked on the open #825 that would force a re-record of the
+parent's evidence in order to land a child. One battery per PR is also this
+repo's usual shape -- 22 `mutate_*.py` files before this one, though
+`mutate_705_792_794.py` shows it is per PR rather than strictly per issue.
 
 TWO ROWS EXIST BECAUSE A POPULATION ARM CANNOT KILL THEM, and both facts were
 measured before the arms were written:

@@ -237,6 +237,18 @@ formula is not. Filed, not built.
 
 ## The circularity control changed the answer for `crossings`
 
+> **Stale since #826, for the portfolio rows.** `portfolio.perturb_jitter` now
+> snaps its offset to the board's own placement lattice, so a regenerated study
+> tree produces different `portfolio-N` candidates on any board that declares
+> one — measured, 10 of the 11 tracked lattice boards previously lost their
+> lattice to the jitter. The rho table and the Kendall-tau finding below were
+> measured on the pre-#826 slate and are **not reproducible from HEAD** without
+> a rebuild (~8.8 h; see `tests/test_703_predictor_regen.py`'s header). The
+> findings are not withdrawn — nothing here suggests the direction changed —
+> but the numbers describe a slate the tool no longer generates. The four
+> regenerable rows in `test_703_predictor_regen.py` are re-recorded, and
+> `esp_prog:portfolio-1` moved.
+
 The realistic-end sampler is `portfolio.generate`, whose quench **minimises
 crossings and hpwl**. Those rows carry `generator: portfolio_quench`, and every
 statistic is computed twice:

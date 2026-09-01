@@ -201,8 +201,11 @@ def jitter_lattice(pcb_data, radius: float) -> Tuple[Optional[float], Dict]:
     No coarse-lattice guard beyond that, deliberately: `infer_board_grid` can
     only ever return 0.05 or 0.3175 (only those two rungs have no proper
     divisor in the ladder), and at radius 4.0 a 0.3175 lattice offers ~500
-    destinations of which `SAMPLE_ATTEMPTS` consumes one. Starvation is
-    unreachable here, unlike at the fanout repair site.
+    destinations, of which the sampler takes the first legal one --
+    `SAMPLE_ATTEMPTS` is the retry budget, not a count of destinations used.
+    Measured, the most boxed-in part on any 0.3175 board still has 9 legal
+    destinations. Starvation is unreachable here, unlike at the fanout repair
+    site.
     """
     from placement.board_grid import infer_board_grid
     ev = infer_board_grid(pcb_data)
@@ -212,7 +215,18 @@ def jitter_lattice(pcb_data, radius: float) -> Tuple[Optional[float], Dict]:
                              'which would leave the disc no destination but '
                              'the seed' % (step, radius))
         step = None
-    return step, dict(ev, source='inferred' if step is not None else 'none',
+    # `step` is WHAT WAS USED, in every branch. The raw inference moves to
+    # `inferred_step`, and it is kept rather than dropped because the radius
+    # guard's reason is only readable beside it.
+    #
+    # The first version left `ev['step']` at the inferred value while
+    # `resolved` went None, so a guarded run reported `{"step": 0.3175,
+    # "resolved": null}` -- three fields describing a snap that never happened.
+    # `infer_board_grid`'s own docstring promises `d['step']` as the terse
+    # form, so a consumer reading it would have been told the opposite of what
+    # happened, and `board_grid.describe(ev)` would have printed it.
+    return step, dict(ev, step=step, inferred_step=ev['step'],
+                      source='inferred' if step is not None else 'none',
                       resolved=step)
 
 
@@ -281,8 +295,23 @@ def perturb_jitter(state, refs: Sequence[str], rng: random.Random,
                     # is a number the operator reasons with ("10mm-class values
                     # destroy corridors"), not a soft target.
                     continue
-            x = round(part.x + dx, 4)
-            y = round(part.y + dy, 4)
+            if lattice is None:
+                # The continuous sampler's 0.1um raster, unchanged.
+                x = round(part.x + dx, 4)
+                y = round(part.y + dy, 4)
+            else:
+                # NOT rounded. `dx` is an exact lattice multiple, so
+                # `part.x + dx` sits on the seed's coset exactly -- and
+                # rounding the SUM to 4dp would knock it back off for any
+                # board whose origins carry 5 or 6 decimals, which KiCad
+                # writes for rotated and imported parts. Inert on today's
+                # corpus (checked: no tracked lattice board has an origin
+                # past 4dp, so the round was a no-op) and the whole point of
+                # the change on a board that does. `write_placed_output`
+                # formats the `(at ...)` node at %.6f, so the extra precision
+                # survives the write.
+                x = part.x + dx
+                y = part.y + dy
             if state.candidate_valid(ref, x, y, part.rot):
                 state.apply_move(ref, x, y, part.rot)
                 poses.append({'reference': ref, 'new_x': x, 'new_y': y,
@@ -610,18 +639,28 @@ def _quench_metrics(m: Dict) -> Dict:
             'pad_conflict_pairs': leg.get('pad_conflict_pairs', 0),
             'pad_shortfall': leg.get('pad_shortfall', 0.0),
             'hole_shortfall': leg.get('hole_shortfall', 0.0),
-            # #826: which lattice THIS candidate's quench saw, in the same
-            # three-scalar vocabulary check_pockets' census uses. Before the
-            # jitter snapped, `board_grid_step` was None on every jitter
-            # candidate of a lattice board while the baseline's was 0.3175 --
-            # so comparing a candidate's against the baseline's, in one
-            # document, is the whole issue in one line.
+            # #826: which lattice THIS candidate's quench actually USED, in
+            # the three-scalar vocabulary check_pockets' census already uses.
+            # Read off the board the quench PARSES -- the candidate's jittered
+            # seed board -- so before the jitter snapped it disagreed with the
+            # baseline's on ten of the eleven lattice boards (None against
+            # 0.3175 on splitflap). NOT on all eleven: glasgow_revC's jittered
+            # seed still resolved 0.05, which is the same reason it is the one
+            # survivor in the population table.
             #
-            # Read `_step`, never `_occupancy`: infer_board_grid leaves
-            # occupancy at None on the DECLINING branch, which is exactly the
-            # branch the defect produces, so an assertion against it is
-            # vacuous or a TypeError. The number lives in `_reason`.
-            'board_grid_step': (m.get('board_grid') or {}).get('step'),
+            # `resolved`, NOT `step`. `quench` infers a lattice and can then
+            # fall back (when it is coarser than `--step`), leaving `step` at
+            # the INFERENCE and putting what it used in `resolved`. Reading
+            # `step` reported a lattice the quench never used: measured, at
+            # `--step 0.25` on an imperial board the shipped candidate has no
+            # lattice at all and 0.120 occupancy, while this key said 0.3175.
+            # A disclosure that exists to prove the fix is not inert must not
+            # be able to report success on an inert run.
+            'board_grid_step': (m.get('board_grid') or {}).get('resolved'),
+            'board_grid_inferred': (m.get('board_grid') or {}).get('step'),
+            # Occupancy belongs to the INFERENCE, so it is None on the
+            # declining branch -- which is exactly the branch the defect
+            # produces. Assert on `_step`; the number lives in `_reason`.
             'board_grid_occupancy': (m.get('board_grid') or {}).get(
                 'occupancy'),
             'board_grid_reason': (m.get('board_grid') or {}).get('reason')}

@@ -839,16 +839,20 @@ radius: **10 lost it**, two of them to 0.000 occupancy
 (`tests/measure_826_jitter_lattice.py`). It is not a tuning problem — the same
 10 of 11 at radius 4.0, 1.0, 0.25 *and* 0.05, because a continuous offset is
 off-lattice at every amplitude. `glasgow_revC` is the only survivor and not a
-reprieve: only 58 of its 243 free parts pass the incumbent-legality guard, so
-it survives on a ~20-part margin by being dense, and its jittered parts still
-sit on a residue the quench then preserves on the wrong coset.
+reprieve: of its 243 free parts only 59 pass the incumbent-legality guard and
+58 then find a legal sample, so it survives by being dense rather than by being
+right. Its post-jitter occupancy is 0.763 against a 0.67 floor — forcing parts
+off-lattice one at a time, the inference still answers at 24 more and declines
+at 25. And its 58 jittered parts still sit on a residue the quench then
+preserves on the wrong coset, so even the survivor is on the wrong grid.
 
 The jitter now snaps the **offset** to the board's lattice when `generate`
-resolves one. The escape is unaffected — a radius-4 disc on 0.3175 offers ~500
-destinations of which the sampler consumes one, the worst-case boxed-in part
-still has 10, and re-running the identical rng stream snapped restores
-occupancy to *exactly* the input value on all 11 boards with the same parts
-perturbed on 9 of them.
+resolves one. The escape is unaffected — a radius-4 disc on 0.3175 holds **496** lattice
+destinations and the sampler takes the first legal one; measured, the most
+boxed-in part on any 0.3175 board still has **9** (`sonde_u` C4/C5,
+`flat_hierarchy` R1/R2/R3/R6), and `splitflap_driver`'s worst is 11. Re-running
+the identical rng stream snapped restores occupancy to *exactly* the input
+value on all 11 boards, with the same parts perturbed on 9 of them.
 
 Two details worth keeping:
 

@@ -31,9 +31,11 @@ measurement of something else.
 
 Occupancy after the jitter is read the way `board_grid` reads it -- over EVERY
 footprint origin, not just the free ones -- by overlaying the returned poses on
-the parsed board. `writer._fmt_mm` emits `%.6f`, so a 4-dp jitter value
-round-trips through a written seed board verbatim and the in-memory overlay is
-exact rather than approximate.
+the parsed board. `write_placed_output` formats the `(at ...)` node
+with `%.6f`, so a jitter value round-trips through a written seed board
+verbatim and the in-memory overlay is exact rather than approximate (checked
+end to end on splitflap_driver: overlay and written board both read 0.3175 at
+0.923).
 
 NOT named `test_*.py`: `tests/run_all.py` does not collect it. It asserts
 nothing and takes minutes.
@@ -119,12 +121,17 @@ def best_after(pcb, poses):
 
 
 def jitter(state, refs, rng, radius, lattice=None, attempts=20):
-    """`perturb_jitter`, with the proposed snap. Counts why a draw was refused.
+    """The engine's sampler, and a count of why each draw was refused.
 
-    Kept here rather than imported so table C can measure the SHIPPED sampler
-    and the PROPOSED one against the same rng stream in one run, before the
-    engine changes. It is a transcription of `portfolio.perturb_jitter`; the
-    arms in `tests/test_826_portfolio_lattice.py` test the real one.
+    The loop below duplicates `portfolio.perturb_jitter` because the refusal
+    counts are not observable from outside it -- the engine returns poses, not
+    the reasons it rejected draws, and the accept test is `candidate_valid`,
+    so a replay that stopped at the geometric checks would miscount.
+
+    A duplicate that can drift is worse than no measurement, so this one is
+    CHECKED: `verify_against_engine` below runs the real `perturb_jitter` on
+    the same rng stream and refuses to report anything if the poses differ.
+    That is the guard the copy has to earn.
     """
     poses, n_zero, n_out = [], 0, 0
     for ref in refs:
@@ -146,13 +153,35 @@ def jitter(state, refs, rng, radius, lattice=None, attempts=20):
                 if math.hypot(dx, dy) > radius + 1e-9:
                     n_out += 1
                     continue
-            x, y = round(part.x + dx, 4), round(part.y + dy, 4)
+                x, y = part.x + dx, part.y + dy
+            else:
+                x, y = round(part.x + dx, 4), round(part.y + dy, 4)
             if state.candidate_valid(ref, x, y, part.rot):
                 state.apply_move(ref, x, y, part.rot)
                 poses.append({'reference': ref, 'new_x': x, 'new_y': y,
                               'new_rotation': part.rot})
                 break
     return poses, n_zero, n_out
+
+
+def verify_against_engine(path, pcb, radius, lattice, rng_factory):
+    """Refuse to report if the local copy has drifted from the engine.
+
+    Runs both on the same stream and compares the emitted poses exactly. A
+    measurement whose sampler no longer matches the shipped one is not a
+    measurement of this tool.
+    """
+    o1, free = oracle_for(path, pcb)
+    mine, _z, _o = jitter(o1, free, rng_factory(), radius, lattice=lattice)
+    o2, free2 = oracle_for(path, pcb)
+    theirs = PF.perturb_jitter(o2, free2, rng_factory(), radius,
+                               lattice=lattice)
+    if mine != theirs:
+        raise SystemExit(
+            "REFUSING to report: this file's sampler has drifted from "
+            'portfolio.perturb_jitter on %s (%d poses vs %d). Re-sync the '
+            'copy in jitter() before trusting any table below.'
+            % (os.path.basename(path), len(mine), len(theirs)))
 
 
 def lattice_boards():
@@ -273,6 +302,11 @@ def main():
         return 0
     lb = lattice_boards()
     print('%d tracked boards, %d declare a lattice.\n' % (len(boards), len(lb)))
+    # The copy in `jitter()` must still BE the engine's sampler, or every
+    # table below describes a function this repo no longer ships. Checked on
+    # both branches -- with a lattice and without.
+    verify_against_engine(lb[0][0], lb[0][1], 4.0, lb[0][2], _rng)
+    verify_against_engine(lb[0][0], lb[0][1], 4.0, None, _rng)
     want = args.table or ('A', 'B', 'C')
     if 'A' in want:
         table_a(lb)

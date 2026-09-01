@@ -15,16 +15,19 @@ if ignored:
     `snap(part.x + dx) - part.x == snap(dx)` for every emitted pose, so an
     ABSOLUTE-snap mutation is invisible. `interf_u_unrouted` perturbs 22 of 22
     with SEVEN off-lattice, and is the fixture the offset arms use. This is the
-    identical trap `mutate_708.py` recorded for its group-offset row.
+    identical trap `tests/test_708_seed_relative_snap.py` records at
+    `t_group_offsets_probes_the_pose_it_emits` -- "a probe fixture whose parts
+    were already on-lattice".
 
   * the zero-offset branch NEVER fires at the shipped radius -- measured 0
     rejections on all eleven lattice boards at radius 4.0 and at 2.0, first
     firing at 1.0. No population arm at the default can kill a dropped
     zero-guard, so that arm scripts the rng instead.
 
-The radius arms script the rng for the same reason: an outward-snapping draw is
-1-6 per board, likely but not guaranteed, and an arm that depends on one being
-drawn goes quietly vacuous the day a fixture changes.
+The radius arms script the rng for a STRONGER version of the same reason: an
+outward-snapping draw is 0-6 per board and is ZERO on six of the eleven,
+including `esp_prog` and `routed_output`. An arm depending on one being drawn
+would be vacuous on most of the corpus, not merely fragile.
 
 MEASURED, `tests/mutate_826.py`, second run: 11 rows, 11 killed, 0 survived,
 0 broken. The table, from the run:
@@ -360,8 +363,92 @@ def t_the_seed_board_the_quench_parses_still_declares_the_lattice():
         report('the candidate reports the occupancy it was read off',
                cands[0].metrics.get('board_grid_reason') == 'inferred',
                str(cands[0].metrics.get('board_grid_reason')))
+        # THE FINAL BOARD, not just the seed. The stated purpose is "so the
+        # quench that follows can preserve a lattice", and that property
+        # belongs to the board the quench WRITES. Checking only the seed board
+        # is what let a disclosure defect through review: at `--step 0.25` the
+        # seed declares 0.3175 and the final board declares nothing.
+        final_ev = BG.infer_board_grid(parse_kicad_pcb(cands[0].board))
+        report('the QUENCHED candidate board still declares the lattice',
+               final_ev['step'] == in_ev['step'], str(final_ev['reason']))
+        report('at the input occupancy',
+               final_ev['occupancy'] == in_ev['occupancy'],
+               '%s vs %s' % (final_ev['occupancy'], in_ev['occupancy']))
+
+
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def t_the_disclosure_reports_what_was_used_not_what_was_inferred():
+    """`quench` infers a lattice and can then FALL BACK -- when it is coarser
+    than `--step` it keeps `step` at the inference and puts what it used in
+    `resolved`. A disclosure that reads `step` reports a lattice the quench
+    never used, and would say the fix worked on a run where it shipped inert.
+
+    Measured at `--step 0.25` on this imperial board: the candidate the run
+    ships has NO lattice and 0.120 occupancy, while `step` still reads 0.3175.
+    """
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    work = tempfile.mkdtemp(prefix='pf826d_')
+    try:
+        path = board(IMPERIAL)
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = PF.generate(path, work, seed=0, n_candidates=2,
+                              strategies=('jitter',), radius=RADIUS,
+                              quench_kw=dict(max_displacement=3.0, step=0.25,
+                                             grid_step=0.1, clearance=0.2,
+                                             board_edge_clearance=0.55,
+                                             max_passes=3, verbose=False))
+        c = res['candidates'][0]
+        if not c.board:
+            report('the --step 0.25 arm produced a candidate', False, c.note)
+            return
+        report('the quench fell back, so this arm tests the right thing',
+               c.metrics.get('board_grid_inferred') == 0.3175
+               and c.metrics.get('board_grid_step') != 0.3175,
+               'inferred %s, used %s' % (c.metrics.get('board_grid_inferred'),
+                                         c.metrics.get('board_grid_step')))
+        # `board_grid_step` is the lattice the quench's OFFSETS were multiples
+        # of -- here the 0.1 raster it fell back to. That is NOT the same
+        # quantity as what the resulting BOARD declares (None: the shipped
+        # candidate's occupancy is 0.120, under the floor), and the first
+        # version of this arm compared the two and failed for exactly that
+        # reason.
+        report('the disclosed lattice is the raster the quench actually used',
+               c.metrics.get('board_grid_step') == 0.1,
+               'disclosed %s' % c.metrics.get('board_grid_step'))
+        # And the point of the arm: reading `step` instead of `resolved` would
+        # have reported 0.3175 for a candidate that shipped with no lattice.
+        declares = BG.infer_board_grid(parse_kicad_pcb(c.board))['step']
+        report('the shipped board declares no lattice, so the INFERRED value '
+               'would have claimed a success that did not happen',
+               declares is None,
+               'board declares %s, inference said %s'
+               % (declares, c.metrics.get('board_grid_inferred')))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def t_the_run_level_disclosure_is_honest_in_every_branch():
+    """`jitter_lattice`'s dict is written verbatim into portfolio.json, so
+    `step` there has to mean what was USED. The first version left it at the
+    inference on the radius-guard branch, shipping
+    `{"step": 0.3175, "resolved": null}`."""
+    pcb, _p, _f, _o = state_for(IMPERIAL)
+    step, ev = PF.jitter_lattice(pcb, 0.3)          # radius guard fires
+    report('a guarded run reports no lattice in the terse form too',
+           step is None and ev['step'] is None and ev['resolved'] is None,
+           'step=%s resolved=%s' % (ev['step'], ev['resolved']))
+    report('and keeps the inference beside it, so the reason is readable',
+           ev['inferred_step'] == 0.3175, str(ev.get('inferred_step')))
+    step2, ev2 = PF.jitter_lattice(pcb, RADIUS)     # ordinary branch
+    report('an ordinary run agrees with itself',
+           step2 == ev2['step'] == ev2['resolved'] == 0.3175,
+           '%s / %s / %s' % (step2, ev2['step'], ev2['resolved']))
 
 
 TESTS = [
@@ -376,6 +463,10 @@ TESTS = [
     ('no pose sits on its seed', t_no_emitted_pose_sits_on_its_own_seed),
     ('determinism', t_it_is_deterministic),
     ('end to end', t_the_seed_board_the_quench_parses_still_declares_the_lattice),
+    ('the disclosure reports what was USED',
+     t_the_disclosure_reports_what_was_used_not_what_was_inferred),
+    ('the run-level disclosure is honest',
+     t_the_run_level_disclosure_is_honest_in_every_branch),
 ]
 
 
