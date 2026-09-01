@@ -338,11 +338,23 @@ def strip_net_items(txt, token, net_ids, net_names=()):
 
 
 def _layer_at(pcb, nid, pt, default):
-    return next(
-        (s.layer for s in pcb.segments if s.net_id == nid
-         and (abs(s.start_x - pt[0]) + abs(s.start_y - pt[1]) < 0.005
-              or abs(s.end_x - pt[0]) + abs(s.end_y - pt[1]) < 0.005)),
-        default)
+    """Layer of the net's copper at pt. Among ALL segments ending
+    there, the LONGEST run wins -- `next()` took the first in file
+    order, so a stray zero-ish landing on the other layer could claim
+    a tooth (K15 SA7: B stub, resolved F; every lane's first via
+    silently bridged the mistake until a 0-via econ re-lay had no via
+    to mask with and severed the net)."""
+    best = None
+    for s in pcb.segments:
+        if s.net_id != nid:
+            continue
+        if not (abs(s.start_x - pt[0]) + abs(s.start_y - pt[1]) < 0.005
+                or abs(s.end_x - pt[0]) + abs(s.end_y - pt[1]) < 0.005):
+            continue
+        ln = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+        if best is None or ln > best[0]:
+            best = (ln, s.layer)
+    return best[1] if best else default
 
 
 def _end_dir(pcb, nid, pt, pads):
@@ -1771,7 +1783,6 @@ class Corridor:
             added += len(segs_o)
             segs_all.extend(segs_o)
             vias_all.extend(vias_o)
-        note_joint(ctx, nm, segs_all)
         return segs_all, vias_all
 
     def plan_columns(self, sched, gaps, lead):
@@ -2079,7 +2090,6 @@ class Corridor:
                     ctx.pcb.vias.extend(vias_o)
                     self.out_segs[nm] = segs_o
                     self.out_vias[nm] = vias_o
-                    note_joint(ctx, nm, segs_o)
                     still.remove(nm)
                     log(f'    last call routed: {nm} ({len(vias_o)} via(s))')
                 self.refused = still
@@ -2114,10 +2124,30 @@ class Corridor:
                 # the smallest margin, never asking whether a wider
                 # window holds a cheaper one; this pass is the asker).
                 econ_min = int(os.environ.get('ECON_MIN_VIAS', '3'))
-                heavy = sorted((nm for nm in self.members
-                                if len(self.out_vias.get(nm) or ())
-                                >= econ_min),
-                               key=lambda nm: -len(self.out_vias[nm]))
+
+                def lane_mm(nm):
+                    return sum(math.hypot(s.end_x - s.start_x,
+                                          s.end_y - s.start_y)
+                               for s in self.out_segs.get(nm) or ())
+
+                def airline(nm):
+                    t_, u_ = self.teeth[nm], self.stubs[nm]
+                    return math.hypot(t_[0] - u_[0], t_[1] - u_[1])
+
+                # candidates: via-heavy lanes AND long ones (the
+                # berth overshoot lives here: primary lanes keep the
+                # TIP discipline so attachment stays order-independent
+                # -- early-join as a primary default let early lanes
+                # park in the berth-approach channel and starved the
+                # late ones (K32 open either way, live or deferred
+                # trim) -- so the economy is harvested HERE, post-
+                # completion, where it cannot cost a lane)
+                heavy = sorted(
+                    (nm for nm in self.members
+                     if len(self.out_vias.get(nm) or ()) >= econ_min
+                     or (self.out_segs.get(nm)
+                         and lane_mm(nm) - airline(nm) > 3.0)),
+                    key=lambda nm: -len(self.out_vias.get(nm) or ()))
                 for nm in heavy:
                     nid, _ = ctx.byname[nm]
                     ids_s = {id(s) for s in self.out_segs[nm]}
@@ -2139,8 +2169,17 @@ class Corridor:
                                         band=None, margin=mg,
                                         window_pts=wp,
                                         b_alts=ctx.dest_alts.get(nm))
-                        if r_ is not None \
-                                and len(r_[1]) < len(self.out_vias[nm]):
+                        # keep FEWER vias, or equal vias and clearly
+                        # shorter copper (the overshoot harvest)
+                        nv0 = len(self.out_vias[nm])
+                        if r_ is not None and (
+                                len(r_[1]) < nv0
+                                or (len(r_[1]) == nv0
+                                    and sum(math.hypot(
+                                        s.end_x - s.start_x,
+                                        s.end_y - s.start_y)
+                                        for s in r_[0])
+                                    < lane_mm(nm) - 0.5)):
                             res = r_
                             break
                     if res is None:
@@ -2150,7 +2189,12 @@ class Corridor:
                     segs_o, vias_o = res
                     ctx.pcb.segments.extend(segs_o)
                     ctx.pcb.vias.extend(vias_o)
-                    note_joint(ctx, nm, segs_o)
+                    if not net_walks(ctx.pcb, nid, ctx.byname[nm][1]):
+                        ctx.pcb.segments = seg0
+                        ctx.pcb.vias = via0
+                        log(f'    econ re-lay: {nm} REJECTED '
+                            '(net would disconnect)')
+                        continue
                     log(f'    econ re-lay: {nm} '
                         f'{len(self.out_vias[nm])} -> {len(vias_o)} '
                         'via(s)')
@@ -2370,12 +2414,62 @@ class Corridor:
                    if abs(self.launch_o[om] - self.launch_o[nm]) < 0.8 and om != nm]))
 
 
+def net_walks(pcb, nid, net):
+    """Union-find over the net's copper + pads + vias: True when every
+    pad sits in one component. The acceptance guard for re-lays -- a
+    lane whose end-layer was mis-resolved connects only through the
+    accident of its own vias, and a via-free replacement severs the
+    net (K15 SA7)."""
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        parent[find(x)] = find(y)
+
+    pts = []
+    for i, s in enumerate(pcb.segments):
+        if s.net_id != nid:
+            continue
+        union(('s', i, 0), ('s', i, 1))
+        pts.append((('s', i, 0), s.start_x, s.start_y, s.layer))
+        pts.append((('s', i, 1), s.end_x, s.end_y, s.layer))
+    anch = [(('v', i), v.x, v.y, v.size / 2 + 0.02)
+            for i, v in enumerate(pcb.vias) if v.net_id == nid] + \
+        [(('p', i), p.global_x, p.global_y,
+          max(p.size_x, p.size_y) / 2 + 0.02)
+         for i, p in enumerate(net.pads)]
+    for (k, x, y, _l) in pts:
+        for (k2, x2, y2, r) in anch:
+            if math.hypot(x - x2, y - y2) <= r:
+                union(k, k2)
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            ka, xa, ya, la = pts[i]
+            kb, xb, yb, lb = pts[j]
+            if la == lb and math.hypot(xa - xb, ya - yb) <= 0.06:
+                union(ka, kb)
+    roots = {find(('p', i)) for i in range(len(net.pads))}
+    return len(roots) <= 1
+
+
 def note_joint(ctx, nm, new_segs):
-    """After a lane lands: which dest-chain vertex it reached. The
-    bypassed tip-side stub segments are REMOVED from ctx.pcb (they
-    would dangle as dead copper, and they stop being obstacles for
-    later lanes) and their spans recorded for the non-smoothed
-    writer's text strip."""
+    """AT WRITE TIME ONLY: which dest-chain vertex the net's FINAL
+    lane reached; the bypassed tip-side stub segments are removed
+    from ctx.pcb (smoothed write re-emits from it) and their spans
+    recorded for the non-smoothed writer's text strip.
+
+    This used to run LIVE after every join, which lost K32 its
+    completion: the braid rips and retries lanes across attempts, a
+    trimmed stub left self.stubs[nm] pointing at a bare point, and
+    later lanes routed a world that shifted underfoot (13 nets
+    trimmed mid-run, SDQM0 unroutable). Deferred, the routing world
+    is IDENTICAL to tip-join semantics -- lanes just end early on the
+    same stub line -- and the trim is pure output economy."""
     chain = ctx.dest_chain.get(nm) or []
     if not chain:
         return
@@ -2397,10 +2491,7 @@ def note_joint(ctx, nm, new_segs):
     ids = {id(s) for (s, _t, _p) in gone}
     ctx.pcb.segments = [s for s in ctx.pcb.segments
                         if id(s) not in ids]
-    ctx.trim_spans.setdefault(nm, []).extend(
-        (t, p) for (_s, t, p) in gone)
-    ctx.dest_chain[nm] = chain[cut:]
-    ctx.dest_alts[nm] = ctx.dest_alts[nm][cut:]
+    ctx.trim_spans[nm] = [(t, p) for (_s, t, p) in gone]
 
 
 class Ctx:
@@ -2659,6 +2750,11 @@ def write_out(a, ctx, corridors, names, log):
     refused = sorted(nm for c in corridors for nm in c.refused)
     if refused:
         log(f'\nREFUSED nets (left open): {refused}')
+    # deferred berth trim: each successfully-routed net's FINAL lane
+    # decides its joint; a refused net's stub stays whole
+    for nm in names:
+        if out_segs.get(nm) and nm not in refused:
+            note_joint(ctx, nm, out_segs[nm])
 
     # ---- repo octolinear smoothing (#536): collapse the distributed 45
     # nudges into single elbows, clearance-validated against ALL copper.
