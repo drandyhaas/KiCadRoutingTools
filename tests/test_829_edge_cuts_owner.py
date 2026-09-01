@@ -9,9 +9,11 @@ The distinction this file exists to pin is NOT "does it own Edge.Cuts". It is
 * geometry OUTSIDE the board-level outline is the board's own boundary --
   moving it resizes the board, which is a mechanical decision the user owns;
 * geometry INSIDE is a relief the designer parented to the part so it travels
-  WITH it. crkbd draws 184 per-LED cutout windows that way, and #628 measured
-  that freezing such a part costs it every legal pose it has (run 20's SW2:
-  0 legal of 14884).
+  WITH it. crkbd draws 184 per-LED cutout windows that way, and #628 exempts a
+  part's own milled ring from the edge-margin test to keep such a part
+  PLACEABLE at all (without that exemption run 20's SW2, sitting inside its own
+  strap slot, had 0 legal poses of 14884). Locking every owner would freeze the
+  class that work protects.
 
 Getting that backwards is not a hypothetical: the first draft of this fix
 locked every owner, and would have frozen all 184.
@@ -255,6 +257,36 @@ def test_both_arms_of_the_containment_ladder_are_exercised():
           'bounds' in seen, str(seen))
 
 
+def test_every_refusal_names_its_own_source():
+    """A refusal that names the wrong source is worse than none: it sends the
+    reader hunting the board for a `(locked yes)` stamp that is not there.
+
+    `seeder.reseat_scope`'s own comment records fixing exactly that for
+    `--lock`. An #829 owner is locked by QuenchState -- by neither a stamp nor
+    a flag -- so it hit the same wrong arm, in the very function this PR cites
+    as the idiom's source.
+    """
+    import json
+    from placement.seeder import reseat_scope
+    from placement import floorplan
+    board = FIX.write()
+    ipath = os.path.join(os.path.dirname(board), 'intent.json')
+    with open(ipath, 'w', encoding='utf-8') as fh:
+        json.dump({'schema': 1, 'kind': 'floorplan-intent',
+                   'units': 'mm', 'must_lock': []}, fh)
+    res = reseat_scope(parse_kicad_pcb(board), board,
+                       floorplan.load_intent(ipath),
+                       refs=['U_STRUCT'], group_sources=(), clearance=0.2,
+                       board_edge_clearance=0.2, grid_step=0.1, seed=0)
+    notes = ' '.join(res.get('notes') or [])
+    check("U_STRUCT is refused", 'U_STRUCT' in (res.get('refused') or [])
+          or 'U_STRUCT' in notes, str(res.get('refused')))
+    check("the refusal mentions the outline", 'outline' in notes.lower(),
+          notes[:240])
+    check("and does NOT claim a (locked yes) stamp the file does not carry",
+          '(locked yes) in the file' not in notes, notes[:240])
+
+
 def test_a_zero_move_write_is_not_a_move():
     """`perturb._all_at_current` hands the writer EVERY part at its CURRENT
     pose -- deliberately, so the moved set cannot be read off the six-decimal
@@ -393,6 +425,7 @@ TESTS = [
     test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed,
     test_the_classifier_on_the_boards_a_review_broke_it_with,
     test_both_arms_of_the_containment_ladder_are_exercised,
+    test_every_refusal_names_its_own_source,
     test_a_zero_move_write_is_not_a_move,
     test_the_tripwire_works_on_an_in_place_write,
     test_a_pure_rotation_is_covered_too,

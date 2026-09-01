@@ -56,10 +56,16 @@ def _outline_owner_map(input_file: str) -> Dict[str, bool]:
             from kicad_parser import footprint_outline_owners
             with open(input_file, encoding='utf-8') as fh:
                 _OUTLINE_OWNER_CACHE[key] = footprint_outline_owners(fh.read())
-        except (OSError, ValueError):
+        except Exception:                                     # noqa: BLE001
             # Cannot decide -> do not invent a refusal. The movable-set gates
             # are the primary defence; a backstop that failed closed on an
             # unreadable file would break every ordinary run.
+            #
+            # Deliberately BROADER than (OSError, ValueError), which is what
+            # this caught first: the classifier walks paren structure, so an
+            # IndexError out of `find_matching_paren` on a malformed board is
+            # reachable, and letting it escape would make a guard documented
+            # as failing OPEN take the whole run down instead.
             _OUTLINE_OWNER_CACHE[key] = {}
     return _OUTLINE_OWNER_CACHE[key]
 

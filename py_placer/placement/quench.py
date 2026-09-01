@@ -835,8 +835,9 @@ class QuenchState:
             # `owns_board_outline`, NOT `owns_edge_cuts`. Geometry parented to
             # a footprint is usually a relief the designer bound to the part so
             # it travels with it -- crkbd draws 184 per-LED windows that way,
-            # and #628 measured that freezing such a part costs it every legal
-            # pose it has (SW2: 0 of 14884). Only geometry lying outside the
+            # and #628 exempts a part's own milled ring from the edge-margin
+            # test precisely to keep such a part placeable (without it run 20's
+            # SW2 had 0 legal poses of 14884). Only geometry lying outside the
             # board-level outline is the board's.
             owns_outline = getattr(fp, 'owns_board_outline', False)
             locked = (ref in locked_refs

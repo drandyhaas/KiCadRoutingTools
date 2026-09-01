@@ -1634,9 +1634,11 @@ def footprint_outline_owners(content: str) -> Dict[str, bool]:
     * **Carried** (`False`) -- the shape sits inside the board outline: a
       milled relief or a window the designer PARENTED to the part precisely so
       it would travel with it. crkbd draws 184 per-LED cutout windows this way
-      (see `_collect_edge_cuts_segments`), and #628 measured that freezing such
-      a part costs it every legal pose it has (run 20's SW2: 0 of 14884). These
-      must keep moving.
+      (see `_collect_edge_cuts_segments`), and #628 exists to keep exactly this
+      class of part PLACEABLE -- it exempts a part's own milled ring from the
+      edge-margin test, because without that exemption run 20's SW2, sitting
+      inside its own strap slot, had 0 legal poses of 14884 (`legality.py`).
+      Locking every owner would freeze the very parts that work protects.
 
     Deciding by containment rather than by "does it own Edge.Cuts at all" is
     the whole point: parentage is the designer's statement about which of the
@@ -5517,22 +5519,38 @@ def _extract_board_contours_from_pcbnew(board, to_mm, include_footprints=True,
         for fp in (board.GetFootprints() if include_footprints else ()):
             _oref = None
             for g in fp.GraphicalItems():
-                # FP_SHAPE is the KiCad 6/7 class for a footprint shape; the
-                # pcbnew BOUNDS scan already accepts it, and #829's owner
-                # collection needs the same set or the two pcbnew paths
-                # disagree about which shapes exist.
-                if g.GetLayer() != edge_cuts_id or g.GetClass() not in (
-                        "PCB_SHAPE", "DRAWSEGMENT", "FP_SHAPE"):
+                if g.GetLayer() != edge_cuts_id:
+                    continue
+                _cls = g.GetClass()
+                # The CONTOUR filter is left exactly as it was
+                # ("PCB_SHAPE", "DRAWSEGMENT"). It omits FP_SHAPE -- the KiCad
+                # 6/7 class for a footprint shape -- where the pcbnew BOUNDS
+                # scan accepts it, so on 6/7 a footprint shape reaches
+                # board_bounds but not board_outlines. That asymmetry is
+                # PRE-EXISTING and is not #829's to change: widening it here
+                # would alter board_outlines/board_cutouts on every KiCad 6/7
+                # parse, which is a behaviour change in a PR about something
+                # else. (An earlier revision of this branch did widen it, and
+                # then claimed in its description to have left it alone.)
+                #
+                # #829's owner collection DOES need FP_SHAPE, or the guard is
+                # blind on 6/7 -- so it takes the wider set for itself only.
+                _for_contours = _cls in ("PCB_SHAPE", "DRAWSEGMENT")
+                _for_owners = (owners_out is not None
+                               and _cls in ("PCB_SHAPE", "DRAWSEGMENT",
+                                            "FP_SHAPE"))
+                if not (_for_contours or _for_owners):
                     continue
                 try:
                     _segs = _shape_segments(g)
                 except Exception:
                     continue
-                segments.extend(_segs)
+                if _for_contours:
+                    segments.extend(_segs)
                 # #829: hand the caller the SAME segments keyed by owner,
                 # rather than writing a second shape handler that would drift
                 # from this one.
-                if owners_out is not None and _segs:
+                if _for_owners and _segs:
                     if _oref is None:
                         _oref = fp.GetReference() or ("#" + str(
                             fp.m_Uuid.AsString()) if hasattr(fp, 'm_Uuid')
