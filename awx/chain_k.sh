@@ -70,6 +70,26 @@ for K in "${KS[@]}"; do
   if [ ! -f "${TAG}_fo_k${K}.kicad_pcb" ]; then
     echo "  NO FANOUT BOARD"; continue
   fi
+  # ROUNDTRIP=1: close the fanout/braid page mismatch -- braid
+  # PLAN-ONLY on the first fanout (seconds, no lanes) gives the
+  # braid's OWN pages; the fanout re-runs with them as the escape
+  # layer source and PINS the sidecar, so a tooth never starts a net
+  # off the layer its lane will ride.
+  if [ -n "$ROUNDTRIP" ]; then
+    python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
+      --dest "$DEST" --nets "$NETS" --out /dev/null \
+      --plan-json "${TAG}_rt_plan_k${K}.json" \
+      >> "${TAG}_fo_k${K}.log" 2>&1
+    python3 -c "import json,sys; p=json.load(open(sys.argv[1])); \
+json.dump({n: d.get('page') for n, d in p.items()}, \
+open(sys.argv[2], 'w'), indent=1)" \
+      "${TAG}_rt_plan_k${K}.json" "${TAG}_rt_pages_k${K}.json"
+    python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
+      --board="$BASE" $DIRS_OPT $SRC_OPT $LINES_OPT $PLAN_OPTS \
+      "--pages-json=${TAG}_rt_pages_k${K}.json" "${FO_OPTS[@]}" \
+      >> "${TAG}_fo_k${K}.log" 2>&1
+    echo "  round-trip: braid pages fed back to the fanout"
+  fi
   echo -n "  fanout board: "
   python3 ../py_router/check_drc.py "${TAG}_fo_k${K}.kicad_pcb" \
     --clearance 0.1 --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"

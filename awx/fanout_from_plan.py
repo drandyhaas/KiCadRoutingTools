@@ -111,6 +111,15 @@ ORDER_MODEL = '--order-model' in sys.argv
 # --order-model; pair with SOURCE=1 and TWO_PAGE=1 in the chain so the
 # source is applied and the braid lays the ribbon.
 TWO_PAGE_PLAN = '--two-page' in sys.argv
+# --pages-json=FILE: the ROUND-TRIP page source. The plan's own
+# transverse projection and the braid's real schedule disagree for a
+# few nets per rung (the tooth-layer/ride mismatch: a B dogbone whose
+# lane rides F pays 2 vias for nothing). With this flag the escape
+# re-pick uses the BRAID'S OWN pages (a plan-only braid dump on a
+# first fanout), and the sidecar is PINNED to the same map so the
+# final braid agrees by construction.
+PAGES_JSON = next((a.split('=', 1)[1] for a in sys.argv
+                   if a.startswith('--pages-json=')), None)
 if TWO_PAGE_PLAN:
     os.environ['TWO_PAGE'] = '1'
     # NOT forcing --order-model any more: the measured verdict (t4..t7)
@@ -295,6 +304,15 @@ if TWO_PAGE_PLAN and choice:
             tgt_ = sorted(grp, key=lambda n: geo_now.exit_key(n, choice[n], t_))
         sched = Schedule(lo_, tgt_, tooth_now,
                          dest_layer={n: choice[n].layer for n in grp})
+        if PAGES_JSON:
+            import json as _json
+            _pg = _json.load(open(PAGES_JSON))
+            sched.page = {n: _pg.get(n) for n in grp}
+            sched.b_page = {n for n in grp
+                            if _pg.get(n) == 'B.Cu'}
+            sched.swimmers = {n for n in grp if _pg.get(n) is None}
+            print(f'  pages from {os.path.basename(PAGES_JSON)} '
+                  '(braid round-trip), not the plan projection')
         n_f = sum(1 for n in grp if sched.page.get(n) == 'F.Cu')
         print(('\n' if not _round else '')
               + f'two-page plan round {_round}: pages F {n_f} / B '
@@ -487,7 +505,16 @@ if TWO_PAGE_PLAN and choice:
         print(f'  UNRESOLVED lane conflict: {a_} vs {b_}')
     import json
     pages_path = os.path.splitext(out_path)[0] + '.pages.json'
-    if scope in ('surgical', 'split'):
+    if PAGES_JSON:
+        # round-trip: PIN the braid's own pages as the sidecar, so
+        # the final braid uses the exact map the escapes were re-
+        # picked for. (Pinning the PLAN's pages was the measured t15
+        # mistake; pinning the braid's own is the 44v-record recipe.)
+        _pg = json.load(open(PAGES_JSON))
+        with open(pages_path, 'w', encoding='utf-8') as f:
+            json.dump({n: _pg.get(n) for n in names}, f, indent=1)
+        print('  pages sidecar PINNED from the braid round-trip')
+    elif scope in ('surgical', 'split'):
         # NO sidecar: the plan's orders are not the braid's (t15: 7 of
         # 25 planned page members crossed their own page under the
         # braid's real orders and were demoted -- 46v/5 vs plain 49/3).
