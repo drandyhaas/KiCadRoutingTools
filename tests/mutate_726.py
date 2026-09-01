@@ -61,6 +61,7 @@ T_WRITER = os.path.join(TESTS, 'test_726_writer_resolves_one_block.py')
 T_CONS = os.path.join(TESTS, 'test_726_consumers_see_both_blocks.py')
 T_PARITY = os.path.join(TESTS, 'test_parser_pcbnew_parity.py')
 T_GUI = os.path.join(TESTS, 'gui_parity', 'test_726_parse_path_parity.py')
+T_SYNC = os.path.join(TESTS, 'gui_parity', 'test_726_gui_sync.py')
 
 #: (name, target, old, new, tests, expectation)
 ROWS = [
@@ -122,11 +123,15 @@ ROWS = [
      "        _unused = (",
      (T_KEYS,), 'KILLED'),
 
+    # The first version of this row rebound `_block_key` AFTER `reference` had
+    # already been taken from it, so it mutated nothing and SURVIVED -- a hole
+    # in the battery, not in the tests, and exactly the kind a declared
+    # expectation can launder. It now cuts the propagation where it actually
+    # happens, at the Pad constructor.
     ('the-key-never-reaches-pad-component_ref', 'p',
-     "        reference = _block_key\n        ref_match = _FP_REF_RE.search(fp_text)",
-     "        reference = _block_key\n        _block_key = _raw_reference\n"
-     "        ref_match = _FP_REF_RE.search(fp_text)",
-     (T_KEYS, T_PARITY), 'SURVIVED'),
+     "            pad = Pad(\n                component_ref=reference,",
+     "            pad = Pad(\n                component_ref=_raw_reference,",
+     (T_KEYS, T_PARITY), 'KILLED'),
 
     # ---- the writer --------------------------------------------------------
     ('writer-matches-by-name-again', 'w',
@@ -185,10 +190,16 @@ ROWS = [
      "                                - len(dup_refs),",
      (T_CONS,), 'KILLED'),
 
+    # SURVIVED on the first run, because nothing covered this function on a
+    # board with duplicates: `test_footprint_position_sync.py` does cover it
+    # and stays GREEN through the mutation, since it runs on a 61-block board
+    # with 61 distinct references. That is a passing gate on a board that
+    # cannot express the defect. `test_726_gui_sync.py` was written because
+    # this row said so.
     ('gui-sync-matches-by-bare-reference', 'u',
      "        for bfp, ref in zip(_live, _keys):",
      "        for bfp, ref in zip(_live, _raw):",
-     (T_GUI,), 'SURVIVED'),
+     (T_SYNC,), 'KILLED'),
 ]
 
 
@@ -242,7 +253,11 @@ def verify_anchors():
         n = src[tgt].count(old)
         others = []
         for rel in tracked:
-            if os.path.abspath(os.path.join(ROOT, rel)) == TARGETS[tgt]:
+            abs_rel = os.path.abspath(os.path.join(ROOT, rel))
+            # Skip the target (where exactly one match is the requirement) and
+            # THIS file, which carries every anchor as a string literal by
+            # construction.
+            if abs_rel in (TARGETS[tgt], os.path.abspath(__file__)):
                 continue
             try:
                 with open(os.path.join(ROOT, rel), encoding='utf-8',
