@@ -115,6 +115,18 @@ def ledger(plan_path, board_path, emit_pages=None):
         greedy_cover(conf, divers)
         for n in nms:
             all_pages[n] = None if n in divers else ride[n]
+    all_divers = {n for n, v in all_pages.items() if v is None}
+    all_rides = {}
+    for ci, nms in corrs.items():
+        for n in nms:
+            all_rides[n] = all_pages.get(n) or plan[n]['dest_layer']
+    extra = inter_corridor_cover(plan, all_rides, all_divers)
+    if extra:
+        print(f'  inter-corridor dives: +{2 * len(extra)} '
+              f'({sorted(extra)})')
+        tot_opt += 2 * len(extra)
+        for n in extra:
+            all_pages[n] = None
     print(f'  MODEL-OPT TOTAL: {tot_opt}   (actual {tot_a})')
     if emit_pages:
         json.dump(all_pages, open(emit_pages, 'w'), indent=1,
@@ -177,7 +189,46 @@ def opt_rides(plan):
                         + (plan[n]['dest_layer'] == 'B.Cu')
                         + (2 if n in dv else 0))
         rides.update({n: ride[n] for n in nms})
+    extra = inter_corridor_cover(plan, rides, divers)
+    for n in extra:
+        model[n] = model.get(n, 0) + 2
+    divers |= extra
     return rides, divers, model
+
+
+def inter_corridor_cover(plan, rides, divers):
+    """The dives the per-corridor model cannot see: same-ride chords
+    (tooth -> berth straight lines) that cross BETWEEN corridors.
+    Measured on the K28 record: singleton-corridor SA0/SA4/SODT1 each
+    pay a real 2-via dive under the main ribbon (band-free re-lays
+    found nothing cheaper), and the per-corridor ledger priced them 0
+    -- promising 36 where ~42 is the physical floor. A per-corridor
+    diver's dive covers its inter-corridor crossings for free; the
+    rest are covered greedily. Plans without 'berth' (older dumps)
+    contribute nothing."""
+    xg = collections.defaultdict(set)
+    names = sorted(plan)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if plan[a].get('corridor') == plan[b].get('corridor'):
+                continue
+            if rides.get(a) != rides.get(b):
+                continue
+            pa = (plan[a].get('tooth'), plan[a].get('berth'))
+            pb = (plan[b].get('tooth'), plan[b].get('berth'))
+            if None in pa or None in pb:
+                continue
+            if seg_x(pa[0], pa[1], pb[0], pb[1]):
+                xg[a].add(b)
+                xg[b].add(a)
+    for d_ in divers:
+        for b in list(xg.get(d_, ())):
+            xg[b].discard(d_)
+        xg.pop(d_, None)
+    xg = {n: v for n, v in xg.items() if v}
+    extra = set()
+    greedy_cover(xg, extra)
+    return extra
 
 
 def greedy_cover(conf, members=None):
@@ -364,7 +415,8 @@ def berth_ends(board_path, nets, du):
 
 def solve(base_path, out_prefix, nets=None, src='U1', dst='DU1',
           sweeps=8, shortlist=24, pin_du=None,
-          anchor=None, anchor_w=0.6, len_w=1.0 / VIA_MM):
+          anchor=None, anchor_w=0.6, len_w=1.0 / VIA_MM,
+          frame='chord'):
     FACES = ('up', 'down', 'left', 'right')
     nets = list(nets or K28)
     pcb = parse_kicad_pcb(base_path)
@@ -528,15 +580,42 @@ def solve(base_path, out_prefix, nets=None, src='U1', dst='DU1',
         return (_push(u1, st[n]['u1']['face'], st[n]['u1']['node']),
                 _push(du, st[n]['du']['face'], st[n]['du']['node']))
 
-    def total():
+    def conflicts(fr):
+        """The crossing structure the cover prices, in one of two
+        frames. 'chord': 2-D chord-polyline parity between EVERY pair
+        -- counts crossings the braid's corridor projection dissolves
+        (a side exit joining at the right rank crosses nobody), which
+        is why chord predictions run ~1.6x the delivered board at
+        K32/K47. 'braid': the braid's own unit (corridor_groups' rule
+        -- every net berthing on one face is one corridor): in-group
+        conflict = the pair's order INVERTS between launch and berth
+        on the face's transverse axis (what the weave must actually
+        undo), cross-group conflict = the chords cross (a REAL forced
+        dive -- K28's singleton-corridor SA0/SA4 pay 2 vias under the
+        main ribbon and the per-corridor ledger priced them 0)."""
         chords = {n: chord(*pts(n), rects) for n in st}
         x = collections.defaultdict(set)
         ns = sorted(st)
+        axis = {'up': 0, 'down': 0, 'left': 1, 'right': 1}
+        face = {n: st[n]['du']['face'] for n in ns}
         for i, a in enumerate(ns):
             for b in ns[i + 1:]:
-                if poly_cross(chords[a], chords[b]):
+                if fr == 'braid' and face[a] == face[b]:
+                    ax = axis.get(face[a], 0)
+                    la, lb = pts(a)[0][ax], pts(b)[0][ax]
+                    ca, cb = st[a]['du']['coord'], st[b]['du']['coord']
+                    hit = (la != lb and ca != cb
+                           and (la < lb) != (ca < cb))
+                else:
+                    hit = poly_cross(chords[a], chords[b])
+                if hit:
                     x[a].add(b)
                     x[b].add(a)
+        return chords, x
+
+    def total(fr=None):
+        chords, x = conflicts(fr or frame)
+        ns = sorted(st)
         c = 0
         for n in ns:
             s = st[n]
@@ -631,13 +710,18 @@ def solve(base_path, out_prefix, nets=None, src='U1', dst='DU1',
     # who dives: recompute the cover MEMBERS -- they are emitted as
     # swimmers (pages=None); forcing every net onto a page left the
     # braid no weave relief and refused 10 lanes (measured)
-    chords = {n: chord(*pts(n), rects) for n in st}
     conf = {n: {b for b in x[n] if st[b]['ride'] == st[n]['ride']}
             for n in st}
     divers = set()
     greedy_cover(conf, divers)
     print(f'\nSOLVED: predicted {cur} vias (cover {cov}: '
           f'{sorted(divers)}, cap {CAP_DIVES})')
+    # disclose the OTHER frame's prediction on the same final state,
+    # so every run carries the calibration pair
+    other = 'braid' if frame == 'chord' else 'chord'
+    oc, ocov, _ox = total(other)
+    print(f'  [{other}-frame prediction on this state: {oc:.1f} vias '
+          f'(cover {ocov})]')
     contract = {}
     pages = {}
     dua = {}
@@ -684,6 +768,12 @@ if __name__ == '__main__':
                     help='contract json: charge anchor-w per mm of '
                          'U1 exit movement away from it (damping)')
     ap.add_argument('--anchor-w', type=float, default=0.6)
+    ap.add_argument('--frame', choices=('chord', 'braid'),
+                    default='chord',
+                    help='crossing frame the solver optimizes: chord '
+                         '(2-D parity, every pair) or braid (the '
+                         "corridor's own 1-D order in-group, chords "
+                         'across groups); both predictions printed')
     a = ap.parse_args()
     if a.cmd == 'ledger':
         ledger(a.args[0], a.args[1], emit_pages=a.emit_pages)
@@ -694,4 +784,5 @@ if __name__ == '__main__':
     else:
         solve(a.base, a.out_prefix, nets=nets_for_k(a.k),
               pin_du=a.pin_du,
-              anchor=a.anchor, anchor_w=a.anchor_w, len_w=a.len_w)
+              anchor=a.anchor, anchor_w=a.anchor_w, len_w=a.len_w,
+              frame=a.frame)

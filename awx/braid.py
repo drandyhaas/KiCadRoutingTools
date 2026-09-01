@@ -2091,8 +2091,17 @@ class Corridor:
             big2.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
             ctx.cfg = big2
             try:
+                # ECON_MIN_VIAS: the cheapest lane worth trying to
+                # re-lay. 3 exempted every 2-via lane, and the K28
+                # ledger says that is where the waste lives (SA0/SA4/
+                # SODT1 dive once each where the cover model rides
+                # free -- the last call keeps the FIRST route found at
+                # the smallest margin, never asking whether a wider
+                # window holds a cheaper one; this pass is the asker).
+                econ_min = int(os.environ.get('ECON_MIN_VIAS', '3'))
                 heavy = sorted((nm for nm in self.members
-                                if len(self.out_vias.get(nm) or ()) >= 3),
+                                if len(self.out_vias.get(nm) or ())
+                                >= econ_min),
                                key=lambda nm: -len(self.out_vias[nm]))
                 for nm in heavy:
                     nid, _ = ctx.byname[nm]
@@ -2390,6 +2399,7 @@ def main():
             for nm in members:
                 d = {'corridor': ci,
                      'tooth': list(ctx.ends[nm][0]),
+                     'berth': list(ctx.ends[nm][1]),
                      'tooth_layer': ctx.tooth_layer[nm],
                      'dest_layer': ctx.dest_layer[nm]}
                 if sched is not None:
