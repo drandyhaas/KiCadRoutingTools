@@ -1066,18 +1066,26 @@ def main():
                 # theirs to change, a board-outline owner is not, and blaming
                 # --lock on a run that passed none sends them looking for a
                 # flag that was never there.
-                _byl = [r for r in diag.selected if r in locked]
                 _byo = [r for r in diag.selected if r in owners
                         and r not in locked]
-                parts = []
-                if _byl:
-                    parts.append(f'{len(_byl)} match --lock')
-                if _byo:
+                if not _byo:
+                    # The pre-#829 sentence, unchanged. Rewording it broke
+                    # test_553_loop_target_select, which greps for
+                    # 'matches --lock' -- and the test is right: this is the
+                    # established wording for the established case, and #829
+                    # has no business changing it.
+                    why = (f'every one of the {len(diag.selected)} diagnosed '
+                           f'part(s) matches --lock')
+                else:
+                    _byl = [r for r in diag.selected if r in locked]
+                    parts = []
+                    if _byl:
+                        parts.append(f'{len(_byl)} match --lock')
                     parts.append(f"{len(_byo)} draw the board outline and are "
                                  f"not this tool's to move (#829): "
                                  f"{', '.join(sorted(_byo))}")
-                why = (f'all {len(diag.selected)} diagnosed part(s) are '
-                       f'excluded -- ' + '; '.join(parts))
+                    why = (f'all {len(diag.selected)} diagnosed part(s) are '
+                           f'excluded -- ' + '; '.join(parts))
             if why:
                 fallback_rounds += 1
                 fallback_reasons.append(f'round {rnd}: {why}')
