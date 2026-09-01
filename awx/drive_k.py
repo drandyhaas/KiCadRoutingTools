@@ -87,6 +87,26 @@ if m2 and os.path.exists(m2.group(1)):
         [sys.executable, 'collapse_dives.py', best, '--out', out_cd],
         capture_output=True, text=True)
     sys.stdout.write(r3.stdout)
+    # quantization-graze micro-nudge (check_drc-driven, verified by
+    # re-running check_drc + check_connected inside the tool; a
+    # pinned vertex's graze can free up once neighbours move, so
+    # iterate to convergence -- measured 3 -> 1 -> 0 at K41)
+    for _i in range(3):
+        out_n = f'{tag}_nudge.kicad_pcb'
+        rn = subprocess.run(
+            [sys.executable, 'nudge_grazes.py', out_cd,
+             '--out', out_n],
+            capture_output=True, text=True)
+        sys.stdout.write(rn.stdout)
+        if rn.returncode != 0 or f'wrote {out_n}' not in rn.stdout:
+            break
+        os.replace(out_n, out_cd)
+        pron = os.path.splitext(out_n)[0] + '.kicad_pro'
+        if os.path.exists(pron):
+            os.replace(pron,
+                       os.path.splitext(out_cd)[0] + '.kicad_pro')
+        if '-> 0' in rn.stdout:
+            break
     nets = subprocess.run(
         [sys.executable, 'coherent_nets.py', a.k],
         capture_output=True, text=True).stdout.strip()

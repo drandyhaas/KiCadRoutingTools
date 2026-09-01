@@ -254,8 +254,18 @@ def relay_try(nets_arg, largs, label, screen=False, rescue=False,
         print(f'  {label}: screened out (single-net'
               + (', strict' if screen == 'strict' else '') + ')')
         return False
+    return _trial_on_fo(out, label, rescue=rescue)
+
+
+def _trial_on_fo(newfo, label, rescue=False):
+    """The confirm tail every FO-changing trial shares: switch to the
+    new fanout board, re-dump its plan, pin own pages + accepted
+    flips, braid once, keep strictly better (with the optional
+    stranded-nets rescue); restore FO/SIDECAR on reject."""
+    global FO, SIDECAR, best_score, best_board, plan, own, cur_pages
+    global rides, divers, model
     fo0, side0 = FO, SIDECAR
-    FO = out
+    FO = newfo
     SIDECAR = os.path.splitext(FO)[0] + '.pages.json'
     plan2 = dump_plan(f'{TAG}_{label}_plan.json')
     own2 = {m: d['page'] for m, d in plan2.items() if 'page' in d}
@@ -572,6 +582,63 @@ _face_spent = 0
 NEST_TOP = 3
 
 
+def _nest_ask(m, tag, board):
+    """Translate a nest-model wrap move into a relay ask on `board`:
+    exit around the named array's north/south, on the BACK third of
+    that face (back = away from the other array)."""
+    end, wrap = tag.split('-')
+    ref = _a.src_ref if end == 'src' else 'DU1'
+    g = _geom(board).get(ref)
+    if not g:
+        return None
+    W = g['W']
+    w = W[2] - W[0]
+    coord = W[0] + 0.25 * w if end == 'src' else W[2] - 0.25 * w
+    side = 'up' if wrap == 'wrapN' else 'down'
+    ride = rides.get(m) or 'F.Cu'
+    return ((['--ref', 'DU1'] if ref == 'DU1' else [])
+            + ['--side', side, '--coord', f'{coord:.2f}',
+               '--layer', ride])
+
+
+def nest_composed(nr, sweep):
+    """The COMPOSED homotopy move (K41 measured the need: every SOLO
+    wrap was rejected because it strands exactly the nets the OTHER
+    recommended wraps would free -- the model's optimum is JOINT).
+    Apply the descent's wrap set as ONE trial: relay each move onto
+    the previous board (refusals skipped), then a single confirm
+    braid through the shared accept/rescue tail. One braid for the
+    whole batch; the per-move sweep remains the fallback."""
+    moves = [(m, tag) for m, (tag, mm, solo) in
+             sorted(nr['moves'].items(), key=lambda kv: -kv[1][2])
+             if solo > 0][:6]
+    if len(moves) < 2:
+        return False
+    tk = tried_key(('nestbatch', tuple(sorted(m for m, _ in moves))))
+    if tk in TRIED:
+        return False
+    TRIED[tk] = True
+    cur = FO
+    applied = []
+    for i, (m, tag) in enumerate(moves):
+        largs = _nest_ask(m, tag, cur)
+        if largs is None:
+            continue
+        out = f'{TAG}_s{sweep}nb{i}{m}.kicad_pcb'
+        r = subprocess.run(
+            [sys.executable, 'relay_net.py', cur, m, '--out', out]
+            + largs, capture_output=True, text=True)
+        if not os.path.exists(out) or 'MISSED' in r.stdout:
+            continue                       # compose what applies
+        cur = out
+        applied.append(m)
+    if len(applied) < 2:
+        return False
+    print(f'  nest composed: {len(applied)} wrap(s) '
+          f'[{",".join(applied)}]')
+    return _trial_on_fo(cur, f's{sweep}nestbatch', rescue=True)
+
+
 def nest_channel(sweep):
     """The HOMOTOPY channel: 'you can nest even more if the homotopy
     is adjusted at either the source or berth'. The nest model
@@ -597,6 +664,9 @@ def nest_channel(sweep):
     print(f'  nest model: {nr["as_is"]} -> {nr["minimum"]} '
           f'interleavings reachable; trying '
           f'{[m for m, _ in cand[:NEST_TOP]]}')
+    # the JOINT batch first -- one braid for the whole assignment
+    if nest_composed(nr, sweep):
+        return True
     got = False
     for m, (tag, mm, solo) in cand[:NEST_TOP]:
         if solo <= 0:
