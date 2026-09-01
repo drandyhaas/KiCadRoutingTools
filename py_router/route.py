@@ -4704,6 +4704,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     project_from=input_file)
                 print(f"  [finalize timing] oracle leg: "
                       f"{_time9.time() - _t9:.1f}s")
+                # #713 item 3: this leg had NO summary key at all, so an
+                # `available: False` -- the authoritative zone-aware check
+                # never running -- was invisible to every JSON_SUMMARY
+                # consumer, and the run read as fully checked. `oracle_check`
+                # describes a DIFFERENT, opt-in end-of-run check and says
+                # nothing about this one.
+                summary['oracle_reconnect'] = {
+                    k: _orc.get(k) for k in
+                    ('available', 'reason', 'why', 'rounds', 'links_routed',
+                     'links_failed', 'remaining')}
                 if not _gui9:
                     # #589: keep the oracle's net list + config for the
                     # post-reconciliation re-audit (CLI file mode only).

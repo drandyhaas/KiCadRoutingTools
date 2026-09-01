@@ -3634,9 +3634,12 @@ Examples:
         except Exception:
             pass
         if not _orc.get('available'):
-            print('NOTE: kicad-cli not found -- the oracle reconnect pass '
-                  'did not run; output may differ from machines that have '
-                  'KiCad installed (replay-determinism caveat).')
+            # Was hardcoded to "kicad-cli not found", which was the cause for
+            # only one of the ways to get here (#713 item 3). The oracle now
+            # says which, so print what it said.
+            print(f"NOTE: {_orc.get('why', 'the oracle could not run')} -- "
+                  f"the oracle reconnect pass did not run; output may differ "
+                  f"from machines where it can (replay-determinism caveat).")
 
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route_planes.py, so a manual DRC in
