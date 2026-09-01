@@ -69,7 +69,8 @@ def _reexec_into_kicad():
 
 def compare_board(board_path):
     import pcbnew
-    from kicad_parser import build_pcb_data_from_board, parse_kicad_pcb
+    from kicad_parser import (build_pcb_data_from_board, parse_kicad_pcb,
+                              disambiguate_references)
     from placement.labels import (fold_upright, label_world_anchor,
                                   label_world_angle)
 
@@ -77,15 +78,19 @@ def compare_board(board_path):
     board = pcbnew.LoadBoard(board_path)
     gui_pcb = build_pcb_data_from_board(board)
 
-    # ref -> live pcbnew footprint, LAST occurrence winning -- the same
-    # collapse both PCBData dicts apply to duplicate references (glasgow
-    # carries several unannotated "REF**" parts; FindFootprintByReference
-    # returns the FIRST, which is a different physical part than the one the
-    # dicts kept).
-    live_fps = {}
-    for f in board.GetFootprints():
-        if f.GetReference():
-            live_fps[f.GetReference()] = f
+    # PCBData key -> live pcbnew footprint, resolved with the SAME function
+    # both parse paths use (#726). This used to reproduce the last-wins
+    # collapse deliberately, because both dicts collapsed the same way and it
+    # had to agree with them -- so on glasgow, six of the seven `REF**` labels
+    # were never compared at all. Every block is a key now, so the gate covers
+    # all seven, and it becomes a THIRD independent check that
+    # `disambiguate_references` answers the same over the live board as it does
+    # over each parse path's own ordering.
+    _live = list(board.GetFootprints())
+    live_fps = dict(zip(
+        disambiguate_references(
+            [f.GetReference() or ('#' + f.m_Uuid.AsString()) for f in _live]),
+        _live))
 
     problems = []
     checked = angles = 0

@@ -4,8 +4,11 @@ The pockets census put every demand-3 window at one end of run 23's board
 while the part mass sat at the other, and no instrument said so. This is the
 join, plus the caution #709 measured and that is easy to get backwards: the
 centroid must be weighted by COURTYARD AREA, not by part count. The count form
-is the intuitive one and it points the wrong way -- on esp_prog it reads 13.7%
-of span where the area form reads 1.3%.
+is the intuitive one and it points the wrong way -- on esp_prog it reads 14.9%
+of span where the area form reads 1.1%. (Those were 13.7% and 1.3% until #726
+stopped the parser losing esp_prog's second `Ref*` fiducial: one more part
+shifts a COUNT-weighted centroid and barely touches an AREA-weighted one,
+which is the caution this file is about, restated by accident.)
 
 `placement_state` records the standing objection to courtyard-area metrics --
 "needs polygon area and breaks on the boards with no courtyards at all". B6
@@ -67,10 +70,18 @@ def t_area_weighting_and_the_count_control_disagree():
     s = arr['sides'][arr['headline_side']]
     area_x = s['offset_frac_span'][0]
     count_x = s['count_control_frac_span'][0]
-    report('esp_prog: the area form is ~1.3% of span',
-           abs(area_x - 0.013) < 0.004, 'got %.4f' % area_x)
-    report('esp_prog: the count control is ~13.7% of span',
-           abs(count_x - 0.137) < 0.008, 'got %.4f' % count_x)
+    # RE-RECORDED for #726. esp_prog carries two footprint blocks named `Ref*`
+    # and the parser used to keep only the second, so this board measured as 20
+    # parts where the file has 21. The recovered fiducial moves the COUNT-
+    # weighted centroid (0.1372 -> 0.1494, one more part on one side of the
+    # span) and barely moves the AREA-weighted one (0.0127 -> 0.0107, because a
+    # fiducial has almost no courtyard). The issue's finding is unchanged and
+    # in fact slightly sharper: the count form still points the wrong way, now
+    # by 14x rather than 11x.
+    report('esp_prog: the area form is ~1.1% of span',
+           abs(area_x - 0.011) < 0.004, 'got %.4f' % area_x)
+    report('esp_prog: the count control is ~14.9% of span',
+           abs(count_x - 0.149) < 0.008, 'got %.4f' % count_x)
     report('the two forms differ by more than 4x -- they are NOT the same '
            'statistic', count_x > 4 * area_x, '%.4f vs %.4f' % (count_x, area_x))
     report('the weight is declared, not implied',

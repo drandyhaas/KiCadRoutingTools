@@ -2194,8 +2194,13 @@ class FanoutTab(wx.Panel):
                                    if t else None),
             )
 
+            # #726: a placement names a PCBData key, which for a duplicated
+            # reference is `TP4~2`; FindFootprintByReference cannot see it.
+            from gui_utils import live_footprints_by_key
+            _live_caps = live_footprints_by_key(board)
             for p in result.get('placements', []):
-                fp = board.FindFootprintByReference(p['reference'])
+                fp = (_live_caps.get(p['reference'])
+                      or board.FindFootprintByReference(p['reference']))
                 if fp is None:
                     continue
                 fp.SetOrientationDegrees(p['new_rotation'])

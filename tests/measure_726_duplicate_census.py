@@ -1,0 +1,508 @@
+#!/usr/bin/env python3
+"""#726 measurement: what duplicate footprint references actually cost.
+
+`PCBData.footprints` is a dict keyed by reference, so two footprint blocks
+sharing one reference silently overwrite (last wins) -- text path
+`kicad_parser.py:2785`, pcbnew path `kicad_parser.py:4644`. This script
+measures the consequence on the boards this repo TRACKS, before anything is
+built. It is a measurement, not a gate: it is deliberately NOT named `test_*`
+so `tests/run_all.py`'s glob never collects it.
+
+Four tables:
+
+  A  census -- blocks vs parsed, and the pad asymmetry. The dropped block's
+     pads are appended to `pads_by_net` BEFORE the dict overwrite
+     (`kicad_parser.py:2774-2783`), so they survive in the net model with no
+     reachable Footprint. That is the sharp number: the two halves of one
+     PCBData disagree about how many pads the board has.
+
+  B  what the twins ARE -- pose, side, lock state, courtyard, library. This
+     table is what forbids "keep any one of them": on ulx3s, orangecrab and
+     glasgow the group members sit on DIFFERENT SIDES, and glasgow's seven
+     REF** are 3 locked + 4 unlocked kikit panel tabs.
+
+  C  key-scheme feasibility -- does `board.GetFootprints()` iterate in file
+     order? A file-order ordinal is only a viable key if both parse paths can
+     compute it independently and agree. Needs KiCad's bundled python; run
+     with --pcbnew (or let it auto-detect). Also reports duplicate UUIDs,
+     which is why a bare-uuid key is NOT viable.
+
+  D  collision surface -- the proposed key for every duplicate block, and
+     whether it survives `part_class`'s `^([A-Za-z]+)` prefix classifier.
+
+Plus an agreement check: this script carries its own copies of the block
+scan, the raw-reference rule, the uuid read and the key scheme, so that the
+BEFORE tree -- which has no shipped resolver -- can be measured at all. Where
+the shipped functions DO exist they are compared against the local ones over
+the whole corpus, and the result is printed. A measurement that quietly uses
+its own definition of the thing it measures proves nothing.
+
+The board set comes from `run_utils.corpus_boards()` (git ls-files), never a
+directory glob: `kicad_files/` accumulates gitignored GENERATED boards, so a
+glob returns 22 entries on a clean clone and 33+ on a worn one.
+
+    python3 -X utf8 tests/measure_726_duplicate_census.py
+    python3 -X utf8 tests/measure_726_duplicate_census.py --pcbnew
+"""
+import argparse
+import collections
+import shutil
+import tempfile
+import glob as _glob
+import os
+import re
+import subprocess
+import sys
+
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(TESTS_DIR)
+for _p in ('', 'py_router', 'py_placer', 'py_tools'):
+    _d = os.path.join(ROOT, _p)
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+
+sys.path.insert(0, TESTS_DIR)
+from run_utils import corpus_boards                              # noqa: E402
+from kicad_parser import (parse_kicad_pcb,                       # noqa: E402
+                          find_matching_paren)
+
+SKIP_EXIT = 77
+
+#: Same candidate list and order as tests/gui_parity/test_ref_label_pcbnew_parity.py.
+KICAD_PYTHONS = [
+    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
+    "/usr/bin/python3",
+    os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
+    *sorted(_glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"), reverse=True),
+]
+
+#: KiCad 8+ property form, then the KiCad 6/7 fallback. Both require at least
+#: one character, exactly as extract_footprints_and_pads does -- so an EMPTY
+#: `(property "Reference" "")` falls through to the uuid branch here too.
+_REF_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]+)"')
+_REF_LEGACY_RE = re.compile(r'\(fp_text\s+reference\s+"([^"]+)"')
+_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"')
+_AT_RE = re.compile(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)')
+_LAYER_RE = re.compile(r'\(layer\s+"([^"]+)"\)')
+_FPNAME_RE = re.compile(r'\(footprint\s+"([^"]*)"')
+
+
+def _header_end(fp_text):
+    """First child element, so a PAD's uuid cannot win the footprint's.
+
+    Mirrors kicad_parser.py:2529-2533 exactly. The reference-less branch at
+    :2475 uses an UNBOUNDED search; the two agree on every corpus board, and
+    the bounded form is the one this measurement (and the fix) uses.
+    """
+    end = len(fp_text)
+    for tok in ('(pad', '(fp_', '(zone', '(model', '(property'):
+        i = fp_text.find(tok)
+        if i != -1:
+            end = min(end, i)
+    return end
+
+
+def blocks(content):
+    """(start, end, fp_text) for every footprint block, in FILE ORDER.
+
+    Uses the shipped string-aware `find_matching_paren`, not a depth counter:
+    a lone paren inside a property value (an MPN like "TCR2EF115,LM(CT")
+    otherwise runs the scan into the next footprint (#113).
+    """
+    out = []
+    for m in re.finditer(r'\(footprint\s+"', content):
+        s = m.start()
+        e = find_matching_paren(content, s)
+        out.append((s, e, content[s:e]))
+    return out
+
+
+def raw_reference(fp_text):
+    """The reference the parser would derive, BEFORE any disambiguation."""
+    m = _REF_RE.search(fp_text) or _REF_LEGACY_RE.search(fp_text)
+    if m:
+        return m.group(1)
+    u = _UUID_RE.search(fp_text[:_header_end(fp_text)])
+    return "#" + u.group(1) if u else "?"
+
+
+def fp_uuid(fp_text):
+    u = _UUID_RE.search(fp_text[:_header_end(fp_text)])
+    return u.group(1) if u else ""
+
+
+def pose(fp_text):
+    m = _AT_RE.search(fp_text)
+    if not m:
+        return (0.0, 0.0, 0.0)
+    return (float(m.group(1)), float(m.group(2)),
+            float(m.group(3)) if m.group(3) else 0.0)
+
+
+def _read(path):
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        return fh.read()
+
+
+def table_a(paths):
+    print("\n== TABLE A -- census (blocks vs parsed, and the pad asymmetry) ==\n")
+    hdr = ('%-34s %6s %6s %5s  %-22s %6s %6s %7s'
+           % ('board', 'blocks', 'parsed', 'lost', 'duplicate refs',
+              'fp_pad', 'netpad', 'orphans'))
+    print(hdr)
+    print('-' * len(hdr))
+    rows = []
+    tot_lost = tot_orphan = 0
+    for p in paths:
+        content = _read(p)
+        bs = blocks(content)
+        refs = [raw_reference(t) for _, _, t in bs]
+        counts = collections.Counter(refs)
+        dups = {r: c for r, c in counts.items() if c > 1}
+        pcb = parse_kicad_pcb(p)
+        n_fp = len(pcb.footprints)
+        lost = len(bs) - n_fp
+        # A pad reachable from the dict vs a pad the net model holds. The
+        # difference is the dropped block's copper: still an obstacle to the
+        # router, invisible to every placement instrument.
+        fp_pads = sum(len(f.pads) for f in pcb.footprints.values())
+        net_pads = sum(len(v) for v in pcb.pads_by_net.values())
+        orphans = net_pads - fp_pads
+        tot_lost += lost
+        tot_orphan += orphans
+        rows.append((os.path.basename(p), len(bs), n_fp, lost, dups,
+                     fp_pads, net_pads, orphans))
+        if dups or orphans:
+            print('%-34s %6d %6d %5d  %-22s %6d %6d %7d'
+                  % (os.path.basename(p)[:34], len(bs), n_fp, lost,
+                     ', '.join('%s x%d' % kv for kv in sorted(dups.items()))[:22],
+                     fp_pads, net_pads, orphans))
+    clean = [r for r in rows if not r[4] and r[7] == 0]
+    print('\n%d board(s) with a duplicate reference or an orphaned pad; '
+          '%d clean.' % (len(rows) - len(clean), len(clean)))
+    print('TOTAL footprints lost: %d.  TOTAL orphaned pads: %d.'
+          % (tot_lost, tot_orphan))
+    print('Clean controls: %s'
+          % ', '.join(r[0].replace('.kicad_pcb', '') for r in clean[:6]))
+    return rows
+
+
+def table_b(paths):
+    print("\n== TABLE B -- what the twins ARE (side, lock, courtyard, library) ==\n")
+    hdr = ('%-20s %-7s %4s %9s %9s %6s %-5s %-6s %-5s %-4s %3s  %s'
+           % ('board', 'ref', 'idx', 'x', 'y', 'rot', 'layer', 'locked',
+              'CrtYd', 'Fab', 'pad', 'footprint_name'))
+    print(hdr)
+    print('-' * len(hdr))
+    any_row = False
+    for p in paths:
+        content = _read(p)
+        bs = blocks(content)
+        refs = [raw_reference(t) for _, _, t in bs]
+        counts = collections.Counter(refs)
+        for idx, ((_, _, t), ref) in enumerate(zip(bs, refs)):
+            if counts[ref] < 2:
+                continue
+            any_row = True
+            x, y, rot = pose(t)
+            lay = _LAYER_RE.search(t)
+            name = _FPNAME_RE.search(t)
+            # Footprint-level (locked yes) only: bound to the header so a
+            # locked PAD does not read as a locked footprint. Bounded by
+            # `_header_end` (5 tokens), which is at least as tight as the
+            # parser's own 3-token footprint-lock bound.
+            locked = bool(re.search(r'\(locked\s+yes\)', t[:_header_end(t)]))
+            print('%-20s %-7s %4d %9.3f %9.3f %6.1f %-5s %-6s %-5s %-4s %3d  %s'
+                  % (os.path.basename(p).replace('.kicad_pcb', '')[:20], ref,
+                     idx, x, y, rot,
+                     (lay.group(1) if lay else '?')[:5],
+                     str(locked), str('.CrtYd"' in t), str('.Fab"' in t),
+                     len(re.findall(r'\(pad\s+"', t)),
+                     (name.group(1) if name else '?')))
+    if not any_row:
+        print('(no duplicate references in the tracked corpus)')
+
+
+class _StubFp:
+    """The minimum `classify_part` reads, built per BLOCK.
+
+    Deliberately not `pcb.footprints[...]`: that dict is the thing under
+    measurement and holds only the surviving twin, so classifying through it
+    would compare a block against itself. `classify_part` reads exactly
+    `footprint_name`, `pads[].pad_type` and `pads[].pinfunction` (part_class.py
+    :111-170), so a stub carrying those is a faithful input.
+    """
+    __slots__ = ('footprint_name', 'pads')
+
+    def __init__(self, fp_text):
+        m = _FPNAME_RE.search(fp_text)
+        self.footprint_name = m.group(1) if m else ''
+        self.pads = [_StubPad(t) for t in
+                     re.findall(r'\(pad\s+"[^"]*"\s+(\w+)\s', fp_text)]
+
+
+class _StubPad:
+    __slots__ = ('pad_type', 'pinfunction')
+
+    def __init__(self, pad_type):
+        self.pad_type = pad_type
+        # NOT read from the block. An earlier version of this comment claimed
+        # a duplicate-reference part carries no pinfunction, which is false --
+        # watchy's TP4 and TP5 both carry `(pinfunction "1")`. The stub is
+        # justified by MEASUREMENT instead: `table_d` classifies every
+        # footprint on every tracked board through both this stub and the real
+        # parsed `Footprint`, and prints the disagreement count. It is 0.
+        self.pinfunction = ''
+
+
+def table_d(paths):
+    """The proposed key, and whether the part classifier survives it."""
+    print("\n== TABLE D -- collision surface (proposed key, prefix class) ==\n")
+    from placement.part_class import classify_part
+    hdr = ('%-20s %-7s %4s  %-10s %-10s %-10s %s'
+           % ('board', 'ref', 'idx', 'proposed', 'prefix_in', 'prefix_out',
+              'class_changes?'))
+    print(hdr)
+    print('-' * len(hdr))
+    pfx = re.compile(r'^([A-Za-z]+)')
+    for p in paths:
+        content = _read(p)
+        bs = blocks(content)
+        refs = [raw_reference(t) for _, _, t in bs]
+        keys = disambiguate(refs)
+        counts = collections.Counter(refs)
+        for idx, ((_, _, t), ref, key) in enumerate(zip(bs, refs, keys)):
+            if counts[ref] < 2:
+                continue
+            a = pfx.match(ref)
+            b = pfx.match(key)
+            changed = (a.group(1) if a else None) != (b.group(1) if b else None)
+            note = 'PREFIX CHANGED' if changed else 'no'
+            stub = _StubFp(t)
+            ca = classify_part(stub, ref).name
+            cb = classify_part(stub, key).name
+            if ca != cb:
+                note = 'CLASS CHANGED %s -> %s' % (ca, cb)
+            elif not changed:
+                note = 'no (class %s)' % ca
+            print('%-20s %-7s %4d  %-10s %-10s %-10s %s'
+                  % (os.path.basename(p).replace('.kicad_pcb', '')[:20], ref,
+                     idx, key, a.group(1) if a else '-',
+                     b.group(1) if b else '-', note))
+    # The other half of the claim: a UNIQUE key must be byte-identical. Print
+    # the DENOMINATOR this loop actually walks -- unique-reference BLOCKS --
+    # rather than leaving a reader to supply one. (The count of distinct
+    # reference STRINGS is a different, smaller number, and quoting it here
+    # would misstate what was checked.)
+    moved = 0
+    unique_blocks = 0
+    distinct_unique = set()
+    for p in paths:
+        refs = [raw_reference(t) for _, _, t in blocks(_read(p))]
+        counts = collections.Counter(refs)
+        for ref, key in zip(refs, disambiguate(refs)):
+            if counts[ref] != 1:
+                continue
+            unique_blocks += 1
+            distinct_unique.add(ref)
+            if key != ref:
+                moved += 1
+    print('\nUnique-reference BLOCKS whose key would change: %d of %d '
+          '(%d distinct reference strings). Must be 0 -- the scheme must not '
+          'perturb a non-colliding name.'
+          % (moved, unique_blocks, len(distinct_unique)))
+
+    # Is `_StubFp` a faithful input, or is this table classifying a fiction?
+    # Compare it against the REAL parsed Footprint on every footprint of every
+    # board. This replaces a claim about pinfunctions that turned out to be
+    # false; a measured 0 is the justification the stub actually has.
+    disagree = 0
+    total = 0
+    for p in paths:
+        pcb = parse_kicad_pcb(p)
+        by_key = {}
+        for _s, _e, t, _r, key in iter_blocks_with_keys(p):
+            by_key[key] = t
+        for key, fp in pcb.footprints.items():
+            t = by_key.get(key)
+            if t is None:
+                continue
+            total += 1
+            if classify_part(_StubFp(t), key).name != classify_part(fp, key).name:
+                disagree += 1
+    print('_StubFp vs the REAL parsed Footprint, classify_part on both: '
+          '%d footprints compared, %d disagreements (must be 0).'
+          % (total, disagree))
+
+
+def iter_blocks_with_keys(path):
+    """(start, end, text, raw_ref, key) per block, using THIS script's own
+    standalone `disambiguate` -- the measurement must not depend on the engine
+    change it exists to justify."""
+    content = _read(path)
+    bs = blocks(content)
+    raw = [raw_reference(t) for _, _, t in bs]
+    for (s_, e_, t_), r_, k_ in zip(bs, raw, disambiguate(raw)):
+        yield s_, e_, t_, r_, k_
+
+
+def disambiguate(refs):
+    """The proposed key scheme, standalone -- file-order ordinal suffix.
+
+    A MEASUREMENT copy, kept DELIBERATELY and not a fork. An earlier draft of
+    this docstring promised to delete it once the engine version landed; that
+    was wrong, and a fact-check caught the promise still standing. This script
+    exists to compare a BEFORE tree against an AFTER one, and a version that
+    imports `kicad_parser.disambiguate_references` cannot run on the before
+    tree at all -- the symbol is not there. The table would then only ever be
+    measurable on the side that already has the fix.
+
+    What a fork would cost is real, so `agreement_check()` runs on every
+    invocation: where the shipped functions exist, these four helpers are
+    compared against them over the whole tracked corpus and the result is
+    printed. Divergence is reported, not assumed away.
+    """
+    taken = set(refs)
+    issued = set()
+    seen = collections.Counter()
+    out = []
+    for r in refs:
+        seen[r] += 1
+        if seen[r] == 1:
+            out.append(r)
+            issued.add(r)
+            continue
+        n = seen[r]
+        cand = '%s~%d' % (r, n)
+        while cand in taken or cand in issued:
+            n += 1
+            cand = '%s~%d' % (r, n)
+        out.append(cand)
+        issued.add(cand)
+    return out
+
+
+_PCBNEW_PROBE = r'''
+import os, re, sys
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, os.path.join(sys.argv[1], "py_router"))
+sys.path.insert(0, os.path.join(sys.argv[1], "tests"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pcbnew
+from measure_726_duplicate_census import blocks, raw_reference, fp_uuid, _read
+print("KiCad build: %s" % pcbnew.GetBuildVersion())
+hdr = ("%-30s %7s %7s %-14s %-12s %s"
+       % ("board", "blocks", "live", "order==file", "ref_seq_eq", "duplicate_uuids"))
+print(hdr); print("-" * len(hdr))
+for p in sys.argv[2:]:
+    bs = blocks(_read(p))
+    file_uu = [fp_uuid(t) for _, _, t in bs]
+    file_rf = [raw_reference(t) for _, _, t in bs]
+    bd = pcbnew.LoadBoard(p)
+    live = list(bd.GetFootprints())
+    live_uu = [f.m_Uuid.AsString() for f in live]
+    live_rf = [(f.GetReference() or ("#" + f.m_Uuid.AsString())) for f in live]
+    dup_uu = sorted({u for u in file_uu if file_uu.count(u) > 1 and u})
+    print("%-30s %7d %7d %-14s %-12s %s"
+          % (os.path.basename(p)[:30], len(bs), len(live),
+             str(file_uu == live_uu), str(file_rf == live_rf),
+             (", ".join(u[:8] for u in dup_uu) or "-")))
+'''
+
+
+def table_c(paths, want):
+    print("\n== TABLE C -- key-scheme feasibility, both parse paths ==\n")
+    kp = next((c for c in KICAD_PYTHONS
+               if os.path.exists(c)
+               and subprocess.run([c, '-c', 'import pcbnew'],
+                                  capture_output=True).returncode == 0), None)
+    if kp is None:
+        print('NOT RUN: no python with pcbnew found. Table C is the fact the '
+              'ordinal key scheme rests on -- it must be produced before '
+              'Phase 1 is trusted. Re-run with KiCad installed.')
+        return False
+    if not want:
+        print('(skipped; pass --pcbnew to run. Found: %s)' % kp)
+        return False
+    # Written OUTSIDE the tracked tests/ directory: a measurement must not
+    # make the working tree dirty, even for the moment it runs.
+    _pd = tempfile.mkdtemp(prefix='m726probe_')
+    probe = os.path.join(_pd, 'measure_726_duplicate_census_probe.py')
+    with open(probe, 'w', encoding='utf-8') as fh:
+        fh.write(_PCBNEW_PROBE)
+    try:
+        r = subprocess.run([kp, '-X', 'utf8', probe, ROOT] + list(paths),
+                           capture_output=True, text=True)
+    finally:
+        shutil.rmtree(_pd, ignore_errors=True)
+    # pcbnew's wx image-handler chatter is unconditional; drop it.
+    for line in (r.stdout or '').splitlines():
+        if 'duplicate image handler' in line:
+            continue
+        print(line)
+    if r.returncode != 0:
+        print('probe exited %d\n%s' % (r.returncode, (r.stderr or '')[-2000:]))
+        return False
+    return True
+
+
+def agreement_check(paths):
+    """Do this script's four local helpers agree with the shipped ones?
+
+    Absent on a pre-fix tree, which is the whole reason the local copies exist
+    (see `disambiguate`). Where they are present, disagreement is a finding
+    about one side or the other and is printed either way -- a measurement that
+    quietly uses its own definition of the thing it is measuring proves
+    nothing.
+    """
+    try:
+        from kicad_parser import (disambiguate_references,
+                                  footprint_raw_reference, footprint_uuid,
+                                  iter_footprint_blocks)
+    except ImportError as exc:
+        print('\n== helper agreement: NOT CHECKED (%s) ==' % exc)
+        print('   This tree has no shipped resolver, so the local copies are '
+              'the only implementation. Expected on a pre-fix tree.')
+        return None
+    bad = []
+    for p in paths:
+        content = _read(p)
+        mine = [(s, e, raw_reference(t), fp_uuid(t))
+                for s, e, t in blocks(content)]
+        mine_keys = disambiguate([m[2] for m in mine])
+        theirs = [(s, e, r, footprint_uuid(t))
+                  for s, e, t, r, _k in iter_footprint_blocks(content)]
+        their_keys = [k for _s, _e, _t, _r, k in iter_footprint_blocks(content)]
+        if mine != theirs or mine_keys != their_keys:
+            bad.append(os.path.basename(p))
+    print('\n== helper agreement: the local copies vs the shipped resolver ==')
+    print('   %d board(s) compared (spans, raw references, uuids, keys); '
+          '%d disagreement(s)%s'
+          % (len(paths), len(bad), (': ' + ', '.join(bad)) if bad else ''))
+    return not bad
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--pcbnew', action='store_true',
+                    help='also run Table C under KiCad\'s bundled python')
+    args = ap.parse_args()
+
+    paths = corpus_boards()
+    if not paths:
+        print('SKIP: run_utils.corpus_boards() returned nothing -- git could '
+              'not answer, so there is no identified board set to measure. '
+              'A census over an unidentified set is not a measurement.')
+        return SKIP_EXIT
+    print('#726 duplicate-reference census over %d git-TRACKED boards.' % len(paths))
+
+    table_a(paths)
+    table_b(paths)
+    table_d(paths)
+    table_c(paths, args.pcbnew)
+    agreement_check(paths)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

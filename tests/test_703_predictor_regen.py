@@ -103,31 +103,54 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #: hair. Isolated on esp_prog:authored with only KICAD_MERGE_COLLINEAR toggled:
 #: 320.69 -> 320.71 mm (+0.006%), segments 241 -> 229, vias unchanged. That is
 #: why the copper column moved on rows where the merge is the only new input.
+#: RE-RECORDED for #726 (the parser stops losing a footprint block whose
+#: reference another block already claims). esp_prog carries TWO blocks named
+#: `Ref*` and only the second was parsed, so this board measured as 20 parts
+#: where the file has 21. All THREE esp_prog rows moved and
+#: `splitflap_driver:authored` did not -- which is the signature to check
+#: before believing any of this: splitflap has no duplicate reference, so a
+#: change that moved it too would be a different change.
+#:
+#: `provenance.poses_sha256` moves on all three by construction: the pose set
+#: it hashes gained a part. Two of the deltas are worth reading rather than
+#: rounding away:
+#:
+#:   * `esp_prog:authored` -- `pad_clearance_pairs` 0 -> 1. The #697 census now
+#:     reaches a part it was structurally blind to; that pair was always there.
+#:     `truth` is unchanged (headline 0, vias 31, copper 336.35, segs 236), so
+#:     the ROUTE is identical and only the census sees more.
+#:   * `esp_prog:portfolio-1` -- `truth.headline` 3 -> 0. The quench candidate
+#:     that used to route to blocking 3 now routes clean. The header's
+#:     commentary about this row being "the study's headline in miniature"
+#:     (23 crossings against the authored board's 53, routing WORSE) no longer
+#:     holds for the blocking half, and is left standing above with this
+#:     correction rather than quietly edited.
+#:
 EXPECTED = {
     'esp_prog:authored': dict(
-        poses_sha256='439485f758347d1929cde06f8ab34ce7c6e6e2174df5d85be98d48afbde51783',
+        poses_sha256='67a9712d200814442b4a25cf1fa8ccd075c1968d5b08c0ad58c4662f0a479da7',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=8.2,
         truth={'headline': 0,
                'quality': {'vias': 31, 'copper_mm': 336.35, 'segments': 236}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
-            'halo': 125.4377644075392, 'overlap_area': 1.1400451712000104,
-            'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 16.612682999999876, 'total': 914.1253439875175,
+            'halo': 127.48707486477095, 'overlap_area': 1.1400451712000104,
+            'pad_copper': 0, 'pad_clearance_pairs': 1,
+            'edge': 16.612682999999876, 'total': 916.1746544447492,
             'oob_count': 0,
         }),
     'esp_prog:perturb-scatter-d1': dict(
-        poses_sha256='f58b7226eee4c4826a6430d1c972deb2cab1daf05ec2a17b1b7d56c9f88c4bdc',
+        poses_sha256='ce4d5a3803cfcf56d4ab3cfbf4f1be3ffd61242a1be78ef4ce2cae110dc96eca',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=11.2,
         truth={'headline': 0,
-               'quality': {'vias': 34, 'copper_mm': 340.13, 'segments': 274}},
+               'quality': {'vias': 38, 'copper_mm': 377.83, 'segments': 286}},
         predictors={
-            'crossings': 56, 'hpwl': 253.13733999999994,
-            'halo': 132.15233459554824, 'overlap_area': 1.1400451712000104,
+            'crossings': 50, 'hpwl': 252.34828000000005,
+            'halo': 130.46454030971682, 'overlap_area': 1.1400451712000104,
             'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 15.019439919999892, 'total': 948.3549654632784,
+            'edge': 16.498992539999946, 'total': 887.3384166729421,
             'oob_count': 0,
         }),
     # The quench candidate, kept because it is the study's own headline in
@@ -167,16 +190,16 @@ EXPECTED = {
     # routed board is in fact slightly better -- vias 28 -> 23, copper
     # 299.93 -> 263.91mm, segments 231 -> 203 -- at the same blocking.
     'esp_prog:portfolio-1': dict(
-        poses_sha256='285c29cf614f5d7adbe998aea92cc46c5fabf2e6fac337c70415731507458416',
+        poses_sha256='d1290d938a770bb17f2c6a4869b8224eb30aeba6bb37e11c2ae2f3c6c042695b',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=9.5,
-        truth={'headline': 3,
-               'quality': {'vias': 25, 'copper_mm': 264.89, 'segments': 207}},
+        truth={'headline': 0,
+               'quality': {'vias': 37, 'copper_mm': 319.41, 'segments': 260}},
         predictors={
-            'crossings': 23, 'hpwl': 236.3288399999999,
-            'halo': 114.71957178262542, 'overlap_area': 1.0,
+            'crossings': 23, 'hpwl': 260.0687799999999,
+            'halo': 101.01900525631262, 'overlap_area': 1.0,
             'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 11.104407139199958, 'total': 582.5469865623817,
+            'edge': 21.49349600000009, 'total': 605.1074633433927,
             'oob_count': 0,
         }),
     # A SECOND board, so a change that only moves one board's numbers cannot
