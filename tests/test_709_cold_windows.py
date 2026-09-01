@@ -508,10 +508,14 @@ def t_no_cold_suppresses_only_the_cold_half():
     report('  ...but the ARRANGEMENT survives',
            doc['arrangement'] is not None and bool(doc['arrangement']['sides']),
            str(doc['arrangement'] is None))
+    # `graded` was 20 until #726: esp_prog carries TWO footprint blocks named
+    # `Ref*` and the parser kept only the second, so this board reported one
+    # part fewer than the file has. 21 is the block count.
     report('  ...and so do the outline sweep and the parts provenance',
            bool(doc['outline']) and doc['windows_in_outline'] == 128
-           and doc['parts']['graded'] == 20,
-           str(doc.get('windows_in_outline')))
+           and doc['parts']['graded'] == 21,
+           'windows_in_outline=%s graded=%s'
+           % (doc.get('windows_in_outline'), doc.get('parts', {}).get('graded')))
     live = census('esp_prog')[0]
     report('  ...and they agree with the full run',
            doc['arrangement'] == live['arrangement'])

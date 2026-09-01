@@ -260,13 +260,26 @@ class TestRealBoards(unittest.TestCase):
     """The reported failure, on the board that reproduces it."""
 
     def _nudge_fiducial(self, board, mm):
-        """Rigidly move the override-carrying footprint toward USB1."""
+        """Rigidly move the override-carrying footprint toward USB1.
+
+        The candidate is chosen as the one NEAREST USB1, not `[0]`. esp_prog
+        carries two `Ref*` fiducial blocks, and until #726 the parser kept only
+        the second -- the one 0.61 mm from USB1, which is what makes a 0.40 mm
+        nudge cross its 1.016 mm keep-clear. With both blocks present, `[0]`
+        picks the OTHER one, 24.05 mm away, where no nudge this small can
+        violate anything: the arm then fails on its own honest guard
+        ("check_drc sees no violation -- fixture drifted") while the engine is
+        fine. Selecting on the property the test actually depends on says what
+        the fixture is for, and cannot be re-broken by a dict order.
+        """
         from kicad_parser import parse_kicad_pcb
         pcb = parse_kicad_pcb(board)
-        fid = [fp for fp in pcb.footprints.values()
-               if any((getattr(q, 'local_clearance', 0.0) or 0.0) > 0.5
-                      for q in fp.pads)][0]
         tgt = pcb.footprints['USB1']
+        cands = [fp for fp in pcb.footprints.values()
+                 if any((getattr(q, 'local_clearance', 0.0) or 0.0) > 0.5
+                        for q in fp.pads)]
+        assert cands, 'no pad-override footprint on this board'
+        fid = min(cands, key=lambda f: math.hypot(f.x - tgt.x, f.y - tgt.y))
         vx, vy = tgt.x - fid.x, tgt.y - fid.y
         n = math.hypot(vx, vy)
         dx, dy = vx / n * mm, vy / n * mm
