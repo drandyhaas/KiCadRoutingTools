@@ -16,8 +16,11 @@ winner's fanout board reproduces the winner exactly (the chain is
 bit-deterministic), and every later accept is lexicographically
 strictly better on (open, drc, vias).
 
-usage: drive_k.py TAG K [--rounds N] [--num-improve N]
+usage: drive_k.py TAG K [--rounds N] [--num-improve N] [-- fanout opts]
 env: BASE, DEST, DIRS, PLAN_OPTS, TWO_PAGE, TP_SCOPE as chain_k.sh.
+The recorded arm wants `-- --no-plane-drop` exactly like chain_k.sh:
+dropping it silently grades a different (plane-drop) world -- measured
+69v/3drc where the chain draws 58v/0/0 at K28.
 """
 import argparse
 import os
@@ -28,12 +31,18 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(HERE)
 
+argv = sys.argv[1:]
+extra = []
+if '--' in argv:
+    i = argv.index('--')
+    extra = argv[i + 1:]
+    argv = argv[:i]
 ap = argparse.ArgumentParser()
 ap.add_argument('tag')
 ap.add_argument('k')
 ap.add_argument('--rounds', type=int, default=2)
 ap.add_argument('--num-improve', type=int, default=3)
-a = ap.parse_args()
+a = ap.parse_args(argv)
 tag = a.tag if '/' in a.tag else os.path.join('tmp', a.tag)
 
 # the recorded arm, unless the caller overrides: retry_chain runs its
@@ -46,7 +55,8 @@ os.environ.setdefault('PLAN_OPTS', '--two-page')
 
 r = subprocess.run(
     [sys.executable, 'retry_chain.py', tag, a.k,
-     '--rounds', str(a.rounds)],
+     '--rounds', str(a.rounds)]
+    + (['--'] + extra if extra else []),
     capture_output=True, text=True)
 sys.stdout.write(r.stdout)
 m = re.search(r'^KEPT (\S+) -> (\S+): open=(\d+) drc=(\d+) '

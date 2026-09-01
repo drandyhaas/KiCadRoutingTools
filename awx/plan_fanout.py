@@ -660,14 +660,41 @@ if not a.no_rescue:
                  if left else 'clean among contract nets'))
 
 # ---- a ripped net that NOTHING re-laid (engine refused, rescue
-# exhausted -- K51's SDQ6) gets its bench copper BACK: only rip what
-# you re-lay, the same rule the strip scope follows. Shipped bare, the
-# net has no stub end for any downstream consumer to walk.
+# exhausted -- K51's SDQ6) must not ship bare. FIRST a FREE re-fan:
+# the contract slot proved infeasible against the kept neighbours
+# (the negotiation that included the collider already failed), so let
+# the engine pick ANY legal escape -- disobedient beats bare, and
+# beats restoring bench copper into the re-laid comb (measured: the
+# K28 restore of SDQ7 grazed SA1 17 times). Bench restore is the
+# fallback of the fallback.
 pcb_f = parse_kicad_pcb(a.out)
 by_f = {n.name.split('/')[-1]: i for i, n in pcb_f.nets.items()}
 bare = [nm for nm in sorted(ripped_blocks)
         if ripped_blocks[nm]
         and not any(s.net_id == by_f[nm] for s in pcb_f.segments)]
+freed = []
+for nm in list(bare):
+    t2, v2, vr2, f2 = bf.generate_bga_fanout(
+        pcb_f.footprints[a.ref], pcb_f, net_filter=[nm],
+        layers=['F.Cu', 'B.Cu'], track_width=0.1, clearance=0.1,
+        via_size=0.45, via_drill=0.25, exit_margin=0.5,
+        escape_method=a.method, plane_drop='off')
+    if t2 and not f2:
+        tmp3 = a.out + '.free.tmp'
+        shutil.copy(a.out, tmp3)
+        add_tracks_and_vias_to_pcb(
+            tmp3, a.out, t2, v2, vr2,
+            net_id_to_name={i: n.name for i, n in pcb_f.nets.items()})
+        os.remove(tmp3)
+        pcb_f = parse_kicad_pcb(a.out)
+        freed.append(nm)
+        bare.remove(nm)
+    else:
+        print(f'  free re-fan refused for {nm} '
+              f'(tracks {len(t2 or ())}, failed {f2})')
+if freed:
+    print('FREE re-fan (contract slot infeasible): ' + ','.join(freed))
+    ach = grade(a.out, 'engine + A* rescue + free re-fan')
 if bare:
     out_txt = open(a.out).read()
     j = out_txt.rfind(')')
@@ -676,4 +703,9 @@ if bare:
     open(a.out, 'w').write(out_txt[:j] + ins + out_txt[j:])
     print('RESTORED bench copper for net(s) nothing re-laid: '
           + ','.join(bare))
+    left2 = drc_pairs(a.out)
+    if left2:
+        # the restored stub lies against the re-laid comb: DISCLOSED,
+        # because a downstream chain grades these as its own drc
+        print('  RESTORED copper grazes: ' + ','.join(sorted(left2)))
     ach = grade(a.out, 'engine + A* rescue + bench restore')
