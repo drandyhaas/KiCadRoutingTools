@@ -1741,12 +1741,24 @@ class Corridor:
         band = None if free_swim else self.band_of(nm)
         segs_all, vias_all = [], []
         added = 0
-        for (a, aL), (b, bL) in zip(way, way[1:]):
+        # BRAID_BALTS=1: the primary lanes may finish at ANY dest-stub
+        # vertex (earliest same-net contact). Measured as a DEFAULT:
+        # K28 58 -> 54v but K21 +2 and K32 loses completion (72v/1
+        # open, SDQM0) -- early joins reshape later lanes' worlds --
+        # so the primary path keeps tip-targeting unless opted in.
+        # The post-completion paths (last call, econ re-lay) keep
+        # b_alts unconditionally: more finish points only help there,
+        # and collapse_dives.py captures the economy per-board.
+        balts_on = os.environ.get('BRAID_BALTS') == '1'
+        for hop, ((a, aL), (b, bL)) in enumerate(zip(way, way[1:])):
+            final = hop == len(way) - 2
             res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg, band=band,
                              virtual=virt, margin=margin,
                              window_pts=self.lane_xy[nm],
                              virtual_vias=virt_vias,
-                             cache=getattr(self, '_obs_cache', None))
+                             cache=getattr(self, '_obs_cache', None),
+                             b_alts=(ctx.dest_alts.get(nm)
+                                     if final and balts_on else None))
             if res is None:
                 # discard the partial copper
                 if added:
@@ -1759,6 +1771,7 @@ class Corridor:
             added += len(segs_o)
             segs_all.extend(segs_o)
             vias_all.extend(vias_o)
+        note_joint(ctx, nm, segs_all)
         return segs_all, vias_all
 
     def plan_columns(self, sched, gaps, lead):
@@ -2047,7 +2060,8 @@ class Corridor:
                             band=None, margin=mg,
                             virtual=self.virtual_of(others),
                             window_pts=self.lane_xy[nm],
-                            virtual_vias=self.virtual_vias_of(others))
+                            virtual_vias=self.virtual_vias_of(others),
+                            b_alts=ctx.dest_alts.get(nm))
                         if res is not None:
                             break
                     if res is None and os.environ.get('RIP_CALL', '1') == '1':
@@ -2065,6 +2079,7 @@ class Corridor:
                     ctx.pcb.vias.extend(vias_o)
                     self.out_segs[nm] = segs_o
                     self.out_vias[nm] = vias_o
+                    note_joint(ctx, nm, segs_o)
                     still.remove(nm)
                     log(f'    last call routed: {nm} ({len(vias_o)} via(s))')
                 self.refused = still
@@ -2122,7 +2137,8 @@ class Corridor:
                                         self.stubs[nm],
                                         ctx.dest_layer[nm], ctx.cfg,
                                         band=None, margin=mg,
-                                        window_pts=wp)
+                                        window_pts=wp,
+                                        b_alts=ctx.dest_alts.get(nm))
                         if r_ is not None \
                                 and len(r_[1]) < len(self.out_vias[nm]):
                             res = r_
@@ -2134,6 +2150,7 @@ class Corridor:
                     segs_o, vias_o = res
                     ctx.pcb.segments.extend(segs_o)
                     ctx.pcb.vias.extend(vias_o)
+                    note_joint(ctx, nm, segs_o)
                     log(f'    econ re-lay: {nm} '
                         f'{len(self.out_vias[nm])} -> {len(vias_o)} '
                         'via(s)')
@@ -2353,6 +2370,39 @@ class Corridor:
                    if abs(self.launch_o[om] - self.launch_o[nm]) < 0.8 and om != nm]))
 
 
+def note_joint(ctx, nm, new_segs):
+    """After a lane lands: which dest-chain vertex it reached. The
+    bypassed tip-side stub segments are REMOVED from ctx.pcb (they
+    would dangle as dead copper, and they stop being obstacles for
+    later lanes) and their spans recorded for the non-smoothed
+    writer's text strip."""
+    chain = ctx.dest_chain.get(nm) or []
+    if not chain:
+        return
+    endpts = set()
+    for s in new_segs:
+        endpts.add((round(s.start_x, 3), round(s.start_y, 3)))
+        endpts.add((round(s.end_x, 3), round(s.end_y, 3)))
+    cut = None
+    for k, (_s, t, p) in enumerate(chain):
+        if t in endpts:
+            cut = k          # joined at the tip-side end of seg k
+            break
+        if p in endpts:
+            cut = k + 1      # joined at its pad-side end
+            break
+    if not cut:              # tip join (cut 0) or no contact: no trim
+        return
+    gone = chain[:cut]
+    ids = {id(s) for (s, _t, _p) in gone}
+    ctx.pcb.segments = [s for s in ctx.pcb.segments
+                        if id(s) not in ids]
+    ctx.trim_spans.setdefault(nm, []).extend(
+        (t, p) for (_s, t, p) in gone)
+    ctx.dest_chain[nm] = chain[cut:]
+    ctx.dest_alts[nm] = ctx.dest_alts[nm][cut:]
+
+
 class Ctx:
     pass
 
@@ -2449,6 +2499,55 @@ def setup(board, names, dest, log, cluster=6.0):
                        for nm in names}
     ctx.dest_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][1], 'F.Cu')
                       for nm in names}
+    # the DEST STUB CHAIN per net: the stub polyline walked from the
+    # tip (the free end the braid targets) back toward the pad, on
+    # the tip's layer, stopping at any junction, same-net via or pad.
+    # Its pad-side vertices are ALTERNATIVE lane targets (b_alts) --
+    # the search finishes at the first same-net contact instead of
+    # climbing to the tip and paying the span twice (the berth
+    # overshoot: 4 nets / ~9 mm doubled at K28) -- and once a lane
+    # joins at vertex k, the bypassed tip-side segments are removed
+    # so they cannot dangle as dead copper.
+    ctx.dest_chain = {}
+    ctx.dest_alts = {}
+    ctx.trim_spans = {}
+    for nm in names:
+        nid, net = byname[nm]
+        segs_n = [s for s in pcb.segments if s.net_id == nid]
+        vias_n = [(v.x, v.y, v.size / 2) for v in pcb.vias
+                  if v.net_id == nid]
+        pads_n = [(p.global_x, p.global_y,
+                   max(p.size_x, p.size_y) / 2) for p in net.pads]
+        lay = ctx.dest_layer[nm]
+
+        def _k(x, y):
+            return (round(x, 3), round(y, 3))
+
+        def _stop(pt):
+            return any(math.hypot(pt[0] - ax, pt[1] - ay)
+                       <= max(0.02, ar)
+                       for ax, ay, ar in vias_n + pads_n)
+
+        chain = []
+        cur, prev = _k(*ends[nm][1]), None
+        for _hop in range(24):
+            nxt = [s for s in segs_n if s.layer == lay
+                   and (id(s) != id(prev))
+                   and (_k(s.start_x, s.start_y) == cur
+                        or _k(s.end_x, s.end_y) == cur)]
+            if len(nxt) != 1:
+                break
+            s = nxt[0]
+            other = _k(s.end_x, s.end_y) \
+                if _k(s.start_x, s.start_y) == cur \
+                else _k(s.start_x, s.start_y)
+            chain.append((s, cur, other))
+            cur, prev = other, s
+            if _stop(other):
+                break
+        ctx.dest_chain[nm] = chain
+        ctx.dest_alts[nm] = [(p_[0], p_[1], lay)
+                             for (_s, _t, p_) in chain]
     ctx.src_ref = {}
     for nm in names:
         nid, net = byname[nm]
@@ -2594,6 +2693,10 @@ def write_out(a, ctx, corridors, names, log):
 
     # ---- write board
     txt = open(a.board, encoding='utf-8').read()
+    n_trim = sum(len(v) for v in ctx.trim_spans.values())
+    if n_trim:
+        log(f'berth stub trim: {n_trim} bypassed segment(s) removed '
+            f'({", ".join(sorted(nm for nm, v in ctx.trim_spans.items() if v))})')
     add = []
     if smoothed:
         kid_names = {pcb.nets[i].name for i in kids if i in pcb.nets}
@@ -2623,6 +2726,53 @@ def write_out(a, ctx, corridors, names, log):
     else:
         emit = {nm: [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer,
                       s.width) for s in out_segs[nm]] for nm in names}
+        # non-smoothed: txt keeps the ORIGINAL stubs, so the bypassed
+        # tail must be stripped from the text (the smoothed branch
+        # re-emits from ctx.pcb, where note_joint already removed it)
+        for nm in names:
+            spans = {frozenset((t, p))
+                     for (t, p) in ctx.trim_spans.get(nm, ())}
+            if not spans:
+                continue
+            nid, net = byname[nm]
+            out2, i2 = [], 0
+            while True:
+                j2 = txt.find('(segment', i2)
+                if j2 < 0:
+                    out2.append(txt[i2:])
+                    break
+                k2, depth = j2, 0
+                while True:
+                    ch = txt[k2]
+                    if ch == '(':
+                        depth += 1
+                    elif ch == ')':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    k2 += 1
+                block = txt[j2:k2 + 1]
+                m1 = re.search(r'\(net (\d+)\)', block)
+                m2 = re.search(r'\(net "([^"]+)"\)', block)
+                pts2 = re.findall(
+                    r'\((?:start|end) ([-\d.]+) ([-\d.]+)', block)
+                hit = ((m1 and int(m1.group(1)) == nid)
+                       or (m2 and m2.group(1) == net.name)) \
+                    and len(pts2) == 2 \
+                    and frozenset(
+                        (round(float(x), 3), round(float(y), 3))
+                        for x, y in pts2) in {
+                            frozenset(sp) for sp in spans}
+                if hit:
+                    out2.append(txt[i2:j2].rstrip(' \t'))
+                    e2 = k2 + 1
+                    if e2 < len(txt) and txt[e2] == '\n':
+                        e2 += 1
+                    i2 = e2
+                else:
+                    out2.append(txt[i2:k2 + 1])
+                    i2 = k2 + 1
+            txt = ''.join(out2)
     for nm in names:
         nid, _ = byname[nm]
         for (p, q, layer, w) in emit[nm]:

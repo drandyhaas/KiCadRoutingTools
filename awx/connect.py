@@ -194,7 +194,8 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             verbose: bool = False,
             window_pts: Optional[List[Point]] = None,
             virtual_vias: Optional[List[Point]] = None,
-            cache: Optional['ObsCache'] = None
+            cache: Optional['ObsCache'] = None,
+            b_alts: Optional[List[Tuple[float, float, str]]] = None
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """Route `net_id` from the copper end at `a` (on `a_layer`) to the
     copper end at `b` (on `b_layer`).
@@ -299,6 +300,15 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     gb = coord.to_grid(*b)
     sources = [(ga[0], ga[1], layer_map[a_layer], a[0], a[1])]
     targets = [(gb[0], gb[1], layer_map[b_layer], b[0], b[1])]
+    # b_alts: ALTERNATIVE finish points (earlier stops on the dest
+    # stub) -- the search terminates at whichever target it reaches
+    # cheapest, so a lane that passes the pad no longer climbs to the
+    # stub tip and pays the span twice (#622 berth overshoot)
+    for (xx, yy, ll) in (b_alts or ()):
+        if ll not in layer_map:
+            continue
+        gg = coord.to_grid(xx, yy)
+        targets.append((gg[0], gg[1], layer_map[ll], xx, yy))
     if verbose:
         print(f'  connect net {net_id}: ({a[0]:.2f},{a[1]:.2f}) {a_layer} -> '
               f'({b[0]:.2f},{b[1]:.2f}) {b_layer}  window '
