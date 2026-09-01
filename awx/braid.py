@@ -2352,6 +2352,17 @@ class Corridor:
                 self.refused.append(nm)
                 self.out_segs[nm] = []
                 self.out_vias[nm] = []
+                ctx.refusal_info[nm] = {
+                    'stage': 'free_corner',
+                    'corridor': self.idx,
+                    'page': None,
+                    'swimmer': False,
+                    'tooth_layer': ctx.tooth_layer[nm],
+                    'dest_layer': ctx.dest_layer[nm],
+                    'tooth': list(self.teeth[nm]),
+                    'berth': list(self.stubs[nm]),
+                    'margins': [2.0, 2.0, 4.0, 6.0],
+                }
                 log(f'    refused: {nm}')
                 continue
             segs_o, vias_o = res
@@ -2687,6 +2698,17 @@ def setup(board, names, dest, log, cluster=6.0):
 
         chain = []
         cur, prev = _k(*ends[nm][1]), None
+        if _stop(cur):
+            # the dest end resolved to an ANCHORED point -- no free
+            # stub end existed (K35 SODT1: doubled 0.01mm micro-segs
+            # in the fanout's B stub made every endpoint degree-2, so
+            # endpoints() fell back to the PAD itself). A chain
+            # walked from a pad is INVERTED: the trim would remove
+            # the pad's own leg and strand it (measured -- SODT1
+            # open, never refused). No chain, no alts, no trim.
+            ctx.dest_chain[nm] = []
+            ctx.dest_alts[nm] = []
+            continue
         for _hop in range(24):
             nxt = [s for s in segs_n if s.layer == lay
                    and (id(s) != id(prev))
