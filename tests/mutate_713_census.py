@@ -62,12 +62,16 @@ ROWS = [
      '    p.add_argument("--probe-gated", action="store_true",',
      'the other deleted flag'),
 
-    ('a registry entry kept after that file ONLY clock is gone',
-     'py_placer/board_store.py',
-     "        entry.setdefault('t', time.time())",
-     "        entry.setdefault('t', 0.0)",
-     'a stale registry rots into folklore; board_store has exactly one clock, '
-     'so removing it must make the entry stale'),
+    # Targets the REGISTRY rather than a source file. Removing a call no
+    # longer makes a file undiscovered -- since discovery widened, a bare
+    # `import time` still matches, which is deliberate (an import is a latent
+    # site). So the staleness rule is exercised the way it actually fires: an
+    # entry naming a file that carries no clock at all.
+    ('a REGISTRY entry for a file with no clock in it',
+     'tests/test_713_wallclock_census.py',
+     "REGISTRY = {\n",
+     "REGISTRY = {\n    'py_router/routing_defaults.py': ('reporting', 'x'),\n",
+     'a stale registry rots into folklore'),
 
     ('a budget added to a HANG_DETECTOR file, exempt from the comparison rule',
      'py_router/kicad_oracle.py',

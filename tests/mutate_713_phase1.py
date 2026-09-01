@@ -115,9 +115,17 @@ ROWS = [
 
     ('an empty fill is scored as the best possible rank again',
      'py_placer/plane_score.py',
-     "        if not fills:",
+     "        if not per_net:",
      "        if False:",
      'islands=0 is the OPTIMUM of a term that sorts before hpwl'),
+
+    ('the guard goes back to testing the WHOLE fill dict',
+     'py_placer/plane_score.py',
+     "        if not per_net:",
+     "        if not fills:",
+     'the shipped-then-corrected form: `fills` is non-empty on the 29 boards '
+     'with pre-existing zones, so a candidate whose WANTED pour is empty '
+     'still scored islands=0 and outranked every real one'),
 
     ('plane_score.why() drops its own detail again',
      'py_placer/plane_score.py',
