@@ -2935,6 +2935,37 @@ _WITHHELD_RULE = {
 _ARM = {'decap_pin_distance': _arm_decap_pins}
 
 
+#: The marker `grade()` appends to a `_SKIP_REASON` when a WITHHELD key
+#: disarmed the rule. A skip carrying it is an abstention, not a "nobody
+#: asked".
+_WITHHELD_MARK = 'the emitter WITHHELD'
+
+
+def _is_not_asked(rule: str, reason: str) -> bool:
+    """Is this `rules_skipped` entry the honest kind -- nobody declared it?
+
+    ONE home for the distinction, because `rules_skipped` carries two opposite
+    things and reading it as one number is how the #713 census first reported
+    21 of 22 boards instead of 5. A `_SKIP_REASON` value means the intent
+    declared nothing, which must not make a verdict incomplete; anything else
+    is an `_ARM` reason ("the intent asked, this board cannot answer") or a
+    withholding note, both of which must.
+
+    Keyed on the RULE, not on the reason string alone. Matching against
+    `_SKIP_REASON.values()` meant an `_ARM` reason that ever happened to equal
+    some OTHER rule's skip reason would read as "nobody asked" -- a real
+    abstention silently downgraded to a pass, which is the dangerous
+    direction. The strings are distinct today; this makes them not have to be.
+
+    The `_WITHHELD_MARK` conjunct is belt over brace: `grade()` builds a
+    withheld reason by APPENDING to `_SKIP_REASON[name]`, so the decorated
+    string can never equal the bare one and the first test already fails. It
+    is kept because if it ever does fire, it fires toward "abstention", which
+    is the safe direction.
+    """
+    return reason == _SKIP_REASON.get(rule) and _WITHHELD_MARK not in reason
+
+
 def _declared_by_hand(intent: Intent, key: str) -> bool:
     """Did the author declare a withheld key anyway? Then it is graded, and
     the withholding note is only history."""
@@ -3012,8 +3043,63 @@ class GradeResult:
         return [v for v in self.violations if v.severity != ERROR]
 
     @property
+    def not_graded(self) -> Dict[str, int]:
+        """The channels a DECLARED thing went ungraded through, by name.
+
+        By NAME, and never one aggregate count, because the three are
+        different claims and `grade()` deliberately keeps them apart
+        (see the note at `_ARM`). #694's lesson applies directly: an
+        aggregate verdict cannot say which of its inputs moved.
+
+        `rules_skipped` is NOT wholly in here, and that is the load-bearing
+        distinction. It carries two opposite things: `_SKIP_REASON` entries,
+        every one of which reads "the intent declares no X" -- NOBODY ASKED,
+        which is honest and fires on 22 of 22 tracked boards -- and `_ARM`
+        entries, "the intent asked, this BOARD cannot answer", which is an
+        abstention. Counting the first would make every board with a minimal
+        intent permanently incomplete and collapse the signal to "every board
+        that passes" (measured: 21 of 22 rather than 5).
+        """
+        out = {}
+        if self.budget_abstained:
+            out['budget_abstained'] = len(self.budget_abstained)
+        _armed = sum(1 for k, r in self.rules_skipped.items()
+                     if not _is_not_asked(k, r))
+        if _armed:
+            out['rules_skipped_armed'] = _armed
+        _edge = sum(1 for e in self.edge_seating
+                    if e.get('declared') and e.get('abstained'))
+        if _edge:
+            out['edge_seating_abstained'] = _edge
+        return out
+
+    @property
+    def complete(self) -> bool:
+        """Did every channel the intent ASKED FOR actually get graded?
+
+        Separate from `passed` on purpose. `passed` answers "were there
+        errors"; this answers "was anything left unmeasured". A run can be
+        both clean and incomplete, and until #713 that combination printed
+        `PASS: N rule(s) ran, no violations` twenty-six lines above
+        `N declared value(s) NOT DERIVABLE -- not graded, not passed`, with
+        `pass: true` and exit 0. Measured on ulx3s, tigard, watchy,
+        glasgow_revC and orangecrab_ext_pll -- 5 of the 22 tracked boards --
+        in the DEFAULT emit-intent-then-grade round trip.
+        """
+        return not self.not_graded
+
+    @property
     def passed(self) -> bool:
-        return not self.errors
+        """No errors AND nothing declared left ungraded.
+
+        The second conjunct is #713 item 5. A verdict about a channel nobody
+        measured is not a pass; it is an absence of a verdict, and the
+        machine-readable `pass` key is where consumers read it -- every
+        production consumer reads `errors` or the violations list, and none
+        read this property, so landing the fix here alone would have been
+        invisible. It lands on the wire and the exit code too.
+        """
+        return not self.errors and self.complete
 
 
 class UntrustworthyOutline(ValueError):
@@ -3830,7 +3916,26 @@ def format_text(r: GradeResult) -> str:
     ol = r.outline
     lines.append(f"  outline: {ol['outlines']} ring(s), {ol['cutouts']} cutout(s), "
                  f"{ol['edge_contours']} milled contour(s)")
-    if not r.violations:
+    if r.violations and not r.complete:
+        # A board can be BOTH wrong and incompletely graded, and the second
+        # fact does not stop mattering because the first is true. The first
+        # draft printed the incompleteness only on the no-violation branch,
+        # so a board with a single warning lost the disclosure entirely.
+        lines.append(
+            "  ALSO NOT FULLY GRADED: " + ', '.join(
+                f'{n} {k}' for k, n in sorted(r.not_graded.items()))
+            + " -- the violations below are what WAS measured, not all of it")
+    if not r.violations and not r.complete:
+        # NOT "PASS". A clean sweep of the channels that ran says nothing
+        # about the ones that did not, and this line used to print 26 lines
+        # above "N declared value(s) NOT DERIVABLE -- not graded, not passed"
+        # in the same report (#713 item 5).
+        lines.append(
+            f"  INCOMPLETE: {len(r.rules_run)} rule(s) ran with no "
+            f"violations, but " + ', '.join(
+                f'{n} {k}' for k, n in sorted(r.not_graded.items()))
+            + " -- this board was not fully graded")
+    elif not r.violations:
         lines.append(f"  PASS: {len(r.rules_run)} rule(s) ran, no violations")
     else:
         lines.append(f"  {len(r.errors)} error(s), {len(r.warnings)} warning(s) "
@@ -3982,6 +4087,13 @@ def to_json(r: GradeResult) -> Dict:
         'board': r.board,
         'intent': r.intent.source_path,
         'pass': r.passed,
+        # #713 item 5. `complete` is the repo's existing name for "this run
+        # did not measure everything" (route_summary.py, refused on by
+        # place_route_loop), reused rather than a second channel invented.
+        # `not_graded` names WHICH channel, because an aggregate cannot say
+        # which of its inputs moved (#694).
+        'complete': r.complete,
+        'not_graded': r.not_graded,
         'violations': [v.to_dict() for v in r.violations],
         'blocks': {k: list(v) for k, v in sorted(r.blocks.items())},
         'legality': r.legality,
@@ -4006,6 +4118,8 @@ def summary(r: GradeResult) -> Dict:
         'board': os.path.basename(r.board),
         'intent': os.path.basename(r.intent.source_path),
         'pass': r.passed,
+        'complete': r.complete,
+        'not_graded': r.not_graded,
         'violations': len(r.violations),
         'errors': len(r.errors),
         'warnings': len(r.warnings),

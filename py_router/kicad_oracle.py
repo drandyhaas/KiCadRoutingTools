@@ -47,23 +47,31 @@ KICAD_CLI_CANDIDATES = [
 # far sooner and its remaining rounds are skipped.
 ORACLE_DRC_TIMEOUT = 240
 
-# Boards whose kicad-cli DRC blew ORACLE_DRC_TIMEOUT once. The oracle is called
-# once per plane-repair step, so remembering a slow board stops it re-burning
-# the timeout on every later step of the same run.
+# NO MODULE-GLOBAL TIMEOUT MEMO. There used to be one, `_ORACLE_TIMED_OUT`,
+# keyed on a fill-cost signature so it survived a chain's fresh output board
+# each step. #713 item 3 retires it, and the reason is worth stating because
+# the issue's own reading of the situation was the opposite of the truth.
 #
-# KEYED ON A FILL-COST SIGNATURE, NOT ON THE PATH. The path key never fired in
-# practice: a chain writes a NEW output board each step (r1c, r1b, r2, r3...),
-# so every step got a fresh key and re-burned the full 240s. Measured on run 9:
-# a board KiCad could not fill in 300s was re-attempted at every step of the
-# chain, and each attempt cost the whole timeout.
+# The issue says a single slow DRC "disables the KiCad oracle for the rest of
+# the run". It did not: the memo's ONLY read sat behind `env_knobs.LEGACY_ORACLE`
+# (KICAD_LEGACY_ORACLE, default off and set by nothing in this repo), so the
+# set was written and never consulted. The live defect was the INVERSE -- the
+# 240 s was re-paid on every round of every oracle leg, which is the pathology
+# the memo had been added to stop. (repair_planes:2316 records the compound
+# form: a repair that cancelled cleanly at 45 s then sat in a KiCad child until
+# an external kill.)
 #
-# What actually drives the fill cost is the ZONE geometry, the outline, and the
-# pad field -- not the routed copper, which grows between steps. So the memo
-# keys on those, which stay stable across a chain while the copper changes.
-# It is a heuristic and it is the honest one available: a board that could not
-# be filled with these zones and these pads will not become fillable because
-# thirty more tracks were added.
-_ORACLE_TIMED_OUT = set()
+# A module-global fixes the re-pay at the price of making the result depend on
+# RUN HISTORY -- which board happened to be opened first in this process. That
+# is precisely what #713 is about, and it is not hypothetical: pcbnew is a
+# long-lived process, so in the GUI one slow board would poison every board
+# opened afterwards in the same session, and a fill-cost key (rather than a
+# path) is exactly what makes that cross-board hit land.
+#
+# CALL-SCOPED state gets both halves. `oracle_reconnect` creates one set and
+# passes it to every `kicad_unconnected` it makes, so a timeout in round 1
+# stops rounds 2 and 3 re-paying -- while two runs of the same command on the
+# same board still do the same thing, whatever ran before them.
 
 
 def _fill_cost_key(board_file: str):
@@ -264,14 +272,20 @@ _UNCONNECTED_MEMO_CAP = 8
 
 
 def kicad_unconnected(board_file: str, kicad_cli: str,
-                      timeout: int = ORACLE_DRC_TIMEOUT) -> Optional[List[Tuple]]:
+                      timeout: int = ORACLE_DRC_TIMEOUT,
+                      timed_out: Optional[set] = None) -> Optional[List[Tuple]]:
     """[(net, (x,y,layer|None), (x,y,layer|None)), ...] per kicad-cli DRC
     unconnected item, after a zone refill. None on tool failure.
 
     Runs against a fast-connectivity staged project (#420) so the DRC skips
-    the expensive geometric providers and returns in seconds; a board that
-    still blows `timeout` is remembered in _ORACLE_TIMED_OUT so later steps
-    skip it instead of re-burning the wall time.
+    the expensive geometric providers and returns in seconds.
+
+    `timed_out` is a CALLER-OWNED set of fill-cost keys that already blew the
+    timeout. Pass one to make a multi-round caller stop re-paying `timeout`
+    per round; leave it None (every direct caller does) and each call decides
+    for itself. It replaces a module-global that made the answer depend on
+    what ran earlier in the same process -- see the note at the top of this
+    module. A board named in the set is refused WITHOUT spawning anything.
 
     MEMOIZED on the board's CONTENT (audit finding): the #589/#659 re-audit
     runs this for its scope-widen and then oracle_reconnect immediately runs
@@ -280,6 +294,17 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
     the oracle rewrites the board between rounds the memo misses and a fresh
     DRC runs; there is no staleness window. refill_islands memoizes the same
     way for the same reason."""
+    # `if timed_out and` -- truthiness, not `is not None`. The deleted
+    # cross-call skip was criticised in this very change for evaluating
+    # `_fill_cost_key` as its LEFT operand and parsing the whole board for a
+    # test that could not matter. `timed_out is not None` is ALWAYS true
+    # from oracle_reconnect, so the first draft of the replacement paid that
+    # same parse on all three calls -- more of the cost it named, not less.
+    # An EMPTY set short-circuits for free.
+    if timed_out and _fill_cost_key(board_file) in timed_out:
+        print(f"  KiCad-oracle recheck: kicad-cli DRC already timed out on "
+              f"this board earlier in THIS call; not re-paying {timeout}s")
+        return None
     _memo_key = None
     try:
         with open(board_file, 'rb') as _bf:
@@ -304,7 +329,8 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
             data = json.load(f)
     except subprocess.TimeoutExpired:
         dt = time.monotonic() - t0
-        _ORACLE_TIMED_OUT.add(_fill_cost_key(board_file))
+        if timed_out is not None:
+            timed_out.add(_fill_cost_key(board_file))
         print(f"  KiCad-oracle recheck: WARNING kicad-cli DRC timed out after "
               f"{dt:.0f}s (>{timeout}s) on {os.path.basename(board_file)}; "
               f"skipping the oracle for this board")
@@ -1552,6 +1578,14 @@ def oracle_reconnect(board_file: str, net_names, config,
     from plane_region_connector import (build_base_obstacles,
                                         route_plane_connection_wide)
 
+    # CALL-SCOPED timeout memo (#713 item 3). One set per oracle_reconnect,
+    # shared by every kicad_unconnected this call makes -- the union demand
+    # gate inside the rounds loop, the exact-source fallback, and the final
+    # count. A timeout in round 1 therefore stops rounds 2 and 3 re-paying
+    # ORACLE_DRC_TIMEOUT, which is the measured pathology; and because it dies
+    # with the call, the same command on the same board does the same thing
+    # whatever ran before it in this process.
+    _timed_out = set()
     kicad_cli = find_kicad_cli()
     # Bail iff NOTHING could serve as a link source. The ladder is
     # exact-fill (pcbnew; tried unless LEGACY_ORACLE) -> kicad-cli -> raster
@@ -1569,27 +1603,21 @@ def oracle_reconnect(board_file: str, net_names, config,
         # oracle_reconnect reported available=False.
         print("  KiCad-oracle recheck: kicad-cli not found and no other "
               "source is enabled, skipping")
-        return {'available': False, 'rounds': 0, 'links_routed': 0,
+        # `reason` (#713 item 3): `available: False` was a bare bool, and the
+        # ONE caller that printed anything about it (repair_planes) blamed
+        # "kicad-cli not found" for every cause. A verdict the run did not get
+        # must say why it did not get it.
+        return {'available': False, 'reason': 'no_link_source',
+                'why': 'kicad-cli not found and no other source is enabled',
+                'rounds': 0, 'links_routed': 0,
                 'links_failed': 0, 'remaining': -1}
 
-    # A board whose DRC already blew ORACLE_DRC_TIMEOUT once (#420) will do it
-    # again on every later plane-repair step of this run -- skip it outright
-    # rather than re-burn minutes of wall time for the same lost result.
-    # SCOPE (audit finding): this memo records a *kicad-cli DRC* timeout,
-    # caused by the geometric rule providers (#420). The DEFAULT link source
-    # is the pcbnew exact fill, which has its own EXACT_FILL_TIMEOUT and is
-    # unaffected by that pathology -- so short-circuiting the WHOLE leg threw
-    # away a source that would have worked. Skip only when kicad-cli is the
-    # source we would actually use (legacy mode, or the union's demand gate
-    # with no exact source available).
-    if (_fill_cost_key(board_file) in _ORACLE_TIMED_OUT
-            and env_knobs.LEGACY_ORACLE):
-        print("  KiCad-oracle recheck: kicad-cli DRC previously timed out on "
-              "this board and KICAD_LEGACY_ORACLE makes it the only source, "
-              "skipping")
-        return {'available': False, 'rounds': 0, 'links_routed': 0,
-                'links_failed': 0, 'remaining': -1}
-
+    # The cross-call skip that used to sit here is gone (#713 item 3). It read
+    # a module-global behind `env_knobs.LEGACY_ORACLE`, which nothing sets, so
+    # it never fired -- while `_fill_cost_key(board_file)`, its LEFT operand,
+    # parsed the whole board on EVERY call to decide a membership test that
+    # could not matter. What it was reaching for is now `_timed_out` below:
+    # call-scoped, always live, and unable to carry a verdict between boards.
     # Board-setup copper-to-edge rule (#338): the oracle links route through
     # build_base_obstacles, whose edge band comes from config.board_edge_clearance
     # (0.0 default -> track-clearance fallback). Callers that construct a bare
@@ -1696,7 +1724,8 @@ def oracle_reconnect(board_file: str, net_names, config,
         # KICAD_ORACLE_UNION=0 restores the pure exact source for A/B.
         if links is not None and _links_from_exact \
                 and env_knobs.ORACLE_UNION:
-            _cli648 = kicad_unconnected(board_file, kicad_cli)
+            _cli648 = kicad_unconnected(board_file, kicad_cli,
+                                       timed_out=_timed_out)
             if _cli648 is not None:
                 # Out-of-scope links from BOTH sources (#659 audit). The
                 # exact source's foreign links were already kept here, but
@@ -1760,7 +1789,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                           f"link(s) added (unseen by the exact source)")
                 links = _out648
         if links is None and kicad_cli:
-            links = kicad_unconnected(board_file, kicad_cli)
+            links = kicad_unconnected(board_file, kicad_cli,
+                                       timed_out=_timed_out)
         if links is None and env_knobs.RASTER_ORACLE:
             # THIRD BRANCH (#648): our own fill-aware model, no KiCad at all.
             # OPT-IN, and deliberately not a silent fallback: making the leg
@@ -2964,7 +2994,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             except Exception:
                 links = None
         if links is None:
-            links = kicad_unconnected(board_file, kicad_cli)
+            links = kicad_unconnected(board_file, kicad_cli,
+                                       timed_out=_timed_out)
         if links is not None:
             remaining = len([l for l in links if l[0] in names])
         else:
@@ -3048,7 +3079,15 @@ def oracle_reconnect(board_file: str, net_names, config,
         _xb = f" ({cross_board} cross-board exempt)" if cross_board else ""
         print(f"  KiCad-oracle recheck: {remaining} link(s) still "
               f"unconnected per KiCad after {rounds} round(s){_xb}")
-    return {'available': True, 'rounds': rounds, 'links_routed': routed,
+    return {'available': True,
+            'reason': 'timed_out' if _timed_out else 'ok',
+            # A leg that RAN but lost its kicad-cli source to the clock part
+            # way through is not the same as one that ran clean, and the
+            # difference was previously invisible to every consumer.
+            'why': ('kicad-cli DRC timed out during this call; the remaining '
+                    'rounds used the exact-fill source only'
+                    if _timed_out else 'the oracle ran'),
+            'rounds': rounds, 'links_routed': routed,
             'links_failed': failed, 'remaining': remaining,
             # Duplicate work entries dropped before the link loop -- disclosed
             # rather than silently swallowed, since `links_failed` used to

@@ -378,6 +378,27 @@ def main(argv=None):
               file=sys.stderr)
         if not args.exit_zero:
             return VIOLATIONS_EXIT
+    # Reported BEFORE the errors return, not after. The first draft put this
+    # block below it, so a board that both had errors and left a declared
+    # channel ungraded exited 4 for the errors and never said the grade was
+    # incomplete -- the reader then fixes the errors, sees a clean run, and
+    # still has not measured what was never measured.
+    if not result.complete:
+        # #713 item 5: an ungraded DECLARED channel is not a pass, and the exit
+        # code is what most callers actually branch on -- board_score,
+        # placement_driver and loop_driver all read `errors` or the exit
+        # status, none reads GradeResult.passed. Measured on the tracked
+        # corpus: 5 of 22 boards reported pass:true and exit 0 in the default
+        # emit-then-grade round trip while `overlap_area` was never graded.
+        # `--exit-zero` still suppresses the code without lying about `pass`,
+        # exactly as it does for violations.
+        print(f"  NOT FULLY GRADED: "
+              + ', '.join(f'{n} {k}' for k, n in
+                          sorted(result.not_graded.items()))
+              + ". A channel the intent asked for was never measured, so this "
+                "is an absent verdict, not a clean one.", file=sys.stderr)
+        if not args.exit_zero:
+            return VIOLATIONS_EXIT
     if result.errors and not args.exit_zero:
         return VIOLATIONS_EXIT
     return 0

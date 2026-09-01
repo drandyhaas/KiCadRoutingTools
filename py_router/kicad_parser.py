@@ -4888,11 +4888,29 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # unchanged board -> hash hit -> cached islands, changed board -> miss.
     _live_fill_memo = {}
 
+    def _warn_live_fill_fallback(why):
+        """LOUD fallback (review DRC-4): the in-process filler sees live
+        copper but STALE clearances -- silently returning it reintroduces the
+        exact divergence the temp save exists to fix. The consumer keeps
+        working either way; the operator must know which fill truth they got.
+
+        One function, two callers, because the two ways of arriving here used
+        to be one loud and one silent (#713 item 4).
+
+        "did not yield a fill" rather than "failed", because one of the ways
+        to arrive is a refill that SUCCEEDED and poured nothing -- which made
+        the first draft print "failed (the KiCad refill succeeded ...)"."""
+        print(f"WARNING: live-board staged refill did not yield a fill "
+              f"({why}); falling back to the "
+              f"in-process fill, which resolves clearances from the "
+              f"project state at board LOAD time -- a netclass this run "
+              f"lowered is invisible to it (GUI/CLI fill divergence).")
+
     def _live_fill(_board=board, _memo=_live_fill_memo):
         import copy as _copy
         import hashlib
         import tempfile
-        from kicad_exact_fill import live_fill_islands, refill_islands
+        from kicad_exact_fill import live_fill_islands, refill_islands_ex
         tmp = None
         try:
             import pcbnew as _pcbnew
@@ -4933,22 +4951,20 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 # poison later consumers (same contract as refill_islands'
                 # own memo).
                 return _copy.deepcopy(_memo[_key])
-            islands = refill_islands(tmp)
+            islands, _st = refill_islands_ex(tmp)
             if islands:
                 _memo.clear()          # one board state at a time
                 _memo[_key] = _copy.deepcopy(islands)
                 return islands
+            # #713 item 4: the LOUD fallback below fires only from `except`,
+            # so a refill that RETURNED nothing -- a 300 s timeout above all --
+            # fell through to the in-process fill in complete silence. That is
+            # the same stale-clearance divergence the except arm shouts about,
+            # reached by the quieter path, and in the GUI it is reached on the
+            # routing worker thread where nobody is watching for it.
+            _warn_live_fill_fallback(_st.why())
         except Exception as _e:
-            # LOUD fallback (review DRC-4): the in-process filler below sees
-            # live copper but STALE clearances -- silently returning it
-            # reintroduces the exact divergence this temp save exists to
-            # fix. The consumer keeps working either way; the operator must
-            # know which fill truth they got.
-            print(f"WARNING: live-board staged refill failed "
-                  f"({type(_e).__name__}: {_e}); falling back to the "
-                  f"in-process fill, which resolves clearances from the "
-                  f"project state at board LOAD time -- a netclass this run "
-                  f"lowered is invisible to it (GUI/CLI fill divergence).")
+            _warn_live_fill_fallback(f"{type(_e).__name__}: {_e}")
         finally:
             if tmp:
                 for _p in (tmp, os.path.splitext(tmp)[0] + '.kicad_pro',

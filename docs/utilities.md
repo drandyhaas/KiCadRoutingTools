@@ -164,7 +164,15 @@ Per seed: a `place_seed` run (a seed failing its own intent gate is
 recorded but never ranked), then a probe of `'*'` minus the ignored nets
 with identical route args. Emits a ranked table, `seeds.json`, and a
 `JSON_SUMMARY` with `best_seed`. Exit 0 with a ranked winner, 4 when
-nothing was rankable.
+nothing was rankable -- including when every probe ran but produced no
+verdict, which returned 0 with `best_seed: null` until #713 fixed it.
+
+There is **no probe timeout**. `--route-timeout` was removed (#713): a probe
+whose verdict a clock erased was not ranked worse, it was DROPPED from the
+ranking, so a comparison could silently be decided by machine speed. The probe
+is bounded by SCOPE -- the net patterns above. Each probe row carries a
+`status` (`ok` / `crashed` / `no_summary` / `screened`) so an absent verdict
+names its cause instead of being an undifferentiated `failures: null`.
 
 ## Plane-Fragility Placement Score (`plane_score.py`)
 
@@ -177,6 +185,16 @@ candidate vs candidate on the same board, and only where the pour layer
 shares parts with the placement (a bottom pour under an all-top board is
 placement-invariant). Requires KiCad python for the refill; exits 3 when
 unavailable rather than guessing from drawn outlines.
+
+`place_portfolio --plane-score` follows that contract, and takes **no budget**
+(`--plane-score-budget` was removed in #713 -- on overrun it stripped the plane
+terms from every candidate's rank key, so a slower machine could promote a
+different winner). The work is bounded by `--candidates`, one refill each. A
+cause that is the same for every candidate (no bounds, no named net, no pcbnew)
+strips the terms and says so; a cause that can strike one candidate and spare
+another (a refill timeout, a failed or empty pour) makes the run REFUSE with
+exit 3, because a strip there would make the winner depend on which candidates
+happened to score. `JSON_SUMMARY.plane_score` records which.
 
 ```bash
 python py_placer/plane_score.py board.kicad_pcb --plane-nets GND 3V3:F.Cu

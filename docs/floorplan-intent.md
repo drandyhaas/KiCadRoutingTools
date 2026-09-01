@@ -721,6 +721,23 @@ reason names the withholding rather than saying only "the intent declares no
 legality_budget". Declaring the key by hand overrides the note: a declared
 budget is graded.
 
+**And it is not a pass in the machine channel either, since #713.** The human
+line used to read `PASS: N rule(s) ran, no violations` twenty-six lines above
+`NOT DERIVABLE -- not graded, not passed`, with `pass: true` and exit 0 --
+measured on 5 of the 22 tracked boards in the default emit-then-grade round
+trip. A grade that left a declared channel unmeasured now reports
+`complete: false`, `not_graded: {channel: count}`, `pass: false`, prints
+`INCOMPLETE` instead of `PASS`, and exits 4. `--exit-zero` suppresses the code
+without changing the verdict, exactly as it does for violations.
+
+`not_graded` names WHICH channel and never aggregates: `budget_abstained` (the
+emitter could not derive a declared key), `rules_skipped_armed` (the intent
+asked and this BOARD cannot answer) and `edge_seating_abstained` (a
+measurement with no basis) are different claims. **`rules_skipped` is NOT
+wholly in it**: its `_SKIP_REASON` entries all mean "the intent declares no X"
+-- nobody asked, which is honest and fires on every board -- and counting
+those would make any board with a minimal intent permanently incomplete.
+
 The withholding channel is **not legality-only**. `_WITHHELD_RULE` maps each
 withholdable key to the rule it disarms and to the test for "declared by hand
 anyway", so a withheld `decaps.max_distance_mm` reaches `decap_distance`'s skip

@@ -74,10 +74,15 @@ def test_absent_metrics_leave_ranking_unchanged():
 def test_portfolio_flag_exists():
     import place_portfolio
     p = place_portfolio.build_parser()
-    a = p.parse_args([BOARD, '--out-dir', 'x',
-                      '--plane-score', 'GND', '--plane-score-budget', '60'])
-    assert a.plane_score == ['GND'] and a.plane_score_budget == 60.0
-    print("  PASS: --plane-score / --plane-score-budget parse")
+    a = p.parse_args([BOARD, '--out-dir', 'x', '--plane-score', 'GND'])
+    assert a.plane_score == ['GND']
+    # The budget is GONE (#713 item 1). Pinned in tests/test_713_removed_flags
+    # the way #621 pinned --deadline: a removed flag exits argparse rc 2, which
+    # a harness reads as an engine failure, so the removal is asserted rather
+    # than assumed.
+    assert not hasattr(a, 'plane_score_budget'), \
+        "a wall clock must not decide which candidate wins"
+    print("  PASS: --plane-score parses; --plane-score-budget is gone")
 
 
 def test_score_smoke_on_splitflap():

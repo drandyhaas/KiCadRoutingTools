@@ -238,8 +238,9 @@ a metric whose direction must be checked per board rather than assumed.
   piantor 735 s to seat one part of five. Those figures are quoted from the lost
   write-up and are **not** the committed rows; the rows here are the run that
   ships.)*
-- **Its deadline behaviour is correct and easy to misread**: on a deadline the
-  output path is NOT written, and the partial board is left at
-  `<output>.staging.kicad_pcb`, said only on stderr. The first harness read that
-  as "no board produced". It is not — and it is what made the partial rows
-  recoverable at all.
+- **The deadline behaviour described here no longer exists.** `--deadline` and
+  exit code 7 were deleted from every main by #621; the rows above were
+  recorded while it still existed, and are kept because the qualitative
+  verdict (non-termination on 87-103-part boards) does not depend on it. What
+  a killed run leaves today is nothing at the output path and no summary of
+  ours: an external kill is the killing harness's problem, by design.

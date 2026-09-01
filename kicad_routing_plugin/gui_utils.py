@@ -930,6 +930,16 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                 os.unlink(_p)
             except OSError:
                 pass
+        # #713 item 3: this front never inspected `available`, so an oracle
+        # that COULD NOT RUN was byte-for-byte indistinguishable here from one
+        # that ran and found everything already connected -- both are an empty
+        # results dict and both were silent. Say which, on the GUI's own log,
+        # since the CLI front has said so since #508.
+        if not orc.get('available'):
+            print(f"KiCad-oracle: did NOT run -- "
+                  f"{orc.get('why', 'no reason recorded')}. The zone-aware "
+                  f"completion check behind this apply is UNBACKED; a clean "
+                  f"result here is 'not checked', not 'checked and clean'.")
         # #508 finding 15: the oracle's stranded-fragment deletions are
         # stripped from its temp file, but the LIVE board still holds that
         # copper -- delete it here, BEFORE the adds, so a same-position

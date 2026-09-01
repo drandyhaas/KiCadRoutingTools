@@ -163,7 +163,11 @@ def test_a_human_board_is_not_failed_by_accident():
     r = _grade('tigard')
     assert not _centring(r, 'J1') and not _centring(r, 'J5') \
         and not _centring(r, 'J7')
-    assert r.passed, [v.message for v in r.errors]
+    # `not r.errors`, not `r.passed`: since #713 item 5 `passed` also requires
+    # that nothing DECLARED went ungraded, and tigard's emitted intent
+    # withholds `overlap_area`. The claim here is about the centring conjunct
+    # not manufacturing a violation, which is the error list.
+    assert not r.errors, [v.message for v in r.errors]
     worst = max(abs(e['along_edge_offset_pct']) for e in r.edge_seating)
     assert worst > 25.0, worst   # anti-vacuity: it really is far off centre
     print(f"  PASS: worst offset {worst:.1f}% and the board still passes -- "

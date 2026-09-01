@@ -2609,7 +2609,14 @@ def _build_exact_stitch_validator(pcb_data, stitch_net_ids, net_display,
         return None
     finally:
         _sh.rmtree(tmpdir, ignore_errors=True)
-    if islands_map is None:
+    # `not`, not `is None` (#713 item 4): an EMPTY map is a refill that ran and
+    # poured nothing, and it validates exactly as little as an unavailable one.
+    # Letting it through built {net: {}} for every net, and the caller then
+    # reported "exact fill has 'GND' main-cluster copper on 0 of its N owned
+    # layer(s) (need 2) -- skipped" -- a message that blames the BOARD for what
+    # was really an absent verdict, instead of the documented "validation
+    # unavailable -- sites gated by the fill model only (#485)" line below.
+    if not islands_map:
         return None
     out = {}
     for net_id in stitch_net_ids:

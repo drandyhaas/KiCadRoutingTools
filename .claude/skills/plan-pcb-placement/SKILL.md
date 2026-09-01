@@ -1104,7 +1104,13 @@ yours to run on the candidate you pick. Among survivors:
    FAILED, not that it was skipped** — read the `[probe]` log lines and fix
    before adopting; empty-routed is never a license to adopt on static rank
    (measured: caller-relative paths broke every probe rc=1 and the slate
-   silently degraded to static). And **the shared window compares like with
+   silently degraded to static). Since #713 the tool says so itself: a
+   contender whose probe produced no verdict is reported as
+   `[probe] WARNING ... produced NO VERDICT (<status>)` on stderr, with the
+   status naming the cause (`crashed`, `no_summary`, `screened`) instead of an
+   undifferentiated `failures: null`. There is also no probe timeout any more —
+   `--route-timeout` is gone, because a verdict a clock erased was DROPPED from
+   the ranking rather than ranked worse. And **the shared window compares like with
    like WITHIN the slate; it is not whole-board routability** — it routes
    only the affected nets (run 7: 13–16 of 45). Pruning on it is fine;
    before ADOPTING on it, pass `--full-probe`: it routes the WHOLE board on

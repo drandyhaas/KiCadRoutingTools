@@ -4111,11 +4111,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 hole_to_hole_clearance=(
                                     config.hole_to_hole_clearance),
                                 project_from=input_file)
-                            print(f"  #666 cap-move re-weld: "
-                                  f"{_orc_cap.get('links_routed', 0)} "
-                                  f"link(s) welded, "
-                                  f"{_orc_cap.get('remaining', -1)} "
-                                  f"remaining")
+                            # The FOURTH oracle_reconnect consumer, and the one
+                            # #713 item 3's first pass missed. Without this it
+                            # printed "0 link(s) welded, -1 remaining" for an
+                            # oracle that could not run, indistinguishable
+                            # from one that ran and found nothing to do.
+                            if not _orc_cap.get('available'):
+                                _capwhy = _orc_cap.get(
+                                    'why', 'no reason recorded')
+                                print(f"  #666 cap-move re-weld: DID NOT RUN "
+                                      f"-- {_capwhy}; the re-weld is "
+                                      f"unchecked")
+                            else:
+                                print(f"  #666 cap-move re-weld: "
+                                      f"{_orc_cap.get('links_routed', 0)} "
+                                      f"link(s) welded, "
+                                      f"{_orc_cap.get('remaining', -1)} "
+                                      f"remaining")
                 except Exception as _ecap:
                     print(f"  (scoped cap move failed: {_ecap})")
 
@@ -4704,6 +4716,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     project_from=input_file)
                 print(f"  [finalize timing] oracle leg: "
                       f"{_time9.time() - _t9:.1f}s")
+                # #713 item 3: this leg had NO summary key at all, so an
+                # `available: False` -- the authoritative zone-aware check
+                # never running -- was invisible to every JSON_SUMMARY
+                # consumer, and the run read as fully checked. `oracle_check`
+                # describes a DIFFERENT, opt-in end-of-run check and says
+                # nothing about this one.
+                summary['oracle_reconnect'] = {
+                    k: _orc.get(k) for k in
+                    ('available', 'reason', 'why', 'rounds', 'links_routed',
+                     'links_failed', 'remaining')}
                 if not _gui9:
                     # #589: keep the oracle's net list + config for the
                     # post-reconciliation re-audit (CLI file mode only).

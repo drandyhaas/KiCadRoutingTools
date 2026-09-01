@@ -421,8 +421,8 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     src = getattr(pcb_data, 'source_path', None)
     if not polys and src and os.path.isfile(src):
         try:
-            from kicad_exact_fill import find_kicad_python, refill_islands
-            fills = refill_islands(src)
+            from kicad_exact_fill import refill_islands_ex
+            fills, _st = refill_islands_ex(src)
             if fills is None:
                 # None is refill_islands' DOCUMENTED "unavailable" return, not
                 # an error. Calling .items() on it raised an AttributeError
@@ -430,13 +430,23 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
                 # has no attribute 'items'" (#647) -- which read like a quirk
                 # of one board while it was really a whole-platform capability
                 # gap (no Windows install was ever found), on every invocation.
-                why = ("no python with pcbnew found; set KICAD_PYTHON to "
-                       "KiCad's bundled interpreter"
-                       if find_kicad_python() is None
-                       else "the KiCad refill failed")
-                print(f"Plane fragility: exact fill unavailable ({why}); "
+                #
+                # #713 item 4: the reason now comes from the refill itself
+                # rather than being re-derived here. The old form re-probed
+                # for a pcbnew interpreter and, on every other cause, printed
+                # a bare refill-failed line -- so a 300 s TIMEOUT, the
+                # one arm that depends on how fast this machine is, was
+                # reported as a fact about the board. That sends the reader to
+                # the wrong repair, and it is the whole of the item.
+                print(f"Plane fragility: exact fill unavailable ({_st.why()}); "
                       f"using zone outlines")
                 fills = {}
+            elif not fills:
+                # The refill RAN and poured nothing. Distinct from every
+                # unavailability above -- it is an answer about the board --
+                # and it was previously the one path that printed nothing at
+                # all before silently substituting outlines below.
+                print(f"Plane fragility: {_st.why()}; using zone outlines")
             polys = [(name_to_id.get(_net, -1), layer, poly)
                      for (_net, layer), pp in fills.items() for poly in pp]
             if polys:

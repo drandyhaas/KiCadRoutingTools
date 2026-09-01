@@ -989,6 +989,16 @@ def select_best(ranking_primary: Sequence[int], ranking_static: Sequence[int],
     have" stays a first-class outcome. Returns None when nothing ranked
     passes -- the caller falls back to the baseline, never to a violator.
     """
+    # NOT `+ [0]`. The baseline is genuinely absent from both lists when its
+    # own probe produced no verdict -- `ranking_static` is built from `cands`,
+    # which excludes index 0 -- and appending it here looks like the fix. It is
+    # not: returning 0 directly SUPPRESSES the caller's
+    # "every ranked candidate violates rule 1" note, which is the disclosure a
+    # reader needs before adopting anything. `None` -> the caller falls back to
+    # the baseline AND says why, which is the behaviour that must survive.
+    # tests/test_portfolio_rule1.py caught this; the real fix for #713 item 2
+    # is that a probe verdict is no longer erased by a clock in the first
+    # place, plus the explicit NO VERDICT warning place_portfolio now prints.
     seen = set()
     for idx in list(ranking_primary) + list(ranking_static):
         if idx in seen:
