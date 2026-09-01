@@ -64,3 +64,6 @@ kicad_files/.history/
 
 # #411 perturbation working dirs -- boards and scoreboards, never committed
 wk/
+
+# #622 campaign run artifacts (boards/logs/plans) -- awx/ stays scripts-only
+awx/tmp/
