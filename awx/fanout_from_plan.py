@@ -928,7 +928,74 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
     if clean_ and not fl_p:
         print('  split GATE: plain engine fanout is DRC-clean and '
               'complete -- adopted, no B pass needed')
-        shutil.copy(probe, out_path)
+        # ...but a FORCED source split still applies. The K28 flank
+        # economy question lives exactly here: the gate adopts and
+        # exits, so TP_SRC_B_NETS could never reach a board whose
+        # plain fanout is clean -- yet the source copper is
+        # independent of the dest fanout. Same tooth walk as the
+        # split-path source pass below, against the ADOPTED board.
+        force_a = ([x for x in os.environ.get('TP_SRC_B_NETS', '')
+                    .split(',') if x and x in names]
+                   if os.environ.get('TP_SRC_B') else [])
+        tr_a, va_a = [], []
+        if force_a:
+            pcb_a = parse_kicad_pcb(probe)
+            oba = {}
+
+            def ob_a(nid, L):
+                if (nid, L) not in oba:
+                    oba[(nid, L)] = te.build_obstacles(pcb_a, nid,
+                                                       set(), L)
+                return oba[(nid, L)]
+
+            cxa = (dgrid.bbox[0] + dgrid.bbox[2]) / 2.0
+            cya = (dgrid.bbox[1] + dgrid.bbox[3]) / 2.0
+            pra = (te.VIA_SIZE - te.TRACK) / 2
+            laid_a = []
+            for n in force_a:
+                nid = byname[n][0]
+                t0 = launch[n]
+                tl = tooth0.get(n, 'F.Cu')
+                if tl == 'B.Cu':
+                    continue
+                h = math.hypot(cxa - t0[0], cya - t0[1]) or 1.0
+                u = ((cxa - t0[0]) / h, (cya - t0[1]) / h)
+                for j in range(4):
+                    site = (t0[0] + 0.4 * j * u[0],
+                            t0[1] + 0.4 * j * u[1])
+                    bend = (site[0] + 0.6 * u[0],
+                            site[1] + 0.6 * u[1])
+                    if any(ob_a(nid, L_).point_violation(site, pad=pra)
+                           is not None for L_ in LAYERS):
+                        continue
+                    if j and not ob_a(nid, tl).seg_clear(t0, site):
+                        continue
+                    if not ob_a(nid, 'B.Cu').seg_clear(site, bend):
+                        continue
+                    if j:
+                        tr_a.append({'start': t0, 'end': site,
+                                     'width': te.TRACK, 'layer': tl,
+                                     'net_id': nid})
+                    tr_a.append({'start': site, 'end': bend,
+                                 'width': te.TRACK, 'layer': 'B.Cu',
+                                 'net_id': nid})
+                    va_a.append({'x': site[0], 'y': site[1],
+                                 'size': te.VIA_SIZE,
+                                 'drill': te.VIA_DRILL,
+                                 'layers': ['F.Cu', 'B.Cu'],
+                                 'net_id': nid})
+                    laid_a.append(n)
+                    break
+            if laid_a:
+                print('  split SOURCE pass (adopted board): '
+                      + ','.join(laid_a))
+        if tr_a:
+            add_tracks_and_vias_to_pcb(
+                probe, out_path, tr_a, va_a, [],
+                net_id_to_name={i: n_.name
+                                for i, n_ in pcb_p.nets.items()})
+        else:
+            shutil.copy(probe, out_path)
         copy_pro(probe, out_path)
         print(f'\nwrote {out_path}: {len(tr_p)} tracks, {len(va_p)} '
               f'vias, {len(set(fl_p))} failed nets')

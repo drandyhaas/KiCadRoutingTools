@@ -1804,7 +1804,7 @@ class Corridor:
             gate = 'last' if need <= self.L_free - RESERVE else 'off'
         return sched.columns(gaps, lead, gate=gate), gate
 
-    def run(self):
+    def run(self, plan_only=False):
         ctx, log = self.ctx, self.log
         M = self.members
         log(f'\ncorridor {self.idx} ({len(M)}): {M}')
@@ -1849,6 +1849,11 @@ class Corridor:
         sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log,
                          dest_layer=ctx.dest_layer,
                          pages=getattr(ctx, 'pages', None))
+        if plan_only:
+            # #622 plan dump: the corridor's PLAN (orders + pages) with
+            # no copper -- the fanout-contract emitters read it
+            self.sched_cur = sched
+            return
         gaps = {d: 1 for d in sched.divers}
         lead = {d: 0 for d in sched.divers}
         boost = {}                # ribbon: refused lanes route earlier
@@ -2368,12 +2373,51 @@ def main():
     ap.add_argument('--cluster', type=float, default=6.0,
                     help='stub-end linkage distance (mm) for corridor '
                          'detection (the reach check does the real work)')
+    ap.add_argument('--plan-json', default=None,
+                    help='dump the plan (orders/pages per net) and stop')
     a = ap.parse_args()
     names = [n.strip() for n in a.nets.split(',') if n.strip()]
 
     def log(msg=''):
         print(msg)
     ctx, groups = setup(a.board, names, a.dest, log, cluster=a.cluster)
+    if a.plan_json:
+        # #622: dump the braid's PLAN (per net: corridor, launch index,
+        # target rank, page layer / swimmer + birth layer, tooth) and
+        # stop -- no routing, no board. Every corridor takes the run()
+        # prefix (spine, offsets, first Schedule); free-corner
+        # corridors too, since only their EXECUTION is free.
+        import json as _json
+        plan = {}
+        for ci, members in enumerate(groups):
+            c = Corridor(ci, members, ctx, log)
+            try:
+                c.run(plan_only=True)
+                sched = c.sched_cur
+            except Exception as e:
+                log(f'  plan-only corridor {ci} failed ({e}); '
+                    'orders only')
+                sched = None
+            for nm in members:
+                d = {'corridor': ci,
+                     'tooth': list(ctx.ends[nm][0]),
+                     'tooth_layer': ctx.tooth_layer[nm],
+                     'dest_layer': ctx.dest_layer[nm]}
+                if sched is not None:
+                    d['launch_idx'] = sched.lidx[nm]
+                    d['target_rank'] = sched.trank[nm]
+                    if nm in getattr(sched, 'swimmers', ()):
+                        d['page'] = None
+                        d['birth'] = sched.tl.get(nm, 'F.Cu')
+                    elif nm in getattr(sched, 'b_page', ()):
+                        d['page'] = 'B.Cu'
+                    else:
+                        d['page'] = 'F.Cu'
+                plan[nm] = d
+        with open(a.plan_json, 'w') as f:
+            _json.dump(plan, f, indent=1, sort_keys=True)
+        log(f'wrote plan: {a.plan_json}')
+        return 0
     corridors = []
     for ci, members in enumerate(groups):
         c = Corridor(ci, members, ctx, log)
