@@ -992,8 +992,13 @@ class PlacementTab(wx.Panel):
     def _pose_moves(self, board, result_pcb, pcbnew):
         """[(ref, live_fp, parsed_fp)] for every footprint whose pose differs."""
         moves = []
+        # Resolve by the PCBData key, not by the bare reference (#726): two
+        # blocks sharing a reference are `TP4` and `TP4~2`, and
+        # FindFootprintByReference would hand both of them the first block.
+        from gui_utils import live_footprints_by_key
+        live = live_footprints_by_key(board)
         for ref, parsed in sorted(result_pcb.footprints.items()):
-            fp = board.FindFootprintByReference(ref)
+            fp = live.get(ref) or board.FindFootprintByReference(ref)
             if fp is None:
                 continue  # part exists only in the result; never invent parts
             pos = fp.GetPosition()
@@ -1187,6 +1192,8 @@ class PlacementTab(wx.Panel):
         if board is None:
             return 0
         from kicad_parser import mm_to_iu
+        from gui_utils import live_footprints_by_key
+        _live_labels = live_footprints_by_key(board)
         applied = 0
         for r in result.get("results", []):
             action = getattr(r, "action", None) or (
@@ -1195,7 +1202,10 @@ class PlacementTab(wx.Panel):
                 continue
             get = (lambda k, _r=r: getattr(_r, k, None)) \
                 if not isinstance(r, dict) else r.get
-            fp = board.FindFootprintByReference(get("reference"))
+            # Same #726 resolution as _pose_moves: a label result names a
+            # PCBData key, which for a duplicated reference is `TP4~2`.
+            _k = get("reference")
+            fp = _live_labels.get(_k) or board.FindFootprintByReference(_k)
             if fp is None:
                 continue
             ref = fp.Reference()

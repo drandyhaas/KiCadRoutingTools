@@ -405,6 +405,38 @@ def refill_all_zones(board):
         return 0
 
 
+def live_footprints_by_key(board):
+    """{PCBData key: live pcbnew footprint} for a live board (#726).
+
+    `board.FindFootprintByReference(ref)` returns the FIRST footprint with that
+    reference, and `PCBData` keys duplicated references `TP4`, `TP4~2`, ... So
+    a bare lookup silently returns the WRONG twin for one of them and `None`
+    for the other -- and `None` is a `continue` at every call site, which is a
+    part the GUI quietly declines to apply.
+
+    Built with the same `disambiguate_references` over the same
+    `board.GetFootprints()` order that `build_pcb_data_from_board` uses, so the
+    keys are the ones the engine was handed. Returns `{}` if pcbnew is absent
+    or the board cannot be walked; callers fall back to their old lookup, which
+    is exactly today's behaviour.
+    """
+    try:
+        from kicad_parser import disambiguate_references
+        live = list(board.GetFootprints())
+        raw = []
+        for f in live:
+            r = f.GetReference()
+            if not r:
+                try:
+                    r = "#" + f.m_Uuid.AsString()
+                except Exception:
+                    r = "?"
+            raw.append(r)
+        return dict(zip(disambiguate_references(raw), live))
+    except Exception:                                            # noqa: BLE001
+        return {}
+
+
 def sync_footprint_positions_from_board(board, pcb_data):
     """Refresh footprint and pad POSITIONS in pcb_data from the live pcbnew board
     (#362).
@@ -432,9 +464,27 @@ def sync_footprint_positions_from_board(board, pcb_data):
     try:
         import math
         import pcbnew
+        from kicad_parser import disambiguate_references
         n = 0
-        for bfp in board.GetFootprints():
-            ref = bfp.GetReference()
+        # Names are resolved for the WHOLE board and zipped on, exactly as
+        # `build_pcb_data_from_board` does (#726). A bare `GetReference()`
+        # lookup was the footprint-level twin of the pad bug this function's
+        # docstring already describes: on a board with two `TP4` blocks both
+        # of them looked up the ONE `TP4` entry, so the second overwrote the
+        # first's pose and the parts moved onto each other in the cached model
+        # -- the same class of silent corruption, one level up.
+        _live = list(board.GetFootprints())
+        _raw = []
+        for _f in _live:
+            _r = _f.GetReference()
+            if not _r:
+                try:
+                    _r = "#" + _f.m_Uuid.AsString()
+                except Exception:
+                    _r = "?"
+            _raw.append(_r)
+        _keys = disambiguate_references(_raw)
+        for bfp, ref in zip(_live, _keys):
             pd_fp = pcb_data.footprints.get(ref)
             if pd_fp is None:
                 continue
