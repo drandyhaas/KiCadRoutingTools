@@ -178,8 +178,47 @@ def copy_siblings(src_board: str, dst_board: str) -> None:
 # WHOLE, not merely pairwise against the original board. The caller owns the
 # snapshot/restore bracket.
 
+def jitter_lattice(pcb_data, radius: float) -> Tuple[Optional[float], Dict]:
+    """The pitch a jitter OFFSET is a multiple of, or None for no snap (#826).
+
+    NOT `board_grid.resolve_snap_lattice`, and the difference is the whole
+    design. That function's fallback is `grid_step`, which is the right off
+    state for the QUENCH -- whose offsets were already multiples of `step`, so
+    falling back to the raster restored exactly today's granularity. The jitter
+    is CONTINUOUS, so snapping a no-lattice board to the 0.1 raster would
+    change behaviour to buy nothing. The off state here is no snap at all, and
+    the board still reaches it rather than a flag. Calling `resolve_snap_lattice`
+    and then undoing its fallback would also write `resolved: 0.1` into the
+    evidence while nothing snapped to 0.1, which is worse than useless.
+
+    Refuses a lattice COARSER than the radius: below it the disc holds no
+    destination but the seed itself, so every candidate goes barren and the CLI
+    exits 4 without anything naming a lattice. Measured on interf_u_unrouted
+    (0.3175): `--radius 0.3175` still perturbs 22 of 22 parts, `--radius 0.3`
+    perturbs 0 of 22 after burning 440 draws. `> radius`, not `>=`, because the
+    equality case demonstrably works.
+
+    No coarse-lattice guard beyond that, deliberately: `infer_board_grid` can
+    only ever return 0.05 or 0.3175 (only those two rungs have no proper
+    divisor in the ladder), and at radius 4.0 a 0.3175 lattice offers ~500
+    destinations of which `SAMPLE_ATTEMPTS` consumes one. Starvation is
+    unreachable here, unlike at the fanout repair site.
+    """
+    from placement.board_grid import infer_board_grid
+    ev = infer_board_grid(pcb_data)
+    step = ev['step']
+    if step is not None and step > radius:
+        ev = dict(ev, reason='inferred %g mm exceeds the %g mm jitter radius, '
+                             'which would leave the disc no destination but '
+                             'the seed' % (step, radius))
+        step = None
+    return step, dict(ev, source='inferred' if step is not None else 'none',
+                      resolved=step)
+
+
 def perturb_jitter(state, refs: Sequence[str], rng: random.Random,
-                   radius: float, attempts: int = SAMPLE_ATTEMPTS) -> List[Dict]:
+                   radius: float, attempts: int = SAMPLE_ATTEMPTS, *,
+                   lattice: Optional[float] = None) -> List[Dict]:
     """Uniform-disc offset per free ref, rotation unchanged. The direct
     basin-escape for a zero-temperature descent: the quench cannot leave a
     local minimum, so the seed does it instead, bounded by `radius`.
@@ -190,7 +229,24 @@ def perturb_jitter(state, refs: Sequence[str], rng: random.Random,
     would happily walk one inboard and silently break its overhang spec) and
     dense hand-packed parts already under the courtyard clearance (any
     accepted sample would be a lateral trade the quench's own gate refuses).
-    Skipping draws nothing from the rng, so the stream stays stable."""
+    Skipping draws nothing from the rng, so the stream stays stable.
+
+    `lattice` (#826) is the pitch the OFFSET is a multiple of, or None for the
+    continuous sampler this has always been. Given one, the escape still goes
+    anywhere in the disc -- it just arrives on the grid the board was laid out
+    on, so the quench that follows can preserve a lattice instead of inheriting
+    an arbitrary residue. Measured: on 10 of the 11 tracked boards that declare
+    a lattice, the continuous sampler destroyed it before the quench ever
+    parsed the seed board (`tests/measure_826_jitter_lattice.py`).
+
+    None is the default and `portfolio.generate` is the only caller that passes
+    a lattice. `perturb.py`'s `scatter` damage kind deliberately does not: its
+    own comment calls it "the POSITIVE CONTROL ... the arm that MUST recover",
+    and a snapped offset would land the part exactly on the coset the quench
+    generates from -- one nudge reaches it -- making the control easier to
+    pass. That is the one direction a positive control must not move.
+    """
+    from placement.utility import snap_to_grid
     poses: List[Dict] = []
     for ref in refs:
         part = state.parts.get(ref)
@@ -201,8 +257,32 @@ def perturb_jitter(state, refs: Sequence[str], rng: random.Random,
         for _ in range(attempts):
             r = radius * math.sqrt(rng.random())
             th = 2.0 * math.pi * rng.random()
-            x = round(part.x + r * math.cos(th), 4)
-            y = round(part.y + r * math.sin(th), 4)
+            dx = r * math.cos(th)
+            dy = r * math.sin(th)
+            if lattice is not None:
+                # The OFFSET, never `part.x + dx`. `part.x` carries the board's
+                # own phase and is not generally a multiple of anything, so
+                # snapping the SUM would discard exactly what this is for.
+                # #708's form, at a fourth site.
+                dx = snap_to_grid(dx, lattice)
+                dy = snap_to_grid(dy, lattice)
+                if dx == 0.0 and dy == 0.0:
+                    # Not a perturbation. Accepting it would be guaranteed to
+                    # succeed -- `candidate_valid` on the incumbent pose was
+                    # just asserted above -- so it would emit a pose identical
+                    # to the seed, inflate the "N part(s) perturbed" line, and
+                    # put a ref in `poses` that `_displacement` (d > 1e-4) does
+                    # not count as moved.
+                    continue
+                if math.hypot(dx, dy) > radius + 1e-9:
+                    # Snapped OUT of the disc. Tested AFTER the snap so the
+                    # radius stays an exact bound, as `quench._candidate_
+                    # positions` and `fanout_clearance` both do -- `--radius`
+                    # is a number the operator reasons with ("10mm-class values
+                    # destroy corridors"), not a soft target.
+                    continue
+            x = round(part.x + dx, 4)
+            y = round(part.y + dy, 4)
             if state.candidate_valid(ref, x, y, part.rot):
                 state.apply_move(ref, x, y, part.rot)
                 poses.append({'reference': ref, 'new_x': x, 'new_y': y,
@@ -423,6 +503,23 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
         grid_step=qkw.get('grid_step', 0.1), ignore_ids=ids)
     origin = {ref: (p.x, p.y, p.rot) for ref, p in oracle.parts.items()}
 
+    # #826: resolved ONCE, from the INPUT board, never from the oracle state.
+    # `--only N` must regenerate candidate N byte-identically without running
+    # 1..N-1, so the lattice has to be a function of (input_file, radius)
+    # alone -- a read off a partially-perturbed state would make it depend on
+    # what earlier candidates did and the ledger's replay primitive would
+    # silently stop replaying. `board_coordinates`' own docstring forbids a
+    # filtered sample for the same reason.
+    lattice, lattice_ev = jitter_lattice(pcb, radius)
+    if lattice is not None:
+        print("[portfolio] jitter offsets snap to %g mm (inferred, %.0f%% of "
+              "%d footprint coordinates)"
+              % (lattice, 100.0 * lattice_ev['occupancy'],
+                 lattice_ev['n_values']))
+    else:
+        print("[portfolio] jitter offsets are continuous (no snap: %s)"
+              % lattice_ev['reason'])
+
     baseline: Optional[Candidate] = None
     if only is None:
         print(f"[portfolio] candidate 0 (baseline): plain quench")
@@ -452,7 +549,8 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
         snap = _snapshot(oracle, free)
         note = ''
         if strategy == 'jitter':
-            poses = perturb_jitter(oracle, free, rng, radius)
+            poses = perturb_jitter(oracle, free, rng, radius,
+                                   lattice=lattice)
         elif strategy == 'poses':
             poses = perturb_poses(oracle, free, (i - 1) // len(strategies))
             if poses is None:
@@ -493,7 +591,8 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
         cand.metrics = _quench_metrics(m)
         candidates.append(cand)
 
-    return {'baseline': baseline, 'candidates': candidates, 'free': free}
+    return {'baseline': baseline, 'candidates': candidates,
+            'free': free, 'jitter_lattice': lattice_ev}
 
 
 def _quench_metrics(m: Dict) -> Dict:
@@ -510,7 +609,22 @@ def _quench_metrics(m: Dict) -> Dict:
             # the layer is off, keeping old-metric candidates comparable).
             'pad_conflict_pairs': leg.get('pad_conflict_pairs', 0),
             'pad_shortfall': leg.get('pad_shortfall', 0.0),
-            'hole_shortfall': leg.get('hole_shortfall', 0.0)}
+            'hole_shortfall': leg.get('hole_shortfall', 0.0),
+            # #826: which lattice THIS candidate's quench saw, in the same
+            # three-scalar vocabulary check_pockets' census uses. Before the
+            # jitter snapped, `board_grid_step` was None on every jitter
+            # candidate of a lattice board while the baseline's was 0.3175 --
+            # so comparing a candidate's against the baseline's, in one
+            # document, is the whole issue in one line.
+            #
+            # Read `_step`, never `_occupancy`: infer_board_grid leaves
+            # occupancy at None on the DECLINING branch, which is exactly the
+            # branch the defect produces, so an assertion against it is
+            # vacuous or a TypeError. The number lives in `_reason`.
+            'board_grid_step': (m.get('board_grid') or {}).get('step'),
+            'board_grid_occupancy': (m.get('board_grid') or {}).get(
+                'occupancy'),
+            'board_grid_reason': (m.get('board_grid') or {}).get('reason')}
 
 
 # --------------------------------------------------------------------------
