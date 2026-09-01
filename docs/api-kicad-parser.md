@@ -181,6 +181,8 @@ default for vias you ADD.
 | `value` | str | Component value (`'100nF'`, `'MCF5213'`) |
 | `clearance` | float | Footprint-level `(clearance …)` override in mm (0 = none). Already **resolved into** each pad's `local_clearance` at parse time — read that field for clearance decisions; this records the raw footprint value (issue #326). |
 | `net_tie_groups` | List[List[str]] | Pad-number groups the footprint deliberately shorts (`(net_tie_pad_groups "1, 2")` — Kelvin shunts, net-ties). KiCad's clearance exemption between the grouped pads is **local**: a tied net's copper may contact the partner pad only where the contact lies on its own pad. Query per-net via `pcb.net_tie_exempt_pad_ids(net_id)`. |
+| `owns_edge_cuts` | bool | The footprint draws Edge.Cuts geometry of its own (`fp_line`/`fp_rect`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_curve` on that layer, issue #829). Its `(at x y rot)` therefore transforms part of the board outline. |
+| `owns_board_outline` | bool | ...and that geometry lies **outside every ring the board-level Edge.Cuts forms**, so it *is* the board boundary — moving the footprint resizes the board. False for a milled relief or window parented to a part so it travels **with** it (crkbd draws 184 per-LED windows that way; see #628), which stays movable. **Movers gate on this field, never on `owns_edge_cuts`.** Computed by `kicad_parser.footprint_outline_owners` (text) and `footprint_outline_owners_from_pcbnew` (live board), which share one decision function. |
 
 ### `Zone`
 

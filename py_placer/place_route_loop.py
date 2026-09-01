@@ -472,6 +472,11 @@ def nets_to_refs(pcb_data, net_names, max_pins, locked_patterns):
         if locked_patterns and any(fnmatch.fnmatch(ref, p)
                                    for p in locked_patterns):
             continue
+        # #829: never offer a footprint that draws the board outline as a
+        # target. QuenchState would lock it anyway, so this stops the loop
+        # naming a target it cannot move rather than preventing a move.
+        if getattr(fp, 'owns_board_outline', False):
+            continue
         out.add(ref)
     return out
 
@@ -484,12 +489,21 @@ def _locked_out(pcb_data, locked_patterns):
     #553 -- "the part that needs to move is never a passive". So a diagnosis
     may offer a 100-pin IC the pin selector would have refused, and that is the
     feature. It may not offer a part the operator locked, and that is the rule.
-    The ranking says what SHOULD move; the lock says what MAY."""
+    The ranking says what SHOULD move; the lock says what MAY.
+
+    #829 adds a second source to the same "what MAY" question: a footprint that
+    draws the board's own outline. Nothing here can move it -- QuenchState locks
+    it downstream, and its lock is monotone -- so this is about HONESTY rather
+    than safety: without it the loop names a target it will then silently fail
+    to move, and the reader is left looking for a lock that is not in the file.
+    """
     import fnmatch
+    out = {r for r, fp in (pcb_data.footprints or {}).items()
+           if getattr(fp, 'owns_board_outline', False)}
     if not locked_patterns:
-        return set()
-    return {r for r in (pcb_data.footprints or {})
-            if any(fnmatch.fnmatch(r, p) for p in locked_patterns)}
+        return out
+    return out | {r for r in (pcb_data.footprints or {})
+                  if any(fnmatch.fnmatch(r, p) for p in locked_patterns)}
 
 
 def block_census(pcb_data) -> str:

@@ -990,9 +990,24 @@ class PlacementTab(wx.Panel):
         self.append_log("Placement apply: " + msg + "\n")
 
     def _pose_moves(self, board, result_pcb, pcbnew):
-        """[(ref, live_fp, parsed_fp)] for every footprint whose pose differs."""
+        """[(ref, live_fp, parsed_fp)] for every footprint whose pose differs.
+
+        #829: a footprint that draws the board's own outline is skipped here.
+        This applier is a SECOND mover -- it writes poses onto the live board
+        with SetPosition/SetOrientationDegrees/Flip and never goes through
+        `placement.writer.write_placed_output`, so the CLI-side guard does not
+        reach it. And it cannot be assumed safe because the CLI already
+        refused: the move list is a diff of the RESULT board against the LIVE
+        board, not a replay of what the CLI decided, so a live board that has
+        drifted from the staged input (the user nudged something in KiCad while
+        the run was going) produces moves the CLI never proposed. `Flip` is the
+        worst of them -- it MIRRORS the owned geometry, which no amount of
+        inspection recovers.
+        """
         moves = []
         for ref, parsed in sorted(result_pcb.footprints.items()):
+            if getattr(parsed, 'owns_board_outline', False):
+                continue
             fp = board.FindFootprintByReference(ref)
             if fp is None:
                 continue  # part exists only in the result; never invent parts

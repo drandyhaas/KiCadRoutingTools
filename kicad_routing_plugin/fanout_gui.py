@@ -2194,9 +2194,18 @@ class FanoutTab(wx.Panel):
                                    if t else None),
             )
 
+            # #829: skip a cap that draws the board's own outline. The engine's
+            # own cap gate already excludes it, so this should never trigger --
+            # but this loop applies poses to the live board directly, without
+            # `write_placed_output`, so it is the CLI's raise-on-refusal
+            # backstop that is missing on this front and this is where it goes.
             for p in result.get('placements', []):
                 fp = board.FindFootprintByReference(p['reference'])
                 if fp is None:
+                    continue
+                _pd = (pcb_data.footprints.get(p['reference'])
+                       if pcb_data is not None else None)
+                if getattr(_pd, 'owns_board_outline', False):
                     continue
                 fp.SetOrientationDegrees(p['new_rotation'])
                 fp.SetPosition(pcbnew.VECTOR2I(
