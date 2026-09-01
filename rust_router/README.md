@@ -313,6 +313,10 @@ src/
 
 ### 0.21.4 (2026-08-30)
 
+- **The 0.21.4 crate binaries are published in the v0.21.5 release**
+  (2026-09-01) -- v0.21.4 itself shipped before this crate work landed and
+  carries 0.21.1-built assets, so `build_router.py` on a 0.21.2..0.21.4 crate
+  had to build from source until v0.21.5 (the 0.20.1/0.20.2 pattern).
 - The UNSTAMP twins of 0.21.3's span adds: `remove_blocked_cell_spans_batch`
   (N x 4) and `remove_blocked_via_spans_batch` (N x 3), same inclusive-bounds
   row layout, expanded in Rust.
