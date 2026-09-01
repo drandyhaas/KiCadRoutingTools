@@ -146,7 +146,8 @@ def write_label_output(input_file: str, output_file: str,
         if not ref_m:
             # A reference-LESS block has no Reference node to edit. The parser
             # keys it `#uuid` and `placement/labels.py` already skips those, so
-            # a result for one cannot be produced -- but say nothing silently.
+            # a result for one should not exist -- and if one ever does, it
+            # is named rather than dropped in silence.
             unaddressed.append(key)
             continue
 
