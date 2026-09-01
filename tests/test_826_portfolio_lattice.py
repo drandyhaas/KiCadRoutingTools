@@ -25,6 +25,28 @@ if ignored:
 The radius arms script the rng for the same reason: an outward-snapping draw is
 1-6 per board, likely but not guaranteed, and an arm that depends on one being
 drawn goes quietly vacuous the day a fixture changes.
+
+MEASURED, `tests/mutate_826.py`, second run: 11 rows, 11 killed, 0 survived,
+0 broken. The table, from the run:
+
+    the-jitter-snap-is-dropped                               KILLED   8
+    the-jitter-snaps-the-absolute-pose                       KILLED   7
+    the-offset-snaps-to-the-raster-not-the-lattice           KILLED   9
+    a-zero-offset-counts-as-a-perturbation                   KILLED   3
+    the-radius-test-goes-back-before-the-snap                KILLED   2
+    the-lattice-falls-back-to-the-grid-step-raster           KILLED   5
+    the-radius-guard-is-dropped                              KILLED   3
+    the-generator-does-not-pass-the-lattice                  KILLED   5
+    the-lattice-is-resolved-per-candidate-from-the-live-state KILLED   6
+    the-default-becomes-the-inferred-lattice                 KILLED   1
+    the-disclosure-drops-the-board-grid                      KILLED   2
+
+The first run killed 10 of 11. The survivor was `the-disclosure-drops-the-
+board-grid`, and it was a hole in THIS file rather than in the engine: the
+end-to-end arm compared the candidate's `board_grid_step` against the
+BASELINE's, so a mutation nulling the whole disclosure made both None and
+`None == None` passed. Both are now asserted against the input board's own
+inferred lattice. Two things that vanish together are not an agreement.
 """
 
 import math
