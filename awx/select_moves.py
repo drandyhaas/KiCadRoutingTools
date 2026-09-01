@@ -100,6 +100,25 @@ def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
     return path
 
 
+# The router's own via/length exchange rate: a via costs 75 units on
+# the 0.1 mm grid, i.e. one via == 7.5 mm of track. Every objective
+# that mixes vias with distance converts at this ONE rate.
+VIA_MM = 7.5
+
+
+def ride_mm(sel: Dict[str, 'Move'], launch: Dict[str, Pt],
+            keep_out) -> float:
+    """Total corridor ride length the destination choice implies: each
+    net's around-the-array distance from its launch point to its berth
+    exit. The judged plan objective adds this at VIA_MM per via so a
+    berth on a far face pays its wrap -- the general cost that replaces
+    face restrictions (a floor-only objective walked berths to far
+    faces for free and unrestricted plans routed WORSE than restricted
+    ones)."""
+    return sum(around_box(launch[n], m.exit_pt, keep_out)
+               for n, m in sel.items() if n in launch)
+
+
 def around_box(a: Pt, b: Pt, box, pad: float = 0.3) -> float:
     """Distance from a to b that does not cross `box`. The straight
     line when it misses; otherwise the shorter of the two ways round,
