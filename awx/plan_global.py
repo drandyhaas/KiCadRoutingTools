@@ -370,6 +370,14 @@ def solve(base_path, out_prefix, nets=None, src='U1', dst='DU1',
     pcb = parse_kicad_pcb(base_path)
     u1 = Lattice(pcb, src)
     du = Lattice(pcb, dst)
+    # a net without a ball in BOTH arrays is outside this two-array
+    # solve (K51's SZQ ends at a calibration resistor, not the DRAM);
+    # it keeps its board pose and the chain routes it as ever
+    scoped = [n for n in nets if n in u1.ball and n in du.ball]
+    if len(scoped) != len(nets):
+        print(f'  out of scope (no ball in {src} and {dst}): '
+              f'{sorted(set(nets) - set(scoped))}')
+    nets = scoped
     u1.reserve_board(pcb, skip_nets=set(nets))
     du.reserve_board(pcb, skip_nets=set(nets))
     pinned_du = (berth_ends(pin_du, nets, du) if pin_du else {})

@@ -200,6 +200,10 @@ strip_set = set()
 for s in base.segments:
     if RW[0] <= s.start_x <= RW[2] and RW[1] <= s.start_y <= RW[3]:
         strip_set.add(id2short[s.net_id])
+# only rip what we will re-lay: a net in the window but out of the
+# contract (K51's SZQ -- no ball in the dest array) keeps its pose,
+# else it ships with ZERO copper and the chain has no stub to braid
+strip_set &= set(contract)
 
 
 def in_rip(x, y):
