@@ -399,7 +399,7 @@ class Corridor:
             kept = [n for n in kept if n != worst]
 
 
-def corridors(choice: Dict[str, Move]) -> List[List[str]]:
+def corridor_groups(choice: Dict[str, Move]) -> List[List[str]]:
     """The unit a corridor actually routes: EVERY net leaving on one
     side, not one taut-path cluster.
 
@@ -788,19 +788,19 @@ def select(menu: Dict[str, List[Move]],
     # recomputed from `choice` because the greedy pass is allowed to
     # send a net off its bus side when the side is full.
     if buses and geo:
-        refine_lis(choice, corridors(choice), menu, geo, _free, log=log)
+        refine_lis(choice, corridor_groups(choice), menu, geo, _free, log=log)
 
     # --- fixed point: exits decide the divers, divers decide the
     # preferred escape layer, which decides the exits
     if buses and tooth_layer and geo:
         best = dict(choice)
-        best_s = score(best, corridors(best), geo, tooth_layer)
+        best_s = score(best, corridor_groups(best), geo, tooth_layer)
         if log:
             log(f'  align round 0: vias {best_s[0]}, floor {best_s[1]}, '
                 f'mismatch {best_s[2]}')
         for r in range(align_rounds):
             want_layer.clear()
-            want_layer.update(delivered_layers(choice, corridors(choice),
+            want_layer.update(delivered_layers(choice, corridor_groups(choice),
                                                geo, tooth_layer))
             taken.clear()
             placed_legs.clear()
@@ -820,9 +820,9 @@ def select(menu: Dict[str, List[Move]],
                 taken.append(pick)
             if len(trial) < len(choice):
                 break                      # lost a net: reject the round
-            refine_lis(trial, corridors(trial), menu, geo, _free,
+            refine_lis(trial, corridor_groups(trial), menu, geo, _free,
                        prefer_layer=want_layer)
-            s = score(trial, corridors(trial), geo, tooth_layer)
+            s = score(trial, corridor_groups(trial), geo, tooth_layer)
             if log:
                 log(f'  align round {r + 1}: vias {s[0]}, floor {s[1]}, '
                     f'mismatch {s[2]}')

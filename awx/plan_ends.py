@@ -110,7 +110,7 @@ def refine_source(src_choice: Dict[str, Move],
             return (sm.plan_floor(dst_choice, geo)
                     + sm.ride_mm(dst_choice, launch_c, dst_box)
                     / sm.VIA_MM)
-        tv = sm.true_vias(dst_choice, sm.corridors(dst_choice), geo, tooth_c)
+        tv = sm.true_vias(dst_choice, sm.corridor_groups(dst_choice), geo, tooth_c)
         tv += sum(m.vias - seed_vias.get(n, 0) for n, m in src_c.items())
         if geo_fn:
             nc, _fl, over, cols = geo.cost(dst_choice)
@@ -227,7 +227,7 @@ def plan_ends(src_menu: Dict[str, List[Move]],
             # for free; DIRS= was the board-specific patch for it)
             return (sm.plan_floor(dst_c, geo)
                     + sm.ride_mm(dst_c, launch_c, dst_box) / sm.VIA_MM)
-        tv = (sm.true_vias(dst_c, sm.corridors(dst_c), geo, tooth_c)
+        tv = (sm.true_vias(dst_c, sm.corridor_groups(dst_c), geo, tooth_c)
               + sum(m.vias for m in src_c.values()))
         if model is not None:
             nc, _fl, over, cols = geo.cost(dst_c)

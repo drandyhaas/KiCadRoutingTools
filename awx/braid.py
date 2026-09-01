@@ -389,9 +389,9 @@ def _end_dir(pcb, nid, pt, pads):
     return (v[0] / h, v[1] / h) if h > 1e-6 else (1.0, 0.0)
 
 
-def _relax_pitch(vals, floor, pinned=()):
+def _relax_pitch(vals, floor):
     """Push a sorted list of offsets apart to at least `floor`,
-    symmetrically, never moving a pinned index."""
+    symmetrically."""
     py = list(vals)
     for _ in range(60):
         moved = False
@@ -399,10 +399,8 @@ def _relax_pitch(vals, floor, pinned=()):
             g_ = py[i + 1] - py[i]
             if g_ < floor - 1e-9:
                 push = (floor - g_) / 2
-                if i not in pinned:
-                    py[i] -= push if i + 1 not in pinned else 2 * push
-                if i + 1 not in pinned:
-                    py[i + 1] += push if i not in pinned else 2 * push
+                py[i] -= push
+                py[i + 1] += push
                 moved = True
         if not moved:
             break
@@ -966,7 +964,7 @@ class Corridor:
             u = [x * scale for x in u]
         pitches = [b - a for a, b in zip([0.0] + u, u)]
         self.W = min(pitches) if pitches else L_avail
-        self.layout_need, self.cols = need, cols
+        self.layout_need = need
         self.all_cols = list(cols)
         # slot midpoints: before the first column, between columns,
         # after the last
@@ -975,13 +973,6 @@ class Corridor:
             s_m.append(self.s_of_u((u[k - 1] + u[k]) / 2))
         if n:
             s_m.append(self.s_of_u((u[-1] + L_avail) / 2))
-        self.invol, self.first, self.last = {}, {}, {}
-        for k, col in enumerate(cols):
-            for (d, p) in col:
-                self.invol.setdefault(d, []).append(k)
-                self.invol.setdefault(p, []).append(k)
-                self.first.setdefault(d, k)
-                self.last[d] = k
         # REQUIRED layers. A page lane is on its page over the whole
         # schedule region (from a via's room past s0, so a tooth on the
         # other layer can dive), which is what makes an F-page / B-page
@@ -2140,7 +2131,6 @@ class Corridor:
                     self.out_segs[nm], self.out_vias[nm] = segs_o, vias_o
             finally:
                 ctx.cfg = cfg0
-        self.sched = sched
         self.finish()
 
     def _rip_assist(self, nm, others, log):
@@ -2288,7 +2278,6 @@ class Corridor:
                              sp.lane_xy(self.mid[nm]))] for nm in self.members}
         self.lane_xy = {nm: [self.teeth[nm]] + self.mid_xy[nm][0][1]
                         + [self.stubs[nm]] for nm in self.members}
-        self.sched = None
         routed = set()
         for nm in sorted(self.members, key=lambda n: self.st[n][1]):
             nid, _ = ctx.byname[nm]
@@ -2446,7 +2435,6 @@ def setup(board, names, dest, log, cluster=6.0):
     ends = endpoints(pcb, names, byname, dest_ref=dest)
     ctx = Ctx()
     ctx.pcb, ctx.byname, ctx.ends, ctx.kids = pcb, byname, ends, kids
-    ctx.names = list(names)
     ctx.tooth_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][0], 'F.Cu')
                        for nm in names}
     ctx.dest_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][1], 'F.Cu')

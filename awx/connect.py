@@ -118,33 +118,6 @@ class ObsCache:
         return precompute_net_obstacles(shell, VIRTUAL_NET, self.cfg)
 
 
-def tube_mask(xs: np.ndarray, ys: np.ndarray, pieces, layer: str
-              ) -> np.ndarray:
-    """The cells within a tube around a polyline: `pieces` is a list of
-    (p, q, half_width, layers) segments, and the mask is True at
-    (xs[i], ys[j]) -- shape (len(xs), len(ys)) -- where some piece
-    whose `layers` contains `layer` passes within `half_width`. This is
-    the general corridor shape: a lane that turns a corner, peels off
-    to a face, or goes round the far side of an array is a polyline,
-    not a function of x, and its corridor is the tube around it."""
-    X = xs[:, None]
-    Y = ys[None, :]
-    m = np.zeros((len(xs), len(ys)), dtype=bool)
-    for (p, q, half, layers) in pieces:
-        if layer not in layers:
-            continue
-        dx, dy = q[0] - p[0], q[1] - p[1]
-        L2 = dx * dx + dy * dy
-        if L2 < 1e-12:
-            d2 = (X - p[0]) ** 2 + (Y - p[1]) ** 2
-        else:
-            t = ((X - p[0]) * dx + (Y - p[1]) * dy) / L2
-            t = np.clip(t, 0.0, 1.0)
-            d2 = (X - (p[0] + t * dx)) ** 2 + (Y - (p[1] + t * dy)) ** 2
-        m |= d2 <= half * half
-    return m
-
-
 def _band_cells(coord: GridCoord, window: PCBData, band,
                 layers: List[str], slack: float) -> np.ndarray:
     """Every window cell outside the band, as an (N, 3) int32 array for

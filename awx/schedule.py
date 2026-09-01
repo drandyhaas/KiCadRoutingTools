@@ -213,7 +213,6 @@ class Schedule:
                      key=lambda nm: trank[nm])
         downs = sorted((d for d in divers if trank[d] >= lidx[d]),
                        key=lambda nm: -trank[nm])
-        self.dirs = {d: (-1 if trank[d] < lidx[d] else 1) for d in divers}
         # a diver whose tooth already sits on B.Cu is BORN diving: it
         # needs no dive via if it reaches its first own crossing on B.
         # It takes no special place in the priority: moving B-born
@@ -233,7 +232,6 @@ class Schedule:
         # below it. The serial pass sees the sequence as it stands when
         # the diver moves, so its direction is the one the wave must
         # use; the global one deadlocked the wave.
-        self.mover_set: Dict[str, List[str]] = {d: [] for d in self.priority}
         sseq = list(self.launch)
         placed = set(nm for nm in self.launch if nm not in divers)
         for d in self.priority:
@@ -248,10 +246,6 @@ class Schedule:
             for j, e in enumerate(rest):
                 if e in placed and trank[e] < trank[d]:
                     want = j + 1
-            passed_ser = rest[want:i] if want <= i else rest[i:want]
-            self.mover_set[d] = list(passed_ser)
-            if want != i:
-                self.dirs[d] = -1 if want < i else 1
             sseq = rest[:want] + [d] + rest[want:]
             placed.add(d)
         assert sseq == self.target, (sseq, self.target)

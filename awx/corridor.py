@@ -119,26 +119,6 @@ def point_after_start(pts: Sequence[Pt], fwd: float) -> Pt:
     return point_before_end(list(reversed(pts)), fwd)
 
 
-def furthest_members(names: Sequence[str], paths, stubs,
-                     slack: float = 1.0) -> List[str]:
-    """The members whose stubs reach furthest along the group's mean
-    flow: the ones the spine must be built from, so that everyone
-    else's stub projects onto its interior instead of past its end
-    (a group exiting on two faces of one chip has its mean path ending
-    inside the chip; the spine follows the members that go on)."""
-    M = simplify(mean_path([paths[nm] for nm in names]), 0.1)
-    if len(M) < 2:
-        return list(names)
-    ex, ey = M[-1]
-    dx, dy = M[-1][0] - M[-2][0], M[-1][1] - M[-2][1]
-    h = math.hypot(dx, dy) or 1.0
-    dx, dy = dx / h, dy / h
-    t = {nm: (stubs[nm][0] - ex) * dx + (stubs[nm][1] - ey) * dy
-         for nm in names}
-    top = max(t.values())
-    return [nm for nm in names if t[nm] >= top - slack]
-
-
 def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
                       pad_clear, D: float = 4.0, log=None,
                       spine_fn=None, dest_ref=None, centres=None,
@@ -661,13 +641,3 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
 
 # ---------------------------------------------------------------- distances
 
-def seg_dist(a: Pt, b: Pt, c: Pt, e: Pt) -> float:
-    return ts.seg_seg_dist(a, b, c, e)
-
-
-def polyline_near(pa: Sequence[Pt], pb: Sequence[Pt], within: float) -> bool:
-    for p, q in zip(pa, pa[1:]):
-        for r, s_ in zip(pb, pb[1:]):
-            if ts.seg_seg_dist(p, q, r, s_) <= within:
-                return True
-    return False

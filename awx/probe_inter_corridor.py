@@ -80,7 +80,7 @@ for nm in names:
 geo = sm.Corridor(grid0.bbox, launch)
 choice, _ = sm.select(menu, launch, keep_out=grid0.bbox, buses=buses,
                       tooth_layer=tooth_layer)
-corr = sm.corridors(choice)
+corr = sm.corridor_groups(choice)
 of = {n: i for i, g in enumerate(corr) for n in g}
 dl = sm.delivered_layers(choice, corr, geo, tooth_layer)
 

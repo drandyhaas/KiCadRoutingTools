@@ -17,7 +17,7 @@ actually leaves the pad, and compared with what was asked for.
 The negative control is the same run with the hints withheld
 (--no-hints), which is what the production fanout does today.
 
-usage: fanout_from_plan.py OUT.kicad_pcb [K] [--no-hints] [--both-ends]
+usage: fanout_from_plan.py OUT.kicad_pcb [K] [--no-hints]
 """
 import math
 import os
@@ -62,7 +62,6 @@ out_path = sys.argv[1]
 rest = [a for a in sys.argv[2:] if not a.startswith('-')]
 K = rest[0] if rest else '21'
 NO_HINTS = '--no-hints' in sys.argv
-BOTH = '--both-ends' in sys.argv
 METHOD = next((a.split('=', 1)[1] for a in sys.argv
                if a.startswith('--escape-method=')), 'auto')
 # Restrict the plan to one exit side. The braid delivers from the WEST

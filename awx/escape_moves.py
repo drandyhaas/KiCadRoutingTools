@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 Pt = Tuple[float, float]
 
@@ -47,11 +47,6 @@ class Grid:
     pitch_y: float
     bbox: Tuple[float, float, float, float]
 
-    def col_of(self, x: float) -> int:
-        return min(range(len(self.xs)), key=lambda i: abs(self.xs[i] - x))
-
-    def row_of(self, y: float) -> int:
-        return min(range(len(self.ys)), key=lambda i: abs(self.ys[i] - y))
 
 
 @dataclass
@@ -93,8 +88,6 @@ def grid_of(footprint) -> Grid:
 
 
 DIRS = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
-DIAGS = {'left': ((-1, -1), (-1, 1)), 'right': ((1, -1), (1, 1)),
-         'up': ((-1, -1), (1, -1)), 'down': ((-1, 1), (1, 1))}
 
 
 def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
@@ -174,10 +167,3 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
     return out
 
 
-def summarise(moves: List[Move]) -> str:
-    if not moves:
-        return 'BOXED IN'
-    by = {}
-    for m in moves:
-        by.setdefault(m.kind, []).append(m)
-    return '  '.join(f'{k}:{len(v)}' for k, v in sorted(by.items()))
