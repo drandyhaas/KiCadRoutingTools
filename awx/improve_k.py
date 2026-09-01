@@ -119,6 +119,11 @@ def group_try(flip_net, flip_val, stranded, label, depth=2):
     new opens appended -- the group of the group."""
     global FO, SIDECAR, best_score, best_board, plan, own, cur_pages
     global rides, divers, model
+    tk = tried_key(('group', flip_net, flip_val, tuple(stranded),
+                    depth))
+    if tk in TRIED:
+        return False                        # a hit is always a reject
+    TRIED[tk] = True
     # pages-only composition FIRST: re-page each stranded net rather
     # than relaying its tooth -- free (one braid, no copper change),
     # and the only move available to a net whose ball can escape on
@@ -193,6 +198,10 @@ def relay_try(nets_arg, largs, label):
     board becomes the base every later trial builds on."""
     global FO, SIDECAR, best_score, best_board, plan, own, cur_pages
     global rides, divers, model
+    tk = tried_key(('relay', nets_arg, tuple(largs)))
+    if tk in TRIED:
+        return False                        # a hit is always a reject
+    TRIED[tk] = True
     out = f'{TAG}_{label}.kicad_pcb'
     r = subprocess.run(
         [sys.executable, 'relay_net.py', FO, nets_arg, '--out', out]
@@ -240,6 +249,125 @@ def put_pages(pages):
     json.dump(pages, open(SIDECAR, 'w'), indent=1)
 
 
+def _walk_strip(txt, token, match):
+    out, i = [], 0
+    pat = '(' + token
+    while True:
+        j = txt.find(pat, i)
+        while j >= 0 and j + len(pat) < len(txt) \
+                and txt[j + len(pat)] not in ' \n\t(':
+            j = txt.find(pat, j + 1)
+        if j < 0:
+            out.append(txt[i:])
+            break
+        k, depth = j, 0
+        while True:
+            ch = txt[k]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        if match(txt[j:k + 1]):
+            out.append(txt[i:j].rstrip(' \t'))
+            e = k + 1
+            if e < len(txt) and txt[e] == '\n':
+                e += 1
+            i = e
+        else:
+            out.append(txt[i:k + 1])
+            i = k + 1
+    return ''.join(out)
+
+
+def _strip_lane(board, fo_board, n, out):
+    """Copy `board` with net n's LANE removed (everything of n not on
+    the fanout board) -- the single-net screen's frozen world."""
+    sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+    from kicad_parser import parse_kicad_pcb
+    fo_p = parse_kicad_pcb(fo_board)
+    by = {net.name.split('/')[-1]: (i, net)
+          for i, net in fo_p.nets.items()}
+    nid, netname = by[n][0], by[n][1].name
+    keep_sp = {(frozenset(((round(s.start_x, 3), round(s.start_y, 3)),
+                           (round(s.end_x, 3), round(s.end_y, 3)))),
+                s.layer)
+               for s in fo_p.segments if s.net_id == nid}
+    keep_via = {(round(v.x, 3), round(v.y, 3))
+                for v in fo_p.vias if v.net_id == nid}
+
+    def net_match(block):
+        m = re.search(r'\(net (\d+)\)', block)
+        if m:
+            return int(m.group(1)) == nid
+        m = re.search(r'\(net "([^"]+)"\)', block)
+        return bool(m and m.group(1) == netname)
+
+    def kill_seg(block):
+        if not net_match(block):
+            return False
+        pts = re.findall(r'\((?:start|end) ([-\d.]+) ([-\d.]+)',
+                         block)
+        ml = re.search(r'\(layer "([^"]+)"\)', block)
+        if len(pts) != 2 or not ml:
+            return False
+        key = (frozenset((round(float(x), 3), round(float(y), 3))
+                         for x, y in pts), ml.group(1))
+        return key not in keep_sp
+
+    def kill_via(block):
+        if not net_match(block):
+            return False
+        m = re.search(r'\(at ([-\d.]+) ([-\d.]+)\)', block)
+        return bool(m) and (round(float(m.group(1)), 3),
+                            round(float(m.group(2)), 3)) \
+            not in keep_via
+
+    txt = open(board, encoding='utf-8').read()
+    txt = _walk_strip(txt, 'segment', kill_seg)
+    txt = _walk_strip(txt, 'via', kill_via)
+    open(out, 'w', encoding='utf-8').write(txt)
+
+
+def screen_reject(n, v):
+    """The user's 'don't redo the WHOLE route': strip n's lane off
+    the current best board and braid n ALONE against the frozen rest
+    under the flipped page (~8 s vs ~50 s). Rejects only a CLEAR
+    loser (routable and no cheaper for the net itself); a frozen-
+    world refusal or improvement pays the honest full braid, so
+    accepts stay whole-board-confirmed."""
+    try:
+        scr = TAG + '_scr.kicad_pcb'
+        _strip_lane(best_board, FO, n, scr)
+        json.dump({n: v},
+                  open(os.path.splitext(scr)[0] + '.pages.json', 'w'))
+        r = subprocess.run(
+            [sys.executable, 'braid.py', '--board', scr,
+             '--dest', 'DU1', '--nets', n, '--out', TAG + '_scr1'],
+            env=ENV, capture_output=True, text=True)
+        b1 = TAG + '_scr1.kicad_pcb'
+        if not os.path.exists(b1) or 'REFUSED' in r.stdout:
+            return False
+        scr_v = actual_vias(b1).get(n, 99)
+        cur_v = actual_vias(best_board).get(n, 0)
+        return scr_v >= cur_v
+    except Exception:
+        return False
+
+
+# trial memo: the sweeps re-braid identical states (same FO, same
+# pages -- e.g. a rejected flip retried every sweep at ~50 s each).
+# A hit can only be a REJECT: best_score only falls, so a score that
+# lost to an older best loses to the current one too.
+TRIED = {}
+
+
+def tried_key(extra=()):
+    return (FO, tuple(sorted(flips.items())), tuple(extra))
+
+
 # ---- step 1: free baseline (no sidecar)
 if os.path.exists(SIDECAR):
     os.remove(SIDECAR)
@@ -267,6 +395,23 @@ cur_pages = dict(best_pages) if best_pages else dict(own)
 flips = {}
 RELAY_TOP = 4          # relay channels only for the worst few
 for sweep in range(_a.num_improve):
+    # OPENS channel first: an open net is the top waste (a refusal
+    # measured B/B at K35 -- the B path walled at margin 6 -- has no
+    # B-ward force move; the F-ward move is a RELAY). Tooth first,
+    # then berth, to the opposite layer; the lexicographic keep means
+    # closing an open always wins.
+    g_ = subprocess.run(
+        [sys.executable, 'grade_k.py', best_board, NETS],
+        capture_output=True, text=True).stdout
+    mo_ = re.search(r'open: ([A-Za-z0-9_,]+)', g_)
+    for n in (mo_.group(1).split(',') if mo_ else [])[:3]:
+        d = plan.get(n) or {}
+        oth = 'F.Cu' if d.get('tooth_layer') == 'B.Cu' else 'B.Cu'
+        ok = relay_try(n, ['--keep-pos', '--layer', oth],
+                       f's{sweep}open_tooth{n}')
+        if not ok:
+            relay_try(n, ['--ref', 'DU1', '--keep-pos',
+                          '--layer', oth], f's{sweep}open_berth{n}')
     act = actual_vias(best_board)
     waste = sorted((n for n in plan
                     if act.get(n, 0) > model.get(n, 99)),
@@ -289,9 +434,18 @@ for sweep in range(_a.num_improve):
         for v in variants:
             trial = dict(cur_pages)
             trial[n] = v
+            tk = tried_key(('pages', n, v))
+            if tk in TRIED:
+                continue                    # a hit is always a reject
+            tagv = v[0] if v else 'swim'
+            if os.environ.get('IMPROVE_SCREEN', '1') == '1' \
+                    and screen_reject(n, v):
+                TRIED[tk] = 'screened'
+                print(f'  {n} -> {tagv}: screened out (single-net)')
+                continue
             put_pages(trial)
             s = braid(TAG + '_try')
-            tagv = v[0] if v else 'swim'
+            TRIED[tk] = s
             if s[0] > 0 and s[1] <= best_score[1] \
                     and s[2] < best_score[2]:
                 gain = best_score[2] - s[2]
