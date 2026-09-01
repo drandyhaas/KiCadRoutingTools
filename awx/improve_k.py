@@ -34,7 +34,8 @@ FO = sys.argv[1]
 K = sys.argv[2] if len(sys.argv) > 2 else '28'
 NETS = subprocess.run([sys.executable, 'coherent_nets.py', K],
                       capture_output=True, text=True).stdout.strip()
-TAG = os.path.join('tmp', 'imp' + K)
+TAG = os.path.join('tmp', 'imp' + K
+                   + (sys.argv[3] if len(sys.argv) > 3 else ''))
 SIDECAR = os.path.splitext(FO)[0] + '.pages.json'
 ENV = dict(os.environ, TWO_PAGE='1')
 

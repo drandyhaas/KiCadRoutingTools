@@ -124,6 +124,62 @@ def ledger(plan_path, board_path, emit_pages=None):
               f'{n_sw} swimmers)')
 
 
+def opt_rides(plan):
+    """The ledger's ride optimizer as a callable: per-corridor local
+    search over ride layers (field = end mismatches, order = 2 x
+    greedy vertex cover of same-ride crossings). Returns (rides,
+    divers, per_net_model_vias) -- the diagnosis the improve loop
+    turns into targeted pages edits."""
+    corrs = collections.defaultdict(list)
+    for nmn, d in plan.items():
+        corrs[d['corridor']].append(nmn)
+    rides, divers, model = {}, set(), {}
+    for ci, nms in sorted(corrs.items()):
+        li = {n: plan[n]['launch_idx'] for n in nms}
+        tr = {n: plan[n]['target_rank'] for n in nms}
+        x = collections.defaultdict(set)
+        for i, a in enumerate(nms):
+            for b in nms[i + 1:]:
+                if (li[a] - li[b]) * (tr[a] - tr[b]) < 0:
+                    x[a].add(b)
+                    x[b].add(a)
+        f = {n: {L: (plan[n]['tooth_layer'] != L)
+                 + (plan[n]['dest_layer'] != L)
+                 for L in ('F.Cu', 'B.Cu')} for n in nms}
+        ride = {n: plan[n]['dest_layer'] for n in nms}
+
+        def cost():
+            conf = {n: {b for b in x[n] if ride[b] == ride[n]}
+                    for n in nms}
+            return (sum(f[n][ride[n]] for n in nms)
+                    + 2 * greedy_cover(conf))
+
+        cur = cost()
+        improved = True
+        while improved:
+            improved = False
+            for n in nms:
+                old = ride[n]
+                ride[n] = 'B.Cu' if old == 'F.Cu' else 'F.Cu'
+                c2 = cost()
+                if c2 < cur:
+                    cur, improved = c2, True
+                else:
+                    ride[n] = old
+        conf = {n: {b for b in x[n] if ride[b] == ride[n]}
+                for n in nms}
+        dv = set()
+        greedy_cover(conf, dv)
+        divers |= dv
+        for n in nms:
+            model[n] = (f[n][ride[n]]
+                        + (plan[n]['tooth_layer'] == 'B.Cu')
+                        + (plan[n]['dest_layer'] == 'B.Cu')
+                        + (2 if n in dv else 0))
+        rides.update({n: ride[n] for n in nms})
+    return rides, divers, model
+
+
 def greedy_cover(conf, members=None):
     live = {n: set(v) for n, v in conf.items() if v}
     cover = 0
