@@ -13,6 +13,46 @@ from kicad_parser import find_matching_paren
 from kicad_writer import move_copper_text_to_silkscreen
 
 
+class OutlineOwnerMove(Exception):
+    """A placement list asked to move a footprint that draws the board outline.
+
+    #829. Raised rather than skipped -- see the call site for why a skip is
+    worse than a refusal here.
+    """
+
+
+# Cheap pre-filter: only a footprint block that mentions Edge.Cuts can possibly
+# own outline geometry, and on an ordinary board no block does, so the real
+# (parsing) check below never runs.
+_OWNS_OUTLINE_RE = re.compile(r'"Edge\.Cuts"')
+
+_OUTLINE_OWNER_CACHE: Dict[str, Dict[str, bool]] = {}
+
+
+def _draws_board_outline(input_file: str, ref: str) -> bool:
+    """Does `ref` draw geometry OUTSIDE the board-level outline (#829)?
+
+    Answered by the parser's own classifier, never by a second predicate here:
+    `owns_edge_cuts` is not the question -- a relief parented to a part travels
+    with it and must keep moving (crkbd's 184 per-LED windows, #628).
+
+    Memoised per input file because `write_placed_output` is called once per
+    board, not once per ref, and the classifier re-reads the file.
+    """
+    try:
+        if input_file not in _OUTLINE_OWNER_CACHE:
+            from kicad_parser import footprint_outline_owners
+            with open(input_file, encoding='utf-8') as fh:
+                _OUTLINE_OWNER_CACHE[input_file] = footprint_outline_owners(
+                    fh.read())
+        return bool(_OUTLINE_OWNER_CACHE[input_file].get(ref))
+    except (OSError, ValueError):
+        # Cannot decide -> do not invent a refusal. The movable-set gates are
+        # the primary defence; this is a backstop, and a backstop that fails
+        # closed on an unreadable file would break every ordinary run.
+        return False
+
+
 def _fmt_mm(v: float) -> str:
     """KiCad-style minimal decimal formatting (nanometre-faithful)."""
     s = f"{v:.6f}".rstrip('0').rstrip('.')
@@ -206,6 +246,31 @@ def write_placed_output(input_file: str, output_file: str,
 
         if ref not in placement_by_ref:
             continue
+
+        # #829 backstop. RAISES, and does not skip: this function returns True
+        # unconditionally, so a skip would be indistinguishable from success --
+        # and `route.py`'s #666 cap move gates its IN-MEMORY mirror on that
+        # return, advancing pcb_data's footprint and pad coordinates while the
+        # file kept the old pose, after which oracle_reconnect welds copper to
+        # pad coordinates that exist nowhere on the board. `converge` would
+        # write N byte-identical candidate boards and report them as N distinct
+        # poses, and `provenance.record_write` would assert a `refs_moved` the
+        # file does not contain. A skip also re-opens the leak
+        # `perturb._all_at_current` exists to close: this writer rewrites `(at)`
+        # in six decimals for exactly the refs it is handed, so a
+        # silently-dropped ref becomes the ONE footprint not in six-decimal
+        # form -- the moved set readable straight off the output text.
+        #
+        # It should never fire: the movable-set gates keep such a ref out of
+        # `placements`. A fired backstop is a bug report, not a degraded mode.
+        if _OWNS_OUTLINE_RE.search(fp_text) and _draws_board_outline(
+                input_file, ref):
+            raise OutlineOwnerMove(
+                f"{ref} draws the board outline (Edge.Cuts geometry outside "
+                f"the board-level outline), so moving it would resize the "
+                f"board. Refusing to write {output_file}. This is a bug in "
+                f"whatever produced the placement list -- the movable-set "
+                f"gates should never have offered {ref} (#829).")
 
         placement = placement_by_ref[ref]
 

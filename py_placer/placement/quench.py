@@ -812,6 +812,7 @@ class QuenchState:
 
         self.parts: Dict[str, _Part] = {}
         no_courtyard = []
+        outline_locked = []   # #829, reported below
         for ref, fp in pcb_data.footprints.items():
             if not fp.pads:
                 # Zero-pad footprints (graphics-only mechanical parts, logos
@@ -823,8 +824,26 @@ class QuenchState:
                     self.parts[ref] = _Part(ref, fp, courtyards, True,
                                             halo_base, halo_coef)
                 continue
+            # #829: a footprint that draws part of the BOARD's own boundary is
+            # never this tool's to move -- its pose transforms that Edge.Cuts
+            # geometry, so moving it resizes the board, which is a mechanical
+            # decision the user owns. A fourth lock INPUT with the same
+            # property the other three have (see the union note in `quench()`):
+            # no un-lock operator, so it can never override what a caller
+            # asked for.
+            #
+            # `owns_board_outline`, NOT `owns_edge_cuts`. Geometry parented to
+            # a footprint is usually a relief the designer bound to the part so
+            # it travels with it -- crkbd draws 184 per-LED windows that way,
+            # and #628 measured that freezing such a part costs it every legal
+            # pose it has (SW2: 0 of 14884). Only geometry lying outside the
+            # board-level outline is the board's.
+            owns_outline = getattr(fp, 'owns_board_outline', False)
             locked = (ref in locked_refs
+                      or owns_outline
                       or (move_refs is not None and ref not in move_refs))
+            if owns_outline:
+                outline_locked.append(ref)
             if ref not in courtyards:
                 no_courtyard.append(ref)
             self.parts[ref] = _Part(ref, fp, courtyards, locked,
@@ -838,6 +857,17 @@ class QuenchState:
             # Ignored nets (e.g. plane-routed power) don't contribute airwires
             self.parts[ref].nets = [n for n in self.parts[ref].nets
                                     if n not in ignore]
+        # #829. DISCLOSED, never silent: a freeze nobody is told about is
+        # the failure mode lock_advisor's 'advice, never action' rule
+        # exists to prevent. The reader needs the ref AND why, because
+        # the remedy is not in this toolchain -- part and outline have to
+        # move together, in KiCad.
+        self.outline_locked = sorted(outline_locked)
+        if self.outline_locked:
+            print(f"  Locked because they draw the board outline (#829): "
+                  f"{', '.join(self.outline_locked)} -- moving one would"
+                  f" resize the board. Edit the part and the outline"
+                  f" together in KiCad if it really must move.")
         warn_missing_courtyards(no_courtyard, 'quench')
 
         # #701 intent keep-outs, resolved ONCE per state rather than once per

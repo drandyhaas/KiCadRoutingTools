@@ -1618,14 +1618,26 @@ def footprint_outline_owners(content: str) -> Dict[str, bool]:
     if not owners:
         return {}
     board_only = _mask_footprint_blocks(content)
-    board_bounds = extract_board_bounds(board_only)
-    if board_bounds is None:
+    outers, _cutouts = extract_board_contours(board_only)
+    return classify_outline_owners(owners, extract_board_bounds(board_only),
+                                   outers)
+
+
+def classify_outline_owners(owners, board_only_bounds, board_only_outers):
+    """`{ref: owns_board_outline}` from per-ref points and the board's own
+    outline. Shared by BOTH parse paths (#829) so they cannot decide
+    differently -- each supplies its own three inputs, the rule lives here once.
+
+    `owners` is `{ref: [(x, y), ...]}` in global mm.
+    """
+    if not owners:
+        return {}
+    if board_only_bounds is None:
         # The board-level Edge.Cuts draws nothing at all, so the footprints ARE
         # the outline (rp2350_fpga_eensy). Every owner is structural.
         return {ref: True for ref in owners}
 
-    outers, _cutouts = extract_board_contours(board_only)
-    rings = [r for r in outers if len(r) >= 3]
+    rings = [r for r in (board_only_outers or []) if len(r) >= 3]
 
     if rings:
         def inside(px, py):
@@ -1641,7 +1653,7 @@ def footprint_outline_owners(content: str) -> Dict[str, bool]:
         # exists to avoid. Fall back to the board-level bounding box, which is
         # weaker than a ring test (it cannot see a concave notch) but is right
         # about the question being asked: does this geometry extend the board?
-        x0, y0, x1, y1 = board_bounds
+        x0, y0, x1, y1 = board_only_bounds
 
         def inside(px, py):
             return (x0 - _OUTLINE_EPS <= px <= x1 + _OUTLINE_EPS
@@ -4789,6 +4801,26 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
         footprints[reference] = footprint
 
+    # #829, mirroring the text path's stamp in parse_kicad_pcb: which
+    # footprints draw Edge.Cuts, and which of those are drawing the BOARD's
+    # boundary rather than a relief that travels with the part. Its OWN try --
+    # not folded into the broad `except Exception: pass` around the bounds
+    # block above, where any failure anywhere would leave every footprint
+    # owns_board_outline=False and silently disarm the guard on the whole GUI
+    # path.
+    try:
+        for _ref, _structural in footprint_outline_owners_from_pcbnew(
+                board, to_mm).items():
+            _fp = footprints.get(_ref)
+            if _fp is not None:
+                _fp.owns_edge_cuts = True
+                _fp.owns_board_outline = _structural
+    except Exception as _exc:                                    # noqa: BLE001
+        print(f"  WARNING: could not determine Edge.Cuts ownership from the "
+              f"live board ({type(_exc).__name__}: {_exc}); a footprint that "
+              f"draws the board outline will NOT be protected from being "
+              f"moved (#829)")
+
     # --- Extract segments and vias (single pass over tracks) ---
     segments = []
     vias = []
@@ -5177,7 +5209,86 @@ def _global_to_local(fp_x, fp_y, fp_rotation_deg, global_x, global_y):
     return local_x, local_y
 
 
-def _extract_board_contours_from_pcbnew(board, to_mm):
+def footprint_outline_owners_from_pcbnew(board, to_mm):
+    """The pcbnew mirror of `footprint_outline_owners` (#829).
+
+    Same decision function (`classify_outline_owners`); only the three inputs
+    are gathered differently, which is already true of every other field these
+    two paths both fill.
+
+    Points come from each Edge.Cuts graphical item's bounding box corners,
+    where the text path uses the shape's own vertices. That is an
+    OVER-approximation, so the two paths can disagree for a shape that sits
+    within a bbox-corner's width of the boundary; they cannot disagree about a
+    shape well inside it (carried) or well outside it (structural), which is
+    the distinction anything acts on. `tests/gui_parity/
+    test_829_edge_cuts_owner_parity.py` pins the agreement.
+
+    The class filter matches the pcbnew BOUNDS scan (`FP_SHAPE` included, for
+    KiCad 6/7), not the pcbnew CONTOUR scan, which omits it -- a pre-existing
+    asymmetry between those two, left alone here rather than fixed in a PR
+    about something else.
+    """
+    import pcbnew
+    edge_cuts_id = getattr(pcbnew, 'Edge_Cuts', None)
+    if edge_cuts_id is None:
+        return {}
+
+    owners = {}
+    try:
+        for fp in board.GetFootprints():
+            ref = fp.GetReference()
+            if not ref:
+                uid = str(fp.m_Uuid.AsString()) if hasattr(fp, 'm_Uuid') else ''
+                ref = "#" + uid if uid else "?"
+            pts = []
+            for g in fp.GraphicalItems():
+                if g.GetLayer() != edge_cuts_id:
+                    continue
+                if g.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT", "FP_SHAPE"):
+                    continue
+                try:
+                    bb = g.GetBoundingBox()
+                    x0, y0 = to_mm(bb.GetLeft()), to_mm(bb.GetTop())
+                    x1, y1 = to_mm(bb.GetRight()), to_mm(bb.GetBottom())
+                    pts += [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                except Exception:
+                    continue
+            if pts:
+                owners.setdefault(ref, []).extend(pts)
+    except Exception:
+        return {}
+    if not owners:
+        return {}
+
+    # What the outline would be with no footprint contributing.
+    bmin_x = bmin_y = float('inf')
+    bmax_x = bmax_y = float('-inf')
+    found = False
+    try:
+        for drawing in board.GetDrawings():
+            if drawing.GetLayer() != edge_cuts_id:
+                continue
+            if drawing.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
+                continue
+            bb = drawing.GetBoundingBox()
+            bmin_x = min(bmin_x, to_mm(bb.GetLeft()))
+            bmax_x = max(bmax_x, to_mm(bb.GetRight()))
+            bmin_y = min(bmin_y, to_mm(bb.GetTop()))
+            bmax_y = max(bmax_y, to_mm(bb.GetBottom()))
+            found = True
+    except Exception:
+        pass
+    board_bounds = (bmin_x, bmin_y, bmax_x, bmax_y) if found else None
+    try:
+        outers, _c = _extract_board_contours_from_pcbnew(
+            board, to_mm, include_footprints=False)
+    except Exception:
+        outers = []
+    return classify_outline_owners(owners, board_bounds, outers)
+
+
+def _extract_board_contours_from_pcbnew(board, to_mm, include_footprints=True):
     """Extract board outline and cutout polygons from Edge.Cuts drawings via pcbnew.
 
     Returns (outers, cutouts): the OUTER boundary rings (largest first --
@@ -5268,8 +5379,11 @@ def _extract_board_contours_from_pcbnew(board, to_mm):
     # Footprint-embedded Edge.Cuts (#304): per-LED cutout windows etc. live as
     # fp_ shapes inside footprints; GraphicalItems() returns them in absolute
     # board coordinates, so the same shape handler applies.
+    # `include_footprints=False` asks the opposite question -- what would the
+    # outline be if no footprint contributed? -- which is how #829 decides
+    # whether a footprint is drawing the BOARD or carrying its own relief.
     try:
-        for fp in board.GetFootprints():
+        for fp in (board.GetFootprints() if include_footprints else ()):
             for g in fp.GraphicalItems():
                 if g.GetLayer() != edge_cuts_id or g.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
                     continue
