@@ -118,6 +118,16 @@ def route_verdict(summary):
     """(failures, note) from a route summary -- the tier-3 comparison key."""
     if not summary:
         return None, 'no summary'
+    # A summary that is not a MAPPING at all. `json.load` is happy to return a
+    # str, a list or a number, and the whole premise here is documents route.py
+    # did not write -- a stale file at a reused path, another tool's output.
+    # Without this the guard below is worse than useless on a str: `k in
+    # summary` becomes a SUBSTRING test, so a document merely mentioning
+    # "failed_single" passes it and then dies on `.get` two lines down. On an
+    # int it raises TypeError outright. Either way the crash lands back in the
+    # caller's loop -- the exact failure scoped_route's guard just closed.
+    if not isinstance(summary, dict):
+        return None, 'unreadable summary'
     # Every read below is a `.get(..., default)`, so a dict that is truthy but
     # carries NONE of the verdict's own keys scores 0 failures and 'clean' --
     # the best possible result, for a document that never mentioned routing.
@@ -471,13 +481,15 @@ def cmd_poses(a):
                 # "it wrote something unreadable". A `status` vocabulary
                 # belongs with #713's probe helpers, which own it; this row
                 # deliberately does not invent a second one.
-                # .get(), not a subscript: scoped_route is monkeypatched with a
-                # hand-built dict in the #713 probe tests.
+                # .get() for BOTH of the new reads, not a subscript: #713's
+                # probe tests replace scoped_route with a lambda returning a
+                # hand-built dict, and a row that is defensive about one key
+                # while subscripting the next is not defensive at all.
                 p['route'] = {'failures': n, 'note': note,
                               'iterations': res['summary'].get('total_iterations'),
                               'vias': res['summary'].get('total_vias'),
                               'nets': len(a.affected),
-                              'returncode': res['returncode'],
+                              'returncode': res.get('returncode'),
                               'summary_error': res.get('summary_error')}
     # A cut sweep returns a DIFFERENT best pose with a byte-identical document
     # shape -- measured, r=3/s=0.25: a full sweep chose rot 0 where a truncated

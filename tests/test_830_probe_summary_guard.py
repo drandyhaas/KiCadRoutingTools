@@ -209,8 +209,10 @@ def test_a_failed_write_leaves_the_destination_untouched():
         try:
             write_summary_file(path, {'failed_single': ['A'],
                                       'poison': {1, 2}, 'tail': 'x'})
-        except TypeError:
-            pass
+        except OSError as exc:
+            assert 'not JSON serializable' in str(exc), exc
+            assert isinstance(exc.__cause__, TypeError), (
+                'the original cause must be chained, not swallowed')
         else:
             raise AssertionError('an unserialisable summary must raise')
         assert not os.path.exists(path), (
@@ -228,15 +230,21 @@ def test_a_failed_write_leaves_the_destination_untouched():
         assert published == buf.getvalue(), (
             'the on-disk format changed; --json-out is a published contract')
 
-        # a LATER failed write must not disturb what is already published
+        # a LATER failed write must REMOVE what is already published, not
+        # preserve it. A previous run's summary standing at this run's path is
+        # a complete, parseable document with no signal that it is stale --
+        # every reader accepts it as this run's. Preserving it was the first
+        # version of this function's real defect, and this assertion is the
+        # inversion of what that version asserted.
         try:
             write_summary_file(path, {'poison': {1, 2}})
-        except TypeError:
+        except OSError:
             pass
-        with open(path, encoding='utf-8') as f:
-            assert f.read() == published, (
-                'a failed write disturbed the previously published file')
-        assert os.listdir(td) == ['route.json'], os.listdir(td)
+        assert not os.path.exists(path), (
+            'a failed write left the previous run\'s summary standing in for '
+            'this one')
+        assert os.listdir(td) == [], os.listdir(td)
+        assert published  # the first write really did publish
     print('  PASS: --json-out is whole or absent, never half')
 
 
@@ -266,24 +274,44 @@ def test_a_write_that_fails_AFTER_the_temp_file_still_leaves_it_untouched():
             raise OSError(5, 'Access is denied')
 
         os.replace = _boom
+        err = None
         try:
             write_summary_file(path, {'failed_single': ['LATER'],
                                       'total_iterations': 999})
-        except OSError:
-            pass
+        except OSError as exc:
+            err = exc
         else:
             raise AssertionError('a failed publish must not report success')
         finally:
             os.replace = real_replace
+        assert before, 'the stale document was never published; repro is void'
 
-        with open(path, encoding='utf-8') as f:
-            after = f.read()
-        assert after == before, (
-            'a failed publish overwrote the destination -- the writer is not '
-            'atomic, so a reader can see a half document')
-        assert os.listdir(td) == ['route.json'], (
+        # FAIL CLOSED, not fail stale. The destination must not still hold the
+        # PREVIOUS run's summary: that is a complete, parseable document every
+        # reader accepts as this run's, with no signal anywhere -- strictly
+        # worse than the truncated file this replaced, which announces itself.
+        assert not os.path.exists(path), (
+            'a failed publish left the previous run\'s summary in place; a '
+            'reader would score this run against the last one\'s tally')
+        assert os.listdir(td) == [], (
             f'the temp file survived a failed publish: {os.listdir(td)}')
-    print('  PASS: a publish that fails mid-flight leaves the old file intact')
+        assert 'no file was left behind' in str(err), (
+            f'the error must say what state the destination is in: {err}')
+    print('  PASS: a publish that fails mid-flight leaves NO file, and says so')
+
+
+def test_route_verdict_survives_a_document_that_is_not_a_mapping():
+    """json.load happily returns a str, a list or a number, and the premise of
+    this whole change is documents route.py did not write.
+
+    On a str the presence test below would be a SUBSTRING test, so a document
+    merely mentioning one of the key names passes it and then dies on `.get`
+    -- back in the caller's loop, which is the failure scoped_route's guard
+    just closed. On an int it raises TypeError outright."""
+    for doc in (1, True, 3.5, [1], 'failed_single was empty', ('a',)):
+        assert converge.route_verdict(doc) == (None, 'unreadable summary'), (
+            f'route_verdict({doc!r}) must refuse, not crash or score')
+    print('  PASS: a non-mapping document is refused, not crashed on')
 
 
 def test_none_publishes_an_empty_document_as_the_old_writer_did():

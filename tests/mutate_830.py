@@ -111,6 +111,16 @@ ROWS = [
      "                                      'protected_skipped')):\n",
      (T830,), 'KILLED'),
 
+    # A document json.load accepts that is not a MAPPING. On a str the presence
+    # test becomes a SUBSTRING test; on an int it raises TypeError. Either way
+    # the crash lands back in the caller's loop.
+    ('a-non-mapping-document-reaches-the-presence-test', 'cv',
+     "    if not isinstance(summary, dict):\n"
+     "        return None, 'unreadable summary'\n",
+     "    if False:\n"
+     "        return None, 'unreadable summary'\n",
+     (T830,), 'KILLED'),
+
     # ---- the publisher -----------------------------------------------------
     ('batch-route-streams-into-json-out-again', 'rt',
      "            write_summary_file(json_out, _merged)\n",
@@ -139,6 +149,25 @@ ROWS = [
 
     # The on-disk format is a published contract: --json-out is read by
     # place_route_loop --accept-cmd, i.e. by judges this repo does not own.
+    # The defect the first version of write_summary_file actually had: an
+    # atomic publish that merely declines to overwrite leaves the PREVIOUS
+    # run's summary standing at the path, which every reader accepts as this
+    # run's with no signal anywhere.
+    ('a-failed-publish-fails-stale-not-closed', 'rs',
+     "        _discard(tmp)\n"
+     "        _discard(path)\n"
+     "        stale = os.path.exists(path)\n",
+     "        _discard(tmp)\n"
+     "        stale = os.path.exists(path)\n",
+     (T830,), 'KILLED'),
+
+    ('a-failed-publish-does-not-say-what-survived', 'rs',
+     "            + ('; a PREVIOUS run\\'s summary is still there and could NOT be '\n"
+     "               'removed -- do not read it as this run\\'s' if stale else\n"
+     "               '; no file was left behind')) from exc\n",
+     "            ) from exc\n",
+     (T830,), 'KILLED'),
+
     ('the-on-disk-format-drifts', 'rs',
      "    text = json.dumps({} if merged is None else merged, indent=1)\n",
      "    text = json.dumps({} if merged is None else merged, indent=2)\n",

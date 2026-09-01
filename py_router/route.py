@@ -5486,10 +5486,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             write_summary_file(json_out, _merged)
             print(f"  route summary written to {json_out}")
         except Exception as _e:
+            # write_summary_file's message already says what state the
+            # destination is in -- removed, or a stale file it could not
+            # remove. Do not add a reassurance here that the code cannot keep.
             print(f"  WARNING: could not write --json-out {json_out}: "
                   f"{type(_e).__name__}: {_e}")
-            print(f"           {json_out} was left UNTOUCHED -- a reader gets "
-                  f"the previous file or no file, never half of one.")
 
     from net_story import net_story_enabled, dump_net_story
     if net_story_enabled():

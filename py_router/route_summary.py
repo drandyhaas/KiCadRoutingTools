@@ -309,6 +309,15 @@ def summary_min(merged: Dict, name_cap: int = 20) -> Dict:
     return out
 
 
+def _discard(path: str) -> None:
+    """Best-effort unlink. A file we cannot remove is reported by the caller,
+    never silently tolerated."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def write_summary_file(path: str, merged: Optional[Dict]) -> None:
     """Publish `merged` at `path` ALL-OR-NOTHING. Raises if it cannot.
 
@@ -351,25 +360,47 @@ def write_summary_file(path: str, merged: Optional[Dict]) -> None:
     Failing closed -- no file -- lands every caller in the `summary = {}` /
     "no summary" case they all already handle, where a candidate without a
     verdict ranks last and never best.
+
+    FAILING CLOSED MEANS DELETING THE DESTINATION, and that is not fussiness.
+    An atomic publish that merely declines to overwrite leaves the PREVIOUS
+    run's summary standing at `path` -- a complete, parseable document that
+    every reader accepts as this run's, with no signal anywhere: the reader's
+    guard sees valid JSON, so it reports no error, and the verdict is simply
+    about the wrong run. That is worse than the truncated file this replaced,
+    which at least announces itself. Measured: with os.replace forced to fail,
+    a destination holding {"failed_single": ["OLD_RUN"]} still held it after a
+    write of ["NEW_RUN"] -- and `place_route_loop` reuses
+    `work/loop_round{N}_route.json` across runs and hands it to `--accept-cmd`,
+    so the judge would score this round against the last one's tally.
+
+    If the destination cannot be removed either -- the same lock that blocked
+    the rename -- the stale file survives and the raised message SAYS SO, so
+    the caller's warning is true rather than reassuring. Note the in-repo
+    precedent at predictor_study.py:266 CATCHES this PermissionError instead;
+    it can, because there the surviving file provably carries the same content.
+    Here it does not.
     """
-    # indent=1, no sort_keys, default ensure_ascii: byte-identical to what the
-    # streaming writer produced, so the on-disk format does not change.
-    text = json.dumps({} if merged is None else merged, indent=1)
-    # pid-suffixed: several routes can share one output directory.
-    tmp = f'{path}.{os.getpid()}.tmp'
+    tmp = f'{path}.{os.getpid()}.tmp'   # several routes can share a directory
     published = False
     try:
+        # indent=1, no sort_keys, default ensure_ascii: byte-identical to what
+        # the streaming writer produced, so the on-disk format does not change.
+        text = json.dumps({} if merged is None else merged, indent=1)
         with open(tmp, 'w', encoding='utf-8') as fh:
             fh.write(text)
         # Windows refuses os.replace while another process holds the
-        # destination open (PermissionError: [WinError 5]). Letting that
-        # propagate is correct: the caller prints its WARNING and the
-        # destination keeps whatever it already had.
+        # destination open (PermissionError: [WinError 5]).
         os.replace(tmp, path)
         published = True
+    except Exception as exc:
+        _discard(tmp)
+        _discard(path)
+        stale = os.path.exists(path)
+        raise OSError(
+            f'could not publish {path}: {type(exc).__name__}: {exc}'
+            + ('; a PREVIOUS run\'s summary is still there and could NOT be '
+               'removed -- do not read it as this run\'s' if stale else
+               '; no file was left behind')) from exc
     finally:
         if not published:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+            _discard(tmp)
