@@ -18,11 +18,13 @@ reconciliation raised, so it needs neither a regex nor a marker string).
 Both were the same 110 lines in two places until they were not.
 """
 import json
+import os
 import re
 from typing import Dict, List, Optional
 
 __all__ = ['merge_summaries', 'merge_route_summaries', 'summary_min',
-           'SUMMARY_RE', 'SUMMARY_MIN_RE', 'RECONCILE_ABORTED', 'EFFORT_KEYS']
+           'write_summary_file', 'SUMMARY_RE', 'SUMMARY_MIN_RE',
+           'RECONCILE_ABORTED', 'EFFORT_KEYS']
 
 SUMMARY_RE = re.compile(r'JSON_SUMMARY: (\{.*\})')
 
@@ -305,3 +307,69 @@ def summary_min(merged: Dict, name_cap: int = 20) -> Dict:
         out['finalize_excluded_nets'] = _names(
             merged['finalize_excluded_nets'])
     return out
+
+
+def write_summary_file(path: str, merged: Optional[Dict]) -> None:
+    """Publish `merged` at `path` ALL-OR-NOTHING. Raises if it cannot.
+
+    `route.py --json-out` is a published contract with readers this repo does
+    not own -- `place_route_loop --accept-cmd` hands the path straight to an
+    arbitrary external judge -- and every reader opens it the same way:
+    ``if os.path.isfile(js): json.load(...)``. So a file that EXISTS and does
+    not parse is the worst artifact this can produce: the existence check
+    passes and the parse raises, out of loops that catch only
+    subprocess.TimeoutExpired.
+
+    The call this replaced could not avoid producing exactly that. It was
+    ``open(path, 'w')`` followed by ``json.dump(...)``: the open TRUNCATES the
+    destination before the first chunk is encoded, and json.dump then streams
+    -- it calls ``iterencode(o)`` with ``_one_shot=False``, so the C encoder is
+    never used, with or without `indent`, and the pure-Python generator writes
+    chunk by chunk straight into the handle. Any failure partway therefore
+    published a valid PREFIX of the document. route.py's `except Exception`
+    around the call cannot undo that: the truncation already happened, and it
+    only prints a WARNING, after which route.py exits 0 like any other run.
+
+    So: serialise FIRST (a payload that will not encode opens nothing at all),
+    write to a sibling temp file, and publish with os.replace, which is atomic
+    on POSIX and Windows alike. A reader sees the whole previous file or the
+    whole new one, never half of either. Same idiom as board_store.put and the
+    .kicad_pro writeback, and the one tests/stress/predictor_study.py adopted
+    after a study run died on a JSONDecodeError that "read like a study failure
+    and was a file-system race" -- this bug, in another file.
+
+    Deliberately NO ``default=str``: route.py prints the same dict through a
+    bare ``json.dumps`` outside any try, before this is ever reached, so an
+    unserialisable summary is already a loud failure of the whole run.
+    Coercing here would let the FILE carry a ``<obj at 0x...>`` repr that the
+    stdout line refused -- non-deterministic, and silently divergent from
+    ``merge_route_summaries(log)``, which a test compares against this file.
+
+    Deliberately NO fallback document either. `converge.route_verdict` scores a
+    truthy dict carrying none of the failure keys as `(0, 'clean')`, so an
+    ``{'complete': false}`` placeholder would rank a broken candidate FIRST.
+    Failing closed -- no file -- lands every caller in the `summary = {}` /
+    "no summary" case they all already handle, where a candidate without a
+    verdict ranks last and never best.
+    """
+    # indent=1, no sort_keys, default ensure_ascii: byte-identical to what the
+    # streaming writer produced, so the on-disk format does not change.
+    text = json.dumps({} if merged is None else merged, indent=1)
+    # pid-suffixed: several routes can share one output directory.
+    tmp = f'{path}.{os.getpid()}.tmp'
+    published = False
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        # Windows refuses os.replace while another process holds the
+        # destination open (PermissionError: [WinError 5]). Letting that
+        # propagate is correct: the caller prints its WARNING and the
+        # destination keeps whatever it already had.
+        os.replace(tmp, path)
+        published = True
+    finally:
+        if not published:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass

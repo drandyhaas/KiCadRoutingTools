@@ -76,17 +76,73 @@ def scoped_route(board, nets, out=None, extra_args=(), timeout=None):
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
                        errors='replace', timeout=timeout, cwd=ROOT)
     summary = {}
+    # A summary we cannot READ is a non-verdict, not an exception. This file
+    # can exist and not parse -- a killed router, ENOSPC, a flush that fails at
+    # close, a stale file at a reused path -- and route.py exits 0 on that path
+    # having printed only a WARNING. Raising here does not spoil one candidate;
+    # it empties the CALLER's loop, and none of the four call sites catch it
+    # (cmd_poses has no try at all; place_portfolio._probe and compare_seeds
+    # catch only subprocess.TimeoutExpired). compare_seeds collects its rows
+    # and writes seeds.json only AFTER the loop, so a throw on seed 3 of 8
+    # ships no document at all, at an exit code not in its own vocabulary.
+    #
+    # `summary` stays {} -- the no-verdict channel every caller already handles
+    # -- and `summary_error` says WHICH absence this was, because the return
+    # code is 0 either way and the router's own WARNING has usually fallen out
+    # of the 1500-character stdout_tail by the time we return:
+    #     summary truthy           -> a verdict
+    #     {} + summary_error None  -> the router wrote nothing
+    #     {} + summary_error set   -> the router wrote something unreadable
+    # Same shape, and the same reasoning, as _load_defects below.
+    #
+    # (OSError, ValueError) rather than the narrower JSONDecodeError: json.load
+    # decodes the text handle first, so a tail cut mid-UTF-8-sequence raises
+    # UnicodeDecodeError -- a ValueError that is NOT a JSONDecodeError.
+    summary_error = None
     if os.path.isfile(js):
-        with open(js, encoding='utf-8') as f:
-            summary = json.load(f)
+        try:
+            with open(js, encoding='utf-8') as f:
+                summary = json.load(f)
+        except (OSError, ValueError) as exc:                    # noqa: BLE001
+            summary_error = f'{type(exc).__name__}: {exc}'
+            # stderr, never stdout: `converge poses` pipes a JSON document.
+            print(f"  WARNING: unreadable route summary {js} "
+                  f"({summary_error}); rc={r.returncode} -- treating as "
+                  f"no summary", file=sys.stderr)
     return {'argv': argv, 'returncode': r.returncode, 'board': out,
-            'json': js, 'summary': summary, 'stdout_tail': r.stdout[-1500:]}
+            'json': js, 'summary': summary, 'summary_error': summary_error,
+            'stdout_tail': r.stdout[-1500:]}
 
 
 def route_verdict(summary):
     """(failures, note) from a route summary -- the tier-3 comparison key."""
     if not summary:
         return None, 'no summary'
+    # Every read below is a `.get(..., default)`, so a dict that is truthy but
+    # carries NONE of the verdict's own keys scores 0 failures and 'clean' --
+    # the best possible result, for a document that never mentioned routing.
+    # `{}` was caught above; `{'x': 1}` was not.
+    #
+    # PRESENCE, not truthiness: a genuinely clean route sets `failed_single:
+    # []`, and ANY ONE key is enough to judge -- a summary carrying
+    # failed_single but not open_single must still degrade to the old
+    # arithmetic (tests/test_open_single_verdict.py). `protected_skipped` is
+    # deliberately absent from the tuple: it only decorates the note, so a
+    # document carrying it alone would still fabricate a 0.
+    #
+    # HARDENING, not a live bug: route.py's summary literal sets failed_single,
+    # open_single AND multipoint_pads_total unconditionally (route.py:3606,
+    # 3611, 3624), and there is one append site into _SUMMARY_SINK, so nothing
+    # it writes today lands here. This is the schema-drift tripwire.
+    #
+    # The tuple is INLINE rather than a module constant on purpose: the gap
+    # between scoped_route and route_verdict is where #713's probe helpers land,
+    # and a constant parked there would collide with them for no benefit.
+    if not any(k in summary for k in ('failed_single', 'open_single',
+                                      'failed_multipoint',
+                                      'multipoint_pads_total',
+                                      'multipoint_pads_connected')):
+        return None, 'unreadable summary'
     failed = list(summary.get('failed_single') or [])
     # Routed-but-OPEN nets (kept result, disconnected pads). Before this key a
     # non-multipoint open net weighed ZERO here -- probes read failures=0 on
@@ -409,9 +465,20 @@ def cmd_poses(a):
                                                      'new_rotation': p['rot']}])
                 res = scoped_route(cand, a.affected, extra_args=a.route_args or [])
                 n, note = route_verdict(res['summary'])
+                # `nets`/`returncode`/`summary_error` so a row that carries no
+                # verdict still says what happened. `failures: None` alone
+                # cannot distinguish "the router died", "it wrote nothing" and
+                # "it wrote something unreadable". A `status` vocabulary
+                # belongs with #713's probe helpers, which own it; this row
+                # deliberately does not invent a second one.
+                # .get(), not a subscript: scoped_route is monkeypatched with a
+                # hand-built dict in the #713 probe tests.
                 p['route'] = {'failures': n, 'note': note,
                               'iterations': res['summary'].get('total_iterations'),
-                              'vias': res['summary'].get('total_vias')}
+                              'vias': res['summary'].get('total_vias'),
+                              'nets': len(a.affected),
+                              'returncode': res['returncode'],
+                              'summary_error': res.get('summary_error')}
     # A cut sweep returns a DIFFERENT best pose with a byte-identical document
     # shape -- measured, r=3/s=0.25: a full sweep chose rot 0 where a truncated
     # one chose rot 90, with no key marking it partial. A ranking nobody can

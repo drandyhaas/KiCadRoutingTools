@@ -5471,13 +5471,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # rescues, Phase-3 tap order, costs -- assembled from state.
     if json_out:
         try:
-            from route_summary import merge_summaries
+            from route_summary import merge_summaries, write_summary_file
             _merged = merge_summaries(list(_SUMMARY_SINK), _RECONCILE_RAISED[0])
-            with open(json_out, 'w', encoding='utf-8') as _jf:
-                json.dump(_merged if _merged is not None else {}, _jf, indent=1)
+            # ALL-OR-NOTHING (#830). This was `open(json_out,'w')` +
+            # `json.dump`, which truncates the destination before the first
+            # chunk is encoded and then STREAMS into it -- so a failure partway
+            # (ENOSPC, a flush that fails at close, an external kill, or a key
+            # stamped onto the summary after the JSON_SUMMARY gate above)
+            # published a HALF document. The except below then printed a
+            # warning and route.py exited 0, exactly as a run with failed nets
+            # does, while every reader of this file -- including an external
+            # `place_route_loop --accept-cmd` judge -- crashed on it. Failing
+            # CLOSED, with no file, is the case they all already handle.
+            write_summary_file(json_out, _merged)
             print(f"  route summary written to {json_out}")
         except Exception as _e:
-            print(f"  WARNING: could not write --json-out {json_out}: {_e}")
+            print(f"  WARNING: could not write --json-out {json_out}: "
+                  f"{type(_e).__name__}: {_e}")
+            print(f"           {json_out} was left UNTOUCHED -- a reader gets "
+                  f"the previous file or no file, never half of one.")
 
     from net_story import net_story_enabled, dump_net_story
     if net_story_enabled():
