@@ -748,7 +748,10 @@ is implemented, the rest are documented targets.
    scratch copy (KiCad ZONE_FILLER refill), and folds (islands, neck sum)
    into `rank_key` — islands before hpwl, neck sum after it. Trust it only
    after calibration on boards with a measured probe order (run 7's seed
-   archive is the first known-answer case).
+   archive is the first known-answer case). It takes no wall-clock budget
+   (#713): the terms are stripped only for a cause every candidate shares, and
+   a per-candidate failure makes the run refuse rather than rank on a
+   different key set.
 
 2. **Channel occupancy as a nonlocality proxy.** *(partly done —
    `--corridor-weight`, below. What remains is occupancy against a capacity,

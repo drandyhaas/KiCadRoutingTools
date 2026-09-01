@@ -2046,9 +2046,11 @@ read. Four things about it that are easy to get wrong:
 - **`status` appears only on a run that legitimately did nothing**, and takes
   exactly two values, `no_valid_nets` and `already_connected`. It says why the
   tally is empty; it is not a verdict about the board.
-- **`complete` means "a sub-run did not finish", never "a budget expired".** No
-  main writes `complete: false` today, because none of them can stop early, but
-  the key is still read and it is the disclosure that keeps a partial tally from
+- **`complete` means "a sub-run did not finish", never "a budget expired".**
+  Since #713 `place_portfolio` writes `complete: false` when it REFUSES to rank
+  (a per-candidate plane-score failure), and `check_floorplan` carries the same
+  key for a grade that left a declared channel unmeasured. No ROUTING main
+  writes one, because none of them can stop early. The key is read and it is the disclosure that keeps a partial tally from
   being merged into a whole-board one: `route_summary.merge_summaries` forces it
   onto the merged summary when ANY summary it merges carries it (merging is
   otherwise last-wins), and `place_route_loop` refuses a summary that has it. A
@@ -2129,12 +2131,18 @@ placement-and-routing loop's machinery; this skill only needs to know that
   | where | limit | on expiry | what you see |
   |---|---|---|---|
   | any main under a shell `timeout`, or any harness kill | the SHELL's clock, never the tool's | the process dies wherever it stood; nothing is flushed and no output board is written | shell `124`/`143`, no `JSON_SUMMARY`, no `JSON_SUMMARY_MIN` |
-  | `EXACT_FILL_TIMEOUT` (`py_router/kicad_exact_fill.py`) | 300 s | returns `None`; the caller silently falls back to its own model | ONE misattributed line |
-  | `ORACLE_DRC_TIMEOUT` (`py_router/kicad_oracle.py`) | 240 s | `None`, and **memoises the board so every later step skips the oracle too** | nothing at all |
+  | `EXACT_FILL_TIMEOUT` (`py_router/kicad_exact_fill.py`) | 300 s | returns `(None, RefillStatus('timeout'))`; the caller falls back to its own model but is TOLD which of the six causes fired (#713) | a named line saying TIMED OUT, with the elapsed |
+  | `ORACLE_DRC_TIMEOUT` (`py_router/kicad_oracle.py`) | 240 s | `None`; the memo of it is CALL-SCOPED, so later rounds of the SAME call stop re-paying the 240 s and no verdict crosses a call boundary (#713) | a WARNING naming the board, and `oracle_reconnect.reason` in `JSON_SUMMARY` |
   | `converge.py record` argv | the OS exec limit (~32 kB) | never execs | shell `126`, **no ledger row** |
 
-  The last three degrade to a fallback with no failure signal and no effect on
-  the exit code. Two consequences you must build into how you run:
+  The last two degrade to a fallback with no effect on the exit code -- but
+  since #713 they no longer do it with NO failure signal: the exact fill and
+  the oracle each name the cause, and the oracle's reaches `JSON_SUMMARY`. The
+  older description of this table ("memoises the board so every later step
+  skips the oracle too") was itself wrong: that memo's only read sat behind
+  `KICAD_LEGACY_ORACLE`, which nothing sets, so it never fired and the real
+  cost was the 240 s being RE-PAID every round. Two consequences you must
+  build into how you run:
 
   1. **NO MAIN TAKES A WALL-CLOCK BUDGET, AND THAT IS DELIBERATE — BOUND THE
      WORK BY SCOPE.** `--deadline` was removed from every tool by upstream #621
