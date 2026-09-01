@@ -691,6 +691,13 @@ def main():
            'rank_crossing_band': args.rank_crossing_band,
            'rank_band_q': band_q,
            'corridor_weight': args.corridor_weight,
+           # #826: which lattice the jitter offsets snapped to, and why. Without
+           # it a run cannot show whether the snap happened -- "the board kept
+           # its lattice" and "there was no lattice to snap to" would read the
+           # same, and the fix could ship inert with nothing saying so.
+           # `source` is 'inferred' or 'none'; `reason` carries the cause,
+           # including the radius guard.
+           'jitter_lattice': result.get('jitter_lattice'),
            'baseline': baseline.to_dict(),
            'candidates': [c.to_dict() for c in cands],
            'ranking_static': ranking_static,

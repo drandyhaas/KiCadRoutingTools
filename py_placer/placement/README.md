@@ -824,6 +824,57 @@ repair's `step=0.2` the candidate count falls 81 → 29 on a 0.3175 lattice and
 81 → 9 on 0.635. `perturb` needed no change at all — it already snapped deltas,
 so it never had the defect, notwithstanding #708 naming it.
 
+### The portfolio jitter (#826)
+
+The quench preserves the lattice it is *given*. `place_portfolio` used to give
+it a broken one: `perturb_jitter` offsets a part by `r·cos(θ)` at 4 decimal
+places — continuous, on no lattice — and `generate` quenches each candidate
+from its jittered seed board. Candidate 0, by contrast, is quenched from the
+input, so the **baseline kept the board's lattice and the candidates did not**:
+the slate was ranked against a baseline with a privilege the candidates were
+denied.
+
+Measured over the 11 tracked boards that declare a lattice, at the default
+radius: **10 lost it**, two of them to 0.000 occupancy
+(`tests/measure_826_jitter_lattice.py`). It is not a tuning problem — the same
+10 of 11 at radius 4.0, 1.0, 0.25 *and* 0.05, because a continuous offset is
+off-lattice at every amplitude. `glasgow_revC` is the only survivor and not a
+reprieve: of its 243 free parts only 59 pass the incumbent-legality guard and
+58 then find a legal sample, so it survives by being dense rather than by being
+right. Its post-jitter occupancy is 0.763 against a 0.67 floor — forcing parts
+off-lattice one at a time, the inference still answers at 24 more and declines
+at 25. And its 58 jittered parts still sit on a residue the quench then
+preserves on the wrong coset, so even the survivor is on the wrong grid.
+
+The jitter now snaps the **offset** to the board's lattice when `generate`
+resolves one. The escape is unaffected — a radius-4 disc on 0.3175 holds **496** lattice
+destinations and the sampler takes the first legal one; measured, the most
+boxed-in part on any 0.3175 board still has **9** (`sonde_u` C4/C5,
+`flat_hierarchy` R1/R2/R3/R6), and `splitflap_driver`'s worst is 11. Re-running
+the identical rng stream snapped restores occupancy to *exactly* the input
+value on all 11 boards, with the same parts perturbed on 9 of them.
+
+Two details worth keeping:
+
+- **The fallback is no snap, not `--grid-step`.** #708's "the fallback is the
+  off state" worked because quench offsets were already multiples of `step`.
+  The jitter is continuous, so snapping a no-lattice board to the 0.1 raster
+  would change behaviour to buy nothing. `jitter_lattice` returns `None`.
+- **A lattice coarser than the radius is refused**, because below it the disc
+  holds no destination but the seed. Measured on `interf_u_unrouted`:
+  `--radius 0.3175` perturbs 22 of 22, `--radius 0.3` perturbs 0 of 22 after
+  440 draws and every candidate goes barren.
+
+`perturb.py`'s `scatter` damage kind calls the same function and deliberately
+does **not** pass a lattice — its own comment calls it "the POSITIVE CONTROL …
+the arm that MUST recover", and a snapped offset would land the part exactly on
+the coset the quench generates from, making the control easier to pass.
+
+`portfolio.json` carries a run-level `jitter_lattice` and three
+`board_grid_*` scalars per candidate, so a run can show which branch it took —
+without them "the board kept its lattice" and "there was no lattice" read the
+same.
+
 ## Placement blocks (`groups.py`, #459)
 
 The per-part nudge cannot express "these parts need to travel together": an IC

@@ -134,6 +134,26 @@ EXPECTED = {
     # miniature: this placement scores 23 crossings against the authored
     # board's 53 -- the best on the slate -- and routes to blocking 3 where the
     # authored board routes to 0.
+    # RE-RECORDED AGAIN for #826 (the portfolio jitter now snaps its offset to
+    # the board's lattice). Second consecutive re-record of this row, and both
+    # times for the same reason: it is the detector the header describes, and
+    # it fired. esp_prog is authored on 0.05mm; the jitter used to hand the
+    # quench a seed board at 0.525 occupancy -- below the inference floor --
+    # and now hands it one at 0.825, so this candidate's poses genuinely
+    # differ. Reproduced twice.
+    #
+    # What did NOT move, which is why the commentary below still stands:
+    # `truth.headline` is still 3 and `predictors.crossings` is still 23. The
+    # routed board is marginally worse this time -- vias 23 -> 25, copper
+    # 263.91 -> 264.89mm, segments 203 -> 207 -- at the same blocking. That is
+    # a different placement, not a better or worse fix; the escape landed
+    # somewhere else.
+    #
+    # `esp_prog:perturb-scatter-d1` deliberately did NOT move: `perturb.py`'s
+    # scatter kind calls perturb_jitter positionally and keeps the continuous
+    # sampler, so its damage model is untouched. That row regenerating
+    # identically is the evidence for it.
+    #
     # RE-RECORDED for #708 (the seed-relative candidate snap). This row is the
     # detector the header describes -- "a change to the placement engine ...
     # silently moving the numbers the study measured" -- and it fired, which is
@@ -147,16 +167,16 @@ EXPECTED = {
     # routed board is in fact slightly better -- vias 28 -> 23, copper
     # 299.93 -> 263.91mm, segments 231 -> 203 -- at the same blocking.
     'esp_prog:portfolio-1': dict(
-        poses_sha256='aa84f6b468eae8f04ef72cc2ff02d4e0eead818463289e7328bce162f9dd3364',
+        poses_sha256='285c29cf614f5d7adbe998aea92cc46c5fabf2e6fac337c70415731507458416',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=9.5,
         truth={'headline': 3,
-               'quality': {'vias': 23, 'copper_mm': 263.91, 'segments': 203}},
+               'quality': {'vias': 25, 'copper_mm': 264.89, 'segments': 207}},
         predictors={
-            'crossings': 23, 'hpwl': 236.44943999999998,
-            'halo': 114.29726291832301, 'overlap_area': 1.0,
+            'crossings': 23, 'hpwl': 236.3288399999999,
+            'halo': 114.71957178262542, 'overlap_area': 1.0,
             'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 11.327191579199937, 'total': 582.4363161985618,
+            'edge': 11.104407139199958, 'total': 582.5469865623817,
             'oob_count': 0,
         }),
     # A SECOND board, so a change that only moves one board's numbers cannot
