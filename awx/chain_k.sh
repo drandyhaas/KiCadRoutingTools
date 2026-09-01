@@ -46,7 +46,7 @@ SRC_OPT=${SOURCE:+--source}
 # directions (default: directions only, --no-lines)
 LINES_OPT=${LINES:---no-lines}
 [ "$LINES_OPT" = "1" ] && LINES_OPT=""
-# PLAN_OPTS: extra fanout_from_plan options (e.g. --legacy-order)
+# PLAN_OPTS: extra fanout_from_plan options (e.g. --two-page)
 PLAN_OPTS=${PLAN_OPTS:-}
 KS=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do KS+=("$1"); shift; done

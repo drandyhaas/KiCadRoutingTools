@@ -5,7 +5,7 @@
 cd "$(dirname "$0")"
 TAG=$1
 shift
-FO=${FO:-ch}
+FO=${FO:-tmp/ch}
 for K in "$@"; do
   echo "=== K$K $(date +%H:%M:%S)"
   bash braid_k.sh "${FO}_fo_k${K}.kicad_pcb" "$TAG" "$K"

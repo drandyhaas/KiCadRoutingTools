@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 FO=$1
 TAG=$2
 K=$3
-OUTDIR=${OUTDIR:-.}
+OUTDIR=${OUTDIR:-tmp}
 NETS=$(python3 coherent_nets.py "$K")
 python3 -u braid.py --board "$FO" --dest "${DEST:-DU1}" --nets "$NETS" \
   --out "$OUTDIR/${TAG}_k${K}" > "$OUTDIR/${TAG}_k${K}.log" 2>&1

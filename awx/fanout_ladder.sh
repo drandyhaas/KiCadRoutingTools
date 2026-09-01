@@ -5,7 +5,7 @@
 # --no-plane-drop (the README ladder's terms). Boards go to $OUTDIR.
 # usage: fanout_ladder.sh K [K...]
 cd "$(dirname "$0")"
-OUTDIR=${OUTDIR:-.}
+OUTDIR=${OUTDIR:-tmp}
 for K in "$@"; do
   for ARM in r f; do
     if [ "$ARM" = r ]; then D="--dirs=left,down"; else D=""; fi

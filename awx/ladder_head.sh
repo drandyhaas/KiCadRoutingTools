@@ -6,8 +6,8 @@
 cd "$(dirname "$0")"
 TAG=$1
 shift
-FO=${FO:-ch}
-OUTDIR=${OUTDIR:-.}
+FO=${FO:-tmp/ch}
+OUTDIR=${OUTDIR:-tmp}
 REF=${REF:-46a268b3}
 if [ ! -f braid_head.py ]; then
   git show "$REF:awx/braid.py" > braid_head.py || exit 2

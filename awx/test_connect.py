@@ -122,8 +122,9 @@ def run_case(board, nm, label, block=False, band=None):
 
 
 if __name__ == '__main__':
-    board = sys.argv[1] if len(sys.argv) > 1 else \
-        os.path.join(HERE, 'ch6_fo_k15.kicad_pcb')
+    if len(sys.argv) < 2:
+        sys.exit('usage: test_connect.py FANOUT_BOARD.kicad_pcb [NET]')
+    board = sys.argv[1]
     nm = sys.argv[2] if len(sys.argv) > 2 else 'SDQ0'
     results = []
     results.append(('open', run_case(board, nm, 'open')))

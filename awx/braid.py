@@ -2093,7 +2093,7 @@ class Corridor:
             # other lane's REAL copper (rip-assist's bookkeeping),
             # keep only a strictly-cheaper lane, restore exactly
             # otherwise. Widest rung drops the window so the flank
-            # detour is inside the search. Default OFF.
+            # detour is inside the search. Default ON under TWO_PAGE (a790468b).
             import copy as _copy
             cfg0 = ctx.cfg
             big2 = _copy.copy(cfg0)

@@ -5,7 +5,7 @@
 #
 # usage: free_plan.sh K [K...]
 cd "$(dirname "$0")"
-OUTDIR=${OUTDIR:-.}
+OUTDIR=${OUTDIR:-tmp}
 for K in "$@"; do
   python3 fanout_from_plan.py "$OUTDIR/free_fo_k${K}.kicad_pcb" "$K" \
     --no-lines --no-plane-drop > "$OUTDIR/free_fo_k${K}.log" 2>&1

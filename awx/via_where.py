@@ -6,8 +6,8 @@ usage: via_where.py BOARD NET,NET,..."""
 import sys
 import os
 
-sys.path.insert(0, '/Users/andy/Documents/KiCadRoutingTools/.claude/'
-                'worktrees/bus622-take3/py_router')
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'py_router'))
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 pcb = parse_kicad_pcb(sys.argv[1])

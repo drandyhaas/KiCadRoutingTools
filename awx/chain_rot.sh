@@ -13,7 +13,7 @@ KS=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do KS+=("$1"); shift; done
 [ "$1" = "--" ] && shift
 for DEG in 90 180 270; do
-  B="fb_rot${DEG}.kicad_pcb"
+  B="tmp/fb_rot${DEG}.kicad_pcb"
   if [ ! -f "$B" ]; then
     python3 rotate_board.py fb_t2q_base.kicad_pcb "$B" "$DEG" || exit 2
   fi

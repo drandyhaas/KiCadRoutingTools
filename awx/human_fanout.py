@@ -10,7 +10,7 @@ import math
 import os
 import sys
 
-HERE = '/Users/andy/Documents/KiCadRoutingTools/.claude/worktrees/bus622-take3/awx'
+HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 

@@ -34,6 +34,9 @@ python3 plan_global.py verify CONTRACT.json                 # do these asks fit 
 python3 plan_global.py menus SWE,SA8                        # priced escape options per net
 python3 plan_fanout.py 28 --contract-json C.json --out B    # the obedience oracle: contract -> engine hints -> grade -> rescue
 bash run_pinpages.sh FO_BOARD OUT [K]                       # schedule-pin post-pass (dump own plan, re-braid pinned)
+python3 retry_chain.py TAG K [--rounds N] -- --no-plane-drop # directed iteration on refusal (completed K32)
+python3 improve_k.py FO_BOARD [K] [tagsuffix]               # diagnose-and-move: ledger waste -> targeted pages flips
+python3 relay_net.py BOARD NET --keep-pos --layer L --out O # surgical 1-net relay (--ref DU1 = berth; --swap = reorder)
 bash chain_rot.sh 15 19 -- --no-plane-drop                  # the rotation gate
 bash braid_k.sh FO_BOARD TAG K                              # braid stage alone on a fanout board
 bash ladder_n.sh TAG 4 11 15 19 21                          # braid stage over the ladder (FO=prefix)
@@ -59,7 +62,7 @@ python3 net_faces.py BOARD NET [NET ...]                    # per net: faces lef
 python3 sched_whatif.py FO_BOARD K [--exit-block NET,..]    # the schedule under another target order; two-page count
 python3 plan_model_check.py FO_BOARD K                      # the plan's order model vs the braid's orders on a recorded board
 PLAN_OPTS=--order-model DIRS=left,down bash chain_k.sh TAG 21 28 -- --no-plane-drop   # the chain with the order model (opt-in)
-python3 test_connect.py ch6_fo_k15.kicad_pcb SDQ0           # connect() unit test
+python3 test_connect.py tmp/FANOUT.kicad_pcb SDQ0           # connect() unit test (any fanout board)
 ```
 
 K is a checkpoint of the **coherent K-ladder** (`k_ladder_coherent.txt`,
@@ -131,8 +134,8 @@ retired WES design.
 | 15 | **16 vias**, 0 / 0 | 18, 0 / 0 | 22 |
 | 19 | **23 vias**, 0 / 0 | 26, 0 / 0 | 30 |
 | 21 | **28 vias**, 0 / 0 | 30, 0 / 0 | 34 |
-| 28 | 75 vias, **1 open** / 0 (`kh_fo_k28`, gate off) | — | 46 |
-| 32 | 56 vias, 10 open / 7 (`kh_fo_k32`; the 7 are the fanout's, SA12 through R1) | — | 52 |
+| 28 | **44 vias**, 0 / 0 (2026-09-01: solver comb + pinned pages, `run_rec44.sh`; chain alone 48-58 by arm) | — | 46 |
+| 32 | **96 vias**, 0 / 0 (2026-08-31: `retry_chain.py` directed iteration — first-ever complete K32) | — | 52 |
 
 (braid vias; open / DRC; the human column is `human_at_k.py`, the same
 nets on `00_human_original`, and counts EVERY via on them — our
