@@ -17,7 +17,7 @@ pair out of two blocks that are one entry. And no test anywhere asserted
 simply never compared. The defect was invisible by construction, not by
 oversight.
 
-FIVE THINGS THIS FILE PINS, each easy to get wrong:
+SIX THINGS THIS FILE PINS, each easy to get wrong:
 
 1. **Every block survives, with its own pose.** Not "the count is right" --
    the two entries must carry the two DIFFERENT positions. A fix that keeps a
@@ -37,8 +37,15 @@ FIVE THINGS THIS FILE PINS, each easy to get wrong:
    `check_assembly` reports the board's block total from these values, so an
    off-by-one here ships a wrong number in a JSON report.
 
-5. **The warning goes to STDERR.** Six shipped tools emit bare JSON on stdout;
-   a WARNING line in front of it is a `JSONDecodeError` at char 0.
+5. **The warning goes to STDERR.** 9 shipped call sites across 4 files emit
+   bare JSON on stdout, where a WARNING line in front is a `JSONDecodeError`
+   at char 0.
+
+6. **The four adversarial shapes an independent review built** and this file
+   did not have: a literal `~2` beside two bare twins, two EMPTY references,
+   the KiCad 6/7 and 8+ forms claiming one name, and a reference-less block
+   between two twins. All four passed on the first run, which is why they are
+   pinned rather than left alone.
 
 The corpus arms carry their own counterexamples: `t_every_pad_is_reachable`
 FAILED on esp_prog and watchy before the fix and held on the other 20, and
@@ -155,8 +162,9 @@ def t_two_blocks_one_reference_both_survive():
 def t_the_key_reaches_footprint_reference_and_pad_component_ref():
     """The disambiguated name is the part's identity, not just a dict key.
 
-    `Pad.component_ref` is compared as a same-part test in ~9 places
-    (`check_drc`, `plane_pad_tap`, `route_diff`, `diff_pair_multipoint`). If
+    `Pad.component_ref` is compared as a same-part test in 7 pad-vs-pad places
+    across `check_drc`, `plane_pad_tap`, `route_diff` and
+    `diff_pair_multipoint`. If
     the key lived only in the dict, two pads on two different parts would go on
     comparing equal.
     """
@@ -344,8 +352,8 @@ def t_duplicate_references_is_keyed_by_the_FILE_spelling():
 # --- 6. the warning ----------------------------------------------------------
 
 def t_the_warning_is_on_stderr_and_stdout_stays_clean():
-    """Six shipped tools emit bare JSON on stdout; a WARNING there is a
-    JSONDecodeError at char 0."""
+    """9 shipped call sites across 4 files emit bare JSON on stdout; a
+    WARNING there is a JSONDecodeError at char 0."""
     p = _board(footprint_text('U7', 1, 1, uuid='a'),
                footprint_text('U7', 2, 2, uuid='b'))
     err = io.StringIO()
@@ -463,6 +471,59 @@ def t_iter_footprint_blocks_agrees_with_the_parser_on_every_board():
           % len(boards), str(bad))
 
 
+def t_the_adversarial_shapes_a_reviewer_found():
+    """Four fixtures an independent review built and this file did not have.
+
+    All four passed on the first run, which is the point: they are cheap, they
+    are exactly where a future refactor of the ordinal breaks, and "it already
+    works" is a reason to PIN a shape, not a reason to leave it unpinned.
+    """
+    # A: a literal ordinal-shaped name sitting BESIDE two bare twins. The
+    #    ordinal must step over it rather than collide with it.
+    two = DUP_REF_SEP + '2'
+    pcb = _parse(_board(footprint_text('TP4', 1, 1, uuid='a'),
+                        footprint_text('TP4', 2, 2, uuid='b'),
+                        footprint_text('TP4' + two, 3, 3, uuid='c')))
+    check(sorted(pcb.footprints) == sorted(['TP4', 'TP4' + DUP_REF_SEP + '3',
+                                            'TP4' + two]),
+          'A: a real `%s2` beside two bare twins keeps all three'
+          % DUP_REF_SEP, str(sorted(pcb.footprints)))
+    check(pcb.footprints['TP4' + two].uuid == 'c',
+          'A: and the literal name still belongs to the block that spells it')
+
+    # B: two EMPTY Reference properties -- esp_prog's three-logo shape.
+    pcb = _parse(_board(footprint_text('', 1, 1, uuid='e1'),
+                        footprint_text('', 2, 2, uuid='e2'),
+                        footprint_text('R1', 3, 3, uuid='r')))
+    check(sorted(pcb.footprints) == ['#e1', '#e2', 'R1'],
+          'B: two EMPTY references key by uuid, not onto each other',
+          str(sorted(pcb.footprints)))
+
+    # C: the KiCad 6/7 form and the modern one claiming ONE name. No tracked
+    #    board mixes them, so this can only be covered synthetically.
+    pcb = _parse(_board(footprint_text('J9', 1, 1, uuid='m', ref_property=True),
+                        footprint_text('J9', 2, 2, uuid='l',
+                                       ref_property=False)))
+    check(sorted(pcb.footprints) == ['J9', 'J9' + two],
+          'C: the 6/7 and 8+ forms disambiguate against EACH OTHER',
+          str(sorted(pcb.footprints)))
+    check(pcb.footprints['J9'].uuid == 'm'
+          and pcb.footprints['J9' + two].uuid == 'l',
+          'C: in file order, whichever form each block uses')
+
+    # D: a reference-LESS block BETWEEN two twins. The ordinal counts
+    #    OCCURRENCES of the name, not positions in the file, so the block in
+    #    between must not shift it.
+    pcb = _parse(_board(footprint_text('C7', 1, 1, uuid='c1'),
+                        footprint_text(None, 2, 2, uuid='c2'),
+                        footprint_text('C7', 3, 3, uuid='c3')))
+    check(sorted(pcb.footprints) == ['#c2', 'C7', 'C7' + two],
+          'D: a reference-less block between two twins does not shift the '
+          'ordinal', str(sorted(pcb.footprints)))
+    check(pcb.footprints['C7' + two].uuid == 'c3',
+          'D: and the ordinal still names the second BEARER of the name')
+
+
 TESTS = (
     t_two_blocks_one_reference_both_survive,
     t_the_key_reaches_footprint_reference_and_pad_component_ref,
@@ -480,6 +541,7 @@ TESTS = (
     t_block_count_equals_key_count,
     t_the_duplicate_witnesses_are_still_in_the_corpus,
     t_iter_footprint_blocks_agrees_with_the_parser_on_every_board,
+    t_the_adversarial_shapes_a_reviewer_found,
 )
 
 

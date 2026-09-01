@@ -19,11 +19,19 @@ THE MEASUREMENT THIS FILE TURNS INTO A GATE. `placement/perturb.py`'s
 -- its docstring says "Poses are unchanged for non-members -- only their
 formatting is", and `perturb.py` builds the stress harness's ground-truth
 CONTROL board with it. Measured over the 22 git-tracked boards before the fix,
-that call relocated **12 footprint blocks across 5 boards, up to 70.66 mm**
-(four of glasgow's six casualties are `kikit:Tab` panel tabs). After: 0 on
-22 of 22. `tests/measure_726_writer_teleport.py` produces the table; the
-`t_an_identity_write_moves_nothing` arm below is that table as an assertion,
-and the 17 boards that always read 0 are its built-in negative controls.
+**that call relocated 3 footprint blocks on 2 boards, up to 23.44 mm**
+(esp_prog `Ref*`, watchy `TP4` and `TP5`). After: 0 on 22 of 22.
+
+The arm below is deliberately the WIDER form -- one placement per PARSED
+footprint, which relocated 12 blocks across 5 boards up to 70.66 mm. No shipped
+caller produces that list: `_all_at_current` iterates `sorted(state.parts)`,
+and `quench.py:815-825` admits a zero-pad footprint only when the board draws
+it a courtyard, so glasgow's `REF**`, orangecrab's `G***` and ulx3s' `EMARD`
+are unreachable. It is gated as the exposure a future caller inherits if that
+filter moves, NOT as damage done -- and an earlier version of this docstring
+reported the 12 as what `_all_at_current` does, which an independent
+fact-check caught. `tests/measure_726_writer_teleport.py` prints both, as E1
+and E2. The 17 boards that always read 0 are the built-in negative controls.
 
 SIX THINGS THIS FILE PINS, each easy to get wrong:
 
@@ -156,12 +164,21 @@ def _out():
 
 
 def _write(src, placements, quiet=True):
-    """Run the writer; return (out_path, its stdout)."""
+    """Run the writer; return (out_path, stdout, stderr).
+
+    Both streams, separately, because #726 puts the `Modified N` line on
+    stdout and every WARNING on stderr -- shipped tools emit bare JSON on
+    stdout, where a warning in front is a JSONDecodeError at char 0.
+    """
     out = _out()
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        write_placed_output(src, out, placements)
-    return out, buf.getvalue()
+    obuf, ebuf = io.StringIO(), io.StringIO()
+    old_err, sys.stderr = sys.stderr, ebuf
+    try:
+        with redirect_stdout(obuf):
+            write_placed_output(src, out, placements)
+    finally:
+        sys.stderr = old_err
+    return out, obuf.getvalue(), ebuf.getvalue()
 
 
 def _read(p):
@@ -207,7 +224,7 @@ def t_one_placement_moves_exactly_one_block():
                  footprint_text('U7', 30, 10, uuid='b'),
                  footprint_text('R1', 20, 10, uuid='c'))
     before = _blocks_by_key(src)
-    out, _ = _write(src, [{'reference': 'U7', 'new_x': 15.0, 'new_y': 15.0,
+    out, _o, _e = _write(src, [{'reference': 'U7', 'new_x': 15.0, 'new_y': 15.0,
                            'new_rotation': 0.0}])
     after = _blocks_by_key(out)
     check(set(before) == set(after), 'the block set is unchanged',
@@ -227,7 +244,7 @@ def t_the_other_twin_is_addressable_too():
                  footprint_text('U7', 30, 10, uuid='b'))
     before = _blocks_by_key(src)
     twin = 'U7' + DUP_REF_SEP + '2'
-    out, _ = _write(src, [{'reference': twin, 'new_x': 55.0, 'new_y': 55.0,
+    out, _o, _e = _write(src, [{'reference': twin, 'new_x': 55.0, 'new_y': 55.0,
                            'new_rotation': 0.0}])
     after = _blocks_by_key(out)
     check(_poses(out)[twin] == (55.0, 55.0, 0.0),
@@ -242,7 +259,7 @@ def t_the_twins_are_independent_in_one_call():
     src = _board(footprint_text('U7', 10, 10, uuid='a'),
                  footprint_text('U7', 30, 10, uuid='b'))
     twin = 'U7' + DUP_REF_SEP + '2'
-    out, txt = _write(src, [
+    out, txt, err = _write(src, [
         {'reference': 'U7', 'new_x': 1.0, 'new_y': 2.0, 'new_rotation': 0.0},
         {'reference': twin, 'new_x': 3.0, 'new_y': 4.0, 'new_rotation': 0.0}])
     p = _poses(out)
@@ -255,7 +272,14 @@ def t_the_twins_are_independent_in_one_call():
 # --- 2: the identity write, over the tracked corpus --------------------------
 
 def t_an_identity_write_moves_nothing():
-    """The headline. Before the fix: 12 blocks across 5 boards, up to 70.66 mm.
+    """One placement per PARSED footprint must move nothing.
+
+    Before the fix: 12 blocks across 5 boards, up to 70.66 mm. That is the
+    UPPER BOUND, not what any shipped caller does -- the real
+    `perturb._all_at_current` reaches 3 blocks on 2 boards (see the module
+    docstring). Gated in the wider form on purpose: it is the whole set of
+    blocks the writer can be handed, and `measure_726_writer_teleport.py`
+    reports the reachable subset separately as E1.
 
     POSES, not bytes -- the writer reformats every `(at)` it is handed to
     `:.6f`, which is not a move.
@@ -271,7 +295,7 @@ def t_an_identity_write_moves_nothing():
                        'new_rotation': f.rotation}
                       for r, f in pcb.footprints.items()]
         before = _poses(b)
-        out, _ = _write(b, placements)
+        out, _o, _e = _write(b, placements)
         moved = _moved(before, _poses(out))
         os.remove(out)
         if moved:
@@ -302,7 +326,7 @@ def t_a_zero_placement_write_changes_only_the_copper_text_pass():
     for b in boards:
         src = _read(b)
         expected = move_copper_text_to_silkscreen(src)
-        out, _ = _write(b, [])
+        out, _o, _e = _write(b, [])
         got = _read(out)
         os.remove(out)
         if got != expected:
@@ -325,7 +349,7 @@ def t_the_modified_count_is_placements_not_blocks():
     src = _board(footprint_text('U7', 10, 10, uuid='a'),
                  footprint_text('U7', 30, 10, uuid='b'),
                  footprint_text('R1', 20, 10, uuid='c'))
-    _, txt = _write(src, [{'reference': 'U7', 'new_x': 1.0, 'new_y': 1.0,
+    _o, txt, err = _write(src, [{'reference': 'U7', 'new_x': 1.0, 'new_y': 1.0,
                            'new_rotation': 0.0}])
     # The FULL phrase: `writer.py` also prints "Modified N reference label(s)",
     # and tests/stress/stage_blind.py quotes "Modified " in prose.
@@ -341,12 +365,17 @@ def t_the_modified_count_is_placements_not_blocks():
 def t_a_placement_matching_no_block_is_reported_not_dropped():
     src = _board(footprint_text('R1', 1, 1, uuid='a'))
     before = _poses(src)
-    out, txt = _write(src, [{'reference': 'NOPE7', 'new_x': 9.0, 'new_y': 9.0,
+    out, txt, err = _write(src, [{'reference': 'NOPE7', 'new_x': 9.0, 'new_y': 9.0,
                              'new_rotation': 0.0}])
     check(_moved(before, _poses(out)) == [],
           'a placement for an absent reference moves nothing')
-    check("'NOPE7'" in txt and 'matched no footprint block' in txt,
-          'and the writer SAYS so rather than dropping it', repr(txt))
+    check("'NOPE7'" in err and 'matched no footprint block' in err,
+          'and the writer SAYS so rather than dropping it -- on STDERR',
+          repr(err))
+    check('WARNING' not in txt,
+          'stdout carries no WARNING: a bare-JSON caller would fail to parse '
+          'it at char 0, which is why the parser half of #726 uses stderr too',
+          repr(txt))
 
 
 def t_a_bare_name_no_longer_reaches_the_ordinal_twin():
@@ -358,16 +387,16 @@ def t_a_bare_name_no_longer_reaches_the_ordinal_twin():
     """
     src = _board(footprint_text('U7', 10, 10, uuid='a'),
                  footprint_text('U7', 30, 10, uuid='b'))
-    out, txt = _write(src, [{'reference': 'U7', 'new_x': 1.0, 'new_y': 1.0,
+    out, txt, err = _write(src, [{'reference': 'U7', 'new_x': 1.0, 'new_y': 1.0,
                              'new_rotation': 0.0}])
-    check('matched no footprint block' not in txt,
-          'the bare name still resolves (to the FIRST block)', repr(txt))
-    out2, txt2 = _write(src, [{'reference': 'U7' + DUP_REF_SEP + '9',
+    check('matched no footprint block' not in err,
+          'the bare name still resolves (to the FIRST block)', repr(err))
+    out2, txt2, err2 = _write(src, [{'reference': 'U7' + DUP_REF_SEP + '9',
                                'new_x': 1.0, 'new_y': 1.0,
                                'new_rotation': 0.0}])
-    check('matched no footprint block' in txt2,
+    check('matched no footprint block' in err2,
           'an ordinal the board does not have is reported, not silently '
-          'dropped', repr(txt2))
+          'dropped', repr(err2))
 
 
 # --- 6: the reference-less block ---------------------------------------------
@@ -384,14 +413,14 @@ def t_a_referenceless_block_is_addressable():
                  footprint_text(None, 2, 2, uuid='u2'),
                  footprint_text('R1', 3, 3, uuid='u3'))
     before = _blocks_by_key(src)
-    out, txt = _write(src, [{'reference': '#u1', 'new_x': 40.0, 'new_y': 40.0,
+    out, txt, err = _write(src, [{'reference': '#u1', 'new_x': 40.0, 'new_y': 40.0,
                              'new_rotation': 0.0}])
     after = _blocks_by_key(out)
     check(_poses(out)['#u1'] == (40.0, 40.0, 0.0),
           'a #uuid-keyed placement moves its block', str(_poses(out)['#u1']))
     check(after['#u2'] == before['#u2'] and after['R1'] == before['R1'],
           'and nothing else')
-    check('matched no footprint block' not in txt,
+    check('matched no footprint block' not in err,
           'without a warning, because it DID match')
 
 

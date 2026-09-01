@@ -7,6 +7,7 @@ to update the (at X Y [rotation]) of each footprint block.
 from __future__ import annotations
 
 import re
+import sys
 from typing import List, Dict
 
 from kicad_parser import find_matching_paren, iter_footprint_blocks
@@ -88,17 +89,25 @@ def _report_unapplied(requested, matched, unaddressed, what):
     that did nothing. The writer is the last place that can still tell.
 
     `unaddressed` is the narrower case -- a block the name DID resolve to, but
-    which carries no Reference node to edit.
+    which the writer could not act on: no `(at ...)` to rewrite, or no
+    Reference node to edit.
+
+    ON STDERR, for the same reason the parser's duplicate-reference warning is
+    (`kicad_parser.py`): shipped tools emit bare JSON on stdout, where a
+    WARNING line in front is a JSONDecodeError at char 0. `converge.py` happens
+    to wrap its write in `_StdoutToStderr()`, which is luck rather than a
+    contract.
     """
     missing = sorted(set(requested) - set(matched))
     if missing:
         print(f"WARNING: {len(missing)} {what}(s) matched no footprint block: "
               + ', '.join(repr(m) for m in missing[:12])
-              + (' ...' if len(missing) > 12 else ''))
+              + (' ...' if len(missing) > 12 else ''), file=sys.stderr)
     if unaddressed:
-        print(f"WARNING: {len(unaddressed)} {what}(s) name a reference-less "
-              f"block, which has no Reference node: "
-              + ', '.join(repr(u) for u in sorted(unaddressed)[:12]))
+        print(f"WARNING: {len(unaddressed)} {what}(s) resolved to a block with "
+              f"no `(at ...)` or no Reference node, so nothing was written: "
+              + ', '.join(repr(u) for u in sorted(unaddressed)[:12]),
+              file=sys.stderr)
 
 
 def write_label_output(input_file: str, output_file: str,
@@ -216,14 +225,18 @@ def write_placed_output(input_file: str, output_file: str,
     placement_by_ref = {p['reference']: p for p in placements}
     modified_count = 0
     matched = set()
+    unapplied_blocks = []
 
     # Blocks are NAMED by the parser's own resolver (#726). Before that, this
     # loop read each block's `(property "Reference" ...)` itself and looked the
     # STRING up, so one placement rewrote EVERY block carrying it: measured, a
     # single placement for esp_prog's `Ref*` moved both fiducials and left them
-    # stacked 23.44 mm from where the second one belonged, and handing the
-    # writer every part at the pose it already had relocated 12 blocks across
-    # 5 corpus boards, up to 70.66 mm.
+    # stacked 23.44 mm from where the second one belonged, and `perturb.
+    # _all_at_current` -- the identity write that builds the stress harness's
+    # ground-truth CONTROL board -- relocated 3 blocks on 2 corpus boards, up
+    # to 23.44 mm. (12 blocks across 5 boards, to 70.66 mm, is the ceiling for
+    # a caller that places every PARSED footprint; `state.parts` excludes the
+    # zero-pad blocks that make up the difference.)
     #
     # Resolving here means the writer and the parser can no longer disagree
     # about what a name means -- which is the property that matters, not merely
@@ -241,13 +254,18 @@ def write_placed_output(input_file: str, output_file: str,
         placement = placement_by_ref.get(key)
         if placement is None:
             continue
-        matched.add(key)
 
         # Find the footprint's (at X Y [rotation]) - it's the first (at ...) in the block
         at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)',
                              fp_text)
         if not at_match:
+            # Resolved, but there is nothing to rewrite. `matched` is added
+            # BELOW this guard on purpose: it means "the writer acted", so a
+            # block with no `(at ...)` is reported rather than falling into
+            # the silence this reporter exists to end.
+            unapplied_blocks.append(key)
             continue
+        matched.add(key)
 
         # Build replacement (at ...) string
         new_x = placement['new_x']
@@ -417,6 +435,7 @@ def write_placed_output(input_file: str, output_file: str,
     provenance.commit_write(output_file)
 
     print(f"Modified {modified_count} footprint positions")
-    _report_unapplied(placement_by_ref, matched, (), 'placement')
+    _report_unapplied(placement_by_ref, matched, unapplied_blocks,
+                      'placement')
     print(f"Successfully wrote {output_file}")
     return True

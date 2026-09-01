@@ -155,16 +155,19 @@ ROWS = [
      "        _seen_raw.add(_raw_ref)",
      (T_WRITER,), 'KILLED'),
 
-    # `matched.add(key)` appears in BOTH writers; anchored on the two lines
-    # above it, which belong to the pose writer alone.
+    # `matched.add(key)` appears in BOTH writers; anchored on the line above
+    # it, which belongs to the pose writer alone. RE-ANCHORED once already:
+    # the Phase-2 review moved `matched.add` below the `(at ...)` guard, so a
+    # block that resolves but has nothing to rewrite is reported rather than
+    # silently neither modified nor named.
     ('writer-counts-blocks-not-placements', 'w',
-     "        if placement is None:\n            continue\n        matched.add(key)",
-     "        if placement is None:\n            continue\n        matched.add(key)\n"
-     "        modified_count += 1",
+     "            continue\n        matched.add(key)",
+     "            continue\n        matched.add(key)\n        modified_count += 1",
      (T_WRITER,), 'KILLED'),
 
     ('writer-drops-an-unmatched-placement-in-silence', 'w',
-     "    _report_unapplied(placement_by_ref, matched, (), 'placement')",
+     "    _report_unapplied(placement_by_ref, matched, unapplied_blocks,\n"
+     "                      'placement')",
      "    pass",
      (T_WRITER,), 'KILLED'),
 

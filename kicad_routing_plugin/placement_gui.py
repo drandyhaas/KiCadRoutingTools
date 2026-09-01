@@ -997,10 +997,17 @@ class PlacementTab(wx.Panel):
         # FindFootprintByReference would hand both of them the first block.
         from gui_utils import live_footprints_by_key
         live = live_footprints_by_key(board)
+        unreachable = []
         for ref, parsed in sorted(result_pcb.footprints.items()):
             fp = live.get(ref) or board.FindFootprintByReference(ref)
             if fp is None:
-                continue  # part exists only in the result; never invent parts
+                # Part exists only in the result; never invent parts. Collected
+                # rather than dropped in silence, for the same reason the CLI
+                # writer reports an unapplied placement (#726): a pose the run
+                # produced and the board never received is the failure nobody
+                # looks at.
+                unreachable.append(ref)
+                continue
             pos = fp.GetPosition()
             live_x = pcbnew.ToMM(pos.x)
             live_y = pcbnew.ToMM(pos.y)
@@ -1011,6 +1018,10 @@ class PlacementTab(wx.Panel):
                     or abs((live_rot - (parsed.rotation or 0) % 360 + 180) % 360 - 180) > 1e-3
                     or live_back != parsed_back):
                 moves.append((ref, fp, parsed))
+        if unreachable:
+            print("WARNING: %d part(s) in the result are not on the live "
+                  "board, so their poses were not applied: %s"
+                  % (len(unreachable), ', '.join(sorted(unreachable)[:12])))
         return moves
 
     def _apply_pose(self, fp, parsed, pcbnew):
