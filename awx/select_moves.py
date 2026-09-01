@@ -20,6 +20,7 @@ silent assignment is impossible to audit.
 from __future__ import annotations
 
 import math
+import os
 from typing import (Callable, Dict, Iterable, List, Optional, Sequence,
                     Tuple)
 
@@ -103,7 +104,10 @@ def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
 # The router's own via/length exchange rate: a via costs 75 units on
 # the 0.1 mm grid, i.e. one via == 7.5 mm of track. Every objective
 # that mixes vias with distance converts at this ONE rate.
-VIA_MM = 7.5
+# RIDE_MM_PER_VIA overrides it for calibration studies ONLY -- the
+# open unit question is that plan_floor counts CROSSINGS (a dive is
+# ~2 vias), so the honest rate for the floor+ride sum may be 2x.
+VIA_MM = float(os.environ.get('RIDE_MM_PER_VIA', '7.5'))
 
 
 def ride_mm(sel: Dict[str, 'Move'], launch: Dict[str, Pt],

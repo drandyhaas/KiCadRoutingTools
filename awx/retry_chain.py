@@ -67,7 +67,10 @@ def main():
     tag, K = args[0], args[1]
     base = os.environ.get('BASE', 'fb_t2q_base.kicad_pcb')
     dest = os.environ.get('DEST', 'DU1')
-    dirs = os.environ.get('DIRS', 'left,down')
+    # DIRS is opt-in exactly as in chain_k.sh: the recorded arm runs
+    # UNRESTRICTED (general costs steer the faces); a left,down
+    # default here was a leftover board-specific restriction
+    dirs = os.environ.get('DIRS', '')
     plan_opts = os.environ.get('PLAN_OPTS', '--two-page').split()
     nets = sh([sys.executable, 'coherent_nets.py', K]).stdout.strip()
 
@@ -76,7 +79,8 @@ def main():
         (grade tuple or None, refused list, board path)."""
         fo = f'{atag}_fo_k{K}.kicad_pcb'
         sh([sys.executable, 'fanout_from_plan.py', fo, K,
-            f'--board={base}', f'--dirs={dirs}', '--no-lines',
+            f'--board={base}',
+            *([f'--dirs={dirs}'] if dirs else []), '--no-lines',
             *plan_opts, *fo_extra],
            env_extra=force_env, log_path=f'{atag}_fo_k{K}.log')
         if not os.path.exists(os.path.join(HERE, fo)):
