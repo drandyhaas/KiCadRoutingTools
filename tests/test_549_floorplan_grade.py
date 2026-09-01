@@ -82,7 +82,14 @@ def test_an_emitted_intent_grades_clean_on_every_tracked_board():
             continue
         raw = emit_intent(parse_kicad_pcb(p), p)
         r = _graded(raw, p)
-        assert r.passed, (name, [v.message for v in r.errors[:4]])
+        # What this test is FOR is "no errors" -- that the rules are wired to
+        # real geometry and an emitted intent does not violate itself. Since
+        # #713 item 5, `passed` also requires `complete`, and 4 of these 7
+        # boards legitimately abstain on `overlap_area` (the emitter refuses to
+        # derive a budget that would bless existing courtyard overlaps). So
+        # assert the two halves separately rather than loosening either.
+        assert not r.errors, (name, [v.message for v in r.errors[:4]])
+        assert r.passed == r.complete, (name, r.not_graded)
         checked += 1
     assert checked >= 5, f"only {checked} boards round-tripped"
     print(f"  PASS: {checked} boards emit -> grade with zero errors")

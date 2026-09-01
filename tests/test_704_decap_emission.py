@@ -627,12 +627,16 @@ def test_the_cli_reports_a_withholding_on_stdout():
              '--emit-intent', out, '--declare-decaps'], accept=True)
         assert 'WITHHELD' in r.stdout, r.stdout[-400:]
         run_utils.evidence(out, 'the emitted intent')
+        # A withheld key is an ungraded DECLARED channel, so since #713 item 5
+        # the grade REFUSES (exit 4) instead of exiting 0. That is the point of
+        # this test's own subject -- it asserts the CLI says NOT DERIVABLE --
+        # so assert the refusal AND its reason rather than a bare success.
         r2 = run_utils.check(
             [sys.executable, '-X', 'utf8',
              os.path.join('py_tools', 'check_floorplan.py'), _board(name),
-             '--intent', out], accept=True)
-        assert 'NOT DERIVABLE' in r2.stdout, r2.stdout[-400:]
+             '--intent', out], refuse='NOT DERIVABLE', code=4)
         assert 'decap_distance' in r2.stdout, r2.stdout[-400:]
+        assert 'NOT FULLY GRADED' in (r2.stdout + r2.stderr), r2.stdout[-400:]
     print(f"  PASS: {name} -- the CLI says WITHHELD on emit and NOT DERIVABLE "
           f"on grade")
 

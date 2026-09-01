@@ -73,7 +73,19 @@ def _emit_once():
     return _EMITTED
 
 
-def test_emit_then_grade_is_clean_and_exits_zero():
+def test_emit_then_grade_is_clean_and_is_honest_about_what_it_graded():
+    """BOARD is ulx3s, and its emitted intent WITHHOLDS `overlap_area`: the
+    board carries 18 unwaived courtyard interpenetrations and an auto-budget
+    would bless them. So this round trip produces zero errors AND an ungraded
+    declared channel.
+
+    Before #713 item 5 that combination printed `PASS: 5 rule(s) ran, no
+    violations` twenty-six lines above `1 declared value(s) NOT DERIVABLE --
+    not graded, not passed`, reported `pass: true`, and exited 0. This test
+    asserted exactly that, so it was pinning the defect. It now asserts the
+    two halves it always meant: the rules find nothing wrong, and the run says
+    plainly that it did not grade everything.
+    """
     code, out, err = _run(BOARD, '--emit-intent', _EMITTED)
     assert code == 0, (code, err)
     doc = json.load(open(_EMITTED, encoding='utf-8'))
@@ -81,10 +93,19 @@ def test_emit_then_grade_is_clean_and_exits_zero():
     assert 'not editable by this toolchain' in out, out
 
     code, out, err = _run(BOARD, '--intent', _EMITTED)
-    assert code == 0, (code, err)
     s = _summary(out)
-    assert s['pass'] is True and s['errors'] == 0
-    print(f"  PASS: emit -> grade exits 0, {s['rules_run']} rules ran")
+    assert s['errors'] == 0 and s['violations'] == 0, s
+    assert s['complete'] is False and s['not_graded'] == {
+        'budget_abstained': 1}, s
+    assert s['pass'] is False, "an ungraded declared channel is not a pass"
+    assert code == VIOLATIONS_EXIT, (code, err)
+    assert 'INCOMPLETE' in out and 'PASS:' not in out, out
+    # --exit-zero suppresses the CODE without lying about the VERDICT, the
+    # same contract it already has for violations.
+    code, out, _ = _run(BOARD, '--intent', _EMITTED, '--exit-zero')
+    assert code == 0 and _summary(out)['pass'] is False
+    print(f"  PASS: emit -> grade is clean but INCOMPLETE, "
+          f"{s['rules_run']} rules ran, exit {VIOLATIONS_EXIT}")
 
 
 def test_violations_exit_4_and_exit_zero_overrides():
@@ -176,7 +197,10 @@ def test_json_output_is_byte_identical_across_hash_seeds():
         code, stdout, err = _run(BOARD, '--intent', _emit_once(), '-q',
                                  '--json', p, env={'PYTHONHASHSEED': seed,
                                                    'KRT_NO_BANNER': '1'})
-        assert code == 0, (seed, err)
+        # 4, not 0: ulx3s's emitted intent withholds `overlap_area`, so this
+        # round trip is clean but INCOMPLETE (#713 item 5). The determinism
+        # claim is about the BYTES and is unaffected either way.
+        assert code == VIOLATIONS_EXIT, (seed, err)
         outs.append((open(p, 'rb').read(), stdout))
     assert outs[0][0] == outs[1][0], "--json differs across PYTHONHASHSEED"
     assert outs[0][1] == outs[1][1], "JSON_SUMMARY differs across PYTHONHASHSEED"
@@ -325,7 +349,7 @@ def test_a_placement_run_leaves_the_board_outline_untouched():
 
 
 TESTS = [
-    test_emit_then_grade_is_clean_and_exits_zero,
+    test_emit_then_grade_is_clean_and_is_honest_about_what_it_graded,
     test_a_placement_run_leaves_the_board_outline_untouched,
     test_violations_exit_4_and_exit_zero_overrides,
     test_argparse_failures_all_exit_2,

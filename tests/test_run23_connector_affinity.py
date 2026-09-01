@@ -81,11 +81,18 @@ class TestDeclareAndGrade(unittest.TestCase):
         self.assertEqual(by_ref['J1']['class'], 'edge_receptacle')
 
     def test_interior_connector_flags_advisory_pass_survives(self):
-        self.assertEqual(self.gr.returncode, 0, self.gr.stdout[-400:])
         doc = json.load(open(self.grade, encoding='utf-8'))
-        self.assertTrue(doc['pass'])
+        # The claim is that an interior connector is an ADVISORY -- a warn,
+        # never an error. Since #713 item 5 the exit code and `pass` also
+        # answer "was everything declared actually graded", and this fixture
+        # (tigard_placed) withholds `overlap_area`, so both now say incomplete.
+        # Assert the advisory claim directly instead of through a verdict that
+        # aggregates a second question.
         sev = [v['severity'] for v in doc['violations']]
         self.assertNotIn('error', sev)
+        self.assertEqual(doc['not_graded'], {'budget_abstained': 1},
+                         doc['not_graded'])
+        self.assertEqual(self.gr.returncode, 4, self.gr.stdout[-400:])
         # J4 sits 6.03mm interior: flagged, as a WARNING.
         j4 = [v for v in doc['violations'] if v['ref'] == 'J4']
         self.assertEqual([v['severity'] for v in j4], ['warn'])

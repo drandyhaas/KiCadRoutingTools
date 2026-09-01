@@ -129,7 +129,11 @@ def test_it_is_a_WARNING_and_the_board_still_passes_on_it():
         assert all(v.severity == fp.WARN for v in hits), name
         # None of them may be in `errors`, which is what the exit code reads.
         assert not [v for v in r.errors if v.rule == 'decap_ungraded'], name
-        assert r.passed, (name, [v.message for v in r.errors[:2]])
+        # `not r.errors`: the claim is "decap_ungraded is a WARN and is not
+        # counted", which is about the error list. `passed` additionally
+        # requires completeness since #713 item 5, and watchy/tigard withhold
+        # `overlap_area`.
+        assert not r.errors, (name, [v.message for v in r.errors[:2]])
     print(f"  PASS: {len(names)} board(s) carry decap_ungraded findings "
           f"and still pass -- warn is reported, not counted")
 

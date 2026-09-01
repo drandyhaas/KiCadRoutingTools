@@ -61,12 +61,17 @@ _ROUTE_PY = os.path.join(ROOT, 'py_router', 'route.py')
 
 # --------------------------------------------------------------------- tier 3
 
-def scoped_route(board, nets, out=None, extra_args=(), timeout=None):
+def scoped_route(board, nets, out=None, extra_args=()):
     """Route ONLY `nets`, and return the merged summary. Seconds, not minutes.
 
     This is the tier that actually discriminates: placement cost says a pose
     looks better, and only a route says the copper agrees. Scoping it to the
-    affected nets is what makes it affordable enough to run per candidate.
+    affected nets is what makes it affordable enough to run per candidate --
+    and that SCOPE is the bound. There is no `timeout`: it existed only to
+    serve the two probe budgets #713 item 2 removed, no caller passes one now,
+    and leaving the parameter would invite a clock straight back into a
+    comparison. The temp dir is deliberately NOT cleaned up -- callers read
+    `res['board']` after the call returns.
     """
     tmp = tempfile.mkdtemp(prefix='converge_t3_')
     out = out or os.path.join(tmp, 'routed.kicad_pcb')
@@ -74,13 +79,65 @@ def scoped_route(board, nets, out=None, extra_args=(), timeout=None):
     argv = [sys.executable, '-X', 'utf8', _ROUTE_PY, board, out,
             '--nets'] + list(nets) + ['--json-out', js] + list(extra_args)
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', timeout=timeout, cwd=ROOT)
+                       errors='replace', cwd=ROOT)
     summary = {}
     if os.path.isfile(js):
         with open(js, encoding='utf-8') as f:
             summary = json.load(f)
     return {'argv': argv, 'returncode': r.returncode, 'board': out,
             'json': js, 'summary': summary, 'stdout_tail': r.stdout[-1500:]}
+
+
+#: A probe row's `status`, and the ONLY place the vocabulary is written down.
+#: `ok` is the one value carrying a verdict; the rest are ways of not having
+#: one, and before #713 item 2 they all shared a single `failures: None` that
+#: no consumer inspected -- so a route.py crash, a "No nets matched" exit, a
+#: deliberate ratsnest skip and a wall-clock timeout were the same row.
+PROBE_STATUSES = ('ok', 'crashed', 'no_summary', 'screened')
+
+
+def probe_route(board, nets, extra_args=(), out=None, note_prefix=''):
+    """One probe route -> a JSON-safe verdict row, shaped IDENTICALLY whatever
+    happens.
+
+    ONE helper because there were two, in place_portfolio and compare_seeds,
+    whose timeout rows dropped different subsets of the success row's keys
+    (`vias`/`returncode` in one; `probe_kind`/`iterations`/`vias`/`returncode`
+    in the other). tests/test_compare_seeds.py:96 reads `probe_kind`
+    unconditionally, so it was a latent KeyError on any timed-out row rather
+    than the assertion it looks like.
+
+    NO TIMEOUT. Both callers used to wrap this in `subprocess.run(timeout=...)`
+    -- 900 s in one, 1800 s in the other -- and record the expiry as
+    `failures: None`, which both then DROPPED from their rankings. A candidate
+    whose verdict a clock erased is not ranked worse; it stops being a
+    contender. route.py has no self-budget by design (#621) and the repo's own
+    main loop, place_route_loop._run_route_cmd, already calls it unbounded. The
+    bound here is SCOPE: `nets`, which both callers already pass.
+    """
+    res = scoped_route(board, nets, out=out, extra_args=list(extra_args))
+    summary = res['summary']
+    if not summary:
+        # Two different absences, kept apart: the router died, or it ran and
+        # wrote nothing we can read. Both used to be 'no summary'.
+        status = 'crashed' if res['returncode'] != 0 else 'no_summary'
+        return {'failures': None, 'status': status,
+                'note': f"{note_prefix}rc={res['returncode']}, no JSON summary",
+                'iterations': None, 'vias': None, 'nets': len(nets),
+                'returncode': res['returncode']}
+    n, note = route_verdict(summary)
+    return {'failures': n, 'status': 'ok', 'note': note_prefix + note,
+            'iterations': summary.get('total_iterations'),
+            'vias': summary.get('total_vias'), 'nets': len(nets),
+            'returncode': res['returncode']}
+
+
+def screened_row(nets, note):
+    """The row for a probe DELIBERATELY not run (the ratsnest screen). Same
+    shape, distinct status -- it was previously another `failures: None`."""
+    return {'failures': None, 'status': 'screened', 'note': note,
+            'iterations': None, 'vias': None, 'nets': len(nets),
+            'returncode': None}
 
 
 def route_verdict(summary):

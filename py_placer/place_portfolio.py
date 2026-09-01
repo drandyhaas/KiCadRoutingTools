@@ -190,8 +190,14 @@ Examples:
                         "verdict outranks the window one (a candidate can "
                         "win its window while losing the board). Costs two "
                         "extra full routes.")
-    p.add_argument("--route-timeout", type=float, default=900,
-                   help="Seconds per probe route (default: 900)")
+    # NO --route-timeout. It wrapped each probe in subprocess.run(timeout=900)
+    # and recorded the expiry as `failures: None`, which the ranking below then
+    # DROPPED -- so a clock did not rank a candidate worse, it stopped it being
+    # a contender, and a total expiry silently downgraded the run to the static
+    # crossings/hpwl ranking with no error and no exit-code change. route.py
+    # has no self-budget by design (#621) and place_route_loop already calls it
+    # unbounded. The bound is SCOPE -- --nets, which the probe already passes
+    # (#713 item 2).
     # Presentation & provenance
     p.add_argument("--no-render", action="store_true",
                    help="Skip the per-candidate PNGs")
@@ -271,18 +277,8 @@ def _affected_nets(pcb_data, cands, ignore_ids):
 
 def _probe(board, nets, args):
     """One probe route; returns the JSON-safe verdict row."""
-    from converge import scoped_route, route_verdict
-    try:
-        res = scoped_route(board, nets, extra_args=args.route_args or [],
-                           timeout=args.route_timeout)
-    except subprocess.TimeoutExpired:
-        return {'failures': None, 'note': f'timeout after {args.route_timeout}s',
-                'iterations': None, 'nets': len(nets)}
-    n, note = route_verdict(res['summary'])
-    return {'failures': n, 'note': note,
-            'iterations': res['summary'].get('total_iterations'),
-            'vias': res['summary'].get('total_vias'), 'nets': len(nets),
-            'returncode': res['returncode']}
+    from converge import probe_route
+    return probe_route(board, nets, extra_args=args.route_args or [])
 
 
 def _render(board, before, out_png, ignore_nets):
@@ -644,14 +640,28 @@ def main():
                     base_rat, {'crossings': c.metrics.get('crossings'),
                                'hpwl': c.metrics.get('hpwl')}, 25.0)
                 if skip:
-                    c.route = {'failures': None, 'iterations': None,
-                               'note': f'route skipped: {note}'}
+                    from converge import screened_row
+                    c.route = screened_row(nets, f'route skipped: {note}')
+                    c.route['probe_kind'] = window_kind
                     print(f"[probe] cand {c.index}: skipped ({note})")
                     continue
                 c.route = _probe(c.board, nets, args)
                 c.route['probe_kind'] = window_kind
                 print(f"[probe] cand {c.index}: failures="
                       f"{c.route['failures']} ({c.route['note']})")
+            # A candidate with no verdict is still DROPPED from the routed
+            # ranking -- but the causes are named now, and a route.py crash is
+            # reported rather than looking like a deliberate skip. `screened`
+            # is the one absence that is a decision rather than a failure.
+            _no_verdict = [c for c in [baseline] + probe_cands
+                           if c.route and c.route.get('failures') is None
+                           and c.route.get('status') != 'screened']
+            for c in _no_verdict:
+                who = 'baseline' if c.index == 0 else f'cand {c.index}'
+                print(f"[probe] WARNING {who} produced NO VERDICT "
+                      f"({c.route.get('status')}: {c.route.get('note')}) -- "
+                      f"it is excluded from the routed ranking, so the winner "
+                      f"is decided without it", file=sys.stderr)
             probed = [c for c in [baseline] + probe_cands
                       if c.route and c.route.get('failures') is not None]
             static_pos = {idx: k for k, idx in

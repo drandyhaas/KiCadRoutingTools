@@ -80,8 +80,12 @@ Examples:
                    help="Extra args for every probe route -- identical "
                         "across seeds by construction. Same quoting rule as "
                         "--seed-args: --route-args='--clearance 0.15'")
-    p.add_argument("--route-timeout", type=int, default=1800,
-                   help="Per-probe timeout in seconds (default: 1800)")
+    # NO --route-timeout (#713 item 2). It defaulted to 1800 here and 900 in
+    # place_portfolio -- two clocks, two defaults, neither covered by a test or
+    # named in any doc -- and a timed-out seed became `failures: None`, which
+    # `_key` sorts into tier 2 and `best` then never selects. A comparison one
+    # of whose arms a clock erased is not one. The bound is SCOPE: the net
+    # patterns already passed below.
     p.add_argument("--skip-gated", action="store_true", default=True,
                    help=argparse.SUPPRESS)
     p.add_argument("--probe-gated", action="store_true",
@@ -162,21 +166,19 @@ def main():
                 continue
         print(f"[seed {seed}] probing full board "
               f"({len(full_nets)} pattern(s))")
-        try:
-            res = scoped_route(out_board, full_nets,
-                               extra_args=args.route_args or [],
-                               timeout=args.route_timeout)
-        except subprocess.TimeoutExpired:
-            row['probe'] = {'failures': None,
-                            'note': f'timeout after {args.route_timeout}s'}
-            rows.append(row)
-            continue
-        n, note = route_verdict(res['summary'])
-        row['probe'] = {'failures': n, 'note': note, 'probe_kind': 'full',
-                        'iterations': res['summary'].get('total_iterations'),
-                        'vias': res['summary'].get('total_vias'),
-                        'returncode': res['returncode']}
-        print(f"[seed {seed}] failures={n} ({note})")
+        from converge import probe_route
+        row['probe'] = probe_route(out_board, full_nets,
+                                   extra_args=args.route_args or [])
+        row['probe']['probe_kind'] = 'full'
+        if row['probe']['failures'] is None:
+            # Previously silent: the only print sat on the success path, so a
+            # seed that produced no verdict vanished from the console AND from
+            # the ranking.
+            print(f"[seed {seed}] NO VERDICT ({row['probe']['status']}: "
+                  f"{row['probe']['note']})")
+        else:
+            print(f"[seed {seed}] failures={row['probe']['failures']} "
+                  f"({row['probe']['note']})")
         rows.append(row)
 
     # Rank: clean-gated probed seeds first by (failures, iterations, seed);
@@ -227,7 +229,21 @@ def main():
         print("compare_seeds: every seed failed its intent gate -- nothing "
               "rankable. Fix the intent or the pile first.", file=sys.stderr)
         return 4
-    return 4 if not any(r['probe'] for r in rows) else 0
+    # `no winner` is `nothing rankable`, full stop (#713 item 2). The old form
+    # was `4 if not any(r['probe'])`, and a no-verdict row is a truthy dict --
+    # so a run where every probe failed returned 0 with `best_seed: null`,
+    # contradicting docs/utilities.md's own contract ("exit 0 with a ranked
+    # winner, 4 when nothing was rankable"). A caller branching on the exit
+    # code read a total failure as a success.
+    _no_verdict = [r for r in rows
+                   if (r.get('probe') or {}).get('failures') is None]
+    if _no_verdict:
+        print(f"compare_seeds: {len(_no_verdict)} of {len(rows)} seed(s) "
+              f"produced NO VERDICT and none was rankable -- "
+              + '; '.join(f"seed {r['seed']}: "
+                          f"{(r.get('probe') or {}).get('status', 'not probed')}"
+                          for r in _no_verdict[:6]), file=sys.stderr)
+    return 4
 
 
 if __name__ == "__main__":
