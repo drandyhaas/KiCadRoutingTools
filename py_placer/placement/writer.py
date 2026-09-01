@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import List, Dict
 
-from kicad_parser import find_matching_paren
+from kicad_parser import find_matching_paren, iter_footprint_blocks
 from kicad_writer import move_copper_text_to_silkscreen
 
 
@@ -79,6 +79,28 @@ def _edit_reference_node(node: str, res) -> str:
     return node[:eff_m.start()] + eff + node[eff_end:]
 
 
+def _report_unapplied(requested, matched, unaddressed, what):
+    """Say which requested names reached no block, instead of dropping them.
+
+    Before #726 an entry that matched nothing was silently discarded: a typo in
+    `--ref`, a reference that only exists on a different board, or a name the
+    caller built from a stale parse all produced a successful-looking write
+    that did nothing. The writer is the last place that can still tell.
+
+    `unaddressed` is the narrower case -- a block the name DID resolve to, but
+    which carries no Reference node to edit.
+    """
+    missing = sorted(set(requested) - set(matched))
+    if missing:
+        print(f"WARNING: {len(missing)} {what}(s) matched no footprint block: "
+              + ', '.join(repr(m) for m in missing[:12])
+              + (' ...' if len(missing) > 12 else ''))
+    if unaddressed:
+        print(f"WARNING: {len(unaddressed)} {what}(s) name a reference-less "
+              f"block, which has no Reference node: "
+              + ', '.join(repr(u) for u in sorted(unaddressed)[:12]))
+
+
 def write_label_output(input_file: str, output_file: str,
                        results: List) -> bool:
     """Write a beautified-labels PCB file (#481).
@@ -102,22 +124,30 @@ def write_label_output(input_file: str, output_file: str,
     by_ref = {r.reference: r for r in results
               if getattr(r, 'changed', False)}
     modified_count = 0
+    matched = set()
+    unaddressed = []
 
-    footprint_starts = [m.start()
-                        for m in re.finditer(r'\(footprint\s+"', content)]
-    # Reverse order so string indices stay valid after replacements
-    # (string-aware block ends -- the same #113 hazard as above).
-    for start in reversed(footprint_starts):
-        end = find_matching_paren(content, start)
-        fp_text = content[start:end]
-
-        ref_m = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        if not ref_m:
-            ref_m = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
-        if not ref_m:
-            continue
-        res = by_ref.get(ref_m.group(1))
+    # Blocks are NAMED by the parser's own resolver (#726), so a label result
+    # for `TP4` edits the one block the parser calls `TP4` -- not every block
+    # that happens to carry that string. Reverse order so string indices stay
+    # valid after replacements; the spans come from the string-aware block scan
+    # (the same #113 hazard as above).
+    for start, end, fp_text, _raw_ref, key in reversed(
+            list(iter_footprint_blocks(content))):
+        res = by_ref.get(key)
         if res is None:
+            continue
+        # MATCHED, not yet applied: a result whose node already reads the way
+        # we would write it is a no-op, not an unresolved name.
+        matched.add(key)
+
+        ref_m = (re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+                 or re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text))
+        if not ref_m:
+            # A reference-LESS block has no Reference node to edit. The parser
+            # keys it `#uuid` and `placement/labels.py` already skips those, so
+            # a result for one cannot be produced -- but say nothing silently.
+            unaddressed.append(key)
             continue
 
         node_end = find_matching_paren(fp_text, ref_m.start())
@@ -133,6 +163,7 @@ def write_label_output(input_file: str, output_file: str,
         f.write(content)
 
     print(f"Modified {modified_count} reference label(s)")
+    _report_unapplied(by_ref, matched, unaddressed, 'label result')
     print(f"Successfully wrote {output_file}")
     return True
 
@@ -183,31 +214,33 @@ def write_placed_output(input_file: str, output_file: str,
 
     placement_by_ref = {p['reference']: p for p in placements}
     modified_count = 0
+    matched = set()
 
-    # Find all footprint blocks and modify their (at ...) lines
-    footprint_starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
-
-    # Process in reverse order so string indices remain valid after replacements
-    for start in reversed(footprint_starts):
-        # String-aware, so a lone paren inside a property value (an MPN like
-        # "TCR2EF115,LM(CT") cannot run the scan past this block and swallow the
-        # next footprint -- issue #113, the same hazard placement/parser.py's
-        # readers carry. A naive depth counter here would place the WRONG
-        # footprint, or silently place none.
-        end = find_matching_paren(content, start)
-        fp_text = content[start:end]
-
-        # Extract reference from (property "Reference" "XX" ...)
-        ref_match = re.search(
-            r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        if not ref_match:
+    # Blocks are NAMED by the parser's own resolver (#726). Before that, this
+    # loop read each block's `(property "Reference" ...)` itself and looked the
+    # STRING up, so one placement rewrote EVERY block carrying it: measured, a
+    # single placement for esp_prog's `Ref*` moved both fiducials and left them
+    # stacked 23.44 mm from where the second one belonged, and handing the
+    # writer every part at the pose it already had relocated 12 blocks across
+    # 5 corpus boards, up to 70.66 mm.
+    #
+    # Resolving here means the writer and the parser can no longer disagree
+    # about what a name means -- which is the property that matters, not merely
+    # that duplicates are handled: producers build their placement dicts from
+    # `pcb.footprints` keys, so those keys have to address these blocks.
+    #
+    # Process in reverse order so string indices remain valid after
+    # replacements; `iter_footprint_blocks` computes every span up front on the
+    # original content. The scan is string-aware, so a lone paren inside a
+    # property value (an MPN like "TCR2EF115,LM(CT") cannot run past a block and
+    # swallow the next footprint -- issue #113. A naive depth counter here would
+    # place the WRONG footprint, or silently place none.
+    for start, end, fp_text, _raw_ref, key in reversed(
+            list(iter_footprint_blocks(content))):
+        placement = placement_by_ref.get(key)
+        if placement is None:
             continue
-        ref = ref_match.group(1)
-
-        if ref not in placement_by_ref:
-            continue
-
-        placement = placement_by_ref[ref]
+        matched.add(key)
 
         # Find the footprint's (at X Y [rotation]) - it's the first (at ...) in the block
         at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)',
@@ -383,5 +416,6 @@ def write_placed_output(input_file: str, output_file: str,
     provenance.commit_write(output_file)
 
     print(f"Modified {modified_count} footprint positions")
+    _report_unapplied(placement_by_ref, matched, (), 'placement')
     print(f"Successfully wrote {output_file}")
     return True
