@@ -624,8 +624,20 @@ def cmd_record(a):
     if a.score:
         try:
             _score_doc = json.loads(a.score)
-        except Exception:                                       # noqa: BLE001
-            _score_doc = None
+        except (OSError, ValueError) as exc:                    # noqa: BLE001
+            # REFUSE, rather than carrying None forward. This used to swallow
+            # the failure here and at the board_sha check below, then hit a
+            # THIRD, unguarded `json.loads(a.score)` while building the ledger
+            # entry -- so a truncated --score-file crashed with a traceback at
+            # exit 1, AFTER store.put() had already written the board into the
+            # content store. Same defect as the route-summary read this change
+            # is about, in the same file: a document that exists and does not
+            # parse. `--score-file` reads it off disk, so the "valid prefix of
+            # a killed writer" case applies here too.
+            print(f"record: --score is not readable JSON "
+                  f"({type(exc).__name__}: {exc}). Nothing was written.",
+                  file=sys.stderr)
+            return 2
     if a.lens and isinstance(_score_doc, dict) and \
             _grades_another_board(a.board, _score_doc):
         # NEVER SILENT. The skip is correct -- a verdict about this board must
@@ -866,7 +878,10 @@ def cmd_record(a):
              'parent_sha': (prev or {}).get('result_sha'),
              'result_sha': sha, 'lever': a.lever,
              'lever_argv': list(a.argv) if a.argv else None,
-             'score': json.loads(a.score) if a.score else None,
+             # _score_doc, not a THIRD json.loads: the payload was parsed and
+             # validated once at the top of this function, which is the only
+             # place that can still refuse before anything is written.
+             'score': _score_doc,
              'renders': list(a.render_json) if a.render_json else None,
              # The MEASUREMENT the next lap is aimed at, not a paragraph
              # about it. Run 20 recorded "throat 0.409mm vs 0.450 needed,

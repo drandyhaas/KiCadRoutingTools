@@ -400,6 +400,44 @@ def test_cmd_poses_route_row_says_what_happened():
     print('  PASS: cmd_poses reports nets/returncode/summary_error')
 
 
+def test_record_refuses_a_score_payload_it_cannot_parse():
+    """The SECOND unguarded json.loads in this file, and a live one.
+
+    `cmd_record` parsed --score three times: twice inside `except Exception:
+    ... = None` swallowers, then once unguarded while building the ledger
+    entry. Neither swallow proves the string parses, so a truncated
+    --score-file reached the third parse and crashed with a traceback at exit
+    1 -- AFTER store.put() had written the board into the content store. It
+    now refuses at the top, which is the posture the surrounding comment
+    already claims ("Refuse before anything is written").
+    """
+    import shutil
+    import subprocess
+    board_src = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    if not os.path.isfile(board_src):
+        print('  SKIP: fixture missing')
+        return
+    with tempfile.TemporaryDirectory() as td:
+        board = os.path.join(td, 'b.kicad_pcb')
+        shutil.copy(board_src, board)
+        score = os.path.join(td, 'score.json')
+        with open(score, 'w', encoding='utf-8') as f:
+            f.write('{\n "blocking": 3,\n "board_sha": ')   # a valid PREFIX
+        r = subprocess.run(
+            [sys.executable, '-X', 'utf8', converge.__file__, 'record',
+             '--ledger', os.path.join(td, 'ledger'), '--board', board,
+             '--kind', 'completion', '--score-file', score,
+             '--argv', os.path.join(ROOT, 'py_router', 'route.py'), 'x'],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace', cwd=ROOT)
+        both = (r.stdout or '') + (r.stderr or '')
+        assert 'Traceback' not in both, f'record still crashes:\n{both[-800:]}'
+        assert r.returncode == 2, f'expected a refusal (2), got {r.returncode}'
+        assert 'not readable JSON' in both, both[-400:]
+        assert 'Nothing was written' in both, both[-400:]
+    print('  PASS: record refuses an unparseable score before writing anything')
+
+
 def main():
     bad = []
     for name, fn in sorted(globals().items()):

@@ -121,6 +121,28 @@ ROWS = [
      "        return None, 'unreadable summary'\n",
      (T830,), 'KILLED'),
 
+    # The SECOND unguarded json.loads in converge.py, in cmd_record. Reverting
+    # the refusal puts the crash back: two swallowing parses, then a third
+    # unguarded one while building the ledger entry.
+    ('record-swallows-an-unparseable-score-again', 'cv',
+     "            print(f\"record: --score is not readable JSON \"\n"
+     "                  f\"({type(exc).__name__}: {exc}). Nothing was written.\",\n"
+     "                  file=sys.stderr)\n"
+     "            return 2\n",
+     "            _score_doc = None\n",
+     (T830,), 'KILLED'),
+
+    # SURVIVES, and the reason is the design rather than a hole: once the
+    # refusal above is in place, `a.score` is guaranteed parseable by the time
+    # the ledger entry is built, so re-parsing it succeeds and nothing
+    # observable changes. The row is kept because it stops surviving the day
+    # someone weakens that refusal back into a swallow -- which is exactly the
+    # shape the bug had. Recorded, not deleted.
+    ('the-ledger-entry-reparses-the-score', 'cv',
+     "             'score': _score_doc,\n",
+     "             'score': json.loads(a.score) if a.score else None,\n",
+     (T830,), 'SURVIVED'),
+
     # ---- the publisher -----------------------------------------------------
     ('batch-route-streams-into-json-out-again', 'rt',
      "            write_summary_file(json_out, _merged)\n",
