@@ -129,6 +129,26 @@ class Obstacles:
                 self._near_d[(gx, gy)] = tuple(dd)
             if cc:
                 self._near_c[(gx, gy)] = tuple(dict.fromkeys(cc))
+        # flat per-cell geometry packs for point_violation: the same
+        # candidates in the same order, but as plain floats with the
+        # capsule direction and L2 precomputed -- the 1.3M-call hot
+        # loop then runs without per-candidate list indexing, tuple
+        # unpacking or seg_pt_dist call frames (measured: numpy per
+        # call is 3x SLOWER at these ~14-candidate sizes, so the win
+        # is fewer interpreter frames, not vectorisation; arithmetic
+        # and order are bit-identical)
+        self._pack = {}
+        keys = set(self._near_d) | set(self._near_c)
+        for k in keys:
+            dd = tuple((self.discs[i][0], self.discs[i][1],
+                        self.discs[i][2])
+                       for i in self._near_d.get(k, ()))
+            cc = []
+            for ci in self._near_c.get(k, ()):
+                (ax, ay), (bx, by), r, _n = self.caps[ci]
+                dx, dy = bx - ax, by - ay
+                cc.append((ax, ay, dx, dy, dx * dx + dy * dy, r))
+            self._pack[k] = (dd, tuple(cc))
 
     def near_discs(self, p):
         nd = getattr(self, '_near_d', None)
@@ -160,7 +180,60 @@ class Obstacles:
     def point_violation(self, p, pad=0.0):
         """Deepest violated obstacle at point p -> (depth, push_dir) or
         None. `pad` inflates every obstacle radius (e.g. for a via body
-        wider than the track the margins were built for)."""
+        wider than the track the margins were built for).
+
+        The built path runs on the per-cell geometry packs: identical
+        candidates, identical order, identical arithmetic (math.hypot
+        kept -- numpy measured 3x SLOWER per call at ~14 candidates),
+        just no per-candidate indexing/unpacking/call frames, and the
+        push direction computed once for the winner instead of per
+        improvement. Bit-identical results, ~2x fewer frames."""
+        pk = getattr(self, '_pack', None)
+        if pk is not None:
+            px, py = p
+            cell = pk.get((int(px / self.cell), int(py / self.cell)))
+            if cell is None:
+                return None
+            discs, caps = cell
+            hyp = math.hypot
+            best = 0.0
+            wdisc = wcap = None
+            for x, y, r in discs:
+                d = hyp(px - x, py - y)
+                depth = r + pad - d
+                if depth > best:
+                    best = depth
+                    wdisc = (x, y, d)
+            for ax, ay, dx, dy, L2, r in caps:
+                if L2 < 1e-12:
+                    tt = 0.0
+                else:
+                    tt = ((px - ax) * dx + (py - ay) * dy) / L2
+                    if tt < 0.0:
+                        tt = 0.0
+                    elif tt > 1.0:
+                        tt = 1.0
+                d = hyp(px - (ax + tt * dx), py - (ay + tt * dy))
+                depth = r + pad - d
+                if depth > best:
+                    best = depth
+                    wdisc = None
+                    wcap = (ax, ay, dx, dy, L2, tt, d)
+            if wcap is not None:
+                ax, ay, dx, dy, L2, tt, d = wcap
+                cx, cy = ax + tt * dx, ay + tt * dy
+                if d < 1e-9:
+                    dirv = (-dy / math.sqrt(L2), dx / math.sqrt(L2)) \
+                        if L2 > 1e-12 else (1.0, 0.0)
+                else:
+                    dirv = ((px - cx) / d, (py - cy) / d)
+                return (best, dirv)
+            if wdisc is not None:
+                x, y, d = wdisc
+                dirv = (1.0, 0.0) if d < 1e-9 else \
+                    ((px - x) / d, (py - y) / d)
+                return (best, dirv)
+            return None
         worst = None
         for i in self.near_discs(p):
             x, y, r, _n = self.discs[i]

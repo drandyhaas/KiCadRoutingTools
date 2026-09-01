@@ -30,12 +30,20 @@ os.chdir(HERE)
 sys.path.insert(0, HERE)
 from plan_global import opt_rides  # noqa: E402
 
-FO = sys.argv[1]
-K = sys.argv[2] if len(sys.argv) > 2 else '28'
+import argparse
+_ap = argparse.ArgumentParser()
+_ap.add_argument('fo')
+_ap.add_argument('k', nargs='?', default='28')
+_ap.add_argument('tag', nargs='?', default='')
+_ap.add_argument('--num-improve', type=int, default=3,
+                 help='evolution sweeps over the waste list (each '
+                      'sweep re-diagnoses and tries targeted flips)')
+_a = _ap.parse_args()
+FO = _a.fo
+K = _a.k
 NETS = subprocess.run([sys.executable, 'coherent_nets.py', K],
                       capture_output=True, text=True).stdout.strip()
-TAG = os.path.join('tmp', 'imp' + K
-                   + (sys.argv[3] if len(sys.argv) > 3 else ''))
+TAG = os.path.join('tmp', 'imp' + K + _a.tag)
 SIDECAR = os.path.splitext(FO)[0] + '.pages.json'
 ENV = dict(os.environ, TWO_PAGE='1')
 
@@ -99,7 +107,7 @@ if s < best_score:
 # ---- steps 3-4: diagnose, targeted flips, keep strictly better
 rides, divers, model = opt_rides(plan)
 cur_pages = dict(best_pages) if best_pages else dict(own)
-for sweep in range(6):
+for sweep in range(_a.num_improve):
     act = actual_vias(best_board)
     waste = sorted((n for n in plan
                     if act.get(n, 0) > model.get(n, 99)),
