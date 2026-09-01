@@ -7,10 +7,11 @@ import os
 import re
 import math
 import json
+import sys
 import routing_defaults as defaults  # fab-floor outline width for 0-stroke copper polys (#337/M2)
 from swig_compat import patch_swig_iterators as _patch_swig_iterators
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Sequence, Tuple, Optional
 from pathlib import Path
 
 # #795: KiCad's own `__iter__` for GetTracks()/GetDrawings() calls the py2
@@ -538,6 +539,22 @@ class PCBData:
     # dropped. Empty on every board in the corpus -- no in-repo board uses
     # groups -- so consumers must treat absence as normal, not as an error.
     groups: Dict[str, List[str]] = field(default_factory=dict)
+    #: #726: {reference as the FILE spells it: how many blocks claim it}, for
+    #: the references claimed by more than one. The value is the total
+    #: occurrence count (`TP4: 2`), not the number of extras.
+    #:
+    #: `footprints` keys are the DISAMBIGUATED names -- the first block keeps
+    #: the bare reference, later ones get `~2`, `~3` -- so every block is
+    #: present and `len(footprints)` is the block count. This dict is what
+    #: says the disambiguation happened, and it is how a consumer reports the
+    #: board's own spelling back to a human who has to go and fix the
+    #: schematic. Filled identically by BOTH parse paths.
+    #:
+    #: Advisory. A duplicate reference is legal in KiCad and can be deliberate
+    #: (a paired testpoint, a net tie), so nothing here refuses. It measured 5
+    #: of the 22 tracked boards: watchy TP4/TP5 (real test points), esp_prog
+    #: Ref*, glasgow_revC REF** x7, orangecrab_ext_pll G*** x3, ulx3s EMARD.
+    duplicate_references: Dict[str, int] = field(default_factory=dict)
 
     def net_tie_exempt_pad_ids(self, net_id: int):
         """id()s of pads whose keep-out copper of `net_id` may IGNORE.
@@ -2417,21 +2434,172 @@ def _parse_ref_label(fp_text: str, ref_start: int,
     )
 
 
-def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: Dict[str, int] = None) -> Tuple[Dict[str, Footprint], Dict[int, List[Pad]]]:
-    """Extract footprints and their pads with global coordinates."""
+#: KiCad 8+ property form, then the KiCad 6/7 fallback. Both require at least
+#: one character, so an EMPTY `(property "Reference" "")` falls through to the
+#: uuid branch -- deliberate, and load-bearing (see #78 and the reference-less
+#: note in `footprint_raw_reference`).
+_FP_REF_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]+)"')
+_FP_REF_LEGACY_RE = re.compile(r'\(fp_text\s+reference\s+"([^"]+)"')
+_FP_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"')
+_FP_START_RE = re.compile(r'\(footprint\s+"')
+
+#: Separator between a duplicated reference and its file-order ordinal (#726).
+#: `~` is NOT an fnmatch metacharacter (those are `*?[]`), so `--lock 'TP4*'`
+#: still covers both twins and no existing literal reference is newly shadowed:
+#: measured over the tracked corpus, ZERO of 545 distinct references contain
+#: `~` or `#`. `#` is not free -- it is already the reference-less prefix and
+#: `placement/labels.py` keys its skip off `ref.startswith('#')`. A PREFIX
+#: would be worse than either: `placement/part_class._PREFIX_RE` is
+#: `^([A-Za-z]+)`, so prefixing silently reclassifies test points and fiducials
+#: out of the marker classes.
+DUP_REF_SEP = '~'
+
+
+def _footprint_header_end(fp_text: str) -> int:
+    """Index of the footprint block's first CHILD element.
+
+    Bounds a header-only search so a PAD's or a graphic's own ``(uuid ...)``
+    cannot be read as the footprint's. The reference-less branch used to run
+    this search unbounded; the two agree on every corpus board, and the
+    bounded form is the one that is actually correct.
+    """
+    end = len(fp_text)
+    for tok in ('(pad', '(fp_', '(zone', '(model', '(property'):
+        i = fp_text.find(tok)
+        if i != -1:
+            end = min(end, i)
+    return end
+
+
+def footprint_uuid(fp_text: str) -> str:
+    """The footprint's OWN uuid, or '' when it has none."""
+    m = _FP_UUID_RE.search(fp_text[:_footprint_header_end(fp_text)])
+    return m.group(1) if m else ""
+
+
+def footprint_raw_reference(fp_text: str) -> str:
+    """The reference this block claims, BEFORE duplicate disambiguation.
+
+    KiCad 8+ uses ``(property "Reference" "R1")``; KiCad 6/7 use
+    ``(fp_text reference "R1" ...)``. Without the fallback every 6/7 footprint
+    got reference "?" and collapsed onto one dict key, so a whole board parsed
+    as a single footprint (issue #78).
+
+    A reference-LESS footprint (a locked NPTH drill dot; thunderscope has 86)
+    is keyed by its uuid instead, because a shared '' / '?' key would collapse
+    them all onto one entry and lose the rest's pads.
+    """
+    m = _FP_REF_RE.search(fp_text) or _FP_REF_LEGACY_RE.search(fp_text)
+    if m:
+        return m.group(1)
+    uid = footprint_uuid(fp_text)
+    return "#" + uid if uid else "?"
+
+
+def disambiguate_references(raw_refs: Sequence[str]) -> List[str]:
+    """Ordered raw references -> ordered UNIQUE keys, by file-order ordinal.
+
+    The first bearer of a name keeps it; the n-th appends ``~n`` (#726). Pure
+    and order-only: both parse paths call this on their own ordered list and
+    therefore agree, which is the whole contract between them.
+
+    Why the FIRST occurrence keeps the bare name, when today the LAST block is
+    the one the dict retains: `placement/floorplan.py` writes `'refs'` into an
+    ``--emit-intent`` file the user keeps and edits, and resolves it back with
+    `fnmatch.filter`. Suffixing every occurrence would make a saved intent
+    naming `TP4` resolve to nothing on a file the user never touched.
+
+    Why uuid is NOT the key: uuids are supposed to be unique, and in real
+    KiCad exports they are -- but hand-made and copy-pasted boards repeat them.
+    `kicad_files/cap_chain.kicad_pcb` shares one footprint uuid across C1/C2
+    and another across J1/J2, so keying on it would reintroduce exactly this
+    bug on a board already in the repo (`extract_groups` reached the same
+    verdict for group members). A KiCad 6/7 block carries `tstamp` rather than
+    `uuid` at all.
+
+    The ordinal is issued against BOTH the file's own names and the names
+    already issued, so a board that genuinely contains `TP4`, `TP4` and
+    `TP4~2` cannot be handed two identical keys whatever the file order.
+    """
+    taken = set(raw_refs)
+    issued = set()
+    seen: Dict[str, int] = {}
+    out: List[str] = []
+    for ref in raw_refs:
+        n = seen.get(ref, 0) + 1
+        seen[ref] = n
+        if n == 1:
+            out.append(ref)
+            issued.add(ref)
+            continue
+        cand = '%s%s%d' % (ref, DUP_REF_SEP, n)
+        while cand in taken or cand in issued:
+            n += 1
+            cand = '%s%s%d' % (ref, DUP_REF_SEP, n)
+        out.append(cand)
+        issued.add(cand)
+    return out
+
+
+def iter_footprint_blocks(content: str):
+    """(start, end, fp_text, raw_reference, key) per block, in FILE ORDER.
+
+    The single place that decides what a footprint block is CALLED. The text
+    parser, `placement/writer.py` and `placement/parser.py` all scan the same
+    file for the same blocks; before #726 each did it with its own regex and
+    its own ref-keyed dict, so the writer could rewrite a block the parser had
+    dropped. They resolve names here now, together or not at all.
+
+    `end` comes from the shipped string-aware `find_matching_paren`, so a lone
+    paren inside a property value (an MPN like "TCR2EF115,LM(CT") cannot run
+    the scan into the next footprint (#113).
+    """
+    spans = []
+    raw = []
+    for m in _FP_START_RE.finditer(content):
+        start = m.start()
+        end = find_matching_paren(content, start)
+        text = content[start:end]
+        spans.append((start, end, text))
+        raw.append(footprint_raw_reference(text))
+    for (start, end, text), r, key in zip(spans, raw,
+                                          disambiguate_references(raw)):
+        yield start, end, text, r, key
+
+
+def duplicate_reference_counts(raw_refs: Sequence[str]) -> Dict[str, int]:
+    """{raw reference: how many blocks claim it}, for the ones claimed twice.
+
+    The VALUE is the total occurrence count, not the number of extras --
+    `check_assembly` prints it as "TP4 x2" and derives the block total from it.
+    """
+    counts: Dict[str, int] = {}
+    for r in raw_refs:
+        counts[r] = counts.get(r, 0) + 1
+    return {r: c for r, c in counts.items() if c > 1}
+
+
+def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
+                                name_to_id: Dict[str, int] = None,
+                                duplicates: Dict[str, int] = None) -> Tuple[Dict[str, Footprint], Dict[int, List[Pad]]]:
+    """Extract footprints and their pads with global coordinates.
+
+    `duplicates`, when given, is FILLED with `duplicate_reference_counts` --
+    an out-param rather than a third return value, because the 2-tuple is a
+    documented public signature (`docs/api-kicad-parser.md`).
+    """
     footprints = {}
     pads_by_net: Dict[int, List[Pad]] = {}
 
-    # Find all footprints - need to handle nested parentheses properly
-    # Strategy: find (footprint and then match balanced parens
-    footprint_starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
+    # Find all footprints - need to handle nested parentheses properly.
+    # Named through iter_footprint_blocks so this path and every writer agree
+    # on what each block is called, including when two blocks claim one
+    # reference (#726).
+    _blocks = list(iter_footprint_blocks(content))
+    if duplicates is not None:
+        duplicates.update(duplicate_reference_counts([b[3] for b in _blocks]))
 
-    for start in footprint_starts:
-        # Find the matching end parenthesis (string-aware: a property value with
-        # a lone paren must not throw off the count — see find_matching_paren).
-        end = find_matching_paren(content, start)
-
-        fp_text = content[start:end]
+    for start, end, fp_text, _raw_reference, _block_key in _blocks:
 
         # Extract footprint name. May be EMPTY: KiCad writes (footprint "")
         # for reference-less drill/graphic footprints (thunderscope's 86 locked
@@ -2455,25 +2623,22 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
         fp_layer = layer_match.group(1) if layer_match else "F.Cu"
 
-        # Extract reference. KiCad 8+ uses (property "Reference" "R1"); KiCad
-        # 6/7 use (fp_text reference "R1" ...). Without the fallback every 6/7
-        # footprint got reference "?" and collapsed onto one dict key, so a
-        # whole board parsed as a single footprint (issue #78).
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+        # The name this block answers to. `footprint_raw_reference` handles the
+        # KiCad 8+ property form, the 6/7 `fp_text` fallback (#78) and the
+        # reference-LESS `#uuid` key (thunderscope's 86 NPTH dots);
+        # `disambiguate_references` then makes it unique when two blocks claim
+        # one reference (#726). `build_pcb_data_from_board` runs the same two
+        # functions over its own ordered list, so the GUI and file models stay
+        # comparable.
+        #
+        # `ref_match` is still resolved locally, but only for its OFFSET: the
+        # #481 label parser needs the position of the Reference sub-node, and
+        # `None` there means "reference-less, so no label".
+        reference = _block_key
+        ref_match = _FP_REF_RE.search(fp_text)
         ref_is_property = ref_match is not None
         if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
-        if ref_match:
-            reference = ref_match.group(1)
-        else:
-            # Reference-less footprint (e.g. a locked NPTH drill dot). The
-            # footprints dict is keyed by reference, so a shared '' / '?' key
-            # would collapse them all onto one entry and lose the rest's pads
-            # (86 NPTH holes on thunderscope). Key by the footprint's uuid --
-            # build_pcb_data_from_board synthesizes the same key, so the GUI
-            # and file models stay comparable.
-            uid_match = re.search(r'\(uuid\s+"([^"]+)"', fp_text)
-            reference = "#" + uid_match.group(1) if uid_match else "?"
+            ref_match = _FP_REF_LEGACY_RE.search(fp_text)
 
         # Extract value (component part number or value)
         value_match = re.search(r'\(property\s+"Value"\s+"([^"]+)"', fp_text)
@@ -3770,7 +3935,26 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     # Extract components in order
     board_info = extract_layers(content)
     nets, name_to_id = extract_nets(content, kicad_version)
-    footprints, pads_by_net = extract_footprints_and_pads(content, nets, name_to_id)
+    _dups: Dict[str, int] = {}
+    footprints, pads_by_net = extract_footprints_and_pads(
+        content, nets, name_to_id, duplicates=_dups)
+    if _dups:
+        # ON STDERR, not stdout: six shipped tools emit bare JSON on stdout
+        # (`--json-out`), where a WARNING line in front is a JSONDecodeError at
+        # char 0. Said at all because a duplicated reference is a schematic
+        # fact the operator has to decide about -- the parser keeps every
+        # block, but two parts answering to one name is still something only
+        # the human can resolve.
+        _n = sum(_dups.values())
+        print("WARNING: %d footprint block(s) share %d reference(s) -- %s. "
+              "Every block is kept; the later ones are keyed %s2, %s3 ... in "
+              "file order, so this board parses as %d parts. Legal in KiCad "
+              "(a paired testpoint, a net tie), but rename them if they are "
+              "meant to be distinct parts."
+              % (_n, len(_dups),
+                 ', '.join('%s x%d' % rc for rc in sorted(_dups.items())),
+                 DUP_REF_SEP, DUP_REF_SEP, len(footprints)),
+              file=sys.stderr)
     vias = extract_vias(content, name_to_id)
     segments = extract_segments(content, name_to_id)
     zones = extract_zones(content, name_to_id)
@@ -3799,6 +3983,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,
         groups=groups,
+        duplicate_references=_dups,
         source_path=os.path.abspath(filepath) if filepath else ""
     )
 
@@ -4231,16 +4416,35 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     footprints = {}
     pads_by_net: Dict[int, List[Pad]] = {}
 
-    for fp in board.GetFootprints():
-        reference = fp.GetReference()
-        if not reference:
+    # Names are resolved for the WHOLE board first, exactly as the text parser
+    # does, and then zipped back on. Two blocks can claim one reference (#726),
+    # and the ordinal that separates them is a property of the ordered list,
+    # not of any one footprint.
+    #
+    # `board.GetFootprints()` returns KiCad's own footprint list. Measured on
+    # KiCad 10.0.0 it iterates in FILE ORDER on all 22 tracked corpus boards --
+    # the uuid sequence and the reference sequence both match a text scan
+    # exactly -- which is what lets the two parse paths compute the same
+    # ordinal independently. That is an empirical fact about one release, not a
+    # documented contract, so `tests/gui_parity/test_726_parse_path_parity.py`
+    # pins it and says what to do if a newer KiCad breaks it.
+    _live_fps = list(board.GetFootprints())
+    _raw_refs = []
+    for _fp in _live_fps:
+        _r = _fp.GetReference()
+        if not _r:
             # Reference-less footprint: key by uuid, mirroring the text parser
-            # (see extract_footprints_and_pads) so both models keep every such
+            # (see footprint_raw_reference) so both models keep every such
             # footprint (NPTH drill dots) instead of collapsing them onto ''.
             try:
-                reference = "#" + fp.m_Uuid.AsString()
+                _r = "#" + _fp.m_Uuid.AsString()
             except Exception:
-                reference = "?"
+                _r = "?"
+        _raw_refs.append(_r)
+    _dups_live = duplicate_reference_counts(_raw_refs)
+    _live_keys = disambiguate_references(_raw_refs)
+
+    for fp, reference in zip(_live_fps, _live_keys):
 
         # Get footprint name (library:footprint)
         try:
@@ -4984,6 +5188,7 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         pads_by_net=pads_by_net,
         zones=zones,
         groups=groups,
+        duplicate_references=_dups_live,
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,
         # Writer parity with parse_kicad_pcb (which has always set this): on a
@@ -5376,6 +5581,19 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
             diffs.append(f"Net {net_id} '{bn.name}' pad count: board={len(bn.pads)} file={len(fn.pads)}")
 
     # --- Compare footprints ---
+    # #726: name the duplicate-reference disagreement DIRECTLY. Both paths
+    # derive their keys with `disambiguate_references` over their own ordered
+    # footprint list, so a KiCad whose `GetFootprints()` no longer iterates in
+    # file order shows up here as a `~n`-shaped key diff plus a pile of
+    # position mismatches -- true, but it reads as a parser bug rather than as
+    # the ordering change it is. Say which it is.
+    if from_board.duplicate_references != from_file.duplicate_references:
+        diffs.append(
+            f"Duplicate references disagree: board={from_board.duplicate_references} "
+            f"file={from_file.duplicate_references}. The two parse paths ordered "
+            f"the footprints differently, so their ordinal suffixes do not "
+            f"match (see disambiguate_references).")
+
     board_refs = set(from_board.footprints.keys())
     file_refs = set(from_file.footprints.keys())
     if board_refs != file_refs:
