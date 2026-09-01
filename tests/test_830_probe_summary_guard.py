@@ -240,6 +240,52 @@ def test_a_failed_write_leaves_the_destination_untouched():
     print('  PASS: --json-out is whole or absent, never half')
 
 
+def test_a_write_that_fails_AFTER_the_temp_file_still_leaves_it_untouched():
+    """The ATOMICITY half, which the test above cannot see.
+
+    A payload that will not serialise never opens anything, so
+    serialise-first alone passes that check -- a writer that wrote straight
+    into the destination would too. What separates them is a failure BETWEEN
+    the write and the publish, which is exactly the reachable case here:
+    ENOSPC, a flush that fails at close, or -- measured in this repo, at
+    predictor_study.py:271 -- os.replace raising PermissionError [WinError 5]
+    on Windows because another process holds the destination open.
+
+    So: force os.replace to fail and require the destination to keep the bytes
+    it already had. A non-atomic writer has overwritten them by this point.
+    """
+    real_replace = os.replace
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, 'route.json')
+        first = {'failed_single': [], 'open_single': [], 'total_iterations': 1}
+        write_summary_file(path, first)
+        with open(path, encoding='utf-8') as f:
+            before = f.read()
+
+        def _boom(src, dst):
+            raise OSError(5, 'Access is denied')
+
+        os.replace = _boom
+        try:
+            write_summary_file(path, {'failed_single': ['LATER'],
+                                      'total_iterations': 999})
+        except OSError:
+            pass
+        else:
+            raise AssertionError('a failed publish must not report success')
+        finally:
+            os.replace = real_replace
+
+        with open(path, encoding='utf-8') as f:
+            after = f.read()
+        assert after == before, (
+            'a failed publish overwrote the destination -- the writer is not '
+            'atomic, so a reader can see a half document')
+        assert os.listdir(td) == ['route.json'], (
+            f'the temp file survived a failed publish: {os.listdir(td)}')
+    print('  PASS: a publish that fails mid-flight leaves the old file intact')
+
+
 def test_none_publishes_an_empty_document_as_the_old_writer_did():
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, 'route.json')
