@@ -381,7 +381,6 @@ def write_summary_file(path: str, merged: Optional[Dict]) -> None:
     Here it does not.
     """
     tmp = f'{path}.{os.getpid()}.tmp'   # several routes can share a directory
-    published = False
     try:
         # indent=1, no sort_keys, default ensure_ascii: byte-identical to what
         # the streaming writer produced, so the on-disk format does not change.
@@ -391,7 +390,6 @@ def write_summary_file(path: str, merged: Optional[Dict]) -> None:
         # Windows refuses os.replace while another process holds the
         # destination open (PermissionError: [WinError 5]).
         os.replace(tmp, path)
-        published = True
     except Exception as exc:
         _discard(tmp)
         _discard(path)
@@ -401,6 +399,3 @@ def write_summary_file(path: str, merged: Optional[Dict]) -> None:
             + ('; a PREVIOUS run\'s summary is still there and could NOT be '
                'removed -- do not read it as this run\'s' if stale else
                '; no file was left behind')) from exc
-    finally:
-        if not published:
-            _discard(tmp)

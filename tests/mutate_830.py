@@ -130,21 +130,16 @@ ROWS = [
      (T830,), 'KILLED'),
 
     ('the-publish-is-not-atomic', 'rs',
-     "    tmp = f'{path}.{os.getpid()}.tmp'\n",
+     "    tmp = f'{path}.{os.getpid()}.tmp'   # several routes can share a directory\n",
      "    tmp = path\n",
      (T830,), 'KILLED'),
 
     ('a-failed-write-leaves-its-litter', 'rs',
-     "        if not published:\n"
-     "            try:\n"
-     "                os.remove(tmp)\n"
-     "            except OSError:\n"
-     "                pass\n",
-     "        if False:\n"
-     "            try:\n"
-     "                os.remove(tmp)\n"
-     "            except OSError:\n"
-     "                pass\n",
+     "    except Exception as exc:\n"
+     "        _discard(tmp)\n"
+     "        _discard(path)\n",
+     "    except Exception as exc:\n"
+     "        _discard(path)\n",
      (T830,), 'KILLED'),
 
     # The on-disk format is a published contract: --json-out is read by
@@ -158,6 +153,7 @@ ROWS = [
      "        _discard(path)\n"
      "        stale = os.path.exists(path)\n",
      "        _discard(tmp)\n"
+     "        pass\n"
      "        stale = os.path.exists(path)\n",
      (T830,), 'KILLED'),
 
@@ -181,7 +177,7 @@ ROWS = [
     # ---- the poses row -----------------------------------------------------
     ('the-poses-row-cannot-say-what-happened', 'cv',
      "                              'nets': len(a.affected),\n"
-     "                              'returncode': res['returncode'],\n"
+     "                              'returncode': res.get('returncode'),\n"
      "                              'summary_error': res.get('summary_error')}\n",
      "                              'nets': len(a.affected)}\n",
      (T830,), 'KILLED'),

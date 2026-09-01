@@ -300,6 +300,39 @@ def test_a_write_that_fails_AFTER_the_temp_file_still_leaves_it_untouched():
     print('  PASS: a publish that fails mid-flight leaves NO file, and says so')
 
 
+def test_the_publish_is_a_rename_from_a_different_file():
+    """The atomicity property itself, which neither test above can see.
+
+    Once a failed publish removes the destination, `tmp = path` reaches the
+    same END STATE as the atomic version by every observable this file has --
+    both leave no file. What actually differs is what a CONCURRENT READER can
+    observe mid-write, which no single-process test can catch by racing it.
+    So assert the mechanism instead: the publish must be a rename INTO the
+    destination from somewhere else. A writer that streams into the
+    destination renames it onto itself, and that is exactly the mutant.
+    """
+    real_replace, seen = os.replace, []
+
+    def _record(src, dst):
+        seen.append((src, dst))
+        return real_replace(src, dst)
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, 'route.json')
+        os.replace = _record
+        try:
+            write_summary_file(path, {'failed_single': []})
+        finally:
+            os.replace = real_replace
+    assert seen, 'the publish never went through os.replace at all'
+    src, dst = seen[-1]
+    assert dst == path, f'published to {dst}, not {path}'
+    assert src != path, (
+        'the summary was renamed onto itself -- it was written straight into '
+        'the destination, so a reader can see it half-written')
+    print('  PASS: the summary is published by renaming a sibling into place')
+
+
 def test_route_verdict_survives_a_document_that_is_not_a_mapping():
     """json.load happily returns a str, a list or a number, and the premise of
     this whole change is documents route.py did not write.
