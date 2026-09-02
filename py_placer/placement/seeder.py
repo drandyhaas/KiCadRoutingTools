@@ -2773,17 +2773,19 @@ def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
     KiCad itself) reads it from. The grade's must_lock rule demands the lock
     IN THE FILE, so writing the intent's locks here is what makes the emitted
     seed grade clean rather than merely hoped-correct."""
-    from kicad_parser import find_matching_paren
+    from kicad_parser import iter_footprint_blocks
     with open(board_file, 'r', encoding='utf-8') as f:
         content = f.read()
     want = set(refs)
     count = 0
-    starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
-    for start in reversed(starts):
-        end = find_matching_paren(content, start)
-        fp_text = content[start:end]
-        m = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        if not m or m.group(1) not in want:
+    # Named by the parser's own resolver (#726), so locking `TP4` stamps the
+    # one block the parser calls `TP4`. It used to match the reference STRING,
+    # so on watchy it locked both test points from one name -- and the refs
+    # handed in here come from `pcb.footprints` keys, which now address the
+    # twins separately. Reverse order keeps the spans valid as text is inserted.
+    for start, end, fp_text, _raw_ref, key in reversed(
+            list(iter_footprint_blocks(content))):
+        if key not in want:
             continue
         if re.search(r'\(locked\s+yes\)', fp_text[:fp_text.find('(pad')
                                                   if '(pad' in fp_text else len(fp_text)]):

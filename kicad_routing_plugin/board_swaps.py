@@ -24,8 +24,18 @@ def _to_mm_key(pcbnew, point):
 
 
 def _find_pad(board, component_ref, pad_number):
-    """Find a pad on the board by footprint reference and pad number."""
-    footprint = board.FindFootprintByReference(component_ref)
+    """Find a pad on the board by footprint reference and pad number.
+
+    `component_ref` comes from a `kicad_parser.Pad`, so it is the PCBData key
+    (#726) -- which for a duplicated reference is `TP4~2`, a name
+    `FindFootprintByReference` cannot see. It would return None and the caller
+    would warn that it could not find the pads to swap: disclosed rather than
+    silent, but still a swap that quietly does not happen. Resolve by key
+    first, and keep the old lookup as the fallback.
+    """
+    from gui_utils import live_footprints_by_key
+    footprint = (live_footprints_by_key(board).get(component_ref)
+                 or board.FindFootprintByReference(component_ref))
     if footprint is None:
         return None
     for pad in footprint.Pads():

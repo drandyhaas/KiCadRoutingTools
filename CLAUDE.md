@@ -517,7 +517,17 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 
 ### PCBData Structure
 
-- `pcb.footprints` - Dict[str, Footprint] keyed by reference (e.g., 'U9', 'R1')
+- `pcb.footprints` - Dict[str, Footprint] keyed by reference (e.g., 'U9', 'R1').
+  **Every footprint BLOCK is an entry (#726)**: when two blocks claim one
+  reference the first keeps the bare name and later ones get a file-order
+  ordinal (`TP4`, `TP4~2`), so `len(pcb.footprints)` is the block count. A
+  reference-LESS block is keyed `#<uuid>`. `pcb.duplicate_references`
+  ({reference as the FILE spells it: occurrence count}) is how a consumer
+  reports the board's own spelling back to a human. Both parse paths derive
+  the keys with the same `disambiguate_references` over their own ordered
+  footprint list, so they agree. **Writers must resolve blocks through
+  `iter_footprint_blocks`**, never by matching the Reference string: one
+  placement used to rewrite every block carrying the name.
 - `pcb.nets` - Dict[int, Net] keyed by net_id
 - `pcb.segments` - List of track segments
 - `pcb.vias` - List of vias

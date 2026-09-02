@@ -20,7 +20,8 @@ import math
 import re
 from typing import Dict, Optional, Set, Tuple
 
-from kicad_parser import _arc_to_segments, find_matching_paren
+from kicad_parser import (_arc_to_segments, find_matching_paren,
+                          iter_footprint_blocks)
 
 Bbox = Tuple[float, float, float, float]
 
@@ -46,13 +47,24 @@ _NUM = r'([\d.eE+-]+)'
 
 
 def _footprint_blocks(content: str):
-    """Yield (reference, footprint_text) for every footprint block."""
-    for m in re.finditer(r'\(footprint\s+"', content):
-        start = m.start()
-        fp_text = content[start:find_matching_paren(content, start)]
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        if ref_match:
-            yield ref_match.group(1), fp_text
+    """Yield (key, footprint_text) for every footprint block.
+
+    The key is the parser's own (#726), so a courtyard, a fab outline and a
+    lock all land under the name `pcb.footprints` uses. This mattered as soon
+    as duplicates stopped collapsing: `placement/labels.py` looks a courtyard
+    up as `courtyard_sides.get(fp.reference)`, so a `TP4~2` against a
+    `TP4`-keyed map would silently find nothing and fall back to the pad bbox.
+
+    Two behaviour changes come with delegating, both in the conservative
+    direction. The old regex required a non-empty `(property "Reference" ...)`,
+    so it skipped reference-LESS blocks and KiCad 6/7 `(fp_text reference ...)`
+    blocks ENTIRELY -- those now appear, under their `#uuid` / 6-7 names.
+    `extract_locked_refs` therefore starts returning `#uuid` keys for locked
+    NPTH drill dots (thunderscope has 86), which adds to lock sets and never
+    subtracts.
+    """
+    for _start, _end, fp_text, _raw_ref, key in iter_footprint_blocks(content):
+        yield key, fp_text
 
 
 def extract_locked_refs(pcb_file: str) -> Set[str]:

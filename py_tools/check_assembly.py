@@ -183,11 +183,14 @@ def main():
             continue
         _buckets.setdefault((round(_fp.x, 3), round(_fp.y, 3)),
                             []).append(_ref)
-    # NOTE this iterates DISTINCT REFERENCES. `pcb.footprints` is a dict keyed
-    # by reference, so two footprint blocks sharing one reference are ONE entry
-    # here and cannot form a coincident pair -- the check that exists to catch
-    # two parts at one point is structurally blind to two parts with one name.
-    # `duplicate_references` below is that case, reported separately.
+    # Every footprint BLOCK is an entry here since #726: two blocks sharing a
+    # reference are keyed `TP4` and `TP4~2`, so two parts at one point form a
+    # coincident pair even when they answer to one name. Before that they
+    # collapsed to a single entry and this check -- the one that exists to
+    # catch exactly that -- was structurally blind to it: run 20's board read
+    # `coincident_origins 0` with TWO coincident pairs on it.
+    # `duplicate_references` below still reports the naming, which is a
+    # schematic question rather than a geometric one.
     stack_groups = [{'point': [pt[0], pt[1]], 'refs': refs}
                     for pt, refs in sorted(_buckets.items())
                     if sum(1 for r in refs if not _marker(r)) >= 2]
@@ -237,10 +240,12 @@ def main():
         print(f"  DUPLICATE REFERENCES (advisory): {_n} footprint block(s) "
               f"share {len(dup_refs)} reference(s) -- "
               + ', '.join(f'{r} x{c}' for r, c in sorted(dup_refs.items())))
-        print(f"    Only the LAST block of each is parsed, so this audit sees "
-              f"{len(pcb.footprints)} parts and `coincident_origins` cannot "
-              f"compare the dropped ones. Legal, but rename them if they are "
-              f"meant to be distinct parts.")
+        print(f"    Every block is audited ({len(pcb.footprints)} parts): the "
+              f"later ones are keyed with an ordinal suffix, so "
+              f"`coincident_origins` above compares them. Legal in KiCad, but "
+              f"rename them if they are meant to be distinct parts -- two "
+              f"parts answering to one name cannot be told apart on a BOM, on "
+              f"a pick-and-place file, or by `--lock`.")
     print(f"  blocking {g['blocking']}  advisory {g['advisory']}"
           f"  waived {g['waived']}  contained {g['contained']}"
           f"  courtyard_blocking {g['courtyard_blocking']}"
@@ -466,12 +471,16 @@ def main():
             'coincident_origin_groups': stack_groups,
             'coincident_origins': len(stack_groups),
             'coincident_origins_basis': (
-                'distinct references only -- footprints are keyed by '
-                'reference, so blocks sharing one reference are a single '
-                'entry here and cannot form a pair. See duplicate_references.'),
+                'every footprint BLOCK (#726): blocks sharing one reference '
+                'are keyed with an ordinal suffix, so they form a pair here '
+                'like any other two parts. See duplicate_references for the '
+                'names the board itself uses.'),
             'duplicate_references': dup_refs,
-            'footprint_blocks': len(pcb.footprints) + sum(dup_refs.values())
-                                - len(dup_refs),
+            # Just the entry count now: every block is one. The old formula
+            # (len + sum(values) - len(values)) reconstructed the block total
+            # from the dict of survivors, and after #726 it OVERCOUNTS -- on
+            # watchy it would report 86 + 4 - 2 = 88 blocks for a board with 86.
+            'footprint_blocks': len(pcb.footprints),
         }
         if new_advisory is not None:
             doc['baseline'] = args.baseline

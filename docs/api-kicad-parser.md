@@ -71,7 +71,8 @@ The top-level container returned by both entry points.
 |-------|------|---------|
 | `board_info` | `BoardInfo` | Layers, bounds, outline, stackup, keepouts |
 | `nets` | `Dict[int, Net]` | Nets keyed by net ID (ID 0 = unconnected) |
-| `footprints` | `Dict[str, Footprint]` | Footprints keyed by reference (`'U9'`, `'R1'`) |
+| `footprints` | `Dict[str, Footprint]` | Every footprint BLOCK, keyed by reference (`'U9'`, `'R1'`). Duplicated references get a file-order ordinal (`TP4`, `TP4~2`); a reference-less block is keyed `#<uuid>` (#726) |
+| `duplicate_references` | `Dict[str, int]` | `{reference as the FILE spells it: how many blocks claim it}`, for the ones claimed more than once. Advisory -- a duplicate is legal in KiCad |
 | `segments` | `List[Segment]` | All track segments |
 | `vias` | `List[Via]` | All vias |
 | `pads_by_net` | `Dict[int, List[Pad]]` | Pads grouped by net ID (fast lookup) |
@@ -172,7 +173,7 @@ default for vias you ADD.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `reference` | str | Reference designator — also the key in `pcb.footprints` |
+| `reference` | str | The key in `pcb.footprints`, which is the reference designator for all but a duplicated one (`TP4~2`) or a reference-less block (`#<uuid>`). `Pad.component_ref` carries the same value |
 | `footprint_name` | str | Library ID (`'interf_u:PGA120'`) |
 | `x`, `y` | float | Footprint origin |
 | `rotation` | float | Rotation in degrees |
@@ -389,7 +390,10 @@ large file:
 | `extract_layers(content)` | `BoardInfo` (layers, bounds, stackup, outline, cutouts) |
 | `extract_stackup(content)` | `List[StackupLayer]` |
 | `extract_nets(content, kicad_version=0)` | `(Dict[int, Net], Dict[str, int])` — nets and name→id |
-| `extract_footprints_and_pads(content, nets, name_to_id=None)` | `(Dict[str, Footprint], Dict[int, List[Pad]])` |
+| `extract_footprints_and_pads(content, nets, name_to_id=None, duplicates=None)` | `(Dict[str, Footprint], Dict[int, List[Pad]])` — `duplicates`, if given, is FILLED with the duplicate-reference counts |
+| `iter_footprint_blocks(content)` | yields `(start, end, fp_text, raw_reference, key)` per block in FILE ORDER — the one place that decides what a block is CALLED |
+| `disambiguate_references(raw_refs)` | ordered raw references -> ordered unique keys, by file-order ordinal |
+| `footprint_raw_reference(fp_text)` | the name a block claims, before disambiguation |
 | `extract_segments(content, name_to_id=None)` | `List[Segment]` |
 | `extract_vias(content, name_to_id=None)` | `List[Via]` |
 | `extract_zones(content, name_to_id=None)` | `List[Zone]` |
@@ -400,6 +404,23 @@ large file:
 
 ## Gotchas
 
+- **A reference is not unique, and the dict key is not always the reference**
+  (#726). Five of the 22 boards this repo tracks carry two or more footprint
+  blocks claiming one reference — on `watchy` they are real test points, on
+  `glasgow_revC` there are seven `REF**`. Every block is an entry; the first
+  keeps the bare name and later ones get a file-order ordinal (`TP4~2`), and a
+  reference-LESS block is keyed `#<uuid>`. `pcb.duplicate_references` reports
+  the board's own spelling. Consequences worth knowing:
+  - `len(pcb.footprints)` is the BLOCK count, so it can exceed the number of
+    distinct designators on the schematic.
+  - `Pad.component_ref` carries the same key, so comparing two pads'
+    `component_ref` is a genuine same-part test.
+  - **A writer must locate blocks with `iter_footprint_blocks`, never by
+    matching the Reference string.** One placement used to rewrite every block
+    carrying the name; measured, that teleported a fiducial 23.44 mm onto its
+    twin, and a write whose contract is that nothing moves relocated 3 blocks.
+  - A `--lock`-style glob still behaves: `~` is not an fnmatch metacharacter,
+    so `TP4*` covers both twins and `TP4` names the first.
 - **`global_x/y` vs `local_x/y`**: global is after footprint rotation, local
   is before. Use globals for anything board-related.
 - **Net ID 0** is "no net". Skip it when iterating nets to route, but

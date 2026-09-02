@@ -257,6 +257,41 @@ def test_both_arms_of_the_containment_ladder_are_exercised():
           'bounds' in seen, str(seen))
 
 
+def test_the_owner_map_is_keyed_like_the_footprints_dict():
+    """#829 meeting #726. Two blocks may claim one reference; #726 keys the
+    second `TP4~2`. An owner map keyed by the RAW name would stamp
+    `owns_board_outline` onto whichever block won the dict -- which, on a
+    duplicated reference, need not be the block that draws the outline.
+
+    Neither PR could have covered this: #726 landed while this branch was open,
+    and the two features only interact here.
+    """
+    from kicad_parser import DUP_REF_SEP
+    text, _want = FIX.rect_board(4)
+    # A SECOND block claiming 'JF', carrying no Edge.Cuts, placed FIRST so it
+    # takes the bare name and the outline owner becomes 'JF~2'.
+    twin = FIX._fp_pads('JF', 8, 8, '')
+    text = text.replace('  (footprint "t:JF"', twin + '\n  (footprint "t:JF"',
+                        1)
+    d = tempfile.mkdtemp(prefix='fix829dup_')
+    p = os.path.join(d, 'dup.kicad_pcb')
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+    pcb = parse_kicad_pcb(p)
+    owners = {r: f.owns_board_outline for r, f in pcb.footprints.items()
+              if f.owns_edge_cuts}
+    dup_key = 'JF' + DUP_REF_SEP + '2'
+    check("both blocks are kept under distinct keys",
+          'JF' in pcb.footprints and dup_key in pcb.footprints,
+          str(sorted(pcb.footprints)))
+    check("exactly one of them owns Edge.Cuts", len(owners) == 1, str(owners))
+    check("and it is the block that draws it, not the one that shares its name",
+          owners.get(dup_key) is True, str(owners))
+    check("the twin that draws nothing is untouched",
+          not pcb.footprints['JF'].owns_edge_cuts
+          and not pcb.footprints['JF'].owns_board_outline)
+
+
 def test_every_refusal_names_its_own_source():
     """A refusal that names the wrong source is worse than none: it sends the
     reader hunting the board for a `(locked yes)` stamp that is not there.
@@ -425,6 +460,7 @@ TESTS = [
     test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed,
     test_the_classifier_on_the_boards_a_review_broke_it_with,
     test_both_arms_of_the_containment_ladder_are_exercised,
+    test_the_owner_map_is_keyed_like_the_footprints_dict,
     test_every_refusal_names_its_own_source,
     test_a_zero_move_write_is_not_a_move,
     test_the_tripwire_works_on_an_in_place_write,

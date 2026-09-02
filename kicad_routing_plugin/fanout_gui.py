@@ -2194,6 +2194,10 @@ class FanoutTab(wx.Panel):
                                    if t else None),
             )
 
+            # #726: a placement names a PCBData key, which for a duplicated
+            # reference is `TP4~2`; FindFootprintByReference cannot see it.
+            from gui_utils import live_footprints_by_key
+            _live_caps = live_footprints_by_key(board)
             # #829: skip a cap that draws the board's own outline. The engine's
             # own cap gate already excludes it, so this should never trigger --
             # but this loop applies poses to the live board directly, without
@@ -2204,7 +2208,8 @@ class FanoutTab(wx.Panel):
             # silent skip would be reported as a move.
             _outline_skipped = []
             for p in result.get('placements', []):
-                fp = board.FindFootprintByReference(p['reference'])
+                fp = (_live_caps.get(p['reference'])
+                      or board.FindFootprintByReference(p['reference']))
                 if fp is None:
                     continue
                 _pd = (pcb_data.footprints.get(p['reference'])

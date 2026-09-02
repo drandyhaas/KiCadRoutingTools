@@ -1876,36 +1876,27 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
         #369 A8: returns ALL same-number pads, not just the first -- connector
         shields / split EP paddles legally repeat one pad number, and swapping
         only the first left the twins on the old net (half-applied swap =
-        short/open at the target). Footprint references are matched via
-        (property "Reference" ...) with an (fp_text reference ...) fallback,
-        like the parser -- KiCad 6/7 boards only carry the latter, and bailing
-        here AFTER the segment/via relabels already applied shipped mixed-net
-        copper."""
-        fp_start_pattern = r'\(footprint\s+"[^"]*"'
+        short/open at the target).
+
+        #726: the footprint is located by the PARSER's key rather than by its
+        Reference string, so the KiCad 6/7 `(fp_text reference ...)` form is
+        handled for free and a duplicated reference resolves to the one block
+        the pad actually belongs to. Bailing here AFTER the segment/via
+        relabels have applied ships mixed-net copper, so a silent miss is the
+        expensive failure."""
+        from kicad_parser import iter_footprint_blocks
         spans = []
 
-        for fp_match in re.finditer(fp_start_pattern, content):
-            fp_start = fp_match.start()
-            # Find the end of this footprint block
-            depth = 0
-            fp_end = fp_start
-            for i, char in enumerate(content[fp_start:], fp_start):
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-                    if depth == 0:
-                        fp_end = i + 1
-                        break
-
-            fp_text = content[fp_start:fp_end]
-
-            # Check if this footprint has the right Reference (KiCad 8+
-            # property, else the KiCad 6/7 fp_text form)
-            ref_pattern = rf'\(property\s+"Reference"\s+"{re.escape(component_ref)}"'
-            legacy_ref_pattern = rf'\(fp_text\s+reference\s+"{re.escape(component_ref)}"'
-            if not (re.search(ref_pattern, fp_text)
-                    or re.search(legacy_ref_pattern, fp_text)):
+        # Blocks are resolved by the PARSER's key (#726). `component_ref` comes
+        # off a `kicad_parser.Pad`, so on a board with two blocks named `TP4`
+        # it is `TP4~2` -- a name the old Reference-string match could never
+        # find, which made this a SILENT no-op after the segment/via relabels
+        # had already applied. Matching the string was equally wrong the other
+        # way: it took the first block carrying the name, which is a different
+        # physical part than the one the pad belongs to.
+        for fp_start, fp_end, fp_text, _raw_ref, key in iter_footprint_blocks(
+                content):
+            if key != component_ref:
                 continue
 
             # Find every pad with this number in this footprint
