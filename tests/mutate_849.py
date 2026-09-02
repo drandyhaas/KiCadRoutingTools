@@ -115,12 +115,16 @@ ROWS = [
      (T_849,), 'KILLED'),
 
     # ---- declared survivors ----------------------------------------------
-    # `tolerant` only changes behaviour for a footprint whose pad model
-    # RAISES, and no committed board has one -- `part_copper_geometry`'s own
-    # docstring says the flag exists for hand-built fixtures. The flag itself
-    # is covered by tests/test_841_obstruction_rect.py, which asks the
-    # geometry directly instead of through a ledger. A test hole would be
-    # closing this by inventing a fixture whose only purpose is this row.
+    # A REAL hole, and no available board can close it. `tolerant` changes
+    # behaviour only for a footprint whose pad model RAISES, and `PartPads`
+    # raises for ZERO footprints across all 27 committed boards -- measured
+    # by a review, which also confirmed with a stub footprint that the flag
+    # is a genuine semantic change (strict raises AttributeError; tolerant
+    # returns the map with the bad ref dropped). So closing it needs a
+    # synthetic fixture whose only purpose is this row, and the flag itself
+    # is already covered by tests/test_841_obstruction_rect.py, which asks
+    # the geometry directly rather than through a ledger. Recorded as a hole
+    # with its reason rather than dressed up as coverage.
     ('parts-built-tolerant', 'r',
      "            self._parts = build_part_pads(self.pcb_data.footprints or {},\n"
      "                                          self.clearance)",

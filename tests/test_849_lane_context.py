@@ -292,9 +292,14 @@ def main():
     best_plain = min(_timed(sweep, pcb, DENSE, refs) for _ in range(3))
     best_ctx = min(_timed(_ctx_sweep, pcb, DENSE, refs) for _ in range(3))
     ratio = best_plain / max(best_ctx, 1e-9)
-    # The floor is 1.5x against a measured 6.3x. A context that is accepted
-    # and then ignored lands at 1.0x, which is what this catches; anything
-    # tighter is a detector for how busy the machine is.
+    # The floor is 1.5x. The number it is loose against is THIS arm's own:
+    # 9.9x-11.5x over its 10 `fine_pitch_parts` refs across four runs on two
+    # machines. (An earlier comment here cited 6.3x, which is the docstring
+    # table's rp2350 figure over check_channels' 7 auto-detected refs -- a
+    # different sweep, so a different ratio. A review caught the borrowed
+    # number.) A context that is accepted and then ignored lands at 1.0x,
+    # which is what this catches; anything tighter is a detector for how busy
+    # the machine is.
     check(f'{len(refs)}-ref sweep at least 1.5x faster ({ratio:.1f}x measured)',
           ratio >= 1.5,
           f'plain {best_plain:.3f}s, hoisted {best_ctx:.3f}s')
@@ -318,7 +323,7 @@ def main():
           'band 4.0 gave the same rows as the default band; this arm would '
           'pass even if the keyword were dropped on the floor')
 
-    print('8. the anchor-channel table agrees either way')
+    print('8. the anchor-channel table agrees either way, and names itself')
     pcw_plain = R.pair_channel_widths(pcb, clearance=LANE['clearance'],
                                       pcb_file=DENSE)
     pcw_ctx = R.pair_channel_widths(pcb, clearance=LANE['clearance'],
@@ -326,6 +331,15 @@ def main():
     check('pair_channel_widths: identical rows', pcw_plain == pcw_ctx,
           f'{len(pcw_plain)} vs {len(pcw_ctx)} rows')
     check('...and it produced some', bool(pcw_plain), 'no rows: arm is blind')
+    # `resolved_for` used to hardcode `face_lane_ledger:` into every message,
+    # so a wrong context handed to THIS function reported a refusal from a
+    # function that was never entered. The caller names itself now, and a
+    # message that names the wrong function is worse than one that names none.
+    ok, why = refuses(
+        lambda: R.pair_channel_widths(pcb, clearance=LANE['clearance'],
+                                      pcb_file=DENSE, context=other_ctx),
+        'pair_channel_widths', 'DIFFERENT board')
+    check('a wrong-board context here blames pair_channel_widths', ok, why)
 
     print('9. the CLI ledgers what the library ledgers, with no context')
     with tempfile.TemporaryDirectory() as td:

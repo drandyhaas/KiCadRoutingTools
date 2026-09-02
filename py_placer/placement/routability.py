@@ -906,12 +906,15 @@ class LaneContext:
     bogus ref MORE expensive than it is today.
 
     WHAT MAKES SHARING SAFE is narrower than "nothing mutates", and the
-    narrower statement is the true one. Four of the five are freshly built
-    containers the ledger only reads. The fifth is not: `pp.extent(...)`
-    WRITES into `PartPads._ext_cache`. That is pure memoization, keyed on the
-    pose delta, whose value is a function of `(pads_local, holes_extent, rot)`
-    alone -- so a shared map accumulates entries, answers identically, and
-    makes the sweep faster still.
+    narrower statement has to be got right. Four of the five are freshly
+    built containers the ledger only reads. The fifth is not: `pp.extent(...)`
+    WRITES into `PartPads._ext_cache` AND, via `PartPads._rotated`, into
+    `_pad_cache` -- measured on rp2350, one ledger call grows both on 61 of 61
+    parts. (An earlier draft of this paragraph said "the one write that does
+    happen" and named only `_ext_cache`; a review counted them.) Both are pure
+    memoization keyed on the pose delta, whose values are functions of
+    `(pads_local, holes_extent, rot)` alone -- so a shared map accumulates
+    entries, answers identically, and makes the sweep faster still.
 
     The members are deliberately NOT a public tuple to unpack: `containers`
     is derived from `graded` and `geom` from `parts`, so a caller that hoisted
@@ -998,7 +1001,8 @@ class LaneContext:
         return self._geom
 
     def resolved_for(self, pcb_data, clearance: float,
-                     pcb_file: Optional[str]) -> 'LaneContext':
+                     pcb_file: Optional[str],
+                     caller: str = 'face_lane_ledger') -> 'LaneContext':
         """This context, or a `ValueError` naming the disagreement.
 
         Three things are checked because all three can silently produce a
@@ -1013,25 +1017,46 @@ class LaneContext:
         wrong clearance, with the reasoning spelled out there; this is the
         same refusal one level up, for the same reason: a disagreement that
         is checkable should not be trusted instead.
+
+        `caller` names the function in the message. Two consumers reach here,
+        and a review found the hardcoded name reporting `face_lane_ledger:`
+        out of a `pair_channel_widths` call -- naming a function that was
+        never entered, which is worse than naming none.
+
+        TWO LIMITS, stated rather than implied:
+
+        * It is NOT a total gate. `face_lane_ledger` returns `[]` for a ref
+          the board does not have BEFORE it gets here, so a mismatched
+          context handed a bogus ref is never noticed. That matches the old
+          code's output exactly; it just is not a check.
+        * The board test is identity, not equality, so a board MUTATED IN
+          PLACE (a part moved) keeps passing while `graded` and `geom` stay
+          frozen at the poses they were built from -- where the un-hoisted
+          code would have rebuilt. No caller in this repo does that; one that
+          moves parts between ledger calls must build a new context.
         """
         if self.pcb_data is not pcb_data:
             raise ValueError(
-                'face_lane_ledger: the lane context was built for a '
-                'DIFFERENT board object ({!r}) than the one being graded '
-                '({!r}); its neighbours, courtyards and net owners are that '
-                "board's, so the ledger would grade this ref against another "
-                "board's geometry".format(self.pcb_file, pcb_file))
+                '{}: the lane context was built for a DIFFERENT board object '
+                '({} footprints, from {!r}) than the one being graded ({} '
+                'footprints, from {!r}); its neighbours, courtyards and net '
+                "owners are that board's, so this ref would be graded against "
+                "another board's geometry".format(
+                    caller, len(getattr(self.pcb_data, 'footprints', None) or {}),
+                    self.pcb_file,
+                    len(getattr(pcb_data, 'footprints', None) or {}), pcb_file))
         if self.pcb_file != pcb_file:
             raise ValueError(
-                'face_lane_ledger: the lane context was built from '
+                '{}: the lane context was built from '
                 '{!r} but {!r} was passed; the courtyards come from the FILE '
-                'and the two need not agree'.format(self.pcb_file, pcb_file))
+                'and the two need not agree'.format(caller, self.pcb_file,
+                                                    pcb_file))
         if abs(self.clearance - float(clearance)) > 1e-9:
             raise ValueError(
-                'face_lane_ledger: the lane context was built at clearance '
+                '{}: the lane context was built at clearance '
                 '{} but {} was requested; the pad boxes carry NPTH hole '
                 'growth at the former and every face would be priced at the '
-                'latter'.format(self.clearance, clearance))
+                'latter'.format(caller, self.clearance, clearance))
         return self
 
 
@@ -1061,7 +1086,10 @@ def board_lane_context(pcb_data, clearance: float, *,
     tigard's 2.3x is the shape of the win, not a disappointment: two refs is
     two rebuilds, so there is almost nothing to hoist. The saving is per
     EXTRA ref, which is why the boards in the fix loop feel it and a
-    two-part board does not.
+    two-part board does not. It is also the least stable figure in the table
+    -- an independent re-measurement put it anywhere in 1.5x-2.5x across four
+    runs, against 6.7x and 8.4x for the other two, which reproduced. Read
+    tigard as "barely worth it here", not as 2.3.
     """
     return LaneContext(pcb_data, clearance, pcb_file=pcb_file)
 
@@ -1295,7 +1323,8 @@ def pair_channel_widths(pcb_data, *, clearance: float,
     # be lying about.
     parts = (graded_parts_from_file(pcb_data, pcb_file) if context is None
              else context.resolved_for(pcb_data, context.clearance,
-                                       pcb_file).graded)
+                                       pcb_file,
+                                       caller='pair_channel_widths').graded)
     big = [g for g in parts
            if max(g.rect[2] - g.rect[0], g.rect[3] - g.rect[1])
            >= min_extent_mm]
