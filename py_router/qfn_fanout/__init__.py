@@ -354,6 +354,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # zone copper, so pour copper is invisible to the stub before and after
     # this change and nothing is being silently left out.
     _erased_vias = [v for v in pcb_data.vias if v.net_id in fanned_nets]
+    _erased_segs = [s for s in pcb_data.segments if s.net_id in fanned_nets]
     # The stub is emitted on `footprint.layer` -- the pad's OWN mount layer,
     # deliberately, so it does not float above the pad (#195) -- and NOT on the
     # `layer` argument. The caller's #498 dru swap resolved `clearance` for the
@@ -363,6 +364,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
     _gate = env_knobs.QFN_UNDERPAD_ERASED_GATE
     _gate_via = _gate in ('all', 'via')
+    _gate_seg = _gate in ('all', 'seg')
     from kicad_parser import pad_drill_circles as _pdc
     import routing_defaults as _rd
     # BOARD-FIRST, same rule as every other floor: a board declaring
@@ -512,6 +514,21 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                     continue                # own-net copper is no obstacle
                 if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \
                         < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:
+                    return False
+        if _gate_seg:
+            # Segments, unlike vias, really ARE single-layer objects, so this
+            # half filters -- on `footprint.layer`, where the stub's copper is
+            # emitted, NOT on `layer`. The surface fan compares against `layer`
+            # (:999) only because ITS stubs land there. Measured on U2: the two
+            # spellings disagree completely -- `footprint.layer` (F.Cu) finds 25
+            # pairs, `layer` (B.Cu) finds 17 DIFFERENT ones.
+            for s in _erased_segs:
+                if s.net_id == net_id or s.layer != footprint.layer:
+                    continue
+                if segment_to_segment_distance(px, py, vx, vy,
+                                               s.start_x, s.start_y,
+                                               s.end_x, s.end_y) \
+                        < s.width / 2 + track_width / 2 + _stub_clr - 1e-6:
                     return False
         return True
 
