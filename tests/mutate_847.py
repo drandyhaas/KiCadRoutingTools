@@ -37,9 +37,11 @@ the ones that matter and both were found the hard way:
     python3 -X utf8 tests/mutate_847.py --verify-anchors
     python3 -X utf8 tests/mutate_847.py --row the-share-form-goes-away
 
-RECORDED at 229b5a5e, with `wk/run7/glasgow_revC` present -- 22 rows, 20 killed,
-2 survived (both of them the intended controls), 0 broken, 0 disagreeing with
-expectation.
+RECORDED at f5bbfce9, with `wk/run7/glasgow_revC` present -- 22 rows, 20 killed,
+2 survived (both of them the intended controls), 0 undecided, 0 broken, 0
+disagreeing with expectation. (Same result at 229b5a5e, before the review
+round; the rows that changed there were the two whose only witness is the
+wk/-gated file, and they still kill with it present.)
 
 The FIRST run of this battery, at ca47c88f, was 17 killed / 5 survived with
 THREE disagreeing, and all three were holes in the tests rather than wrong
