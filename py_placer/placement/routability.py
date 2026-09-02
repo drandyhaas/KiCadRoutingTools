@@ -1042,22 +1042,23 @@ def board_lane_context(pcb_data, clearance: float, *,
     Build one above a loop over refs and pass it to every call; see
     `LaneContext`. Measured on this repo's own committed boards at clearance
     0.09 / track 0.127 / grid 0.05, sweeping every ref `check_channels`
-    auto-detects -- the whole sweep in one process, min-of-5, the context
-    built INSIDE the timed region because one per run is what the caller
-    does:
+    auto-detects -- both arms in ONE process, min-of-5, the context built
+    INSIDE the timed region because one per run is what the caller does:
 
         board                       refs   sweep            courtyard parses
-        tigard                         2   0.116s -> 0.066s   2 -> 1
-        rp2350_fpga_eensy_prePlane     7   0.326s -> 0.039s   7 -> 1
-        glasgow_revC                   9   2.211s -> 0.282s   9 -> 1
+        tigard                         2   0.119s -> 0.052s   2 -> 1
+        rp2350_fpga_eensy_prePlane     7   0.284s -> 0.045s   7 -> 1
+        glasgow_revC                   9   1.767s -> 0.198s   9 -> 1
 
     The parse count is the honest half of that table. Seconds are
-    load-dependent, and this machine does not reproduce #849's own 12.6-15.8s
-    on glasgow (it measures 4.1s of CLI wall clock, 2.2s after) -- but "once
-    per ref" against "once per board" is a property, not a measurement, and it
-    is what `tests/test_849_lane_context.py` pins.
+    load-dependent: the same un-hoisted sweep measured 0.094 / 0.275 / 1.704
+    in a clean checkout of the parent commit, so read the ratio, not the
+    absolute. This machine does not reproduce #849's own 12.6-15.8s on
+    glasgow at all (4.01s of CLI wall clock, 1.61s after) -- but "once per
+    ref" against "once per board" is a property, not a measurement, and it is
+    what `tests/test_849_lane_context.py` pins.
 
-    tigard's 1.8x is the shape of the win, not a disappointment: two refs is
+    tigard's 2.3x is the shape of the win, not a disappointment: two refs is
     two rebuilds, so there is almost nothing to hoist. The saving is per
     EXTRA ref, which is why the boards in the fix loop feel it and a
     two-part board does not.
