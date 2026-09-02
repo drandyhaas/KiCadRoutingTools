@@ -333,6 +333,44 @@ def test_face_lane_ledger_cannot_cover_more_than_the_face():
           'finest grid never supplies less'.format(rows, checked))
 
 
+def test_the_union_is_what_moves_tigard():
+    """tigard is the clean UNION witness, and the reason it is clean matters.
+
+    It has no container and no cross-side charge at all, so neither of the
+    other two arms can touch it -- its escape ledger is 41 lanes before and
+    after. What moves is `routability`, purely because three neighbours over
+    the same stretch of J1's east face were billed three times.
+
+    J1 is also the symmetric-side witness on the same part: J1 is DRILLED, so
+    it occupies both faces and the B-side JP1 is charged against its north
+    face. A one-sided `own_side in g.sides` test would drop that.
+    """
+    pcb, path = _board('tigard')
+    if pcb is None:
+        print('  SKIP: tigard not present')
+        return
+    assert not container_refs(pcb, graded_parts_from_file(pcb, path)), (
+        'tigard grew a container; it is no longer the clean union witness')
+    sides = _sides(pcb)
+    assert sides['J1'] == frozenset(('F', 'B')), sorted(sides['J1'])
+    rows = {r['face']: r for r in R.face_lane_ledger(
+        pcb, 'J1', clearance=0.2, track_width=0.2, grid_step=0.1,
+        pcb_file=path)}
+    east = rows['E']
+    assert abs(east['length_mm'] - 9.64) < 0.01, east
+    assert len(east['eaten_by']) == 3, east['eaten_by']
+    # Three neighbours eating ~13 lanes between them on a face that holds 32:
+    # summed, that left supply 4; unioned, it is 11.
+    assert sum(mm for _r, mm in east['eaten_by']) > 12.0, east['eaten_by']
+    assert east['supply_routed_grid'] == 11, (
+        'tigard J1 east supply moved from the recorded 11: {}'.format(east))
+    north = rows['N']
+    assert 'JP1' in {r for r, _mm in north['eaten_by']}, north
+    assert sides['JP1'] == frozenset(('B',)), sorted(sides['JP1'])
+    print('  PASS: J1 east supply 11 with 3 unioned blockers; the B-side JP1 '
+          'still charged against the drilled J1')
+
+
 def test_face_lane_ledger_side_test_is_symmetric():
     """A drilled part keeps its far-side blockers.
 
