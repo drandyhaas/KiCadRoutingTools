@@ -154,21 +154,29 @@ class TestTheGateIsInertOnTheBoardAsShipped(unittest.TestCase):
                                 f'gap against its own 0.25mm declaration')
 
 
-class TestTheSiteConflictHalfIsLive(unittest.TestCase):
-    """The half the gate exists for, and the one the mutation battery caught
-    having NO coverage: `_via_site_conflict` against the board's own copper.
+class TestNoViaLandsOnBoardCopper(unittest.TestCase):
+    """An END-TO-END property, and NOT a test of the coupled gate's
+    site-conflict half -- which is the finding, so it is written down here
+    rather than claimed away.
 
-    The arms below plant a foreign-net via at a coordinate the unplanted run
-    puts a coupled escape via on, then re-run. With the gate, that ball's site
-    is declined and no via lands on the planted hole; without it, the coupled
-    pair goes in regardless and two drills share a point.
+    The arms plant a foreign-net via on the exact coordinate the unplanted run
+    puts a COUPLED escape via on (verified: `vias[0]` is a Z-pair via and the
+    rig couples 13 of 13 pairs), then re-run and assert no emitted via lands
+    within the hole-to-hole floor of it.
 
-    Two engine runs, because the plant site has to be a coordinate this engine
-    actually chooses -- a hand-picked ball centre would prove nothing if the
-    pair never couples there.
+    THE MUTATION BATTERY SHOWS THIS PASSES EVEN WITH
+    `_coupled_via_sites_ok`'s `_via_site_conflict` LOOP DISABLED. That is not a
+    hole in the arms; it is what the code does. `_via_site_conflict` has two
+    domains -- the board's own copper, and the vias this run has already
+    committed -- and the first is already covered by the occupancy grid, which
+    is built from the board before any escape runs. The check is redundant for
+    a board via and load-bearing only against this run's own output, which no
+    in-repo board reaches (the only rigs that couple are 0.8mm pitch, where a
+    committed via clears the floor by 0.4mm). `mutate_620.py` records that as
+    an expected survivor with the same reasoning.
 
-    MUTATION: `return True` before the `_via_site_conflict` loop in
-    `_coupled_via_sites_ok` -- these arms die.
+    So what these arms pin is the OUTCOME -- a coupled escape never drills into
+    copper the board already has -- by whichever mechanism holds it.
     """
 
     def test_a_foreign_hole_at_a_coupled_ball_centre_declines_that_site(self):
