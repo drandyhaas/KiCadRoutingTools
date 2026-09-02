@@ -26,6 +26,15 @@ What is asserted, and why each one is here rather than implied:
      decoration -- `extent` is a copper box -- but NPTH growth is folded into
      it, so a hardcoded clearance would price a mounting hole wrongly and
      nothing else in the file would notice.
+  6. `copper` is inside `rect`, and every EDGE of `copper` is attained by some
+     pad. That is not decoration either: it is the property that keeps an edge
+     pad at distance exactly 0 once face assignment measures pad edges, which
+     is what makes the subject-rect half of #841 invariant rather than
+     catastrophic. `rect` does not have it -- 12 edges on the corpus are set
+     by a mounting hole no pad reaches.
+  7. A footprint whose pad model cannot be built degrades to the pad-CENTRE
+     box and says so via `modelled`. A silent fallback makes a map of the
+     wrong geometry look exactly like a map of the right one.
 
 Run: python3 -X utf8 tests/test_841_obstruction_rect.py
 """
@@ -42,6 +51,7 @@ import run_utils                                              # noqa: E402
 from kicad_parser import parse_kicad_pcb                      # noqa: E402
 from placement import escape as E                             # noqa: E402
 from placement.legality import (build_part_pads,              # noqa: E402
+                                part_copper_geometry,
                                 graded_parts_from_file)
 
 RUN_ALL_FAST_OK = True
@@ -74,7 +84,8 @@ def test_it_is_PartPads_extent_called_not_copied():
         if pcb is None:
             print('  SKIP {} absent'.format(name))
             continue
-        rects = E.board_obstruction_rects(pcb, 0.2)
+        geom = E.board_copper_geometry(pcb, 0.2)
+        rects = {r: g.rect for r, g in geom.items()}
         parts = build_part_pads(pcb.footprints, 0.2)
         for ref, pp in parts.items():
             fp = pcb.footprints[ref]
@@ -103,7 +114,8 @@ def test_it_is_wider_than_the_pad_centre_box():
         if pcb is None:
             print('  SKIP {} absent'.format(name))
             continue
-        rects = E.board_obstruction_rects(pcb, 0.2)
+        geom = E.board_copper_geometry(pcb, 0.2)
+        rects = {r: g.rect for r, g in geom.items()}
         for ref, rect in rects.items():
             fp = pcb.footprints[ref]
             if not fp.pads:
@@ -131,7 +143,8 @@ def test_it_is_not_the_courtyard():
     if pcb is None:
         print('  SKIP glasgow_revC absent')
         return
-    rects = E.board_obstruction_rects(pcb, 0.2)
+    geom = E.board_copper_geometry(pcb, 0.2)
+    rects = {r: g.rect for r, g in geom.items()}
     court = {g.ref: g.rect for g in graded_parts_from_file(pcb, path)}
     differ = sum(1 for r, v in rects.items()
                  if r in court and max(abs(a - b) for a, b in zip(v, court[r])) > 1e-6)
@@ -140,6 +153,97 @@ def test_it_is_not_the_courtyard():
         'assembly keep-out, not copper'.format(differ, len(rects)))
     print('  PASS: {} of {} rects differ from the courtyard'
           .format(differ, len(rects)))
+
+
+def test_copper_is_inside_rect_and_every_copper_edge_is_attained_by_a_pad():
+    """Rule 6, and the load-bearing one for face ASSIGNMENT.
+
+    `CopperGeometry` carries two boxes because they answer different
+    questions. `rect` is the obstruction box -- pad copper UNION the NPTH hole
+    extents. `copper` is the pads alone, and face assignment is measured
+    against it precisely because every one of its four edges is attained by
+    some pad: that is what keeps an edge pad at distance exactly 0 once
+    `_face_of` measures pad EDGES, which is what makes the subject-rect change
+    invariant instead of catastrophic.
+
+    `rect` does NOT have that property, and the test says so with a number
+    rather than leaving it as an argument: on the corpus's fine-pitch parts
+    some faces are set by a mounting hole no pad reaches.
+    """
+    hole_set = 0
+    faces = 0
+    checked = 0
+    for path in run_utils.corpus_boards():
+        try:
+            pcb = parse_kicad_pcb(path)
+        except Exception:                                     # noqa: BLE001
+            continue
+        geom = E.board_copper_geometry(pcb, 0.2)
+        refs = E.fine_pitch_parts(pcb)
+        if not refs:
+            continue
+        checked += 1
+        for ref in refs:
+            g = geom.get(ref)
+            if g is None or not g.modelled:
+                continue
+            r, c = g.rect, g.copper
+            assert (r[0] <= c[0] + 1e-9 and r[1] <= c[1] + 1e-9
+                    and r[2] >= c[2] - 1e-9 and r[3] >= c[3] - 1e-9), (
+                '{}: {} copper {} is not inside rect {}'
+                .format(os.path.basename(path), ref, c, r))
+            for i, edge in enumerate(c):
+                faces += 1
+                hit = any(abs(p[i] - edge) < 1e-6 for p in g.pads)
+                assert hit, (
+                    '{}: {} copper edge {} ({}) is attained by no pad; face '
+                    'assignment would have no zero-distance pad on that side'
+                    .format(os.path.basename(path), ref, i, edge))
+                if abs(r[i] - edge) > 1e-6:
+                    hole_set += 1
+    assert checked >= 5, 'only {} board(s) had a fine-pitch part'.format(checked)
+    assert faces > 200, 'only {} edges examined'.format(faces)
+    assert hole_set > 0, (
+        'no face has its extent edge set by a hole rather than by copper, so '
+        'the two boxes are interchangeable here and this arm proves nothing -- '
+        'which would mean `copper` can be dropped')
+    print('  PASS: copper inside rect on {} edges over {} board(s); {} edges '
+          'are set by a hole, not by a pad'.format(faces, checked, hole_set))
+
+
+def test_an_unmodellable_footprint_degrades_to_the_pad_centre_box():
+    """Rule 7. The fallback is a live path, not a defensive gesture: the
+    hand-built fixtures in `tests/test_escape_ledger.py` carry no `reference`,
+    so `PartPads` raises on them and those tests' recorded numbers are
+    pad-CENTRE numbers. `modelled` is what tells a reader which parts got
+    which answer -- a silent fallback is how a map of the wrong geometry looks
+    exactly like a map of the right one."""
+    class _Pad:
+        def __init__(self, x, y):
+            self.global_x, self.global_y = x, y
+            self.local_x, self.local_y = x, y
+            self.net_id, self.drill = 1, 0.0
+            self.size_x = self.size_y = 0.3
+            self.layers, self.pad_type = ['F.Cu'], 'smd'
+            self.rect_rotation = 0.0
+
+    class _Fp:                       # deliberately missing `reference`
+        def __init__(self, pads):
+            self.pads = pads
+            self.x, self.y, self.rotation = 0.0, 0.0, 0.0
+            self.layer = 'F.Cu'
+            self.footprint_name = 'QFN-32'
+
+    fp = _Fp([_Pad(0.0, 0.0), _Pad(1.0, 2.0)])
+    geom = part_copper_geometry({'U1': fp}, 0.2)
+    g = geom['U1']
+    assert g.modelled is False, 'the broken fixture was modelled after all'
+    assert g.rect == g.copper == (0.0, 0.0, 1.0, 2.0), g
+    assert g.pads == (), g.pads
+    assert g.rect == E._part_rect(fp), (
+        'the fallback is not the pad-centre box the old ledger used')
+    print('  PASS: an unmodellable footprint degrades to {} with '
+          'modelled=False'.format(g.rect))
 
 
 def test_a_padless_footprint_is_absent():
@@ -154,7 +258,8 @@ def test_a_padless_footprint_is_absent():
         if pcb is None:
             print('  SKIP {} absent'.format(name))
             continue
-        rects = E.board_obstruction_rects(pcb, 0.2)
+        geom = E.board_copper_geometry(pcb, 0.2)
+        rects = {r: g.rect for r, g in geom.items()}
         padless = [r for r, f in pcb.footprints.items() if not (f.pads or [])]
         assert padless, '{}: no pad-less footprint to test with'.format(name)
         for r in padless:
@@ -175,8 +280,8 @@ def test_clearance_reaches_the_result_and_only_via_drilled_holes():
         if pcb is None:
             print('  SKIP {} absent'.format(name))
             continue
-        tight = E.board_obstruction_rects(pcb, 0.0)
-        loose = E.board_obstruction_rects(pcb, 0.5)
+        tight = {r: g.rect for r, g in E.board_copper_geometry(pcb, 0.0).items()}
+        loose = {r: g.rect for r, g in E.board_copper_geometry(pcb, 0.5).items()}
         moved = {r for r in tight
                  if max(abs(a - b) for a, b in zip(tight[r], loose[r])) > 1e-6}
         assert moved == expect, (

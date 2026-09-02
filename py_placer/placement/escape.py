@@ -694,8 +694,9 @@ def board_container_refs(pcb_data, pcb_file=None) -> set:
         return set()
 
 
-def board_obstruction_rects(pcb_data, clearance: float) -> Dict[str, Tuple]:
-    """{ref: pad-COPPER bbox} -- the ONE rect a lane ledger charges (#841).
+def board_copper_geometry(pcb_data, clearance: float) -> Dict[str, object]:
+    """{ref: legality.CopperGeometry} -- the ONE geometry a lane ledger charges
+    (#841).
 
     Both lane ledgers ask "what stops a track leaving this face". The answer
     is foreign COPPER, so this is the bbox over the pads' own edges plus the
@@ -718,32 +719,17 @@ def board_obstruction_rects(pcb_data, clearance: float) -> Dict[str, Tuple]:
     88, tigard 41 / 48 / 75, ulx3s 0 / 5 / 19, kit-dev-coldfire 0 / 4 / 18.
     Regenerate with `tests/measure_834_835_side_awareness.py --table D`.
 
-    Two consequences worth knowing:
-
-    * A footprint with NO pads is ABSENT from the map. That is deliberate: it
-      has no copper, so it obstructs no track, and it is also how the
-      `synthetic` +/-0.5mm fiction `legality.part_local_bounds` invents for a
-      zero-pad footprint stops reaching a lane SUPPLY -- a number
-      `options.move_blocker` turns into an instruction to move a part.
-    * `clearance` is a REAL parameter, not decoration. `PartPads.extent`
-      folds in the NPTH growth `max(0, npth_floor - clearance)`, so it is
-      clearance-dependent for parts that carry drilled holes: measured over
-      414 corpus parts, exactly 5 differ between clearance 0.0 and 0.5
-      (tigard H1-H4, rp2350 J2 -- all mounting holes), by 0.200mm. Each
-      ledger therefore passes the clearance it resolved for its own lane
-      pitch, so the two cannot silently price the same hole differently.
+    The geometry itself lives in `legality.part_copper_geometry`, beside the
+    `PartPads` it is built from; this is the per-board hoist, resolved ONCE and
+    threaded down for the reason `board_side_map` gives. Two fields, and they
+    answer different questions -- `rect` is what a part contributes as a
+    neighbour and what its own faces are measured on, `copper` is what face
+    ASSIGNMENT is measured against. See `CopperGeometry`.
 
     `legality` is imported lazily for the reason `board_side_map` gives.
     """
-    from .legality import build_part_pads
-    fps = pcb_data.footprints or {}
-    out: Dict[str, Tuple] = {}
-    for ref, pp in build_part_pads(fps, clearance).items():
-        fp = fps[ref]
-        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
-        if ext is not None:
-            out[ref] = ext
-    return out
+    from .legality import part_copper_geometry
+    return part_copper_geometry(pcb_data.footprints or {}, clearance)
 
 
 def span_eaten(lo, hi, band, horizontal, obstacles):
@@ -834,8 +820,8 @@ def face_band(rect, face, reach):
     return lo, hi, band, horizontal
 
 
-def _blocked_span(pcb_data, ref, rect, face, reach, courtyards=None,
-                  sides=None, containers=None):
+def _blocked_span(pcb_data, ref, rect, face, reach,
+                  sides=None, containers=None, obstruction_rects=None):
     """How much of a face's span is unusable, and WHO took it.
 
     A neighbour parked off a face does not merely crowd it -- its own body
@@ -863,10 +849,18 @@ def _blocked_span(pcb_data, ref, rect, face, reach, courtyards=None,
       are exempt from the courtyard channels EVERYWHERE; escape is the channel
       that never got the exemption.
 
-    `sides` / `containers` are the per-board maps `escape_ledger` computes once
-    (see `board_side_map`). Both are looked up with `.get`, and a ref they do
-    not name is charged exactly as before -- a caller passing a partial map
-    must not silently lose an obstruction.
+    `sides` / `containers` / `obstruction_rects` are the per-board maps
+    `escape_ledger` computes once (see `board_side_map`). All three are looked
+    up with `.get`, and a ref they do not name is charged exactly as before --
+    a caller passing a partial map must not silently lose an obstruction.
+
+    WHICH rect each neighbour contributes is `board_copper_geometry`' answer
+    (#841): the pad-COPPER box, not the bbox of pad CENTRES this function used
+    to build. A pad-centre box gives a two-terminal passive a zero-width body.
+    The `_part_rect` fallback below is for a caller that passes no map -- the
+    hand-built fixtures in `tests/test_escape_ledger.py` are `_Fp` objects with
+    no `PartPads` behind them, and their recorded numbers are pad-centre
+    numbers by construction.
     """
     lo, hi, band, horizontal = face_band(rect, face, reach)
     own = None if sides is None else sides.get(ref)
@@ -884,7 +878,9 @@ def _blocked_span(pcb_data, ref, rect, face, reach, courtyards=None,
                 continue
         if containers is not None and other in containers:
             continue
-        obstacles.append((other, _part_rect(ofp)))
+        g = (None if obstruction_rects is None
+             else obstruction_rects.get(other))
+        obstacles.append((other, g.rect if g is not None else _part_rect(ofp)))
 
     blocked, order = span_eaten(lo, hi, band, horizontal, obstacles)
     return blocked, tuple(r for r, _mm in order)
@@ -899,6 +895,8 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                 plane_layers_found: Sequence[str] = (),
                 sides: Optional[Dict[str, frozenset]] = None,
                 containers: Optional[set] = None,
+                obstruction_rects: Optional[Dict[str, Tuple]] = None,
+                clearance: Optional[float] = None,
                 pcb_file: Optional[str] = None) -> PartEscape:
     """The full per-face ledger for one part.
 
@@ -925,6 +923,15 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
         sides = board_side_map(pcb_data)
     if containers is None:
         containers = board_container_refs(pcb_data, pcb_file)
+    # #841: the same hoist for the obstruction rects. A direct caller that
+    # names no clearance gets the board's own, resolved the way the lane pitch
+    # above resolves it, so the two halves of a face's arithmetic cannot come
+    # from different rules.
+    if obstruction_rects is None:
+        clr = clearance
+        if clr is None:
+            _tw, clr = lane_pitch_parts(pcb_data, pcb_file)
+        obstruction_rects = board_copper_geometry(pcb_data, clr)
 
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
     interior: List[int] = []
@@ -944,7 +951,8 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
         span = math.hypot(x2 - x1, y2 - y1)
         blocked, blockers = _blocked_span(pcb_data, ref, rect, f, reach,
                                           sides=sides,
-                                          containers=containers)
+                                          containers=containers,
+                                          obstruction_rects=obstruction_rects)
         usable = max(0.0, span - blocked)
         nets = tuple(sorted(set(demand[f])))
         faces.append(FaceLedger(
@@ -997,13 +1005,16 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
         pcb_data, signal_layers=signal_layers, plane_layers=plane_layers)
     targets = list(refs) if refs is not None else fine_pitch_parts(pcb_data)
     # #835: both per-board maps resolved ONCE, then threaded into every part.
+    # #841 adds the third, at the clearance the lane pitch already resolved.
     sides = board_side_map(pcb_data)
     containers = board_container_refs(pcb_data, pcb_file)
+    orects = board_copper_geometry(pcb_data, clr)
     out = [part_escape(pcb_data, r, pitch_mm=lane,
                        ignore_net_ids=ignore_net_ids, reach_mm=reach_mm,
                        via_pitch_mm=vpitch, signal_layers=nsig,
                        signal_layers_source=source, plane_layers_found=planes,
-                       sides=sides, containers=containers)
+                       sides=sides, containers=containers,
+                       obstruction_rects=orects)
            for r in targets if r in pcb_data.footprints]
     # Sorted by the OWN-LAYER deficit, unchanged. It selects `escape_lanes[:10]`
     # and board_brief's `worst[:WORST_N]`, and feeds

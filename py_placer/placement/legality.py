@@ -2299,20 +2299,115 @@ class PartPads:
 def build_part_pads(footprints: Dict[str, object],
                     clearance: float, model=None,
                     copper_holes: bool = True,
-                    npth_floor: float = None) -> Dict[str, 'PartPads']:
+                    npth_floor: float = None,
+                    tolerant: bool = False) -> Dict[str, 'PartPads']:
     """PartPads for every footprint that has any pad (copper or NPTH).
 
     `model` is an optional `PadClearanceModel` (#697); without it the parts
     carry no per-pad clearance floors and every consumer behaves exactly as
     before.
+
+    `tolerant` (#841) SKIPS a footprint whose pad model cannot be built rather
+    than losing the whole map to it. Default False, so the six existing call
+    sites are bit-identical: a gate that silently drops a part it could not
+    model is worse than one that raises. It exists for the lane ledgers, whose
+    callers include hand-built test fixtures that carry no `reference` -- there
+    a missing part degrades to the pad-centre box it always had, and
+    `CopperGeometry.modelled` says which parts those are.
     """
     out = {}
     for ref, fp in footprints.items():
         if not getattr(fp, 'pads', None):
             continue
-        pp = PartPads(fp, clearance, model, copper_holes, npth_floor)
+        try:
+            pp = PartPads(fp, clearance, model, copper_holes, npth_floor)
+        except Exception:                                    # noqa: BLE001
+            if not tolerant:
+                raise
+            continue
         if pp.n_pads or pp.holes_local:
             out[ref] = pp
+    return out
+
+
+class CopperGeometry(NamedTuple):
+    """One part's copper, as both lane ledgers charge it (#841)."""
+    ref: str
+    #: `PartPads.extent`: pad copper UNION the NPTH hole extents. This is the
+    #: part's obstruction box -- what it contributes as a NEIGHBOUR, and the
+    #: box its own faces are measured on, so two parts facing each other
+    #: cannot disagree about where the channel between them is.
+    rect: Tuple[float, float, float, float]
+    #: The union of the PAD rects alone, never wider than `rect`. Face
+    #: ASSIGNMENT is measured against this one, because every edge of it is
+    #: attained by some pad -- which is what keeps an edge pad at distance
+    #: exactly 0. `rect` does not have that property: measured, on 12 of the
+    #: 348 faces of the corpus's fine-pitch parts the extreme edge is set by
+    #: an NPTH hole and no pad reaches it (rp2350 4 faces, by up to 1.372mm;
+    #: watchy 8, by 0.400mm).
+    copper: Tuple[float, float, float, float]
+    #: `(x0, y0, x1, y1)` per pad at this pose, in `fp.pads` order.
+    pads: Tuple[Tuple[float, float, float, float], ...]
+    #: False when the pad model could not be built and `rect`/`copper` are the
+    #: pad-CENTRE bbox instead -- today's answer, kept for the caller that has
+    #: no `PartPads` behind its footprints.
+    modelled: bool
+
+
+def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
+                         parts: Optional[Dict[str, 'PartPads']] = None
+                         ) -> Dict[str, CopperGeometry]:
+    """{ref: CopperGeometry} at each footprint's own pose -- THE lane-ledger
+    obstruction geometry (#841).
+
+    One definition, because two lane ledgers asking "what stops a track
+    leaving this face" answered it with two different rectangles: `escape`
+    charged the bbox of pad CENTRES (a 0.9mm passive terminal contributing a
+    zero-width body), `routability.face_lane_ledger` charged the COURTYARD (an
+    assembly keep-out a track may legally run under). Neither is copper.
+
+    `clearance` is NOT decoration. `holes_extent` carries
+    `max(0, NPTH_TO_TRACK_CLEARANCE - clearance)` (see `extent_local`), so
+    below 0.20mm the hole box grows: measured over the 22 tracked boards, 19
+    parts on 6 boards differ between clearance 0.05 and 0.20, by up to
+    0.150mm, and nothing differs between 0.20 and 0.40. Pass the clearance you
+    priced the LANE at -- `check_channels` runs the corpus at 0.09, squarely
+    inside that regime, so two ledgers on different clearances would disagree
+    exactly where the starved-face gate lives.
+
+    A pad-LESS footprint is absent from the result (as it is from
+    `build_part_pads`). That is deliberate and it closes #841's own hazard:
+    the +/-0.5mm `synthetic` fiction `part_local_bounds` invents for a
+    footprint with neither courtyard nor pads can no longer reach a lane
+    SUPPLY, which `options.move_blocker` turns into an instruction to move a
+    part. Measured, the refs this drops from `face_lane_ledger`'s neighbour
+    list are EXACTLY that board's `synthetic` set: glasgow_revC 8, ulx3s 9,
+    orangecrab 3, tigard 3, esp_prog 3, watchy 2, and none elsewhere.
+    """
+    if parts is None:
+        parts = build_part_pads(footprints, clearance, tolerant=True)
+    out: Dict[str, CopperGeometry] = {}
+    for ref, fp in footprints.items():
+        if not getattr(fp, 'pads', None):
+            continue
+        pp = parts.get(ref)
+        ext = None if pp is None else pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if pp is None or ext is None:
+            xs = [p.global_x for p in fp.pads]
+            ys = [p.global_y for p in fp.pads]
+            centre = (min(xs), min(ys), max(xs), max(ys))
+            out[ref] = CopperGeometry(ref=ref, rect=centre, copper=centre,
+                                      pads=(), modelled=False)
+            continue
+        rects = tuple((r[0], r[1], r[2], r[3])
+                      for r in pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0))
+        if rects:
+            copper = (min(r[0] for r in rects), min(r[1] for r in rects),
+                      max(r[2] for r in rects), max(r[3] for r in rects))
+        else:
+            copper = ext                      # holes only: no pad copper at all
+        out[ref] = CopperGeometry(ref=ref, rect=ext, copper=copper,
+                                  pads=rects, modelled=True)
     return out
 
 

@@ -53,17 +53,37 @@ from placement.options import deficit_totals                  # noqa: E402
 #: `python3 -X utf8 tests/measure_834_835_side_awareness.py --table B`.
 #: Boards absent from a checkout are skipped, not failed.
 EXPECTED = {
-    'ulx3s': (0, 0, 0),
-    'orangecrab_ext_pll': (70, 18, 39),
-    'glasgow_revC': (17, 14, 14),
-    'rp2350_fpga_eensy_prePlane': (53, 8, 24),
-    # The controls. tigard and splitflap_driver must not move under ANY of the
-    # three arms; watchy and kit-dev-coldfire are the boards with no cross-side
-    # charge and no container at all.
-    'tigard': (41, 8, 23),
+    'ulx3s': (5, 1, 1),
+    'orangecrab_ext_pll': (123, 21, 53),
+    'glasgow_revC': (61, 20, 30),
+    'rp2350_fpga_eensy_prePlane': (78, 9, 26),
+    # #835's controls were "does not move under the SIDE or CONTAINER arm",
+    # and they still hold for those two arms. They are NOT controls for #841:
+    # the obstruction RECT changed from the bbox of pad centres to the pad
+    # copper box, and that reaches every board with a neighbour in a face's
+    # band -- which is every board with fine-pitch parts. 7 of the 22 tracked
+    # boards moved; splitflap_driver, esp_prog and haasoscope are the boards
+    # that did not, and only splitflap has no fine-pitch part at all.
+    'tigard': (48, 9, 25),
     'splitflap_driver': (0, 0, 0),
-    'watchy': (25, 4, 13),
-    'kit-dev-coldfire-xilinx_5213': (0, 0, 0),
+    'watchy': (62, 7, 17),
+    'kit-dev-coldfire-xilinx_5213': (4, 1, 3),
+}
+
+#: Total per-face DEMAND and interior pads, per board (#841). Demand is a
+#: NETLIST fact -- which nets have a pad nearest which face -- so an
+#: obstruction-rect change must not move it at all. Pinned separately from
+#: `EXPECTED` because a deficit that falls can mean the instrument got honest
+#: OR that it stopped counting nets, and only this pair tells them apart.
+DEMAND = {
+    'ulx3s': (149, 406),
+    'orangecrab_ext_pll': (232, 309),
+    'glasgow_revC': (305, 116),
+    'rp2350_fpga_eensy_prePlane': (122, 46),
+    'tigard': (102, 20),
+    'splitflap_driver': (0, 0),
+    'watchy': (113, 1),
+    'kit-dev-coldfire-xilinx_5213': (207, 0),
 }
 
 
@@ -149,6 +169,41 @@ def test_no_blocker_is_ever_on_a_face_the_part_does_not_occupy():
           .format(charges, checked))
 
 
+def test_demand_is_a_netlist_fact_and_the_rect_change_did_not_move_it():
+    """#841's own tripwire, and the reason `DEMAND` is pinned apart from
+    `EXPECTED`.
+
+    An obstruction rect decides SUPPLY. Demand is which nets have a pad
+    nearest which face, and interior pads are the complement -- both are
+    properties of the part's own pad lattice, so a change to what a NEIGHBOUR
+    contributes must leave them exactly alone.
+
+    Without this, a deficit that FALLS reads as "the instrument got honest"
+    when it can equally mean the demand model stopped counting nets. That is
+    not hypothetical: pointing the subject rect at the pad-copper box while
+    leaving `_face_of` measuring pad CENTRES pushes every pad a half-pad
+    inside its own face, and on one corpus board it makes all 244 pads
+    interior -- deficit 0, demand 0, and every number in `EXPECTED` green
+    downward.
+    """
+    seen = 0
+    for name, (want_demand, want_interior) in sorted(DEMAND.items()):
+        pcb, path = _board(name)
+        if pcb is None:
+            print('  SKIP: {} not present'.format(name))
+            continue
+        led = E.escape_ledger(pcb, pcb_file=path)
+        got = (sum(f.demand for p in led for f in p.faces),
+               sum(p.interior_pads for p in led))
+        assert got == (want_demand, want_interior), (
+            '{}: demand/interior {} != recorded {} -- a rect change must not '
+            'move either'.format(name, got, (want_demand, want_interior)))
+        seen += 1
+    assert seen >= 5, 'only {} board(s) checked'.format(seen)
+    print('  PASS: demand and interior pads unmoved on {} board(s)'
+          .format(seen))
+
+
 def test_no_blocker_is_a_container():
     """A frame the part sits inside is not a body parked off its face."""
     checked = 0
@@ -214,9 +269,24 @@ def test_the_ulx3s_witness_stops_charging_across_the_board():
             continue
         for f in led[a].faces:
             assert b not in f.blockers, (a, f.face, f.blockers)
-    assert deficit_totals(E.escape_ledger(pcb, pcb_file=path))['lanes'] == 0, (
-        'ulx3s still reports a deficit; every one of its six was cross-side')
-    print('  PASS: U9<->SD1 charge each other nowhere, and ulx3s reports 0')
+    # #841 moved this board off zero, and the two-arm form says WHY rather
+    # than recording the new number twice. Charged at the pad-CENTRE rect this
+    # ledger used before #841 -- reachable through the documented empty-map
+    # fallback -- ulx3s is still 0: every one of its six deficit faces was
+    # cross-side. Charged at pad COPPER it is 5, and none of that is
+    # cross-side (the corpus invariant above covers that for every board).
+    # Re-record with `tests/measure_834_835_side_awareness.py --table B`.
+    centres = deficit_totals([
+        E.part_escape(pcb, r, pitch_mm=E.lane_pitch(pcb, path),
+                      obstruction_rects={})
+        for r in E.fine_pitch_parts(pcb)])['lanes']
+    assert centres == 0, (
+        'ulx3s at the pad-CENTRE rect is no longer 0, so this witness no '
+        'longer isolates the #841 change: {}'.format(centres))
+    copper = deficit_totals(E.escape_ledger(pcb, pcb_file=path))['lanes']
+    assert copper == EXPECTED['ulx3s'][0], (copper, EXPECTED['ulx3s'][0])
+    print('  PASS: U9<->SD1 charge each other nowhere; ulx3s is 0 at pad '
+          'centres and {} at pad copper'.format(copper))
 
 
 def test_the_rp2350_witness_is_the_container_not_the_side():
@@ -396,11 +466,14 @@ def test_the_union_is_measured_where_it_actually_bites():
 def test_tigard_moves_on_the_side_test_not_the_union():
     """The other half, kept apart on purpose.
 
-    tigard has no container and no cross-side blocker charge, so its ESCAPE
-    ledger is 41 lanes before and after. Its `routability` numbers do move, and
-    the cause is the symmetric side test: J1 is DRILLED, so it occupies both
-    faces and the B-side JP1 is charged against its north face, where the
-    one-sided `own_side in g.sides` dropped it.
+    tigard has no container and no cross-side blocker charge, so neither of
+    #835's two arms moves its ESCAPE ledger. (#841 does -- 41 lanes to 48 --
+    but through the obstruction RECT, which is a third arm and is pinned in
+    `EXPECTED`. This test is about the side arm, and tigard is still its
+    control.) Its `routability` numbers move here, and the cause is the
+    symmetric side test: J1 is DRILLED, so it occupies both faces and the
+    B-side JP1 is charged against its north face, where the one-sided
+    `own_side in g.sides` dropped it.
     """
     pcb, path = _board('tigard')
     if pcb is None:
@@ -414,7 +487,7 @@ def test_tigard_moves_on_the_side_test_not_the_union():
         pcb_file=path)}
     assert 'JP1' in {r for r, _mm in rows['N']['eaten_by']}, rows['N']
     print('  PASS: tigard J1 keeps its B-side JP1 through the symmetric side '
-          'test, and its escape ledger does not move at all')
+          'test, and its escape ledger does not move on EITHER #835 arm')
 
 
 def test_face_lane_ledger_side_test_is_symmetric():
