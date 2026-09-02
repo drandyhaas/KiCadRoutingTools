@@ -30,7 +30,7 @@ What is asserted, and why each one is here rather than implied:
      pad. That is not decoration either: it is the property that keeps an edge
      pad at distance exactly 0 once face assignment measures pad edges, which
      is what makes the subject-rect half of #841 invariant rather than
-     catastrophic. `rect` does not have it -- 12 edges on the corpus are set
+     catastrophic. `rect` does not have it -- 14 edges on the corpus are set
      by a mounting hole no pad reaches.
   7. A footprint whose pad model cannot be built degrades to the pad-CENTRE
      box and says so via `modelled`. A silent fallback makes a map of the
@@ -166,9 +166,15 @@ def test_copper_is_inside_rect_and_every_copper_edge_is_attained_by_a_pad():
     `_face_of` measures pad EDGES, which is what makes the subject-rect change
     invariant instead of catastrophic.
 
-    `rect` does NOT have that property, and the test says so with a number
-    rather than leaving it as an argument: on the corpus's fine-pitch parts
-    some faces are set by a mounting hole no pad reaches.
+    The edge property holds BY CONSTRUCTION today -- `copper` is the min/max
+    over the very pad rects it is checked against -- and the arm is here so
+    that a future redefinition (building `copper` from `extent`, say) trips
+    instead of quietly removing the guarantee `_face_of` rests on.
+
+    The second half is not tautological and is the number that matters:
+    `rect` does NOT have the property, and the test says how often rather than
+    leaving it as an argument -- on the corpus's fine-pitch parts some edges
+    are set by a mounting hole no pad reaches.
     """
     hole_set = 0
     faces = 0
@@ -194,7 +200,7 @@ def test_copper_is_inside_rect_and_every_copper_edge_is_attained_by_a_pad():
                 .format(os.path.basename(path), ref, c, r))
             for i, edge in enumerate(c):
                 faces += 1
-                hit = any(abs(p[i] - edge) < 1e-6 for p in g.pads)
+                hit = any(abs(b[i] - edge) < 1e-6 for b in g.pads.values())
                 assert hit, (
                     '{}: {} copper edge {} ({}) is attained by no pad; face '
                     'assignment would have no zero-distance pad on that side'
@@ -239,7 +245,7 @@ def test_an_unmodellable_footprint_degrades_to_the_pad_centre_box():
     g = geom['U1']
     assert g.modelled is False, 'the broken fixture was modelled after all'
     assert g.rect == g.copper == (0.0, 0.0, 1.0, 2.0), g
-    assert g.pads == (), g.pads
+    assert g.pads == {}, g.pads
     assert g.rect == E._part_rect(fp), (
         'the fallback is not the pad-centre box the old ledger used')
     print('  PASS: an unmodellable footprint degrades to {} with '

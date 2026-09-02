@@ -2346,8 +2346,14 @@ class CopperGeometry(NamedTuple):
     #: an NPTH hole and no pad reaches it (rp2350 4 faces, by up to 1.372mm;
     #: watchy 8, by 0.400mm).
     copper: Tuple[float, float, float, float]
-    #: `(x0, y0, x1, y1)` per pad at this pose, in `fp.pads` order.
-    pads: Tuple[Tuple[float, float, float, float], ...]
+    #: `{(round(global_x, 4), round(global_y, 4)): (x0, y0, x1, y1)}` -- each
+    #: copper pad's own rect at this pose, keyed by its centre so a caller
+    #: holding a `Pad` can find it. NOT indexed by position: `PartPads` drops
+    #: pads that carry no copper, so its order does not align with `fp.pads`.
+    #: Measured over the tracked corpus, 383 of 9491 pads have no rect and
+    #: EVERY one of them is copper-less -- zero netted pads miss, which is
+    #: what makes this lookup safe for the demand loop.
+    pads: Dict[Tuple[float, float], Tuple[float, float, float, float]]
     #: False when the pad model could not be built and `rect`/`copper` are the
     #: pad-CENTRE bbox instead -- today's answer, kept for the caller that has
     #: no `PartPads` behind its footprints.
@@ -2397,18 +2403,35 @@ def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
             ys = [p.global_y for p in fp.pads]
             centre = (min(xs), min(ys), max(xs), max(ys))
             out[ref] = CopperGeometry(ref=ref, rect=centre, copper=centre,
-                                      pads=(), modelled=False)
+                                      pads={}, modelled=False)
             continue
-        rects = tuple((r[0], r[1], r[2], r[3])
-                      for r in pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0))
+        rects = {}
+        for r in pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0):
+            box = (r[0], r[1], r[2], r[3])
+            rects[(round((box[0] + box[2]) / 2.0, 4),
+                   round((box[1] + box[3]) / 2.0, 4))] = box
         if rects:
-            copper = (min(r[0] for r in rects), min(r[1] for r in rects),
-                      max(r[2] for r in rects), max(r[3] for r in rects))
+            vals = rects.values()
+            copper = (min(b[0] for b in vals), min(b[1] for b in vals),
+                      max(b[2] for b in vals), max(b[3] for b in vals))
         else:
             copper = ext                      # holes only: no pad copper at all
         out[ref] = CopperGeometry(ref=ref, rect=ext, copper=copper,
                                   pads=rects, modelled=True)
     return out
+
+
+def pad_box(geom: CopperGeometry, pad) -> Optional[Tuple[float, float,
+                                                         float, float]]:
+    """`pad`'s own copper rect within `geom`, or None when it has none.
+
+    The one lookup, so a caller does not re-derive a pad's half-extents from
+    `size_x`/`size_y`/`rect_rotation` and end up with a box that disagrees with
+    the `copper` union built from `PartPads`. None means the pad carries no
+    copper (a paste aperture, an NPTH mounting hole) -- measured, no NETTED pad
+    on the tracked corpus answers None.
+    """
+    return geom.pads.get((round(pad.global_x, 4), round(pad.global_y, 4)))
 
 
 def _sides_interact(a, b) -> bool:

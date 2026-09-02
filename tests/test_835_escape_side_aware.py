@@ -54,9 +54,9 @@ from placement.options import deficit_totals                  # noqa: E402
 #: Boards absent from a checkout are skipped, not failed.
 EXPECTED = {
     'ulx3s': (5, 1, 1),
-    'orangecrab_ext_pll': (123, 21, 53),
-    'glasgow_revC': (61, 20, 30),
-    'rp2350_fpga_eensy_prePlane': (78, 9, 26),
+    'orangecrab_ext_pll': (115, 20, 50),
+    'glasgow_revC': (55, 16, 25),
+    'rp2350_fpga_eensy_prePlane': (79, 10, 27),
     # #835's controls were "does not move under the SIDE or CONTAINER arm",
     # and they still hold for those two arms. They are NOT controls for #841:
     # the obstruction RECT changed from the bbox of pad centres to the pad
@@ -64,18 +64,31 @@ EXPECTED = {
     # band -- which is every board with fine-pitch parts. 7 of the 22 tracked
     # boards moved; splitflap_driver, esp_prog and haasoscope are the boards
     # that did not, and only splitflap has no fine-pitch part at all.
-    'tigard': (48, 9, 25),
+    'tigard': (55, 9, 24),
     'splitflap_driver': (0, 0, 0),
-    'watchy': (62, 7, 17),
-    'kit-dev-coldfire-xilinx_5213': (4, 1, 3),
+    'watchy': (55, 6, 16),
+    'kit-dev-coldfire-xilinx_5213': (8, 1, 2),
 }
 
-#: Total per-face DEMAND and interior pads, per board (#841). Demand is a
-#: NETLIST fact -- which nets have a pad nearest which face -- so an
-#: obstruction-rect change must not move it at all. Pinned separately from
-#: `EXPECTED` because a deficit that falls can mean the instrument got honest
-#: OR that it stopped counting nets, and only this pair tells them apart.
+#: Total per-face DEMAND and interior pads, per board (#841). Pinned apart
+#: from `EXPECTED` because a deficit that falls can mean the instrument got
+#: honest OR that it stopped counting nets, and only this pair tells them
+#: apart.
 DEMAND = {
+    'ulx3s': (149, 402),
+    'orangecrab_ext_pll': (234, 306),
+    'glasgow_revC': (307, 108),
+    'rp2350_fpga_eensy_prePlane': (130, 37),
+    'tigard': (103, 18),
+    'splitflap_driver': (0, 0),
+    'watchy': (113, 1),
+    'kit-dev-coldfire-xilinx_5213': (207, 0),
+}
+
+#: The same pair BEFORE #841 touched the subject rect, i.e. pad centres
+#: measured against the pad-centre box. The direction between the two is the
+#: assertion; the values are the change detector.
+DEMAND_AT_PAD_CENTRES = {
     'ulx3s': (149, 406),
     'orangecrab_ext_pll': (232, 309),
     'glasgow_revC': (305, 116),
@@ -169,22 +182,29 @@ def test_no_blocker_is_ever_on_a_face_the_part_does_not_occupy():
           .format(charges, checked))
 
 
-def test_demand_is_a_netlist_fact_and_the_rect_change_did_not_move_it():
+def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
     """#841's own tripwire, and the reason `DEMAND` is pinned apart from
     `EXPECTED`.
 
     An obstruction rect decides SUPPLY. Demand is which nets have a pad
-    nearest which face, and interior pads are the complement -- both are
-    properties of the part's own pad lattice, so a change to what a NEIGHBOUR
-    contributes must leave them exactly alone.
+    nearest which face; interior pads are the complement. When the part's own
+    box grew from the pad-CENTRE bbox to its pad COPPER, `_face_of` moved with
+    it and started measuring each pad by its own copper edge -- so a pad on
+    the box is still at distance exactly 0 and the assignment is invariant
+    where it should be.
 
-    Without this, a deficit that FALLS reads as "the instrument got honest"
-    when it can equally mean the demand model stopped counting nets. That is
-    not hypothetical: pointing the subject rect at the pad-copper box while
-    leaving `_face_of` measuring pad CENTRES pushes every pad a half-pad
-    inside its own face, and on one corpus board it makes all 244 pads
-    interior -- deficit 0, demand 0, and every number in `EXPECTED` green
-    downward.
+    The DIRECTION is the assertion, not the values. A bigger box with the same
+    tolerance can only pull pads ONTO faces, never off them, so:
+
+        demand never falls, interior pads never grow.
+
+    Get that pairing wrong -- point the subject rect at the copper box and
+    leave `_face_of` measuring pad CENTRES -- and every pad moves half its own
+    width inside the part. Measured, that reassigns 6 to 244 pads per board,
+    makes ALL 244 of one corpus board's pads interior, and reports demand 0,
+    deficit 0 and a clean sweep of green numbers on an instrument that has
+    stopped looking. The recorded pairs are the change detector under the
+    direction rule; regenerate with `--table B` and this file's own run.
     """
     seen = 0
     for name, (want_demand, want_interior) in sorted(DEMAND.items()):
@@ -195,13 +215,25 @@ def test_demand_is_a_netlist_fact_and_the_rect_change_did_not_move_it():
         led = E.escape_ledger(pcb, pcb_file=path)
         got = (sum(f.demand for p in led for f in p.faces),
                sum(p.interior_pads for p in led))
+        before = DEMAND_AT_PAD_CENTRES[name]
+        assert got[0] >= before[0], (
+            '{}: demand FELL {} -> {}. A larger subject box cannot take a pad '
+            'off a face; the demand model has gone blind'
+            .format(name, before[0], got[0]))
+        assert got[1] <= before[1], (
+            '{}: interior pads GREW {} -> {}, same reason'
+            .format(name, before[1], got[1]))
         assert got == (want_demand, want_interior), (
-            '{}: demand/interior {} != recorded {} -- a rect change must not '
-            'move either'.format(name, got, (want_demand, want_interior)))
+            '{}: demand/interior {} != recorded {}'
+            .format(name, got, (want_demand, want_interior)))
         seen += 1
     assert seen >= 5, 'only {} board(s) checked'.format(seen)
-    print('  PASS: demand and interior pads unmoved on {} board(s)'
-          .format(seen))
+    moved = sum(1 for n, v in DEMAND.items() if v != DEMAND_AT_PAD_CENTRES[n])
+    assert moved >= 3, (
+        'only {} board(s) differ from the pad-centre pair, so this arm is not '
+        'exercising the subject-rect change at all'.format(moved))
+    print('  PASS: demand never fell and interior never grew on {} board(s); '
+          '{} moved'.format(seen, moved))
 
 
 def test_no_blocker_is_a_container():

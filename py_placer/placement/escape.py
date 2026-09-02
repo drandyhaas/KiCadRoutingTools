@@ -628,17 +628,37 @@ def _part_rect(fp) -> Tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def _face_of(pad, rect, pitch) -> Optional[str]:
+def _face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
     """Which face a pad escapes through, or None when it is interior.
 
     A pad on the bounding box escapes through the side it sits on; a corner pad
     is assigned to the side it is closest to, deterministically. `pitch/2` is
     the tolerance, so a pad row that is not perfectly collinear still counts.
+
+    `rect` is the part's COPPER box (`CopperGeometry.copper`) and `pad_box` is
+    this pad's own rect in it, so each distance is copper edge to copper edge
+    (#841). That pairing is not a detail -- it is what keeps this function
+    invariant while the box it measures against grew:
+
+    * every edge of `copper` is attained by SOME pad, so an edge pad is at
+      distance exactly 0, exactly as it was against the pad-CENTRE box.
+    * measure a pad's CENTRE against a copper box instead and every pad moves
+      half its own width inside the part. Measured, that reassigns 6 to 244
+      pads per board and on one corpus board makes all 244 interior -- the
+      ledger then reports no demand at all, no deficit, and reads as a fix.
+      With the pairing, 0 to 9 pads per board move and interior never grows.
+
+    `pad_box=None` is the caller that has no rect for this pad -- a copper-less
+    pad, or a part whose model could not be built. It degrades to the pad's
+    centre, which is what this function always did.
     """
     minx, miny, maxx, maxy = rect
     tol = max(pitch / 2.0, INTERIOR_EPS)
-    d = {'west': pad.global_x - minx, 'east': maxx - pad.global_x,
-         'north': pad.global_y - miny, 'south': maxy - pad.global_y}
+    px0, py0, px1, py1 = (pad_box if pad_box is not None
+                          else (pad.global_x, pad.global_y,
+                                pad.global_x, pad.global_y))
+    d = {'west': px0 - minx, 'east': maxx - px1,
+         'north': py0 - miny, 'south': maxy - py1}
     near = min(d.values())
     if near > tol:
         return None
@@ -913,7 +933,6 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     fp = pcb_data.footprints[ref]
     ignored = set(ignore_net_ids or ())
     lane = pitch_mm if pitch_mm is not None else lane_pitch(pcb_data)
-    rect = _part_rect(fp)
     pitch = pad_pitch(fp)
     reach = reach_mm if reach_mm is not None else max(lane * 4.0, 1.0)
     # #835: resolved ONCE per part, not once per face. `escape_ledger` passes
@@ -933,13 +952,26 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
             _tw, clr = lane_pitch_parts(pcb_data, pcb_file)
         obstruction_rects = board_copper_geometry(pcb_data, clr)
 
+    # #841: the part's OWN faces are measured on the same copper box it
+    # contributes as a neighbour, so two parts facing each other cannot
+    # disagree about where the channel between them is. `_part_rect` is the
+    # fallback for a footprint whose pad model could not be built -- today's
+    # answer for exactly the parts that get today's neighbour rect too.
+    from .legality import pad_box as _pad_box
+    own = obstruction_rects.get(ref)
+    rect = own.rect if own is not None else _part_rect(fp)
+    assign_rect = own.copper if own is not None else rect
+
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
     interior: List[int] = []
     for pad in fp.pads:
         nid = getattr(pad, 'net_id', 0)
         if not nid or nid in ignored:
             continue
-        face = _face_of(pad, rect, pitch if pitch != float('inf') else lane)
+        box = None if own is None else _pad_box(own, pad)
+        face = _face_of(pad, assign_rect,
+                        pitch if pitch != float('inf') else lane,
+                        pad_box=box)
         if face is None:
             interior.append(nid)
         else:
