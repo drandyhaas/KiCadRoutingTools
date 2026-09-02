@@ -37,6 +37,11 @@ not value arms:
      the sweep and parsed the courtyards one more time.
   9. END TO END: the CLI's own `ledgers` equal a fresh library recomputation
      with no context at all. The byte-identity claim, executable.
+  10. THE VALUES ARE THE PARENT COMMIT'S. Recorded from b5c567c7 before any
+     of this existed. Arms 1-9 all run through `LaneContext` now, so a
+     mutation to what the context BUILDS moves both sides of an equivalence
+     check equally and it still passes; a value from before the change is
+     the one oracle that cannot move with it.
 
 MEASURED on this machine (min-of-5, both arms in one process, the context
 built inside the timed region because one per run is what the caller does):
@@ -87,6 +92,36 @@ LANE = {'clearance': 0.09, 'track_width': 0.127, 'grid_step': 0.05}
 SMALL = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
 DENSE = os.path.join(ROOT, 'kicad_files',
                      'rp2350_fpga_eensy_prePlane.kicad_pcb')
+
+#: Ledger rows recorded from the PARENT commit b5c567c7, before any of this
+#: existed: `(face, demand_nets, supply_routed_grid, supply_finest_grid,
+#: eaten_by)` at LANE. This is the arm the other nine cannot be:
+#: every path in this file now runs through `LaneContext`, so a mutation that
+#: changes what the context BUILDS moves both arms of an equivalence check
+#: equally and the check still passes. A value recorded from before the change
+#: is the only oracle that does not move with it.
+#:
+#: tigard U3's west face is why the `eaten_by` list is pinned and not just its
+#: length: eight blockers at exactly 2.56 lanes is a TIE SET, and
+#: `eaten.sort(key=-lanes)` is not stable across a reordered neighbour list.
+#: The order below is `graded_parts_from_file`'s -- `sorted(footprints.items())`
+#: -- and a hoist that reordered it would be invisible in every number.
+GOLDEN_PRE_HOIST = {
+    'rp2350_fpga_eensy_prePlane:U2': [
+        ('N', 7, 3, 4, [('C24', 4.2), ('C22', 1.6), ('C23', 0.8)]),
+        ('S', 13, 10, 11, []),
+        ('W', 5, 4, 4, [('C19', 4.4), ('C18', 1.8)]),
+        ('E', 6, 4, 4, [('C20', 4.4), ('C17', 1.6)]),
+    ],
+    'tigard:U3': [
+        ('N', 5, 38, 43, []),
+        ('S', 8, 38, 43, []),
+        ('W', 10, 15, 17, [('C11', 2.56), ('C5', 2.56), ('C6', 2.56),
+                           ('C7', 2.56), ('C8', 2.56), ('FB1', 2.56),
+                           ('FB2', 2.56), ('R6', 2.56)]),
+        ('E', 9, 38, 43, []),
+    ],
+}
 
 FAILURES = []
 
@@ -280,6 +315,23 @@ def main():
               mine == doc['ledgers'],
               _first_difference(mine, doc['ledgers']))
         check('...and it reported some', bool(doc['ledgers']), 'no ledgers')
+
+    print('10. the rows still equal what b5c567c7 produced, value for value')
+    for key, want in sorted(GOLDEN_PRE_HOIST.items()):
+        board, ref = key.split(':')
+        path = os.path.join(ROOT, 'kicad_files', board + '.kicad_pcb')
+        if not os.path.isfile(path):
+            check(f'{key}: board present', False, f'{path} missing')
+            continue
+        rows = R.face_lane_ledger(parse_kicad_pcb(path), ref,
+                                  **dict(LANE, pcb_file=path))
+        got = [(r['face'], r['demand_nets'], r['supply_routed_grid'],
+                r['supply_finest_grid'],
+                [(n, v) for n, v in r['eaten_by']]) for r in rows]
+        check(f'{key}: identical to the pre-hoist recording',
+              got == want,
+              '\n        '.join(f'{g} != {w}' for g, w in zip(got, want)
+                                if g != w) or f'{got} != {want}')
 
     print()
     if FAILURES:
