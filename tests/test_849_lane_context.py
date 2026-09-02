@@ -42,6 +42,10 @@ not value arms:
      mutation to what the context BUILDS moves both sides of an equivalence
      check equally and it still passes; a value from before the change is
      the one oracle that cannot move with it.
+  11. THE TOOL ITSELF parses once per BOARD, counted in-process across a
+     whole `check_channels.main()` run. This is what catches the hoist being
+     undone in the CALLER: move `board_lane_context` back inside the ref loop
+     and every value stays identical, so arms 1-10 cannot see it.
 
 MEASURED on this machine (min-of-5, both arms in one process, the context
 built inside the timed region because one per run is what the caller does):
@@ -333,12 +337,60 @@ def main():
               '\n        '.join(f'{g} != {w}' for g, w in zip(got, want)
                                 if g != w) or f'{got} != {want}')
 
+    print('11. the TOOL parses the board once per board it was given')
+    # In-process, because the parse count is the whole claim and it does not
+    # survive a subprocess boundary. This is what catches the hoist being
+    # undone in the CALLER -- put `board_lane_context` back inside the ref
+    # loop and every value stays identical, so arms 1-10 cannot see it.
+    import check_channels
+    with tempfile.TemporaryDirectory() as td:
+        argv = ['check_channels.py', SMALL,
+                '--clearance', str(LANE['clearance']),
+                '--track-width', str(LANE['track_width']),
+                '--grid-step', str(LANE['grid_step']),
+                '--json', os.path.join(td, 'a.json')]
+        code, n_one = _quiet_main(check_channels, argv)
+        check('the one-board run exits 0', code == 0, f'exit {code}')
+        check('...and parsed the courtyards ONCE, not once per ref',
+              n_one == 1, f'{n_one} parses')
+        # ...and TWO boards means two parses -- one each. A single context
+        # shared across both sweeps would show up here as 1, and the ledger
+        # would have refused it anyway; this pins that they are separate.
+        argv = ['check_channels.py', SMALL, '--baseline', SMALL,
+                '--clearance', str(LANE['clearance']),
+                '--track-width', str(LANE['track_width']),
+                '--grid-step', str(LANE['grid_step']),
+                '--json', os.path.join(td, 'b.json')]
+        code, n_two = _quiet_main(check_channels, argv)
+        check('the --baseline run exits 0', code == 0, f'exit {code}')
+        check('...and parses once PER BOARD, not once per ref per board',
+              n_two == 2, f'{n_two} parses for two boards')
+
     print()
     if FAILURES:
         print(f'FAILED: {len(FAILURES)} -- ' + ', '.join(FAILURES))
         return 1
     print('all arms passed')
     return 0
+
+
+def _quiet_main(mod, argv):
+    """`mod.main()` under `argv`, with its output swallowed.
+
+    Returns `(exit code, courtyard parses)`. The tool prints a screenful per
+    run and this file has ten other arms to read.
+    """
+    import contextlib
+    import io as _io
+    old = sys.argv
+    sys.argv = list(argv)
+    try:
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            code, n = counted(mod.main)
+        return code, n
+    finally:
+        sys.argv = old
 
 
 def _ctx_sweep(pcb, path, refs):
