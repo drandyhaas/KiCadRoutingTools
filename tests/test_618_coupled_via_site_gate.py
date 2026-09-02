@@ -154,6 +154,70 @@ class TestTheGateIsInertOnTheBoardAsShipped(unittest.TestCase):
                                 f'gap against its own 0.25mm declaration')
 
 
+class TestTheSiteConflictHalfIsLive(unittest.TestCase):
+    """The half the gate exists for, and the one the mutation battery caught
+    having NO coverage: `_via_site_conflict` against the board's own copper.
+
+    The arms below plant a foreign-net via at a coordinate the unplanted run
+    puts a coupled escape via on, then re-run. With the gate, that ball's site
+    is declined and no via lands on the planted hole; without it, the coupled
+    pair goes in regardless and two drills share a point.
+
+    Two engine runs, because the plant site has to be a coordinate this engine
+    actually chooses -- a hand-picked ball centre would prove nothing if the
+    pair never couples there.
+
+    MUTATION: `return True` before the `_via_site_conflict` loop in
+    `_coupled_via_sites_ok` -- these arms die.
+    """
+
+    def test_a_foreign_hole_at_a_coupled_ball_centre_declines_that_site(self):
+        from kicad_writer import add_tracks_and_vias_to_pcb
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = _board_with_floor(tmp, 0.25)
+            vias, _log = _fanout(plain)
+            self.assertTrue(vias, 'the rig emits no vias at all')
+            target = vias[0]
+            # Plant a foreign-net via ON that site, in the INPUT board.
+            planted = os.path.join(tmp, 'planted.kicad_pcb')
+            shutil.copy(os.path.splitext(plain)[0] + '.kicad_pro',
+                        os.path.join(tmp, 'planted.kicad_pro'))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                add_tracks_and_vias_to_pcb(
+                    plain, planted, [],
+                    [{'x': target['x'], 'y': target['y'], 'size': 0.3,
+                      'drill': 0.2, 'layers': ['F.Cu', 'B.Cu'],
+                      'net_id': 0}])
+            evidence(planted, 'the planted board')
+            after, log2 = _fanout(planted)
+
+        floor = 0.25
+        clashes = [v for v in after
+                   if math.hypot(v['x'] - target['x'], v['y'] - target['y'])
+                   < (v['drill'] or 0) / 2 + 0.1 + floor - 1e-6]
+        self.assertEqual(
+            clashes, [],
+            f'{len(clashes)} emitted via(s) land within the {floor}mm '
+            f'hole-to-hole floor of a via that was already on the board at '
+            f'({target["x"]:.4f}, {target["y"]:.4f}) -- the site-conflict half '
+            f'of the coupled gate is not running')
+
+    def test_the_plant_is_what_moved_it(self):
+        """Without this, the arm above passes on a rig where the engine simply
+        never chooses that coordinate again for its own reasons."""
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = _board_with_floor(tmp, 0.25)
+            vias, _log = _fanout(plain)
+        self.assertTrue(vias)
+        hit = [v for v in vias
+               if math.hypot(v['x'] - vias[0]['x'], v['y'] - vias[0]['y'])
+               < 1e-9]
+        self.assertTrue(hit, 'the unplanted run does not put a via on the '
+                             'coordinate the planted arm tests, so that arm '
+                             'proves nothing')
+
+
 class TestTheDeclaredFloorIsHonoured(unittest.TestCase):
     """#618 clause 2, re-derived. A declaration the geometry cannot meet must
     change the outcome -- otherwise the floor is decorative, which is exactly

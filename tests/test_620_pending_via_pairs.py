@@ -263,6 +263,35 @@ class TestTwinsShareOneHole(_TmpCase):
         self.assertAlmostEqual(add[0]['y'], 10.0, places=6)
         self.assertEqual(add[0]['net_id'], 7)
 
+    def test_a_twin_FURTHER_OUT_than_either_floor_is_still_a_twin(self):
+        """The anchor term in the broad-phase window, which nothing else makes
+        binding.
+
+        `verdict`'s window is `max(drill term, ring term, anchor_tol)`. On a
+        BGA-sized pad the drill term (0.40mm at the standard floor) exceeds the
+        anchor radius, so dropping `atol` from the max changes nothing and the
+        mutation survives -- the battery caught exactly that. A BIG pad inverts
+        it: a 2.0mm pad has an anchor radius of 1.01mm against a 0.40mm drill
+        window, so a twin 0.9mm away is inside the pad and OUTSIDE the window.
+        Without the anchor term it is never even scanned, so the second route
+        gets its own via 0.9mm from the first -- two holes in one pad.
+
+        MUTATION: drop `atol` from the `window = max(...)` -- this arm dies."""
+        p = PendingVias(H2H, 0.1)
+        p.add(10.0, 10.0, 0.45, 0.2, 7)
+        self.assertGreater(1.01, 0.2 / 2 + 0.2 / 2 + H2H,
+                           'the rig no longer makes the ANCHOR term the '
+                           'binding one, so it cannot detect its loss')
+        self.assertEqual(p.verdict(10.9, 10.0, 0.45, 0.2, 7,
+                                   anchor_tol=1.01)[0], 'twin',
+                         'a same-net via well inside this ball pad is no '
+                         'longer recognised as its anchor')
+        # ... and end to end, where it becomes a second hole in one pad.
+        add, blocked, _t = _two_balls(0.9, 2.0, same_net=True)
+        self.assertEqual((len(add), len(blocked)), (1, 0),
+                         'two routes 0.9mm apart inside one 2.0mm pad got '
+                         'two vias')
+
     def test_there_is_no_ONE_MICRON_CLIFF(self):
         """An exact-match twin rule had one, and an adversarial review found
         it: two same-net sites 0.0010mm apart merged into one via and both

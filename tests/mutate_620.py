@@ -268,10 +268,15 @@ ROWS = [
      (T620,), 'KILLED'),
 
     # --- #618: the coupled escape's via sites -------------------------------
+    # Anchored INSIDE the gate, not at a call site: the call site text is
+    # identical at both of them, and a two-match anchor is reported BROKEN
+    # (which is right -- a battery that silently applies one of two edits
+    # measures half a mutation). Returning True after the locked-SMD check
+    # reproduces the pre-#618 behaviour exactly, at both callers at once.
     ('coupled-gate-reverted-to-locked-smd-only', 'up',
-     '                if use_via and not _coupled_via_sites_ok(pp, nn):',
-     '                if use_via and locked_smd_pads and not all(\n'
-     '                        _via_gate_ok(q) for q in (pp, nn)):',
+     '        sites = [_via_site_geom(q) for q in (pp, nn)]',
+     '        return True\n'
+     '        sites = [_via_site_geom(q) for q in (pp, nn)]',
      (T618,), 'KILLED'),
 
     ('coupled-gate-skips-the-site-conflict', 'up',
@@ -282,14 +287,17 @@ ROWS = [
      '            if False:\n                return False',
      (T618,), 'KILLED'),
 
+    # I recorded this as an expected SURVIVOR, reasoning that the only in-repo
+    # rigs are 0.8mm-pitch parts whose pair clears by 0.4mm. The battery
+    # refuted it: the declared-0.7 arm makes the pair need 0.9mm at 0.8mm
+    # pitch, so the pair-vs-itself test is what declines it and the row is
+    # KILLED. Kept as the record of a wrong expectation corrected by measuring.
     ('coupled-pair-not-tested-against-itself', 'up',
      '        if math.hypot(ax - bx, ay - by) < ((ad or 0.0) / 2.0\n'
      '                                           + (bd or 0.0) / 2.0\n'
      '                                           + _h2h - 1e-6):',
      '        if False:',
-     (T618,), 'SURVIVED'),      # 0.8mm-pitch parts are the only in-repo rigs
-                                # and their pair clears by 0.4mm; recorded as
-                                # measured-uncovered rather than deleted.
+     (T618,), 'KILLED'),
 
     ('h2h-decline-not-disclosed', 'up',
      '            print(f"  Under-pad: {h2h_stats[\'sites\']} via-in-pad centre '
