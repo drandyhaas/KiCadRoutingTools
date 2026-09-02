@@ -5,10 +5,12 @@ Functions for calculating 45-degree stubs, exit points, and jog endpoints.
 """
 from __future__ import annotations
 
+import bisect
 import math
 from typing import List, Tuple, Optional, Dict
 
 from bga_fanout.types import BGAGrid, Channel
+from bga_fanout.constants import POSITION_TOLERANCE
 
 # Reference prefixes place_fanout_clearance treats as movable passives (keep in
 # sync with its --cap-prefix default): an unlocked <=2-copper-pad part with one
@@ -291,3 +293,239 @@ def calculate_jog_end(exit_pos: Tuple[float, float],
                    round(jog_end[1] / grid_step) * grid_step)
 
     return jog_end, extension_point
+
+
+# --- #620: the run's own output, testable against itself ---------------------
+
+class PendingVias:
+    """The via-in-pads ONE ``manage_vias`` call has already committed.
+
+    Everything else in that function tests a candidate against the INPUT board:
+    ``would_overlap_existing_via`` and ``via_in_pad_conflict`` both iterate
+    ``pcb_data.vias``, and ``vias_to_add`` was appended to and never read back.
+    So two vias placed in one call were spaced against the board and against
+    nothing else. This is the missing half.
+
+    WHAT IS TESTED, AND WHY IT IS NOT SYMMETRIC:
+
+    * **The drill, always.** The balls are SMD and carry no hole, so every hole
+      in the neighbourhood is one this pass is creating: a drill pair too close
+      is never a condition the board shipped. It is also the arm with a LEVER --
+      a thinner drill can cure it (``thin_drill_to_clear``), and a hole pair
+      below the fab floor is not a DRC opinion but an unbuildable board.
+    * **The ring, only when a via BULGES past its pad** (clamp status
+      ``'floor'``: the ball pad is smaller than the deepest fab rung's via, so
+      ``clamp_via_to_pad`` gives up and holds the floor, which the pass already
+      warns "still bulges past the pad edge").
+
+      The reason is NOT that a fitting via's ring is free. Two things are true
+      at once and only the second is a justification:
+
+        - Ring-to-ring spacing for a via clamped into its pad EQUALS the
+          footprint's own pad-to-pad spacing, because both features sit at ball
+          centres and the via is no wider than the pad. So the fanout is asking
+          the fab for an etch pitch the footprint already demands. A bulging via
+          asks for a TIGHTER one, which the board's own geometry does not
+          demonstrate is achievable. That is the line the split is drawn on.
+        - It is NOT true that a fitting via adds no copper. A ball pad is
+          ``['F.Cu']``; the via spans F.Cu to B.Cu. On the inner layers and
+          B.Cu there is no pad under the ring at all, so at the same spacing
+          the copper IS new, and ``check_drc``'s VIA-VIA arm can legitimately
+          flag it. An earlier draft of this docstring called such a pair
+          "phantom" on the strength of the F.Cu picture, and an adversarial
+          review was right to refuse that.
+
+      There is also no lever on this arm: a via-in-pad site is the ball centre
+      by definition, and a bulging via is already at the deepest fab rung, so
+      neither moving nor shrinking is available. Refusing removes an escape and
+      nothing else. That is why the arm is narrow and why it is disclosed.
+
+      AN EARLIER DRAFT CITED A SWEEP HERE -- "of the ring-only rejections whose
+      pads are not already sub-clearance, 100% are bulging vias, at every
+      clearance" -- and presented it as the measurement the scope rested on.
+      **It is a tautology**, and is recorded here so nobody re-derives it and
+      believes it: a ring-only rejection needs ``pitch < via + clearance``, and
+      "pads not already sub-clearance" is ``pitch >= pad + clearance``; together
+      those give ``pad < via``, which IS the bulge condition. It holds for any
+      clamp function whatsoever. ``tests/test_620_pending_via_pairs.py`` now
+      pins it AS an identity, and measures the thing that is actually
+      contingent: what a bulge-blind ring arm would additionally reject.
+
+    The ring arm is foreign-net only: same-net copper in contact is not a
+    clearance violation. (``would_overlap_existing_via``'s board-facing test is
+    net-BLIND; that is pre-existing and deliberately not changed here.)
+
+    Scalar ``math.hypot`` with a sorted-by-x broad phase, deliberately NOT
+    numpy: numpy's hypot is not CPython's Neumaier-compensated one and the two
+    disagree by 1 ULP on ~17% of off-grid inputs, each disagreement feeding a
+    ``dist < floor`` comparison -- the finding that closed #786/#787. The broad
+    phase is also simply faster at this size (2.0 ms vs 12.8 ms vectorised on
+    the largest in-repo BGA, 529 balls).
+    """
+
+    __slots__ = ('_h2h', '_clearance', '_tol', '_xs', '_rows', '_max_drill',
+                 '_max_size')
+
+    def __init__(self, hole_to_hole: float, clearance: float,
+                 site_tol: float = None):
+        self._h2h = hole_to_hole
+        self._clearance = clearance
+        self._tol = POSITION_TOLERANCE if site_tol is None else site_tol
+        self._xs: List[float] = []      # sorted, parallel to _rows
+        self._rows: List[Tuple] = []    # (x, y, size, drill, net_id, bulges)
+        self._max_drill = 0.0
+        self._max_size = 0.0
+
+    def __len__(self):
+        return len(self._xs)
+
+    def tighten(self, x, y, size, drill):
+        """Shrink the via recorded at (x, y) to `size`/`drill`.
+
+        The twin merge keeps ONE via for two routes, and which one it keeps was
+        whichever arrived first -- so two coincident same-net pads of 0.25 and
+        0.60 gave a 0.45 via when the big pad went first, bulging past the
+        small pad and re-creating exactly the #202 violation
+        ``clamp_via_to_pad`` exists to prevent. An adversarial review found it.
+        The surviving via must be the TIGHTER pad's clamp, so the caller
+        tightens on a twin hit. Returns True if anything changed.
+
+        `_max_drill`/`_max_size` are deliberately NOT lowered here: they only
+        size the broad-phase window, and leaving them high makes the window
+        wider than needed, which cannot miss a conflict. Recomputing them would
+        be the only way to make them wrong.
+        """
+        for i, (ox, oy, os_, od, onet, ob) in enumerate(self._rows):
+            if ox == x and oy == y:
+                if size < os_ - 1e-12 or drill < od - 1e-12:
+                    self._rows[i] = (ox, oy, min(size, os_), min(drill, od),
+                                     onet, ob)
+                    return True
+                return False
+        return False
+
+    def add(self, x, y, size, drill, net_id, bulges=False):
+        """Record a via this call has committed."""
+        d = drill or 0.0
+        s = size or 0.0
+        i = bisect.bisect_left(self._xs, x)
+        self._xs.insert(i, x)
+        self._rows.insert(i, (x, y, s, d, net_id, bool(bulges)))
+        if d > self._max_drill:
+            self._max_drill = d
+        if s > self._max_size:
+            self._max_size = s
+
+    def verdict(self, x, y, size, drill, net_id, bulges=False, tol=1e-6,
+                anchor_box=None):
+        """How a candidate at (x, y) relates to what this call already placed.
+
+        ``anchor_box`` is the candidate BALL's own pad half-extents,
+        ``(size_x / 2 + t, size_y / 2 + t)`` -- a RECTANGLE, because a pad is
+        one. Default: the 1 um site tolerance in both axes.
+
+        A SCALAR RADIUS HERE WAS A BUG, and an expensive one, so it is spelled
+        out. The first version took ``max(size_x, size_y) / 2 + 0.01`` and
+        compared it against a straight-line distance, which on an OBLONG pad
+        reaches far outside the copper along the short axis: two same-net
+        0.30 x 1.50 fingers 0.50mm apart -- an ordinary fine-pitch QFP pair
+        whose pads are 0.20mm apart and NOT touching -- were merged into one
+        via, and the second route shipped with no via at all while still
+        counting as escaped. That is precisely the defect the sibling commit
+        fixes, re-created by the merge. An adversarial review found it, with
+        17 footprints on 11 in-repo boards matching the geometry.
+
+        Returns ``(verdict, detail)``:
+
+        ``('clear', None)``
+            nothing committed so far is in the way.
+        ``('twin', (x, y, size, drill))``
+            the SAME net already has a via INSIDE this ball's pad, so that via
+            already connects this ball and a second hole would buy nothing. Two
+            routes, one physical hole. An exposed pad modelled as an F.Cu +
+            B.Cu pair puts two routes at one coordinate (5 of this repo's 22
+            boards do it; ``interf_u`` BUS1 has 31 such sites on one
+            component), and distance 0 is below every threshold, so a plain
+            spacing test makes twins refuse each other and takes their net with
+            them -- while one via serving both routes is strictly better than
+            today's, which appends a second identical dict that the writer
+            emits as a second ``(via ...)`` at the same point.
+
+            KEYED ON THE PAD, NOT ON AN EXACT MATCH. An exact-match rule has a
+            1 um cliff: an adversarial review found same-net sites 0.0010mm
+            apart merging into one via while 0.0011mm apart DROPPED an escape
+            outright, because no fab rung can space two holes 1.1 um apart. A
+            via inside the ball's own pad is a via that anchors it, which is
+            the question actually being asked -- and "inside the pad" is a
+            rectangle test, per ``anchor_box`` above.
+        ``('conflict', (reason, x, y))``
+            that via is closer than a floor allows. A DIFFERENT net at the same
+            site lands here, not in ``'twin'``: two nets sharing one hole is a
+            short, and no rung can ever clear distance 0.
+        """
+        d = drill or 0.0
+        s = size or 0.0
+        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else
+                    (max(anchor_box[0], self._tol),
+                     max(anchor_box[1], self._tol)))
+        # Broad phase: nothing outside this x-window can be within either floor
+        # of the candidate, whatever its y. `ahx` is in it because a twin can
+        # sit further out than either floor when the pad is large.
+        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,
+                     s / 2.0 + self._max_size / 2.0 + self._clearance,
+                     ahx)
+        lo = bisect.bisect_left(self._xs, x - window)
+        hi = bisect.bisect_right(self._xs, x + window)
+        best = None
+        for (ox, oy, os_, od, onet, obulges) in self._rows[lo:hi]:
+            dist = math.hypot(ox - x, oy - y)
+            if (onet == net_id
+                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):
+                return 'twin', (ox, oy, os_, od)
+            if dist <= self._tol:
+                return 'conflict', ("two nets would share one hole", ox, oy)
+            need = d / 2.0 + od / 2.0 + self._h2h
+            if dist < need - tol:
+                if best is None or dist < best[0]:
+                    best = (dist, "drill hole-to-hole vs this run's own via",
+                            ox, oy)
+                continue
+            if (bulges or obulges) and onet != net_id:
+                ring = s / 2.0 + os_ / 2.0 + self._clearance
+                if dist < ring - tol and (best is None or dist < best[0]):
+                    best = (dist, "via ring vs this run's own via (one held "
+                            "at the fab floor bulges past its pad)", ox, oy)
+        if best is not None:
+            return 'conflict', (best[1], best[2], best[3])
+        return 'clear', None
+
+
+def thin_drill_to_clear(drill, floors, rung, clears):
+    """The second rung ``manage_vias`` never had (#620).
+
+    A refusal there DROPS the escape -- there is no re-sweep -- so a spacing
+    rule that can only refuse turns escaped balls into failed nets. Before
+    refusing, descend the fab ladder's drill floors: a thinner drill inside an
+    unchanged ring is more manufacturable in every dimension but the drill, so
+    what is being spent is fab tier, which is what ``warn_fab_escalation``
+    exists to disclose.
+
+    ``clears(candidate_drill)`` is the caller's predicate. Returns the largest
+    drill that clears, or ``None`` if no rung does.
+
+    **A ``--fab-overrides`` run has no ladder to descend.** ``fab_floor_ladder``
+    collapses to ONE hard rung when an override file is supplied, by design:
+    the file states the user's exact fab limits, so there is no deeper tier to
+    escalate into. Such a run refuses instead -- the honest answer to a declared
+    fab that cannot drill these holes at this pitch. It is also why the
+    contributor who first built this fix measured it as pure loss: their arm
+    raised ``via_drill`` to 0.35 through an override file, which both makes the
+    floor unmeetable at 0.5 mm pitch AND removes every rung that could rescue
+    it.
+    """
+    cands = sorted({f['via_drill'] for f in floors[rung:]
+                    if f['via_drill'] < drill - 1e-9}, reverse=True)
+    for cand in cands:
+        if clears(cand):
+            return cand
+    return None
