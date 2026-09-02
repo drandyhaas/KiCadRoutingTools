@@ -1178,8 +1178,15 @@ class _Repair:
             # test and wrongly exclude it from placement (#130).
             n_copper = sum(1 for p in fp.pads
                            if any(str(l).endswith('.Cu') for l in p.layers))
+            # #829: a cap that draws the board's own outline is not movable
+            # either. This gate is INDEPENDENT of free_refs and QuenchState --
+            # it is its own movable set, and its moves reach disk through
+            # place_fanout_clearance.py and the live board through
+            # fanout_gui.py -- so the rule has to be repeated here or it does
+            # not apply on this path at all.
             is_cap = (ref.startswith(self._cap_prefixes) and n_copper <= 2
-                      and ref not in locked)
+                      and ref not in locked
+                      and not getattr(fp, 'owns_board_outline', False))
             if is_cap:
                 cap = _Cap(fp, lb, self._floors, self._all_cu_ordered)
                 if self._near_any(cap.rect(), bga_bboxes, near_margin):

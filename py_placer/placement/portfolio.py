@@ -102,10 +102,18 @@ class Candidate:
 # --------------------------------------------------------------------------
 
 def free_refs(pcb_data, pcb_file: str,
-              lock_globs: Optional[Sequence[str]] = None) -> List[str]:
+              lock_globs: Optional[Sequence[str]] = None,
+              refused: Optional[Dict[str, str]] = None) -> List[str]:
     """Sorted refs the portfolio may perturb: pad-bearing, not `(locked yes)`
-    on the board, not matching a --lock glob. The same two lock sources the
-    quench itself honors, resolved once so every consumer agrees."""
+    on the board, not matching a --lock glob, and not drawing the board's own
+    outline (#829). The same lock sources the quench itself honors, resolved
+    once so every consumer agrees.
+
+    `refused` is an optional out-dict `{ref: why}`, the idiom `seeder.
+    reseat_scope` uses: name the source, and end with what the caller can do
+    about it. Only the #829 refusal is recorded -- the pad and lock rules were
+    always silent here and stay that way, because the quench discloses those.
+    """
     from placement.parser import extract_locked_refs
     locked = set(extract_locked_refs(pcb_file))
     out = []
@@ -115,6 +123,16 @@ def free_refs(pcb_data, pcb_file: str,
         if ref in locked:
             continue
         if lock_globs and any(fnmatch.fnmatch(ref, p) for p in lock_globs):
+            continue
+        if getattr(fp, 'owns_board_outline', False):
+            # Not `owns_edge_cuts`: a relief parented to the part travels WITH
+            # it and must keep moving (crkbd's 184 per-LED windows, #628's
+            # owned rings). Only geometry outside the board-level outline is
+            # the board's own.
+            if refused is not None:
+                refused[ref] = ("draws the board outline -- moving it would "
+                                "resize the board, which is not this tool's "
+                                "to change (#829)")
             continue
         out.append(ref)
     return sorted(out)
@@ -523,7 +541,10 @@ def generate(input_file: str, out_dir: str, *, seed: int = 0,
         raise ValueError("no strategies enabled")
 
     pcb = parse_kicad_pcb(input_file)
-    free = free_refs(pcb, input_file, lock_globs)
+    _refused: Dict[str, str] = {}
+    free = free_refs(pcb, input_file, lock_globs, refused=_refused)
+    for _ref, _why in sorted(_refused.items()):
+        print(f"  NOTE: {_ref} not perturbed: {_why}")
     ids = ignore_net_ids(pcb, ignore_nets)
     oracle = make_oracle(
         pcb, input_file, free=free,

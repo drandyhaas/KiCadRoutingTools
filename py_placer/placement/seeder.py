@@ -3895,7 +3895,19 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             # NAME THE SOURCE. This said "(locked yes) in the file"
             # unconditionally, which is false for a ref locked by --lock -- and
             # sends the reader hunting the board for a stamp that is not there.
-            if ref in _extra_locked:
+            if ref in getattr(state, 'outline_locked', ()):
+                # #829, and it belongs FIRST: an outline owner is locked by
+                # QuenchState, not by a stamp or a flag, so both arms below
+                # would name a source that is not there. That is the same
+                # defect this block's own comment records having fixed for
+                # --lock, recurring for a new lock source -- so the rule is
+                # not "special-case --lock", it is "every source names
+                # itself".
+                refused[ref] = ("draws the board outline -- moving it would "
+                                "resize the board, which is not this tool's "
+                                "to change (#829). Edit part and outline "
+                                "together in KiCad if it must move")
+            elif ref in _extra_locked:
                 refused[ref] = ("locked by --lock on this invocation -- not "
                                 "this tool's to move")
             else:

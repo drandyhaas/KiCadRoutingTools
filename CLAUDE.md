@@ -557,6 +557,25 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   the tied net's copper may contact the partner pad only where the contact
   lies on its own pad. Consumers: `PCBData.net_tie_exempt_pad_ids(net_id)`,
   the obstacle builders (own-pad-sliver lift), and check_drc's waiver.
+- `footprint.owns_edge_cuts` / `footprint.owns_board_outline` - #829. The
+  first is the FACT (this footprint draws Edge.Cuts of its own, so its
+  `(at x y rot)` transforms part of the outline); the second is the DECISION
+  (that geometry is the BOARD's boundary rather than a relief the part
+  carries). A footprint is CARRIED -- `owns_board_outline` False, still
+  movable -- only when its segments **close on themselves** (a window, slot or
+  milled relief) AND that shape lies inside the outline the board draws without
+  it. An open path cannot be a cut-out, so it is always boundary.
+  **Anything that MOVES a footprint gates on `owns_board_outline`, never on
+  `owns_edge_cuts`** -- a relief parented to a part travels WITH it by the
+  designer's intent (crkbd draws 184 per-LED windows that way; #628 measured
+  that freezing such a part costs it every legal pose it has), and must stay
+  movable. Deciding on containment ALONE was wrong three measured ways: a
+  connector drawing the real board's edge on a PANELISED board sits inside the
+  panel frame; `extract_board_contours` short-circuits a 4-segment axis-aligned
+  rectangle to no rings, so the same geometry classified differently depending
+  on how the outline was spelled; and a round window's bounding-box CORNER
+  escapes a round board while the circle does not. Both parse paths fill these,
+  sharing one decision function (`kicad_parser.classify_outline_owners`).
 - `footprint.ref_label` - Optional[RefLabel]: the Reference silkscreen text's
   geometry (#481): `at_x/at_y` (footprint-LOCAL mm), `rotation` (the stored
   angle, which is ABSOLUTE board angle — probed on KiCad 10, `% 360`

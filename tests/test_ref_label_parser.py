@@ -227,11 +227,26 @@ def test_legacy_fp_text_form():
 
 
 def test_ref_label_appended_not_inserted():
-    """Positional Footprint(...) constructions exist across the tree, so
-    ref_label must stay the LAST field."""
+    """Positional Footprint(...) constructions exist across the tree, so a new
+    field may only be APPENDED -- never inserted before an existing one.
+
+    This asserted `fields(Footprint)[-1].name == 'ref_label'`, which pinned the
+    right property by the wrong means: it also forbade appending a *later*
+    field, so #829's `owns_edge_cuts` tripped it while shifting nothing. Pin
+    the PREFIX instead -- that is the invariant positional callers actually
+    depend on, and it still fails loudly on a mid-list insert.
+    """
     import dataclasses
     from kicad_parser import Footprint
-    assert dataclasses.fields(Footprint)[-1].name == 'ref_label'
+    names = [f.name for f in dataclasses.fields(Footprint)]
+    expected_prefix = [
+        'reference', 'footprint_name', 'x', 'y', 'rotation', 'layer', 'pads',
+        'value', 'dnp', 'locked', 'clearance', 'uuid', 'sheet_path',
+        'net_tie_groups', 'ref_label',
+    ]
+    assert names[:len(expected_prefix)] == expected_prefix, (
+        f"a Footprint field was inserted or reordered, which silently rebinds "
+        f"every positional Footprint(...) in the tree:\n  {names}")
     assert isinstance(RefLabel(at_x=0, at_y=0, rotation=0), RefLabel)
     print("PASS test_ref_label_appended_not_inserted")
 
