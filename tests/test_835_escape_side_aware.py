@@ -195,23 +195,29 @@ def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
     the box is still at distance exactly 0 and the assignment is invariant
     where it should be.
 
-    The DIRECTION is the assertion, not the values. A bigger box with the same
-    tolerance can only pull pads ONTO faces, never off them, so:
+    The DIRECTION is the assertion: a bigger box with the same tolerance can
+    only pull pads ONTO faces, never off them, so demand never falls and
+    interior pads never grow.
 
-        demand never falls, interior pads never grow.
+    Both sides are MEASURED. The pad-centre arm is reached through the
+    documented empty-map fallback -- `obstruction_rects={}` puts the subject
+    rect back on `_part_rect` and `_face_of` back on pad centres, which is
+    exactly the pre-#841 pairing. An earlier version of this arm compared the
+    live numbers against a second hardcoded table, so its direction asserts
+    could only fail if someone edited the table, and its "at least N boards
+    moved" check compared two module constants and executed no product code
+    at all.
 
-    Get that pairing wrong -- point the subject rect at the copper box and
+    Get the pairing wrong -- point the subject rect at the copper box and
     leave `_face_of` measuring pad CENTRES -- and every pad moves half its own
-    width inside the part. Measured, that reassigns 6 to 244 pads per board,
-    makes ALL 244 of one corpus board's pads interior, and reports demand 0,
-    deficit 0 and a clean sweep of green numbers on an instrument that has
-    stopped looking. The recorded pairs are the change detector under the
-    direction rule; regenerate with `--table B` and this file's own run.
+    width inside the part. Measured, that makes ALL 244 of one corpus board's
+    pads interior and reports demand 0, deficit 0 and a clean sweep of green
+    numbers on an instrument that has stopped looking.
     """
     if not run_utils.corpus_boards():
         print('SKIP: git could not name the tracked corpus')
         return
-    seen = 0
+    seen = moved = 0
     for name, (want_demand, want_interior) in sorted(DEMAND.items()):
         pcb, path = _board(name)
         if pcb is None:
@@ -220,7 +226,12 @@ def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
         led = E.escape_ledger(pcb, pcb_file=path)
         got = (sum(f.demand for p in led for f in p.faces),
                sum(p.interior_pads for p in led))
-        before = DEMAND_AT_PAD_CENTRES[name]
+        # ...and the same board at the pad-centre pairing, measured now.
+        lane = E.lane_pitch(pcb, path)
+        base_led = [E.part_escape(pcb, r, pitch_mm=lane, obstruction_rects={})
+                    for r in E.fine_pitch_parts(pcb)]
+        before = (sum(f.demand for p in base_led for f in p.faces),
+                  sum(p.interior_pads for p in base_led))
         assert got[0] >= before[0], (
             '{}: demand FELL {} -> {}. A larger subject box cannot take a pad '
             'off a face; the demand model has gone blind'
@@ -231,14 +242,19 @@ def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
         assert got == (want_demand, want_interior), (
             '{}: demand/interior {} != recorded {}'
             .format(name, got, (want_demand, want_interior)))
+        assert before == DEMAND_AT_PAD_CENTRES[name], (
+            '{}: the pad-centre arm measures {} but {} is recorded -- the '
+            'baseline this direction rule is judged against has moved'
+            .format(name, before, DEMAND_AT_PAD_CENTRES[name]))
+        if got != before:
+            moved += 1
         seen += 1
     assert seen >= 5, 'only {} board(s) checked'.format(seen)
-    moved = sum(1 for n, v in DEMAND.items() if v != DEMAND_AT_PAD_CENTRES[n])
     assert moved >= 3, (
-        'only {} board(s) differ from the pad-centre pair, so this arm is not '
+        'only {} board(s) differ between the two pairings, so this arm is not '
         'exercising the subject-rect change at all'.format(moved))
     print('  PASS: demand never fell and interior never grew on {} board(s); '
-          '{} moved'.format(seen, moved))
+          '{} moved, both arms measured'.format(seen, moved))
 
 
 def test_no_blocker_is_a_container():
@@ -517,10 +533,10 @@ def test_tigard_moves_on_the_side_test_not_the_union():
     """The other half, kept apart on purpose.
 
     tigard has no container and no cross-side blocker charge, so neither of
-    #835's two arms moves its ESCAPE ledger. (#841 does -- 41 lanes to 48 --
-    but through the obstruction RECT, which is a third arm and is pinned in
-    `EXPECTED`. This test is about the side arm, and tigard is still its
-    control.) Its `routability` numbers move here, and the cause is the
+    #835's two arms moves its ESCAPE ledger. (#841 does -- 41 lanes to 55 --
+    but through the obstruction RECT and the subject rect, which are a third
+    and fourth arm and are pinned in `EXPECTED`. This test is about the side
+    arm, and tigard is still its control.) Its `routability` numbers move here, and the cause is the
     symmetric side test: J1 is DRILLED, so it occupies both faces and the
     B-side JP1 is charged against its north face, where the one-sided
     `own_side in g.sides` dropped it.

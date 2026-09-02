@@ -960,9 +960,15 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     if containers is None:
         containers = board_container_refs(pcb_data, pcb_file)
     # #841: the same hoist for the obstruction rects. A direct caller that
-    # names no clearance gets the board's own, resolved the way the lane pitch
-    # above resolves it, so the two halves of a face's arithmetic cannot come
-    # from different rules.
+    # names no clearance gets the board's own.
+    #
+    # This does NOT guarantee the two halves of a face's arithmetic share a
+    # rule, and saying so would be wrong twice over: the lane above is
+    # `lane_pitch(pcb_data)` with no `pcb_file`, and any caller passing
+    # `pitch_mm` (every fixture in `tests/test_escape_ledger.py`) fixes the
+    # lane by hand while this reads the board. `escape_ledger` is where they
+    # ARE tied -- it resolves `clr` once and passes both -- which is the path
+    # every production caller takes.
     if obstruction_rects is None:
         clr = clearance
         if clr is None:

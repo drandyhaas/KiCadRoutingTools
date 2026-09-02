@@ -2086,12 +2086,13 @@ class PartPads:
             _f = any(not str(l).startswith(('B', '*')) for l in copper)
             pside = (None if (through or _star or (_b and _f))
                      else ('B' if _b else 'F'))
-            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-            c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
-            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            # THE one formula (see its docstring): PartPads was a fourth
+            # copy of it, and `part_copper_geometry` keys a pad's own rect
+            # on the same call, so a lookup cannot disagree with the box it
+            # is looking up.
+            phx, phy = pad_half_extents(p)
             self.pads_local.append((p.global_x - fp.x, p.global_y - fp.y,
-                                    hx * c + hy * s, hx * s + hy * c,
-                                    p.net_id, pside))
+                                    phx, phy, p.net_id, pside))
             if model is not None:
                 floor = model.pad_floor(p)
                 self.pad_floors.append(floor)
@@ -2341,19 +2342,35 @@ class CopperGeometry(NamedTuple):
     #: The union of the PAD rects alone, never wider than `rect`. Face
     #: ASSIGNMENT is measured against this one, because every edge of it is
     #: attained by some pad -- which is what keeps an edge pad at distance
-    #: exactly 0. `rect` does not have that property: measured, on 14 of the
+    #: exactly 0. `rect` does not have that property: measured, on 12 of the
     #: 388 edges of the corpus's fine-pitch parts the extreme edge is set by
-    #: an NPTH hole and no pad reaches it -- watchy SW1-SW4 (8 edges, 0.400mm),
-    #: rp2350 J2 (4, up to 1.372mm), ulx3s U1 (2, 0.1905mm). Regenerate with
+    #: an NPTH hole and no pad reaches it -- watchy SW1-SW4 (8 edges, 0.400mm)
+    #: and rp2350 J2 (4, up to 1.372mm). Regenerate with
     #: `tests/test_841_obstruction_rect.py`, which prints the count.
+    #:
+    #: It read 14 for one commit, with ulx3s U1 (2 edges, 0.1905mm) named as a
+    #: third hole part. U1 has no holes: those two edges were `copper` losing
+    #: four stacked pad rects to a lookup keyed on the centre alone, and the
+    #: number was corrected in the docstring before the bug behind it was
+    #: found. A number that disagrees with another number is not always the
+    #: one to change.
     copper: Tuple[float, float, float, float]
-    #: `{(round(global_x, 4), round(global_y, 4)): (x0, y0, x1, y1)}` -- each
-    #: copper pad's own rect at this pose, keyed by its centre so a caller
-    #: holding a `Pad` can find it. NOT indexed by position: `PartPads` drops
-    #: pads that carry no copper, so its order does not align with `fp.pads`.
+    #: `{(cx, cy, half_x, half_y): (x0, y0, x1, y1)}` -- each copper pad's own
+    #: rect at this pose, keyed by its centre AND its half-extents (rounded to
+    #: 1e-4 mm) so a caller holding a `Pad` can find it. NOT indexed by
+    #: position: `PartPads` drops pads that carry no copper, so its order does
+    #: not align with `fp.pads`.
+    #:
+    #: The size is in the key because the centre alone is not unique. Pads
+    #: STACKED at one point are ordinary -- a cross-shaped alignment mark, a
+    #: thermal pad drawn as several rects -- and keying on the centre gave the
+    #: last one to whichever pad asked: measured, glasgow_revC U1's 0.6mm
+    #: GND pad 57 was handed a co-located 6.22mm box, and rp2350 U6's pad 61
+    #: a 3.4mm one.
+    #:
     #: Measured over the tracked corpus, 383 of 9491 pads have no rect and
-    #: EVERY one of them is copper-less -- zero netted pads miss, which is
-    #: what makes this lookup safe for the demand loop.
+    #: every one of them is copper-less; no NETTED pad misses, and none is now
+    #: handed another pad's box.
     pads: Dict[Tuple[float, float], Tuple[float, float, float, float]]
     #: False when the pad model could not be built and `rect`/`copper` are the
     #: pad-CENTRE bbox instead -- today's answer, kept for the caller that has
@@ -2397,6 +2414,21 @@ def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
     """
     if parts is None:
         parts = build_part_pads(footprints, clearance, tolerant=True)
+    else:
+        # `parts` decides the NPTH hole growth, not `clearance` -- the boxes
+        # are already built. A caller handing in a map built at a different
+        # clearance would get hole extents up to 0.2mm off the value it just
+        # asked for, silently, and the docstring above spends a paragraph
+        # promising the opposite. `PartPads` records the clearance it was
+        # built at, so the disagreement is checkable rather than trusted.
+        for _pp in parts.values():
+            if abs(float(_pp.clearance) - float(clearance)) > 1e-9:
+                raise ValueError(
+                    'part_copper_geometry: parts were built at clearance '
+                    '{} but {} was requested; the NPTH hole extents would be '
+                    'the former and every caller would read the latter'
+                    .format(_pp.clearance, clearance))
+            break
     out: Dict[str, CopperGeometry] = {}
     for ref, fp in footprints.items():
         if not getattr(fp, 'pads', None):
@@ -2410,17 +2442,39 @@ def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
             out[ref] = CopperGeometry(ref=ref, rect=centre, copper=centre,
                                       pads={}, modelled=False)
             continue
-        rects = {}
-        for r in pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0):
-            box = (r[0], r[1], r[2], r[3])
-            rects[(round((box[0] + box[2]) / 2.0, 4),
-                   round((box[1] + box[3]) / 2.0, 4))] = box
-        if rects:
-            vals = rects.values()
-            copper = (min(b[0] for b in vals), min(b[1] for b in vals),
-                      max(b[2] for b in vals), max(b[3] for b in vals))
+        boxes = [(r[0], r[1], r[2], r[3])
+                 for r in pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)]
+        # The UNION comes from the full list, never from the lookup dict.
+        # Keying it by centre alone collapsed pads STACKED at one point -- a
+        # cross-shaped alignment pad, a thermal pad drawn as several rects --
+        # so `copper` silently lost them: measured, ulx3s U1 dropped 4 of its
+        # 389 rects and came out 0.1905mm short on two sides, and glasgow U1's
+        # 0.6mm pad 57 was handed a co-located 6.22mm box. A dict cannot be
+        # the union AND the lookup; it is now only the lookup.
+        if boxes:
+            copper = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes))
         else:
             copper = ext                      # holes only: no pad copper at all
+        # ...and the lookup key carries the pad's SIZE as well as its centre,
+        # so two pads at one point are distinguishable and a hit is the pad's
+        # own box. BOTH sides of that key come from `pad_half_extents(pad)` --
+        # here and in `pad_box` -- rather than one from the pad and one from
+        # the finished rect: measured, re-deriving the half-extent as
+        # `(x1 - x0) / 2` puts esp_prog U2 pad 2 (1.5019mm wide) at 0.7509
+        # against the pad's own 0.751, and it stops being findable.
+        #
+        # `pads_local` is built by walking `fp.pads` and keeping the pads that
+        # carry copper, so `pad_rects` is index-aligned with that same filter;
+        # the zip below is that correspondence, and the length check is what
+        # refuses to guess if it ever stops holding.
+        copper_pads = [q for q in fp.pads if _pad_carries_copper(q)]
+        rects = {}
+        if len(copper_pads) == len(boxes):
+            for q, box in zip(copper_pads, boxes):
+                qhx, qhy = pad_half_extents(q)
+                rects[(round(q.global_x, 4), round(q.global_y, 4),
+                       round(qhx, 4), round(qhy, 4))] = box
         out[ref] = CopperGeometry(ref=ref, rect=ext, copper=copper,
                                   pads=rects, modelled=True)
     return out
@@ -2436,7 +2490,15 @@ def pad_box(geom: CopperGeometry, pad) -> Optional[Tuple[float, float,
     copper (a paste aperture, an NPTH mounting hole) -- measured, no NETTED pad
     on the tracked corpus answers None.
     """
-    return geom.pads.get((round(pad.global_x, 4), round(pad.global_y, 4)))
+    if not geom.pads:
+        # An unmodelled part (`modelled=False`) has no pad boxes at all, and
+        # asking one for its half-extents is how this reached out and touched
+        # a `size_x` the caller's footprints do not carry -- the hand-built
+        # fixtures in `tests/test_escape_ledger.py` are exactly that caller.
+        return None
+    hx, hy = pad_half_extents(pad)
+    return geom.pads.get((round(pad.global_x, 4), round(pad.global_y, 4),
+                          round(hx, 4), round(hy, 4)))
 
 
 def _sides_interact(a, b) -> bool:

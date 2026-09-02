@@ -74,16 +74,43 @@ def _shape_halo(pin_count):
     return HALO_BASE + HALO_COEF * math.sqrt(max(pin_count, 1))
 
 
-def _face_demand(fp, lane):
-    """Largest per-face distinct-net count, by the ledger's own face rule."""
-    rect = escape._part_rect(fp)
+def _geom(pcb, path):
+    """The board's copper geometry, at the clearance the ledger prices with.
+
+    #841: one resolution per board, threaded into `_face_demand`, so this file
+    and `escape_ledger` cannot answer "which face does this pad point at" two
+    different ways -- which they did, silently, for the whole of the last
+    re-measurement.
+    """
+    from placement.legality import part_copper_geometry
+    _tw, clr = escape.lane_pitch_parts(pcb, path)
+    return part_copper_geometry(pcb.footprints or {}, clr)
+
+
+def _face_demand(fp, lane, geom=None):
+    """Largest per-face distinct-net count, by the ledger's own face rule.
+
+    #841: the ledger measures each pad by its own COPPER EDGE against the
+    part's copper box, so this must too. It was pad CENTRES against the
+    pad-centre box, which was the ledger's rule when this file was written and
+    stopped being it -- while the same file goes on calling `escape_ledger`
+    two functions down. That is a third copy of the face rule disagreeing with
+    the other two, which is the defect #841 exists to remove; it is threaded
+    from the caller rather than rebuilt here so there is no fourth.
+
+    `geom=None` keeps the old pairing, for a caller with no `PCBData`.
+    """
+    from placement.legality import pad_box
+    g = None if geom is None else geom.get(fp.reference)
+    rect = escape._part_rect(fp) if g is None else g.copper
     pitch = escape.pad_pitch(fp)
     per = {f: set() for f in escape.FACES}
     for pad in fp.pads:
         if not getattr(pad, 'net_id', 0):
             continue
         face = escape._face_of(pad, rect,
-                               pitch if pitch != float('inf') else lane)
+                               pitch if pitch != float('inf') else lane,
+                               pad_box=None if g is None else pad_box(g, pad))
         if face:
             per[face].add(pad.net_id)
     return max((len(v) for v in per.values()), default=0)
@@ -146,11 +173,12 @@ def question_a():
         pcb, path = _load(name)
         ncu = len(pcb.board_info.copper_layers or ['F.Cu', 'B.Cu'])
         lane = escape.lane_pitch(pcb, path)
+        geom = _geom(pcb, path)
         hits = []
         for ref in (a, b):
             fp = pcb.footprints[ref]
             pin = len([p for p in fp.pads if p.net_id > 0])
-            want = _face_demand(fp, lane) * lane / ncu
+            want = _face_demand(fp, lane, geom) * lane / ncu
             if want > _shape_halo(pin) + 1e-9:
                 hits.append(ref)
             seen.add((name, ref))
@@ -179,6 +207,7 @@ def question_b():
         # disagree about the board they are both reading.
         nsig, _source, planes = escape.signal_layer_count(pcb)
         lane = escape.lane_pitch(pcb, path)
+        geom = _geom(pcb, path)
         fires = parts = 0
         worst_ask = (0.0, '')
         for ref, fp in pcb.footprints.items():
@@ -186,7 +215,7 @@ def question_b():
             if not pin:
                 continue
             parts += 1
-            want = _face_demand(fp, lane) * lane / nsig
+            want = _face_demand(fp, lane, geom) * lane / nsig
             if want > _shape_halo(pin) + 1e-9:
                 fires += 1
                 if want > worst_ask[0]:

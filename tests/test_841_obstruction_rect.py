@@ -30,7 +30,7 @@ What is asserted, and why each one is here rather than implied:
      pad. That is not decoration either: it is the property that keeps an edge
      pad at distance exactly 0 once face assignment measures pad edges, which
      is what makes the subject-rect half of #841 invariant rather than
-     catastrophic. `rect` does not have it -- 14 edges on the corpus are set
+     catastrophic. `rect` does not have it -- 12 edges on the corpus are set
      by a mounting hole no pad reaches.
   7. A footprint whose pad model cannot be built degrades to the pad-CENTRE
      box and says so via `modelled`. A silent fallback makes a map of the
@@ -50,9 +50,11 @@ for _p in (ROOT, os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_placer'
 import run_utils                                              # noqa: E402
 from kicad_parser import parse_kicad_pcb                      # noqa: E402
 from placement import escape as E                             # noqa: E402
-from placement.legality import (build_part_pads,              # noqa: E402
-                                part_copper_geometry,
-                                graded_parts_from_file)
+from placement.legality import (_pad_carries_copper,          # noqa: E402
+                                build_part_pads,
+                                graded_parts_from_file,
+                                pad_box,
+                                part_copper_geometry)
 
 RUN_ALL_FAST_OK = True
 
@@ -225,6 +227,75 @@ def test_copper_is_inside_rect_and_every_copper_edge_is_attained_by_a_pad():
         'which would mean `copper` can be dropped')
     print('  PASS: copper inside rect on {} edges over {} board(s); {} edges '
           'are set by a hole, not by a pad'.format(faces, checked, hole_set))
+
+
+def test_copper_is_the_union_of_the_pad_rects_and_each_pad_finds_its_own():
+    """Rule 8, and the arm whose ABSENCE let a real bug ship for six commits.
+
+    The edge arm above holds BY CONSTRUCTION, so it cannot see `copper` being
+    built from a lossy source -- and it was. `pads` was keyed on the pad's
+    CENTRE alone, so pads STACKED at one point collapsed to whichever came
+    last, and `copper` (built from that dict) silently lost them: ulx3s U1
+    dropped 4 of its 389 rects and came out 0.1905mm short on two sides, and
+    glasgow_revC U1's 0.6mm GND pad 57 was handed a co-located 6.22mm box.
+    Every arm in this file passed throughout.
+
+    So this one compares against `PartPads.pad_rects` directly -- the thing
+    `copper` claims to be the union of -- and checks that each pad's lookup
+    returns a box centred on THAT pad. A lookup that quietly hands back a
+    neighbour's rectangle is worse than one that misses, and only the second
+    assertion can tell them apart.
+    """
+    if not run_utils.corpus_boards():
+        print('SKIP: git could not name the tracked corpus')
+        return
+    parts = pads = stacked = 0
+    for path in run_utils.corpus_boards():
+        try:
+            pcb = parse_kicad_pcb(path)
+        except Exception:                                     # noqa: BLE001
+            continue
+        fps = pcb.footprints
+        pp = build_part_pads(fps, 0.2, tolerant=True)
+        geom = part_copper_geometry(fps, 0.2, parts=pp)
+        for ref, g in geom.items():
+            if not g.modelled:
+                continue
+            fp = fps[ref]
+            boxes = [(r[0], r[1], r[2], r[3])
+                     for r in pp[ref].pad_rects(fp.x, fp.y, fp.rotation or 0.0)]
+            if not boxes:
+                continue
+            parts += 1
+            want = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                    max(b[2] for b in boxes), max(b[3] for b in boxes))
+            assert max(abs(a - b) for a, b in zip(want, g.copper)) < 1e-9, (
+                '{}: {} copper {} is not the union of its {} pad rects {}'
+                .format(os.path.basename(path), ref, g.copper, len(boxes),
+                        want))
+            if len(g.pads) < len(boxes):
+                stacked += 1
+            for pad in fp.pads:
+                box = pad_box(g, pad)
+                if box is None:
+                    assert not _pad_carries_copper(pad), (
+                        '{}: {} pad {} carries copper and has no rect'
+                        .format(os.path.basename(path), ref, pad.pad_number))
+                    continue
+                pads += 1
+                cx = (box[0] + box[2]) / 2.0
+                cy = (box[1] + box[3]) / 2.0
+                assert (abs(cx - pad.global_x) < 1e-6
+                        and abs(cy - pad.global_y) < 1e-6), (
+                    "{}: {} pad {} was handed a box centred at ({}, {}), not "
+                    "its own ({}, {})".format(
+                        os.path.basename(path), ref, pad.pad_number, cx, cy,
+                        pad.global_x, pad.global_y))
+    assert parts > 500, 'only {} parts examined'.format(parts)
+    assert pads > 5000, 'only {} pads examined'.format(pads)
+    print('  PASS: {} parts, copper is the pad-rect union; {} pads each found '
+          'their own box ({} parts carry stacked pads)'
+          .format(parts, pads, stacked))
 
 
 def test_an_unmodellable_footprint_degrades_to_the_pad_centre_box():

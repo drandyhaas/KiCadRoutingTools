@@ -65,6 +65,7 @@ TARGETS = {'leg': LEG, 'esc': ESC, 'rou': ROU}
 
 T834 = os.path.join(ROOT, 'tests', 'test_834_cap_branch_side.py')
 T835 = os.path.join(ROOT, 'tests', 'test_835_escape_side_aware.py')
+T841 = os.path.join(ROOT, 'tests', 'test_841_obstruction_rect.py')
 T700 = os.path.join(ROOT, 'tests', 'test_700_layer_term.py')
 T761 = os.path.join(ROOT, 'tests', 'test_761_legality_npth_keepout.py')
 
@@ -267,6 +268,39 @@ ROWS = [
      """    rect = own.rect if own is not None else _part_rect(fp)""",
      """    rect = _part_rect(fp)""",
      (T835,), 'KILLED'),
+
+    # #841, and the two rows the battery would have wanted six commits ago:
+    # `copper` was built from the LOOKUP DICT, which is keyed per pad, so pads
+    # stacked at one point collapsed and the union silently lost them. Every
+    # arm in test_841 passed throughout, because the one that pins the
+    # "every edge is attained by a pad" property is true by construction over
+    # whatever survived the dict. A blind code review found it; these rows are
+    # what would have.
+    ('copper-goes-back-to-the-collapsed-dict', 'leg',
+     """        if boxes:
+            copper = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes))""",
+     """        if boxes:
+            _v = list(rects.values()) if False else boxes
+            _seen = {}
+            for _b in boxes:
+                _seen[(round((_b[0] + _b[2]) / 2.0, 4),
+                       round((_b[1] + _b[3]) / 2.0, 4))] = _b
+            _v = list(_seen.values())
+            copper = (min(b[0] for b in _v), min(b[1] for b in _v),
+                      max(b[2] for b in _v), max(b[3] for b in _v))""",
+     (T841,), 'KILLED'),
+
+    ('the-pad-lookup-key-drops-the-size', 'leg',
+     """    hx, hy = pad_half_extents(pad)
+    return geom.pads.get((round(pad.global_x, 4), round(pad.global_y, 4),
+                          round(hx, 4), round(hy, 4)))""",
+     """    for _k, _v in geom.pads.items():
+        if (abs(_k[0] - round(pad.global_x, 4)) < 1e-9
+                and abs(_k[1] - round(pad.global_y, 4)) < 1e-9):
+            return _v
+    return None""",
+     (T841,), 'KILLED'),
 
     ('routability-stops-exempting-containers', 'rou',
      """                 and g.ref not in _containers and g.ref in _geom]""",

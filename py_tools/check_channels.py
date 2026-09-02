@@ -166,7 +166,9 @@ def main():
     # SHIPPED CLI prints -- the two lower rungs coincide because the fab floor
     # is doing exactly the job this block exists to describe:
     #
-    #   python3 -X utf8 py_tools/check_channels.py kicad_files/tigard.kicad_pcb     #       --refs U3 --clearance C --track-width C
+    #   python3 -X utf8 py_tools/check_channels.py \
+    #       kicad_files/tigard.kicad_pcb --refs U3 \
+    #       --clearance C --track-width C
     #
     #     declared 0.2 /0.2    U3 W supply  9@finest   deficit faces 1
     #     declared 0.05/0.05   U3 W supply 22@finest   deficit faces 0
