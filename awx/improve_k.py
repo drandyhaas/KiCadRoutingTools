@@ -76,6 +76,28 @@ ENV = dict(os.environ, TWO_PAGE='1')
 OPENS = {}     # score board path -> open net names of the last grade
 
 
+# IMPROVE_FLOOR_JUDGE=1 (step-1 of the calibrated-ledger ladder):
+# the strict screens judge a position candidate by whether the
+# board's DP FLOOR drops (ledger_cal.Judge, calibrated on six boards
+# 0902: slack 2-4 everywhere, true order reproduced), instead of by
+# the net's own via count. Cache one Judge per best board.
+_JUDGE = {'path': None, 'obj': None}
+
+
+def _floor_judge():
+    if os.environ.get('IMPROVE_FLOOR_JUDGE') != '1':
+        return None
+    if _JUDGE['path'] != best_board:
+        _JUDGE['path'] = best_board
+        try:
+            from ledger_cal import Judge
+            _JUDGE['obj'] = Judge(best_board, NETS.split(','))
+        except Exception as e:
+            print(f'  floor judge unavailable ({e})')
+            _JUDGE['obj'] = None
+    return _JUDGE['obj']
+
+
 def braid(out, smooth=False):
     # trials skip #536 smoothing: it is 23s of a 52s braid (measured,
     # K35 cProfile) and the lexicographic key (open, drc, vias) is
@@ -468,10 +490,18 @@ def screen_relay(n, relayed_fo, strict=False):
         b1 = TAG + '_scr1.kicad_pcb'
         if not os.path.exists(b1) or 'REFUSED' in r.stdout:
             return False
-        scr_v = actual_vias(b1).get(n, 99)
-        cur_v = actual_vias(best_board).get(n, 0)
-        if scr_v >= cur_v - (1 if strict else 0):
-            return True
+        J = _floor_judge() if strict else None
+        if J is not None:
+            nf = J.swap_floor(b1, n)
+            if nf is None or nf >= J.floor_total:
+                return True         # reject: the FLOOR does not drop
+            print(f'  floor judge: {n} candidate floor '
+                  f'{J.floor_total} -> {nf}')
+        else:
+            scr_v = actual_vias(b1).get(n, 99)
+            cur_v = actual_vias(best_board).get(n, 0)
+            if scr_v >= cur_v - (1 if strict else 0):
+                return True
         if strict:
             g = subprocess.run(
                 [sys.executable, 'grade_k.py', b1, NETS],
