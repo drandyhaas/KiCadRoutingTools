@@ -950,13 +950,15 @@ def manage_vias(
                 # Placed AFTER them so the board keeps its present precedence
                 # -- this only decides among sites THIS call is creating.
                 _bulges = status == 'floor'
-                # The candidate ball's anchor radius, spelled the way the
-                # downstream ball-anchor test spells it (`_has_copper`): a via
-                # this far in is a via that connects this ball.
-                _atol = max(route.pad.size_x, route.pad.size_y) / 2 + 0.01
+                # The candidate ball's pad, as a RECTANGLE: a via inside it
+                # is a via that connects this ball. A scalar radius here
+                # merged two DISTINCT oblong pads into one via and stranded
+                # the loser's route -- see `PendingVias.verdict`.
+                _abox = (route.pad.size_x / 2 + 0.01,
+                         route.pad.size_y / 2 + 0.01)
                 _v, _detail = _pending.verdict(pad_x, pad_y, v_size, v_drill,
                                                route.net_id, _bulges,
-                                               anchor_tol=_atol)
+                                               anchor_box=_abox)
                 if _v == 'twin':
                     # Two routes, one physical hole. Both keep their tracks and
                     # both anchor to the via already committed here: the ball-
@@ -991,7 +993,7 @@ def manage_vias(
                         v_drill, floors, rung,
                         lambda cand: _pending.verdict(
                             pad_x, pad_y, v_size, cand, route.net_id,
-                            _bulges, anchor_tol=_atol)[0] == 'clear')
+                            _bulges, anchor_box=_abox)[0] == 'clear')
                     if _thin is None:
                         via_blocked_routes.append(route)
                         _pending_refused.append(

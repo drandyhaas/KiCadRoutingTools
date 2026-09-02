@@ -267,23 +267,24 @@ class TestTwinsShareOneHole(_TmpCase):
         """The anchor term in the broad-phase window, which nothing else makes
         binding.
 
-        `verdict`'s window is `max(drill term, ring term, anchor_tol)`. On a
-        BGA-sized pad the drill term (0.40mm at the standard floor) exceeds the
-        anchor radius, so dropping `atol` from the max changes nothing and the
-        mutation survives -- the battery caught exactly that. A BIG pad inverts
-        it: a 2.0mm pad has an anchor radius of 1.01mm against a 0.40mm drill
-        window, so a twin 0.9mm away is inside the pad and OUTSIDE the window.
-        Without the anchor term it is never even scanned, so the second route
-        gets its own via 0.9mm from the first -- two holes in one pad.
+        `verdict`'s window is `max(drill term, ring term, anchor half-width)`.
+        On a BGA-sized pad the drill term (0.40mm at the standard floor)
+        exceeds the anchor half-width, so dropping it from the max changes
+        nothing and the mutation survives -- the battery caught exactly that.
+        A BIG pad inverts it: a 2.0mm pad has a 1.01mm half-width against a
+        0.40mm drill window, so a twin 0.9mm away is inside the pad and
+        OUTSIDE the window. Without the anchor term it is never even scanned,
+        so the second route gets its own via 0.9mm from the first -- two holes
+        in one pad.
 
-        MUTATION: drop `atol` from the `window = max(...)` -- this arm dies."""
+        MUTATION: drop `ahx` from the `window = max(...)` -- this arm dies."""
         p = PendingVias(H2H, 0.1)
         p.add(10.0, 10.0, 0.45, 0.2, 7)
         self.assertGreater(1.01, 0.2 / 2 + 0.2 / 2 + H2H,
                            'the rig no longer makes the ANCHOR term the '
                            'binding one, so it cannot detect its loss')
         self.assertEqual(p.verdict(10.9, 10.0, 0.45, 0.2, 7,
-                                   anchor_tol=1.01)[0], 'twin',
+                                   anchor_box=(1.01, 1.01))[0], 'twin',
                          'a same-net via well inside this ball pad is no '
                          'longer recognised as its anchor')
         # ... and end to end, where it becomes a second hole in one pad.
@@ -291,6 +292,47 @@ class TestTwinsShareOneHole(_TmpCase):
         self.assertEqual((len(add), len(blocked)), (1, 0),
                          'two routes 0.9mm apart inside one 2.0mm pad got '
                          'two vias')
+
+    def test_an_OBLONG_pad_does_not_swallow_its_NEIGHBOUR(self):
+        """The regression an adversarial review found in the twin rule's first
+        version, which took `max(size_x, size_y) / 2 + 0.01` as a RADIUS and
+        compared it against a straight-line distance. On a 0.30 x 1.50 finger
+        that radius is 0.76mm -- more than twice the pad's own half-width --
+        so two same-net fingers 0.50mm apart, whose copper is 0.20mm apart and
+        NOT touching, merged into ONE via and the second route shipped with no
+        via while still counting as escaped. Exactly the defect the sibling
+        commit fixes, re-created by the merge. 17 footprints on 11 in-repo
+        boards match this geometry (glasgow U1/J5/U21, kit-dev U102/U301,
+        watchy U4/J3, rp2350 U6, tigard U5/U6, lvds IC2/IC3, orangecrab J6).
+
+        MUTATION: make `anchor_box` a scalar radius again, or compare `dist`
+        instead of the per-axis deltas -- this arm dies."""
+        a = _ball(10.0, 10.0, 7, 0.3, 'A1')
+        a.size_y = 1.5
+        b = _ball(10.5, 10.0, 7, 0.3, 'A2')
+        b.size_y = 1.5
+        ra = FanoutRoute(pad=a, pad_pos=(10.0, 10.0), stub_end=(10.0, 10.9),
+                         exit_pos=(10.0, 11.4), layer='B.Cu')
+        rb = FanoutRoute(pad=b, pad_pos=(10.5, 10.0), stub_end=(10.5, 9.1),
+                         exit_pos=(10.5, 8.6), layer='B.Cu')
+        pcb = make_pcb(board_info=BoardInfo(layers={}, copper_layers=list(CU),
+                                            board_bounds=(0.0, 0.0, 20.0, 20.0)),
+                       vias=[], segments=[], pads_by_net={7: [a, b]},
+                       source_path='', zones=[])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            add, _rm, blocked = manage_vias([ra, rb], pcb, 'F.Cu', 0.45, 0.2,
+                                            0.1)
+        self.assertEqual(
+            (len(add), len(blocked)), (2, 0),
+            'two DISTINCT same-net pads 0.50mm apart were merged into one '
+            'via, so one route ships with no via and still counts escaped')
+        for pad in (a, b):
+            self.assertTrue(
+                any(abs(v['x'] - pad.global_x) <= pad.size_x / 2 + 0.01
+                    and abs(v['y'] - pad.global_y) <= pad.size_y / 2 + 0.01
+                    for v in add),
+                f'pad at ({pad.global_x}, {pad.global_y}) has no via inside it')
 
     def test_there_is_no_ONE_MICRON_CLIFF(self):
         """An exact-match twin rule had one, and an adversarial review found
@@ -304,7 +346,7 @@ class TestTwinsShareOneHole(_TmpCase):
         `_has_copper` spelling), so anything inside the pad is a via that
         already connects this ball.
 
-        MUTATION: replace `anchor_tol` with `self._tol` in `verdict` -- the
+        MUTATION: replace `anchor_box` with `self._tol` in `verdict` -- the
         0.0011 row dies."""
         for sep in (0.0, 0.0005, 0.0010, 0.0011, 0.05, 0.2):
             add, blocked, _t = _two_balls(sep, 0.5, same_net=True)
@@ -429,24 +471,45 @@ class TestTheLadderKeepsTheEscape(_TmpCase):
     def test_the_THINNED_drill_is_what_gets_recorded(self):
         """The pending record must carry the drill that actually ships, or the
         NEXT candidate is spaced against a hole that does not exist. Passing
-        the pre-thin drill is over-strict rather than unsafe, which is why no
-        arm caught it until a reviewer mutated exactly that line.
+        the pre-thin drill is over-strict rather than unsafe.
 
-        Asserted through behaviour: a third ball placed just outside the
-        THINNED floor and just inside the ORIGINAL one must be accepted.
+        THIS ARM RUNS `manage_vias`, and that is the whole point. An earlier
+        version asserted on `PendingVias` directly -- it built one record with
+        0.15 and one with 0.17 and checked they differ -- which is true of the
+        class and says NOTHING about which one the call site passes. A reviewer
+        applied the exact mutation the docstring named (capture the drill
+        before the ladder, hand THAT to `_pending.add`) and all 32 tests stayed
+        green while a real escape was lost.
 
-        MUTATION: `_pending.add(..., v_drill_before_thinning, ...)`."""
-        p = PendingVias(H2H, 0.1)
-        p.add(10.0, 10.0, 0.32, 0.15, 7)         # as if thinned 0.17 -> 0.15
-        # 0.36 clears 0.15/2 + 0.17/2 + 0.20 = 0.36 exactly, and clears the
-        # all-thinned floor 0.35; it would NOT clear 0.17/0.17 (0.37).
-        self.assertEqual(p.verdict(10.36, 10.0, 0.32, 0.17, 8)[0], 'clear')
-        stale = PendingVias(H2H, 0.1)
-        stale.add(10.0, 10.0, 0.32, 0.17, 7)     # the un-thinned record
-        self.assertEqual(stale.verdict(10.36, 10.0, 0.32, 0.17, 8)[0],
-                         'conflict',
-                         'the two records are indistinguishable here, so this '
-                         'arm cannot detect a stale drill')
+        Three balls in a row: the first pair conflicts and is rescued by the
+        ladder, and the third is spaced against the SECOND via's recorded
+        drill. With the thinned value recorded it clears; with the pre-thin
+        value it is refused.
+
+        MUTATION: `_pending.add(..., <the pre-thin drill>, ...)` -- this arm
+        dies (2 added, 1 blocked)."""
+        pads, routes = [], []
+        for i, x in enumerate((10.0, 10.36, 10.71)):
+            p = _ball(x, 10.0, 7 + i, 0.32, f'A{i}')
+            pads.append(p)
+            routes.append(FanoutRoute(
+                pad=p, pad_pos=(x, 10.0), stub_end=(x, 10.5),
+                exit_pos=(x, 11.0), layer='B.Cu'))
+        pcb = make_pcb(board_info=BoardInfo(layers={},
+                                            copper_layers=list(CU),
+                                            board_bounds=(0.0, 0.0, 20.0, 20.0)),
+                       vias=[], segments=[],
+                       pads_by_net={7 + i: [p] for i, p in enumerate(pads)},
+                       source_path='', zones=[])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            add, _rm, blocked = manage_vias(routes, pcb, 'F.Cu', 0.45, 0.2, 0.1)
+        self.assertEqual(
+            (len(add), len(blocked)), (3, 0),
+            'the third ball was refused, which means it was spaced against a '
+            'drill wider than the one actually recorded')
+        self.assertEqual(sorted(v['drill'] for v in add), [0.15, 0.15, 0.17],
+                         'the drills that shipped are not the ladder result')
 
     def test_the_escalation_is_DISCLOSED(self):
         """A silent tier escalation is a fab cost the operator did not choose.

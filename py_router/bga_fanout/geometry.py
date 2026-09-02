@@ -417,13 +417,23 @@ class PendingVias:
             self._max_size = s
 
     def verdict(self, x, y, size, drill, net_id, bulges=False, tol=1e-6,
-                anchor_tol=None):
+                anchor_box=None):
         """How a candidate at (x, y) relates to what this call already placed.
 
-        ``anchor_tol`` is the candidate BALL's own anchor radius -- the same
-        ``max(size_x, size_y) / 2 + 0.01`` the downstream ball-anchor test
-        (``_has_copper``) uses to decide whether a via connects a ball. Default
-        ``site_tol`` (1 um) if not given.
+        ``anchor_box`` is the candidate BALL's own pad half-extents,
+        ``(size_x / 2 + t, size_y / 2 + t)`` -- a RECTANGLE, because a pad is
+        one. Default: the 1 um site tolerance in both axes.
+
+        A SCALAR RADIUS HERE WAS A BUG, and an expensive one, so it is spelled
+        out. The first version took ``max(size_x, size_y) / 2 + 0.01`` and
+        compared it against a straight-line distance, which on an OBLONG pad
+        reaches far outside the copper along the short axis: two same-net
+        0.30 x 1.50 fingers 0.50mm apart -- an ordinary fine-pitch QFP pair
+        whose pads are 0.20mm apart and NOT touching -- were merged into one
+        via, and the second route shipped with no via at all while still
+        counting as escaped. That is precisely the defect the sibling commit
+        fixes, re-created by the merge. An adversarial review found it, with
+        17 footprints on 11 in-repo boards matching the geometry.
 
         Returns ``(verdict, detail)``:
 
@@ -441,12 +451,13 @@ class PendingVias:
             today's, which appends a second identical dict that the writer
             emits as a second ``(via ...)`` at the same point.
 
-            KEYED ON THE ANCHOR RADIUS, NOT ON AN EXACT MATCH. An exact-match
-            rule has a 1 um cliff: an adversarial review found same-net sites
-            0.0010mm apart merging into one via while 0.0011mm apart DROPPED an
-            escape outright, because no fab rung can space two holes 1.1 um
-            apart. Anything inside the ball's own pad is a via that anchors it,
-            which is the question actually being asked.
+            KEYED ON THE PAD, NOT ON AN EXACT MATCH. An exact-match rule has a
+            1 um cliff: an adversarial review found same-net sites 0.0010mm
+            apart merging into one via while 0.0011mm apart DROPPED an escape
+            outright, because no fab rung can space two holes 1.1 um apart. A
+            via inside the ball's own pad is a via that anchors it, which is
+            the question actually being asked -- and "inside the pad" is a
+            rectangle test, per ``anchor_box`` above.
         ``('conflict', (reason, x, y))``
             that via is closer than a floor allows. A DIFFERENT net at the same
             site lands here, not in ``'twin'``: two nets sharing one hole is a
@@ -454,19 +465,22 @@ class PendingVias:
         """
         d = drill or 0.0
         s = size or 0.0
-        atol = self._tol if anchor_tol is None else max(anchor_tol, self._tol)
+        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else
+                    (max(anchor_box[0], self._tol),
+                     max(anchor_box[1], self._tol)))
         # Broad phase: nothing outside this x-window can be within either floor
-        # of the candidate, whatever its y. `atol` is in it because a twin can
+        # of the candidate, whatever its y. `ahx` is in it because a twin can
         # sit further out than either floor when the pad is large.
         window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,
                      s / 2.0 + self._max_size / 2.0 + self._clearance,
-                     atol)
+                     ahx)
         lo = bisect.bisect_left(self._xs, x - window)
         hi = bisect.bisect_right(self._xs, x + window)
         best = None
         for (ox, oy, os_, od, onet, obulges) in self._rows[lo:hi]:
             dist = math.hypot(ox - x, oy - y)
-            if onet == net_id and dist <= atol:
+            if (onet == net_id
+                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):
                 return 'twin', (ox, oy, os_, od)
             if dist <= self._tol:
                 return 'conflict', ("two nets would share one hole", ox, oy)
