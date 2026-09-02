@@ -244,10 +244,16 @@ def main():
           f"(track {track} [{trk_src}] clearance {clearance} [{clr_src}] "
           f"grid {grid}; taps NOT modeled -- v1):")
     ledgers = {}
+    # #849: the board's geometry is resolved ONCE for the whole sweep instead
+    # of once per ref. Every ref here asks the same whole-board questions --
+    # which parts obstruct, which are frames, who owns each net, and the
+    # courtyard parse behind all of it -- and re-deriving them per ref cost
+    # more than computing the lane supply did.
+    ctx = routability.board_lane_context(pcb, clearance, pcb_file=args.board)
     for ref in refs:
         rows = routability.face_lane_ledger(
             pcb, ref, clearance=clearance, track_width=track,
-            grid_step=grid, pcb_file=args.board)
+            grid_step=grid, pcb_file=args.board, context=ctx)
         if not rows:
             continue
         ledgers[ref] = rows
@@ -295,10 +301,16 @@ def main():
                   file=sys.stderr)
             return 2
         base_ledgers = {}
+        # ...and its OWN context (#849). The baseline is a different board and
+        # a different file, so reusing the one above would grade these refs
+        # against the primary board's geometry and invent a delta; the ledger
+        # refuses that rather than trusting it, and this is why it can.
+        base_ctx = routability.board_lane_context(base_pcb, clearance,
+                                                  pcb_file=args.baseline)
         for ref in refs:
             rows = routability.face_lane_ledger(
                 base_pcb, ref, clearance=clearance, track_width=track,
-                grid_step=grid, pcb_file=args.baseline)
+                grid_step=grid, pcb_file=args.baseline, context=base_ctx)
             if rows:
                 base_ledgers[ref] = rows
         was = {(r, f) for r, f, _d in _starved_faces(base_ledgers,

@@ -1040,19 +1040,27 @@ def board_lane_context(pcb_data, clearance: float, *,
     """The per-board half of `face_lane_ledger`, resolved ONCE (#849).
 
     Build one above a loop over refs and pass it to every call; see
-    `LaneContext`. Measured on this repo's committed boards at clearance
-    0.09 / track 0.127 / grid 0.05, the sweep and the number of times it
-    re-parses the board's courtyards:
+    `LaneContext`. Measured on this repo's own committed boards at clearance
+    0.09 / track 0.127 / grid 0.05, sweeping every ref `check_channels`
+    auto-detects -- the whole sweep in one process, min-of-5, the context
+    built INSIDE the timed region because one per run is what the caller
+    does:
 
-        board                        refs   sweep      courtyard parses
-        tigard                          2   0.129s ->  2 -> 1
-        rp2350_fpga_eensy_prePlane      7   0.361s ->  7 -> 1
-        glasgow_revC                    9   2.448s ->  9 -> 1
+        board                       refs   sweep            courtyard parses
+        tigard                         2   0.116s -> 0.066s   2 -> 1
+        rp2350_fpga_eensy_prePlane     7   0.326s -> 0.039s   7 -> 1
+        glasgow_revC                   9   2.211s -> 0.282s   9 -> 1
 
-    The parse count is the honest half of that table: seconds are
-    load-dependent and this machine does not reproduce #849's own 12.6-15.8s
-    on glasgow, but "once per ref" against "once per board" is a property, not
-    a measurement.
+    The parse count is the honest half of that table. Seconds are
+    load-dependent, and this machine does not reproduce #849's own 12.6-15.8s
+    on glasgow (it measures 4.1s of CLI wall clock, 2.2s after) -- but "once
+    per ref" against "once per board" is a property, not a measurement, and it
+    is what `tests/test_849_lane_context.py` pins.
+
+    tigard's 1.8x is the shape of the win, not a disappointment: two refs is
+    two rebuilds, so there is almost nothing to hoist. The saving is per
+    EXTRA ref, which is why the boards in the fix loop feel it and a
+    two-part board does not.
     """
     return LaneContext(pcb_data, clearance, pcb_file=pcb_file)
 
