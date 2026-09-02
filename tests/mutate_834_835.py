@@ -136,12 +136,15 @@ ROWS = [
      """            ext = () if not xs0 else (min(xs0), min(ys0), max(xs1), max(ys1))
             self._ext_side_cache[key] = ext""",
      (T834, T761),
-     # A hole is only in a per-side box for a part that HAS one, and no board
-     # -- and no fixture -- puts a holed part on the cap branch's per-side
-     # path: over the cap the disjoint case returns before it, and the mixed
-     # fixture carries no NPTH. Recorded rather than deleted, because it stops
-     # surviving the day someone adds that case, and because a silent drop
-     # here would be a real defect on a board that does have one.
+     # A hole is only in a per-side box for a part that HAS one, and no
+     # fixture puts a holed part on the cap branch's per-side path: over the
+     # cap the disjoint case returns before it, and the mixed fixture carries
+     # no NPTH. The corpus does have a mixed-side part above the cap --
+     # glasgow_revC's U1, whose B box is strictly smaller than its whole
+     # extent -- but its over-cap partner U30 is front-only, so the shared
+     # face is F and the boxes coincide there. Recorded rather than deleted,
+     # because it stops surviving the day either case changes, and because a
+     # silent drop here would be a real defect on a board that has one.
      'SURVIVED'),
 
     # ---- #835: the escape ledger ----------------------------------------

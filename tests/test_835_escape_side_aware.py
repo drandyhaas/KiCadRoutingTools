@@ -357,22 +357,40 @@ def test_the_union_is_measured_where_it_actually_bites():
         pcb_file=path)}
     east = rows['E']
     assert abs(east['length_mm'] - 9.64) < 0.01, east
-    assert len(east['eaten_by']) == 8, east['eaten_by']
-    # `eaten_by` is in LANES, the face length in MILLIMETRES -- convert before
-    # comparing. (The first version of this arm compared the two directly. It
-    # passed, for the wrong reason.)
-    pitch = east['length_mm'] / max(1, east['supply_routed_grid']
-                                    + east['deficit_routed_grid'])
-    summed_mm = sum(lanes for _r, lanes in east['eaten_by']) * pitch
-    assert summed_mm > east['length_mm'], (
-        'the per-neighbour cover no longer exceeds the face, so summing and '
-        'unioning would agree and this arm proves nothing: {:.2f}mm vs '
-        '{:.2f}mm'.format(summed_mm, east['length_mm']))
     assert east['supply_routed_grid'] == 3, (
         'glasgow J1 east supply moved from the recorded 3 (it is 0 if the '
         'intervals are summed rather than unioned): {}'.format(east))
-    print('  PASS: glasgow J1 east -- 8 neighbours, 12.42mm summed against '
-          '8.23mm unioned on a 9.64mm face, supply 3 (0 if summed)')
+    # NOT `len(east['eaten_by'])`: `face_lane_ledger` truncates that list to
+    # the top 8 for DISPLAY, so asserting 8 asserts the cap and passes for any
+    # neighbour count at or above it -- and summing the truncated list gives
+    # 11.48mm rather than the real 12.42mm. Ask the kernel instead.
+    seen = {}
+    orig = E.span_eaten
+
+    def probe(lo, hi, band, horiz, obstacles):
+        blocked, order = orig(lo, hi, band, horiz, obstacles)
+        if abs((hi - lo) - east['length_mm']) < 0.01 and len(order) > 1:
+            seen[round(blocked, 2)] = (len(order),
+                                       round(sum(mm for _r, mm in order), 2))
+        return blocked, order
+
+    E.span_eaten = probe
+    try:
+        R.face_lane_ledger(pcb, 'J1', clearance=0.2, track_width=0.2,
+                           grid_step=0.1, pcb_file=path)
+    finally:
+        E.span_eaten = orig
+    assert 8.23 in seen, sorted(seen)
+    n_obs, summed = seen[8.23]
+    assert n_obs == 9, (n_obs, sorted(seen))
+    assert abs(summed - 12.42) < 0.01, summed
+    assert summed > east['length_mm'], (
+        'the summed cover no longer exceeds the face, so summing and unioning '
+        'would agree and this arm proves nothing: {:.2f}mm vs {:.2f}mm'
+        .format(summed, east['length_mm']))
+    print('  PASS: glasgow J1 east -- {} neighbours, {:.2f}mm summed against '
+          '8.23mm unioned on a {:.2f}mm face, supply 3 (0 if summed)'
+          .format(n_obs, summed, east['length_mm']))
 
 
 def test_tigard_moves_on_the_side_test_not_the_union():

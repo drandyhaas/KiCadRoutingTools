@@ -191,10 +191,13 @@ def t_the_other_layer_term_survives_a_fully_blocked_face():
     longer carry this arm.
 
     U3 is a better fixture than U6 ever was: a SOT-666 boxed in by four real
-    same-side neighbours (J1, J2, R1, R2), where the blockage is a fact about
-    the placement rather than an artifact of the instrument. Its deficits are
-    smaller (1/2/1/2) and the property under test is unchanged -- supply 0 on
-    every face, so `(L-1)*supply` is 0, while `supply_other_max` is not.
+    neighbours (J1, J2, R1, R2) that all share a face with it -- J2 sits on
+    B.Cu but is DRILLED, so its leads occupy U3's face too, which is the
+    symmetric side rule doing its job rather than an exception to it. The
+    blockage is a fact about the placement rather than an artifact of the
+    instrument. Its deficits are smaller (1/2/1/2) and the property under test
+    is unchanged -- supply 0 on every face, so `(L-1)*supply` is 0, while
+    `supply_other_max` is not.
 
     It is the ONLY part on the tracked corpus that still meets all four
     conditions; `tests/measure_834_835_side_awareness.py` regenerates the

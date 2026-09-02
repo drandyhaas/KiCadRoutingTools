@@ -31,8 +31,12 @@ Pinned here:
   5. A THT pad (`pside is None`) interacts with both faces, so a drilled part
      is never skipped.
   6. The per-side extent is REACHED, by a part with SMD pads on both faces
-     above the cap. No tracked board has one, so without this arm that code
-     would be unreachable and deletable without a red.
+     above the cap. glasgow_revC's U1 IS such a part -- 57 SMD pads on F.Cu,
+     ONE on B.Cu and 25 through -- and U1 x U30 is 10043 pairs, over the cap.
+     But U30 is front-only, so their shared face is F, where the per-side box
+     equals the whole extent, and no corpus verdict moves. The synthetic
+     fixture below is what makes the code reachable at all; without it the
+     branch could be deleted with the suite still green.
   7. On the real ulx3s: the issue's own verification, plus a same-side
      over-cap pair that must not move.
 

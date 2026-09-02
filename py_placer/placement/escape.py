@@ -710,10 +710,17 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
     Intervals are UNIONED, so two neighbours covering the same stretch are
     charged once. That is the correction: without it a face can be reported as
     more than fully blocked, and an over-100% total silently becomes "supply 0"
-    rather than an error. Measured, glasgow_revC's J1 east has eight
-    neighbours covering 12.42mm of a 9.64mm face -- summed that is supply 0,
-    unioned it is 8.23mm and supply 3. Corpus-wide, 227 faces sum to more than
-    they cover.
+    rather than an error. Measured, glasgow_revC's J1 east has NINE neighbours
+    covering 12.42mm of a 9.64mm face -- summed that is supply 0, unioned it is
+    8.23mm and supply 3. (Nine, not the eight `face_lane_ledger` reports: its
+    `eaten_by` is truncated to the top 8 for display, so counting that list
+    undercounts the obstruction and sums to 11.48mm rather than 12.42mm.)
+
+    Corpus-wide over the git-tracked boards: 25 of the 388 faces the ESCAPE
+    ledger reports have neighbours covering the same stretch twice, and
+    `face_lane_ledger` has 506 of 5276 taken over every footprint. Regenerate
+    both by instrumenting this function -- the counts are scope-dependent, and
+    an unscoped one is not a number.
 
     The `min(blocked, hi - lo)` below is BELT AND BRACES, and provably so while
     the union stands: every interval is already clipped to [lo, hi] as it is

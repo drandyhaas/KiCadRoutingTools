@@ -1017,13 +1017,20 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # SHARED WITH `escape` (#835): the obstruction arithmetic -- the
     # interval union, the clamp, the symmetric side test and the container
     # exemption -- is one kernel, `escape.span_eaten`, because the two ledgers
-    # were answering the same question three different ways.
+    # were answering the same question three different ways. What the union
+    # fixes here: this loop billed `covered += span` per neighbour, so
+    # glasgow_revC's J1 east summed 12.42mm of cover on a 9.64mm face and
+    # `max(0.0, length - covered)` absorbed the impossible total as supply 0.
+    # Unioned it is 8.23mm and supply 3.
     #
     # NOT shared, and the difference is the point: the neighbour RECTANGLE.
-    # This ledger charges the courtyard, `escape` the pad bbox. Measured,
-    # putting escape on courtyards moves it 3-6x on five boards (glasgow
-    # 19 -> 126 deficit lanes, ulx3s 19 -> 88, kit-dev-coldfire 0 -> 43), which
-    # is a different instrument rather than a refinement. The two are also
+    # This ledger charges the courtyard, `escape` the pad bbox. Measured on
+    # THIS branch, swapping only the neighbour rect moves the escape ledger on
+    # SEVEN boards -- glasgow_revC 17 -> 125 deficit lanes, watchy 25 -> 88,
+    # orangecrab 70 -> 147, tigard 41 -> 75, rp2350 53 -> 91, and
+    # kit-dev-coldfire 0 -> 18 and ulx3s 0 -> 19, which stop being
+    # zero-deficit boards. That is a different instrument rather than a
+    # refinement. The two are also
     # answering different questions: what obstructs a TRACK is foreign COPPER,
     # what obstructs a PART is a foreign BODY, and a courtyard is an assembly
     # keep-out drawn deliberately beyond the copper. Which of the two a LANE
