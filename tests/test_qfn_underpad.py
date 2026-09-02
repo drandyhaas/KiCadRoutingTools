@@ -290,16 +290,23 @@ def _q2_reuse_end_to_end():
             via_size=0.45, via_drill=0.25, allow_via_in_pad=True)
 
     got = (len(vias), len(dropped), len(tracks))
-    # #619 moved this pin: the escape now tests its pad->via stub against the
-    # copper `nets_to_route` erased from the obstacle map (pre-existing vias,
-    # tracks and pads on the OTHER nets in this same fanout call), which it
-    # never did before, so escapes that were only reachable THROUGH that copper
-    # are withdrawn. On this configuration 28/12/30 -> 18/22/20. The reuse
-    # behaviour this section exists to pin is unchanged -- see the named
-    # DATA_30 check below, which still passes.
-    check('U2 underpad reuse: 18 vias / 22 dropped / 20 tracks '
-          '(was 28 / 12 / 30 before the #619 erased-copper gate)',
-          got == (18, 22, 20), f"got {got[0]} / {got[1]} / {got[2]}")
+    # Two fixes moved this pin, both of which bite HERE because this call is
+    # cross-layer -- U2 mounts on F.Cu and is escaped to B.Cu:
+    #   #619, the erased-copper gate: the escape now tests its pad->via stub
+    #     against copper `nets_to_route` erased from the obstacle map
+    #     (pre-existing vias, tracks and pads on the OTHER nets in this same
+    #     fanout call), so escapes only reachable THROUGH that copper are
+    #     withdrawn.  28/12/30 -> 18/22/20.
+    #   #845, the layer fix: the stub's clearance test used to read the ESCAPE
+    #     layer's obstacle plane (B.Cu) for copper the stub actually lands on
+    #     at the MOUNT layer (F.Cu, #195). It now reads F.Cu.  -> 18/23/19.
+    # The second is invisible on a same-layer call, which is every board in the
+    # corpus sweep; this test is one of only two places that exercise it.
+    # The reuse behaviour this section exists to pin is unchanged -- see the
+    # named DATA_30 check below, which still passes.
+    check('U2 underpad reuse: 18 vias / 23 dropped / 19 tracks '
+          '(28 / 12 / 30 before #619; 18 / 22 / 20 before the #845 layer fix)',
+          got == (18, 23, 19), f"got {got[0]} / {got[1]} / {got[2]}")
     # The specific net the regression cost, named -- a count can drift back
     # into place for an unrelated reason, this cannot.
     check('Net-(U2A-DATA_30) keeps its escape (it reuses an existing via)',

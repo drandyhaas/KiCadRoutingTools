@@ -334,7 +334,24 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _prog(0, 0, "building obstacle map...")
     obstacles = build_base_obstacle_map(pcb_data, cfg, nets_to_route=list(fanned_nets),
                                         extra_clearance=track_width / 2)
-    obs_layer_idx = layer_map.get(layer)
+    # #845: the obstacle plane for the STUB, which is emitted on the pad's own
+    # mount layer (:766 and :777, deliberately -- putting it on an inner/back
+    # escape layer would float it above the pad, #195). This used to resolve
+    # `layer`, the ESCAPE layer, which is where the VIA lands and not where the
+    # stub's copper is; on the configuration under-pad exists for (an F.Cu part
+    # escaped to B.Cu) every stub was clearance-tested against the wrong
+    # layer's plane -- grading copper that is not there and ignoring copper
+    # that is.
+    #
+    # It is the only consumer of this index. The VIA is not tested through the
+    # map at all (it is a through via, and `via_clears` scans pcb_data
+    # geometrically), so there was never a second reader for whom the escape
+    # layer was the right answer.
+    #
+    # Per-layer clearance comes along for free: build_base_obstacle_map stamps
+    # each layer at that layer's own rule (#498, installed into cfg at :331),
+    # so reading the mount layer's plane also reads the mount layer's floor.
+    stub_layer_idx = layer_map.get(footprint.layer)
 
     # Foreign obstacles, keyed by net so the via's OWN net is exempt at check
     # time. A through-via spans every copper layer, so foreign tracks on ANY
@@ -404,11 +421,14 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # this is exact, but when it is not, the fallback is `clearance` -- which
     # the caller already rebound to the ESCAPE layer's rule (#498, :900-904).
     # So an unruled mount layer inherits the escape layer's number rather than
-    # the base. Closing that means not rebinding the scalar in the caller at
-    # all, which is the same fix the sibling issue on `obs_layer_idx` needs and
-    # is deliberately not attempted here. Inert on every board this repo
-    # ingests (#770: no tracked board carries a .kicad_dru layer rule), and
-    # inert on the default path, where --layer IS the mount layer.
+    # the base. Closing that means not rebinding the scalar in the CALLER at
+    # all, which is a change to the surface fan's path too and is deliberately
+    # not attempted here. The map-based test above does not share the problem:
+    # build_base_obstacle_map stamps each layer at its own rule, so reading the
+    # mount layer's plane already reads the mount layer's floor. Inert on every
+    # board this repo ingests (#770: no tracked board carries a .kicad_dru
+    # layer rule), and inert on the default path, where --layer IS the mount
+    # layer.
     _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
     # A SET of halves, so an A/B arm can be 'via', 'via,seg', 'off' or 'all'.
     # 'off' wins over everything (an explicit ablation is never partial), and
@@ -718,13 +738,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # 28/12/30 vias/dropped/tracks becoming 29/13/31 on U2.
             #
             # stub_clears_erased is a SEPARATE `and` term, never folded into
-            # the `obs_layer_idx is None` `or`: that short-circuit skips the
+            # the `stub_layer_idx is None` `or`: that short-circuit skips the
             # whole clearance test when the escape layer is not in the layer
             # map, and #619 is pure geometry on the mount layer that must run
             # regardless.
-            if (obs_layer_idx is None or
+            if (stub_layer_idx is None or
                     check_line_clearance(obstacles, px, py, _rvx, _rvy,
-                                         obs_layer_idx, cfg)) \
+                                         stub_layer_idx, cfg)) \
                     and stub_clears_erased(px, py, _rvx, _rvy, pi.pad.net_id) \
                     and not run_output_conflict(
                         _rvx, _rvy, pi.pad.net_id, placed, px, py,
@@ -734,8 +754,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
-            stub_ok = (obs_layer_idx is None or
-                       check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
+            stub_ok = (stub_layer_idx is None or
+                       check_line_clearance(obstacles, px, py, vx, vy, stub_layer_idx, cfg))
             if stub_ok \
                     and stub_clears_erased(px, py, vx, vy, pi.pad.net_id) \
                     and via_clears(vx, vy, pi.pad.net_id, placed, px, py):

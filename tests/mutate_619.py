@@ -80,6 +80,14 @@ ROWS = [
      (T_619,), 'KILLED'),
 
     # ---- the layer decision ---------------------------------------------
+    # #845: the PRIMARY clearance test's plane. Reverting it to the escape
+    # layer is the exact defect that shipped, and it is invisible on a
+    # same-layer call -- which is every board in the corpus sweep. Only the
+    # cross-layer pins can catch it.
+    ('primary-clearance-test-reads-the-ESCAPE-layer', 'q',
+     "    stub_layer_idx = layer_map.get(footprint.layer)",
+     "    stub_layer_idx = layer_map.get(layer)",
+     (T_619, T_UP), 'KILLED'),
     # The surface fan's spelling, which is correct THERE and wrong here: the
     # under-pad stub is emitted on footprint.layer (#195), not on `layer`.
     ('seg-half-filters-the-ESCAPE-layer', 'q',

@@ -476,11 +476,17 @@ def test_layer_scope_decision():
     check("the stub's copper layer is footprint.layer, not the escape layer "
           "(#195: putting it on the escape layer would float it above the pad)",
           e.get('layer') == "F.Cu", str(e.get('layer')))
-    check("cross-layer tally pinned at 15 tracks / 13 vias / 27 dropped. "
-          "Filtering erased segments by the ESCAPE layer instead of the stub's "
-          "layer selects a DIFFERENT set (25 vs 17 pairs on this board) and "
-          "moves this number -- which is what makes this a real check",
-          (len(t_x), len(v_x), len(d_x)) == (15, 13, 27),
+    # 15/13/27 before #845, when the PRIMARY clearance test still read the
+    # escape layer's plane while this gate read the mount layer's. Both now
+    # read the mount layer, and this configuration is one of only two places in
+    # the repo that can tell the difference -- every board in the corpus sweep
+    # runs escape layer == footprint.layer, where the distinction is invisible.
+    check("cross-layer tally pinned at 14 tracks / 13 vias / 28 dropped "
+          "(15 / 13 / 27 before the #845 layer fix). Filtering erased segments "
+          "by the ESCAPE layer instead of the stub's layer selects a DIFFERENT "
+          "set (25 vs 17 pairs on this board) and moves this number -- which "
+          "is what makes this a real check",
+          (len(t_x), len(v_x), len(d_x)) == (14, 13, 28),
           f"got {(len(t_x), len(v_x), len(d_x))}")
 
 
