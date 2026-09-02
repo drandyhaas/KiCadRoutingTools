@@ -436,63 +436,73 @@ def test_face_lane_ledger_cannot_cover_more_than_the_face():
 
 
 def test_the_union_is_measured_where_it_actually_bites():
-    """glasgow_revC J1 east: eight neighbours, 12.42mm of cover on a 9.64mm
-    face. SUMMED that is more than the face, so `max(0.0, length - covered)`
-    collapses supply to 0; UNIONED it is 8.23mm and supply is 3.
+    """ulx3s H4 south: two neighbours, 6.16mm of cover on a 5.50mm face.
+    SUMMED that is more than the face, so `max(0.0, length - covered)`
+    collapses supply to 0; UNIONED it is 3.71mm and supply is 4.
 
-    Chosen by scanning, not by guessing. My first witness for this was tigard
-    J1 east, and it was wrong: tigard's routability numbers move under this
-    branch because of the SYMMETRIC SIDE TEST, not the union -- summing and
-    unioning give it the same supply. The mutation battery caught that, which
-    is what it is for. Corpus-wide there are 227 faces where the summed cover
-    exceeds the union; this is the largest clean one on a board with no
-    container.
+    Chosen by scanning, not by guessing, and re-chosen the same way for #841.
+    Two witnesses have been retired here, and both retirements are the point:
+
+      * tigard J1 east was the FIRST, and was wrong -- tigard's routability
+        numbers move on the SYMMETRIC SIDE TEST, not the union; summing and
+        unioning give it the same supply. The mutation battery caught that.
+      * glasgow_revC J1 east was the second (9 neighbours, 12.42mm summed
+        against 8.23mm unioned on a 9.64mm face, supply 3). Once
+        `face_lane_ledger` charges pad COPPER rather than the courtyard
+        (#841), that face is supply 8 whether the intervals are summed or
+        unioned, and glasgow has NO discriminating face left. Keeping it and
+        re-recording the numbers would have left an arm that proves nothing.
+
+    Corpus-wide, on the container-free boards, there are 11 faces where the
+    summed cover exceeds the face AND the unioned supply is still positive --
+    the only ones where the two rules give different answers. This is the
+    largest by supply margin (4 against 0; every other is 1 against 0).
+    Regenerate the scan with the probe below over `corpus_boards()`.
     """
-    pcb, path = _board('glasgow_revC')
+    pcb, path = _board('ulx3s')
     if pcb is None:
-        print('  SKIP: glasgow_revC not present')
+        print('  SKIP: ulx3s not present')
         return
     assert not container_refs(pcb, graded_parts_from_file(pcb, path)), (
-        'glasgow grew a container; this is no longer a clean union witness')
+        'ulx3s grew a container; this is no longer a clean union witness')
     rows = {r['face']: r for r in R.face_lane_ledger(
-        pcb, 'J1', clearance=0.2, track_width=0.2, grid_step=0.1,
+        pcb, 'H4', clearance=0.2, track_width=0.2, grid_step=0.1,
         pcb_file=path)}
-    east = rows['E']
-    assert abs(east['length_mm'] - 9.64) < 0.01, east
-    assert east['supply_routed_grid'] == 3, (
-        'glasgow J1 east supply moved from the recorded 3 (it is 0 if the '
-        'intervals are summed rather than unioned): {}'.format(east))
-    # NOT `len(east['eaten_by'])`: `face_lane_ledger` truncates that list to
-    # the top 8 for DISPLAY, so asserting 8 asserts the cap and passes for any
-    # neighbour count at or above it -- and summing the truncated list gives
-    # 11.48mm rather than the real 12.42mm. Ask the kernel instead.
+    south = rows['S']
+    assert abs(south['length_mm'] - 5.5) < 0.01, south
+    assert south['supply_routed_grid'] == 4, (
+        'ulx3s H4 south supply moved from the recorded 4 (it is 0 if the '
+        'intervals are summed rather than unioned): {}'.format(south))
+    # NOT `len(south['eaten_by'])`: `face_lane_ledger` truncates that list to
+    # the top 8 for DISPLAY, so counting it asserts the cap rather than the
+    # obstruction. Ask the kernel instead.
     seen = {}
     orig = E.span_eaten
 
     def probe(lo, hi, band, horiz, obstacles):
         blocked, order = orig(lo, hi, band, horiz, obstacles)
-        if abs((hi - lo) - east['length_mm']) < 0.01 and len(order) > 1:
+        if abs((hi - lo) - south['length_mm']) < 0.01 and len(order) > 1:
             seen[round(blocked, 2)] = (len(order),
                                        round(sum(mm for _r, mm in order), 2))
         return blocked, order
 
     E.span_eaten = probe
     try:
-        R.face_lane_ledger(pcb, 'J1', clearance=0.2, track_width=0.2,
+        R.face_lane_ledger(pcb, 'H4', clearance=0.2, track_width=0.2,
                            grid_step=0.1, pcb_file=path)
     finally:
         E.span_eaten = orig
-    assert 8.23 in seen, sorted(seen)
-    n_obs, summed = seen[8.23]
-    assert n_obs == 9, (n_obs, sorted(seen))
-    assert abs(summed - 12.42) < 0.01, summed
-    assert summed > east['length_mm'], (
+    assert 3.71 in seen, sorted(seen)
+    n_obs, summed = seen[3.71]
+    assert n_obs == 2, (n_obs, sorted(seen))
+    assert abs(summed - 6.16) < 0.01, summed
+    assert summed > south['length_mm'], (
         'the summed cover no longer exceeds the face, so summing and unioning '
         'would agree and this arm proves nothing: {:.2f}mm vs {:.2f}mm'
-        .format(summed, east['length_mm']))
-    print('  PASS: glasgow J1 east -- {} neighbours, {:.2f}mm summed against '
-          '8.23mm unioned on a {:.2f}mm face, supply 3 (0 if summed)'
-          .format(n_obs, summed, east['length_mm']))
+        .format(summed, south['length_mm']))
+    print('  PASS: ulx3s H4 south -- {} neighbours, {:.2f}mm summed against '
+          '3.71mm unioned on a {:.2f}mm face, supply 4 (0 if summed)'
+          .format(n_obs, summed, south['length_mm']))
 
 
 def test_tigard_moves_on_the_side_test_not_the_union():

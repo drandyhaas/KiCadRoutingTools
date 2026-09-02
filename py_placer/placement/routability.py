@@ -859,9 +859,11 @@ def health(state, pcb_data, blocks: Dict[str, Sequence[str]],
 # run-6 exploration). V1 scope, stated honestly:
 #   - supply counts lanes a face can pass at the routed pitch AND at the
 #     finest legal grid (the run-5 grid confound, productized);
-#   - lanes eaten by NEIGHBOR BODIES inside the escape band are charged
-#     per neighbor (`eaten_by`), via the same courtyard geometry the
-#     assembly channel uses;
+#   - lanes eaten by NEIGHBOR COPPER inside the escape band are charged
+#     per neighbor (`eaten_by`), via `legality.part_copper_geometry` -- the
+#     same box `escape` charges, since #841. It was the courtyard, justified
+#     by consistency with the ASSEMBLY channel rather than by what obstructs
+#     a track; see the note beside the kernel call below;
 #   - supply-tap/via consumption is NOT modeled (v2; every consumer output
 #     says so rather than faking it).
 # Report-only: these numbers feed the placement fix loop's classification
@@ -903,8 +905,8 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     """
     from placement.legality import (build_part_pads, container_refs,
                                     footprint_has_through_pads, footprint_side,
-                                    graded_parts_from_file, rect_gap,
-                                    sides_occupied)
+                                    graded_parts_from_file,
+                                    part_copper_geometry, sides_occupied)
     from .escape import span_eaten
 
     fps = pcb_data.footprints or {}
@@ -967,9 +969,18 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                                footprint_has_through_pads(fp))
     _graded = graded_parts_from_file(pcb_data, pcb_file)
     _containers = container_refs(pcb_data, _graded)
-    neighbors = [g for g in _graded
+    # #841: the neighbour RECT is the pad COPPER, not the courtyard. The
+    # SIDE and CONTAINER questions stay on `_graded`: "which faces does this
+    # part occupy" and "is this footprint a frame" are both properties of the
+    # drawn outline, and `CONTAINER_RATIO` was calibrated on courtyard AREA.
+    # A ref with no copper geometry is dropped -- measured, that set is
+    # exactly the board's `synthetic` refs (glasgow 8, ulx3s 9, orangecrab 3,
+    # tigard 3, esp_prog 3, watchy 2, none elsewhere), the +/-0.5mm fiction
+    # `grade_body_overlap` already refuses to gate on.
+    _geom = part_copper_geometry(fps, clearance, parts=parts)
+    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
                  if g.ref != ref and (own_sides & g.sides)
-                 and g.ref not in _containers]
+                 and g.ref not in _containers and g.ref in _geom]
 
     out = []
     for fname, (x0, y0, x1, y1) in faces.items():
@@ -992,14 +1003,10 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
         # and clamps to the span, so an impossible total is impossible rather
         # than absorbed.
         #
-        # The neighbour RECTANGLE stays the courtyard, deliberately: this
-        # ledger and `escape` disagree about that and the disagreement is not
-        # settled here. Measured, swapping escape onto courtyards moves it by
-        # 3-6x on five boards (glasgow 19 -> 126, kit-dev 0 -> 43), which is a
-        # different instrument rather than a refinement. The kernel takes the
-        # rects from its caller precisely so that choice stays a caller's.
-        covered, order = span_eaten(lo, hi, band_across, horiz,
-                                    [(g.ref, g.rect) for g in neighbors])
+        # ...and the same neighbour RECTANGLE as `escape`, since #841: the
+        # pad-copper box `part_copper_geometry` resolves once above. The two
+        # ledgers now agree on every input to this kernel.
+        covered, order = span_eaten(lo, hi, band_across, horiz, neighbors)
         eaten = [(r, round(mm / pitch_routed, 2)) for r, mm in order]
         usable = max(0.0, length - covered)
         supply_routed = int(usable // pitch_routed)
@@ -1023,18 +1030,30 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # `max(0.0, length - covered)` absorbed the impossible total as supply 0.
     # Unioned it is 8.23mm and supply 3.
     #
-    # NOT shared, and the difference is the point: the neighbour RECTANGLE.
-    # This ledger charges the courtyard, `escape` the pad bbox. Measured on
-    # THIS branch, swapping only the neighbour rect moves the escape ledger on
-    # SEVEN boards -- glasgow_revC 17 -> 125 deficit lanes, watchy 25 -> 88,
-    # orangecrab 70 -> 147, tigard 41 -> 75, rp2350 53 -> 91, and
-    # kit-dev-coldfire 0 -> 18 and ulx3s 0 -> 19, which stop being
-    # zero-deficit boards. That is a different instrument rather than a
-    # refinement. The two are also
-    # answering different questions: what obstructs a TRACK is foreign COPPER,
-    # what obstructs a PART is a foreign BODY, and a courtyard is an assembly
-    # keep-out drawn deliberately beyond the copper. Which of the two a LANE
-    # ledger should use is a real question and is filed separately.
+    # ...and since #841 the neighbour RECTANGLE is shared too, which is what
+    # settles the question this block used to leave open. What obstructs a
+    # TRACK is foreign COPPER; what obstructs a PART is a foreign BODY, and a
+    # courtyard is an assembly keep-out drawn deliberately beyond the copper.
+    # A lane ledger wants the first. Both ledgers charge
+    # `legality.part_copper_geometry`.
+    #
+    # This ledger's own deficit at the finest grid, over the fine-pitch parts,
+    # at clearance 0.2 / track 0.2 / grid 0.05 -- courtyard (before) -> pad
+    # copper (now), with the bbox of pad CENTRES for scale, since that is what
+    # `escape` charged and it is NOT the same box:
+    #
+    #   glasgow_revC  116 ->  75 (37)     orangecrab_ext_pll 163 -> 147 (87)
+    #   rp2350         67 ->  53 (30)     tigard              54 ->  37  (8)
+    #   watchy         31 ->  10  (2)     ulx3s               72 ->  68 (65)
+    #   kit-dev / splitflap / esp_prog: 0 throughout
+    #
+    # ONE CONSEQUENCE, disclosed rather than buried: this takes
+    # `check_channels --gate` from exit 4 to exit 0 on the only wrong-basin
+    # fixture the starved-face gate has. The detection turned on U30's 1.325mm
+    # courtyard skirt reaching into a 1.0mm escape band its copper does not.
+    # `tests/test_run8_starved_face_gate.py` records the measurement, pins the
+    # band dependence, and says the band needs its own re-derivation -- the
+    # band floor and the neighbour rect are one model.
     #
     # Also still different, and deliberately: the demand model (this one takes
     # nets with >= 2 owners and <= DISPLACEMENT_MAX_FANOUT, escape takes an

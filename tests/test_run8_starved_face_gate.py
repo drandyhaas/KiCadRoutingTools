@@ -28,6 +28,42 @@ So the gate is `--baseline` + `--gate`, mirroring check_assembly, and the
 absolute count stays a report. The refuted absolute form is recorded here with
 its numbers so the finding stays a change detector rather than folklore.
 
+#841: THE WRONG-BASIN ARM NO LONGER FIRES, and that is recorded rather than
+repaired, because repairing it here would mean tuning a constant until one
+fixture agreed with a conclusion already reached.
+
+`face_lane_ledger` now charges a neighbour its pad COPPER instead of its
+COURTYARD. The detection turned entirely on the difference. glasgow's U30 is
+an 8.35 x 8.35mm pad field inside an 11.0 x 11.0mm courtyard -- a 1.325mm
+skirt on every side. U1's east face looks `max(1.0, 4 * pitch_routed)` deep
+for neighbours, which at --clearance 0.09 is the 1.0mm FLOOR. U30's courtyard
+reached into that floor; its copper sits 1.775mm out and does not. So:
+
+    band 1.0 (shipped)  U1 E supply 25, eaten by C14/C76      exit 0, 0 NEW
+    band 2.0            U1 E supply  1, eaten by U30 (30.3)   exit 4, 2 NEW
+    band 3.0            U1 E supply  1, eaten by U30          exit 0, 0 NEW
+    band 4.0            U1 E supply  1, eaten by U30          exit 0, 1 NEW
+
+The detection is BAND-GATED, not gone -- and the band is NON-MONOTONE on the
+only fixture there is, which is why no value of it is adopted here. The band
+floor and the neighbour rectangle are one model (a courtyard IS a body plus a
+skirt, so shrinking to copper while holding the band silently narrows the
+search by that skirt), and re-deriving it needs the 33-healthy-board
+preregistered calibration above re-run at the copper rect, not a fixture fit.
+Filed as its own issue.
+
+Two things follow that a reader must not have to infer:
+
+  * The gate currently has NO known true positive on the copper instrument.
+    That is a real loss, not a bookkeeping item.
+  * `wk/` is gitignored, so a clean clone SKIPs this block and CI has never
+    executed the assertion. A green suite is not evidence about it either way.
+
+The arm below therefore asserts what is MEASURED at the shipped band, and a
+second arm pins the band dependence through `face_lane_ledger`'s own
+`escape_band_mm` keyword, so the mechanism stays executable instead of
+becoming prose in this docstring.
+
 Run: python3 -X utf8 tests/test_run8_starved_face_gate.py
 """
 import os
@@ -42,6 +78,42 @@ sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
 os.environ.setdefault('KRT_NO_BANNER', '1')
 
 import check_channels                                          # noqa: E402
+from kicad_parser import parse_kicad_pcb                       # noqa: E402
+from placement import routability as _R                        # noqa: E402
+
+
+def _u1_east(board, band):
+    """U1's east face on the wrong-basin board, at one escape band."""
+    pcb = parse_kicad_pcb(board)
+    kw = dict(clearance=0.09, track_width=0.127, grid_step=0.05,
+              pcb_file=board)
+    if band is not None:
+        kw['escape_band_mm'] = band
+    rows = _R.face_lane_ledger(pcb, 'U1', **kw)
+    return next(r for r in rows if r['face'] == 'E')
+
+
+def _check_the_band_is_what_moved(workdir):
+    """#841: the detection is band-gated, and that is asserted rather than
+    described.
+
+    Without this the docstring above is the only record that the wrong-basin
+    board still HAS a starved face at a deeper band -- and a claim that lives
+    only in prose is the one that goes stale. `escape_band_mm` is a public
+    keyword of `face_lane_ledger` that no production caller passes, which is
+    itself part of the finding.
+    """
+    board = os.path.join(workdir, 'rL_repair.kicad_pcb')
+    shipped = _u1_east(board, None)
+    deep = _u1_east(board, 2.0)
+    check('at the shipped band U1 east is not starved',
+          shipped['supply_finest_grid'] >= 20, shipped)
+    check('...and U30 is not even charged there',
+          'U30' not in {r for r, _v in shipped['eaten_by']}, shipped)
+    check('at a 2.0mm band the same face collapses',
+          deep['supply_finest_grid'] <= 2, deep)
+    check('...and U30 is the blocker that took it',
+          deep['eaten_by'] and deep['eaten_by'][0][0] == 'U30', deep)
 
 FAILURES = []
 
@@ -94,9 +166,14 @@ def main():
         code, out = run([os.path.join(wrong, 'rL_repair.kicad_pcb'),
                          '--clearance', '0.09', '--baseline',
                          os.path.join(wrong, 'perturbed.kicad_pcb'), '--gate'])
-        check('the wrong-basin placement fails the gate', code == 4,
+        # #841: 4 -> 0. Recorded, with the mechanism pinned below, NOT
+        # repaired by moving the band until this fixture agrees again.
+        check('the wrong-basin placement no longer fails the gate at the '
+              'shipped escape band (#841, a LOSS -- see the docstring)',
+              code == 0, out[-400:])
+        check('...and it names no new starved face', 'NEW:' not in out,
               out[-400:])
-        check('it names the starved faces', out.count('NEW:') >= 2, out[-400:])
+        _check_the_band_is_what_moved(wrong)
     else:
         print('  SKIP  recorded boards not present; the measured values are '
               'in the docstring')

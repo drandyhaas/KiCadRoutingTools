@@ -209,33 +209,61 @@ ROWS = [
 
     # ---- the reconciliation ---------------------------------------------
     ('routability-keeps-its-one-sided-side-test', 'rou',
-     """    neighbors = [g for g in _graded
+     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
                  if g.ref != ref and (own_sides & g.sides)
-                 and g.ref not in _containers]""",
-     """    neighbors = [g for g in _graded
+                 and g.ref not in _containers and g.ref in _geom]""",
+     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
                  if g.ref != ref and (footprint_side(fp) in g.sides)
-                 and g.ref not in _containers]""",
+                 and g.ref not in _containers and g.ref in _geom]""",
      (T835,), 'KILLED'),
 
     ('routability-goes-back-to-double-charging', 'rou',
-     """        covered, order = span_eaten(lo, hi, band_across, horiz,
-                                    [(g.ref, g.rect) for g in neighbors])""",
-     """        covered, order = span_eaten(lo, hi, band_across, horiz, [])
-        covered = 0.0
+     """        covered, order = span_eaten(lo, hi, band_across, horiz, neighbors)""",
+     """        covered = 0.0
         order = []
-        for g in neighbors:
-            rct = g.rect
-            if rect_gap(rct, (lo if horiz else band_across[0],
-                              band_across[0] if horiz else lo,
-                              hi if horiz else band_across[1],
-                              band_across[1] if horiz else hi)) >= 0:
+        for _nref, rct in neighbors:
+            across = (rct[1], rct[3]) if horiz else (rct[0], rct[2])
+            if across[1] < band_across[0] or across[0] > band_across[1]:
                 continue
             sp = ((min(rct[2], hi) - max(rct[0], lo)) if horiz
                   else (min(rct[3], hi) - max(rct[1], lo)))
             if sp <= 0:
                 continue
             covered += sp
-            order.append((g.ref, sp))""",
+            order.append((_nref, sp))""",
+     (T835,), 'KILLED'),
+
+    # #841. Without this row nothing in the battery notices `face_lane_ledger`
+    # going back to billing routing for assembly margin: the deficit GROWS,
+    # so every "is there a deficit" arm is satisfied harder.
+    ('routability-goes-back-to-the-courtyard', 'rou',
+     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded""",
+     """    neighbors = [(g.ref, g.rect) for g in _graded""",
+     (T835,), 'KILLED'),
+
+    # #841, the other direction. `escape` charged the bbox of pad CENTRES, so
+    # this is the exact code that shipped before -- and the per-board table is
+    # what has to catch it.
+    ('escape-neighbour-goes-back-to-pad-centres', 'esc',
+     """        obstacles.append((other, g.rect if g is not None else _part_rect(ofp)))""",
+     """        obstacles.append((other, _part_rect(ofp)))""",
+     (T835,), 'KILLED'),
+
+    # #841. The pairing that keeps face ASSIGNMENT invariant while the box it
+    # measures against grows. Measured, this alone makes all 244 of one corpus
+    # board's pads interior, and the ledger then reports no demand at all --
+    # every deficit number goes green DOWNWARD, which is why the demand arm
+    # exists to kill it.
+    ('escape-face-assignment-forgets-the-pad-edge', 'esc',
+     """        box = None if own is None else _pad_box(own, pad)""",
+     """        box = None""",
+     (T835,), 'KILLED'),
+
+    # #841. The subject rect. Separable from the row above on purpose: one
+    # moves the face, the other moves which pads are on it.
+    ('escape-subject-rect-goes-back-to-pad-centres', 'esc',
+     """    rect = own.rect if own is not None else _part_rect(fp)""",
+     """    rect = _part_rect(fp)""",
      (T835,), 'KILLED'),
 
     ('routability-stops-exempting-containers', 'rou',
