@@ -17,7 +17,11 @@ Three things make this honest rather than a plausible number:
   manufacture deficits on a fine board and hide them on a coarse one.
 * **`blockers` names who ate the lanes.** A count says a face is short; the
   blocker list says which neighbouring part to move. That is the difference
-  between a signal and an action, and it is the field to read first.
+  between a signal and an action, and it is the field to read first. It is
+  only that if the names are real: until #835 a neighbour was charged on XY
+  overlap alone, so a part on the far side of the board -- copper these tracks
+  never share -- and a module outline the part sits INSIDE were both named as
+  the one to move. On ulx3s every reported deficit was one of those.
 * **Interior pads count toward NO face.** A pad boxed in by its neighbours does
   not escape sideways at all -- it needs a via. Rolling it into a face's demand
   would blame the face for a fanout problem. Reported separately.
@@ -88,13 +92,25 @@ class FaceLedger:
         """Vias that fit in ONE row along this face -- UNOBSTRUCTED.
 
         Measured on `span_mm`, not on `span_mm - blocked_mm`, and the
-        asymmetry with `supply` on the same row is deliberate. `blocked_mm`
-        comes from `_blocked_span`, which is side-blind and container-blind:
-        on rp2350, U8's pad rect CONTAINS U6's, so 6.90 of a 6.90mm face is
-        charged to it, and one of that face's four blockers sits on the
-        opposite board side. Feeding that into an upper bound turns the bound
-        into a lower one with no warning. Over-stating is inside this term's
-        contract -- it may never be used to PASS a face; under-stating is not.
+        asymmetry with `supply` on the same row is deliberate: over-stating is
+        inside this term's contract -- it may never be used to PASS a face --
+        and under-stating is not. Feeding a `blocked_mm` that is too large into
+        an UPPER bound turns it into a lower one with no warning.
+
+        The original reason was that `_blocked_span` was "side-blind and
+        container-blind", citing rp2350's U6: 6.90 of a 6.90mm face charged
+        because U8's pad rect contains it, and a blocker on the opposite board
+        side. #835 fixed both, so that reason is gone, and the witness was
+        wrong about the side half anyway -- U6 is DRILLED, so it occupies both
+        faces and its B-side blocker U1 was charged correctly.
+
+        The asymmetry stays, on the argument rather than the example.
+        `blocked_mm` is still a pad-BBOX model of a neighbour, which for a
+        perimeter-pad part reads as a solid block; and `supply` is a floor
+        while this is a ceiling, so they may not be built from the same
+        subtraction even when both are sound. Post-#835, U6 is
+        supply 2/11/10/12 against demand 13/13/14/14 -- still the board's worst
+        part, and no longer fully blocked.
 
         ONE ROW, and the arithmetic is the reason rather than the caution. A
         second-row via must be reached BETWEEN two first-row vias: the copper

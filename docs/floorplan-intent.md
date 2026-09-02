@@ -612,7 +612,11 @@ Three things keep it honest:
   or hide a structural finding depending on the board it met.
 - **`blockers` names who ate the lanes.** A count says a face is short; the
   blocker list says which neighbour to move. Read that field first — it is the
-  difference between a signal and an action.
+  difference between a signal and an action. A neighbour is charged only if it
+  shares a board face with the part (a drilled part occupies both) and is not a
+  container — a module outline covering half the board, which the part sits
+  inside rather than beside (#835). Before that, ulx3s reported six faces in
+  deficit and every one of them was charged to copper on the other side.
 - **Interior pads count toward no face** and are reported separately. A boxed-in
   pad does not escape sideways at any pitch; it needs a via. Rolling it into a
   face's demand would blame the face for a fanout problem.

@@ -1014,6 +1014,26 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                     'deficit_finest_grid': max(0, n_demand - supply_fine),
                     'eaten_by': eaten[:8],
                     'taps_not_modeled': True})
+    # SHARED WITH `escape` (#835): the obstruction arithmetic -- the
+    # interval union, the clamp, the symmetric side test and the container
+    # exemption -- is one kernel, `escape.span_eaten`, because the two ledgers
+    # were answering the same question three different ways.
+    #
+    # NOT shared, and the difference is the point: the neighbour RECTANGLE.
+    # This ledger charges the courtyard, `escape` the pad bbox. Measured,
+    # putting escape on courtyards moves it 3-6x on five boards (glasgow
+    # 19 -> 126 deficit lanes, ulx3s 19 -> 88, kit-dev-coldfire 0 -> 43), which
+    # is a different instrument rather than a refinement. The two are also
+    # answering different questions: what obstructs a TRACK is foreign COPPER,
+    # what obstructs a PART is a foreign BODY, and a courtyard is an assembly
+    # keep-out drawn deliberately beyond the copper. Which of the two a LANE
+    # ledger should use is a real question and is filed separately.
+    #
+    # Also still different, and deliberately: the demand model (this one takes
+    # nets with >= 2 owners and <= DISPLACEMENT_MAX_FANOUT, escape takes an
+    # `ignore_net_ids` list and an interior bucket) and the grid quantization
+    # below.
+    #
     # NO LAYER TERM HERE, deliberately (#700). `escape.FaceLedger` gained
     # `via_slots` / `supply_other_max` / `deficit_floor`; this ledger did not,
     # because its supplies are GRID-QUANTIZED (`_quantized_pitch` above) while
