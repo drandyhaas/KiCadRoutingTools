@@ -207,10 +207,16 @@ ROWS = [
      (T620,), 'KILLED'),
 
     # --- THE LADDER ---------------------------------------------------------
-    ('ladder-never-tried', 'bga',
+    # NAMED FOR WHAT IT IS, after an audit pointed out the old name asserted a
+    # behaviour the edit does not produce: `None or X` is exactly `X`, so this
+    # never stops the ladder being tried. It is the battery's OWN control --
+    # the row that proves a SURVIVED verdict is reachable and that the runner
+    # is not silently killing everything. `ladder-refuses-immediately` is the
+    # row that actually removes the ladder.
+    ('control-semantically-inert-edit', 'bga',
      '                    _thin = thin_drill_to_clear(',
      '                    _thin = None or thin_drill_to_clear(',
-     (T620,), 'SURVIVED'),      # deliberately inert: a no-op control row
+     (T620,), 'SURVIVED'),
 
     ('ladder-refuses-immediately', 'bga',
      '                    if _thin is None:',
@@ -229,13 +235,16 @@ ROWS = [
      '    for cand in cands:\n        return cand',
      (T620,), 'KILLED'),
 
+    # EXPECTED SURVIVOR, with the rationale CORRECTED by an audit. It is not
+    # "rung 0 is the top" -- the real reason is the `via_drill < drill - 1e-9`
+    # filter: the standard ladder's drills are [0.20, 0.15, 0.15], so widening
+    # the slice can only re-admit drills the filter then throws away. The row
+    # stays because the slice IS load-bearing for a ladder whose shallow rungs
+    # are thinner than a deep one, which no packaged tier is today.
     ('ladder-climbs-above-its-own-rung', 'geo',
      "    cands = sorted({f['via_drill'] for f in floors[rung:]",
      "    cands = sorted({f['via_drill'] for f in floors[0:]",
-     (T620,), 'SURVIVED'),      # rung 0 is the top: floors[0:] == floors[rung:]
-                                # whenever the clamp did not escalate, and the
-                                # filter drops anything >= drill. Recorded as a
-                                # measured no-op, not deleted.
+     (T620,), 'SURVIVED'),
 
     ('thinned-drill-not-applied', 'bga',
      '                    _thinned.append((v_drill, _thin))\n'
@@ -244,10 +253,21 @@ ROWS = [
      (T620,), 'KILLED'),
 
     # --- the second guard's bookkeeping (#620's other half) -----------------
-    ('silent-skip-restored', 'bga',
+    # RENAMED after an audit: `if False and ...` DELETES the refusal, it does
+    # not restore the old drop-via/keep-route shape. Both are live mutations
+    # worth having, so the second one is now its own row below.
+    ('ring-guard-refusal-deleted', 'bga',
      '                if would_overlap_existing_via(pad_x, pad_y, v_size):',
      '                if False and would_overlap_existing_via(pad_x, pad_y, '
      'v_size):',
+     (T620,), 'KILLED'),
+
+    # The actual pre-#620 shape: the via is dropped and the ROUTE is kept, so
+    # an inner-layer track ships with nothing connecting it to the ball.
+    ('silent-skip-restored', 'bga',
+     '                if would_overlap_existing_via(pad_x, pad_y, v_size):\n',
+     '                if would_overlap_existing_via(pad_x, pad_y, v_size):\n'
+     '                    continue\n',
      (T620,), 'KILLED'),
 
     # --- the disclosures ----------------------------------------------------
