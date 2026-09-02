@@ -51,6 +51,8 @@ from bga_fanout.geometry import (
     clamp_via_to_pad,
     immovable_foreign_pads,
     via_clears_pad_rects,
+    PendingVias,
+    thin_drill_to_clear,
 )
 from bga_fanout.escape import (
     find_escape_channel,
@@ -619,7 +621,7 @@ def manage_vias(
     via_size: float,
     via_drill: float,
     clearance: float,
-) -> Tuple[List[Dict], List[Dict]]:
+) -> Tuple[List[Dict], List[Dict], List['FanoutRoute']]:
     """
     Manage vias for fanout routes.
 
@@ -635,23 +637,40 @@ def manage_vias(
         clearance: Minimum clearance between vias
 
     Returns:
-        Tuple of (vias_to_add, vias_to_remove)
+        Tuple of (vias_to_add, vias_to_remove, via_blocked_routes)
 
-    KNOWN GAP, NOT FIXED HERE -- D10's self-blindness, in this function.
-    `vias_to_add` is appended to below and never read back, and BOTH guards
-    that gate an append iterate `pcb_data.vias` only: `would_overlap_existing_via`
-    and `via_in_pad_conflict`'s drill loop. So two vias added in ONE call are
-    never tested against each other -- the same shape as the qfn underpad
-    escape's, where the fix was to test each candidate against this run's own
-    output as well as the input board (`qfn_fanout.run_output_conflict`, which
-    is reusable and would be this code's second caller).
+    D10's SELF-BLINDNESS, CLOSED HERE (#620). `vias_to_add` was appended to
+    below and never read back, and BOTH guards that gate an append iterate
+    `pcb_data.vias` only: `would_overlap_existing_via` and
+    `via_in_pad_conflict`'s drill loop. So two vias added in ONE call were
+    never tested against each other. `PendingVias` (bga_fanout/geometry.py) is
+    the missing half, and its docstring argues what it tests -- the drill
+    always, the ring only for a via the clamp could not fit inside its pad --
+    from a sweep rather than from first principles.
 
-    Structurally verified by reading; the IMPACT is UNMEASURED, deliberately
-    stated as such. A 0.5mm-pitch BGA taking via 0.45 + clearance 0.1 needs
-    0.55mm between adjacent ball centres and has 0.50 -- but `clamp_via_to_pad`
-    shrinks a via to fit its pad first, and on that pitch it may clamp far
-    enough to make the pair legal anyway. Whether this bites needs measuring
-    on a real fine-pitch BGA before anyone claims it does.
+    The impact, which the issue deliberately left UNMEASURED, is measured now:
+    on an empty board two 0.30mm-pitch balls with 0.25mm pads ship holes
+    0.15mm apart against a 0.20mm fab floor, `added=2 blocked=0`, and two
+    coincident same-net balls ship TWO `(via ...)` s-exprs at one point. The
+    issue's own worked example -- 0.5mm pitch, via 0.45, clearance 0.1 -- was
+    right to hedge: `clamp_via_to_pad` shrinks that via to the ball pad first
+    and the pair is legal. **No board in this repo reaches the refusal branch
+    at CLI defaults**, which is why the evidence is a constructed fixture and
+    the corpus arms are a safety check, not a headline.
+
+    The cost is stated where it is paid: a refusal drops the escape (see the
+    #756 block below), so the conflict branch descends the fab drill ladder
+    before giving one up, and `--fab-overrides` -- which collapses that ladder
+    to one hard rung -- cannot descend at all. That is the configuration the
+    #620 contributor measured as pure loss, and their measurement is why this
+    has a ladder and a same-site rule at all.
+
+    RESIDUAL, named rather than hidden: a conflict is resolved against the vias
+    committed SO FAR, while the two whole-net drops that run after this
+    function returns (`esc_dropped`, and the via-vs-foreign-track pass) can
+    later delete a via a refusal was measured against. Twins are immune -- same
+    net, dropped together -- but a distinct-pair loser is not recoverable once
+    its tracks are gone.
 
     `via_in_pad_conflict`'s drill floor was the OTHER gap here -- priced at
     the flat `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the
@@ -665,10 +684,10 @@ def manage_vias(
     **The cost, which the via-nudge half does not pay:** a refusal here
     DROPS the escape rather than searching again, so a tighter floor can
     turn an escaped ball into a failed net. The via-nudge answers that with
-    a two-rung ladder; this pass has no second rung to descend to. Stated
-    at the resolution site with the numbers.
-
-    The self-blindness above is untouched and still open.
+    a two-rung ladder; this pass had no second rung to descend to. Stated
+    at the resolution site with the numbers. #620 gives the SAME-CALL arm one
+    (`thin_drill_to_clear`); the board-facing arm above still has none, so a
+    board declaration can still refuse an escape outright.
     """
     def find_nearby_via(x: float, y: float, net_id: int, max_dist: float):
         """Find an existing via on the same net within max_dist of position."""
@@ -856,6 +875,16 @@ def manage_vias(
     floor_pads = 0
     escalated_count = 0
 
+    # #620: this run's OWN output, queryable as it grows. Every guard above
+    # scans `pcb_data`, and `vias_to_add` was appended to and never read back,
+    # so two vias placed in one call were spaced against the input board and
+    # against nothing else. `PendingVias` is the missing half; what it tests
+    # and what it deliberately does not is argued at its definition.
+    _pending = PendingVias(_h2h, clearance)
+    _twin_shared = 0       # coincident same-net sites served by ONE hole
+    _thinned = []          # (from, to) drills a deeper fab rung rescued
+    _pending_refused = []  # (net name, reason) escapes no rung could place
+
     # Check distance threshold: via is "at pad" if within via radius + small tolerance
     via_proximity_threshold = via_size / 2 + 0.1
 
@@ -906,6 +935,39 @@ def manage_vias(
                                        route.net_id) is not None:
                     via_blocked_routes.append(route)
                     continue
+                # #620: the pair test the input-board guards above cannot do.
+                # Placed AFTER them so the board keeps its present precedence
+                # -- this only decides among sites THIS call is creating.
+                _bulges = status == 'floor'
+                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, v_drill,
+                                               route.net_id, _bulges)
+                if _v == 'twin':
+                    # Two routes, one physical hole. Both keep their tracks and
+                    # both anchor to the via already committed here: the ball-
+                    # anchor test downstream (`_has_copper`) looks for a via
+                    # inside the pad, and this is that via. Today's code
+                    # appends a second identical dict and the writer, which
+                    # does not dedupe, emits both as stacked copper.
+                    _twin_shared += 1
+                    continue
+                if _v == 'conflict':
+                    # A refusal here drops the escape -- there is no re-sweep
+                    # -- so descend the fab ladder's drill floors first. The
+                    # twin branch above cannot re-fire for a thinner drill, so
+                    # 'clear' is the right predicate.
+                    _thin = thin_drill_to_clear(
+                        v_drill, floors, rung,
+                        lambda cand: _pending.verdict(
+                            pad_x, pad_y, v_size, cand, route.net_id,
+                            _bulges)[0] == 'clear')
+                    if _thin is None:
+                        via_blocked_routes.append(route)
+                        _pending_refused.append(
+                            (route.pad.net_name or f"net{route.net_id}",
+                             _detail[0]))
+                        continue
+                    _thinned.append((v_drill, _thin))
+                    v_drill = _thin
                 if not would_overlap_existing_via(pad_x, pad_y, v_size):
                     vias_to_add.append({
                         'x': pad_x,
@@ -915,6 +977,8 @@ def manage_vias(
                         'layers': ['F.Cu', 'B.Cu'],
                         'net_id': route.net_id
                     })
+                    _pending.add(pad_x, pad_y, v_size, v_drill, route.net_id,
+                                 _bulges)
 
     if vias_to_add:
         print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
@@ -926,6 +990,26 @@ def manage_vias(
         print(f"  WARNING: {floor_pads} pad(s) smaller than the fab via floor "
               f"({fab_floor_min(copper)['via_diameter']:.2f}mm dia); via held at the "
               f"floor and still bulges past the pad edge")
+    # #620 disclosure. Separate from the #253/#370 line below because these are
+    # this run's own vias meeting each other, which the reader cannot act on in
+    # the same way: the levers are the pitch, the drill and the fab tier.
+    if _twin_shared:
+        print(f"  #620: {_twin_shared} coincident same-net site(s) share one "
+              f"via instead of stacking two")
+    if _thinned:
+        warn_fab_escalation(
+            f"{len(_thinned)} via-in-pad drill(s) thinned to "
+            f"{min(t[1] for t in _thinned):g}mm to hold the {_h2h:g}mm "
+            f"hole-to-hole floor ({_h2h_src}) against this run's own vias")
+    if _pending_refused:
+        _names = sorted({n for n, _r in _pending_refused})
+        _reasons = sorted({r for _n, r in _pending_refused})
+        print(f"  WARNING: {len(_pending_refused)} escape(s) dropped: this "
+              f"run's own via-in-pads cannot be spaced at the {_h2h:g}mm "
+              f"hole-to-hole floor ({_h2h_src}) on this pitch, and no fab rung "
+              f"is thin enough ({'; '.join(_reasons)}); retry with "
+              f"--escape-method underpad, a smaller --via-drill, or a fab tier "
+              f"whose floor this pitch can meet: {', '.join(_names)}")
     if vias_to_remove:
         print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
     if via_blocked_routes:
