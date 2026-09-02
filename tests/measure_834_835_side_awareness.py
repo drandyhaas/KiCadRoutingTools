@@ -264,11 +264,24 @@ def diff(before, after):
         b = json.load(fh)
     print('before {}  ->  after {}'.format(
         a['engine_sha'][:12], b['engine_sha'][:12]))
+    # A table one side did not RUN is not a change. Saying so is the whole
+    # point: a `--table BC` run diffed against a full one otherwise reports
+    # every board as moved, which is a instrument that cannot tell a real
+    # transition from its own missing input.
+    common = sorted({t for t, _ in DIFF_KEYS
+                     if any(t in r for r in a['boards'].values())
+                     and any(t in r for r in b['boards'].values())})
+    skipped = sorted({t for t, _ in DIFF_KEYS} - set(common))
+    if skipped:
+        print('table(s) {} not measured on both sides -- not compared'
+              .format(', '.join(skipped)))
     moved = 0
     for name in sorted(set(a['boards']) | set(b['boards'])):
         ra, rb = a['boards'].get(name, {}), b['boards'].get(name, {})
         lines = []
         for t, k in DIFF_KEYS:
+            if t not in common:
+                continue
             va = (ra.get(t) or {}).get(k)
             vb = (rb.get(t) or {}).get(k)
             if va is None and vb is None:
@@ -280,7 +293,8 @@ def diff(before, after):
             print('  {:<34} {}'.format(name, ';  '.join(lines)))
         else:
             print('  {:<34} unchanged'.format(name))
-    print('{} of {} board(s) moved'.format(moved, len(a['boards'])))
+    print('{} of {} board(s) moved, comparing table(s) {}'.format(
+        moved, len(set(a['boards']) | set(b['boards'])), ''.join(common)))
 
 
 def main():

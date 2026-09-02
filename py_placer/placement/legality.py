@@ -257,6 +257,26 @@ def sides_occupied(side: str, has_tht: bool) -> frozenset:
     return BOTH_SIDES if has_tht else frozenset((side,))
 
 
+def container_refs(pcb_data, graded) -> set:
+    """Refs whose courtyard covers at least `CONTAINER_RATIO` of the board.
+
+    A frame, not a body -- see the constant. Extracted from
+    `grade_body_overlap` (#835) so the escape ledger decides who is a
+    container the same way the courtyard channel does; two copies of this
+    arithmetic is how the two channels would come to disagree about rp2350's
+    U8, which is the part the constant was calibrated on.
+
+    `graded` is a `graded_parts_from_file(...)` sequence. Empty when the board
+    declares no bounds, which is the conservative answer: nothing is exempt.
+    """
+    bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
+    if not bb:
+        return set()
+    barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
+    return {g.ref for g in graded
+            if rect_area(g.rect) >= CONTAINER_RATIO * barea}
+
+
 def rect_on(side_wanted: str, own_side: str, courtyard_rect, tht_rect):
     """The rect a part presents on `side_wanted`.
 
@@ -1058,13 +1078,9 @@ def grade_body_overlap(pcb_data, clearance: float,
     # Refs whose courtyard rect is the zero-pad +/-0.5mm fiction: their pairs
     # may inform but must never gate (run-23's phantom G***<->J5).
     _synthetic_refs = {g.ref for g in _graded if g.synthetic}
-    _containers: set = set()
+    # `bb` stays bound here: the edge-waiver and off-board arms below read it.
     bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
-    if bb:
-        _barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
-        for g in _graded:
-            if rect_area(g.rect) >= CONTAINER_RATIO * _barea:
-                _containers.add(g.ref)
+    _containers = container_refs(pcb_data, _graded)
 
     def _waiver_for(a: str, b: str) -> str:
         if a in _containers or b in _containers:

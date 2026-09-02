@@ -177,26 +177,52 @@ def t_the_other_layer_term_survives_a_fully_blocked_face():
     """The defect in the obvious formulation, pinned as a test.
 
     `(signal_layers - 1) * supply` vanishes wherever `supply` is 0 -- and a
-    face in deficit is overwhelmingly one whose channel was eaten. rp2350's
-    U6 has supply 0 on ALL FOUR faces with demand 13/13/14/14, so the obvious
-    form scores the worst part on the 6-layer board that motivated #700 a
-    layer term of exactly zero.
+    face in deficit is overwhelmingly one whose channel was eaten. So the
+    fixture has to be a part with supply 0 on ALL FOUR faces and real demand
+    on each: under the obvious form its layer term is exactly zero.
+
+    RE-ANCHORED by #835, from rp2350's U6 to rp2350's U3, and the reason is
+    worth keeping. U6 read as fully blocked because `_blocked_span` charged it
+    for U8 -- a Teensy module whose 66 perimeter pads bound 17.3 x 34.1mm of
+    mostly empty interior, and which by `legality.CONTAINER_RATIO` is a FRAME,
+    not a body. U6 sits inside it. With that charge gone U6 is
+    supply 2/11/10/12 against demand 13/13/14/14, still the worst part on the
+    board (deficit 11 on north) but no longer fully blocked, so it can no
+    longer carry this arm.
+
+    U3 is a better fixture than U6 ever was: a SOT-666 boxed in by four real
+    same-side neighbours (J1, J2, R1, R2), where the blockage is a fact about
+    the placement rather than an artifact of the instrument. Its deficits are
+    smaller (1/2/1/2) and the property under test is unchanged -- supply 0 on
+    every face, so `(L-1)*supply` is 0, while `supply_other_max` is not.
+
+    It is the ONLY part on the tracked corpus that still meets all four
+    conditions; `tests/measure_834_835_side_awareness.py` regenerates the
+    search. If it stops qualifying, the honest move is a hand-built fixture,
+    not a weaker assertion.
     """
     pcb, path = _board('rp2350_fpga_eensy_prePlane')
-    led = escape.escape_ledger(pcb, pcb_file=path, refs=['U6'])
-    assert led, 'U6 not on this board any more'
-    u6 = led[0]
-    assert all(f.supply == 0 for f in u6.faces), \
-        'U6 is no longer fully blocked; pick another fixture'
-    assert all(f.demand > 0 for f in u6.faces), u6.to_dict()
+    led = escape.escape_ledger(pcb, pcb_file=path, refs=['U3'])
+    assert led, 'U3 not on this board any more'
+    u3 = led[0]
+    assert all(f.supply == 0 for f in u3.faces), \
+        'U3 is no longer fully blocked; pick another fixture'
+    assert all(f.demand > 0 for f in u3.faces), u3.to_dict()
     # The term must still say something here. This is the whole point.
-    assert all(f.supply_other_max > 0 for f in u6.faces), \
-        [f.to_dict() for f in u6.faces]
-    assert all(f.deficit_floor < f.deficit for f in u6.faces), \
-        [(f.face, f.deficit, f.deficit_floor) for f in u6.faces]
-    print(f"  PASS: U6 supply 0 on 4 faces, layer term still "
-          f"{u6.faces[0].supply_other_max} -- deficit "
-          f"{u6.faces[0].deficit} -> {u6.faces[0].deficit_floor}")
+    assert all(f.supply_other_max > 0 for f in u3.faces), \
+        [f.to_dict() for f in u3.faces]
+    assert all(f.deficit_floor < f.deficit for f in u3.faces), \
+        [(f.face, f.deficit, f.deficit_floor) for f in u3.faces]
+    # ...and the part this arm used to name is still the board's worst, which
+    # is what says the instrument was corrected rather than quieted.
+    u6 = escape.escape_ledger(pcb, pcb_file=path, refs=['U6'])[0]
+    assert u6.worst is not None and u6.worst.deficit >= 11, u6.to_dict()
+    assert any(f.supply > 0 for f in u6.faces), \
+        'U6 is fully blocked again -- the container exemption regressed'
+    print(f"  PASS: U3 supply 0 on 4 faces, layer term still "
+          f"{u3.faces[0].supply_other_max} -- deficit "
+          f"{u3.faces[0].deficit} -> {u3.faces[0].deficit_floor}; "
+          f"U6 still worst at {u6.worst.deficit}")
 
 
 def t_the_saturation_is_asserted_rather_than_discovered():
