@@ -110,7 +110,9 @@ ROWS = [
      "        base_ctx = ctx",
      (T_HONESTY, T_849), 'KILLED'),
     ('anchor-channels-drop-the-context', 'c',
+     "        pcb, clearance=clearance, min_extent_mm=args.min_extent,\n"
      "        pcb_file=args.board, context=ctx)",
+     "        pcb, clearance=clearance, min_extent_mm=args.min_extent,\n"
      "        pcb_file=args.board)",
      (T_849,), 'KILLED'),
 

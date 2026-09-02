@@ -167,9 +167,9 @@ ROWS = [
     # ---- the CLI surface --------------------------------------------------
     ('the-cli-flag-never-reaches-the-ledger', 'chk',
      """            grid_step=grid, escape_band_mm=args.escape_band,
-            pcb_file=args.board)""",
+            pcb_file=args.board, context=ctx)""",
      """            grid_step=grid, escape_band_mm=None,
-            pcb_file=args.board)""",
+            pcb_file=args.board, context=ctx)""",
      (T847,), 'KILLED'),
 
     # The BASELINE leg. A gate is a delta, so grading the two sides at
@@ -177,9 +177,9 @@ ROWS = [
     # in the printed output would show it.
     ('the-baseline-is-graded-at-a-different-band', 'chk',
      """                grid_step=grid, escape_band_mm=args.escape_band,
-                pcb_file=args.baseline)""",
+                pcb_file=args.baseline, context=base_ctx)""",
      """                grid_step=grid, escape_band_mm=None,
-                pcb_file=args.baseline)""",
+                pcb_file=args.baseline, context=base_ctx)""",
      (T847,),
      # The battery caught this as a HOLE and the hole was closed rather than
      # the expectation re-recorded: a board against ITSELF at a deep band is
