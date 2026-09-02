@@ -2341,10 +2341,11 @@ class CopperGeometry(NamedTuple):
     #: The union of the PAD rects alone, never wider than `rect`. Face
     #: ASSIGNMENT is measured against this one, because every edge of it is
     #: attained by some pad -- which is what keeps an edge pad at distance
-    #: exactly 0. `rect` does not have that property: measured, on 12 of the
-    #: 348 faces of the corpus's fine-pitch parts the extreme edge is set by
-    #: an NPTH hole and no pad reaches it (rp2350 4 faces, by up to 1.372mm;
-    #: watchy 8, by 0.400mm).
+    #: exactly 0. `rect` does not have that property: measured, on 14 of the
+    #: 388 edges of the corpus's fine-pitch parts the extreme edge is set by
+    #: an NPTH hole and no pad reaches it -- watchy SW1-SW4 (8 edges, 0.400mm),
+    #: rp2350 J2 (4, up to 1.372mm), ulx3s U1 (2, 0.1905mm). Regenerate with
+    #: `tests/test_841_obstruction_rect.py`, which prints the count.
     copper: Tuple[float, float, float, float]
     #: `{(round(global_x, 4), round(global_y, 4)): (x0, y0, x1, y1)}` -- each
     #: copper pad's own rect at this pose, keyed by its centre so a caller
@@ -2386,9 +2387,13 @@ def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
     the +/-0.5mm `synthetic` fiction `part_local_bounds` invents for a
     footprint with neither courtyard nor pads can no longer reach a lane
     SUPPLY, which `options.move_blocker` turns into an instruction to move a
-    part. Measured, the refs this drops from `face_lane_ledger`'s neighbour
-    list are EXACTLY that board's `synthetic` set: glasgow_revC 8, ulx3s 9,
-    orangecrab 3, tigard 3, esp_prog 3, watchy 2, and none elsewhere.
+    part. Measured over the whole tracked corpus, the refs this drops from
+    `face_lane_ledger`'s neighbour list are EXACTLY that board's `synthetic`
+    set -- set equality, on every board that has one: ulx3s 9, glasgow_revC 8,
+    orangecrab 3, tigard 3, esp_prog 3, watchy 2, and interf_u_unrouted /
+    interf_u_unrouted_placed 1 each. Those last two carry no fine-pitch part,
+    so no default run reaches them; they are named because "and none
+    elsewhere" is what was written here first, and it was wrong.
     """
     if parts is None:
         parts = build_part_pads(footprints, clearance, tolerant=True)

@@ -191,9 +191,13 @@ def t_the_other_layer_term_survives_a_fully_blocked_face():
     for U8 -- a Teensy module whose 66 perimeter pads bound 17.3 x 34.1mm of
     mostly empty interior, and which by `legality.CONTAINER_RATIO` is a FRAME,
     not a body. U6 sits inside it. With that charge gone U6 is
-    supply 2/11/10/12 against demand 13/13/14/14, still the worst part on the
-    board (deficit 11 on north) but no longer fully blocked, so it can no
-    longer carry this arm.
+    supply 0/9/4/12 against demand 13/13/14/14, still the worst part on the
+    board (deficit 13 on north) but no longer fully blocked on every face, so
+    it can no longer carry this arm. (Those were 2/11/10/12 and deficit 11
+    when #835 wrote them; #841 charges a neighbour its pad COPPER rather than
+    the bbox of its pad centres, so every supply here fell. The arm's
+    REASONING is unchanged -- U6 is not blocked on all four faces -- which is
+    why the numbers are re-recorded and the fixture is not.)
 
     U3 is a better fixture than U6 ever was: a SOT-666 boxed in by four real
     neighbours (J1, J2, R1, R2) that all share a face with it -- J2 sits on

@@ -417,7 +417,9 @@ def diff(before, after):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--table', default='ABC',
-                    help='which tables to run (subset of ABC)')
+                    help='which tables to run (subset of ABCD; D is the '
+                         '#841 three-rectangle census and is not in the '
+                         'default, since it runs each ledger three times)')
     ap.add_argument('--boards', nargs='*',
                     help='board basenames to restrict to')
     ap.add_argument('--out', help='write the measurement to this JSON file')

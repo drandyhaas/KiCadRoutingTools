@@ -42,10 +42,16 @@ reached into that floor; its copper sits 1.775mm out and does not. So:
     band 1.0 (shipped)  U1 E supply 25, eaten by C14/C76      exit 0, 0 NEW
     band 2.0            U1 E supply  1, eaten by U30 (30.3)   exit 4, 2 NEW
     band 3.0            U1 E supply  1, eaten by U30          exit 0, 0 NEW
-    band 4.0            U1 E supply  1, eaten by U30          exit 0, 1 NEW
+    band 4.0            U1 E supply  1, eaten by U30          exit 4, 1 NEW
 
-The detection is BAND-GATED, not gone -- and the band is NON-MONOTONE on the
-only fixture there is, which is why no value of it is adopted here. The band
+...all at --clearance 0.09, track 0.127, grid 0.05, which is the basis
+`_u1_east` below uses. The CLI resolves the board's OWN track width and
+reports 28 / 2 / 2 / 2 with U30 at 37.88 lanes; same conclusion, different
+instrument, so the table is one basis rather than two halves.
+
+The detection is BAND-GATED, not gone -- and the gate is NON-MONOTONE on the
+only fixture there is: it fires at 2.0, does NOT fire at 3.0, and fires again
+at 4.0. That is why no value of it is adopted here. The band
 floor and the neighbour rectangle are one model (a courtyard IS a body plus a
 skirt, so shrinking to copper while holding the band silently narrows the
 search by that skirt), and re-deriving it needs the 33-healthy-board

@@ -974,9 +974,11 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # part occupy" and "is this footprint a frame" are both properties of the
     # drawn outline, and `CONTAINER_RATIO` was calibrated on courtyard AREA.
     # A ref with no copper geometry is dropped -- measured, that set is
-    # exactly the board's `synthetic` refs (glasgow 8, ulx3s 9, orangecrab 3,
-    # tigard 3, esp_prog 3, watchy 2, none elsewhere), the +/-0.5mm fiction
-    # `grade_body_overlap` already refuses to gate on.
+    # exactly the board's `synthetic` refs on every tracked board that has one
+    # (ulx3s 9, glasgow 8, orangecrab 3, tigard 3, esp_prog 3, watchy 2, and
+    # the two interf_u boards 1 each), the +/-0.5mm fiction
+    # `grade_body_overlap` already refuses to gate on. See
+    # `legality.part_copper_geometry` for the full census.
     _geom = part_copper_geometry(fps, clearance, parts=parts)
     neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
                  if g.ref != ref and (own_sides & g.sides)
@@ -1025,10 +1027,14 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # interval union, the clamp, the symmetric side test and the container
     # exemption -- is one kernel, `escape.span_eaten`, because the two ledgers
     # were answering the same question three different ways. What the union
-    # fixes here: this loop billed `covered += span` per neighbour, so
-    # glasgow_revC's J1 east summed 12.42mm of cover on a 9.64mm face and
-    # `max(0.0, length - covered)` absorbed the impossible total as supply 0.
-    # Unioned it is 8.23mm and supply 3.
+    # fixes here: this loop billed `covered += span` per neighbour, so a face
+    # could be reported as more than fully blocked and `max(0.0, length -
+    # covered)` absorbed the impossible total as supply 0 rather than refusing
+    # it. The witness is ulx3s H4 south -- two neighbours covering 6.16mm of a
+    # 5.50mm face; unioned it is 3.71mm and supply 4. (It was glasgow_revC's
+    # J1 east, 12.42mm on 9.64mm, supply 3. At the pad-copper rect that face
+    # is supply 8 whether summed or unioned, so it is history, not an example
+    # -- see `escape.span_eaten`, which carries the same note.)
     #
     # ...and since #841 the neighbour RECTANGLE is shared too, which is what
     # settles the question this block used to leave open. What obstructs a

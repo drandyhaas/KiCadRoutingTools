@@ -735,11 +735,19 @@ def board_copper_geometry(pcb_data, clearance: float) -> Dict[str, object]:
       track. A courtyard is pick-and-place and rework margin, drawn
       deliberately beyond the copper; a track may legally run under one.
 
-    Measured, escape deficit lanes with only this rect swapped (clearance
-    0.2): glasgow_revC 17 pad-centre / 61 pad-copper / 125 courtyard,
+    Measured, escape deficit lanes with only this rect swapped and the
+    SUBJECT rect held at the pad-centre box #841 inherited (clearance 0.2):
+    glasgow_revC 17 pad-centre / 61 pad-copper / 125 courtyard,
     orangecrab_ext_pll 70 / 123 / 147, rp2350 53 / 78 / 91, watchy 25 / 62 /
     88, tigard 41 / 48 / 75, ulx3s 0 / 5 / 19, kit-dev-coldfire 0 / 4 / 18.
-    Regenerate with `tests/measure_834_835_side_awareness.py --table D`.
+
+    `--table D` does NOT reproduce those: it holds the subject rect at pad
+    copper, which is where the shipped ledger has it, and prints 7 / 55 / 118,
+    71 / 115 / 144, 47 / 79 / 94, 23 / 55 / 87, 37 / 55 / 82, 0 / 5 / 28,
+    0 / 8 / 15 for the same boards. Both are right on their own basis and the
+    basis is the whole point; the numbers above are the isolated NEIGHBOUR
+    measurement this function's change was judged on, and they are reproduced
+    by the commit that made it, not by table D.
 
     The geometry itself lives in `legality.part_copper_geometry`, beside the
     `PartPads` it is built from; this is the per-board hoist, resolved ONCE and
