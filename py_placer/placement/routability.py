@@ -883,10 +883,185 @@ def _quantized_pitch(track_width: float, clearance: float,
     return math.ceil(raw / grid_step - 1e-9) * grid_step
 
 
+class LaneContext:
+    """The whole-board geometry a lane ledger grades ONE ref against (#849).
+
+    `face_lane_ledger` answers a per-REF question out of five WHOLE-BOARD
+    objects, and it rebuilt all five on every call -- including
+    `graded_parts_from_file`, which re-reads the `.kicad_pcb` from disk and
+    re-parses every footprint's courtyards. `check_channels` calls the ledger
+    once per auto-detected fine-pitch ref, and a SECOND time per ref with
+    `--baseline`, so the sweep spent more time re-deriving geometry it already
+    had than computing lane supply.
+
+    This is the hoist `escape_ledger` already does for its own three board
+    maps (`board_side_map`, `board_container_refs`, `board_copper_geometry`),
+    and it is threaded the same way: an optional keyword that DEFAULTS to
+    None and is built inside the ledger, so every direct caller and every
+    test keeps working unchanged and byte-identical.
+
+    Each member is built on FIRST USE rather than at construction, because
+    the ledger's own early returns (a ref with no footprint, no pad model, or
+    no extent) reach only `parts`; building the rest for them would make a
+    bogus ref MORE expensive than it is today.
+
+    WHAT MAKES SHARING SAFE is narrower than "nothing mutates", and the
+    narrower statement is the true one. Four of the five are freshly built
+    containers the ledger only reads. The fifth is not: `pp.extent(...)`
+    WRITES into `PartPads._ext_cache`. That is pure memoization, keyed on the
+    pose delta, whose value is a function of `(pads_local, holes_extent, rot)`
+    alone -- so a shared map accumulates entries, answers identically, and
+    makes the sweep faster still.
+
+    The members are deliberately NOT a public tuple to unpack: `containers`
+    is derived from `graded` and `geom` from `parts`, so a caller that hoisted
+    four of five, or built `parts` at a different clearance than it priced the
+    lane at, would get a silently wrong answer. `part_copper_geometry` refuses
+    that same mismatch rather than trusting it (see `resolved_for`).
+    """
+
+    __slots__ = ('pcb_data', 'pcb_file', 'clearance', '_parts', '_net_owners',
+                 '_graded', '_containers', '_geom')
+
+    def __init__(self, pcb_data, clearance: float,
+                 pcb_file: Optional[str] = None):
+        self.pcb_data = pcb_data
+        self.pcb_file = pcb_file
+        self.clearance = float(clearance)
+        self._parts = None
+        self._net_owners = None
+        self._graded = None
+        self._containers = None
+        self._geom = None
+
+    @property
+    def parts(self):
+        """`{ref: PartPads}` at this context's clearance.
+
+        Built WITHOUT `tolerant=True`, which is what the ledger has always
+        done -- `part_copper_geometry`'s own fallback uses the tolerant form,
+        so the two differ and a caller hand-mirroring the builder would
+        silently change which parts are modelled.
+        """
+        if self._parts is None:
+            from placement.legality import build_part_pads
+            self._parts = build_part_pads(self.pcb_data.footprints or {},
+                                          self.clearance)
+        return self._parts
+
+    @property
+    def net_owners(self):
+        """`{net_id: {ref, ...}}` -- which parts own each net.
+
+        Whole-board, and a function of `pcb_data` alone: the demand half asks
+        "does this net have somewhere to escape TO", which is the same answer
+        for every ref on the board.
+        """
+        if self._net_owners is None:
+            owners: Dict[int, set] = {}
+            for r2, f2 in (self.pcb_data.footprints or {}).items():
+                for pad in (f2.pads or []):
+                    if pad.net_id:
+                        owners.setdefault(pad.net_id, set()).add(r2)
+            self._net_owners = owners
+        return self._net_owners
+
+    @property
+    def graded(self):
+        """`graded_parts_from_file(...)` -- THE `.kicad_pcb` courtyard parse.
+
+        This is the one #849 is named for: `part_local_bounds` reaches
+        `parser.extract_courtyard_sides`, which opens and regex-walks the
+        whole board file. Once per ref is once per ref too many.
+        """
+        if self._graded is None:
+            from placement.legality import graded_parts_from_file
+            self._graded = graded_parts_from_file(self.pcb_data, self.pcb_file)
+        return self._graded
+
+    @property
+    def containers(self):
+        """The refs the courtyard channel treats as frames, not bodies."""
+        if self._containers is None:
+            from placement.legality import container_refs
+            self._containers = container_refs(self.pcb_data, self.graded)
+        return self._containers
+
+    @property
+    def geom(self):
+        """`{ref: CopperGeometry}` -- the #841 obstruction rectangle."""
+        if self._geom is None:
+            from placement.legality import part_copper_geometry
+            self._geom = part_copper_geometry(
+                self.pcb_data.footprints or {}, self.clearance,
+                parts=self.parts)
+        return self._geom
+
+    def resolved_for(self, pcb_data, clearance: float,
+                     pcb_file: Optional[str]) -> 'LaneContext':
+        """This context, or a `ValueError` naming the disagreement.
+
+        Three things are checked because all three can silently produce a
+        plausible wrong number, and the BOARD is the dangerous one:
+        `check_channels` ledgers two different boards in one run (the board
+        and its `--baseline`), so a context hoisted to the wrong scope would
+        grade the baseline's refs against the primary board's geometry and
+        fabricate a delta -- which `--gate` turns into exit 4 on a board that
+        did not regress.
+
+        `part_copper_geometry` already refuses a `parts=` map built at the
+        wrong clearance, with the reasoning spelled out there; this is the
+        same refusal one level up, for the same reason: a disagreement that
+        is checkable should not be trusted instead.
+        """
+        if self.pcb_data is not pcb_data:
+            raise ValueError(
+                'face_lane_ledger: the lane context was built for a '
+                'DIFFERENT board object ({!r}) than the one being graded '
+                '({!r}); its neighbours, courtyards and net owners are that '
+                "board's, so the ledger would grade this ref against another "
+                "board's geometry".format(self.pcb_file, pcb_file))
+        if self.pcb_file != pcb_file:
+            raise ValueError(
+                'face_lane_ledger: the lane context was built from '
+                '{!r} but {!r} was passed; the courtyards come from the FILE '
+                'and the two need not agree'.format(self.pcb_file, pcb_file))
+        if abs(self.clearance - float(clearance)) > 1e-9:
+            raise ValueError(
+                'face_lane_ledger: the lane context was built at clearance '
+                '{} but {} was requested; the pad boxes carry NPTH hole '
+                'growth at the former and every face would be priced at the '
+                'latter'.format(self.clearance, clearance))
+        return self
+
+
+def board_lane_context(pcb_data, clearance: float, *,
+                       pcb_file: Optional[str] = None) -> LaneContext:
+    """The per-board half of `face_lane_ledger`, resolved ONCE (#849).
+
+    Build one above a loop over refs and pass it to every call; see
+    `LaneContext`. Measured on this repo's committed boards at clearance
+    0.09 / track 0.127 / grid 0.05, the sweep and the number of times it
+    re-parses the board's courtyards:
+
+        board                        refs   sweep      courtyard parses
+        tigard                          2   0.129s ->  2 -> 1
+        rp2350_fpga_eensy_prePlane      7   0.361s ->  7 -> 1
+        glasgow_revC                    9   2.448s ->  9 -> 1
+
+    The parse count is the honest half of that table: seconds are
+    load-dependent and this machine does not reproduce #849's own 12.6-15.8s
+    on glasgow, but "once per ref" against "once per board" is a property, not
+    a measurement.
+    """
+    return LaneContext(pcb_data, clearance, pcb_file=pcb_file)
+
+
 def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                      track_width: float, grid_step: float,
                      escape_band_mm: Optional[float] = None,
-                     pcb_file: Optional[str] = None) -> List[Dict]:
+                     pcb_file: Optional[str] = None,
+                     context: Optional[LaneContext] = None) -> List[Dict]:
     """Per-face escape supply/demand for one part (SKILL's lane ledger, v1).
 
     For each face (N/S/E/W of the part's pad extent):
@@ -903,29 +1078,30 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     Rail nets (fanout > DISPLACEMENT_MAX_FANOUT) are not demand: planes
     feed them, not face escapes. Tap/via lane consumption is v2.
     """
-    from placement.legality import (build_part_pads, container_refs,
-                                    footprint_has_through_pads, footprint_side,
-                                    graded_parts_from_file,
-                                    part_copper_geometry, sides_occupied)
+    from placement.legality import (footprint_has_through_pads,
+                                    footprint_side, sides_occupied)
     from .escape import span_eaten
 
     fps = pcb_data.footprints or {}
     fp = fps.get(ref)
     if fp is None:
         return []
-    parts = build_part_pads(fps, clearance)
-    pp = parts.get(ref)
+    # #849: the five whole-board objects below are resolved ONCE per BOARD,
+    # not once per ref. A caller sweeping refs (`check_channels`, and its
+    # `--baseline` sweep separately) builds one `board_lane_context` above its
+    # loop and passes it; a direct caller passes nothing and gets one built
+    # here, so this stays a standalone entry point. See `LaneContext`.
+    ctx = (board_lane_context(pcb_data, clearance, pcb_file=pcb_file)
+           if context is None
+           else context.resolved_for(pcb_data, clearance, pcb_file))
+    pp = ctx.parts.get(ref)
     if pp is None:
         return []
     ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
     if ext is None:
         return []
 
-    net_owners: Dict[int, set] = {}
-    for r2, f2 in fps.items():
-        for pad in (f2.pads or []):
-            if pad.net_id:
-                net_owners.setdefault(pad.net_id, set()).add(r2)
+    net_owners = ctx.net_owners
 
     faces = {'N': (ext[0], ext[1], ext[2], ext[1]),
              'S': (ext[0], ext[3], ext[2], ext[3]),
@@ -967,8 +1143,8 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # parked off its face.
     own_sides = sides_occupied(footprint_side(fp),
                                footprint_has_through_pads(fp))
-    _graded = graded_parts_from_file(pcb_data, pcb_file)
-    _containers = container_refs(pcb_data, _graded)
+    _graded = ctx.graded
+    _containers = ctx.containers
     # #841: the neighbour RECT is the pad COPPER, not the courtyard. The
     # SIDE and CONTAINER questions stay on `_graded`: "which faces does this
     # part occupy" and "is this footprint a frame" are both properties of the
@@ -979,7 +1155,7 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # the two interf_u boards 1 each), the +/-0.5mm fiction
     # `grade_body_overlap` already refuses to gate on. See
     # `legality.part_copper_geometry` for the full census.
-    _geom = part_copper_geometry(fps, clearance, parts=parts)
+    _geom = ctx.geom
     neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
                  if g.ref != ref and (own_sides & g.sides)
                  and g.ref not in _containers and g.ref in _geom]
