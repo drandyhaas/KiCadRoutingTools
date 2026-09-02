@@ -101,6 +101,77 @@ def lost_last_lane(ledgers, base_ledgers):
     return out
 
 
+#: A face carrying real demand that lost this SHARE of its escape supply is
+#: new damage, whether or not it reached zero (#847).
+#:
+#: Calibrated, not chosen -- `tests/measure_847_calibration.py` and the JSON
+#: beside it are the run. The measured separation at the shipped band:
+#:
+#:     glasgow wrong-basin   U1 E  supply 43 -> 28  demand 12   drop 0.349
+#:     tigard damaged        U3 E  supply 27 -> 13  demand  9   drop 0.518
+#:     glasgow truth restore U1 E  supply 43 -> 39  demand 12   drop 0.093
+#:     both self-comparisons                                    drop 0.000
+#:
+#: 0.20 is the geometric midpoint of 0.093 and 0.349, and it sits inside the
+#: plateau 0.15-0.25 over which every pair's verdict is unchanged -- so it is
+#: not the edge of the range that happens to work. A FRACTION rather than a
+#: lane count deliberately: a lane count would have to be scaled by face
+#: length, which varies by an order of magnitude on one board, while "this
+#: face lost a fifth of its escape" compares a 2mm passive with a 20mm BGA
+#: edge. Rounded to 4 places before comparing, so a face is not judged on
+#: floating-point noise in the last bit.
+GATE_MIN_SUPPLY_DROP = 0.20
+
+
+def lost_escape_share(ledgers, base_ledgers, min_demand,
+                      min_drop=GATE_MIN_SUPPLY_DROP):
+    """(ref, face, demand, before, now) for faces that lost a SHARE of escape.
+
+    The magnitude form of what `lost_last_lane` asks as a zero-crossing, and
+    the reason it exists is that the zero-crossing MASKS real damage (#847).
+
+    `lost_last_lane`'s predicate is `now == 0 and before > 0`, and both
+    supplies fall as the escape band deepens -- so each face contributes an
+    INTERVAL of bands over which it fires, and the gate is a union of
+    intervals. Measured on the run-7 wrong-basin fixture: D22's north face
+    goes 16 -> 0 and fires at bands 2.0 and 2.5, then stops at 3.0, not
+    because it recovered but because its BASELINE also reached 0. "The
+    baseline got worse too" is not evidence that the placement under test is
+    fine, and that masking is exactly why `check_channels --gate` is
+    non-monotone in a parameter no caller could even set.
+
+    It also misses the damage the issue is actually about. At the shipped band
+    the wrong-basin board's U1 east face falls 43 -> 28 lanes against a demand
+    of 12: a 35% loss of escape, eaten by U30, and invisible to every
+    predicate here before this one -- `_starved_faces` needs supply 0,
+    `lost_last_lane` needs a crossing to 0, and the deficit form sees nothing
+    because 28 still exceeds 12. That face is the one #847 names.
+
+    DELTA ONLY. The absolute forms are unchanged: `_starved_faces` still asks
+    for supply 0, and `_deficit_faces` is still a report. A share-of-escape
+    question has no meaning without a baseline to be a share OF.
+
+    Unlike `lost_last_lane` this one IS filtered by --min-demand, and that
+    conjunct is load-bearing rather than decorative. Measured: without it the
+    form fires on demand-1 diodes whose supply halved from 8 to 3, and on the
+    truth-restore control. With it, both positives fire and every control is
+    silent.
+    """
+    was = {(ref, r['face']): r['supply_finest_grid']
+           for ref, rows in (base_ledgers or {}).items()
+           for r in rows}
+    out = []
+    for ref, rows in sorted((ledgers or {}).items()):
+        for r in rows:
+            before = was.get((ref, r['face']), 0)
+            now = r['supply_finest_grid']
+            if before <= 0 or now >= before or r['demand_nets'] < min_demand:
+                continue
+            if round(1.0 - now / before, 4) >= min_drop:
+                out.append((ref, r['face'], r['demand_nets'], before, now))
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Per-face lane ledger + anchor channel widths.")
@@ -139,6 +210,12 @@ def main():
                         "entry point, so the one parameter that decides the "
                         "starved-face gate could not be varied without "
                         "editing source")
+    p.add_argument("--min-supply-drop", type=float,
+                   default=GATE_MIN_SUPPLY_DROP, metavar="FRAC",
+                   help="share of a face's escape supply that must be LOST "
+                        "against --baseline before it counts as new damage, "
+                        "for a face carrying at least --min-demand nets "
+                        "(default: %(default)s). 0 disables the check")
     p.add_argument("--min-demand", type=int, default=GATE_MIN_DEMAND,
                    help="nets a face must carry before zero supply counts as "
                         "starvation (default: %(default)s)")
@@ -311,6 +388,7 @@ def main():
 
     starved = _starved_faces(ledgers, args.min_demand)
     new_starved = None
+    share = []
     if args.baseline:
         try:
             base_pcb = parse_kicad_pcb(args.baseline)
@@ -349,16 +427,43 @@ def main():
             print(f"  NEW (lost its last lane): {ref} {face}: demand {dem}, "
                   f"supply {before} -> 0. Below --min-demand "
                   f"{args.min_demand}, so only the delta sees it.")
+
+        # #847: ...and the SHARE form, which is the one that catches the
+        # damage the zero-crossing masks. See `lost_escape_share`: a face can
+        # lose a third of its escape without reaching zero, and until now no
+        # predicate here could see that -- which is how the gate ended up
+        # deciding on an escape-band constant nobody had re-derived.
+        share = []
+        if args.min_supply_drop > 0:
+            share = lost_escape_share(ledgers, base_ledgers, args.min_demand,
+                                      args.min_supply_drop)
+        for ref, face, dem, before, now in share:
+            if (ref, face) in seen:
+                continue
+            new_starved.append((ref, face, dem))
+            seen.add((ref, face))
+            print(f"  NEW (lost {100 * (1 - now / before):.0f}% of its "
+                  f"escape): {ref} {face}: demand {dem}, supply {before} -> "
+                  f"{now}. Still non-zero, so only the share form sees it.")
         print(f"Starved faces (zero supply at the finest grid, demand >= "
               f"{args.min_demand}): {len(starved)} now, {len(was)} on the "
-              f"baseline, {len(new_starved)} NEW")
+              f"baseline, {len(new_starved)} NEW (all channels)")
+        # ONLY the zero-supply channel gets the zero-supply sentence. The
+        # other two printed their own line above, with their own numbers, and
+        # this loop used to reprint every one of them as "supply 0 -- nothing
+        # leaves this face" -- which for a share-form hit at supply 28 is a
+        # false statement in the tool's own output. `new_starved` is a merged
+        # list; the message may not assume which channel put a row in it.
+        _zero = {(r, f) for r, f, _d in _starved_faces(ledgers,
+                                                       args.min_demand)}
         for ref, face, dem in new_starved:
-            print(f"  NEW: {ref} {face}: demand {dem}, supply 0 -- nothing "
-                  f"leaves this face")
+            if (ref, face) in _zero:
+                print(f"  NEW: {ref} {face}: demand {dem}, supply 0 -- "
+                      f"nothing leaves this face")
         if new_starved:
-            print("  A face that carries real demand and has no lane left is "
-                  "a placement the router cannot rescue, readable now rather "
-                  "than after the retries. Move what ate the span (see "
+            print("  A face that carries real demand and has lost its escape "
+                  "is a placement the router cannot rescue, readable now "
+                  "rather than after the retries. Move what ate the span (see "
                   "eaten_by above) or reconsider the arrangement.")
 
     channels = routability.pair_channel_widths(
@@ -392,6 +497,14 @@ def main():
                        'taps_not_modeled': True,
                        'ledgers': ledgers, 'channels': channels,
                        'starved_faces': starved,
+                       # #847: the share form's hits, kept as their own key
+                       # rather than only folded into new_starved_faces, so a
+                       # reader can tell WHICH predicate fired. Merging them
+                       # is how the fixture's band table came to read as one
+                       # phenomenon when it was two.
+                       'lost_escape_share': [list(t) for t in share] if
+                       args.baseline else None,
+                       'min_supply_drop': args.min_supply_drop,
                        # run-12 Tier 3.6: the ABSOLUTE deficit, which the gate's
                        # starvation predicate (supply == 0 AND demand >=
                        # --min-demand) does not cover. Report-only.

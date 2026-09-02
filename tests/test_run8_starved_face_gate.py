@@ -18,6 +18,26 @@ and worse, on one run the HUMAN control board fires exactly the same face as
 the tool's output. A starved face is often a property of the DESIGN -- a dense
 part hard against an edge -- not of the placement decision under test.
 
+#847 -- THAT DENOMINATOR IS NOT RECONSTRUCTABLE, and the re-run at the
+pad-copper rect. `git ls-files 'kicad_files/*.kicad_pcb'` gives 22, while a
+plain `ls` on a working copy that has run the suite gives 33: the extra 11 are
+GITIGNORED generated outputs (`interf_u_*` x4, `fanout_output*`,
+`sonde_u_routed_routed`, ...), four of them derivatives of one source board.
+That is the hazard `run_utils.corpus_boards()`'s own docstring describes, and
+the unreproducible number was cited in production code. Re-run over the tracked
+set, at the pad-copper rect, by `tests/measure_847_calibration.py`:
+
+    demand >= 5    2 of 16 boards with a ledger   orangecrab, rp2350
+    demand >= 7    2 of 16                        the same two
+    demand >= 9    2 of 16                        the same two
+    demand >= 11   1 of 16                        rp2350 alone
+
+Both denominators are given because a board that auto-detects no fine-pitch
+part can never fire, and counting it as evidence of quiet is how 33 happened.
+GATE_MIN_DEMAND stays 7 -- but note that 5, 7 and 9 fire on the SAME two
+boards, so nothing in that range discriminates on this corpus and the value is
+left alone rather than re-pinned on a measurement that cannot tell them apart.
+
 Taking the delta against the board the placement was derived from removes the
 design term, because both boards carry it:
 
@@ -51,24 +71,56 @@ instrument, so the table is one basis rather than two halves.
 
 The detection is BAND-GATED, not gone -- and the gate is NON-MONOTONE on the
 only fixture there is: it fires at 2.0, does NOT fire at 3.0, and fires again
-at 4.0. That is why no value of it is adopted here. The band
-floor and the neighbour rectangle are one model (a courtyard IS a body plus a
-skirt, so shrinking to copper while holding the band silently narrows the
-search by that skirt), and re-deriving it needs the 33-healthy-board
-preregistered calibration above re-run at the copper rect, not a fixture fit.
-Filed as its own issue.
+at 4.0. That is why no value of it was adopted. Filed as #847.
 
-Two things follow that a reader must not have to infer:
+#847: WHAT THAT TABLE ACTUALLY MEASURED, and the loss REPAIRED
+---------------------------------------------------------------
+The table above is right and its reading was wrong, in a way that matters
+because it sent the fix at the wrong parameter. `tests/measure_847_band_gate.py`
+decomposes the verdict; three corrections follow from it.
 
-  * The gate currently has NO known true positive on the copper instrument.
-    That is a real loss, not a bookkeeping item.
-  * `wk/` is gitignored, so a clean clone SKIPs this block and CI has never
-    executed the assertion. A green suite is not evidence about it either way.
+  1. THE TWO COLUMNS ARE TWO DIFFERENT PHENOMENA. "U1 E supply 1, eaten by
+     U30" and "exit 4, 2 NEW" are presented above as one story. They are not.
+     `_starved_faces` is EMPTY at every band on BOTH boards -- the absolute
+     predicate never fires on this fixture at all -- so every exit-4 came from
+     `lost_last_lane`, and the faces that produced it are the diodes D22/D23
+     (at 2.0) and D21 (at 4.0), carrying demand 3 and 1. U1 never appeared in
+     the exit code.
 
-The arm below therefore asserts what is MEASURED at the shipped band, and a
-second arm pins the band dependence through `face_lane_ledger`'s own
-`escape_band_mm` keyword, so the mechanism stays executable instead of
-becoming prose in this docstring.
+  2. SO RE-PINNING GATE_MIN_DEMAND COULD NEVER HAVE FIXED IT. `lost_last_lane`
+     is deliberately unfiltered by --min-demand, and it was the only channel
+     firing. #847's own "shape of a fix" would have moved nothing here.
+
+  3. THE NON-MONOTONICITY IS `lost_last_lane`'s `before > 0` CLAUSE. Both
+     supplies fall as the band deepens, so each face contributes an INTERVAL:
+
+         D22 N   1.5: 16/16   2.0*: 0/16   2.5*: 0/16   3.0: 0/0
+         D21 W   3.0:  3/4    3.5*: 0/4    4.0*: 0/4    5.0: 0/0
+
+     (now/base; * = fired.) Nothing fires at 3.0 because D22/D23's BASELINE
+     has itself reached zero -- the damage is masked because the baseline
+     became equally bad. That is an artifact, not a property.
+
+The repair is therefore in the PREDICATE, not the band, and the band is left
+where it is: `tests/measure_847_calibration.py` measures that deepening it
+raises the false-positive rate (at 2.0mm the truth-restore control reaches a
+0.435 drop). `check_channels.lost_escape_share` adds the magnitude form --
+a face carrying real demand that lost >= 20% of its escape supply -- and with
+it the wrong-basin board fails the gate again AT THE SHIPPED BAND, on the face
+#847 actually names:
+
+    U1 E   supply 43 -> 28   demand 12   drop 0.349    -> exit 4
+    truth restore control    worst drop  0.093         -> exit 0
+
+So the sentence that stood here -- "the gate currently has NO known true
+positive on the copper instrument" -- is now false, and it was a real loss
+while it stood. It is kept in the history rather than deleted, because the
+refuted form is the change detector.
+
+`wk/` is gitignored, so this block still SKIPs on a clean clone. What changed
+is that the skip is now LOUD (exit 77 with a `SKIP:` line the runner buckets
+separately) instead of returning 0 and landing in `passed` -- which is how an
+assertion CI has never executed came to look green.
 
 Run: python3 -X utf8 tests/test_run8_starved_face_gate.py
 """
@@ -81,9 +133,14 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522/py_placer layout
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # #522/py_placer layout
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
 os.environ.setdefault('KRT_NO_BANNER', '1')
 
 import check_channels                                          # noqa: E402
+import run_utils                                              # noqa: E402
+from run_utils import evidence as run_check_evidence          # noqa: E402
+
+SKIP_EXIT = 77
 from kicad_parser import parse_kicad_pcb                       # noqa: E402
 from placement import routability as _R                        # noqa: E402
 
@@ -168,21 +225,55 @@ def main():
 
     print('recorded runs, when the work dir is present (wk/ is gitignored)')
     wrong = os.path.join(ROOT, 'wk', 'run7', 'glasgow_revC')
-    if os.path.isdir(wrong):
-        code, out = run([os.path.join(wrong, 'rL_repair.kicad_pcb'),
-                         '--clearance', '0.09', '--baseline',
-                         os.path.join(wrong, 'perturbed.kicad_pcb'), '--gate'])
-        # #841: 4 -> 0. Recorded, with the mechanism pinned below, NOT
-        # repaired by moving the band until this fixture agrees again.
-        check('the wrong-basin placement no longer fails the gate at the '
-              'shipped escape band (#841, a LOSS -- see the docstring)',
-              code == 0, out[-400:])
-        check('...and it names no new starved face', 'NEW:' not in out,
-              out[-400:])
-        _check_the_band_is_what_moved(wrong)
-    else:
-        print('  SKIP  recorded boards not present; the measured values are '
-              'in the docstring')
+    boards = [os.path.join(wrong, n) for n in ('rL_repair.kicad_pcb',
+                                               'perturbed.kicad_pcb')]
+    missing = [b for b in boards
+               if not (os.path.isfile(b) and os.path.getsize(b) > 0)]
+    if missing:
+        # LOUD, and exit 77. This block used to print two spaces and no colon
+        # and return 0, so on a clean clone it landed in `passed` -- an
+        # assertion CI has never executed, reading as green. `run_all.py:200`
+        # requires the colon form, and 77 is the bucket that is not a pass.
+        print(f'SKIP: the recorded run-7 boards are absent, so the only '
+              f'wrong-basin fixture the starved-face gate has could not be '
+              f'measured: {", ".join(os.path.relpath(m, ROOT) for m in missing)}')
+        print('      wk/ is gitignored. The arms above ran; these did not, '
+              'and the measured values are in the docstring.')
+        return SKIP_EXIT
+
+    for b in boards:
+        run_check_evidence(b, 'the wrong-basin fixture')
+    code, out = run([boards[0], '--clearance', '0.09',
+                     '--baseline', boards[1], '--gate'])
+    # #841 took this from 4 to 0 and that loss was recorded here rather than
+    # repaired by tuning the band. #847 repaired it in the PREDICATE, so it is
+    # 4 again -- and on the face the issue actually names, at the band the
+    # tool actually uses.
+    check('the wrong-basin placement fails the gate again at the SHIPPED '
+          'escape band (#847 repaired the loss #841 recorded)', code == 4,
+          f'exit {code} :: {out[-400:]}')
+    check('...and it is U1 east that fails it, not a diode',
+          'U1 E' in out, out[-500:])
+    check('...named by the SHARE form, because supply never reached zero',
+          'lost 35% of its escape' in out and '43 -> 28' in out, out[-500:])
+    # The correction that made #847 findable: the exit code was NEVER the
+    # absolute predicate on this fixture, at any band.
+    check('...while the absolute starvation form still finds nothing',
+          '0 now, 0 on the baseline' in out, out[-500:])
+
+    control = os.path.join(wrong, 'perturbed.control.kicad_pcb')
+    if os.path.isfile(control):
+        code, out = run([control, '--clearance', '0.09',
+                         '--track-width', '0.0889', '--baseline', boards[1],
+                         '--gate'])
+        # ONE BASIS. --track-width is passed explicitly because this board
+        # declares a different netclass, and grading the two halves of a delta
+        # differently manufactured two false positives while #847 was being
+        # measured. A control graded at another basis is not a control.
+        check('the legitimate restore does NOT fail the gate (the control)',
+              code == 0, f'exit {code} :: {out[-400:]}')
+
+    _check_the_band_is_what_moved(wrong)
 
     print()
     if FAILURES:

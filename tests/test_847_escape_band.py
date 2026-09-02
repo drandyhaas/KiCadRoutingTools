@@ -184,6 +184,26 @@ def the_band_reported_is_the_band_searched():
           {f.escape_band_basis for f in rows['e'].faces} == {'raw_lane'},
           rows['e'].faces[0])
 
+    # A SECOND BASIS, because the first one is degenerate and an independent
+    # verifier caught it: at clearance 0.09 / track 0.127 / grid 0.05 the
+    # quantized pitch is 0.25, so `4 * pitch` is EXACTLY 1.0 -- and a row that
+    # hard-coded 1.0 while searching something else would satisfy every
+    # assertion above. Measured: it did. This basis resolves to 2.4, where a
+    # hard-coded constant and the real band cannot coincide.
+    def run_nondegenerate():
+        rows['nd'] = R.face_lane_ledger(pcb, 'U3', clearance=0.25,
+                                        track_width=0.3, grid_step=0.1,
+                                        pcb_file=TIGARD)
+
+    depths = _captured_band_depth(run_nondegenerate)
+    reported = {r['escape_band_mm'] for r in rows['nd']}
+    check('at a NON-degenerate basis the searched depth is not 1.0',
+          depths and abs(next(iter(depths)) - 1.0) > 0.5, depths)
+    check('...and the row still reports the depth that was searched',
+          len(reported) == 1 and len(depths) == 1
+          and abs(next(iter(reported)) - next(iter(depths))) < 1e-6,
+          (reported, depths))
+
     def run_escape_reach():
         rows['er'] = E.part_escape(pcb, 'U3', reach_mm=3.0, pcb_file=TIGARD)
 
@@ -217,7 +237,7 @@ def the_two_ledgers_still_differ():
 def where_the_floor_decides():
     print('the 1.0mm floor decides on one tracked board, not on the corpus')
     # Named boards rather than a corpus sweep, so this stays a fast unit test;
-    # the corpus census is `tests/measure_847_band_calibration.py`, which is
+    # the corpus census is `tests/measure_847_calibration.py`, which is
     # where the 16-of-388 / 3-of-97 figures in the docstring are re-derived.
     pcb = parse_kicad_pcb(ROUTED)
     ref = next(r for r in sorted(pcb.footprints) if pcb.footprints[r].pads)
