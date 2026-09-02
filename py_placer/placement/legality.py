@@ -2079,9 +2079,12 @@ class PartPads:
             # class docstring: it may falsely reject, never falsely accept).
             # Measured a no-op on the corpus: zero such pads on any of the 22
             # tracked boards, so this is hardening, not a behaviour change.
+            # `*.Cu` is KiCad's ALL-copper wildcard, so it is both faces on its
+            # own -- and it read as FRONT, because it does not start with 'B'.
+            _star = any(str(l).startswith('*') for l in copper)
             _b = any(str(l).startswith('B') for l in copper)
-            _f = any(not str(l).startswith('B') for l in copper)
-            pside = (None if (through or (_b and _f))
+            _f = any(not str(l).startswith(('B', '*')) for l in copper)
+            pside = (None if (through or _star or (_b and _f))
                      else ('B' if _b else 'F'))
             tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
             c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
