@@ -64,6 +64,18 @@ arms below sweep `escape.fine_pitch_parts` instead -- 10 refs on both boards
 the table measures the tool, the arms measure the ledger. `refs_of` says why
 this file does not carry a second copy of the CLI's selector.
 
+MUTATION COVERAGE, from the run and not from a prediction
+(`python3 tests/mutate_849.py`, 13 rows): 11 KILLED, 2 SURVIVED, 0 broken, 0
+disagreeing with expectation. Both survivors are declared there with the
+reason they are not holes -- `tolerant=` changes nothing on a board whose
+pads all model, and dropping `parts=` from `part_copper_geometry` is a
+performance regression only, which no assertion should claim to detect.
+
+Every one of the other eleven is killed by this file, and nine of them by the
+two arms that do not compare values: the parse counts. That is the ratio to
+notice -- if arms 2, 10 and 11 were removed, most of this battery would go
+green against a broken hoist.
+
 Run: python3 -X utf8 tests/test_849_lane_context.py
 """
 import json
