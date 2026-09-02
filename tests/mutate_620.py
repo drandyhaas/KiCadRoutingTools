@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""The #620/#618 mutation battery, shipped so its numbers can be re-derived.
+
+`tests/test_620_pending_via_pairs.py` and `tests/test_618_coupled_via_site_gate.py`
+record what each arm kills. A count is only checkable if the exact source edit
+is written down -- two reviewers of an earlier branch reconstructed rows from
+their names and both got the wrong answer, because a plausible-looking
+reconstruction of one row was semantically inert. So the edits live here, as
+data, next to the numbers they produced.
+
+Every row carries an EXPECTATION. An inert row recorded as an expected survivor
+is a finding; an inert row quietly deleted is a hole.
+
+THREE targets: the pair test and ladder in `bga_fanout/geometry.py`, their
+wiring in `bga_fanout/__init__.py`, and #618's coupled-escape gate in
+`bga_fanout/underpad.py`.
+
+THE ROWS TO LOOK AT FIRST if this file ever goes red are the four broad-phase
+ones. An adversarial review found that the differential test named
+`window = max(d + self._h2h,` in its own docstring and could not kill it: the
+parameter grid never made the drill term binding, so half the window could be
+corrupted freely. `broad-phase-window-drops-the-halving` is that exact
+mutation, and it is why the grid now sweeps floors of zero and drills that
+exceed every ring.
+
+THIS RUNNER IS A COPY of `mutate_756.py`'s (itself the fourth). Deliberately
+not refactored into a shared one: that would rewrite shipped batteries whose
+recorded counts are the evidence for merged reviews, which is a change to make
+on its own and not inside a fix.
+
+NOT named `test_*.py`, so `tests/run_all.py` does not collect it: it REWRITES
+the engine in place. One writer per tree -- do not run it while a suite, an A/B
+replay or a review is reading the same checkout. It refuses to start on a dirty
+engine, because restoring would write the COMMITTED text back over uncommitted
+work.
+
+    python3 tests/mutate_620.py
+    python3 tests/mutate_620.py --row twin-branch-refuses-instead
+
+A row is KILLED by a FAILURE **or an ERROR**: dropping a term makes some arms
+raise rather than fail, and a battery counting only failures would call that a
+survivor.
+
+An anchor that does not match EXACTLY ONCE is reported as BROKEN rather than
+skipped -- a battery that silently applies nothing reports every row as a
+survivor, which reads as a catastrophic test failure and is really a stale
+anchor.
+
+ANCHORS ARE WRITTEN WITH LF AND TRANSLATED TO THE TARGET'S OWN ENDING. All
+three targets are LF in git (`.gitattributes` has `*.py text eol=lf`), so from
+a clean checkout the translation is a no-op. It is here because a WORKING TREE
+can still be CRLF -- any edit written through Python's text mode on Windows
+converts the whole file, which happened twice while building this branch.
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import os
+import subprocess
+import sys
+
+_TESTS = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_TESTS)
+
+GEO = os.path.join(_ROOT, 'py_router', 'bga_fanout', 'geometry.py')
+BGA = os.path.join(_ROOT, 'py_router', 'bga_fanout', '__init__.py')
+UP = os.path.join(_ROOT, 'py_router', 'bga_fanout', 'underpad.py')
+TARGETS = {'geo': GEO, 'bga': BGA, 'up': UP}
+
+T620 = os.path.join(_TESTS, 'test_620_pending_via_pairs.py')
+T618 = os.path.join(_TESTS, 'test_618_coupled_via_site_gate.py')
+T370 = os.path.join(_TESTS, 'test_370_tierb_fixes.py')
+T756 = os.path.join(_TESTS, 'test_756_fanout_clearance_drill_floors.py')
+
+_WINDOW = ("        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n"
+           "                     s / 2.0 + self._max_size / 2.0 + "
+           "self._clearance,\n"
+           "                     atol)")
+
+# (name, target, old, new, tests, expect)
+ROWS = [
+    # --- the defect itself: the pair test ----------------------------------
+    ('pair-test-never-consulted', 'bga',
+     '                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, '
+     'v_drill,\n'
+     '                                               route.net_id, _bulges,\n'
+     '                                               anchor_tol=_atol)',
+     "                _v, _detail = 'clear', None",
+     (T620,), 'KILLED'),
+
+    ('verdict-always-clear', 'geo',
+     '        d = drill or 0.0\n        s = size or 0.0\n'
+     '        atol = self._tol if anchor_tol is None else max(anchor_tol, '
+     'self._tol)',
+     "        return 'clear', None\n"
+     '        d = drill or 0.0\n        s = size or 0.0\n'
+     '        atol = self._tol if anchor_tol is None else max(anchor_tol, '
+     'self._tol)',
+     (T620,), 'KILLED'),
+
+    ('pending-never-records-the-committed-via', 'bga',
+     '                _pending.add(pad_x, pad_y, v_size, v_drill, '
+     'route.net_id,\n                             _bulges)',
+     '                pass',
+     (T620,), 'KILLED'),
+
+    # --- the DRILL arm ------------------------------------------------------
+    ('drill-arm-deleted', 'geo',
+     '            need = d / 2.0 + od / 2.0 + self._h2h',
+     '            need = 0.0',
+     (T620,), 'KILLED'),
+
+    ('drill-arm-drops-the-floor', 'geo',
+     '            need = d / 2.0 + od / 2.0 + self._h2h',
+     '            need = d / 2.0 + od / 2.0',
+     (T620,), 'KILLED'),
+
+    ('drill-arm-reads-the-FAB-floor-not-the-boards', 'bga',
+     '    _pending = PendingVias(_h2h, clearance)',
+     '    _pending = PendingVias(_h2h_fab, clearance)',
+     (T620,), 'KILLED'),
+
+    # --- the RING arm and its bulge condition -------------------------------
+    ('ring-arm-deleted', 'geo',
+     '            if (bulges or obulges) and onet != net_id:',
+     '            if False:',
+     (T620,), 'KILLED'),
+
+    ('ring-arm-ignores-the-bulge', 'geo',
+     '            if (bulges or obulges) and onet != net_id:',
+     '            if onet != net_id:',
+     (T620,), 'KILLED'),
+
+    ('ring-arm-ignores-the-net', 'geo',
+     '            if (bulges or obulges) and onet != net_id:',
+     '            if (bulges or obulges):',
+     (T620,), 'KILLED'),
+
+    ('bulge-flag-hardwired-false', 'bga',
+     "                _bulges = status == 'floor'",
+     '                _bulges = False',
+     (T620,), 'KILLED'),
+
+    ('bulge-flag-hardwired-true', 'bga',
+     "                _bulges = status == 'floor'",
+     '                _bulges = True',
+     (T620,), 'KILLED'),
+
+    # --- THE BROAD PHASE. The rows an earlier test could not kill. ----------
+    ('broad-phase-window-drops-the-halving', 'geo',
+     _WINDOW,
+     '        window = max(d + self._h2h,\n'
+     '                     s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
+     '                     atol)',
+     (T620,), 'KILLED'),
+
+    ('broad-phase-window-drops-the-ring-term', 'geo',
+     _WINDOW,
+     '        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n'
+     '                     atol)',
+     (T620,), 'KILLED'),
+
+    ('broad-phase-window-drops-the-drill-term', 'geo',
+     _WINDOW,
+     '        window = max(s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
+     '                     atol)',
+     (T620,), 'KILLED'),
+
+    ('broad-phase-window-drops-the-anchor-term', 'geo',
+     _WINDOW,
+     '        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n'
+     '                     s / 2.0 + self._max_size / 2.0 + self._clearance)',
+     (T620,), 'KILLED'),
+
+    ('broad-phase-max-drill-never-updated', 'geo',
+     '        if d > self._max_drill:\n            self._max_drill = d',
+     '        pass',
+     (T620,), 'KILLED'),
+
+    # --- TWINS --------------------------------------------------------------
+    ('twin-branch-refuses-instead', 'geo',
+     '            if onet == net_id and dist <= atol:\n'
+     "                return 'twin', (ox, oy, os_, od)",
+     '            if onet == net_id and dist <= atol:\n'
+     "                return 'conflict', ('same site', ox, oy)",
+     (T620,), 'KILLED'),
+
+    ('twin-branch-ignores-the-net', 'geo',
+     '            if onet == net_id and dist <= atol:',
+     '            if dist <= atol:',
+     (T620,), 'KILLED'),
+
+    ('twin-keyed-on-the-exact-site-again', 'geo',
+     '            if onet == net_id and dist <= atol:',
+     '            if onet == net_id and dist <= self._tol:',
+     (T620,), 'KILLED'),
+
+    ('twin-appends-a-second-via-anyway', 'bga',
+     "                    _twin_shared += 1\n                    continue",
+     '                    _twin_shared += 1',
+     (T620,), 'KILLED'),
+
+    ('twin-keeps-the-FIRST-via-not-the-tighter', 'bga',
+     '                    if _pending.tighten(_tx, _ty, v_size, v_drill):',
+     '                    if False:',
+     (T620,), 'KILLED'),
+
+    # --- THE LADDER ---------------------------------------------------------
+    ('ladder-never-tried', 'bga',
+     '                    _thin = thin_drill_to_clear(',
+     '                    _thin = None or thin_drill_to_clear(',
+     (T620,), 'SURVIVED'),      # deliberately inert: a no-op control row
+
+    ('ladder-refuses-immediately', 'bga',
+     '                    if _thin is None:',
+     '                    if True:',
+     (T620,), 'KILLED'),
+
+    ('ladder-returns-the-thinnest-rung', 'geo',
+     "    cands = sorted({f['via_drill'] for f in floors[rung:]\n"
+     "                    if f['via_drill'] < drill - 1e-9}, reverse=True)",
+     "    cands = sorted({f['via_drill'] for f in floors[rung:]\n"
+     "                    if f['via_drill'] < drill - 1e-9})",
+     (T620,), 'KILLED'),
+
+    ('ladder-returns-a-rung-that-does-not-clear', 'geo',
+     '    for cand in cands:\n        if clears(cand):\n            return cand',
+     '    for cand in cands:\n        return cand',
+     (T620,), 'KILLED'),
+
+    ('ladder-climbs-above-its-own-rung', 'geo',
+     "    cands = sorted({f['via_drill'] for f in floors[rung:]",
+     "    cands = sorted({f['via_drill'] for f in floors[0:]",
+     (T620,), 'SURVIVED'),      # rung 0 is the top: floors[0:] == floors[rung:]
+                                # whenever the clamp did not escalate, and the
+                                # filter drops anything >= drill. Recorded as a
+                                # measured no-op, not deleted.
+
+    ('thinned-drill-not-applied', 'bga',
+     '                    _thinned.append((v_drill, _thin))\n'
+     '                    v_drill = _thin',
+     '                    _thinned.append((v_drill, _thin))',
+     (T620,), 'KILLED'),
+
+    # --- the second guard's bookkeeping (#620's other half) -----------------
+    ('silent-skip-restored', 'bga',
+     '                if would_overlap_existing_via(pad_x, pad_y, v_size):',
+     '                if False and would_overlap_existing_via(pad_x, pad_y, '
+     'v_size):',
+     (T620,), 'KILLED'),
+
+    # --- the disclosures ----------------------------------------------------
+    ('refusal-disclosure-deleted', 'bga',
+     '        print(f"  WARNING: {len(_pending_refused)} escape(s) dropped: '
+     'this "',
+     '        _unused = (f"  WARNING: {len(_pending_refused)} escape(s) '
+     'dropped: this "',
+     (T620,), 'KILLED'),
+
+    ('thinning-escalation-not-disclosed', 'bga',
+     '        warn_fab_escalation(\n'
+     '            f"{len(_thinned)} via-in-pad drill(s) thinned to {_to}mm to '
+     'hold "',
+     '        _unused = (\n'
+     '            f"{len(_thinned)} via-in-pad drill(s) thinned to {_to}mm to '
+     'hold "',
+     (T620,), 'KILLED'),
+
+    # --- #618: the coupled escape's via sites -------------------------------
+    ('coupled-gate-reverted-to-locked-smd-only', 'up',
+     '                if use_via and not _coupled_via_sites_ok(pp, nn):',
+     '                if use_via and locked_smd_pads and not all(\n'
+     '                        _via_gate_ok(q) for q in (pp, nn)):',
+     (T618,), 'KILLED'),
+
+    ('coupled-gate-skips-the-site-conflict', 'up',
+     '            if why is not None:\n'
+     "                if why.startswith('drill hole'):\n"
+     "                    h2h_stats['coupled'] += 1\n"
+     '                return False',
+     '            if False:\n                return False',
+     (T618,), 'KILLED'),
+
+    ('coupled-pair-not-tested-against-itself', 'up',
+     '        if math.hypot(ax - bx, ay - by) < ((ad or 0.0) / 2.0\n'
+     '                                           + (bd or 0.0) / 2.0\n'
+     '                                           + _h2h - 1e-6):',
+     '        if False:',
+     (T618,), 'SURVIVED'),      # 0.8mm-pitch parts are the only in-repo rigs
+                                # and their pair clears by 0.4mm; recorded as
+                                # measured-uncovered rather than deleted.
+
+    ('h2h-decline-not-disclosed', 'up',
+     '            print(f"  Under-pad: {h2h_stats[\'sites\']} via-in-pad centre '
+     'site(s)"',
+     '            _unused = (f"  Under-pad: {h2h_stats[\'sites\']} via-in-pad '
+     'centre site(s)"',
+     (T618,), 'KILLED'),
+
+    # --- #756's arms must still hold (this branch touches the same file) ----
+    ('bga-via-arm-reverted-to-the-flat-constant', 'bga',
+     '                    + _h2h - 1e-6:',
+     '                    + HOLE_TO_HOLE_CLEARANCE - 1e-6:',
+     (T756, T620), 'KILLED'),
+
+    ('bga-drops-the-fab-wrap', 'bga',
+     '    _h2h = max(_h2h_decl, _h2h_fab)',
+     '    _h2h = _h2h_decl',
+     (T756, T370), 'KILLED'),
+]
+
+
+def _dirty(path):
+    p = subprocess.run(['git', 'status', '--porcelain', '--', path],
+                       capture_output=True, text=True, cwd=_ROOT)
+    return bool(p.stdout.strip())
+
+
+def run(only=None):
+    rows = [r for r in ROWS if only is None or r[0] == only]
+    if not rows:
+        print('no row named %r' % only)
+        return 1
+    for path in TARGETS.values():
+        if _dirty(path):
+            print('REFUSING: %s has uncommitted changes. Commit or stash '
+                  'first -- this battery restores by overwriting.'
+                  % os.path.basename(path))
+            return 2
+
+    orig = {k: io.open(v, encoding='utf-8', newline='').read()
+            for k, v in TARGETS.items()}
+    results = []
+    try:
+        for name, tgt, old, new, tests, expect in rows:
+            path = TARGETS[tgt]
+            base = orig[tgt]
+            edits = old if isinstance(old, list) else [(old, new)]
+            if '\r\n' in base:
+                edits = [(o.replace('\n', '\r\n'), n.replace('\n', '\r\n'))
+                         for o, n in edits]
+            counts = [base.count(o) for o, _n in edits]
+            if counts != [1] * len(edits):
+                results.append((name, 'BROKEN', expect,
+                                'anchors matched %s times' % counts, []))
+                continue
+            mutated = base
+            for o, nw in edits:
+                mutated = mutated.replace(o, nw, 1)
+            io.open(path, 'w', encoding='utf-8', newline='').write(mutated)
+            killed, failed = False, []
+            for t in tests:
+                p = subprocess.run([sys.executable, '-X', 'utf8', t],
+                                   capture_output=True, text=True,
+                                   encoding='utf-8', errors='replace',
+                                   timeout=1800, cwd=_ROOT)
+                out = (p.stderr or '') + (p.stdout or '')
+                if p.returncode:
+                    killed = True
+                failed += ['%s::%s' % (os.path.basename(t)[5:8],
+                                       l.split('(')[0].replace('FAIL: ', '')
+                                       .replace('ERROR: ', '').strip())
+                           for l in out.splitlines()
+                           if l.startswith(('FAIL:', 'ERROR:'))]
+            io.open(path, 'w', encoding='utf-8', newline='').write(base)
+            results.append((name, 'KILLED' if killed else 'SURVIVED', expect,
+                            '%d' % len(failed), failed))
+    finally:
+        for k, v in TARGETS.items():
+            io.open(v, 'w', encoding='utf-8', newline='').write(orig[k])
+
+    w = max(len(r[0]) for r in results)
+    wrong = 0
+    for name, verdict, expect, cnt, failed in results:
+        mark = ''
+        if verdict != expect:
+            mark = '   <-- WRONG, expected %s' % expect
+            wrong += 1
+        print('%-*s  %-9s  %-3s%s' % (w, name, verdict, cnt, mark))
+        for f in failed:
+            print('%s      %s' % (' ' * w, f))
+    killed = sum(1 for r in results if r[1] == 'KILLED')
+    survived = sum(1 for r in results if r[1] == 'SURVIVED')
+    broken = sum(1 for r in results if r[1] == 'BROKEN')
+    print('\n%d rows: %d killed, %d survived (%d of them expected), %d broken'
+          % (len(results), killed, survived,
+             sum(1 for r in results if r[1] == r[2] == 'SURVIVED'), broken))
+    if wrong or broken:
+        print('%d row(s) did not match their expectation' % (wrong + broken))
+    return 1 if (wrong or broken) else 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument('--row', help='run a single row by name')
+    a = ap.parse_args()
+    return run(a.row)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
