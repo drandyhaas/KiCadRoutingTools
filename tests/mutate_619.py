@@ -75,8 +75,8 @@ ROWS = [
      "                if s.layer != footprint.layer:",
      (T_619,), 'KILLED'),
     ('pad-half-drops-the-own-net-skip', 'q',
-     "                if p.net_id == net_id or id(p) in _tie:",
-     "                if id(p) in _tie:",
+     "                if p.net_id == net_id:\n                    continue\n",
+     "                if False:\n                    continue\n",
      (T_619,), 'KILLED'),
 
     # ---- the layer decision ---------------------------------------------
@@ -93,23 +93,42 @@ ROWS = [
     ('seg-half-disabled', 'q',
      "        if _gate_seg:", "        if False:", (T_619,), 'KILLED'),
     ('pad-half-disabled', 'q',
-     "        if _gate_pad:", "        if False:", (T_619,), 'KILLED'),
+     "        if _gate_pad and _erased_pads:", "        if False:",
+     (T_619,), 'KILLED'),
 
     # ---- the knob's failure direction ------------------------------------
     # An unrecognised value must mean ALL, never OFF: a typo in a harness must
     # not silently ship the bug back.
-    ('unknown-knob-value-means-OFF', 'q',
-     "    _gate_all = not _gsel or 'all' in _gsel or not (_gsel & {'via', 'seg', 'pad'})",
-     "    _gate_all = 'all' in _gsel",
+    # Targets the GUARD, not `_gate_all`. A wholly unrecognised value falls
+    # back to ALL through two independent paths, so mutating `_gate_all` alone
+    # cannot express the defect -- which is exactly what the battery reported
+    # when this row still did that, and why the test now uses 'sge,pad'.
+    ('unknown-knob-token-silently-drops-a-half', 'q',
+     "    if _bad:\n", "    if False:\n",
      (T_619,), 'KILLED'),
 
     # ---- the pad half's exclusions ---------------------------------------
     ('pad-half-ignores-local-clearance', 'q',
-     "                                 margin=max(_stub_clr,\n"
-     "                                            getattr(p, 'local_clearance', 0.0)\n"
-     "                                            or 0.0) + track_width / 2 - 1e-6):",
-     "                                 margin=_stub_clr + track_width / 2 - 1e-6):",
+     "                _eff = max(_stub_clr, getattr(p, 'local_clearance', 0.0) or 0.0)\n",
+     "                _eff = _stub_clr\n",
      (T_619,), 'KILLED'),
+    # The waiver defect an adversarial review found: check_drc requires BOTH
+    # the membership test and the LOCALITY test (check_drc.py:2442-2445), and
+    # skipping the partner pad outright waives a short 2-3mm away. No tracked
+    # board declares net_tie_pad_groups, so nothing here can catch it -- named
+    # as a hole rather than left as an untested claim.
+    ('pad-half-waives-the-WHOLE-tie-partner', 'q',
+     "                if id(p) in _tie and _tie_span_waived(pcb_data, seg, net_id,\n"
+     "                                                     p, _stub_clr):\n",
+     "                if id(p) in _tie:\n",
+     (T_619,), 'SURVIVED  (no tracked board declares net_tie_pad_groups; this '
+               'is a real test hole, not a covered case)'),
+    ('erased-set-is-not-cleared-between-footprints', 'q',
+     "    global LAST_ERASED_SETS\n    LAST_ERASED_SETS = {}\n",
+     "    pass\n",
+     (T_619,), 'SURVIVED  (the staleness is only visible ACROSS footprints, '
+               'which the sweep exercises and this single-footprint test file '
+               'does not)'),
     # NPTH and the wildcard are asserted against check_drc's own helpers rather
     # than through emitted geometry, because no tracked board places a netted
     # NPTH or an F&B.Cu pad where a stub can reach it. Removing the filter

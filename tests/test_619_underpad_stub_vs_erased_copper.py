@@ -74,7 +74,7 @@ WHAT IS PINNED HERE, and what each check is FOR:
    the reason this half is safe to ship.
 
 MUTATION EVIDENCE (`python3 tests/mutate_619.py`, from the run -- never edited
-to match a prediction). 14 rows, 12 KILLED, 2 SURVIVED, 0 broken:
+to match a prediction). 16 rows, 12 KILLED, 4 SURVIVED, 0 broken:
 
     over-strict-floor-x5                      KILLED    (the negative control)
     via-floor-uses-drill-not-size             KILLED
@@ -86,12 +86,14 @@ to match a prediction). 14 rows, 12 KILLED, 2 SURVIVED, 0 broken:
     via-half-disabled                         KILLED
     seg-half-disabled                         KILLED
     pad-half-disabled                         KILLED
-    unknown-knob-value-means-OFF              KILLED
+    unknown-knob-token-silently-drops-a-half  KILLED
     pad-half-ignores-local-clearance          KILLED
+    pad-half-waives-the-WHOLE-tie-partner     SURVIVED (declared)
+    erased-set-is-not-cleared-between-fps     SURVIVED (declared)
     pad-half-includes-NPTH                    SURVIVED (declared)
     stub-clearance-ignores-the-dru-layer-map  SURVIVED (declared)
 
-FOUR of those kills exist only because the battery found them SURVIVING first,
+FIVE of those kills exist only because the battery found them SURVIVING first,
 and every one was a check that read as though it covered the thing it named:
 
   * the zero-stub guard was argued for in a commit message and tested nowhere;
@@ -101,14 +103,23 @@ and every one was a check that read as though it covered the thing it named:
     swapping `footprint.layer` for `layer` changed nothing. It needed a
     CROSS-LAYER run (U2 mounted F.Cu, escaped to B.Cu) to become a check;
   * no pinned geometry sat between the drill-derived and copper-derived floors;
-  * the knob's fail-safe direction (an unknown value means ALL, never OFF) was
-    asserted only by reading the code.
+  * the knob's fail-safe direction was asserted only by reading the code; and
+  * once that WAS tested, the battery caught the test using a NON-discriminating
+    spelling. A wholly unrecognised value ('bogus') falls back to ALL through
+    two independent paths, so it cannot tell a hardened parser from a naive
+    one. The input that can is a TRANSPOSED token beside a valid one --
+    'sge,pad', which the naive set form reads as a deliberate pad-only arm
+    while silently dropping two halves.
 
-The two declared survivors are real test holes, named rather than hidden: no
-tracked board places a netted NPTH within stub reach, and #770 records that no
-board this repo ingests carries a `.kicad_dru` layer rule, so `_stub_clr` and
-`clearance` are equal on every fixture. Both are asserted against check_drc's
-helpers directly (check 8) instead of pretending a board covers them.
+The four declared survivors are real test holes, named rather than hidden:
+no tracked board declares `net_tie_pad_groups`, so the locality half of the
+net-tie waiver is unfalsifiable here; the stale-set defect is only visible
+ACROSS footprints, which the sweep exercises and this single-footprint file
+does not; no tracked board places a netted NPTH within stub reach; and #770
+records that no board this repo ingests carries a `.kicad_dru` layer rule, so
+`_stub_clr` and `clearance` are equal on every fixture. The first is the one
+that matters -- it could pass a real short -- and it is named here precisely
+because nothing in the repo can catch it.
 
     python3 tests/test_619_underpad_stub_vs_erased_copper.py
 """
@@ -334,12 +345,20 @@ def test_erasure_injection_and_control():
     # -- 3c. AN UNRECOGNISED KNOB VALUE MEANS ALL, NEVER OFF. A typo in a
     #    harness must not silently ship the bug back. Same injected board as
     #    check 2, so the expected outcome is exactly check 2's.
-    _gate('bogus-not-a-real-arm')
-    t5, v5, d5 = _fanout(p2, "U3", [a, b])
-    check("an unrecognised gate value behaves as 'all', not as 'off' -- a "
-          "typo in an A/B harness cannot silently disable the gate",
-          (len(t5), len(v5), sorted(d5)) == (1, 1, [a]),
-          f"{len(t5)}/{len(v5)}/{sorted(d5)}")
+    # 'sge,pad' is the discriminating input, not 'bogus': a wholly unrecognised
+    # value falls back to ALL through two independent paths, so it cannot tell
+    # a hardened parser from a naive one. A TRANSPOSED token beside a VALID one
+    # can -- the naive set form reads it as a deliberate pad-only arm and
+    # silently drops two halves. mutate_619 caught this test using the
+    # non-discriminating spelling.
+    for typo in ('bogus-not-a-real-arm', 'sge,pad', 'vias', 'none'):
+        _gate(typo)
+        t5, v5, d5 = _fanout(p2, "U3", [a, b])
+        check(f"gate={typo!r} behaves as 'all', not as a partial arm or as "
+              f"'off' -- a typo in an A/B harness cannot silently disable a "
+              f"half",
+              (len(t5), len(v5), sorted(d5)) == (1, 1, [a]),
+              f"{len(t5)}/{len(v5)}/{sorted(d5)}")
     _gate('off')
     t6, v6, d6 = _fanout(p2, "U3", [a, b])
     check("...and 'off' really does disable it, so the check above is a real "
