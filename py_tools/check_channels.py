@@ -418,11 +418,17 @@ def main():
           f"grid {grid} escape-band {_band.mm:g} [{_band.source}]; "
           f"taps NOT modeled -- v1):")
     ledgers = {}
+    # #849: the board's geometry is resolved ONCE for the whole sweep instead
+    # of once per ref. Every ref here asks the same whole-board questions --
+    # which parts obstruct, which are frames, who owns each net, and the
+    # courtyard parse behind all of it -- and re-deriving them per ref cost
+    # more than computing the lane supply did.
+    ctx = routability.board_lane_context(pcb, clearance, pcb_file=args.board)
     for ref in refs:
         rows = routability.face_lane_ledger(
             pcb, ref, clearance=clearance, track_width=track,
             grid_step=grid, escape_band_mm=args.escape_band,
-            pcb_file=args.board)
+            pcb_file=args.board, context=ctx)
         if not rows:
             continue
         ledgers[ref] = rows
@@ -471,6 +477,12 @@ def main():
                   file=sys.stderr)
             return 2
         base_ledgers = {}
+        # ...and its OWN context (#849). The baseline is a different board and
+        # a different file, so reusing the one above would grade these refs
+        # against the primary board's geometry and invent a delta; the ledger
+        # refuses that rather than trusting it, and this is why it can.
+        base_ctx = routability.board_lane_context(base_pcb, clearance,
+                                                  pcb_file=args.baseline)
         for ref in refs:
             # THE SAME BAND ON BOTH SIDES. The gate is a delta, so a
             # baseline graded at a different depth is not a baseline -- it is
@@ -478,7 +490,7 @@ def main():
             rows = routability.face_lane_ledger(
                 base_pcb, ref, clearance=clearance, track_width=track,
                 grid_step=grid, escape_band_mm=args.escape_band,
-                pcb_file=args.baseline)
+                pcb_file=args.baseline, context=base_ctx)
             if rows:
                 base_ledgers[ref] = rows
         was = {(r, f) for r, f, _d in _starved_faces(base_ledgers,
@@ -555,7 +567,7 @@ def main():
 
     channels = routability.pair_channel_widths(
         pcb, clearance=clearance, min_extent_mm=args.min_extent,
-        pcb_file=args.board)
+        pcb_file=args.board, context=ctx)
     print(f"Anchor channels (narrowest first, {len(channels)} pair(s)):")
     for row in channels[:12]:
         parts = (' parts: ' + ', '.join(row['parts_in_channel'])
