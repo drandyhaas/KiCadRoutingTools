@@ -339,6 +339,16 @@ def refresh() -> None:
     g['NO_STATIC_BASE'] = _truthy('KICAD_NO_STATIC_BASE')
     g['ALLOW_STAGGERED_BGA'] = _truthy('KICAD_ALLOW_STAGGERED_BGA')
     g['QFN_UNDERPAD_NO_ALT_STAGGER'] = _truthy('QFN_UNDERPAD_NO_ALT_STAGGER')
+    # #619 which halves of the nets_to_route erasure the under-pad escape tests
+    # its pad->via stub against: 'all' (default) | 'via' | 'seg' | 'off'.
+    # An A/B isolation knob like KICAD_NO_SOFT_JOINT_BRIDGE, not a behaviour
+    # choice -- the halves are NOT additive (the via half changes which offsets
+    # are chosen, so it moves the SEGMENT residual too: on routed_output U2 it
+    # takes seg 25 -> 12 without testing a single segment), so attributing a
+    # half needs an arm that runs only that half. An unrecognised value is
+    # 'all', so a typo cannot silently disable the gate.
+    g['QFN_UNDERPAD_ERASED_GATE'] = _s('KICAD_QFN_UNDERPAD_ERASED_GATE',
+                                       'all').strip().lower()
     g['LEGACY_ORACLE'] = _truthy('KICAD_LEGACY_ORACLE')
     g['NO_EXACT_FILL'] = _truthy('KICAD_NO_EXACT_FILL')
     g['NO_FILL_NETCLASS'] = _truthy('KICAD_NO_FILL_NETCLASS')  # fill-model A/B

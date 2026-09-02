@@ -40,6 +40,17 @@ from qfn_fanout.geometry import calculate_fanout_stub
 # planner (or the user) into a pointless tighter-clearance retry.
 LAST_CANCEL_SKIPPED: List[str] = []
 
+# #619: what the last under-pad escape's obstacle map ERASED, published so a
+# sweep or a test can grade against the set the ENGINE used instead of
+# re-deriving it. Re-deriving is a live trap: `fanned_nets` comes from
+# `pad_infos`, which drops net 0, `unconnected-*`, net-filter misses and
+# `center` pads, so the obvious proxy -- `{p.net_id for p in footprint.pads}`
+# -- can report the gate as live on a footprint where the erased set is
+# empty and the gate is a constant True. Keys: `nets` (the net-id set handed
+# to nets_to_route), `vias`/`segs` (erased counts), `layer` (where the stub
+# copper lands), `clearance` (the floor the stub was graded at).
+LAST_ERASED_SETS: Dict = {}
+
 
 def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
     """Move a shortened fan tip back ONTO the routing grid (#446).
@@ -323,7 +334,24 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _prog(0, 0, "building obstacle map...")
     obstacles = build_base_obstacle_map(pcb_data, cfg, nets_to_route=list(fanned_nets),
                                         extra_clearance=track_width / 2)
-    obs_layer_idx = layer_map.get(layer)
+    # #845: the obstacle plane for the STUB, which is emitted on the pad's own
+    # mount layer (:766 and :777, deliberately -- putting it on an inner/back
+    # escape layer would float it above the pad, #195). This used to resolve
+    # `layer`, the ESCAPE layer, which is where the VIA lands and not where the
+    # stub's copper is; on the configuration under-pad exists for (an F.Cu part
+    # escaped to B.Cu) every stub was clearance-tested against the wrong
+    # layer's plane -- grading copper that is not there and ignoring copper
+    # that is.
+    #
+    # It is the only consumer of this index. The VIA is not tested through the
+    # map at all (it is a through via, and `via_clears` scans pcb_data
+    # geometrically), so there was never a second reader for whom the escape
+    # layer was the right answer.
+    #
+    # Per-layer clearance comes along for free: build_base_obstacle_map stamps
+    # each layer at that layer's own rule (#498, installed into cfg at :331),
+    # so reading the mount layer's plane also reads the mount layer's floor.
+    stub_layer_idx = layer_map.get(footprint.layer)
 
     # Foreign obstacles, keyed by net so the via's OWN net is exempt at check
     # time. A through-via spans every copper layer, so foreign tracks on ANY
@@ -337,6 +365,104 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _own_via_pos: Dict[int, List[Tuple[float, float]]] = {}
     for v in pcb_data.vias:
         _own_via_pos.setdefault(v.net_id, []).append((v.x, v.y))
+    # #619: `nets_to_route` above ERASES every piece of copper on a net we are
+    # escaping -- segments, vias AND pads (obstacle_map.py :216 / :299 / :312).
+    # Right for a net's OWN copper; wrong for every OTHER net in the same call.
+    # The candidate VIA still meets that copper (via_clears scans pcb_data
+    # directly), but the pad->via STUB's only channel to the input board is
+    # `check_line_clearance` on the holed map -- so stubs shipped straight
+    # through the CENTRES of pre-existing vias on sibling fanned nets.
+    #
+    # The SURFACE fan already closes exactly this hole for itself, geometrically
+    # (#257, the tail of `_seg_grazes`); the under-pad path returns ~200 lines
+    # earlier and shares none of it. This is that backstop, ported.
+    #
+    # These lists are EXACTLY the complement of what `nets_to_route` erases:
+    # build_base_obstacle_map stamps only segments, vias and pads and never
+    # zone copper, so pour copper is invisible to the stub before and after
+    # this change and nothing is being silently left out.
+    _erased_vias = [v for v in pcb_data.vias if v.net_id in fanned_nets]
+    _erased_segs = [s for s in pcb_data.segments if s.net_id in fanned_nets]
+    # The pad half needs FOUR exclusions the surface fan's pad loop (:990-996)
+    # does not make, or it phantom-rejects. Three are check_drc's own rules,
+    # applied here so the gate refuses exactly what the grader flags:
+    #   * NPTH carries no copper -- KiCad lists *.Cu on it for hole keep-out,
+    #     but an np_thru_hole pad's "size" is only the mask opening. check_drc
+    #     skips it for PAD-SEGMENT (`_pad_has_no_copper`, #260); so do we.
+    #   * layer scope resolves through `pad_copper_layers`, which expands the
+    #     `*.Cu` and `F&B.Cu` wildcards. A bare `layer in pad.layers` misses
+    #     both -- zero occurrences in this corpus, but the pcbnew parse path
+    #     emits them, so the GUI front would diverge from the CLI one (#722).
+    #   * `pad.local_clearance` RAISES the floor: check_drc grades PAD-SEGMENT
+    #     at `_pad_pair_cl = max(local_clearance, pair)`. It is per-pad, so it
+    #     cannot be hoisted the way the surface fan hoists its `margin` -- that
+    #     is precisely why the surface fan cannot honour it and this does.
+    # The fourth is a net TIE: `_seg_hits_pad` is net-blind, and obstacle_map's
+    # own tie lift only fires when exactly one net is being routed
+    # (obstacle_map.py:338-341), so the under-pad path never gets it. Today a
+    # tie partner on a fanned net is absent from the map by accident; without
+    # this the pad half would turn that accident into a hard block with no lift.
+    from check_drc import (_pad_has_no_copper, pad_copper_layers,
+                           check_pad_segment_overlap,
+                           _net_tie_span_waived as _tie_span_waived)
+    from kicad_parser import Segment as _Segment
+    _board_cu = list(pcb_data.board_info.copper_layers or [])
+    _erased_pads = [p for p in foreign_pads
+                    if p.net_id in fanned_nets
+                    and not _pad_has_no_copper(p)
+                    and footprint.layer in pad_copper_layers(p, _board_cu)]
+    # The stub is emitted on `footprint.layer` -- the pad's OWN mount layer,
+    # deliberately, so it does not float above the pad (#195) -- and NOT on the
+    # `layer` argument. The caller's #498 dru swap resolved `clearance` for the
+    # ESCAPE layer, which is where the VIA lands, not where the stub's copper
+    # lives, and check_drc grades a segment with `_pair_cl(..., layer=seg.layer)`.
+    # So the stub's own pair clearance is the mount layer's rule.
+    # PARTIAL, and the limit is worth stating: when footprint.layer IS ruled
+    # this is exact, but when it is not, the fallback is `clearance` -- which
+    # the caller already rebound to the ESCAPE layer's rule (#498, :900-904).
+    # So an unruled mount layer inherits the escape layer's number rather than
+    # the base. Closing that means not rebinding the scalar in the CALLER at
+    # all, which is a change to the surface fan's path too and is deliberately
+    # not attempted here. The map-based test above does not share the problem:
+    # build_base_obstacle_map stamps each layer at its own rule, so reading the
+    # mount layer's plane already reads the mount layer's floor. Inert on every
+    # board this repo ingests (#770: no tracked board carries a .kicad_dru
+    # layer rule), and inert on the default path, where --layer IS the mount
+    # layer.
+    _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
+    # A SET of halves, so an A/B arm can be 'via', 'via,seg', 'off' or 'all'.
+    # 'off' wins over everything (an explicit ablation is never partial), and
+    # an empty or unrecognised value is 'all' -- a typo must not silently
+    # disable the gate.
+    _gate = env_knobs.QFN_UNDERPAD_ERASED_GATE
+    _gsel = {t for t in _gate.replace(',', ' ').split() if t}
+    # ANY unrecognised token means ALL and says so. The earlier form silently
+    # dropped a half on a transposition -- 'sge,pad' ran the pad half only,
+    # reporting itself as a deliberate two-half arm -- and quietly accepted the
+    # PLURAL spellings ('vias', 'segs', 'pads') that LAST_ERASED_SETS itself
+    # publishes, as well as 'none'/'0'/'false', which read as ablations and are
+    # not. Fail-safe in direction (never silently OFF) and now audible.
+    _known = {'all', 'off', 'via', 'seg', 'pad'}
+    _bad = _gsel - _known
+    if _bad:
+        print(f"  WARNING: KICAD_QFN_UNDERPAD_ERASED_GATE={_gate!r} has "
+              f"unrecognised token(s) {sorted(_bad)}; running ALL halves. "
+              f"Valid: all | off | via | seg | pad (comma-separated).")
+        _gsel = {'all'}
+    _gate_all = not _gsel or 'all' in _gsel or not (_gsel & {'via', 'seg', 'pad'})
+    _gate_via = 'off' not in _gsel and (_gate_all or 'via' in _gsel)
+    _gate_seg = 'off' not in _gsel and (_gate_all or 'seg' in _gsel)
+    _gate_pad = 'off' not in _gsel and (_gate_all or 'pad' in _gsel)
+
+    def _tie_exempt(net_id):
+        f = getattr(pcb_data, 'net_tie_exempt_pad_ids', None)
+        return f(net_id) if f else ()
+
+    global LAST_ERASED_SETS
+    LAST_ERASED_SETS = {'nets': set(fanned_nets), 'vias': len(_erased_vias),
+                        'segs': len(_erased_segs), 'pads': len(_erased_pads),
+                        'layer': footprint.layer,
+                        'clearance': _stub_clr, 'gate': _gate}
     from kicad_parser import pad_drill_circles as _pdc
     import routing_defaults as _rd
     # BOARD-FIRST, same rule as every other floor: a board declaring
@@ -448,6 +574,105 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             via_size=via_size, via_drill=via_drill, clearance=clearance,
             track_width=track_width, hole_to_hole=_h2h)
 
+    def stub_clears_erased(px, py, vx, vy, net_id):
+        """#619: is the pad->via stub clear of the copper `nets_to_route` erased?
+
+        The tail of the surface fan's `_seg_grazes` (#257), applied to the
+        bridging stub. Returns True when the stub is CLEAR -- the opposite
+        polarity to `_seg_grazes`, so it reads like the `stub_ok` it is
+        and-ed into.
+
+        Deliberately LAYER-BLIND, matching every grader around it:
+        `check_drc.check_via_segment_overlap` ignores `via.layers` ("vias go
+        through ALL copper layers") and `obstacle_map._add_via_obstacle`
+        stamps every via on every layer. Filtering a blind/buried via out
+        here would emit copper this repo's own DRC flags, and would make a
+        fanned-net via behave differently from an identical non-fanned one.
+
+        Called BEFORE `via_clears`, not after, and that ordering is
+        load-bearing rather than cosmetic: `via_clears` scans, per candidate,
+        every board via + every board pad (a 17-sample `_seg_hits_pad` each)
+        + every board segment -- ~20k point tests on routed_output U2, where
+        `_erased_vias` is 89. Running this first kills a doomed candidate for
+        ~0.5% of that cost. Measured on U2: correctly ordered 7.0s against a
+        10.9s baseline (-36%); appended after `via_clears` instead, +18%.
+        The gate is a speed-up.
+        """
+        if math.hypot(vx - px, vy - py) <= POSITION_TOLERANCE:
+            # Via centred on the pad: the commit loop emits NO track at all
+            # (:604, :616), so there is no stub to test. `run_output_conflict`
+            # states the same rule for the reuse case at :213-215; without
+            # this, a zero-length reuse -- a pre-existing via-in-pad at the pad
+            # centre, the canonical re-run case -- is judged as a degenerate
+            # segment and can be rejected for copper it will never emit.
+            return True
+        if _gate_via:
+            for v in _erased_vias:
+                if v.net_id == net_id:
+                    continue                # own-net copper is no obstacle
+                if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \
+                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:
+                    return False
+        if _gate_seg:
+            # Segments, unlike vias, really ARE single-layer objects, so this
+            # half filters -- on `footprint.layer`, where the stub's copper is
+            # emitted, NOT on `layer`. The surface fan compares against `layer`
+            # (:999) only because ITS stubs land there. Measured on U2: the two
+            # spellings disagree completely -- `footprint.layer` (F.Cu) finds 25
+            # pairs, `layer` (B.Cu) finds 17 DIFFERENT ones.
+            for s in _erased_segs:
+                if s.net_id == net_id or s.layer != footprint.layer:
+                    continue
+                if segment_to_segment_distance(px, py, vx, vy,
+                                               s.start_x, s.start_y,
+                                               s.end_x, s.end_y) \
+                        < s.width / 2 + track_width / 2 + _stub_clr - 1e-6:
+                    return False
+        if _gate_pad and _erased_pads:
+            # CALL the grader; do not mirror it. An earlier revision of this
+            # used `_seg_hits_pad` with a hand-built margin, which is what the
+            # surface fan's pad loop does -- and it was measurably NOT the same
+            # predicate. Audited over the whole corpus at 0.1/0.1/0.45, it
+            # rejected 83 candidate/pad pairs that `check_pad_segment_overlap`
+            # grades CLEAN, the worst 0.234mm clear of the requirement, from
+            # two causes it cannot express:
+            #   * `_seg_hits_pad` tests the full axis-aligned RECTANGLE and
+            #     grows it with square corners, while check_drc resolves a
+            #     `corner_radius` for circle/oval/roundrect and calls
+            #     `segment_to_rect_distance` with it -- a 1.45mm round pad
+            #     becomes a 1.6x1.6 box whose corner is 1.131mm from centre
+            #     where the true keep-out is 0.875mm (61 of the 83); and
+            #   * it rejects at 1e-6 while the grader forgives `_grade_tol` =
+            #     5% of clearance, so a 0.005mm overlap at CL 0.1 is clean to
+            #     check_drc and a violation here (the other 22).
+            # It is also SAMPLED (`samples=16`), so on a long stub a small pad
+            # can fall between two samples: a 0.25mm pad on a 6.95mm stub --
+            # reachable at via 0.8 / pitch 0.4, where the ladder's top offset
+            # is exactly 6.95mm -- was reported CLEAR while the stub ran
+            # through its centre. `check_pad_segment_overlap` is exact.
+            seg = _Segment(start_x=px, start_y=py, end_x=vx, end_y=vy,
+                           width=track_width, layer=footprint.layer,
+                           net_id=net_id)
+            _tie = _tie_exempt(net_id)
+            for p in _erased_pads:
+                if p.net_id == net_id:
+                    continue
+                # The net-tie waiver is check_drc's BOTH-condition form. The
+                # exemption is LOCAL -- KiCad waives the contact only where it
+                # lies on the tied net's own pad (DRC_ENGINE::IsNetTieExclusion)
+                # -- so skipping the partner pad outright would wave through a
+                # real short 2-3mm away, which is exactly the geometry the
+                # ladder produces. `id(p) in _tie` alone is NOT the rule.
+                if id(p) in _tie and _tie_span_waived(pcb_data, seg, net_id,
+                                                     p, _stub_clr):
+                    continue
+                # local_clearance is per-PAD and RAISES the floor, exactly as
+                # check_drc's `_pad_pair_cl = max(local_clearance, pair)`.
+                _eff = max(_stub_clr, getattr(p, 'local_clearance', 0.0) or 0.0)
+                if check_pad_segment_overlap(p, seg, _eff, _board_cu)[0]:
+                    return False
+        return True
+
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
 
@@ -511,9 +736,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # already there) judged against a demanded 0.55. That was measured
             # as Net-(U2A-DATA_30) losing its escape to a fresh drill --
             # 28/12/30 vias/dropped/tracks becoming 29/13/31 on U2.
-            if (obs_layer_idx is None or
+            #
+            # stub_clears_erased is a SEPARATE `and` term, never folded into
+            # the `stub_layer_idx is None` `or`: that short-circuit skips the
+            # whole clearance test when the escape layer is not in the layer
+            # map, and #619 is pure geometry on the mount layer that must run
+            # regardless.
+            if (stub_layer_idx is None or
                     check_line_clearance(obstacles, px, py, _rvx, _rvy,
-                                         obs_layer_idx, cfg)) \
+                                         stub_layer_idx, cfg)) \
+                    and stub_clears_erased(px, py, _rvx, _rvy, pi.pad.net_id) \
                     and not run_output_conflict(
                         _rvx, _rvy, pi.pad.net_id, placed, px, py,
                         via_size=via_size, via_drill=via_drill,
@@ -522,9 +754,11 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
             vx, vy = snap(px + ex * d), snap(py + ey * d)
-            stub_ok = (obs_layer_idx is None or
-                       check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
-            if stub_ok and via_clears(vx, vy, pi.pad.net_id, placed, px, py):
+            stub_ok = (stub_layer_idx is None or
+                       check_line_clearance(obstacles, px, py, vx, vy, stub_layer_idx, cfg))
+            if stub_ok \
+                    and stub_clears_erased(px, py, vx, vy, pi.pad.net_id) \
+                    and via_clears(vx, vy, pi.pad.net_id, placed, px, py):
                 return (vx, vy)
         return None
 
@@ -711,6 +945,15 @@ def generate_qfn_fanout(footprint: Footprint,
     default, and what the CLI passes) is fully inert.
     """
     LAST_CANCEL_SKIPPED.clear()
+    # #619: and the erased-set report, for the same reason. `generate_qfn_fanout`
+    # returns early on several paths that never reach `_underpad_via_escape`
+    # (no recognised layout, no pad_infos, a cancel), and the surface fan never
+    # reaches it at all -- so without this a later reader gets the PREVIOUS
+    # footprint's set, from a different board. Measured over the tracked corpus:
+    # 155 of 408 footprints with >=4 pads never enter the escape, and every one
+    # of them was being graded against whatever ran before it.
+    global LAST_ERASED_SETS
+    LAST_ERASED_SETS = {}
     _cancelled = [False]
 
     def _cancel() -> bool:
