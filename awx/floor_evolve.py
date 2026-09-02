@@ -21,7 +21,6 @@ improvements. Every accepted board is graded and floor-verified.
 usage: floor_evolve.py TAG BEST_BOARD FO_BOARD K [--rounds 4]
 """
 import argparse
-import math
 import os
 import re
 import shutil
@@ -32,8 +31,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 sys.path.insert(0, HERE)
 os.chdir(HERE)
-from kicad_parser import parse_kicad_pcb  # noqa: E402
 from ledger_cal import Judge              # noqa: E402
+import surgical as sg                     # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument('tag')
@@ -51,177 +50,24 @@ nets = NETS.split(',')
 ENV = dict(os.environ, TWO_PAGE='1')
 
 
-def _walk_strip(txt, token, match):
-    out, i = [], 0
-    pat = '(' + token
-    while True:
-        j = txt.find(pat, i)
-        while j >= 0 and j + len(pat) < len(txt) \
-                and txt[j + len(pat)] not in ' \n\t(':
-            j = txt.find(pat, j + 1)
-        if j < 0:
-            out.append(txt[i:])
-            break
-        k, depth = j, 0
-        while True:
-            ch = txt[k]
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        if match(txt[j:k + 1]):
-            out.append(txt[i:j].rstrip(' \t'))
-            e = k + 1
-            if e < len(txt) and txt[e] == '\n':
-                e += 1
-            i = e
-        else:
-            out.append(txt[i:k + 1])
-            i = k + 1
-    return ''.join(out)
-
-
-def _collect(txt, token, match):
-    out, i = [], 0
-    pat = '(' + token
-    while True:
-        j = txt.find(pat, i)
-        while j >= 0 and j + len(pat) < len(txt) \
-                and txt[j + len(pat)] not in ' \n\t(':
-            j = txt.find(pat, j + 1)
-        if j < 0:
-            break
-        k, depth = j, 0
-        while True:
-            ch = txt[k]
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        if match(txt[j:k + 1]):
-            out.append(txt[j:k + 1])
-        i = k + 1
-    return out
-
-
-def _matcher(nid, name):
-    def match(block):
-        m = re.search(r'\(net (\d+)\)', block)
-        if m:
-            return int(m.group(1)) == nid
-        m = re.search(r'\(net "([^"]+)"\)', block)
-        return bool(m and m.group(1) == name)
-    return match
-
-
-def net_ids(board):
-    p = parse_kicad_pcb(board)
-    return {n.name.split('/')[-1]: (i, n.name)
-            for i, n in p.nets.items()}
-
-
 def swap_stub(best, src_board, n, out, strip_only_lane=False):
-    """best with net n's copper replaced by src_board's copy of n.
-    With strip_only_lane, n's copper in `best` is stripped and
-    src_board must BE best (in-place re-braid harvest)."""
-    ids = net_ids(src_board)
-    nid, name = ids[n]
-    match = _matcher(nid, name)
-    blocks = []
-    if not strip_only_lane:
-        src_txt = open(src_board, encoding='utf-8').read()
-        blocks = (_collect(src_txt, 'segment', match)
-                  + _collect(src_txt, 'via', match))
-    ids_b = net_ids(best)
-    match_b = _matcher(ids_b[n][0], ids_b[n][1])
-    txt = open(best, encoding='utf-8').read()
-    txt = _walk_strip(txt, 'segment', match_b)
-    txt = _walk_strip(txt, 'via', match_b)
-    pos = txt.rfind(')')
-    open(out, 'w', encoding='utf-8').write(
-        txt[:pos] + '\n'.join(blocks) + '\n' + txt[pos:])
+    return sg.swap_stub(best, src_board, n, out, strip_only_lane)
 
 
 def grade(board):
-    g = subprocess.run(
-        [sys.executable, 'grade_k.py', board, NETS],
-        capture_output=True, text=True).stdout
-    m = re.search(r'open=(\d+) drc=(\d+) vias=(\d+)', g)
-    return tuple(int(x) for x in m.groups()) if m else (99, 99, 999)
+    return sg.grade(board, NETS)
 
 
 def braid_one(board, n, out):
-    side = os.path.splitext(board)[0] + '.pages.json'
-    if os.path.exists(side):
-        os.remove(side)
-    r = subprocess.run(
-        [sys.executable, 'braid.py', '--board', board, '--dest',
-         a.dst, '--nets', n, '--out', out],
-        env=ENV, capture_output=True, text=True)
-    return (os.path.exists(out + '.kicad_pcb')
-            and 'REFUSED' not in r.stdout)
+    return sg.braid_one(board, n, out, dst=a.dst, env=ENV)
 
 
-# ---- candidate menu (the sweep's geometry)
-fo_pcb = parse_kicad_pcb(a.fo)
-
-
-def bbox(ref):
-    fp = fo_pcb.footprints[ref]
-    xs = [p.global_x for p in fp.pads]
-    ys = [p.global_y for p in fp.pads]
-    return (min(xs) - 0.25, min(ys) - 0.25,
-            max(xs) + 0.25, max(ys) + 0.25)
-
-
-BBs = {a.src: bbox(a.src), a.dst: bbox(a.dst)}
-
-
-def ball(ref, nm):
-    fp = fo_pcb.footprints[ref]
-    nid = next((i for i, n2 in fo_pcb.nets.items()
-                if n2.name.rsplit('/', 1)[-1] == nm), None)
-    p = next((p2 for p2 in fp.pads if p2.net_id == nid), None)
-    return (p.global_x, p.global_y) if p else None
+# ---- candidate menu (the sweep's geometry): surgical.Menu
+_menu = sg.Menu(a.fo, a.src, a.dst)
 
 
 def cands(nm):
-    out = []
-    for ref in (a.src, a.dst):
-        b = ball(ref, nm)
-        o = ball(a.dst if ref == a.src else a.src, nm)
-        if not b or not o:
-            continue
-        W = BBs[ref]
-        dx, dy = o[0] - b[0], o[1] - b[1]
-        for side in ('up', 'down', 'left', 'right'):
-            if side in ('left', 'right'):
-                edge = W[0] if side == 'left' else W[2]
-                t = (edge - b[0]) / dx if abs(dx) > 1e-9 else -1
-                raw = b[1] + t * dy if t > 1e-9 else o[1]
-                span = (W[1], W[3])
-            else:
-                edge = W[1] if side == 'up' else W[3]
-                t = (edge - b[1]) / dy if abs(dy) > 1e-9 else -1
-                raw = b[0] + t * dx if t > 1e-9 else o[0]
-                span = (W[0], W[2])
-            coord = min(max(raw, span[0] + 0.3), span[1] - 0.3)
-            for L in ('F.Cu', 'B.Cu'):
-                out.append((f'{ref[0]}{side[0]}{L[0]}',
-                            (['--ref', a.dst] if ref == a.dst else [])
-                            + ['--side', side, '--coord',
-                               f'{coord:.2f}', '--layer', L]))
-        for L in ('F.Cu', 'B.Cu'):
-            out.append((f'{ref[0]}kp{L[0]}',
-                        (['--ref', a.dst] if ref == a.dst else [])
-                        + ['--keep-pos', '--layer', L]))
-    return out
+    return _menu.cands(nm)
 
 
 best = a.best
@@ -272,6 +118,14 @@ for rnd in range(a.rounds):
     for nf, nm, label, rel_fo in found[:5]:
         cand = f'tmp/{a.tag}_r{rnd}_{nm}_{label}_b1.kicad_pcb'
         gc = grade(cand)
+        if gc[0] > g0[0] and gc[1] <= g0[1]:
+            # completion rescue before the veto: close each stranded
+            # net alone on the candidate's frozen copper
+            _gb, base_open = sg.grade_full(best, NETS)
+            cand, gc2, _o = sg.rescue_close(cand, rel_fo, base_open,
+                                            NETS, a.tag, a.dst)
+            print(f'  try {nm} {label}: strands -> rescue {gc} -> {gc2}')
+            gc = gc2
         Jc = Judge(cand, nets)
         print(f'  try {nm} {label}: predicted {nf}, realized '
               f'floor {Jc.floor_total}, grade {gc}')

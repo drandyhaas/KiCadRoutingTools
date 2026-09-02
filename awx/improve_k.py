@@ -52,6 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(HERE)
 sys.path.insert(0, HERE)
 from plan_global import opt_rides  # noqa: E402
+import surgical as sg               # noqa: E402
 
 import argparse
 _ap = argparse.ArgumentParser()
@@ -303,6 +304,10 @@ def _trial_on_fo(newfo, label, rescue=False):
         rides, divers, model = opt_rides(plan)
         return True
     print(f'  {label}: open={s[0]} drc={s[1]} vias={s[2]}')
+    # every via-saving, drc-ok board this trial produces that STRANDS
+    # nets is a candidate for the completion CLOSE rescue below
+    close_cands = []
+    base_open = set()
     if rescue and s[0] > 0 and s[1] <= best_score[1] \
             and s[2] < best_score[2]:
         gb = subprocess.run(
@@ -312,6 +317,8 @@ def _trial_on_fo(newfo, label, rescue=False):
         base_open = set(mb.group(1).split(',')) if mb else set()
         newly = [m for m in OPENS.get(f'{TAG}_{label}_pin', [])
                  if m not in base_open]
+        close_cands.append((s, f'{TAG}_{label}_pin.kicad_pcb',
+                            trial, {}))
         # WIDE rescue for batch trials (rescue='wide'): the composed
         # wrap batches measured 64v-with-4-open at K35 -- 25+ vias on
         # the table beyond the <=2 cap. Cap 4 and ONE recursion round
@@ -349,13 +356,46 @@ def _trial_on_fo(newfo, label, rescue=False):
             if not (s2[0] > 0 and s2[1] <= best_score[1]
                     and s2[2] < best_score[2]):
                 break
+            close_cands.append((s2, rtag + '.kicad_pcb', trial2,
+                                dict(rnd_flip)))
             newly = [m for m in OPENS.get(rtag, [])
                      if m not in base_open]
             rnd_trial = trial2
+    if close_cands and os.environ.get('IMPROVE_CLOSE_RESCUE', '1') == '1':
+        # COMPLETION CLOSE RESCUE (the user's rule, 0902): the veto on
+        # a via-saving trial is completion loss, so fix completion --
+        # braid each stranded net ALONE against the trial board's
+        # frozen copper (stubs from the trial's own fanout board). The
+        # single-net last call routes what the whole-board pass
+        # refused (SA2 at K41: +5 vias, 0 drc, first complete K41).
+        # Cheapest via-saving board first. IMPROVE_CLOSE_RESCUE=0 off.
+        close_cands.sort(key=lambda c: c[0])
+        s3, b3, pages3, flips3 = close_cands[0]
+        b4, s4, _o4 = sg.rescue_close(
+            b3, FO, base_open, NETS,
+            os.path.basename(TAG) + '_' + label, 'DU1')
+        print(f'  {label}c: close rescue of {os.path.basename(b3)} '
+              f'{s3} -> open={s4[0]} drc={s4[1]} vias={s4[2]}'
+              + ('   ACCEPT' if s4 < best_score else ''))
+        if s4 < best_score:
+            best_score = s4
+            best_board = b4
+            SURGICAL_BEST[0] = True
+            for m, v in flips3.items():
+                flips[m] = v
+            plan, own, cur_pages = plan2, own2, pages3
+            rides, divers, model = opt_rides(plan)
+            return True
     if os.path.exists(SIDECAR):
         os.remove(SIDECAR)
     FO, SIDECAR = fo0, side0
     return False
+
+
+# a best board produced by the surgical close rescue is NOT a pure
+# function of (FO, pages): the final whole-board smooth re-braid
+# cannot reproduce it, so it is skipped (the close itself is smoothed)
+SURGICAL_BEST = [False]
 
 
 def actual_vias(board):
@@ -1066,10 +1106,15 @@ if best_board.endswith('_free.kicad_pcb'):
         os.remove(SIDECAR)
 else:
     put_pages(cur_pages)
-_s = braid(TAG + '_smooth', smooth=True)
+if SURGICAL_BEST[0]:
+    print('  best came through the close rescue (surgical): final '
+          'smooth re-braid skipped, keeping it as is')
+    _s = None
+else:
+    _s = braid(TAG + '_smooth', smooth=True)
 if _s == best_score:
     best_board = TAG + '_smooth.kicad_pcb'
-else:
+elif _s is not None:
     print(f'  final smooth re-braid diverged (open={_s[0]} '
           f'drc={_s[1]} vias={_s[2]} vs {best_score}); '
           'keeping the unsmoothed best')
