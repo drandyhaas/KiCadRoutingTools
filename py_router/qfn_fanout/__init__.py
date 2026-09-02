@@ -366,6 +366,31 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # this change and nothing is being silently left out.
     _erased_vias = [v for v in pcb_data.vias if v.net_id in fanned_nets]
     _erased_segs = [s for s in pcb_data.segments if s.net_id in fanned_nets]
+    # The pad half needs FOUR exclusions the surface fan's pad loop (:990-996)
+    # does not make, or it phantom-rejects. Three are check_drc's own rules,
+    # applied here so the gate refuses exactly what the grader flags:
+    #   * NPTH carries no copper -- KiCad lists *.Cu on it for hole keep-out,
+    #     but an np_thru_hole pad's "size" is only the mask opening. check_drc
+    #     skips it for PAD-SEGMENT (`_pad_has_no_copper`, #260); so do we.
+    #   * layer scope resolves through `pad_copper_layers`, which expands the
+    #     `*.Cu` and `F&B.Cu` wildcards. A bare `layer in pad.layers` misses
+    #     both -- zero occurrences in this corpus, but the pcbnew parse path
+    #     emits them, so the GUI front would diverge from the CLI one (#722).
+    #   * `pad.local_clearance` RAISES the floor: check_drc grades PAD-SEGMENT
+    #     at `_pad_pair_cl = max(local_clearance, pair)`. It is per-pad, so it
+    #     cannot be hoisted the way the surface fan hoists its `margin` -- that
+    #     is precisely why the surface fan cannot honour it and this does.
+    # The fourth is a net TIE: `_seg_hits_pad` is net-blind, and obstacle_map's
+    # own tie lift only fires when exactly one net is being routed
+    # (obstacle_map.py:338-341), so the under-pad path never gets it. Today a
+    # tie partner on a fanned net is absent from the map by accident; without
+    # this the pad half would turn that accident into a hard block with no lift.
+    from check_drc import _pad_has_no_copper, pad_copper_layers
+    _board_cu = list(pcb_data.board_info.copper_layers or [])
+    _erased_pads = [p for p in foreign_pads
+                    if p.net_id in fanned_nets
+                    and not _pad_has_no_copper(p)
+                    and footprint.layer in pad_copper_layers(p, _board_cu)]
     # The stub is emitted on `footprint.layer` -- the pad's OWN mount layer,
     # deliberately, so it does not float above the pad (#195) -- and NOT on the
     # `layer` argument. The caller's #498 dru swap resolved `clearance` for the
@@ -373,12 +398,25 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # lives, and check_drc grades a segment with `_pair_cl(..., layer=seg.layer)`.
     # So the stub's own pair clearance is the mount layer's rule.
     _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
+    # A SET of halves, so an A/B arm can be 'via', 'via,seg', 'off' or 'all'.
+    # 'off' wins over everything (an explicit ablation is never partial), and
+    # an empty or unrecognised value is 'all' -- a typo must not silently
+    # disable the gate.
     _gate = env_knobs.QFN_UNDERPAD_ERASED_GATE
-    _gate_via = _gate in ('all', 'via')
-    _gate_seg = _gate in ('all', 'seg')
+    _gsel = {t for t in _gate.replace(',', ' ').split() if t}
+    _gate_all = not _gsel or 'all' in _gsel or not (_gsel & {'via', 'seg', 'pad'})
+    _gate_via = 'off' not in _gsel and (_gate_all or 'via' in _gsel)
+    _gate_seg = 'off' not in _gsel and (_gate_all or 'seg' in _gsel)
+    _gate_pad = 'off' not in _gsel and (_gate_all or 'pad' in _gsel)
+
+    def _tie_exempt(net_id):
+        f = getattr(pcb_data, 'net_tie_exempt_pad_ids', None)
+        return f(net_id) if f else ()
+
     global LAST_ERASED_SETS
     LAST_ERASED_SETS = {'nets': set(fanned_nets), 'vias': len(_erased_vias),
-                        'segs': len(_erased_segs), 'layer': footprint.layer,
+                        'segs': len(_erased_segs), 'pads': len(_erased_pads),
+                        'layer': footprint.layer,
                         'clearance': _stub_clr, 'gate': _gate}
     from kicad_parser import pad_drill_circles as _pdc
     import routing_defaults as _rd
@@ -544,6 +582,19 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                                                s.start_x, s.start_y,
                                                s.end_x, s.end_y) \
                         < s.width / 2 + track_width / 2 + _stub_clr - 1e-6:
+                    return False
+        if _gate_pad:
+            _tie = _tie_exempt(net_id)
+            for p in _erased_pads:
+                if p.net_id == net_id or id(p) in _tie:
+                    continue
+                # local_clearance is per-PAD and RAISES the floor, so the
+                # margin is resolved here rather than hoisted (check_drc:
+                # `_pad_pair_cl = max(local_clearance, pair)`).
+                if _seg_hits_pad(px, py, vx, vy, p,
+                                 margin=max(_stub_clr,
+                                            getattr(p, 'local_clearance', 0.0)
+                                            or 0.0) + track_width / 2 - 1e-6):
                     return False
         return True
 
