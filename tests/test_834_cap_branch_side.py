@@ -238,41 +238,53 @@ def test_a_through_pad_is_never_skipped():
 
 
 def test_the_per_side_extent_is_reached_by_a_two_faced_part():
-    """The over-cap branch's per-side box, exercised.
+    """The over-cap branch's per-side box, exercised where it CHANGES a verdict.
 
-    No tracked board has a part with SMD pads on BOTH faces above the cap, so
+    No tracked board has a part with SMD pads on both faces above the cap, so
     without this arm `extent_side` is unreachable and could be deleted with the
-    suite still green. Here A carries an F lattice AND a distant B lattice; B
-    is back-side only. The whole-part extent spans both, and charging the pair
-    on it prices A's far-away F copper against B.
+    suite still green.
+
+    A carries an F lattice at the origin and a B lattice 50mm away; B is
+    back-side only and sits ON A's F lattice. The two share only the BACK face,
+    where they are 50mm apart -- but A's WHOLE extent spans both lattices, so
+    the extent branch used to see a full overlap and charge it. The first
+    version of this arm put B on A's back lattice instead, where both models
+    agree, and a mutation reverting the branch to `rect_gap(ea, eb)` survived
+    it. The battery caught that.
     """
     a = _grid('A', 8, 0.0, 0.0, layers=('F.Cu',), net_base=1)
     for i in range(8):
         for j in range(8):
             a.pads.append(FakePad(50.0 + i, 50.0 + j, 0.4, 0.4,
                                   net=200 + i * 8 + j, layers=('B.Cu',)))
-    b = _grid('B', 8, 50.0, 50.0, layers=('B.Cu',), net_base=900)
+    b = _grid('B', 8, 0.0, 0.0, layers=('B.Cu',), net_base=900)
     ctx, parts = _ctx([a, b])
     assert parts['A'].pad_sides == L.BOTH_SIDES, sorted(parts['A'].pad_sides)
+    assert parts['A'].pad_sides & parts['B'].pad_sides, 'the pair must not be '
     assert parts['A'].n_pads * parts['B'].n_pads > L.PAIR_TEST_CAP, (
         parts['A'].n_pads, parts['B'].n_pads)
-    # The F box and the B box really are different, or the arm proves nothing.
-    fbox = parts['A'].extent_local_side(0.0, 'F')
-    bbox = parts['A'].extent_local_side(0.0, 'B')
-    full = parts['A'].extent_local(0.0)
-    assert fbox != bbox and fbox != full, (fbox, bbox, full)
-    # B's pads sit on A's BACK lattice, so the pair interacts on B only, and
-    # the F half of A must not enter the gap.
+    # The whole extent spans both lattices and OVERLAPS B; the shared-side box
+    # does not. That difference is the arm.
+    ea = parts['A'].extent(0.0, 0.0, 0.0)
+    eb = parts['B'].extent(0.0, 0.0, 0.0)
+    assert L.rect_gap(ea, eb) < 0.0, (
+        'the whole extents no longer overlap, so this arm cannot tell the two '
+        'models apart: {} vs {}'.format(ea, eb))
+    back_a = parts['A'].extent_side(0.0, 0.0, 0.0, 'B')
+    back_b = parts['B'].extent_side(0.0, 0.0, 0.0, 'B')
+    assert L.rect_gap(back_a, back_b) > 40.0, (back_a, back_b)
+    assert parts['A'].extent_side(0.0, 0.0, 0.0, 'F') != back_a
     sf = ctx.pair_shortfall('A', 'B')
-    assert sf.pad > 0.0 and sf.stack, (
-        'the two back lattices overlap; this must still be a conflict: {}'
-        .format(sf))
-    # ...and moving B far away on the BACK clears it, even though A's F copper
-    # is still where it was.
-    far = ctx.pair_shortfall('A', 'B', pose_b=(200.0, 200.0, 0.0))
-    assert far.pad == 0.0 and not far.stack, far
-    print('  PASS: per-side extents differ (F {} vs B {}), and the pair is '
-          'graded on the shared face'.format(fbox, bbox))
+    assert sf.pad == 0.0 and not sf.stack and not sf.pad_overlap, (
+        'the pair is 50mm apart on the only face they share; the whole-part '
+        'extent is what says otherwise: {}'.format(sf))
+    # ...and moving B onto A's BACK lattice IS a conflict, so the arm is not
+    # merely asserting that everything is clear.
+    near = ctx.pair_shortfall('A', 'B', pose_b=(50.0, 50.0, 0.0))
+    assert near.pad > 0.0 and near.stack, near
+    print('  PASS: shared-face gap {:.1f}mm grades clean while the whole '
+          'extents overlap; on the shared lattice it still conflicts'
+          .format(L.rect_gap(back_a, back_b)))
 
 
 def _ulx3s_ctx(clearance=0.2):

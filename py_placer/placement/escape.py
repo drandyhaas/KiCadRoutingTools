@@ -708,10 +708,20 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
     each took so the first name is the one to move.
 
     Intervals are UNIONED, so two neighbours covering the same stretch are
-    charged once, and the total is clamped to the span. Both matter: without
-    the union a face can be reported as more than fully blocked -- measured,
-    glasgow_revC J1 east accumulated 11.82mm of cover on a 9.64mm face -- and
-    an over-100% total silently becomes "supply 0" rather than an error.
+    charged once. That is the correction: without it a face can be reported as
+    more than fully blocked, and an over-100% total silently becomes "supply 0"
+    rather than an error. Measured, glasgow_revC's J1 east has eight
+    neighbours covering 12.42mm of a 9.64mm face -- summed that is supply 0,
+    unioned it is 8.23mm and supply 3. Corpus-wide, 227 faces sum to more than
+    they cover.
+
+    The `min(blocked, hi - lo)` below is BELT AND BRACES, and provably so while
+    the union stands: every interval is already clipped to [lo, hi] as it is
+    built, so their union is a subset of [lo, hi] and cannot measure more than
+    `hi - lo`. It is kept because it is the guard that binds the moment the
+    union is removed, and a mutation that drops it is recorded as an expected
+    survivor rather than deleted (`tests/mutate_834_835.py`). Do not read it as
+    the thing that fixed the 12.42-on-9.64 number; the union is.
     """
     intervals: List[Tuple[float, float, str]] = []
     for ref, (oxmin, oymin, oxmax, oymax) in obstacles:

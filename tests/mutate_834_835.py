@@ -159,7 +159,16 @@ ROWS = [
     ('span_eaten-drops-the-clamp', 'esc',
      '    return min(blocked, hi - lo), order',
      '    return blocked, order',
-     (T835,), 'KILLED'),
+     (T835,),
+     # SURVIVES, and by algebra rather than by a gap in the tests: every
+     # interval is clipped to [lo, hi] as it is built, so their UNION cannot
+     # measure more than hi - lo and the clamp never binds. It binds the moment
+     # the union is removed -- which is the row above -- so it is kept, and
+     # this row is kept with it, because a future edit that reorders the
+     # clipping makes the clamp live again. Expected first, then measured, not
+     # the other way round: the first version of this row expected KILLED and
+     # the battery corrected it.
+     'SURVIVED'),
 
     ('the-sides-map-is-not-threaded-into-the-ledger', 'esc',
      """                       sides=sides, containers=containers)""",
@@ -205,11 +214,10 @@ ROWS = [
      """                 and g.ref not in _containers]""",
      """                 and g.ref not in ()]""",
      (T835,),
-     # rp2350 is the only tracked board with a container, and the arm that
-     # would notice asserts on `escape`, not on this ledger. Recorded so the
-     # gap is visible rather than implied; closing it needs a pinned
-     # `face_lane_ledger` row on rp2350 U6.
-     'SURVIVED'),
+     # Expected SURVIVED on the reasoning that only `escape` is asserted on;
+     # measured KILLED, because `test_face_lane_ledger_side_test_is_symmetric`
+     # asserts the container is absent from THIS ledger's `eaten_by` too.
+     'KILLED'),
 ]
 
 

@@ -333,42 +333,63 @@ def test_face_lane_ledger_cannot_cover_more_than_the_face():
           'finest grid never supplies less'.format(rows, checked))
 
 
-def test_the_union_is_what_moves_tigard():
-    """tigard is the clean UNION witness, and the reason it is clean matters.
+def test_the_union_is_measured_where_it_actually_bites():
+    """glasgow_revC J1 east: eight neighbours, 12.42mm of cover on a 9.64mm
+    face. SUMMED that is more than the face, so `max(0.0, length - covered)`
+    collapses supply to 0; UNIONED it is 8.23mm and supply is 3.
 
-    It has no container and no cross-side charge at all, so neither of the
-    other two arms can touch it -- its escape ledger is 41 lanes before and
-    after. What moves is `routability`, purely because three neighbours over
-    the same stretch of J1's east face were billed three times.
-
-    J1 is also the symmetric-side witness on the same part: J1 is DRILLED, so
-    it occupies both faces and the B-side JP1 is charged against its north
-    face. A one-sided `own_side in g.sides` test would drop that.
+    Chosen by scanning, not by guessing. My first witness for this was tigard
+    J1 east, and it was wrong: tigard's routability numbers move under this
+    branch because of the SYMMETRIC SIDE TEST, not the union -- summing and
+    unioning give it the same supply. The mutation battery caught that, which
+    is what it is for. Corpus-wide there are 227 faces where the summed cover
+    exceeds the union; this is the largest clean one on a board with no
+    container.
     """
-    pcb, path = _board('tigard')
+    pcb, path = _board('glasgow_revC')
     if pcb is None:
-        print('  SKIP: tigard not present')
+        print('  SKIP: glasgow_revC not present')
         return
     assert not container_refs(pcb, graded_parts_from_file(pcb, path)), (
-        'tigard grew a container; it is no longer the clean union witness')
-    sides = _sides(pcb)
-    assert sides['J1'] == frozenset(('F', 'B')), sorted(sides['J1'])
+        'glasgow grew a container; this is no longer a clean union witness')
     rows = {r['face']: r for r in R.face_lane_ledger(
         pcb, 'J1', clearance=0.2, track_width=0.2, grid_step=0.1,
         pcb_file=path)}
     east = rows['E']
     assert abs(east['length_mm'] - 9.64) < 0.01, east
-    assert len(east['eaten_by']) == 3, east['eaten_by']
-    # Three neighbours eating ~13 lanes between them on a face that holds 32:
-    # summed, that left supply 4; unioned, it is 11.
-    assert sum(mm for _r, mm in east['eaten_by']) > 12.0, east['eaten_by']
-    assert east['supply_routed_grid'] == 11, (
-        'tigard J1 east supply moved from the recorded 11: {}'.format(east))
-    north = rows['N']
-    assert 'JP1' in {r for r, _mm in north['eaten_by']}, north
+    assert len(east['eaten_by']) == 8, east['eaten_by']
+    summed = sum(mm for _r, mm in east['eaten_by'])
+    assert summed > east['length_mm'], (
+        'the per-neighbour cover no longer exceeds the face, so summing and '
+        'unioning would agree and this arm proves nothing: {} vs {}'
+        .format(summed, east['length_mm']))
+    assert east['supply_routed_grid'] == 3, (
+        'glasgow J1 east supply moved from the recorded 3 (it is 0 if the '
+        'intervals are summed rather than unioned): {}'.format(east))
+
+
+def test_tigard_moves_on_the_side_test_not_the_union():
+    """The other half, kept apart on purpose.
+
+    tigard has no container and no cross-side blocker charge, so its ESCAPE
+    ledger is 41 lanes before and after. Its `routability` numbers do move, and
+    the cause is the symmetric side test: J1 is DRILLED, so it occupies both
+    faces and the B-side JP1 is charged against its north face, where the
+    one-sided `own_side in g.sides` dropped it.
+    """
+    pcb, path = _board('tigard')
+    if pcb is None:
+        print('  SKIP: tigard not present')
+        return
+    sides = _sides(pcb)
+    assert sides['J1'] == frozenset(('F', 'B')), sorted(sides['J1'])
     assert sides['JP1'] == frozenset(('B',)), sorted(sides['JP1'])
-    print('  PASS: J1 east supply 11 with 3 unioned blockers; the B-side JP1 '
-          'still charged against the drilled J1')
+    rows = {r['face']: r for r in R.face_lane_ledger(
+        pcb, 'J1', clearance=0.2, track_width=0.2, grid_step=0.1,
+        pcb_file=path)}
+    assert 'JP1' in {r for r, _mm in rows['N']['eaten_by']}, rows['N']
+    print('  PASS: glasgow J1 east supply 3 (0 if summed); tigard J1 keeps '
+          'its B-side JP1 through the symmetric side test')
 
 
 def test_face_lane_ledger_side_test_is_symmetric():
