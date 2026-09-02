@@ -22,6 +22,31 @@ overwritten by the restore, and killing it mid-row left a mutant on disk.)
     python3 tests/mutate_834_835.py --row the-side-filter-goes-away
     python3 tests/mutate_834_835.py --list
     python3 tests/mutate_834_835.py --selftest
+
+RECORDED at 49fff127 -- 16 rows, 12 killed, 4 survived (4 of them expected),
+0 broken, 0 disagreeing with expectation:
+
+    pside-goes-back-to-back-only                  KILLED
+    pad_sides-uses-the-BODY-answer                KILLED
+    the-disjoint-early-return-goes-away           KILLED
+    the-early-return-forgets-the-hole-channel     KILLED
+    the-cap-branch-goes-back-to-the-whole-extent  KILLED
+    the-per-side-extent-ignores-the-side          KILLED
+    the-per-side-extent-drops-the-holes           SURVIVED  (expected)
+    the-side-filter-goes-away                     KILLED
+    the-side-filter-becomes-one-sided             SURVIVED  (expected: a no-op
+                                                             control)
+    the-container-filter-goes-away                KILLED
+    span_eaten-sums-instead-of-unioning           KILLED
+    span_eaten-drops-the-clamp                    SURVIVED  (expected, proved)
+    the-sides-map-is-not-threaded-into-the-ledger SURVIVED  (expected)
+    routability-keeps-its-one-sided-side-test     KILLED
+    routability-goes-back-to-double-charging      KILLED
+    routability-stops-exempting-containers        KILLED
+
+The FIRST run of this table had four disagreements, three of which were holes
+in the new tests rather than in the engine -- see the commit that fixed them.
+That is the whole argument for the battery: the suite was green before it ran.
 """
 import argparse
 import glob
