@@ -37,6 +37,29 @@ the ones that matter and both were found the hard way:
     python3 -X utf8 tests/mutate_847.py --verify-anchors
     python3 -X utf8 tests/mutate_847.py --row the-share-form-goes-away
 
+RECORDED at 229b5a5e, with `wk/run7/glasgow_revC` present -- 22 rows, 20 killed,
+2 survived (both of them the intended controls), 0 broken, 0 disagreeing with
+expectation.
+
+The FIRST run of this battery, at ca47c88f, was 17 killed / 5 survived with
+THREE disagreeing, and all three were holes in the tests rather than wrong
+expectations. They are named here because a battery that only ever reports a
+clean sweep is not evidence that it can find anything:
+
+    the-baseline-is-graded-at-a-different-band   dropping the band from the
+        BASELINE leg alone passed every arm. Closed with a board against
+        ITSELF at a deep band -- the two sides are identical there, so the
+        only way to make a NEW row is to grade them differently.
+    lost_last_lane-goes-away   the honesty test drives that predicate on
+        hand-built dicts, so nothing exercised its MERGE into the list the
+        exit code reads. Closed with a CLI arm that disables the share form at
+        a band where a face crosses to zero.
+    the-share-form-drops-its-demand-conjunct   could not be closed on tracked
+        boards at all: MEASURED, no face on the tigard pair has both demand
+        < 7 and a >= 20% drop. The arm lives in the wk/-gated file where
+        D21 W (demand 1, 8 -> 3) does, so on a clean clone this row SKIPS
+        rather than judging -- the honest answer, not a pass.
+
 RUN `--verify-anchors` FIRST. An anchor stales the moment a line it quotes is
 reworded, and a stale anchor reports BROKEN 50 minutes into a run rather than
 in one second before it. It also refuses an anchor that matches PROSE
