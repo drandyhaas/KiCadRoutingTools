@@ -1354,11 +1354,12 @@ that face is taken by U1, U7, C6` is an instruction; "north face is short" is
 not.
 
 A blocker is only actionable if it is real, and until #835 it often was not.
-The example this page used to give — `U9 west … 15.35mm taken by SD1`, on
-ulx3s — was the defect itself: U9 is on B.Cu and SD1 on F.Cu, they never share
-copper, and each was charged the other's whole body across the board. A part on
-the far side, and a module outline the part sits *inside*, are both skipped
-now; ulx3s went from six faces in deficit to none.
+The example this page used to give was the defect itself: the part and the
+neighbour it named sat on OPPOSITE copper faces, never shared copper, and each
+was charged the other's whole body across the board. Two neighbours are skipped
+now — one that shares no face with the part (a drilled part occupies both), and
+a module outline the part sits *inside* rather than beside. On a back-heavy
+board that can be every deficit it reported.
 Interior pads are reported separately and are a **fanout** question, not a lane
 one — they need a via, not a channel.
 
