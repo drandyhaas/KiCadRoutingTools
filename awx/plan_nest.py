@@ -133,7 +133,50 @@ def _crossings(assign):
     return X, pairs
 
 
-def analyze(board, nets, src='U1', dst='DU1', allow_pages=False):
+def _walk_xy(t, bb, back_west, first_north):
+    """Inverse of _walk_t: perimeter coordinate -> (relay side name,
+    relay coord) -- 'up'/'down' faces coord in x, 'left'/'right' in
+    y, matching relay_net's --side/--coord convention."""
+    x0, y0, x1, y1 = bb
+    w, h = x1 - x0, y1 - y0
+    ymid = (y0 + y1) / 2
+    P = 2 * (w + h)
+    d = (t % 1.0) * P
+    if back_west and first_north:
+        # W-mid up -> N(W->E) -> E(N->S) -> S(E->W) -> W-mid
+        if d <= (ymid - y0):
+            return 'left', ymid - d
+        d -= (ymid - y0)
+        if d <= w:
+            return 'up', x0 + d
+        d -= w
+        if d <= h:
+            return 'right', y0 + d
+        d -= h
+        if d <= w:
+            return 'down', x1 - d
+        d -= w
+        return 'left', y1 - d
+    if not back_west and not first_north:
+        # E-mid down -> S(E->W) -> W(S->N) -> N(W->E) -> E-mid
+        if d <= (y1 - ymid):
+            return 'right', ymid + d
+        d -= (y1 - ymid)
+        if d <= w:
+            return 'down', x1 - d
+        d -= w
+        if d <= h:
+            return 'left', y1 - d
+        d -= h
+        if d <= w:
+            return 'up', x0 + d
+        d -= w
+        return 'right', y0 + d
+    raise ValueError('unsupported walk combination')
+
+
+def analyze(board, nets, src='U1', dst='DU1', allow_pages=False,
+            minimize_shifts=False):
     """Nest analysis of one board, scoped to `nets` (short names).
     Returns a dict:
       as_is        same-page interleaving count, ports from copper
@@ -214,7 +257,55 @@ def analyze(board, nets, src='U1', dst='DU1', allow_pages=False):
         if not improved:
             break
     xmin, _ = _crossings(st)
+    # minimize_shifts gate: the polish rewrites wrapmm, which is a
+    # candidate-ranking TIEBREAK downstream -- it must be fully inert
+    # unless requested, or the "off" arm of an A/B still reorders
+    # trials (the fa4-vs-fa7 lesson: order IS the draw)
+    if not minimize_shifts:
+        moves = {}
+        for m in st:
+            if choice[m] == 'direct' and st[m][2] == cur[m][2]:
+                continue
+            solo = dict(cur)
+            solo[m] = st[m]
+            moves[m] = (choice[m], wrapmm[m],
+                        x0 - _crossings(solo)[0])
+        return {'as_is': x0, 'pairs': pairs0, 'minimum': xmin,
+                'moves': moves, 'asks': {}, 'rides': len(R)}
+    # SHIFT-MINIMIZATION polish (user-observed on the renders: the
+    # arc-end ask made a wrap exit at the array's BACK -- a stub
+    # crossing the whole array -- when sliding just past the ports it
+    # must un-interleave with suffices). Walk each wrapped port back
+    # toward its original position, interval by interval between the
+    # other ports, keeping the JOINT crossing count at the minimum;
+    # the nearest-to-original interval that holds the minimum wins.
+    for m in sorted(st):
+        tag = choice[m]
+        if '-wrap' not in tag:
+            continue
+        sp, dp, pg = st[m]
+        widx = 0 if tag.startswith('src') else 1
+        wcur = (sp, dp)[widx]
+        worig = (cur[m][0], cur[m][1])[widx]
+        lo, hi = min(wcur, worig), max(wcur, worig)
+        others = sorted(set(
+            x for k2, v2 in st.items() if k2 != m
+            for x in (v2[0], v2[1]) if lo < x < hi))
+        bounds = [lo] + others + [hi]
+        mids = [(bounds[i] + bounds[i + 1]) / 2
+                for i in range(len(bounds) - 1)]
+        mids.sort(key=lambda v: abs(v - worig))
+        for v in mids:
+            tv = (v, dp, pg) if widx == 0 else (sp, v, pg)
+            trial = dict(st)
+            trial[m] = tv
+            if _crossings(trial)[0] == xmin:
+                st[m] = tv
+                per = sper if widx == 0 else dper
+                wrapmm[m] = abs(v - worig) * per
+                break
     moves = {}
+    asks = {}
     for m in st:
         if choice[m] == 'direct' and st[m][2] == cur[m][2]:
             continue
@@ -224,8 +315,16 @@ def analyze(board, nets, src='U1', dst='DU1', allow_pages=False):
         solo[m] = st[m]
         moves[m] = (choice[m], wrapmm[m],
                     x0 - _crossings(solo)[0])
+        if '-wrap' in choice[m]:
+            sp, dp, pg = st[m]
+            if choice[m].startswith('src'):
+                side, coordv = _walk_xy(sp, sbb, True, True)
+            else:
+                side, coordv = _walk_xy(dp - 1.0, dbb, False, False)
+            asks[m] = (choice[m].split('-')[0], side,
+                       round(coordv, 2))
     return {'as_is': x0, 'pairs': pairs0, 'minimum': xmin,
-            'moves': moves, 'rides': len(R)}
+            'moves': moves, 'asks': asks, 'rides': len(R)}
 
 
 def main():
@@ -239,7 +338,7 @@ def main():
     nets = subprocess.run(
         [sys.executable, os.path.join(HERE, 'coherent_nets.py'), a.k],
         capture_output=True, text=True).stdout.strip().split(',')
-    r = analyze(a.board, nets, a.src, a.dst)
+    r = analyze(a.board, nets, a.src, a.dst, minimize_shifts=True)
     print(f'{os.path.basename(a.board)} K={a.k}: {r["rides"]} rides')
     print(f'as-is same-page interleavings: {r["as_is"]}')
     for m, n2 in r['pairs'][:14]:
@@ -252,7 +351,8 @@ def main():
     for m, (tag, mm, solo) in sorted(r['moves'].items(),
                                      key=lambda kv: -kv[1][2]):
         print(f'  {m}: {tag} (+{mm:.1f}mm, solo -{solo} crossings)')
-    rp = analyze(a.board, nets, a.src, a.dst, allow_pages=True)
+    rp = analyze(a.board, nets, a.src, a.dst, allow_pages=True,
+                 minimize_shifts=True)
     print(f'homotopy+pages minimum:    {rp["minimum"]} '
           f'({len(rp["moves"])} move(s))')
 

@@ -290,25 +290,46 @@ def _trial_on_fo(newfo, label, rescue=False):
         base_open = set(mb.group(1).split(',')) if mb else set()
         newly = [m for m in OPENS.get(f'{TAG}_{label}_pin', [])
                  if m not in base_open]
-        if 1 <= len(newly) <= 2:
-            trial2 = dict(trial)
+        # WIDE rescue for batch trials (rescue='wide'): the composed
+        # wrap batches measured 64v-with-4-open at K35 -- 25+ vias on
+        # the table beyond the <=2 cap. Cap 4 and ONE recursion round
+        # (re-page the rescue's own newly-stranded on top), same
+        # strictly-better keep throughout.
+        cap = 4 if rescue == 'wide' else 2
+        rnd_trial = trial
+        rnd_flip = {}
+        for rnd in range(2 if rescue == 'wide' else 1):
+            if not (1 <= len(newly) <= cap):
+                break
+            if any(m in rnd_flip for m in newly):
+                break                    # a re-paged net re-stranded
+            trial2 = dict(rnd_trial)
             for m in newly:
                 trial2[m] = None if trial2.get(m) is not None else \
                     (plan2.get(m) or {}).get('tooth_layer')
+                rnd_flip[m] = trial2[m]
             put_pages(trial2)
-            s2 = braid(f'{TAG}_{label}_r')
+            rtag = f'{TAG}_{label}_r{rnd if rnd else ""}'
+            s2 = braid(rtag)
             if s2 < best_score:
-                print(f'  {label}r: open={s2[0]} drc={s2[1]} '
-                      f'vias={s2[2]}   ACCEPT')
+                print(f'  {label}r{rnd if rnd else ""}: open={s2[0]} '
+                      f'drc={s2[1]} vias={s2[2]}   ACCEPT')
                 best_score = s2
-                best_board = f'{TAG}_{label}_r.kicad_pcb'
-                for m in newly:
-                    flips[m] = trial2[m]
+                best_board = rtag + '.kicad_pcb'
+                for m, v in rnd_flip.items():
+                    flips[m] = v
                 plan, own, cur_pages = plan2, own2, trial2
                 rides, divers, model = opt_rides(plan)
                 return True
-            print(f'  {label}r: open={s2[0]} drc={s2[1]} '
-                  f'vias={s2[2]}')
+            print(f'  {label}r{rnd if rnd else ""}: open={s2[0]} '
+                  f'drc={s2[1]} vias={s2[2]}')
+            # recursion condition: still via-saving, still stranding
+            if not (s2[0] > 0 and s2[1] <= best_score[1]
+                    and s2[2] < best_score[2]):
+                break
+            newly = [m for m in OPENS.get(rtag, [])
+                     if m not in base_open]
+            rnd_trial = trial2
     if os.path.exists(SIDECAR):
         os.remove(SIDECAR)
     FO, SIDECAR = fo0, side0
@@ -582,19 +603,30 @@ _face_spent = 0
 NEST_TOP = 3
 
 
-def _nest_ask(m, tag, board):
-    """Translate a nest-model wrap move into a relay ask on `board`:
-    exit around the named array's north/south, on the BACK third of
-    that face (back = away from the other array)."""
+def _nest_ask(m, tag, board, ask=None):
+    """Translate a nest-model wrap move into a relay ask on `board`.
+    With `ask` (the model's SHIFT-MINIMIZED position -- (end, side,
+    coord) from analyze()['asks']) use it verbatim: the wrap exits
+    only as far around as the orderings require (user-observed on the
+    renders: the old back-third constant made a SE-corner ball walk
+    its stub across the whole array). Fallback = back third."""
     end, wrap = tag.split('-')
     ref = _a.src_ref if end == 'src' else 'DU1'
-    g = _geom(board).get(ref)
-    if not g:
-        return None
-    W = g['W']
-    w = W[2] - W[0]
-    coord = W[0] + 0.25 * w if end == 'src' else W[2] - 0.25 * w
-    side = 'up' if wrap == 'wrapN' else 'down'
+    # NEST_MIN_ASKS=1: use the model's shift-minimized position.
+    # GATED OFF as a default: the asks are measurably better copper
+    # (3-4x cheaper wraps, the SE-ball-exits-north-west pathology
+    # gone) but the changed accept ORDER regressed the K35 draw
+    # 73 -> 78; re-earn per-rung before flipping on
+    if ask is not None and os.environ.get('NEST_MIN_ASKS') == '1':
+        _, side, coord = ask
+    else:
+        g = _geom(board).get(ref)
+        if not g:
+            return None
+        W = g['W']
+        w = W[2] - W[0]
+        coord = W[0] + 0.25 * w if end == 'src' else W[2] - 0.25 * w
+        side = 'up' if wrap == 'wrapN' else 'down'
     ride = rides.get(m) or 'F.Cu'
     return ((['--ref', 'DU1'] if ref == 'DU1' else [])
             + ['--side', side, '--coord', f'{coord:.2f}',
@@ -621,7 +653,7 @@ def nest_composed(nr, sweep):
     cur = FO
     applied = []
     for i, (m, tag) in enumerate(moves):
-        largs = _nest_ask(m, tag, cur)
+        largs = _nest_ask(m, tag, cur, ask=nr.get('asks', {}).get(m))
         if largs is None:
             continue
         out = f'{TAG}_s{sweep}nb{i}{m}.kicad_pcb'
@@ -636,7 +668,14 @@ def nest_composed(nr, sweep):
         return False
     print(f'  nest composed: {len(applied)} wrap(s) '
           f'[{",".join(applied)}]')
-    return _trial_on_fo(cur, f's{sweep}nestbatch', rescue=True)
+    # NEST_WIDE_RESCUE=1: cap-4 + recursion batch rescue. GATED OFF:
+    # mechanically sound (recovered 4->2 strands, 64v batch to 66v/2)
+    # but the K35 draw regressed 73 -> 77/78 with it on -- the extra
+    # early accepts steer the accept-and-build path into worse basins
+    return _trial_on_fo(
+        cur, f's{sweep}nestbatch',
+        rescue='wide' if os.environ.get('NEST_WIDE_RESCUE') == '1'
+        else True)
 
 
 def nest_channel(sweep):
@@ -653,7 +692,9 @@ def nest_channel(sweep):
         return False
     try:
         from plan_nest import analyze
-        nr = analyze(best_board, NETS.split(','), _a.src_ref, 'DU1')
+        nr = analyze(best_board, NETS.split(','), _a.src_ref, 'DU1',
+                     minimize_shifts=(
+                         os.environ.get('NEST_MIN_ASKS') == '1'))
     except Exception as e:
         print(f'  nest model unavailable ({e})')
         return False
@@ -664,34 +705,32 @@ def nest_channel(sweep):
     print(f'  nest model: {nr["as_is"]} -> {nr["minimum"]} '
           f'interleavings reachable; trying '
           f'{[m for m, _ in cand[:NEST_TOP]]}')
-    # the JOINT batch first -- one braid for the whole assignment
+    # the JOINT batch FIRST -- the fa4..fa8 matrix (73/77/78/77/78)
+    # says the ONLY 73v path runs THROUGH an early batch acceptance;
+    # every reordering/widening experiment regressed the draw. The
+    # committed default IS the record path; deviations live behind
+    # NEST_WIDE_RESCUE / NEST_MIN_ASKS.
     if nest_composed(nr, sweep):
         return True
     got = False
     for m, (tag, mm, solo) in cand[:NEST_TOP]:
         if solo <= 0:
             continue
-        end, wrap = tag.split('-')          # 'src'/'dst', 'wrapN/S'
+        end, _wrap = tag.split('-')
         ref = _a.src_ref if end == 'src' else 'DU1'
-        g = _geom(FO).get(ref)
-        if not g:
+        base_largs = _nest_ask(m, tag, FO,
+                               ask=nr.get('asks', {}).get(m))
+        if base_largs is None:
             continue
-        W = g['W']
-        w = W[2] - W[0]
-        # the wrap leaves around the array's north or south, on the
-        # BACK third of that face (back = away from the other array;
-        # src sits west of dst on an analyze()-accepted layout)
-        coord = W[0] + 0.25 * w if end == 'src' else W[2] - 0.25 * w
-        side = 'up' if wrap == 'wrapN' else 'down'
         ride = rides.get(m)
         layers = ([ride, 'B.Cu' if ride == 'F.Cu' else 'F.Cu']
                   if ride else ['F.Cu', 'B.Cu'])
         cur_end = _geom(FO).get(ref, {}).get('end', {}).get(m)
         delivered = [cur_end] if cur_end else []
+        side = base_largs[base_largs.index('--side') + 1]
         for L in layers:
-            largs = ((['--ref', 'DU1'] if ref == 'DU1' else [])
-                     + ['--side', side, '--coord', f'{coord:.2f}',
-                        '--layer', L])
+            largs = list(base_largs)
+            largs[largs.index('--layer') + 1] = L
             if relay_try(m, largs,
                          f's{sweep}nest{m}_{end}{side[0]}{L[0]}',
                          screen=True, rescue=True, dedupe=delivered):
