@@ -76,7 +76,7 @@ T756 = os.path.join(_TESTS, 'test_756_fanout_clearance_drill_floors.py')
 _WINDOW = ("        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n"
            "                     s / 2.0 + self._max_size / 2.0 + "
            "self._clearance,\n"
-           "                     atol)")
+           "                     ahx)")
 
 # (name, target, old, new, tests, expect)
 ROWS = [
@@ -85,18 +85,16 @@ ROWS = [
      '                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, '
      'v_drill,\n'
      '                                               route.net_id, _bulges,\n'
-     '                                               anchor_tol=_atol)',
+     '                                               anchor_box=_abox)',
      "                _v, _detail = 'clear', None",
      (T620,), 'KILLED'),
 
     ('verdict-always-clear', 'geo',
      '        d = drill or 0.0\n        s = size or 0.0\n'
-     '        atol = self._tol if anchor_tol is None else max(anchor_tol, '
-     'self._tol)',
+     '        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else',
      "        return 'clear', None\n"
      '        d = drill or 0.0\n        s = size or 0.0\n'
-     '        atol = self._tol if anchor_tol is None else max(anchor_tol, '
-     'self._tol)',
+     '        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else',
      (T620,), 'KILLED'),
 
     ('pending-never-records-the-committed-via', 'bga',
@@ -152,19 +150,19 @@ ROWS = [
      _WINDOW,
      '        window = max(d + self._h2h,\n'
      '                     s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
-     '                     atol)',
+     '                     ahx)',
      (T620,), 'KILLED'),
 
     ('broad-phase-window-drops-the-ring-term', 'geo',
      _WINDOW,
      '        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n'
-     '                     atol)',
+     '                     ahx)',
      (T620,), 'KILLED'),
 
     ('broad-phase-window-drops-the-drill-term', 'geo',
      _WINDOW,
      '        window = max(s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
-     '                     atol)',
+     '                     ahx)',
      (T620,), 'KILLED'),
 
     ('broad-phase-window-drops-the-anchor-term', 'geo',
@@ -180,20 +178,26 @@ ROWS = [
 
     # --- TWINS --------------------------------------------------------------
     ('twin-branch-refuses-instead', 'geo',
-     '            if onet == net_id and dist <= atol:\n'
+     '            if (onet == net_id\n'
+     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):\n'
      "                return 'twin', (ox, oy, os_, od)",
-     '            if onet == net_id and dist <= atol:\n'
+     '            if (onet == net_id\n'
+     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):\n'
      "                return 'conflict', ('same site', ox, oy)",
      (T620,), 'KILLED'),
 
     ('twin-branch-ignores-the-net', 'geo',
-     '            if onet == net_id and dist <= atol:',
-     '            if dist <= atol:',
+     '            if (onet == net_id\n'
+     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
+     '            if (True\n'
+     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
      (T620,), 'KILLED'),
 
     ('twin-keyed-on-the-exact-site-again', 'geo',
-     '            if onet == net_id and dist <= atol:',
-     '            if onet == net_id and dist <= self._tol:',
+     '            if (onet == net_id\n'
+     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
+     '            if (onet == net_id\n'
+     '                    and dist <= self._tol and abs(oy - y) <= ahy):',
      (T620,), 'KILLED'),
 
     ('twin-appends-a-second-via-anyway', 'bga',
@@ -313,7 +317,7 @@ ROWS = [
     ('coupled-gate-skips-the-site-conflict', 'up',
      '            if why is not None:\n'
      "                if why.startswith('drill hole'):\n"
-     "                    h2h_stats['coupled'] += 1\n"
+     "                    h2h_stats['coupled_pairs'].add(_pair_key)\n"
      '                return False',
      '            if False:\n                return False',
      (T618,), 'SURVIVED'),
