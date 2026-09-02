@@ -480,6 +480,72 @@ class TestTheRingArmIsOnlyForBulgingVias(_TmpCase):
                          'apart needs 0.45')
 
 
+class TestTheSilentSkipIsNowAnHonestDrop(_TmpCase):
+    """#620's other half, in the SAME two guards.
+
+    `would_overlap_existing_via` used to gate the append as `if not ...:
+    append`, so when it fired the via was dropped and the ROUTE was kept: its
+    inner-layer track shipped anyway, connected to nothing, while the ball
+    still counted as escaped. The guard two lines above does the opposite --
+    `via_blocked_routes`, whose tracks the caller strips -- and the #508
+    comment at this function's call site says exactly why that shape was
+    adopted: the old code "left the sibling routes in `routes` -- still counted
+    escaped, shipping via-in-pad balls with no track."
+
+    THE REFUSAL SET IS UNCHANGED; only the bookkeeping is. Measured on
+    orangecrab_ext_pll U3 at defaults -- the one in-repo board that reaches
+    this branch -- it fires 11 times over the retry passes (4 distinct nets,
+    every blocker foreign) and the written board does not change, because each
+    stranded route was removed by a later filter anyway.
+
+    The rig needs a blocker that trips the RING guard while CLEARING the drill
+    guard that runs first, or the arm attributes the drop to the wrong rule: a
+    via of size 0.6 and drill 0.1 at 0.5mm needs 0.625 of ring (fires) and
+    0.35 of drill (clears).
+    """
+
+    def _run(self, sep, ov_size=0.6, ov_drill=0.1):
+        from synth import make_via
+        ball = _ball(10.0, 10.0, 7, 0.5)
+        r = FanoutRoute(pad=ball, pad_pos=(10.0, 10.0), stub_end=(10.5, 10.5),
+                        exit_pos=(11.0, 10.5), layer='B.Cu')
+        ov = make_via(10.0 + sep, 10.0, net_id=9, size=ov_size, drill=ov_drill)
+        pcb = make_pcb(board_info=BoardInfo(layers={},
+                                            copper_layers=list(CU),
+                                            board_bounds=(0.0, 0.0, 20.0, 20.0)),
+                       vias=[ov], segments=[], pads_by_net={7: [ball]},
+                       source_path='', zones=[])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            add, _rm, blocked = manage_vias([r], pcb, 'F.Cu', 0.45, 0.2, 0.1)
+        return len(add), len(blocked)
+
+    def test_ON_THE_BRANCH_the_blocker_trips_the_ring_and_clears_the_drill(self):
+        """Without this, a drop at 0.5mm could be the drill guard and the arm
+        below would be about a different rule entirely."""
+        v_drill, ov_drill, h2h = 0.2, 0.1, H2H
+        self.assertGreaterEqual(0.5, v_drill / 2 + ov_drill / 2 + h2h,
+                                'the rig blocker no longer clears the DRILL '
+                                'guard, which runs first')
+        self.assertLess(0.5, 0.45 / 2 + 0.6 / 2 + 0.1,
+                        'the rig blocker no longer trips the RING guard, so '
+                        'nothing refuses and the arm is inert')
+
+    def test_the_refused_escape_is_REPORTED_not_silently_stranded(self):
+        """MUTATION: restore `if not would_overlap_existing_via(...): append`
+        -- the via count stays 0 and only the BLOCKED count catches it, which
+        is exactly why this arm asserts the pair."""
+        self.assertEqual(self._run(0.5), (0, 1),
+                         'a via refused on ring clearance leaves its route in '
+                         'place again: an inner-layer track with no via')
+
+    def test_a_clearing_blocker_still_gets_its_via(self):
+        """The acceptance half, so the arm above cannot pass on a rig that
+        refuses everything. 0.7 > 0.625."""
+        self.assertEqual(self._run(0.7), (1, 0),
+                         'the ring guard is now refusing a via that clears it')
+
+
 class TestPendingViasItself(unittest.TestCase):
     """The helper, directly. Module-level and pure precisely so it can be."""
 

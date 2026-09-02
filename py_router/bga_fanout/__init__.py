@@ -968,17 +968,44 @@ def manage_vias(
                         continue
                     _thinned.append((v_drill, _thin))
                     v_drill = _thin
-                if not would_overlap_existing_via(pad_x, pad_y, v_size):
-                    vias_to_add.append({
-                        'x': pad_x,
-                        'y': pad_y,
-                        'size': v_size,
-                        'drill': v_drill,
-                        'layers': ['F.Cu', 'B.Cu'],
-                        'net_id': route.net_id
-                    })
-                    _pending.add(pad_x, pad_y, v_size, v_drill, route.net_id,
-                                 _bulges)
+                if would_overlap_existing_via(pad_x, pad_y, v_size):
+                    # #620, second half: this used to be `if not ...: append`,
+                    # so a refusal here dropped the VIA and kept the route --
+                    # its inner-layer track shipped anyway, connected to
+                    # nothing, while the ball still counted as escaped. The
+                    # sibling guard two lines up does the opposite, and the
+                    # #508 comment at this function's call site says why: the
+                    # old code "left the sibling routes in `routes` -- still
+                    # counted escaped, shipping via-in-pad balls with no
+                    # track". This is the same defect with the halves swapped.
+                    #
+                    # THE REFUSAL SET IS UNCHANGED -- only the bookkeeping is.
+                    # `would_overlap_existing_via` stays net-BLIND (a same-net
+                    # via inside the pad is already handled by the
+                    # `existing_via` branch above); making it foreign-only
+                    # would change WHICH sites get a via, which is not this
+                    # issue.
+                    #
+                    # Measured on orangecrab_ext_pll U3 at defaults, the one
+                    # in-repo board that reaches this branch: it fires 11
+                    # times over the retry passes (4 distinct nets, every
+                    # blocker foreign), and the output board is UNCHANGED --
+                    # each stranded route was removed by a later filter
+                    # anyway, and its net already reported unescaped. So this
+                    # ships as a coherence fix with no measured board effect,
+                    # said plainly rather than dressed up.
+                    via_blocked_routes.append(route)
+                    continue
+                vias_to_add.append({
+                    'x': pad_x,
+                    'y': pad_y,
+                    'size': v_size,
+                    'drill': v_drill,
+                    'layers': ['F.Cu', 'B.Cu'],
+                    'net_id': route.net_id
+                })
+                _pending.add(pad_x, pad_y, v_size, v_drill, route.net_id,
+                             _bulges)
 
     if vias_to_add:
         print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
@@ -1016,8 +1043,9 @@ def manage_vias(
         names = sorted(r.pad.net_name or f"net{r.net_id}" for r in via_blocked_routes)
         print(f"  WARNING: {len(via_blocked_routes)} escape(s) dropped: via-in-pad "
               f"would hit an immovable foreign pad (locked part/connector/test "
-              f"point, #253), a drill within hole-to-hole of another hole, or a "
-              f"foreign track (#370): {', '.join(names)}")
+              f"point, #253), a drill within hole-to-hole of another hole, a "
+              f"foreign track (#370), or an existing via's ring (#620): "
+              f"{', '.join(names)}")
 
     return vias_to_add, vias_to_remove, via_blocked_routes
 
