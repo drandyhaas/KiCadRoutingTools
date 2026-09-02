@@ -411,8 +411,11 @@ The delta cancels the design term because both boards carry it.
 What each one refuses to let pass:
   check_assembly     a blocking pair (two parts on the same copper -- not
                      buildable whatever the nets), or copper on a LOCKED part
-  check_channels     a face that now carries demand with no lane left, and did
-                     not before
+  check_channels     a face that now carries demand and has LOST its escape
+                     relative to the baseline -- all of it, or a large share
+                     of it (--min-supply-drop, default 0.20). #847: the
+                     zero-crossing form alone missed a face going 43 -> 28
+                     lanes against a demand of 12
   check_rigid_...    a new contact between two parts moved by DIFFERENT
                      vectors -- impossible in a rigid restore, so the result is
                      a search that happened to fit, not the damage undone

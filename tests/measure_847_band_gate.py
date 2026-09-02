@@ -169,12 +169,24 @@ def new_deficit_lanes(now, base):
 
 
 def gate_verdict(now, base, min_demand):
-    """Reproduce `check_channels.main`'s gate, with the channels kept APART.
+    """The gate as it stood BEFORE #847, with its two channels kept APART.
 
-    The shipped code merges `lost_last_lane`'s hits into `new_starved` before
-    deciding, so its output cannot tell you which channel fired. That merge is
-    the whole reason the fixture's table reads as one phenomenon when it is
-    two, so this keeps them separate and reports both.
+    NOT the shipped gate any more, and the distinction matters when reading
+    the `exit` column below. `check_channels.main` now merges a THIRD channel
+    -- `lost_escape_share` -- into the same list, so on a pair where only that
+    one fires (the tracked run23 tigard pair at the shipped band, for one)
+    this prints exit 0 where the CLI exits 4.
+
+    That is deliberate: this file exists to show what the OLD two channels did
+    across the band, which is the measurement #847 turns on. It is a
+    historical instrument, and reading it as the current gate would be reading
+    the wrong thing. `tests/measure_847_calibration.py` is where the shipped
+    predicate set is evaluated.
+
+    Keeping the channels apart is the point either way: the shipped code
+    merges them before deciding, so its output cannot say which one fired, and
+    that merge is why the fixture's band table reads as one phenomenon when it
+    is two.
     """
     starved_now = CC._starved_faces(now, min_demand)
     starved_base = CC._starved_faces(base, min_demand)

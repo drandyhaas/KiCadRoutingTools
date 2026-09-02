@@ -57,8 +57,10 @@ clean sweep is not evidence that it can find anything:
     the-share-form-drops-its-demand-conjunct   could not be closed on tracked
         boards at all: MEASURED, no face on the tigard pair has both demand
         < 7 and a >= 20% drop. The arm lives in the wk/-gated file where
-        D21 W (demand 1, 8 -> 3) does, so on a clean clone this row SKIPS
-        rather than judging -- the honest answer, not a pass.
+        D21 W (demand 1, 8 -> 3) does, so on a clean clone this row is
+        reported UNDECIDED -- excluded from the verdict rather than graded as
+        a survivor, which is what a skip used to be and which failed the
+        battery on every clean clone.
 
 RUN `--verify-anchors` FIRST. An anchor stales the moment a line it quotes is
 reworded, and a stale anchor reports BROKEN 50 minutes into a run rather than
@@ -198,9 +200,10 @@ ROWS = [
      # MEASURED: no face on the tracked tigard pair has both demand < 7 and a
      # >= 20% drop, so that pair cannot discriminate this at all. The arm
      # lives in the wk/-gated file, where D21 W (demand 1, 8 -> 3) does. On a
-     # clean clone this row therefore SKIPS rather than judging -- which the
-     # runner reports as a survivor, and which is the honest answer: the
-     # conjunct is unpinned without the recorded boards.
+     # clean clone this row is reported UNDECIDED -- its only witness skipped,
+     # so it judged nothing. An earlier draft called that "a survivor, which is
+     # the honest answer"; it was neither, it FAILED the battery on every clean
+     # clone. A skip is its own bucket now, excluded from the verdict.
      'KILLED'),
 
     ('the-share-threshold-changes', 'chk',
@@ -296,7 +299,7 @@ def _run(tests):
                    [ROOT, os.path.join(ROOT, 'py_router'),
                     os.path.join(ROOT, 'py_placer'),
                     os.path.join(ROOT, 'py_tools')]))
-    skipped = []
+    skipped, ran = [], []
     for t in tests:
         r = subprocess.run([sys.executable, '-B', '-X', 'utf8', t],
                            cwd=ROOT, capture_output=True, text=True,
@@ -304,10 +307,18 @@ def _run(tests):
         if r.returncode == 77:
             skipped.append(os.path.basename(t))
             continue
+        ran.append(os.path.basename(t))
         if r.returncode != 0:
-            return True, '{} exit {}'.format(os.path.basename(t),
-                                             r.returncode)
-    return False, ('all SKIPPED: ' + ', '.join(skipped)) if skipped else ''
+            return 'KILLED', '{} exit {}'.format(os.path.basename(t),
+                                                 r.returncode)
+    if not ran:
+        # UNDECIDED, not SURVIVED. Every witness self-skipped, so this row
+        # judged nothing -- and grading it against its expectation fails the
+        # battery on any clean clone for a reason that is about the FIXTURES,
+        # not the code. Its own bucket, excluded from the verdict.
+        return 'UNDECIDED', 'no witness ran: ' + ', '.join(skipped) + ' skipped'
+    return 'SURVIVED', ('{} skipped'.format(', '.join(skipped))
+                        if skipped else '')
 
 
 def _apply(path, old, new):
@@ -413,16 +424,17 @@ def main():
 
     # The battery is only evidence if the gate passes UNMUTATED first.
     _drop_pyc()
-    killed0, why0 = _run((T847, TSTV))
-    if killed0:
+    got0, why0 = _run((T847, TSTV))
+    if got0 == 'KILLED':
         print('BROKEN: the gate does not pass on the UNMUTATED tree ({}). '
               'Every verdict below would be meaningless.'.format(why0))
         return 2
     if why0:
-        print('NOTE: on the unmutated tree, {}. Rows resting on those arms '
-              'cannot judge anything here.'.format(why0))
+        print('NOTE: on the unmutated tree, {}. Rows whose ONLY witness is a '
+              'skipped file are reported UNDECIDED below, never as '
+              'survivors.'.format(why0))
 
-    verdicts, broken, wrong = [], [], []
+    verdicts, broken, wrong, undecided = [], [], [], []
     for name, tgt, old, new, tests, exp in rows:
         path = TARGETS[tgt]
         _drop_pyc()
@@ -433,23 +445,28 @@ def main():
             continue
         try:
             _drop_pyc()
-            killed, why = _run(tests)
+            got, why = _run(tests)
         finally:
             with open(path, 'w', encoding='utf-8', newline='') as fh:
                 fh.write(src)
             _drop_pyc()
-        got = 'KILLED' if killed else 'SURVIVED'
         verdicts.append((name, got))
-        if got != exp:
+        mark = ''
+        if got == 'UNDECIDED':
+            undecided.append(name)
+        elif got != exp:
             wrong.append('{}: expected {}, got {}'.format(name, exp, got))
-        print('{:<46} {:<9} {:<8} {}'.format(
-            name, got, '' if got == exp else 'WRONG', why))
+            mark = 'WRONG'
+        print('{:<46} {:<10} {:<8} {}'.format(name, got, mark, why))
 
     n_k = sum(1 for _n, g in verdicts if g == 'KILLED')
-    n_s = len(verdicts) - n_k
-    print('\n{} row(s): {} killed, {} survived, {} broken, {} disagreeing '
-          'with expectation'.format(len(rows), n_k, n_s, len(broken),
-                                    len(wrong)))
+    n_s = sum(1 for _n, g in verdicts if g == 'SURVIVED')
+    print('\n{} row(s): {} killed, {} survived, {} undecided (no witness '
+          'ran), {} broken, {} disagreeing with expectation'
+          .format(len(rows), n_k, n_s, len(undecided), len(broken),
+                  len(wrong)))
+    for u in undecided:
+        print('  UNDECIDED (needs wk/): ' + u)
     for w in wrong:
         print('  WRONG: ' + w)
     for b in broken:

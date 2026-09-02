@@ -12,10 +12,16 @@ REPORT-ONLY BY DEFAULT -- the corridor law is measured descriptive, not
 prescriptive, so these numbers inform the loop and do not gate by themselves.
 This line used to say "exit 0 unless the board is unreadable", which predates
 two exits that now exist and is the kind of stale contract a caller reads
-literally: with `--gate` the exits are **4** (a NEW starved face against
+literally: with `--gate` the exits are **4** (NEW escape damage against
 `--baseline`) and **3** (nothing had a ledger, so the gate did not run and must
-not be recorded as a pass); **2** is an unreadable board, with or without the
-flag. Without `--gate` it is still exit 0 throughout.
+not be recorded as a pass); **2** is an unreadable board or a flag outside its
+domain, with or without the gate. Without `--gate` it is still exit 0
+throughout.
+
+"NEW escape damage" is three predicates, not one, and saying "a new STARVED
+face" was accurate only until #847: a face can now fail the gate while still
+having lanes to spare. `--json` keeps them apart (`starved_faces`,
+`lost_escape_share`); the text output labels each line with which one fired.
 
 V1 limitation, stated: supply-tap/via lane consumption is not modeled.
 """
@@ -112,9 +118,23 @@ def lost_last_lane(ledgers, base_ledgers):
 #:     glasgow truth restore U1 E  supply 43 -> 39  demand 12   drop 0.093
 #:     both self-comparisons                                    drop 0.000
 #:
-#: 0.20 is the geometric midpoint of 0.093 and 0.349, and it sits inside the
-#: plateau 0.15-0.25 over which every pair's verdict is unchanged -- so it is
-#: not the edge of the range that happens to work. A FRACTION rather than a
+#: ONE BASIS, and it has to be said: the three glasgow rows are graded at
+#: track 0.0889 / clearance 0.09, which is what `rL_repair` resolves. The
+#: control board declares a DIFFERENT netclass (0.2/0.2), so run with no flags
+#: it is graded at another basis and the two rows would not be a delta at all.
+#: At its own basis that control exits 4 -- from `lost_last_lane`, on two
+#: RN parts going supply 3 -> 0, which is pre-existing behaviour this
+#: predicate did not introduce and does not change. The SHARE form is silent
+#: on it at either basis, which is what the 0.093 above is about.
+#:
+#: 0.20 sits between the control's 0.093 and the worst positive's 0.349 --
+#: 2.15x above the one and 1.74x below the other -- and inside the plateau
+#: 0.15-0.25 over which every pair's verdict is unchanged, so it is not the
+#: edge of the range that happens to work. (An earlier draft of this comment
+#: called it "the geometric midpoint of 0.093 and 0.349". It is not: that is
+#: 0.180, and the arithmetic mean is 0.221. The margins above are the honest
+#: statement and are what the acceptance rule asks for anyway.) A FRACTION
+#: rather than a
 #: lane count deliberately: a lane count would have to be scaled by face
 #: length, which varies by an order of magnitude on one board, while "this
 #: face lost a fifth of its escape" compares a 2mm passive with a 20mm BGA
@@ -142,30 +162,64 @@ def lost_escape_share(ledgers, base_ledgers, min_demand,
 
     It also misses the damage the issue is actually about. At the shipped band
     the wrong-basin board's U1 east face falls 43 -> 28 lanes against a demand
-    of 12: a 35% loss of escape, eaten by U30, and invisible to every
-    predicate here before this one -- `_starved_faces` needs supply 0,
-    `lost_last_lane` needs a crossing to 0, and the deficit form sees nothing
-    because 28 still exceeds 12. That face is the one #847 names.
+    of 12 -- a 35% loss of escape, invisible to every predicate here before
+    this one: `_starved_faces` needs supply 0, `lost_last_lane` needs a
+    crossing to 0, and the deficit form sees nothing because 28 still exceeds
+    12. That face is the one #847 names.
+
+    WHO ATE IT, corrected -- an earlier draft of this paragraph said "eaten by
+    U30" and that is wrong at this band. At the shipped band U1 east is eaten
+    by C14(5.0), C76(4.75) and C6(3.2); U30 is not charged there at all, and
+    `tests/test_run8_starved_face_gate.py` carries a passing arm asserting
+    exactly that. U30 appears only at a 2.0mm band, which is #841's story, not
+    this one. The distinction is not pedantic: `eaten_by` is advertised as the
+    move target, so naming the wrong part sends a fix at a part that is not in
+    the way.
 
     DELTA ONLY. The absolute forms are unchanged: `_starved_faces` still asks
     for supply 0, and `_deficit_faces` is still a report. A share-of-escape
     question has no meaning without a baseline to be a share OF.
 
-    Unlike `lost_last_lane` this one IS filtered by --min-demand, and that
-    conjunct is load-bearing rather than decorative. Measured: without it the
-    form fires on demand-1 diodes whose supply halved from 8 to 3, and on the
-    truth-restore control. With it, both positives fire and every control is
-    silent.
+    Unlike `lost_last_lane` this one IS filtered by --min-demand. What that
+    conjunct actually buys, stated precisely because a first draft of this
+    paragraph overclaimed it: it keeps the reported list off LOW-DEMAND NOISE
+    -- without it the wrong-basin pair also names demand-1 diodes whose supply
+    merely halved, 8 -> 3. It is NOT what keeps the controls quiet. Measured
+    on the truth-restore pair at the shipped band, at --min-demand 0, 1 and 7
+    and at a drop threshold of 0.15: zero hits in every combination. The
+    controls are quiet because their worst drop is 0.093, below any threshold
+    considered -- the separation does that work, not the conjunct. (Graded at
+    the shipped pair's basis; see the constant above for why that has to be
+    said, and for what the control does at its own.)
     """
-    was = {(ref, r['face']): r['supply_finest_grid']
+    was = {(ref, r['face']): r
            for ref, rows in (base_ledgers or {}).items()
            for r in rows}
     out = []
     for ref, rows in sorted((ledgers or {}).items()):
         for r in rows:
-            before = was.get((ref, r['face']), 0)
-            now = r['supply_finest_grid']
+            b = was.get((ref, r['face']))
+            if b is None:
+                continue
+            before, now = b['supply_finest_grid'], r['supply_finest_grid']
             if before <= 0 or now >= before or r['demand_nets'] < min_demand:
+                continue
+            # THE FACE MUST BE THE SAME FACE. Faces are keyed by board-absolute
+            # N/S/E/W of the pad extent, so ROTATING a part swaps which
+            # physical edge each name refers to -- and a rectangular part then
+            # reports a large "loss" on a face nothing touched. Measured on
+            # tigard's J1 (faces 6.62 and 9.64mm): a 90-degree rotation with no
+            # neighbour moved takes W from supply 32 to 22, a 31% drop, and the
+            # gate would name a blocker that does not exist.
+            #
+            # A face whose own LENGTH changed did not lose its escape to a
+            # neighbour; it became a different face. That is outside what this
+            # predicate is asking, so the pair is skipped rather than guessed
+            # at. The two zero-crossing forms are largely immune by luck -- they
+            # need an exact crossing to 0 -- but `lost_last_lane` has the same
+            # exposure and is left alone here, because changing a shipped
+            # predicate is not this issue's business. Disclosed, not fixed.
+            if abs(r['length_mm'] - b['length_mm']) > 1e-6:
                 continue
             if round(1.0 - now / before, 4) >= min_drop:
                 out.append((ref, r['face'], r['demand_nets'], before, now))
@@ -196,12 +250,15 @@ def main():
     p.add_argument("--json", default=None, metavar="PATH")
     p.add_argument("--baseline", default=None, metavar="BOARD",
                    help="the board this one was derived from (typically the "
-                        "damaged input). Enables the E8 gate: faces that lose "
-                        "ALL escape supply while carrying real demand, and did "
-                        "not already do so on the baseline.")
+                        "damaged input). Enables the E8 gate: faces that LOSE "
+                        "ESCAPE relative to it -- all of it, or a large share "
+                        "of it (--min-supply-drop) -- while carrying real "
+                        "demand, and did not already do so on the baseline.")
     p.add_argument("--gate", action="store_true",
-                   help="exit 4 when the --baseline comparison finds a NEW "
-                        "starved face (default: report only)")
+                   help="exit 4 when the --baseline comparison finds NEW "
+                        "escape damage -- a face that lost all of its supply, "
+                        "or a --min-supply-drop share of it (default: report "
+                        "only)")
     p.add_argument("--escape-band", type=float, default=None, metavar="MM",
                    help="how deep off a face to look for neighbours that eat "
                         "its lanes. Default: the board's own lane pitch via "
@@ -220,6 +277,23 @@ def main():
                    help="nets a face must carry before zero supply counts as "
                         "starvation (default: %(default)s)")
     args = p.parse_args()
+
+    # DOMAIN CHECKS, because both of these silently turn the gate into a pass.
+    # `--min-supply-drop` is a FRACTION and the message it produces is a
+    # PERCENT ("lost 35% of its escape"), so `--min-supply-drop 20` is a
+    # plausible misreading -- and it disabled the predicate with no warning.
+    # That is the failure the exit-3 block below exists to forbid: a gate that
+    # examined nothing must not answer "clean".
+    if not 0.0 <= args.min_supply_drop <= 1.0:
+        p.error("--min-supply-drop is a FRACTION in [0, 1], not a percent: "
+                "{} would disable the check silently. Use 0.2 for 20%, or 0 "
+                "to turn the check off deliberately."
+                .format(args.min_supply_drop))
+    if args.escape_band is not None and args.escape_band <= 0:
+        p.error("--escape-band must be positive: {} makes the neighbour "
+                "search band empty or inverted, so every face reports full "
+                "supply and the gate passes everything."
+                .format(args.escape_band))
 
     import routing_defaults as defaults
     from kicad_parser import parse_kicad_pcb, detect_package_type
@@ -388,7 +462,7 @@ def main():
 
     starved = _starved_faces(ledgers, args.min_demand)
     new_starved = None
-    share = []
+    share = []          # stays empty without --baseline; the JSON reads it
     if args.baseline:
         try:
             base_pcb = parse_kicad_pcb(args.baseline)
@@ -445,26 +519,39 @@ def main():
             print(f"  NEW (lost {100 * (1 - now / before):.0f}% of its "
                   f"escape): {ref} {face}: demand {dem}, supply {before} -> "
                   f"{now}. Still non-zero, so only the share form sees it.")
+        # The `N NEW` token is KEPT verbatim: it is a published output shape
+        # that tests and drivers parse, and rewording it to say "escape
+        # damage" more precisely would have broken two of them for no gain.
+        # What changed is the sentence around it -- "starved" was the whole
+        # story until #847 and is now one of three channels.
         print(f"Starved faces (zero supply at the finest grid, demand >= "
               f"{args.min_demand}): {len(starved)} now, {len(was)} on the "
-              f"baseline, {len(new_starved)} NEW (all channels)")
+              f"baseline. Escape damage, ALL channels: "
+              f"{len(new_starved)} NEW")
         # ONLY the zero-supply channel gets the zero-supply sentence. The
         # other two printed their own line above, with their own numbers, and
         # this loop used to reprint every one of them as "supply 0 -- nothing
         # leaves this face" -- which for a share-form hit at supply 28 is a
         # false statement in the tool's own output. `new_starved` is a merged
         # list; the message may not assume which channel put a row in it.
-        _zero = {(r, f) for r, f, _d in _starved_faces(ledgers,
-                                                       args.min_demand)}
+        _zero = {(r, f) for r, f, _d in starved}
         for ref, face, dem in new_starved:
             if (ref, face) in _zero:
                 print(f"  NEW: {ref} {face}: demand {dem}, supply 0 -- "
                       f"nothing leaves this face")
         if new_starved:
-            print("  A face that carries real demand and has lost its escape "
-                  "is a placement the router cannot rescue, readable now "
-                  "rather than after the retries. Move what ate the span (see "
-                  "eaten_by above) or reconsider the arrangement.")
+            # The wording is hedged on purpose. A face at supply 0 IS
+            # unrescuable; a face that lost a third of its escape and still
+            # has headroom is not, and saying so would contradict this tool's
+            # own deficit report two lines above -- which can read 0 while
+            # this reads 2. Both are true and they answer different questions.
+            print("  These faces lost escape relative to the baseline -- "
+                  "readable now rather than after the retries. A face at zero "
+                  "supply is one the router cannot rescue; one that merely "
+                  "lost a large share still has headroom, and is a trend "
+                  "rather than a wall. Check the DEFICIT line above for which "
+                  "of the two you have. Move what ate the span (see eaten_by) "
+                  "or reconsider the arrangement.")
 
     channels = routability.pair_channel_widths(
         pcb, clearance=clearance, min_extent_mm=args.min_extent,
@@ -510,6 +597,11 @@ def main():
                        # --min-demand) does not cover. Report-only.
                        'deficit_faces': deficit,
                        'baseline': args.baseline,
+                       # HISTORICAL NAME. Since #847 this list is the union of
+                       # three predicates and a row in it may have supply left,
+                       # so it is no longer only "starved" faces. Kept because
+                       # renaming a published key breaks every reader; the
+                       # per-predicate keys beside it are the precise ones.
                        'new_starved_faces': new_starved},
                       f, indent=1, sort_keys=True)
         print(f"  JSON -> {args.json}")

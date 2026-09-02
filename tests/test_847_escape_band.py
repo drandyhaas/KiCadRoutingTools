@@ -18,9 +18,11 @@ reader should not have to take on trust:
   * WHICH TERM DECIDES. `4 * lane` is the model; the 1.0mm floor is the term
     #847 is about, and it was chosen while a neighbour contributed its
     COURTYARD rather than the pad copper both ledgers charge since #841.
-    Measured here: on the tracked corpus that floor decides on **exactly one
-    board**, `routed_output` -- 16 of 388 routability face-rows and 3 of 97
-    escape parts. Everywhere else `4 * lane` is already larger. So a fix that
+    Measured on the tracked corpus (a one-off sweep, dated rather than
+    regenerable -- see `where_the_floor_decides` below for what is actually
+    PINNED): the floor decides on **exactly one board**, `routed_output`, at
+    16 of 388 routability face-rows and 3 of 97 escape parts. Everywhere else
+    `4 * lane` is already larger. So a fix that
     re-derives only the FLOOR would be very nearly a no-op, and that is worth
     knowing before anyone spends a calibration on it.
 
@@ -236,9 +238,15 @@ def the_two_ledgers_still_differ():
 
 def where_the_floor_decides():
     print('the 1.0mm floor decides on one tracked board, not on the corpus')
-    # Named boards rather than a corpus sweep, so this stays a fast unit test;
-    # the corpus census is `tests/measure_847_calibration.py`, which is
-    # where the 16-of-388 / 3-of-97 figures in the docstring are re-derived.
+    # Named boards rather than a corpus sweep, so this stays a fast unit test.
+    # The 16-of-388 / 3-of-97 census in this file's docstring is NOT produced
+    # by any committed script -- it was taken by a one-off sweep, and saying
+    # otherwise (an earlier draft pointed at `measure_847_calibration.py`,
+    # which computes a starvation ladder and not this) is how a number stops
+    # being checkable. What IS pinned here is the property the census
+    # summarises: `routed_output` reports `floor`, glasgow reports `lanes`.
+    # Read the two figures as dated, and re-take them if they are ever load-
+    # bearing.
     pcb = parse_kicad_pcb(ROUTED)
     ref = next(r for r in sorted(pcb.footprints) if pcb.footprints[r].pads)
     rows = R.face_lane_ledger(pcb, ref, clearance=0.09, track_width=0.09,
@@ -391,6 +399,62 @@ def the_gate_has_a_tracked_true_positive():
           'J1 N' in r.stdout, r.stdout[-300:])
 
 
+# ------------------------------------------- a rotation is not escape damage
+
+def _row(face, length, supply, demand):
+    """One `face_lane_ledger` row, only the keys the predicate reads."""
+    return {'face': face, 'length_mm': length, 'supply_finest_grid': supply,
+            'demand_nets': demand, 'deficit_finest_grid': max(0, demand - supply)}
+
+
+def a_rotation_is_not_escape_damage():
+    """The share form must not fire because a part TURNED.
+
+    Faces are keyed by board-absolute N/S/E/W of the pad extent, so rotating a
+    part by 90 degrees swaps which physical edge each name refers to. On a
+    rectangular part the delta then compares a long edge to a short one and
+    reports a large "loss" with no neighbour having moved.
+
+    Not hypothetical: tigard's J1 has faces of 6.62 and 9.64 mm, and a
+    rotation takes W from supply 32 to 22 -- a 31% drop -- while nothing else
+    on the board changes. At demand >= 7 that is exit 4 by default, naming a
+    blocker that does not exist. The two zero-crossing predicates are largely
+    immune by luck; they need an exact crossing to 0.
+
+    Found by a blind review of the diff, not by any arm that existed then.
+
+    Hand-built rows rather than a rotated board, deliberately: this pins the
+    PREDICATE's rule, and building a board would test the writer as well and
+    leave the rule itself asserted only in passing. Same shape as
+    `test_run8_channels_gate_honesty.py`'s predicate arms.
+    """
+    print('a rotation is not escape damage')
+    import check_channels as CC
+
+    # The real J1 numbers, before and after a 90-degree turn.
+    now = {'J1': [_row('W', 6.62, 22, 9)]}
+    base = {'J1': [_row('W', 9.64, 32, 9)]}
+    check('a face whose own LENGTH changed is not compared',
+          CC.lost_escape_share(now, base, 7) == [],
+          CC.lost_escape_share(now, base, 7))
+
+    # The guard must not swallow the real case: same face, same length, and a
+    # genuine loss to a neighbour still fires.
+    now = {'J1': [_row('W', 9.64, 22, 9)]}
+    check('...while a real loss on an UNCHANGED face still fires',
+          [t[:3] for t in CC.lost_escape_share(now, base, 7)]
+          == [('J1', 'W', 9)],
+          CC.lost_escape_share(now, base, 7))
+
+    # `lost_last_lane` has the same exposure and is deliberately NOT changed
+    # here -- it is a shipped predicate and not this issue's business. Pinned
+    # so the asymmetry is a recorded decision rather than an oversight.
+    now = {'J1': [_row('W', 6.62, 0, 9)]}
+    check('lost_last_lane is NOT guarded, and that is recorded not fixed',
+          [t[:2] for t in CC.lost_last_lane(now, base)] == [('J1', 'W')],
+          CC.lost_last_lane(now, base))
+
+
 def main():
     the_arithmetic()
     print()
@@ -403,6 +467,8 @@ def main():
     the_cli_can_reach_the_band()
     print()
     the_gate_has_a_tracked_true_positive()
+    print()
+    a_rotation_is_not_escape_damage()
     print()
     if FAILURES:
         print(f'FAIL: {len(FAILURES)} check(s): {", ".join(FAILURES)}')

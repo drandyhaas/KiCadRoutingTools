@@ -14,7 +14,11 @@ A candidate delta predicate is ADOPTED only if all of:
       of it give the SAME verdict on every pair below. A value that works
       because it happens to is a fit, not a calibration.
   R2  SEPARATION. Every POSITIVE pair fires; every CONTROL pair is silent; and
-      the worst control margin is at least 2x from the threshold.
+      the threshold is at least 2x the worst CONTROL drop -- a predicate that
+      separates by a hair is one board away from not separating at all. The
+      margin is computed and reported per candidate (`control_margin`), not
+      merely asserted here; an earlier draft stated this rule and never
+      calculated it, which is the same defect the rule is about.
   R3  FALSE-POSITIVE BUDGET. The ABSOLUTE starvation form's corpus fire count
       at the re-pinned --min-demand must not exceed what the shipped
       GATE_MIN_DEMAND produces today. Reported for both arms, with the
@@ -172,13 +176,25 @@ def _face_deltas(now_path, base_path, trk, clr, band):
                         'demand': r['demand_nets'],
                         'supply_now': r['supply_finest_grid'],
                         'supply_base': b['supply_finest_grid'],
+                        'length_now': r['length_mm'],
+                        'length_base': b['length_mm'],
                         'deficit_now': r['deficit_finest_grid'],
                         'deficit_base': b['deficit_finest_grid']})
     return out, len(refs)
 
 
 def fires_shipped(deltas, min_demand):
-    """The predicate as it ships: supply crossed to zero (lost_last_lane)."""
+    """The zero-crossing form: supply reached 0 from non-zero.
+
+    Named `shipped` because it was the whole delta channel when this
+    calibration was written. It is now one of two -- #847 added the share form
+    that this file exists to evaluate -- so read this column as the BASELINE
+    being compared against, not as what the tool currently does.
+
+    `min_demand` is accepted and ignored, matching `lost_last_lane`, which is
+    deliberately unfiltered by it. Taking the argument keeps the three
+    candidates one signature so `_verdict` can drive them uniformly.
+    """
     return [d for d in deltas
             if d['supply_now'] == 0 and d['supply_base'] > 0
             and d['demand'] >= 1]
@@ -208,6 +224,13 @@ def fires_drop(deltas, frac, min_demand):
     out = []
     for d in deltas:
         if d['demand'] < min_demand or d['supply_base'] <= 0:
+            continue
+        # The shipped predicate skips a face whose own LENGTH moved -- a
+        # rotated part renames its faces and the comparison stops being
+        # like-for-like. Mirrored here so this models what ships. It changes
+        # nothing on the pairs below (verified: the JSON is unchanged), since
+        # none of them rotates anything; it matters the day one does.
+        if abs(d['length_now'] - d['length_base']) > 1e-6:
             continue
         lost = 1.0 - (d['supply_now'] / d['supply_base'])
         if lost >= frac:
@@ -371,13 +394,26 @@ def _verdict(doc):
             # the band costs false positives.
             deep_ctl = sum(1 for p in ctl for b in deeper
                            if count(p, field, t, b) > 0)
+            # R2's margin, COMPUTED. Only the fraction candidates have a
+            # continuous threshold to take a ratio against; the others report
+            # None rather than a number that would not mean anything.
+            margin = None
+            if field == 'drop' and isinstance(t, float) and t > 0:
+                worst_ctl = max((p['bands'][SHIP]['worst_drop_at_min_demand']
+                                 for p in ctl), default=0.0)
+                margin = (float('inf') if worst_ctl <= 0
+                          else round(t / worst_ctl, 2))
+            ok_margin = margin is None or margin >= 2.0
             out.append({'candidate': name, 'threshold': t,
                         'positives_fire_at_shipped_band': ok_pos,
                         'controls_silent_at_shipped_band': ok_ctl,
                         'stable_under_pm25pct': stable,
                         'monotone_in_band_on_positives': mono,
+                        'control_margin': margin,
+                        'control_margin_ok': ok_margin,
                         'control_fires_at_deeper_bands': deep_ctl,
-                        'adopt': bool(ok_pos and ok_ctl and stable and mono)})
+                        'adopt': bool(ok_pos and ok_ctl and stable and mono
+                                      and ok_margin)})
     return out
 
 

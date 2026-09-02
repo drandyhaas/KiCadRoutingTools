@@ -112,6 +112,17 @@ it the wrong-basin board fails the gate again AT THE SHIPPED BAND, on the face
     U1 E   supply 43 -> 28   demand 12   drop 0.349    -> exit 4
     truth restore control    worst drop  0.093         -> exit 0
 
+...both at track 0.0889 / clearance 0.09, which is what `rL_repair` resolves
+and which the control must be FORCED to, because that board declares 0.2/0.2
+of its own. Run with no flags the control exits 4 -- from `lost_last_lane`, on
+RN4/RN9 going supply 3 -> 0 -- which is pre-existing and untouched here. The
+SHARE form is silent on it at either basis. Two rows of one table graded at
+two bases would not be a delta, which is the mistake the calibration script
+records itself making and correcting.
+
+And U1 east is eaten at that band by C14/C76/C6, NOT by U30 -- see the arm
+below, which asserts it. U30 enters only at a 2.0mm band.
+
 So the sentence that stood here -- "the gate currently has NO known true
 positive on the copper instrument" -- is now false, and it was a real loss
 while it stood. It is kept in the history rather than deleted, because the
@@ -263,9 +274,11 @@ def main():
 
     # THE DEMAND CONJUNCT, which only this fixture can discriminate. The share
     # form is filtered by --min-demand and `lost_last_lane` deliberately is
-    # not, and that difference is load-bearing rather than cosmetic: without
-    # it the form fires on demand-1 diodes whose supply merely halved, and on
-    # the truth-restore control. The tracked tigard pair CANNOT pin this --
+    # not. What the conjunct buys is keeping the reported list off LOW-DEMAND
+    # NOISE -- demand-1 diodes whose supply merely halved. It is NOT what
+    # keeps the controls quiet: measured, the truth-restore pair reports zero
+    # hits at --min-demand 0, 1 and 7 alike, because its worst drop is 0.093.
+    # The separation does that work. The tracked tigard pair CANNOT pin this --
     # measured, no face on it has both demand < 7 and a >= 20% drop -- so the
     # arm lives here, where D21 W (demand 1, supply 8 -> 3, drop 0.625) does.
     # The mutation battery records that removing the conjunct therefore

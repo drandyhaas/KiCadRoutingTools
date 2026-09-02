@@ -1046,6 +1046,12 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     # open-coded the same `max(1.0, 4 * pitch)` on a grid-QUANTIZED pitch while
     # this one used the raw lane. Value-identical to what this line did before;
     # what is new is that the band and the term that decided it are reported.
+    # `raw_lane` is a claim about `lane`, and it holds because every caller
+    # today passes an unquantized `track + clearance` (`escape_ledger` passes
+    # `tw + clr`; a direct caller passing `pitch_mm` passes the same kind of
+    # number). It is an assertion, not a measurement -- a caller that handed
+    # this a grid-quantized pitch would get a row labelled with the wrong
+    # basis and nothing would notice.
     band = escape_band(lane, basis='raw_lane', override=reach_mm)
     reach = band.mm
     # #835: resolved ONCE per part, not once per face. `escape_ledger` passes
