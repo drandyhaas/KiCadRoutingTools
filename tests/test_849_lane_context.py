@@ -47,22 +47,24 @@ not value arms:
      undone in the CALLER: move `board_lane_context` back inside the ref loop
      and every value stays identical, so arms 1-10 cannot see it.
 
-MEASURED on this machine (min-of-5, both arms in one process, the context
-built inside the timed region because one per run is what the caller does):
+MEASURED by `tests/measure_849_hoist.py`, which is committed so these are
+re-measurable rather than quoted (min-of-3, one process, the context built
+inside the timed region because one per run is what the caller does):
 
-    board                       refs   sweep            courtyard parses
-    tigard                         2   0.119s -> 0.052s   2 -> 1
-    rp2350_fpga_eensy_prePlane     7   0.284s -> 0.045s   7 -> 1
-    glasgow_revC                   9   1.767s -> 0.198s   9 -> 1
+    board                     basis  refs    sweep            parses
+    tigard                    cli       2   0.147s -> 0.068s   2 -> 1
+    rp2350_fpga_eensy_prePl.  cli       7   0.370s -> 0.061s   7 -> 1
+    glasgow_revC              cli       9   2.568s -> 0.301s   9 -> 1
+    glasgow_revC              fine     24   6.374s -> 0.262s  24 -> 1
 
-The parse counts are the durable half; the seconds are load-dependent and
-this machine does not reproduce #849's own 12.6-15.8s on glasgow at all.
+TWO BASES. `cli` is `check_channels`' own auto-detection -- what the TOOL
+costs. `fine` is `escape.fine_pitch_parts`, which is what the ARMS below
+sweep (10 refs on both test boards) and what #849 measured. On its own basis
+the issue's "~97% of the sweep is avoidable" reproduces: 95.9% removed,
+24.3x. Comparing its 24-ref figure against a 9-ref one is how a draft of
+this header concluded the opposite.
 
-Those ref counts are `check_channels`' OWN auto-detection at that lane. The
-arms below sweep `escape.fine_pitch_parts` instead -- 10 refs on both boards
--- so their numbers are not comparable to the table and are not meant to be:
-the table measures the tool, the arms measure the ledger. `refs_of` says why
-this file does not carry a second copy of the CLI's selector.
+The parse counts are the durable half; the seconds are load-dependent.
 
 MUTATION COVERAGE, from the run and not from a prediction
 (`python3 tests/mutate_849.py`, 13 rows): 11 KILLED, 2 SURVIVED, 0 broken, 0
@@ -94,7 +96,6 @@ Run: python3 -X utf8 tests/test_849_lane_context.py
 """
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -137,9 +138,9 @@ DENSE = os.path.join(ROOT, 'kicad_files',
 #: 2.56 lanes, a real tie set) is ordered by REF NAME and is invariant under
 #: any reordering of the neighbour list. I asserted the opposite here first,
 #: and the battery disproved it: `graded-order-reversed` does not fail this
-#: arm, it fails arm 8. The list stays pinned because it is free and it is
-#: eight more values; the ORDER claim is retracted, and where the reordering
-#: is actually visible is recorded in the attribution table above.
+#: arm -- it fails arm 8, `pair_channel_widths`, which is the one place a
+#: reordering is observable. The list stays pinned because it is free and it
+#: is eight more values, not because the order is fragile.
 GOLDEN_PRE_HOIST = {
     'rp2350_fpga_eensy_prePlane:U2': [
         ('N', 7, 3, 4, [('C24', 4.2), ('C22', 1.6), ('C23', 0.8)]),
@@ -267,8 +268,8 @@ def main():
     ok, why = refuses(
         lambda: R.face_lane_ledger(pcb, refs[0], **dict(LANE, pcb_file=DENSE,
                                                         context=other_ctx)),
-        'DIFFERENT board', os.path.basename(SMALL))
-    check('the wrong board is named, not silently graded', ok, why)
+        'DIFFERENT board', os.path.basename(SMALL), os.path.basename(DENSE))
+    check('BOTH boards are named, not just the one that was wrong', ok, why)
 
     print('4. a context built from ANOTHER FILE is refused')
     same_board_wrong_file = R.board_lane_context(pcb, LANE['clearance'],
@@ -292,14 +293,13 @@ def main():
     best_plain = min(_timed(sweep, pcb, DENSE, refs) for _ in range(3))
     best_ctx = min(_timed(_ctx_sweep, pcb, DENSE, refs) for _ in range(3))
     ratio = best_plain / max(best_ctx, 1e-9)
-    # The floor is 1.5x. The number it is loose against is THIS arm's own:
-    # 9.9x-11.5x over its 10 `fine_pitch_parts` refs across four runs on two
-    # machines. (An earlier comment here cited 6.3x, which is the docstring
-    # table's rp2350 figure over check_channels' 7 auto-detected refs -- a
-    # different sweep, so a different ratio. A review caught the borrowed
-    # number.) A context that is accepted and then ignored lands at 1.0x,
-    # which is what this catches; anything tighter is a detector for how busy
-    # the machine is.
+    # The floor is 1.5x, and the number it is loose against is THIS arm's
+    # own: 9.8x-11.5x over its 10 `fine_pitch_parts` refs, across six runs on
+    # two machines. Quote no single value for it -- a ratio measured once is
+    # a machine reading. A context that is accepted and then ignored lands at
+    # 1.0x, which is what this catches; anything tighter is a detector for
+    # how busy the machine is. `tests/measure_849_hoist.py` is where the
+    # numbers live, on both bases and with the parse counts beside them.
     check(f'{len(refs)}-ref sweep at least 1.5x faster ({ratio:.1f}x measured)',
           ratio >= 1.5,
           f'plain {best_plain:.3f}s, hoisted {best_ctx:.3f}s')

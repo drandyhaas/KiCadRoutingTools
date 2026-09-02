@@ -146,11 +146,26 @@ ROWS = [
 ]
 
 
+#: `run_all.py`'s self-skip code. A test that exits 77 asserted NOTHING, so
+#: reading it as a kill is exactly the "most flattering possible bug" this
+#: file's header refuses. It is a THIRD outcome, not a kill.
+SKIP_EXIT = 77
+
+
 def run(tests):
+    """(killed, why) -- killed when ANY named test exits non-zero.
+
+    `why` is `SKIP:<name>` when a test SELF-SKIPPED, which the caller turns
+    into BROKEN: a mutation is only shown to be caught if the test that
+    caught it actually ran.
+    """
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
     for t in tests:
         r = subprocess.run([sys.executable, '-B', '-X', 'utf8', t],
-                           cwd=ROOT, capture_output=True, text=True, env=env)
+                           cwd=ROOT, capture_output=True, text=True, env=env,
+                           timeout=3600)
+        if r.returncode == SKIP_EXIT:
+            return False, 'SKIP:' + os.path.basename(t)
         if r.returncode != 0:
             return True, os.path.basename(t)
     return False, ''
@@ -180,19 +195,35 @@ def main():
             print(f'  {n:42s} {os.path.basename(TARGETS[t]):20s} {exp}')
         return 0
 
-    # A dirty engine tree would be RESTORED to its committed text, silently
-    # destroying uncommitted work. Refuse rather than help.
-    dirty = subprocess.run(['git', 'diff', '--quiet', '--']
-                           + list(TARGETS.values()), cwd=ROOT).returncode
-    if dirty:
-        print('REFUSED: the files this battery rewrites have uncommitted '
-              'changes.\nRestoring them would write the COMMITTED text back '
-              'over your work. Commit first.')
-        return 2
-
     rows = [r for r in ROWS if not a.row or r[0] == a.row]
     if not rows:
         print(f'no row named {a.row!r}')
+        return 2
+
+    # Uncommitted work in the files this rewrites is unrecoverable if the
+    # process dies mid-row: a crash between the write and the restore leaves
+    # the MUTANT on disk with nothing to put back. `git status --porcelain`
+    # rather than `git diff --quiet`, so a STAGED change counts as dirty too.
+    dirty = subprocess.run(['git', 'status', '--porcelain', '--']
+                           + list(TARGETS.values()), cwd=ROOT,
+                           capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print('REFUSED: the files this battery rewrites have uncommitted '
+              'changes:\n' + dirty + '\nA row that dies between the write and '
+              'the restore leaves a MUTANT in your tree. Commit first.')
+        return 2
+
+    # The battery is only evidence if the gate passes UNMUTATED first.
+    # Without this, a red tree -- or a test that SELF-SKIPS because a fixture
+    # is missing -- scores every row KILLED and this file reports full
+    # coverage for a gate that asserted nothing. Demonstrated by a reviewer:
+    # hide `kicad_files/tigard.kicad_pcb` and every row read KILLED.
+    every = tuple(dict.fromkeys(t for r in rows for t in r[4]))
+    killed0, why0 = run(every)
+    if killed0 or why0.startswith('SKIP:'):
+        print('BROKEN: the gate does not pass on the UNMUTATED tree ({}). '
+              'Every row would score KILLED against it, so nothing here would '
+              'be evidence. Fix the tree first.'.format(why0 or 'unknown'))
         return 2
     originals = {k: open(v, encoding='utf-8').read() for k, v in TARGETS.items()}
     killed = survived = broken = disagree = 0
@@ -213,6 +244,10 @@ def main():
                           newline='') as fh:
                     fh.write(src)
                 _drop_pycache(TARGETS[tgt])
+            if by.startswith('SKIP:'):
+                print(f'  {name:42s} BROKEN ({by} -- it asserted nothing)')
+                broken += 1
+                continue
             got = 'KILLED' if died else 'SURVIVED'
             mark = '' if got == exp else '   *** DISAGREES with ' + exp
             if got != exp:

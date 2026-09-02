@@ -905,16 +905,15 @@ class LaneContext:
     no extent) reach only `parts`; building the rest for them would make a
     bogus ref MORE expensive than it is today.
 
-    WHAT MAKES SHARING SAFE is narrower than "nothing mutates", and the
-    narrower statement has to be got right. Four of the five are freshly
-    built containers the ledger only reads. The fifth is not: `pp.extent(...)`
-    WRITES into `PartPads._ext_cache` AND, via `PartPads._rotated`, into
-    `_pad_cache` -- measured on rp2350, one ledger call grows both on 61 of 61
-    parts. (An earlier draft of this paragraph said "the one write that does
-    happen" and named only `_ext_cache`; a review counted them.) Both are pure
-    memoization keyed on the pose delta, whose values are functions of
-    `(pads_local, holes_extent, rot)` alone -- so a shared map accumulates
-    entries, answers identically, and makes the sweep faster still.
+    WHAT MAKES SHARING SAFE is narrower than "nothing mutates". Four of the
+    five are freshly built containers the ledger only reads. The fifth is
+    not: `pp.extent(...)` writes into `PartPads._ext_cache` AND, via
+    `PartPads._rotated`, into `_pad_cache` -- measured on rp2350, one ledger
+    call grows BOTH on 61 of 61 parts. Both are pure memoization keyed on the
+    pose delta, whose values are functions of `(pads_local, holes_extent,
+    rot)` alone, so a shared map accumulates entries, answers identically,
+    and makes the sweep faster still. Count them before repeating the
+    sentence: "the one write that does happen" was wrong by one.
 
     The members are deliberately NOT a public tuple to unpack: `containers`
     is derived from `graded` and `geom` from `parts`, so a caller that hoisted
@@ -1018,10 +1017,12 @@ class LaneContext:
         same refusal one level up, for the same reason: a disagreement that
         is checkable should not be trusted instead.
 
-        `caller` names the function in the message. Two consumers reach here,
-        and a review found the hardcoded name reporting `face_lane_ledger:`
-        out of a `pair_channel_widths` call -- naming a function that was
-        never entered, which is worse than naming none.
+        `caller` names the function in the message, because a message that
+        names the WRONG function is worse than one that names none: two
+        consumers reach here, and a hardcoded `face_lane_ledger:` reported
+        refusals out of `pair_channel_widths` calls. It defaults to the
+        common caller rather than being required, so a third consumer that
+        forgets it gets a stale name -- pass it.
 
         TWO LIMITS, stated rather than implied:
 
@@ -1065,31 +1066,33 @@ def board_lane_context(pcb_data, clearance: float, *,
     """The per-board half of `face_lane_ledger`, resolved ONCE (#849).
 
     Build one above a loop over refs and pass it to every call; see
-    `LaneContext`. Measured on this repo's own committed boards at clearance
-    0.09 / track 0.127 / grid 0.05, sweeping every ref `check_channels`
-    auto-detects -- both arms in ONE process, min-of-5, the context built
-    INSIDE the timed region because one per run is what the caller does:
+    `LaneContext`. Measured by `tests/measure_849_hoist.py` (min-of-3, one
+    process, the context built INSIDE the timed region because one per run is
+    what the caller does) at clearance 0.09 / track 0.127 / grid 0.05:
 
-        board                       refs   sweep            courtyard parses
-        tigard                         2   0.119s -> 0.052s   2 -> 1
-        rp2350_fpga_eensy_prePlane     7   0.284s -> 0.045s   7 -> 1
-        glasgow_revC                   9   1.767s -> 0.198s   9 -> 1
+        board                     basis  refs    sweep            parses
+        tigard                    cli       2   0.147s -> 0.068s   2 -> 1
+        rp2350_fpga_eensy_prePl.  cli       7   0.370s -> 0.061s   7 -> 1
+        glasgow_revC              cli       9   2.568s -> 0.301s   9 -> 1
+        glasgow_revC              fine     24   6.374s -> 0.262s  24 -> 1
 
-    The parse count is the honest half of that table. Seconds are
-    load-dependent: the same un-hoisted sweep measured 0.094 / 0.275 / 1.704
-    in a clean checkout of the parent commit, so read the ratio, not the
-    absolute. This machine does not reproduce #849's own 12.6-15.8s on
-    glasgow at all (4.01s of CLI wall clock, 1.61s after) -- but "once per
-    ref" against "once per board" is a property, not a measurement, and it is
-    what `tests/test_849_lane_context.py` pins.
+    TWO BASES, and mixing them is the mistake this table exists to prevent.
+    `cli` is what `check_channels` auto-detects and therefore what the TOOL
+    costs. `fine` is `escape.fine_pitch_parts`, which is the basis #849
+    measured -- and on that basis its "~97% of the sweep is avoidable"
+    REPRODUCES here (95.9% removed, 24.3x), even though its absolute
+    12.6-15.8s does not. A draft of this docstring compared the issue's
+    24-ref sweep against a 9-ref number and concluded the opposite.
 
-    tigard's 2.3x is the shape of the win, not a disappointment: two refs is
-    two rebuilds, so there is almost nothing to hoist. The saving is per
-    EXTRA ref, which is why the boards in the fix loop feel it and a
-    two-part board does not. It is also the least stable figure in the table
-    -- an independent re-measurement put it anywhere in 1.5x-2.5x across four
-    runs, against 6.7x and 8.4x for the other two, which reproduced. Read
-    tigard as "barely worth it here", not as 2.3.
+    The parse count is the load-independent half, and it is what
+    `tests/test_849_lane_context.py` pins: seconds move with the machine,
+    "once per ref" against "once per board" does not.
+
+    tigard's 2.2x is the shape of the win, not a disappointment -- two refs
+    is two rebuilds, so there is almost nothing to hoist, and it is the least
+    stable figure here (independent re-measurement put it anywhere in
+    1.5x-2.5x). The saving is per EXTRA ref, which is why a dense board in
+    the fix loop feels it and a two-part board does not.
     """
     return LaneContext(pcb_data, clearance, pcb_file=pcb_file)
 
