@@ -73,6 +73,43 @@ WHAT IS PINNED HERE, and what each check is FOR:
    fan's pad loop makes none of them, so these are not inherited -- they are
    the reason this half is safe to ship.
 
+MUTATION EVIDENCE (`python3 tests/mutate_619.py`, from the run -- never edited
+to match a prediction). 14 rows, 12 KILLED, 2 SURVIVED, 0 broken:
+
+    over-strict-floor-x5                      KILLED    (the negative control)
+    via-floor-uses-drill-not-size             KILLED
+    drop-the-zero-stub-guard                  KILLED
+    via-half-drops-the-own-net-skip           KILLED
+    seg-half-drops-the-own-net-skip           KILLED
+    pad-half-drops-the-own-net-skip           KILLED
+    seg-half-filters-the-ESCAPE-layer         KILLED
+    via-half-disabled                         KILLED
+    seg-half-disabled                         KILLED
+    pad-half-disabled                         KILLED
+    unknown-knob-value-means-OFF              KILLED
+    pad-half-ignores-local-clearance          KILLED
+    pad-half-includes-NPTH                    SURVIVED (declared)
+    stub-clearance-ignores-the-dru-layer-map  SURVIVED (declared)
+
+FOUR of those kills exist only because the battery found them SURVIVING first,
+and every one was a check that read as though it covered the thing it named:
+
+  * the zero-stub guard was argued for in a commit message and tested nowhere;
+  * check 7 asserted `check_drc`'s layer behaviour and the fixture's layer, but
+    never the ENGINE's choice between them -- every board in the sweep runs
+    escape layer == footprint.layer, so the distinction was invisible and
+    swapping `footprint.layer` for `layer` changed nothing. It needed a
+    CROSS-LAYER run (U2 mounted F.Cu, escaped to B.Cu) to become a check;
+  * no pinned geometry sat between the drill-derived and copper-derived floors;
+  * the knob's fail-safe direction (an unknown value means ALL, never OFF) was
+    asserted only by reading the code.
+
+The two declared survivors are real test holes, named rather than hidden: no
+tracked board places a netted NPTH within stub reach, and #770 records that no
+board this repo ingests carries a `.kicad_dru` layer rule, so `_stub_clr` and
+`clearance` are equal on every fixture. Both are asserted against check_drc's
+helpers directly (check 8) instead of pretending a board covers them.
+
     python3 tests/test_619_underpad_stub_vs_erased_copper.py
 """
 import contextlib
@@ -275,6 +312,61 @@ def test_erasure_injection_and_control():
           (len(t3), len(v3), sorted(d3)) == (2, 2, []),
           f"{len(t3)}/{len(v3)}/{sorted(d3)}")
 
+    # -- 3b. THE FLOOR IS BUILT FROM via.SIZE, NOT via.DRILL. The two differ
+    #    by (size - drill)/2 = 0.125 mm on this injected via, so a blocker
+    #    placed BETWEEN the two floors is caught by the shipped code and
+    #    missed by a drill-based one. Found by tests/mutate_619.py: without
+    #    this, `v.size / 2` -> `v.drill / 2` SURVIVED the whole file.
+    f_size = VS / 2 + TW / 2 + CL            # 0.3750
+    f_drill = 0.2 / 2 + TW / 2 + CL          # 0.2500 (injected drill = 0.2)
+    band = (f_size + f_drill) / 2.0          # 0.3125, strictly between them
+    bx, by = ix + (-dy / L) * band, iy + (dx / L) * band
+    p4 = parse_kicad_pcb(TIGARD)
+    p4.vias.append(Via(x=bx, y=by, size=VS, drill=0.2,
+                       layers=["F.Cu", "B.Cu"], net_id=nid_b))
+    t4, v4, d4 = _fanout(p4, "U3", [a, b])
+    check(f"the floor is the via's COPPER radius, not its drill radius: a "
+          f"blocker at d={band:.4f}, between the drill floor {f_drill:.4f} and "
+          f"the copper floor {f_size:.4f}, DOES block -- a drill-based floor "
+          f"would wave it through",
+          a in d4, f"dropped={sorted(d4)}")
+
+    # -- 3c. AN UNRECOGNISED KNOB VALUE MEANS ALL, NEVER OFF. A typo in a
+    #    harness must not silently ship the bug back. Same injected board as
+    #    check 2, so the expected outcome is exactly check 2's.
+    _gate('bogus-not-a-real-arm')
+    t5, v5, d5 = _fanout(p2, "U3", [a, b])
+    check("an unrecognised gate value behaves as 'all', not as 'off' -- a "
+          "typo in an A/B harness cannot silently disable the gate",
+          (len(t5), len(v5), sorted(d5)) == (1, 1, [a]),
+          f"{len(t5)}/{len(v5)}/{sorted(d5)}")
+    _gate('off')
+    t6, v6, d6 = _fanout(p2, "U3", [a, b])
+    check("...and 'off' really does disable it, so the check above is a real "
+          "discrimination and not a constant",
+          (len(t6), len(v6), sorted(d6)) == (2, 2, []),
+          f"{len(t6)}/{len(v6)}/{sorted(d6)}")
+    _gate('all')
+
+    # -- 3d. THE ZERO-LENGTH STUB EMITS NO COPPER, SO IT IS NOT TESTED.
+    #    Inject a via on net A's OWN net at net A's pad centre: the #479 reuse
+    #    path bridges to it with zero length, so the commit loop emits no track
+    #    (:604). Then put a net B via within the floor of that same point.
+    #    Without the guard the degenerate point-"segment" is graded against it
+    #    and the reuse is refused for copper that is never emitted. Found by
+    #    mutate_619: without this, removing the guard SURVIVED.
+    pa = [p for p in pcb.footprints["U3"].pads if p.net_id == nid_a][0]
+    p7 = parse_kicad_pcb(TIGARD)
+    p7.vias.append(Via(x=pa.global_x, y=pa.global_y, size=VS, drill=0.2,
+                       layers=["F.Cu", "B.Cu"], net_id=nid_a))
+    p7.vias.append(Via(x=pa.global_x + 0.20, y=pa.global_y, size=VS, drill=0.2,
+                       layers=["F.Cu", "B.Cu"], net_id=nid_b))
+    t7, v7, d7 = _fanout(p7, "U3", [a, b])
+    check("a ZERO-LENGTH stub (via reused at the pad centre) emits no track, "
+          "so a foreign via beside it must not reject the reuse -- net A keeps "
+          "its escape and emits no new via",
+          a not in d7, f"dropped={sorted(d7)}")
+
 
 # -------------------------------------------------------------------- 4 -----
 def test_gate_live_but_rejects_nothing():
@@ -349,13 +441,28 @@ def test_layer_scope_decision():
           "deliberately layer-blind, and this fails the day that changes",
           hit is True)
     # And the segment half's filter is on the STUB's layer, not the escape
-    # layer. On U2 the two spellings disagree completely.
+    # layer. Every board in the sweep runs escape layer == footprint.layer, so
+    # the distinction is INVISIBLE there -- mutate_619 found that swapping
+    # `footprint.layer` for `layer` SURVIVED the whole file. It needs a
+    # CROSS-LAYER configuration to be a real check: U2 is an F.Cu part escaped
+    # to B.Cu, which is what the under-pad method exists for.
     _gate('all')
     pcb = parse_kicad_pcb(U2BOARD)
     fp = pcb.footprints["U2"]
-    check("the fixture actually exercises the distinction: the escape layer "
-          "argument and footprint.layer are different layers here",
+    check("the fixture is genuinely cross-layer: U2 mounts on F.Cu and is "
+          "escaped to B.Cu, so the stub's layer and the escape layer differ",
           fp.layer == "F.Cu")
+    t_x, v_x, d_x = _fanout(pcb, "U2", layer="B.Cu")
+    e = _erased(pcb, "U2")
+    check("the stub's copper layer is footprint.layer, not the escape layer "
+          "(#195: putting it on the escape layer would float it above the pad)",
+          e.get('layer') == "F.Cu", str(e.get('layer')))
+    check("cross-layer tally pinned at 15 tracks / 13 vias / 27 dropped. "
+          "Filtering erased segments by the ESCAPE layer instead of the stub's "
+          "layer selects a DIFFERENT set (25 vs 17 pairs on this board) and "
+          "moves this number -- which is what makes this a real check",
+          (len(t_x), len(v_x), len(d_x)) == (15, 13, 27),
+          f"got {(len(t_x), len(v_x), len(d_x))}")
 
 
 # -------------------------------------------------------------------- 8 -----
