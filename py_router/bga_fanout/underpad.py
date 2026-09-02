@@ -760,7 +760,7 @@ def generate_underpad_escape(footprint: Footprint,
     # Refuse-to-build was measured and rejected: on ulx3s U1, honouring a
     # declared 0.9mm floor costs 15 of 199 escapes, so refusing the RUN would
     # throw away 184 good ones to prevent 62 bad holes.
-    h2h_stats = {'sites': 0, 'coupled': 0}
+    h2h_stats = {'sites': 0, 'coupled_pairs': set()}
 
     # DRILL FLOOR, board-first and raise-only. `_via_site_conflict` below spaced
     # every drill it places at the flat routing_defaults.HOLE_TO_HOLE_CLEARANCE
@@ -1624,6 +1624,14 @@ def generate_underpad_escape(footprint: Footprint,
         """
         if locked_smd_pads and not all(_via_gate_ok(q) for q in (pp, nn)):
             return False           # a through via would hit locked copper
+
+        # COUNT PAIRS, NOT CALLS. This gate runs inside `strict x direction x
+        # candidate` loops from two templates and is not memoised, so a bare
+        # `+= 1` reported "8 coupled pair(s) declined" on a board with ONE
+        # coupled pair (16 calls for it). An adversarial review measured that.
+        # The `sites` counter is fine -- its caller memoises per ball centre.
+        _pair_key = tuple(sorted((id(pp), id(nn))))
+
         sites = [_via_site_geom(q) for q in (pp, nn)]
         for pad, (vx, vy, cs, cd) in zip((pp, nn), sites):
             ctx = _via_ctx(pad.net_id, vx, vy)
@@ -1631,13 +1639,13 @@ def generate_underpad_escape(footprint: Footprint,
                                      vdr=(cd or 0.0) / 2.0, skip_resv=True)
             if why is not None:
                 if why.startswith('drill hole'):
-                    h2h_stats['coupled'] += 1
+                    h2h_stats['coupled_pairs'].add(_pair_key)
                 return False
         (ax, ay, _as, ad), (bx, by, _bs, bd) = sites
         if math.hypot(ax - bx, ay - by) < ((ad or 0.0) / 2.0
                                            + (bd or 0.0) / 2.0
                                            + _h2h - 1e-6):
-            h2h_stats['coupled'] += 1
+            h2h_stats['coupled_pairs'].add(_pair_key)
             return False           # the pair's own two holes, #620's shape
         return True
 
@@ -2607,9 +2615,10 @@ def generate_underpad_escape(footprint: Footprint,
         # SEE that the floor is what refused them is. Balls that lose their
         # via-in-pad here fall to the checked off-centre search, and only fail
         # to the main router if that finds nothing either.
-        if h2h_stats['sites'] or h2h_stats['coupled']:
+        _n_coupled_declined = len(h2h_stats['coupled_pairs'])
+        if h2h_stats['sites'] or _n_coupled_declined:
             print(f"  Under-pad: {h2h_stats['sites']} via-in-pad centre site(s)"
-                  f" and {h2h_stats['coupled']} coupled pair(s) declined by the"
+                  f" and {_n_coupled_declined} coupled pair(s) declined by the"
                   f" {_h2h:g}mm hole-to-hole floor ({_h2h_src}); the levers are"
                   f" a smaller --via-drill, a fab tier whose floor this pitch"
                   f" can meet, or the board's own min_hole_to_hole")

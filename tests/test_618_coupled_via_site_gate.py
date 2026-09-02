@@ -46,6 +46,7 @@ geometry against a declaration a fab could really make.
 """
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -248,6 +249,32 @@ class TestTheDeclaredFloorIsHonoured(unittest.TestCase):
                 round(gap, 6), 0.70,
                 f'a run announcing a 0.7mm floor still emits a {gap:.4f}mm '
                 f'drill gap')
+
+    def test_the_disclosure_counts_PAIRS_not_CALLS(self):
+        """`_coupled_via_sites_ok` runs inside `strict x direction x candidate`
+        loops from two templates and is not memoised, so a bare counter counts
+        invocations. An adversarial review measured a run printing "8 coupled
+        pair(s) declined" on a board with ONE coupled pair -- the gate was
+        called 16 times for it.
+
+        A disclosure that overstates by an order of magnitude is worse than
+        none: it invites the operator to go looking for pairs that do not
+        exist. The declined count can never exceed the pairs the run found.
+
+        MUTATION: `h2h_stats['coupled_pairs'].add(...)` -> a bare `+= 1`
+        counter -- this arm dies."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _v, log = _fanout(_board_with_floor(tmp, 0.70))
+        m = re.search(r'and (\d+) coupled pair\(s\) declined', log)
+        found = re.search(r'Found (\d+) differential pair\(s\)', log)
+        self.assertIsNotNone(found, 'the rig found no diff pairs at all')
+        if m is None:
+            self.skipTest('no coupled pair declined on this rig')
+        self.assertLessEqual(
+            int(m.group(1)), int(found.group(1)),
+            f'the run reports {m.group(1)} coupled pair(s) declined but only '
+            f'found {found.group(1)} differential pair(s) -- the counter is '
+            f'counting gate CALLS')
 
     def test_the_decline_is_DISCLOSED(self):
         """#618's policy question, answered as WARN. MUTATION: delete the
