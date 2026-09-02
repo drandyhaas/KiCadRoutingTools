@@ -21,7 +21,10 @@ Three things make this honest rather than a plausible number:
   only that if the names are real: until #835 a neighbour was charged on XY
   overlap alone, so a part on the far side of the board -- copper these tracks
   never share -- and a module outline the part sits INSIDE were both named as
-  the one to move. On ulx3s every reported deficit was one of those.
+  the one to move. On ulx3s every reported deficit was one of those. And until
+  #841 what a charged neighbour CONTRIBUTED was the bbox of its pad CENTRES,
+  so a two-terminal passive obstructed a zero-width strip; it is now its pad
+  copper, the same box `routability.face_lane_ledger` charges.
 * **Interior pads count toward NO face.** A pad boxed in by its neighbours does
   not escape sideways at all -- it needs a via. Rolling it into a face's demand
   would blame the face for a fanout problem. Reported separately.
@@ -104,13 +107,12 @@ class FaceLedger:
         wrong about the side half anyway -- U6 is DRILLED, so it occupies both
         faces and its B-side blocker U1 was charged correctly.
 
-        The asymmetry stays, on the argument rather than the example.
-        `blocked_mm` is still a pad-BBOX model of a neighbour, which for a
-        perimeter-pad part reads as a solid block; and `supply` is a floor
-        while this is a ceiling, so they may not be built from the same
-        subtraction even when both are sound. Post-#835, U6 is
-        supply 2/11/10/12 against demand 13/13/14/14 -- still the board's worst
-        part, and no longer fully blocked.
+        The asymmetry stays, on the argument rather than the example, and
+        the example has now been overtaken twice. `blocked_mm` models a
+        neighbour by its pad-COPPER box (#841, previously the bbox of its pad
+        CENTRES), which for a perimeter-pad part still reads as a solid block;
+        and `supply` is a floor while this is a ceiling, so they may not be
+        built from the same subtraction even when both are sound.
 
         ONE ROW, and the arithmetic is the reason rather than the caution. A
         second-row via must be reached BETWEEN two first-row vias: the copper
@@ -768,17 +770,24 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
     Intervals are UNIONED, so two neighbours covering the same stretch are
     charged once. That is the correction: without it a face can be reported as
     more than fully blocked, and an over-100% total silently becomes "supply 0"
-    rather than an error. Measured, glasgow_revC's J1 east has NINE neighbours
-    covering 12.42mm of a 9.64mm face -- summed that is supply 0, unioned it is
-    8.23mm and supply 3. (Nine, not the eight `face_lane_ledger` reports: its
-    `eaten_by` is truncated to the top 8 for display, so counting that list
-    undercounts the obstruction and sums to 11.48mm rather than 12.42mm.)
+    rather than an error. The witness is ulx3s H4 south: TWO neighbours
+    covering 6.16mm of a 5.50mm face -- summed that is supply 0, unioned it is
+    3.71mm and supply 4. (It used to be glasgow_revC's J1 east, nine
+    neighbours covering 12.42mm of a 9.64mm face. Once both ledgers charge pad
+    COPPER rather than the courtyard or the bbox of pad centres (#841), that
+    face is supply 8 either way and glasgow has no discriminating face left;
+    `tests/test_835_escape_side_aware.py` records the re-scan. Note also that
+    `face_lane_ledger`'s `eaten_by` is truncated to the top 8 for display, so
+    counting THAT list undercounts the obstruction -- ask this function.)
 
-    Corpus-wide over the git-tracked boards: 25 of the 388 faces the ESCAPE
-    ledger reports have neighbours covering the same stretch twice, and
-    `face_lane_ledger` has 506 of 5276 taken over every footprint. Regenerate
-    both by instrumenting this function -- the counts are scope-dependent, and
-    an unscoped one is not a number.
+    Corpus-wide over the git-tracked boards, at the pad-copper rect: 60 of the
+    388 faces the ESCAPE ledger reports have neighbours covering the same
+    stretch twice, and `face_lane_ledger` has 278 of 5276 taken over every
+    footprint. (It was 25 and 506 at the two rects those ledgers used before
+    #841 -- the escape count rises because a pad-centre box overlaps almost
+    nothing, the routability count falls because a courtyard overlaps almost
+    everything.) Regenerate both by instrumenting this function -- the counts
+    are scope-dependent, and an unscoped one is not a number.
 
     The `min(blocked, hi - lo)` below is BELT AND BRACES, and provably so while
     the union stands: every interval is already clipped to [lo, hi] as it is

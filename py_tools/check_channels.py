@@ -136,10 +136,13 @@ def main():
 
     # BOARD-FIRST. A lane is `track + clearance` wide, so BOTH of these decide
     # how much escape supply this tool believes a face has -- and it used to
-    # believe two constants. Measured HERE on the run board (Default netclass
-    # clearance 0.2, track 0.254): at the old 0.25/0.3 constants it reports 334
-    # escape lanes where the board's own floor gives 399 -- a 65-lane
-    # understatement. The originating report measured 304 vs 378 (74 lanes) on
+    # believe two constants. Measured 2026-08 on an unnamed run board (Default
+    # netclass clearance 0.2, track 0.254): at the old 0.25/0.3 constants it
+    # reports 334 escape lanes where the board's own floor gives 399 -- a
+    # 65-lane understatement. That board is not in the corpus, so these two
+    # figures are NOT re-derivable here and are dated rather than presented as
+    # current; #841 moved every escape supply on every board, so read them for
+    # the direction and the scale only. The originating report measured 304 vs 378 (74 lanes) on
     # that board at 0.2/0.2; the direction and scale agree, the exact figures
     # depend on the track width in force, so both are recorded rather than
     # blended. A phantom deficit steers a placement search at the thing that is
@@ -157,11 +160,22 @@ def main():
     # it PREDICTS routability, and a lane pitch below what any fab can etch
     # predicts capacity nobody can build.
     #
-    # Measured on tigard, --refs U3, against fab floors 0.09 / 0.0762:
+    # Measured on tigard, --refs U3, against fab floors 0.09 / 0.0762.
+    # Re-measured 2026-09-02 after #841 (a neighbour is charged its pad
+    # COPPER, not the bbox of its pad centres), and the ladder is now what the
+    # SHIPPED CLI prints -- the two lower rungs coincide because the fab floor
+    # is doing exactly the job this block exists to describe:
     #
-    #     declared 0.2 /0.2    supply  29   deficit faces 3
-    #     declared 0.05/0.05   supply 120   deficit faces 1   <- two real
-    #     declared 0.02/0.02   supply 242   deficit faces 1      deficits gone
+    #   python3 -X utf8 py_tools/check_channels.py kicad_files/tigard.kicad_pcb     #       --refs U3 --clearance C --track-width C
+    #
+    #     declared 0.2 /0.2    U3 W supply  9@finest   deficit faces 1
+    #     declared 0.05/0.05   U3 W supply 22@finest   deficit faces 0
+    #     declared 0.02/0.02   U3 W supply 22@finest   deficit faces 0  <- clamped
+    #
+    # The earlier recording (supply 29 / 120 / 242, deficit faces 3 / 1 / 1)
+    # was taken at the pad-centre obstruction rect AND with the floor out of
+    # the way, so it is not reproducible from this CLI at any flag. It is kept
+    # in the history rather than restated as current.
     #
     # That is the OPTIMISTIC direction, and the dangerous one: the instrument
     # reports escape capacity that cannot be manufactured, and a placement
