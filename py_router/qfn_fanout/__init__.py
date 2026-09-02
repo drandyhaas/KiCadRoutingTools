@@ -337,6 +337,32 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _own_via_pos: Dict[int, List[Tuple[float, float]]] = {}
     for v in pcb_data.vias:
         _own_via_pos.setdefault(v.net_id, []).append((v.x, v.y))
+    # #619: `nets_to_route` above ERASES every piece of copper on a net we are
+    # escaping -- segments, vias AND pads (obstacle_map.py :216 / :299 / :312).
+    # Right for a net's OWN copper; wrong for every OTHER net in the same call.
+    # The candidate VIA still meets that copper (via_clears scans pcb_data
+    # directly), but the pad->via STUB's only channel to the input board is
+    # `check_line_clearance` on the holed map -- so stubs shipped straight
+    # through the CENTRES of pre-existing vias on sibling fanned nets.
+    #
+    # The SURFACE fan already closes exactly this hole for itself, geometrically
+    # (#257, the tail of `_seg_grazes`); the under-pad path returns ~200 lines
+    # earlier and shares none of it. This is that backstop, ported.
+    #
+    # These lists are EXACTLY the complement of what `nets_to_route` erases:
+    # build_base_obstacle_map stamps only segments, vias and pads and never
+    # zone copper, so pour copper is invisible to the stub before and after
+    # this change and nothing is being silently left out.
+    _erased_vias = [v for v in pcb_data.vias if v.net_id in fanned_nets]
+    # The stub is emitted on `footprint.layer` -- the pad's OWN mount layer,
+    # deliberately, so it does not float above the pad (#195) -- and NOT on the
+    # `layer` argument. The caller's #498 dru swap resolved `clearance` for the
+    # ESCAPE layer, which is where the VIA lands, not where the stub's copper
+    # lives, and check_drc grades a segment with `_pair_cl(..., layer=seg.layer)`.
+    # So the stub's own pair clearance is the mount layer's rule.
+    _stub_clr = cfg.layer_clearance(footprint.layer, clearance)
+    _gate = env_knobs.QFN_UNDERPAD_ERASED_GATE
+    _gate_via = _gate in ('all', 'via')
     from kicad_parser import pad_drill_circles as _pdc
     import routing_defaults as _rd
     # BOARD-FIRST, same rule as every other floor: a board declaring
@@ -448,6 +474,47 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             via_size=via_size, via_drill=via_drill, clearance=clearance,
             track_width=track_width, hole_to_hole=_h2h)
 
+    def stub_clears_erased(px, py, vx, vy, net_id):
+        """#619: is the pad->via stub clear of the copper `nets_to_route` erased?
+
+        The tail of the surface fan's `_seg_grazes` (#257), applied to the
+        bridging stub. Returns True when the stub is CLEAR -- the opposite
+        polarity to `_seg_grazes`, so it reads like the `stub_ok` it is
+        and-ed into.
+
+        Deliberately LAYER-BLIND, matching every grader around it:
+        `check_drc.check_via_segment_overlap` ignores `via.layers` ("vias go
+        through ALL copper layers") and `obstacle_map._add_via_obstacle`
+        stamps every via on every layer. Filtering a blind/buried via out
+        here would emit copper this repo's own DRC flags, and would make a
+        fanned-net via behave differently from an identical non-fanned one.
+
+        Called BEFORE `via_clears`, not after, and that ordering is
+        load-bearing rather than cosmetic: `via_clears` scans, per candidate,
+        every board via + every board pad (a 17-sample `_seg_hits_pad` each)
+        + every board segment -- ~20k point tests on routed_output U2, where
+        `_erased_vias` is 89. Running this first kills a doomed candidate for
+        ~0.5% of that cost. Measured on U2: correctly ordered 7.0s against a
+        10.9s baseline (-36%); appended after `via_clears` instead, +18%.
+        The gate is a speed-up.
+        """
+        if math.hypot(vx - px, vy - py) <= POSITION_TOLERANCE:
+            # Via centred on the pad: the commit loop emits NO track at all
+            # (:604, :616), so there is no stub to test. `run_output_conflict`
+            # states the same rule for the reuse case at :213-215; without
+            # this, a zero-length reuse -- a pre-existing via-in-pad at the pad
+            # centre, the canonical re-run case -- is judged as a degenerate
+            # segment and can be rejected for copper it will never emit.
+            return True
+        if _gate_via:
+            for v in _erased_vias:
+                if v.net_id == net_id:
+                    continue                # own-net copper is no obstacle
+                if point_to_segment_distance(v.x, v.y, px, py, vx, vy) \
+                        < v.size / 2 + track_width / 2 + _stub_clr - 1e-6:
+                    return False
+        return True
+
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
 
@@ -511,9 +578,16 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             # already there) judged against a demanded 0.55. That was measured
             # as Net-(U2A-DATA_30) losing its escape to a fresh drill --
             # 28/12/30 vias/dropped/tracks becoming 29/13/31 on U2.
+            #
+            # stub_clears_erased is a SEPARATE `and` term, never folded into
+            # the `obs_layer_idx is None` `or`: that short-circuit skips the
+            # whole clearance test when the escape layer is not in the layer
+            # map, and #619 is pure geometry on the mount layer that must run
+            # regardless.
             if (obs_layer_idx is None or
                     check_line_clearance(obstacles, px, py, _rvx, _rvy,
                                          obs_layer_idx, cfg)) \
+                    and stub_clears_erased(px, py, _rvx, _rvy, pi.pad.net_id) \
                     and not run_output_conflict(
                         _rvx, _rvy, pi.pad.net_id, placed, px, py,
                         via_size=via_size, via_drill=via_drill,
@@ -524,7 +598,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             vx, vy = snap(px + ex * d), snap(py + ey * d)
             stub_ok = (obs_layer_idx is None or
                        check_line_clearance(obstacles, px, py, vx, vy, obs_layer_idx, cfg))
-            if stub_ok and via_clears(vx, vy, pi.pad.net_id, placed, px, py):
+            if stub_ok \
+                    and stub_clears_erased(px, py, vx, vy, pi.pad.net_id) \
+                    and via_clears(vx, vy, pi.pad.net_id, placed, px, py):
                 return (vx, vy)
         return None
 
