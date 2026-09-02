@@ -40,6 +40,17 @@ from qfn_fanout.geometry import calculate_fanout_stub
 # planner (or the user) into a pointless tighter-clearance retry.
 LAST_CANCEL_SKIPPED: List[str] = []
 
+# #619: what the last under-pad escape's obstacle map ERASED, published so a
+# sweep or a test can grade against the set the ENGINE used instead of
+# re-deriving it. Re-deriving is a live trap: `fanned_nets` comes from
+# `pad_infos`, which drops net 0, `unconnected-*`, net-filter misses and
+# `center` pads, so the obvious proxy -- `{p.net_id for p in footprint.pads}`
+# -- can report the gate as live on a footprint where the erased set is
+# empty and the gate is a constant True. Keys: `nets` (the net-id set handed
+# to nets_to_route), `vias`/`segs` (erased counts), `layer` (where the stub
+# copper lands), `clearance` (the floor the stub was graded at).
+LAST_ERASED_SETS: Dict = {}
+
 
 def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
     """Move a shortened fan tip back ONTO the routing grid (#446).
@@ -365,6 +376,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     _gate = env_knobs.QFN_UNDERPAD_ERASED_GATE
     _gate_via = _gate in ('all', 'via')
     _gate_seg = _gate in ('all', 'seg')
+    global LAST_ERASED_SETS
+    LAST_ERASED_SETS = {'nets': set(fanned_nets), 'vias': len(_erased_vias),
+                        'segs': len(_erased_segs), 'layer': footprint.layer,
+                        'clearance': _stub_clr, 'gate': _gate}
     from kicad_parser import pad_drill_circles as _pdc
     import routing_defaults as _rd
     # BOARD-FIRST, same rule as every other floor: a board declaring
