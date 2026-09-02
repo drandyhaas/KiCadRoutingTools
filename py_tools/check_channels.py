@@ -347,7 +347,7 @@ def main():
 
     channels = routability.pair_channel_widths(
         pcb, clearance=clearance, min_extent_mm=args.min_extent,
-        pcb_file=args.board)
+        pcb_file=args.board, context=ctx)
     print(f"Anchor channels (narrowest first, {len(channels)} pair(s)):")
     for row in channels[:12]:
         parts = (' parts: ' + ', '.join(row['parts_in_channel'])

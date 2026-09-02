@@ -1266,7 +1266,8 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
 def pair_channel_widths(pcb_data, *, clearance: float,
                         min_extent_mm: float = 3.5,
                         radius_mm: float = 15.0,
-                        pcb_file: Optional[str] = None) -> List[Dict]:
+                        pcb_file: Optional[str] = None,
+                        context: Optional[LaneContext] = None) -> List[Dict]:
     """Measured channel width between ANCHOR-sized parts, plus what lives
     in the channel -- the run-2 corridor law's inputs, measured instead of
     declared (Corridor.width_mm has only ever been an intent input).
@@ -1275,10 +1276,25 @@ def pair_channel_widths(pcb_data, *, clearance: float,
     r=+0.41..+0.90 on 8/8 boards -- never against routed `blocking`, which no
     predictor here has been correlated with; see docs/placement-predictors.md):
     each row reports the gap and the small parts whose bodies sit inside
-    the channel rectangle between the two anchors."""
+    the channel rectangle between the two anchors.
+
+    `context` (#849) is the same `LaneContext` the lane ledger takes, and is
+    used ONLY for its `graded` -- this function's whole per-board input.
+    `check_channels` calls this once, right after a sweep that already built
+    that list, so without it the tool parses the board's courtyards one more
+    time than it has refs. Defaults to None and rebuilds, and the context is
+    checked against this call's board and file before it is believed.
+    """
     from placement.legality import graded_parts_from_file, rect_gap
 
-    parts = graded_parts_from_file(pcb_data, pcb_file)
+    # `clearance` is not part of the check: this function never touches the
+    # pad boxes it prices, so a context built at another clearance carries
+    # exactly the `graded` list this wants. Passing `context.clearance`
+    # asserts the pair that matters -- board and file -- and nothing it would
+    # be lying about.
+    parts = (graded_parts_from_file(pcb_data, pcb_file) if context is None
+             else context.resolved_for(pcb_data, context.clearance,
+                                       pcb_file).graded)
     big = [g for g in parts
            if max(g.rect[2] - g.rect[0], g.rect[3] - g.rect[1])
            >= min_extent_mm]
