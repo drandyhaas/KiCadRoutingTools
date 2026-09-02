@@ -29,7 +29,12 @@ RUN_ALL_TIMEOUT = 600
 
 BOARDS = ('rp2350_fpga_eensy_prePlane', 'glasgow_revC', 'tigard', 'watchy',
           'ulx3s', 'esp_prog', 'kit-dev-coldfire-xilinx_5213',
-          'interf_u_plane', 'lvds_converter_dualclk', 'qfn_csi_underpad_diff')
+          'interf_u_plane', 'lvds_converter_dualclk', 'qfn_csi_underpad_diff',
+          # #841: the ONLY board carrying a part whose worst face differs by
+          # the two fields, once the ledger charges pad copper. Without it
+          # `t_worst_floor_selects_by_the_FLOOR_deficit_not_the_own_layer_one`
+          # has nothing to tell the two rules apart and says so.
+          'orangecrab_ext_pll')
 
 
 def _board(name):
@@ -186,9 +191,13 @@ def t_the_other_layer_term_survives_a_fully_blocked_face():
     for U8 -- a Teensy module whose 66 perimeter pads bound 17.3 x 34.1mm of
     mostly empty interior, and which by `legality.CONTAINER_RATIO` is a FRAME,
     not a body. U6 sits inside it. With that charge gone U6 is
-    supply 2/11/10/12 against demand 13/13/14/14, still the worst part on the
-    board (deficit 11 on north) but no longer fully blocked, so it can no
-    longer carry this arm.
+    supply 0/9/4/12 against demand 13/13/14/14, still the worst part on the
+    board (deficit 13 on north) but no longer fully blocked on every face, so
+    it can no longer carry this arm. (Those were 2/11/10/12 and deficit 11
+    when #835 wrote them; #841 charges a neighbour its pad COPPER rather than
+    the bbox of its pad centres, so every supply here fell. The arm's
+    REASONING is unchanged -- U6 is not blocked on all four faces -- which is
+    why the numbers are re-recorded and the fixture is not.)
 
     U3 is a better fixture than U6 ever was: a SOT-666 boxed in by four real
     neighbours (J1, J2, R1, R2) that all share a face with it -- J2 sits on
@@ -350,24 +359,33 @@ def t_worst_floor_selects_by_the_FLOOR_deficit_not_the_own_layer_one():
     # The VALUE assertion above is not enough on its own: where two faces TIE
     # on deficit_floor, selecting by the own-layer `deficit` returns the same
     # value and a DIFFERENT face -- and `worst_face_floor` is a published
-    # board_brief key. tigard RN5 is that case, concretely:
+    # board_brief key. Pinned by its ANSWER, not by re-deriving the selection
+    # expression, which would only compare the code with itself.
+    #
+    # The witness is orangecrab_ext_pll U1 (#841). It USED to be tigard RN5:
     #     north  deficit 2  deficit_floor 1
     #     east   deficit 3  deficit_floor 1
-    # so the floor rule (value, then face name) gives `north`, and the
-    # own-layer rule gives `east`. Pinned by its answer, not by re-deriving
-    # the selection expression, which would only compare the code with itself.
-    pcb, path = _board('tigard')
-    if True:
-        rn5 = [q for q in escape.escape_ledger(pcb, pcb_file=path)
-               if q.ref == 'RN5']
-        if rn5:
-            d = rn5[0].to_dict()
-            faces = {f.face: (f.deficit, f.deficit_floor) for f in rn5[0].faces}
-            assert (faces.get('north') == (2, 1)
-                    and faces.get('east') == (3, 1)), (
-                f'the RN5 fixture moved: {faces}')
-            assert d['worst_face_floor'] == 'north', d['worst_face_floor']
-            assert d['worst_deficit_floor'] == 1, d['worst_deficit_floor']
+    # Once the ledger charges pad COPPER rather than the bbox of pad centres,
+    # RN5 is north (2,0) / east (3,1) / south (1,0) / west (2,0) -- one face
+    # short at the floor and therefore no tie at all. It is replaced rather
+    # than re-recorded, because what moved is whether it is a witness, not
+    # what its numbers are.
+    pcb, path = _board('orangecrab_ext_pll')
+    if pcb is not None:
+        u1 = [q for q in escape.escape_ledger(pcb, pcb_file=path)
+              if q.ref == 'U1']
+        assert u1, 'orangecrab_ext_pll U1 is not in the ledger any more'
+        d = u1[0].to_dict()
+        faces = {f.face: (f.deficit, f.deficit_floor) for f in u1[0].faces}
+        assert faces == {'north': (3, 1), 'east': (1, 0),
+                         'south': (3, 1), 'west': (2, 1)}, (
+            f'the U1 fixture moved: {faces}')
+        # Three faces tie at deficit_floor 1, and the own-layer deficit picks a
+        # different one of them. `max` keys on `(value, face)`, so a tie breaks
+        # to the LAST face name: floor -> west, own-layer -> south.
+        assert d['worst_face_floor'] == 'west', d['worst_face_floor']
+        assert d['worst_deficit_floor'] == 1, d['worst_deficit_floor']
+        assert u1[0].worst.face == 'south', u1[0].worst.face
 
     print(f"  PASS: {seen} parts selected by deficit_floor; {len(split)} "
           f"disagree with the own-layer worst face, and a tie resolves by "

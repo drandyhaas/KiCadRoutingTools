@@ -53,17 +53,52 @@ from placement.options import deficit_totals                  # noqa: E402
 #: `python3 -X utf8 tests/measure_834_835_side_awareness.py --table B`.
 #: Boards absent from a checkout are skipped, not failed.
 EXPECTED = {
-    'ulx3s': (0, 0, 0),
-    'orangecrab_ext_pll': (70, 18, 39),
-    'glasgow_revC': (17, 14, 14),
-    'rp2350_fpga_eensy_prePlane': (53, 8, 24),
-    # The controls. tigard and splitflap_driver must not move under ANY of the
-    # three arms; watchy and kit-dev-coldfire are the boards with no cross-side
-    # charge and no container at all.
-    'tigard': (41, 8, 23),
+    'ulx3s': (5, 1, 1),
+    'orangecrab_ext_pll': (115, 20, 50),
+    'glasgow_revC': (55, 16, 25),
+    'rp2350_fpga_eensy_prePlane': (79, 10, 27),
+    # #835's controls were "does not move under the SIDE or CONTAINER arm",
+    # and they still hold for those two arms. They are NOT controls for #841:
+    # the obstruction RECT changed from the bbox of pad centres to the pad
+    # copper box, and that reaches every board with a neighbour in a face's
+    # band -- which is every board with fine-pitch parts. 8 of the 22 tracked
+    # boards moved. The 8th is haasoscope_pro_max_test, 9 -> 5, which is not
+    # pinned here because it is not in EXPECTED -- `--table B` carries it.
+    # splitflap_driver and esp_prog are the only fine-pitch-bearing boards
+    # that did not move, and splitflap has no fine-pitch part at all.
+    'tigard': (55, 9, 24),
     'splitflap_driver': (0, 0, 0),
-    'watchy': (25, 4, 13),
-    'kit-dev-coldfire-xilinx_5213': (0, 0, 0),
+    'watchy': (55, 6, 16),
+    'kit-dev-coldfire-xilinx_5213': (8, 1, 2),
+}
+
+#: Total per-face DEMAND and interior pads, per board (#841). Pinned apart
+#: from `EXPECTED` because a deficit that falls can mean the instrument got
+#: honest OR that it stopped counting nets, and only this pair tells them
+#: apart.
+DEMAND = {
+    'ulx3s': (149, 402),
+    'orangecrab_ext_pll': (234, 306),
+    'glasgow_revC': (307, 108),
+    'rp2350_fpga_eensy_prePlane': (130, 37),
+    'tigard': (103, 18),
+    'splitflap_driver': (0, 0),
+    'watchy': (113, 1),
+    'kit-dev-coldfire-xilinx_5213': (207, 0),
+}
+
+#: The same pair BEFORE #841 touched the subject rect, i.e. pad centres
+#: measured against the pad-centre box. The direction between the two is the
+#: assertion; the values are the change detector.
+DEMAND_AT_PAD_CENTRES = {
+    'ulx3s': (149, 406),
+    'orangecrab_ext_pll': (232, 309),
+    'glasgow_revC': (305, 116),
+    'rp2350_fpga_eensy_prePlane': (122, 46),
+    'tigard': (102, 20),
+    'splitflap_driver': (0, 0),
+    'watchy': (113, 1),
+    'kit-dev-coldfire-xilinx_5213': (207, 0),
 }
 
 
@@ -149,8 +184,84 @@ def test_no_blocker_is_ever_on_a_face_the_part_does_not_occupy():
           .format(charges, checked))
 
 
+def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
+    """#841's own tripwire, and the reason `DEMAND` is pinned apart from
+    `EXPECTED`.
+
+    An obstruction rect decides SUPPLY. Demand is which nets have a pad
+    nearest which face; interior pads are the complement. When the part's own
+    box grew from the pad-CENTRE bbox to its pad COPPER, `_face_of` moved with
+    it and started measuring each pad by its own copper edge -- so a pad on
+    the box is still at distance exactly 0 and the assignment is invariant
+    where it should be.
+
+    The DIRECTION is the assertion: a bigger box with the same tolerance can
+    only pull pads ONTO faces, never off them, so demand never falls and
+    interior pads never grow.
+
+    Both sides are MEASURED. The pad-centre arm is reached through the
+    documented empty-map fallback -- `obstruction_rects={}` puts the subject
+    rect back on `_part_rect` and `_face_of` back on pad centres, which is
+    exactly the pre-#841 pairing. An earlier version of this arm compared the
+    live numbers against a second hardcoded table, so its direction asserts
+    could only fail if someone edited the table, and its "at least N boards
+    moved" check compared two module constants and executed no product code
+    at all.
+
+    Get the pairing wrong -- point the subject rect at the copper box and
+    leave `_face_of` measuring pad CENTRES -- and every pad moves half its own
+    width inside the part. Measured, that makes ALL 244 of one corpus board's
+    pads interior and reports demand 0, deficit 0 and a clean sweep of green
+    numbers on an instrument that has stopped looking.
+    """
+    if not run_utils.corpus_boards():
+        print('SKIP: git could not name the tracked corpus')
+        return
+    seen = moved = 0
+    for name, (want_demand, want_interior) in sorted(DEMAND.items()):
+        pcb, path = _board(name)
+        if pcb is None:
+            print('  SKIP: {} not present'.format(name))
+            continue
+        led = E.escape_ledger(pcb, pcb_file=path)
+        got = (sum(f.demand for p in led for f in p.faces),
+               sum(p.interior_pads for p in led))
+        # ...and the same board at the pad-centre pairing, measured now.
+        lane = E.lane_pitch(pcb, path)
+        base_led = [E.part_escape(pcb, r, pitch_mm=lane, obstruction_rects={})
+                    for r in E.fine_pitch_parts(pcb)]
+        before = (sum(f.demand for p in base_led for f in p.faces),
+                  sum(p.interior_pads for p in base_led))
+        assert got[0] >= before[0], (
+            '{}: demand FELL {} -> {}. A larger subject box cannot take a pad '
+            'off a face; the demand model has gone blind'
+            .format(name, before[0], got[0]))
+        assert got[1] <= before[1], (
+            '{}: interior pads GREW {} -> {}, same reason'
+            .format(name, before[1], got[1]))
+        assert got == (want_demand, want_interior), (
+            '{}: demand/interior {} != recorded {}'
+            .format(name, got, (want_demand, want_interior)))
+        assert before == DEMAND_AT_PAD_CENTRES[name], (
+            '{}: the pad-centre arm measures {} but {} is recorded -- the '
+            'baseline this direction rule is judged against has moved'
+            .format(name, before, DEMAND_AT_PAD_CENTRES[name]))
+        if got != before:
+            moved += 1
+        seen += 1
+    assert seen >= 5, 'only {} board(s) checked'.format(seen)
+    assert moved >= 3, (
+        'only {} board(s) differ between the two pairings, so this arm is not '
+        'exercising the subject-rect change at all'.format(moved))
+    print('  PASS: demand never fell and interior never grew on {} board(s); '
+          '{} moved, both arms measured'.format(seen, moved))
+
+
 def test_no_blocker_is_a_container():
     """A frame the part sits inside is not a body parked off its face."""
+    if not run_utils.corpus_boards():
+        print('SKIP: git could not name the tracked corpus')
+        return
     checked = 0
     for path in run_utils.corpus_boards():
         try:
@@ -214,9 +325,24 @@ def test_the_ulx3s_witness_stops_charging_across_the_board():
             continue
         for f in led[a].faces:
             assert b not in f.blockers, (a, f.face, f.blockers)
-    assert deficit_totals(E.escape_ledger(pcb, pcb_file=path))['lanes'] == 0, (
-        'ulx3s still reports a deficit; every one of its six was cross-side')
-    print('  PASS: U9<->SD1 charge each other nowhere, and ulx3s reports 0')
+    # #841 moved this board off zero, and the two-arm form says WHY rather
+    # than recording the new number twice. Charged at the pad-CENTRE rect this
+    # ledger used before #841 -- reachable through the documented empty-map
+    # fallback -- ulx3s is still 0: every one of its six deficit faces was
+    # cross-side. Charged at pad COPPER it is 5, and none of that is
+    # cross-side (the corpus invariant above covers that for every board).
+    # Re-record with `tests/measure_834_835_side_awareness.py --table B`.
+    centres = deficit_totals([
+        E.part_escape(pcb, r, pitch_mm=E.lane_pitch(pcb, path),
+                      obstruction_rects={})
+        for r in E.fine_pitch_parts(pcb)])['lanes']
+    assert centres == 0, (
+        'ulx3s at the pad-CENTRE rect is no longer 0, so this witness no '
+        'longer isolates the #841 change: {}'.format(centres))
+    copper = deficit_totals(E.escape_ledger(pcb, pcb_file=path))['lanes']
+    assert copper == EXPECTED['ulx3s'][0], (copper, EXPECTED['ulx3s'][0])
+    print('  PASS: U9<->SD1 charge each other nowhere; ulx3s is 0 at pad '
+          'centres and {} at pad copper'.format(copper))
 
 
 def test_the_rp2350_witness_is_the_container_not_the_side():
@@ -334,73 +460,86 @@ def test_face_lane_ledger_cannot_cover_more_than_the_face():
 
 
 def test_the_union_is_measured_where_it_actually_bites():
-    """glasgow_revC J1 east: eight neighbours, 12.42mm of cover on a 9.64mm
-    face. SUMMED that is more than the face, so `max(0.0, length - covered)`
-    collapses supply to 0; UNIONED it is 8.23mm and supply is 3.
+    """ulx3s H4 south: two neighbours, 6.16mm of cover on a 5.50mm face.
+    SUMMED that is more than the face, so `max(0.0, length - covered)`
+    collapses supply to 0; UNIONED it is 3.71mm and supply is 4.
 
-    Chosen by scanning, not by guessing. My first witness for this was tigard
-    J1 east, and it was wrong: tigard's routability numbers move under this
-    branch because of the SYMMETRIC SIDE TEST, not the union -- summing and
-    unioning give it the same supply. The mutation battery caught that, which
-    is what it is for. Corpus-wide there are 227 faces where the summed cover
-    exceeds the union; this is the largest clean one on a board with no
-    container.
+    Chosen by scanning, not by guessing, and re-chosen the same way for #841.
+    Two witnesses have been retired here, and both retirements are the point:
+
+      * tigard J1 east was the FIRST, and was wrong -- tigard's routability
+        numbers move on the SYMMETRIC SIDE TEST, not the union; summing and
+        unioning give it the same supply. The mutation battery caught that.
+      * glasgow_revC J1 east was the second (9 neighbours, 12.42mm summed
+        against 8.23mm unioned on a 9.64mm face, supply 3). Once
+        `face_lane_ledger` charges pad COPPER rather than the courtyard
+        (#841), that face is supply 8 whether the intervals are summed or
+        unioned, and glasgow has NO discriminating face left. Keeping it and
+        re-recording the numbers would have left an arm that proves nothing.
+
+    Corpus-wide, on the container-free boards, there are 11 faces where the
+    summed cover exceeds the face AND the unioned supply is still positive --
+    the only ones where the two rules give different answers. This is the
+    largest by supply margin (4 against 0; every other is 1 against 0).
+    Regenerate the scan with the probe below over `corpus_boards()`.
     """
-    pcb, path = _board('glasgow_revC')
+    pcb, path = _board('ulx3s')
     if pcb is None:
-        print('  SKIP: glasgow_revC not present')
+        print('  SKIP: ulx3s not present')
         return
     assert not container_refs(pcb, graded_parts_from_file(pcb, path)), (
-        'glasgow grew a container; this is no longer a clean union witness')
+        'ulx3s grew a container; this is no longer a clean union witness')
     rows = {r['face']: r for r in R.face_lane_ledger(
-        pcb, 'J1', clearance=0.2, track_width=0.2, grid_step=0.1,
+        pcb, 'H4', clearance=0.2, track_width=0.2, grid_step=0.1,
         pcb_file=path)}
-    east = rows['E']
-    assert abs(east['length_mm'] - 9.64) < 0.01, east
-    assert east['supply_routed_grid'] == 3, (
-        'glasgow J1 east supply moved from the recorded 3 (it is 0 if the '
-        'intervals are summed rather than unioned): {}'.format(east))
-    # NOT `len(east['eaten_by'])`: `face_lane_ledger` truncates that list to
-    # the top 8 for DISPLAY, so asserting 8 asserts the cap and passes for any
-    # neighbour count at or above it -- and summing the truncated list gives
-    # 11.48mm rather than the real 12.42mm. Ask the kernel instead.
+    south = rows['S']
+    assert abs(south['length_mm'] - 5.5) < 0.01, south
+    assert south['supply_routed_grid'] == 4, (
+        'ulx3s H4 south supply moved from the recorded 4 (it is 0 if the '
+        'intervals are summed rather than unioned): {}'.format(south))
+    # NOT `len(south['eaten_by'])`: `face_lane_ledger` truncates that list to
+    # the top 8 for DISPLAY, so counting it asserts the cap rather than the
+    # obstruction. Ask the kernel instead.
     seen = {}
     orig = E.span_eaten
 
     def probe(lo, hi, band, horiz, obstacles):
         blocked, order = orig(lo, hi, band, horiz, obstacles)
-        if abs((hi - lo) - east['length_mm']) < 0.01 and len(order) > 1:
+        if abs((hi - lo) - south['length_mm']) < 0.01 and len(order) > 1:
             seen[round(blocked, 2)] = (len(order),
                                        round(sum(mm for _r, mm in order), 2))
         return blocked, order
 
     E.span_eaten = probe
     try:
-        R.face_lane_ledger(pcb, 'J1', clearance=0.2, track_width=0.2,
+        R.face_lane_ledger(pcb, 'H4', clearance=0.2, track_width=0.2,
                            grid_step=0.1, pcb_file=path)
     finally:
         E.span_eaten = orig
-    assert 8.23 in seen, sorted(seen)
-    n_obs, summed = seen[8.23]
-    assert n_obs == 9, (n_obs, sorted(seen))
-    assert abs(summed - 12.42) < 0.01, summed
-    assert summed > east['length_mm'], (
+    assert 3.71 in seen, sorted(seen)
+    n_obs, summed = seen[3.71]
+    assert n_obs == 2, (n_obs, sorted(seen))
+    assert abs(summed - 6.16) < 0.01, summed
+    assert summed > south['length_mm'], (
         'the summed cover no longer exceeds the face, so summing and unioning '
         'would agree and this arm proves nothing: {:.2f}mm vs {:.2f}mm'
-        .format(summed, east['length_mm']))
-    print('  PASS: glasgow J1 east -- {} neighbours, {:.2f}mm summed against '
-          '8.23mm unioned on a {:.2f}mm face, supply 3 (0 if summed)'
-          .format(n_obs, summed, east['length_mm']))
+        .format(summed, south['length_mm']))
+    print('  PASS: ulx3s H4 south -- {} neighbours, {:.2f}mm summed against '
+          '3.71mm unioned on a {:.2f}mm face, supply 4 (0 if summed)'
+          .format(n_obs, summed, south['length_mm']))
 
 
 def test_tigard_moves_on_the_side_test_not_the_union():
     """The other half, kept apart on purpose.
 
-    tigard has no container and no cross-side blocker charge, so its ESCAPE
-    ledger is 41 lanes before and after. Its `routability` numbers do move, and
-    the cause is the symmetric side test: J1 is DRILLED, so it occupies both
-    faces and the B-side JP1 is charged against its north face, where the
-    one-sided `own_side in g.sides` dropped it.
+    tigard has no container and no cross-side blocker charge, so neither of
+    #835's two arms moves its ESCAPE ledger. (#841 does -- 41 lanes to 55 --
+    but through the obstruction RECT and the subject rect, which are a third
+    and fourth arm and are pinned in `EXPECTED`. This test is about the side
+    arm, and tigard is still its control.) Its `routability` numbers move here, and the cause is the
+    symmetric side test: J1 is DRILLED, so it occupies both faces and the
+    B-side JP1 is charged against its north face, where the one-sided
+    `own_side in g.sides` dropped it.
     """
     pcb, path = _board('tigard')
     if pcb is None:
@@ -414,7 +553,7 @@ def test_tigard_moves_on_the_side_test_not_the_union():
         pcb_file=path)}
     assert 'JP1' in {r for r, _mm in rows['N']['eaten_by']}, rows['N']
     print('  PASS: tigard J1 keeps its B-side JP1 through the symmetric side '
-          'test, and its escape ledger does not move at all')
+          'test, and its escape ledger does not move on EITHER #835 arm')
 
 
 def test_face_lane_ledger_side_test_is_symmetric():

@@ -173,58 +173,71 @@ escape demand instead of its pin count, divided by the copper layer count. It
 is not implemented, and this is the measurement rather than a preference:
 `tests/stress/demand_halo_study.py` re-derives every number below.
 
-*It reaches no blocker the shipped halo does not already charge.* The escape
-ledger NAMES the parts eating a face in deficit. Across six boards there are
-219 such (face, blocker) pairs, and **205 of them (93.6%) already sit inside
+*It reaches few blockers the shipped halo does not already charge.* The escape
+ledger NAMES the parts eating a face in deficit. Across seven boards there are
+288 such (face, blocker) pairs, and **208 of them (72.2%) already sit inside
 `halo_a + halo_b`** at the A/B harness's own coefficients -- the OFF arm
-already repels them. Of the 14 it does not charge, the demand term fires on
-**0 of the 26 parts involved**. Its whole mechanism is a larger quadratic on
+already repels them. Of the 80 it does not charge, the demand term fires on
+**14 of the 93 parts involved**. Its whole mechanism is a larger quadratic on
 repulsions that already exist, which is the mode
 `docs/placement-optimization.md` records as scattering the layout.
 
 | board | named blockers | already charged |
 |---|---|---|
-| rp2350_fpga_eensy_prePlane | 71 | 67 (94.4%) |
-| orangecrab_ext_pll | 86 | 79 (91.9%) |
-| ulx3s | 10 | 9 (90.0%) |
-| watchy | 15 | 13 (86.7%) |
-| glasgow_revC | 18 | 18 (100%) |
-| tigard | 19 | 19 (100%) |
-| **total** | **219** | **205 (93.6%)** |
+| rp2350_fpga_eensy_prePlane | 77 | 55 (71.4%) |
+| orangecrab_ext_pll | 88 | 53 (60.2%) |
+| tigard | 39 | 37 (94.9%) |
+| watchy | 48 | 40 (83.3%) |
+| glasgow_revC | 27 | 18 (66.7%) |
+| kit-dev-coldfire | 8 | 5 (62.5%) |
+| ulx3s | 1 | 0 (0.0%) |
+| **total** | **288** | **208 (72.2%)** |
 
-*And it fires where the grader is blind.* The only independent escape
+*And it fires where the grader is nearly blind.* The only independent escape
 instrument the placement A/B has is `health_escape_deficit_parts` /
-`health_escape_worst_deficit`. The two boards where the term is largest report
-**zero** escape deficit; the board with the worst deficit on the corpus is the
-one board where the term is exactly inert, so its two arms would be identical:
+`health_escape_worst_deficit`. The board where the term is largest by far
+reports a deficit of 1 part; the board with the worst deficit on the corpus is
+the one board where the term is exactly inert, so its two arms would be
+identical:
 
 | board | deficit parts / worst | term fires on | largest ask |
 |---|---|---|---|
-| kit-dev-coldfire | 0 / 0 | 88 of 160 (55%) | **18.15 mm** (U301) |
+| kit-dev-coldfire | 1 / 7 | 88 of 160 (55%) | **18.15 mm** (U301) |
 | esp_prog | 0 / 0 | 3 of 16 (19%) | 2.48 mm (U1) |
-| rp2350_fpga_eensy_prePlane | 8 / **11** | **0 of 61** | -- |
-| orangecrab_ext_pll | 18 / 9 | 2 of 154 (1%) | 1.38 mm (J2) |
-| ulx3s | 0 / 0 | 6 of 226 (3%) | 3.03 mm (U2) |
-| glasgow_revC | 14 / 2 | 1 of 257 (0%) | 1.50 mm (J5) |
-| tigard | 8 / 3 | 4 of 85 (5%) | 1.51 mm (U5) |
+| rp2350_fpga_eensy_prePlane | 10 / **13** | **0 of 61** | -- |
+| orangecrab_ext_pll | 20 / 10 | 2 of 154 (1%) | 1.38 mm (J2) |
+| ulx3s | 1 / 5 | 6 of 226 (3%) | 3.03 mm (U2) |
+| glasgow_revC | 16 / 4 | 1 of 257 (0%) | 1.50 mm (J5) |
+| tigard | 9 / 8 | 4 of 85 (5%) | 1.51 mm (U5) |
+| watchy | 6 / 9 | 2 of 84 (2%) | 3.03 mm (J3) |
 
-**Re-measured after #835** (2026-09-02); the deficit column moved and the
-argument above it moved with it. Every escape deficit was previously charged on
-XY overlap alone, so a neighbour on the opposite board face, or a module
-outline the part sits inside, counted as a blocker. Regenerate with
-`python3 -X utf8 tests/measure_834_835_side_awareness.py --table BC`.
+**Re-measured twice, and the second time WEAKENED the argument above rather
+than strengthening it.** Both tables are regenerated, never hand-edited:
+`python3 -X utf8 tests/stress/demand_halo_study.py` for the first,
+`tests/measure_834_835_side_awareness.py --table BC` for the second.
 
-The recorded transitions: **ulx3s 4 / 8 -> 0 / 0** (all six of its deficit
-faces were charged across the board), orangecrab 21 / 10 -> 18 / 9, glasgow
-14 / 3 -> 14 / 2, rp2350 9 / 14 -> 8 / 11 (its U8 is a Teensy module whose pad
-bbox encloses five other parts). tigard, kit-dev-coldfire and esp_prog do not
-move.
+*After #835* (2026-09-02) the deficit column moved because a neighbour on the
+opposite board face, or a module outline the part sits inside, had been
+counted as a blocker: ulx3s 4 / 8 -> 0 / 0, orangecrab 21 / 10 -> 18 / 9,
+glasgow 14 / 3 -> 14 / 2, rp2350 9 / 14 -> 8 / 11; tigard, kit-dev-coldfire
+and esp_prog unmoved. That reading said ulx3s became a THIRD zero-deficit
+board and called it a strengthening.
 
-**This strengthens the point the paragraph above makes rather than weakening
-it.** ulx3s becomes a THIRD board reporting zero escape deficit while the term
-fires on 6 of its 226 parts, so the instrument the placement A/B has is now
-inert on three of the seven boards rather than two. The board with the worst
-remaining deficit, rp2350, is still the one board where the term never fires.
+*After #841* it is no longer true. Both ledgers now charge a neighbour its pad
+COPPER rather than the bbox of pad CENTRES, which is strictly more obstruction
+than #835 left, and the zero-deficit boards come back: ulx3s 0 / 0 -> 1 / 5,
+kit-dev-coldfire 0 / 0 -> 1 / 7, glasgow 14 / 2 -> 16 / 4, rp2350 8 / 11 ->
+10 / 13, orangecrab 18 / 9 -> 20 / 10, tigard 8 / 3 -> 9 / 8, watchy 4 / 4 ->
+6 / 9; only esp_prog stays at 0 / 0.
+
+**What that does to the argument, stated rather than absorbed.** The
+"already charged" share falls 93.6% -> 72.2%, and the pairs the halo misses
+that the demand term WOULD reach go from 0 of 26 to 14 of 93. So the first
+claim is weaker than it was: the term is no longer measurably redundant, it is
+mostly redundant. The conclusion does not turn over -- 72% is still most of
+them, kit-dev-coldfire still asks U301 for 18.15 mm, the corridor rows are
+still `rejected`, and the gate below is still unrunnable on this corpus -- but
+"reaches NO blocker" was the sentence doing the work, and it is now false.
 
 U301 is the 144-pin Xilinx that `docs/placement-optimization.md` already
 records as unable to satisfy a 6.5 mm halo on a dense board. This term asks it
@@ -241,15 +254,17 @@ of its rows are marked `rejected`.
 *The gate it would have to pass cannot be run on this corpus.* `CLAUDE.md`
 requires a new objective term to improve on at least 3 distinct boards. Of the
 four in `ROWS`, rp2350 produces bit-identical arms and kit-dev-coldfire's
-signal is already at floor 0 -- and no in-repo 2-layer board can carry a row at
+signal was at floor 0 when this was written (it is 1 part / worst 7 after
+#841, which does not rescue the gate: one board is not three) -- and no in-repo 2-layer board can carry a row at
 all (`esp_prog` has one fine-pitch part at deficit 0, `splitflap_driver` has
 none so its verdict is `skip` and it does not count toward N,
 `qfn_diffpair_escape` has one part and therefore no pairs). A term whose entire
 claim is layer dependence is untestable on the corpus that must approve it.
 
 *What the evidence does point at.* `routability.health` already emits
-`escape_blockers` -- it names WHO to move. The 14 uncharged pairs miss their
-requirement by 0.001 to 0.56 mm. A per-ref halo override driven by that list is
+`escape_blockers` -- it names WHO to move. The 80 uncharged pairs miss their
+requirement by 0.003 to 1.819 mm (re-measured after #841; it was 14 pairs at
+0.001 to 0.56 mm when the ledger charged pad centres). A per-ref halo override driven by that list is
 a targeted lever this measurement supports; a global pin-count-and-layer
 formula is not. Filed, not built.
 

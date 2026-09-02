@@ -65,6 +65,7 @@ TARGETS = {'leg': LEG, 'esc': ESC, 'rou': ROU}
 
 T834 = os.path.join(ROOT, 'tests', 'test_834_cap_branch_side.py')
 T835 = os.path.join(ROOT, 'tests', 'test_835_escape_side_aware.py')
+T841 = os.path.join(ROOT, 'tests', 'test_841_obstruction_rect.py')
 T700 = os.path.join(ROOT, 'tests', 'test_700_layer_term.py')
 T761 = os.path.join(ROOT, 'tests', 'test_761_legality_npth_keepout.py')
 
@@ -199,8 +200,10 @@ ROWS = [
      'SURVIVED'),
 
     ('the-sides-map-is-not-threaded-into-the-ledger', 'esc',
-     """                       sides=sides, containers=containers)""",
-     """                       sides=None, containers=containers)""",
+     """                       sides=sides, containers=containers,
+                       obstruction_rects=orects)""",
+     """                       sides=None, containers=containers,
+                       obstruction_rects=orects)""",
      (T835,),
      # Inert by construction: `part_escape` builds its own map when given
      # None. Recorded so that if the fallback is ever removed -- making the
@@ -209,38 +212,104 @@ ROWS = [
 
     # ---- the reconciliation ---------------------------------------------
     ('routability-keeps-its-one-sided-side-test', 'rou',
-     """    neighbors = [g for g in _graded
+     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
                  if g.ref != ref and (own_sides & g.sides)
-                 and g.ref not in _containers]""",
-     """    neighbors = [g for g in _graded
+                 and g.ref not in _containers and g.ref in _geom]""",
+     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
                  if g.ref != ref and (footprint_side(fp) in g.sides)
-                 and g.ref not in _containers]""",
+                 and g.ref not in _containers and g.ref in _geom]""",
      (T835,), 'KILLED'),
 
     ('routability-goes-back-to-double-charging', 'rou',
-     """        covered, order = span_eaten(lo, hi, band_across, horiz,
-                                    [(g.ref, g.rect) for g in neighbors])""",
-     """        covered, order = span_eaten(lo, hi, band_across, horiz, [])
-        covered = 0.0
+     """        covered, order = span_eaten(lo, hi, band_across, horiz, neighbors)""",
+     """        covered = 0.0
         order = []
-        for g in neighbors:
-            rct = g.rect
-            if rect_gap(rct, (lo if horiz else band_across[0],
-                              band_across[0] if horiz else lo,
-                              hi if horiz else band_across[1],
-                              band_across[1] if horiz else hi)) >= 0:
+        for _nref, rct in neighbors:
+            across = (rct[1], rct[3]) if horiz else (rct[0], rct[2])
+            if across[1] < band_across[0] or across[0] > band_across[1]:
                 continue
             sp = ((min(rct[2], hi) - max(rct[0], lo)) if horiz
                   else (min(rct[3], hi) - max(rct[1], lo)))
             if sp <= 0:
                 continue
             covered += sp
-            order.append((g.ref, sp))""",
+            order.append((_nref, sp))""",
      (T835,), 'KILLED'),
 
+    # #841. Without this row nothing in the battery notices `face_lane_ledger`
+    # going back to billing routing for assembly margin: the deficit GROWS,
+    # so every "is there a deficit" arm is satisfied harder.
+    ('routability-goes-back-to-the-courtyard', 'rou',
+     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded""",
+     """    neighbors = [(g.ref, g.rect) for g in _graded""",
+     (T835,), 'KILLED'),
+
+    # #841, the other direction. `escape` charged the bbox of pad CENTRES, so
+    # this is the exact code that shipped before -- and the per-board table is
+    # what has to catch it.
+    ('escape-neighbour-goes-back-to-pad-centres', 'esc',
+     """        obstacles.append((other, g.rect if g is not None else _part_rect(ofp)))""",
+     """        obstacles.append((other, _part_rect(ofp)))""",
+     (T835,), 'KILLED'),
+
+    # #841. The pairing that keeps face ASSIGNMENT invariant while the box it
+    # measures against grows. Measured, this alone makes all 244 of one corpus
+    # board's pads interior, and the ledger then reports no demand at all --
+    # every deficit number goes green DOWNWARD, which is why the demand arm
+    # exists to kill it.
+    ('escape-face-assignment-forgets-the-pad-edge', 'esc',
+     """        box = None if own is None else _pad_box(own, pad)""",
+     """        box = None""",
+     (T835,), 'KILLED'),
+
+    # #841. The subject rect. Separable from the row above on purpose: one
+    # moves the face, the other moves which pads are on it.
+    ('escape-subject-rect-goes-back-to-pad-centres', 'esc',
+     """    rect = own.rect if own is not None else _part_rect(fp)""",
+     """    rect = _part_rect(fp)""",
+     (T835,), 'KILLED'),
+
+    # #841, and the two rows the battery would have wanted six commits ago:
+    # `copper` was built from the LOOKUP DICT, which is keyed per pad, so pads
+    # stacked at one point collapsed and the union silently lost them. Every
+    # arm in test_841 passed throughout, because the one that pins the
+    # "every edge is attained by a pad" property is true by construction over
+    # whatever survived the dict. A blind code review found it; these rows are
+    # what would have.
+    ('copper-goes-back-to-the-collapsed-dict', 'leg',
+     """        if boxes:
+            copper = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes))""",
+     """        if boxes:
+            _v = list(rects.values()) if False else boxes
+            _seen = {}
+            for _b in boxes:
+                _seen[(round((_b[0] + _b[2]) / 2.0, 4),
+                       round((_b[1] + _b[3]) / 2.0, 4))] = _b
+            _v = list(_seen.values())
+            copper = (min(b[0] for b in _v), min(b[1] for b in _v),
+                      max(b[2] for b in _v), max(b[3] for b in _v))""",
+     (T841,), 'KILLED'),
+
+    # Expected KILLED and measured SURVIVED on its first run, because the arm
+    # meant to catch it checked only the box's CENTRE -- and pads stacked at
+    # one point share a centre by definition, so a centre check passes on
+    # every wrong hit among exactly the pads the key was rekeyed for. The arm
+    # now checks the size too. Expected first, then measured.
+    ('the-pad-lookup-key-drops-the-size', 'leg',
+     """    hx, hy = pad_half_extents(pad)
+    return geom.pads.get((round(pad.global_x, 4), round(pad.global_y, 4),
+                          round(hx, 4), round(hy, 4)))""",
+     """    for _k, _v in geom.pads.items():
+        if (abs(_k[0] - round(pad.global_x, 4)) < 1e-9
+                and abs(_k[1] - round(pad.global_y, 4)) < 1e-9):
+            return _v
+    return None""",
+     (T841,), 'KILLED'),
+
     ('routability-stops-exempting-containers', 'rou',
-     """                 and g.ref not in _containers]""",
-     """                 and g.ref not in ()]""",
+     """                 and g.ref not in _containers and g.ref in _geom]""",
+     """                 and g.ref not in () and g.ref in _geom]""",
      (T835,),
      # Expected SURVIVED on the reasoning that only `escape` is asserted on;
      # measured KILLED, because `test_face_lane_ledger_side_test_is_symmetric`

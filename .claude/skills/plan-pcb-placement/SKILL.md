@@ -564,6 +564,22 @@ Each lap:
    courtyard kisses (corpus: 235), so the loop's advisory fix-list is the pairs
    NEW relative to the input, never a shipped design's own geometry.
 
+   **`check_channels --gate` now catches a face that LOST most of its escape,
+   not only one that reached zero (#847).** The old predicates were both
+   zero-crossings, and a zero-crossing on a falling quantity is masked exactly
+   when the baseline falls too — so a face going supply 43 → 28 against a
+   demand of 12 lost 35% of its escape and nothing reported it. `--min-supply-
+   drop` (default 0.20) is that threshold; the printed line names the share and
+   both supplies, and `--json` keeps `lost_escape_share` as its own key so you
+   can tell WHICH predicate fired. Read it as a move target the same way as a
+   starved face: the `eaten_by` refs on that row are what to move.
+
+   `--escape-band MM` exposes how deep off a face neighbours are charged
+   (default `max(1.0, 4 × lane pitch)`, printed with its source). **Do not
+   deepen it to make the gate more sensitive** — measured, deepening it raises
+   the false-positive rate, and at 2.0 mm a legitimate restore reports a 0.435
+   loss of escape. It is a screening depth, not a safety margin.
+
 2. **Fix iteration** — one ladder invocation targeting the NAMED findings: blocking
    body pairs and pad/hole conflicts go to `place_reconstruct` (full stages if
    structure moved, `--stages legalize` for local residue — the repair census
@@ -1348,18 +1364,26 @@ nets only chooses WHICH nets strand there, never how many (run 5 spent multiple
 ordering experiments proving this on a face whose ledger would have said it in
 seconds).
 
-Read **`blockers` first** — it names the neighbouring parts whose bodies ate the
-lanes, which is the move to make. `U6 north: supply 2 < demand 13 … 5.41mm of
-that face is taken by U1, U7, C6` is an instruction; "north face is short" is
-not.
+Read **`blockers` first** — it names the neighbouring parts whose copper ate
+the lanes, which is the move to make. `U6 north: supply 0 < demand 13 … 7.70mm
+of that face is taken by U1, L1, U7, C6` is an instruction; "north face is
+short" is not.
 
-A blocker is only actionable if it is real, and until #835 it often was not.
-The example this page used to give was the defect itself: the part and the
-neighbour it named sat on OPPOSITE copper faces, never shared copper, and each
-was charged the other's whole body across the board. Two neighbours are skipped
-now — one that shares no face with the part (a drilled part occupies both), and
-a module outline the part sits *inside* rather than beside. On a back-heavy
-board that can be every deficit it reported.
+A blocker is only actionable if it is real, and it twice was not. Until #835 a
+neighbour was charged on XY overlap alone: the example this page used to give
+was the defect itself — the part and the neighbour it named sat on OPPOSITE
+copper faces, never shared copper, and each was charged the other's whole body
+across the board. Two neighbours are skipped now: one that shares no face with
+the part (a drilled part occupies both), and a module outline the part sits
+*inside* rather than beside. On a back-heavy board that can be every deficit
+it reported.
+
+And until #841 what a charged neighbour CONTRIBUTED was the bounding box of
+its pad **centres**, so a two-terminal passive obstructed a strip of zero
+width. It is now its pad **copper** — not its courtyard either, which is an
+assembly keep-out drawn beyond the copper and which a track may legally run
+under. Expect the numbers on this page's example to be larger than a run from
+before that change.
 Interior pads are reported separately and are a **fanout** question, not a lane
 one — they need a via, not a channel.
 

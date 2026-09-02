@@ -616,7 +616,11 @@ Three things keep it honest:
   shares a board face with the part (a drilled part occupies both) and is not a
   container — a module outline covering half the board, which the part sits
   inside rather than beside (#835). Before that, ulx3s reported six faces in
-  deficit and every one of them was charged to copper on the other side.
+  deficit and every one of them was charged to copper on the other side. What
+  a charged neighbour CONTRIBUTES is its pad copper (#841) — not its
+  courtyard, which is an assembly keep-out a track may legally run under, and
+  not the bbox of its pad centres, which gives a two-terminal passive a
+  zero-width body.
 - **Interior pads count toward no face** and are reported separately. A boxed-in
   pad does not escape sideways at any pitch; it needs a via. Rolling it into a
   face's demand would blame the face for a fanout problem.
@@ -642,10 +646,13 @@ ledger now reports what the other signal layers could take:
   be a number that mysteriously ignores the stackup, which is the complaint
   #700 was filed about one level up.
 - **`via_slots` is measured on the face's full span, unobstructed**, while
-  `supply` on the same row is not. Deliberate: `blocked_mm` is side-blind and
-  container-blind (on rp2350, U8's pad rect *contains* U6's and is charged the
-  whole 6.90 mm face), and feeding that into an upper bound would silently turn
-  it into a lower one.
+  `supply` on the same row is not. Deliberate, and the reason has changed
+  twice: it was that `blocked_mm` was side-blind and container-blind (#835
+  fixed both), then that it modelled a neighbour by the bbox of its pad
+  CENTRES (#841 fixed that). What remains is the asymmetry itself — `supply`
+  is a floor and `via_slots` a ceiling, and feeding a `blocked_mm` that is too
+  large into an upper bound would silently turn it into a lower one, which is
+  outside this term's contract in a way over-stating is not.
 - **`signal_layers` is observed or declared, never guessed.** A copper layer
   counts as a plane when a named-net, board-level zone covers most of the board.
   Placement runs *before* the pours exist, so on a board being placed the answer
@@ -662,11 +669,17 @@ pads fit through the channel beside it", which a fine-pitch *perimeter* part
 fails with no interior pad at all. Through-hole parts are excluded — a THT pin
 is reachable on every copper layer, so there is no escape to be short of.
 
-A worked pairing from ulx3s: the ledger reports `U9 west: supply 6 < demand 14`
-with `15.35mm of that face is taken by SD1`, and `net_affinity` independently
-reports SD1 carrying 57–63% of `SD_D0`, `SD_D1` and `SD_CMD`. Two signals
-computed from different quantities naming the same part is the case worth
-acting on.
+A worked pairing wants two signals computed from different quantities naming
+the same part: an escape face in deficit whose `blockers` names a neighbour,
+and `net_affinity` reporting that same neighbour carrying most of the nets on
+that face. That is the case worth acting on.
+
+The example this section used to give was ulx3s `U9 west: supply 6 < demand 14`,
+`15.35mm of that face is taken by SD1`. **It was an artifact and is kept here
+as one:** U9 is on B.Cu and SD1 on F.Cu, so each was charged the other's whole
+body across the board, and #835 removed the charge entirely —
+`tests/test_835_escape_side_aware.py` now asserts that the pair charges each
+other nowhere. A blocker list is only an action list if the names are real.
 
 ## What `--emit-intent` does and does not claim
 
