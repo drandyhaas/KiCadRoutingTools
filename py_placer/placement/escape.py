@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 FACES = ('north', 'east', 'south', 'west')
 
@@ -78,6 +78,16 @@ class FaceLedger:
     via_pitch_mm: float = 0.0
     signal_layers: int = 1
     signal_layers_source: str = 'unknown'
+    # --- the escape band (#847). APPENDED and DEFAULTED for the same reason
+    # the layer term above was: every existing construction keeps working.
+    # `escape_band_source` is the term that set it -- 'caller', 'lanes' or
+    # 'floor' -- so a reader can tell a band the board's own pitch produced
+    # from one the un-re-derived 1.0mm floor did. `escape_band_basis` names
+    # which lane pitch it was resolved from, which is the one thing this
+    # ledger and `routability.face_lane_ledger` still legitimately differ on.
+    escape_band_mm: float = 0.0
+    escape_band_source: str = 'unknown'
+    escape_band_basis: str = 'unknown'
 
     @property
     def deficit(self) -> int:
@@ -255,6 +265,17 @@ class PartEscape:
                 'signal_layers': f0.signal_layers if f0 else 1,
                 'signal_layers_source': (f0.signal_layers_source if f0
                                          else 'unknown'),
+                # The escape band (#847), board-wide within one part for the
+                # same reason: it is resolved once per part, not per face.
+                # ADDITIVE, like the layer term above. Reported with its
+                # SOURCE because a band the 1.0mm floor set and a band the
+                # board's own pitch set are different measurements, and until
+                # now neither ledger disclosed which one it had.
+                'escape_band_mm': round(f0.escape_band_mm, 4) if f0 else 0.0,
+                'escape_band_source': (f0.escape_band_source if f0
+                                       else 'unknown'),
+                'escape_band_basis': (f0.escape_band_basis if f0
+                                      else 'unknown'),
                 # Named even when the clamp kept signal_layers at 1: on
                 # interf_u_plane BOTH copper layers are 98% pours, and "this
                 # board has no signal layer left" is a fact a reader should
@@ -767,10 +788,15 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
 
     The shared obstruction kernel (#835). `obstacles` is `[(ref, rect)]`;
     WHICH neighbours are in it, and which rectangle each contributes, is the
-    caller's decision -- see `_blocked_span` below (pad bboxes, side- and
-    container-filtered) and `routability.face_lane_ledger` (courtyards). The
-    two callers deliberately disagree about that choice and agree about this
-    arithmetic, which is the half they were getting different answers for.
+    caller's decision -- see `_blocked_span` below and
+    `routability.face_lane_ledger`, both side- and container-filtered. This
+    line used to say the second one contributed COURTYARDS, and it was right
+    until #841 moved both onto `legality.part_copper_geometry`'s pad-copper
+    box; the disagreement it describes no longer exists and the sentence
+    outlived it. What the two callers still choose separately is WHICH
+    neighbours to put in the list, and (until #847 unified the arithmetic)
+    how deep off the face to look for them -- see `escape_band`, whose
+    `basis` field records the one difference that remains.
 
     Returns `(blocked_mm, ((ref, mm), ...))`, the pairs ordered by how much
     each took so the first name is the one to move.
@@ -835,6 +861,71 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
     order = tuple((r, by_ref[r])
                   for r in sorted(by_ref, key=lambda r: (-by_ref[r], r)))
     return min(blocked, hi - lo), order
+
+
+#: The escape band's two terms, named so a reader can tell which one decided.
+#: `4 x lane` is the model ("a track has room to turn past four lanes of
+#: depth"); the 1.0mm FLOOR is the term nobody has re-derived (#847) and it was
+#: chosen while a neighbour contributed its COURTYARD -- a body plus an
+#: assembly skirt -- rather than the pad copper both ledgers charge since #841.
+ESCAPE_BAND_LANES = 4.0
+ESCAPE_BAND_FLOOR_MM = 1.0
+
+
+class EscapeBand(NamedTuple):
+    """How deep off a face a neighbour is looked for, and WHY that depth.
+
+    One resolver for both lane ledgers (#847). Before this, `part_escape` and
+    `routability.face_lane_ledger` each open-coded `max(1.0, 4 * pitch)` on a
+    DIFFERENT pitch -- escape on the raw `track + clearance`, routability on
+    the grid-quantized one -- so the two instruments looked different depths
+    off the same face and neither file said so. Measured over the 22 tracked
+    boards they disagree on 19 of them (2.2mm against 2.4mm at the
+    routing_defaults 0.3/0.25 fallback); they agree only on glasgow_revC,
+    flat_hierarchy and routed_output.
+
+    This does NOT unify the two bases -- that moves published numbers on every
+    dense board and is its own decision. It gives them one arithmetic and makes
+    the basis a REPORTED FIELD instead of a difference nobody could see.
+
+    `source` is the term that decided: 'caller' (an explicit override),
+    'lanes' (`lanes * lane_mm`), or 'floor'. An exact tie reports 'lanes',
+    because a floor equal to the scaled term decides nothing -- which is not a
+    pedantic distinction: at the basis `tests/test_run8_starved_face_gate.py`
+    uses (track 0.127, clearance 0.09, grid 0.05) the quantized pitch is 0.25
+    and `4 * pitch` is exactly 1.0, so the floor TIES there and does not bind,
+    while at the basis the shipped CLI resolves for the same board (track
+    0.0889, grid 0.1) the pitch is 0.20, `4 * pitch` is 0.80, and it DOES.
+    Same band, two different reasons, and #847 is about only one of them.
+    """
+    mm: float
+    source: str          # 'caller' | 'lanes' | 'floor'
+    basis: str           # 'raw_lane' | 'quantized_lane'
+    lane_mm: float
+    lanes: float
+    floor_mm: float
+
+
+def escape_band(lane_mm: float, *, basis: str,
+                override: Optional[float] = None,
+                lanes: float = ESCAPE_BAND_LANES,
+                floor_mm: float = ESCAPE_BAND_FLOOR_MM) -> EscapeBand:
+    """Resolve the escape band from ONE arithmetic, and name the term that won.
+
+    `lane_mm` is the caller's already-resolved lane pitch and `basis` says
+    which one it is, so this function never silently re-resolves a pitch on a
+    caller's behalf -- the two ledgers legitimately resolve theirs differently
+    and that difference is reported, not hidden.
+    """
+    if override is not None:
+        return EscapeBand(float(override), 'caller', basis, float(lane_mm),
+                          lanes, floor_mm)
+    scaled = lanes * float(lane_mm)
+    if scaled >= floor_mm:
+        return EscapeBand(scaled, 'lanes', basis, float(lane_mm), lanes,
+                          floor_mm)
+    return EscapeBand(floor_mm, 'floor', basis, float(lane_mm), lanes,
+                      floor_mm)
 
 
 def face_band(rect, face, reach):
@@ -951,7 +1042,12 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     ignored = set(ignore_net_ids or ())
     lane = pitch_mm if pitch_mm is not None else lane_pitch(pcb_data)
     pitch = pad_pitch(fp)
-    reach = reach_mm if reach_mm is not None else max(lane * 4.0, 1.0)
+    # #847: ONE resolver, shared with `routability.face_lane_ledger`, which
+    # open-coded the same `max(1.0, 4 * pitch)` on a grid-QUANTIZED pitch while
+    # this one used the raw lane. Value-identical to what this line did before;
+    # what is new is that the band and the term that decided it are reported.
+    band = escape_band(lane, basis='raw_lane', override=reach_mm)
+    reach = band.mm
     # #835: resolved ONCE per part, not once per face. `escape_ledger` passes
     # both maps in; a direct caller gets them built here so this stays a
     # standalone entry point.
@@ -1017,7 +1113,10 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
             nets=nets,
             via_pitch_mm=float(via_pitch_mm or 0.0),
             signal_layers=max(1, int(signal_layers)),
-            signal_layers_source=signal_layers_source))
+            signal_layers_source=signal_layers_source,
+            escape_band_mm=band.mm,
+            escape_band_source=band.source,
+            escape_band_basis=band.basis))
     return PartEscape(ref=ref, pitch_mm=pitch, faces=tuple(faces),
                       interior_pads=len(interior),
                       interior_nets=tuple(sorted(set(interior))),

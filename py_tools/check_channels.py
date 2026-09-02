@@ -8,10 +8,16 @@ input for "is this failure floorplan-shaped": a face in deficit AT THE
 FINEST LEGAL GRID is a placement/floorplan fact no routing parameter can
 fix, and its `eaten_by` refs are the fix iteration's move targets.
 
-REPORT-ONLY (exit 0 unless the board is unreadable): the corridor law is
-measured descriptive, not prescriptive -- these numbers inform the loop,
-they do not gate by themselves. V1 limitation, stated: supply-tap/via lane
-consumption is not modeled.
+REPORT-ONLY BY DEFAULT -- the corridor law is measured descriptive, not
+prescriptive, so these numbers inform the loop and do not gate by themselves.
+This line used to say "exit 0 unless the board is unreadable", which predates
+two exits that now exist and is the kind of stale contract a caller reads
+literally: with `--gate` the exits are **4** (a NEW starved face against
+`--baseline`) and **3** (nothing had a ledger, so the gate did not run and must
+not be recorded as a pass); **2** is an unreadable board, with or without the
+flag. Without `--gate` it is still exit 0 throughout.
+
+V1 limitation, stated: supply-tap/via lane consumption is not modeled.
 """
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
@@ -125,6 +131,14 @@ def main():
     p.add_argument("--gate", action="store_true",
                    help="exit 4 when the --baseline comparison finds a NEW "
                         "starved face (default: report only)")
+    p.add_argument("--escape-band", type=float, default=None, metavar="MM",
+                   help="how deep off a face to look for neighbours that eat "
+                        "its lanes. Default: the board's own lane pitch via "
+                        "placement.escape.escape_band (4 x pitch, floored at "
+                        "1mm). #847: this was unreachable from any shipped "
+                        "entry point, so the one parameter that decides the "
+                        "starved-face gate could not be varied without "
+                        "editing source")
     p.add_argument("--min-demand", type=int, default=GATE_MIN_DEMAND,
                    help="nets a face must carry before zero supply counts as "
                         "starvation (default: %(default)s)")
@@ -240,14 +254,24 @@ def main():
     # Name the source, not just the number: a reader cannot otherwise tell a
     # ledger graded at the board's own floor from one graded at this tool's
     # fallback, and those are different measurements.
+    # The BAND is resolved and printed beside the floors for the same reason
+    # they are: a ledger graded at one depth is not comparable with one graded
+    # at another, and until #847 the band appeared in no output at all -- so
+    # two runs that searched different depths looked identical on paper.
+    from placement.escape import escape_band as _resolve_band
+    from placement.routability import _quantized_pitch as _qp
+    _band = _resolve_band(_qp(track, clearance, grid),
+                          basis='quantized_lane', override=args.escape_band)
     print(f"Lane ledger of {args.board} "
           f"(track {track} [{trk_src}] clearance {clearance} [{clr_src}] "
-          f"grid {grid}; taps NOT modeled -- v1):")
+          f"grid {grid} escape-band {_band.mm:g} [{_band.source}]; "
+          f"taps NOT modeled -- v1):")
     ledgers = {}
     for ref in refs:
         rows = routability.face_lane_ledger(
             pcb, ref, clearance=clearance, track_width=track,
-            grid_step=grid, pcb_file=args.board)
+            grid_step=grid, escape_band_mm=args.escape_band,
+            pcb_file=args.board)
         if not rows:
             continue
         ledgers[ref] = rows
@@ -296,9 +320,13 @@ def main():
             return 2
         base_ledgers = {}
         for ref in refs:
+            # THE SAME BAND ON BOTH SIDES. The gate is a delta, so a
+            # baseline graded at a different depth is not a baseline -- it is
+            # a second measurement being subtracted from the first.
             rows = routability.face_lane_ledger(
                 base_pcb, ref, clearance=clearance, track_width=track,
-                grid_step=grid, pcb_file=args.baseline)
+                grid_step=grid, escape_band_mm=args.escape_band,
+                pcb_file=args.baseline)
             if rows:
                 base_ledgers[ref] = rows
         was = {(r, f) for r, f, _d in _starved_faces(base_ledgers,
@@ -349,6 +377,18 @@ def main():
                        # ...and WHERE each came from, so two ledgers are
                        # comparable only when they say the same thing here.
                        'floors': floors,
+                       # #847: the depth the neighbour search ran to, and the
+                       # term that set it. Two ledgers are comparable only
+                       # when they agree here as well as on `floors`.
+                       'escape_band': {'value': round(_band.mm, 4),
+                                       'source': _band.source,
+                                       'basis': _band.basis,
+                                       'lanes': _band.lanes,
+                                       'floor_mm': _band.floor_mm},
+                       # The threshold the starvation predicate ran at. It was
+                       # absent, so two JSON files taken at different
+                       # --min-demand were indistinguishable.
+                       'min_demand': args.min_demand,
                        'taps_not_modeled': True,
                        'ledgers': ledgers, 'channels': channels,
                        'starved_faces': starved,

@@ -907,7 +907,7 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                                     footprint_has_through_pads, footprint_side,
                                     graded_parts_from_file,
                                     part_copper_geometry, sides_occupied)
-    from .escape import span_eaten
+    from .escape import escape_band as _escape_band, span_eaten
 
     fps = pcb_data.footprints or {}
     fp = fps.get(ref)
@@ -950,8 +950,17 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     pitch_routed = _quantized_pitch(track_width, clearance, grid_step)
     pitch_fine = _quantized_pitch(track_width, clearance,
                                   FINEST_LEGAL_GRID_MM)
-    band = (escape_band_mm if escape_band_mm is not None
-            else max(1.0, 4 * pitch_routed))
+    # #847: ONE resolver, shared with `escape.part_escape`. Both open-coded
+    # `max(1.0, 4 * pitch)` -- this one on the grid-QUANTIZED pitch, `escape`
+    # on the raw `track + clearance` -- so the two ledgers looked DIFFERENT
+    # depths off the same face and no file said so. Measured over the 22
+    # tracked boards they disagree on 19 (2.2mm against 2.4mm at the
+    # routing_defaults fallback). The basis stays each ledger's own here, and
+    # is now a reported field rather than an invisible difference; unifying it
+    # moves published deficits on every dense board and is its own decision.
+    _band = _escape_band(pitch_routed, basis='quantized_lane',
+                         override=escape_band_mm)
+    band = _band.mm
 
     # #835: the SYMMETRIC side test, `own & other`, not `own_side in g.sides`.
     # The one-sided form charges a through-hole part only for neighbours on
@@ -1022,7 +1031,14 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                     'deficit_routed_grid': max(0, n_demand - supply_routed),
                     'deficit_finest_grid': max(0, n_demand - supply_fine),
                     'eaten_by': eaten[:8],
-                    'taps_not_modeled': True})
+                    'taps_not_modeled': True,
+                    # #847: the band this row was measured at, and the term
+                    # that set it ('caller' / 'lanes' / 'floor'). Two ledgers
+                    # graded at different bands are not comparable, and until
+                    # now nothing in the output said which band either used.
+                    'escape_band_mm': round(_band.mm, 4),
+                    'escape_band_source': _band.source,
+                    'escape_band_basis': _band.basis})
     # SHARED WITH `escape` (#835): the obstruction arithmetic -- the
     # interval union, the clamp, the symmetric side test and the container
     # exemption -- is one kernel, `escape.span_eaten`, because the two ledgers
@@ -1074,8 +1090,12 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # setting, which is the confound `check_channels.py` documents at its
     # floor-wrapping block. Adding it here needs
     # `_quantized_pitch(via_pitch, 0.0, grid_step)` and its own thought.
-    # (Also note `escape_band_mm` above: a public keyword no caller has ever
-    # passed, in either of this function's two call sites or its tests.)
+    # (`escape_band_mm` above was long described here as "a public keyword no
+    # caller has ever passed, in either of this function's two call sites or
+    # its tests" -- already false when it was written, since
+    # `tests/test_run8_starved_face_gate.py` passes it. Since #847 it is also
+    # reachable from the shipped CLI as `check_channels --escape-band`, and
+    # every row reports the band it was graded at.)
     return out
 
 
