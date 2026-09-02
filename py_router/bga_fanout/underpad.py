@@ -754,6 +754,13 @@ def generate_underpad_escape(footprint: Footprint,
     _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
     floors = fab_floor_ladder(_copper)
     clamp_stats = {'clamped': 0, 'floor': 0, 'escalated': 0}
+    # #618's policy answer: DISCLOSE. Sites this engine declines to put a
+    # via-in-pad on because their hole is inside the hole-to-hole floor --
+    # 'sites' for the single-ended centre fallback, 'coupled' for a diff pair.
+    # Refuse-to-build was measured and rejected: on ulx3s U1, honouring a
+    # declared 0.9mm floor costs 15 of 199 escapes, so refusing the RUN would
+    # throw away 184 good ones to prevent 62 bad holes.
+    h2h_stats = {'sites': 0, 'coupled': 0}
 
     # DRILL FLOOR, board-first and raise-only. `_via_site_conflict` below spaced
     # every drill it places at the flat routing_defaults.HOLE_TO_HOLE_CLEARANCE
@@ -1566,6 +1573,74 @@ def generate_underpad_escape(footprint: Footprint,
             half = via_size / 2.0
         return via_site_ok(vx, vy, half)
 
+    def _via_site_geom(pad):
+        """(x, y, size, drill) for the escape via this ball would get.
+
+        Pure: uses `clamp_via_to_pad` directly rather than `via_for_pad`, whose
+        `clamp_stats` side effect would count vias that are only being
+        CONSIDERED.
+        """
+        vx, vy = _via_spot(pad, True)
+        if (vx, vy) == (pad.global_x, pad.global_y):
+            cs, cd, _st, _r = clamp_via_to_pad(via_size, via_drill, pad, floors)
+        else:
+            cs, cd = via_size, via_drill
+        return vx, vy, cs, cd
+
+    def _coupled_via_sites_ok(pp, nn):
+        """#618: gate the COUPLED escape's two via-in-pads the way every other
+        via site in this engine is gated.
+
+        `_drop_escape_via` emits a via-in-pad at each ball centre, and its two
+        callers gated that on `_via_gate_ok` alone -- the locked-SMD copper
+        check -- and only when the board HAS locked SMD pads. So on an ordinary
+        board the coupled pair's vias went in with no `_via_site_conflict` at
+        all: not against the board's drills, not against this run's committed
+        vias, and not against each other. Every other via site in this file
+        goes through `_via_site_conflict` (`_site_ok`, and the centre-site
+        fallback #567 closed at the plane-drop path); this one did not, which
+        is the structurally live remainder of #618 -- the issue's other three
+        clauses were closed by #567 and #756.
+
+        `skip_resv=True` for the same reason #567 gives at its own call site:
+        these sites ARE the mutual centre reservation, so including `resv`
+        would make each ball veto itself.
+
+        THE PAIR IS ALSO TESTED AGAINST ITSELF, which `_via_site_conflict`
+        cannot do: neither via is in `vias_to_add` when the decision is made,
+        so `_via_ctx` cannot see the sibling. DRILL ONLY, on the reasoning
+        `PendingVias` sets out for the channel engine: both balls are SMD and
+        carry no hole, so both holes are ones this pass creates, and a drill
+        pair inside the floor is an unbuildable board rather than a DRC
+        opinion. The RING between the pair is left alone because a via clamped
+        into its pad asks the fab for the etch pitch the footprint already
+        demands, and because there is no lever -- a via-in-pad site IS the ball
+        centre, so refusing buys a lost escape and nothing else. It is NOT
+        because the copper is already there: a ball pad is one layer and the
+        via spans all of them.
+
+        Drill hole-to-hole is net-independent (#282), which is what makes it
+        the right test for a P/N pair.
+        """
+        if locked_smd_pads and not all(_via_gate_ok(q) for q in (pp, nn)):
+            return False           # a through via would hit locked copper
+        sites = [_via_site_geom(q) for q in (pp, nn)]
+        for pad, (vx, vy, cs, cd) in zip((pp, nn), sites):
+            ctx = _via_ctx(pad.net_id, vx, vy)
+            why = _via_site_conflict(vx, vy, pad.net_id, ctx, vr=cs / 2.0,
+                                     vdr=(cd or 0.0) / 2.0, skip_resv=True)
+            if why is not None:
+                if why.startswith('drill hole'):
+                    h2h_stats['coupled'] += 1
+                return False
+        (ax, ay, _as, ad), (bx, by, _bs, bd) = sites
+        if math.hypot(ax - bx, ay - by) < ((ad or 0.0) / 2.0
+                                           + (bd or 0.0) / 2.0
+                                           + _h2h - 1e-6):
+            h2h_stats['coupled'] += 1
+            return False           # the pair's own two holes, #620's shape
+        return True
+
     def _drop_escape_via(pad):
         """Emit this ball's escape via -- at its dog-bone site (plus the
         pad->via stub, whose corridor was stamped at reservation) when
@@ -1648,9 +1723,11 @@ def generate_underpad_escape(footprint: Footprint,
             if De <= Lc + 0.01:
                 continue
             for L, use_via in candidates:
-                if use_via and locked_smd_pads and not all(
-                        _via_gate_ok(q) for q in (pp, nn)):
-                    continue  # a through via would hit locked copper
+                # #618: locked copper, or a via site conflicting with the
+                # board, with this run's own committed copper, or with the
+                # pair's own sibling hole.
+                if use_via and not _coupled_via_sites_ok(pp, nn):
+                    continue
                 segs = []
                 ok = True
                 for pad, side in ((pp, 1.0), (nn, -1.0)):
@@ -1742,9 +1819,11 @@ def generate_underpad_escape(footprint: Footprint,
                 return (mx + along * ex + off * px, my + along * ey + off * py)
 
             for L, use_via in candidates:
-                if use_via and locked_smd_pads and not all(
-                        _via_gate_ok(q) for q in (pp, nn)):
-                    continue  # a through via would hit locked copper
+                # #618: locked copper, or a via site conflicting with the
+                # board, with this run's own committed copper, or with the
+                # pair's own sibling hole.
+                if use_via and not _coupled_via_sites_ok(pp, nn):
+                    continue
                 for tside in (1.0, -1.0):         # which gap the trail bulges through
                     lside = -tside
                     lead_segs = [(_via_spot(lead, use_via), pt(De - run, lside * half_sp)),
@@ -2184,9 +2263,17 @@ def generate_underpad_escape(footprint: Footprint,
                 key = ('c', round(x, 6), round(y, 6))
                 ok = _m.get(key)
                 if ok is None:
-                    ok = _via_site_conflict(x, y, _nid, _c, vr=_cs / 2.0,
-                                            vdr=(_cd or 0.0) / 2.0,
-                                            skip_resv=True) is None
+                    _why = _via_site_conflict(x, y, _nid, _c, vr=_cs / 2.0,
+                                              vdr=(_cd or 0.0) / 2.0,
+                                              skip_resv=True)
+                    ok = _why is None
+                    # #618 asks for a policy on via-in-pad sites the
+                    # hole-to-hole floor refuses -- skip, warn, or fail. This
+                    # is the WARN answer. Counted on the cache MISS so each
+                    # distinct site counts once. It changes no decision; it
+                    # makes one visible that the operator could not see.
+                    if _why is not None and _why.startswith('drill hole'):
+                        h2h_stats['sites'] += 1
                     _m[key] = ok
                 return ok
             key = (round(x, 6), round(y, 6))
@@ -2515,6 +2602,17 @@ def generate_underpad_escape(footprint: Footprint,
             print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller than "
                   f"the fab via floor ({fab_floor_min(_copper)['via_diameter']:.2f}mm "
                   f"dia); via held at the floor and still bulges past the pad edge")
+        # #618: the hole-to-hole floor's cost, disclosed. Refusing these sites
+        # is not new (the floor has been enforced since #756); being able to
+        # SEE that the floor is what refused them is. Balls that lose their
+        # via-in-pad here fall to the checked off-centre search, and only fail
+        # to the main router if that finds nothing either.
+        if h2h_stats['sites'] or h2h_stats['coupled']:
+            print(f"  Under-pad: {h2h_stats['sites']} via-in-pad centre site(s)"
+                  f" and {h2h_stats['coupled']} coupled pair(s) declined by the"
+                  f" {_h2h:g}mm hole-to-hole floor ({_h2h_src}); the levers are"
+                  f" a smaller --via-drill, a fab tier whose floor this pitch"
+                  f" can meet, or the board's own min_hole_to_hole")
     # The FAB requirement under-pad escape creates (#489 §8): via-in-pad needs
     # IPC-4761 Type VII. Emitted from the shared engine so both fronts report it.
     from fab_notes import print_via_in_pad_note
