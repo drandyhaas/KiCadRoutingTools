@@ -358,14 +358,21 @@ def test_the_union_is_measured_where_it_actually_bites():
     east = rows['E']
     assert abs(east['length_mm'] - 9.64) < 0.01, east
     assert len(east['eaten_by']) == 8, east['eaten_by']
-    summed = sum(mm for _r, mm in east['eaten_by'])
-    assert summed > east['length_mm'], (
+    # `eaten_by` is in LANES, the face length in MILLIMETRES -- convert before
+    # comparing. (The first version of this arm compared the two directly. It
+    # passed, for the wrong reason.)
+    pitch = east['length_mm'] / max(1, east['supply_routed_grid']
+                                    + east['deficit_routed_grid'])
+    summed_mm = sum(lanes for _r, lanes in east['eaten_by']) * pitch
+    assert summed_mm > east['length_mm'], (
         'the per-neighbour cover no longer exceeds the face, so summing and '
-        'unioning would agree and this arm proves nothing: {} vs {}'
-        .format(summed, east['length_mm']))
+        'unioning would agree and this arm proves nothing: {:.2f}mm vs '
+        '{:.2f}mm'.format(summed_mm, east['length_mm']))
     assert east['supply_routed_grid'] == 3, (
         'glasgow J1 east supply moved from the recorded 3 (it is 0 if the '
         'intervals are summed rather than unioned): {}'.format(east))
+    print('  PASS: glasgow J1 east -- 8 neighbours, 12.42mm summed against '
+          '8.23mm unioned on a 9.64mm face, supply 3 (0 if summed)')
 
 
 def test_tigard_moves_on_the_side_test_not_the_union():
@@ -388,8 +395,8 @@ def test_tigard_moves_on_the_side_test_not_the_union():
         pcb, 'J1', clearance=0.2, track_width=0.2, grid_step=0.1,
         pcb_file=path)}
     assert 'JP1' in {r for r, _mm in rows['N']['eaten_by']}, rows['N']
-    print('  PASS: glasgow J1 east supply 3 (0 if summed); tigard J1 keeps '
-          'its B-side JP1 through the symmetric side test')
+    print('  PASS: tigard J1 keeps its B-side JP1 through the symmetric side '
+          'test, and its escape ledger does not move at all')
 
 
 def test_face_lane_ledger_side_test_is_symmetric():
