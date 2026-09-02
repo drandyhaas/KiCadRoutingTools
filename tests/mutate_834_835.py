@@ -291,6 +291,11 @@ ROWS = [
                       max(b[2] for b in _v), max(b[3] for b in _v))""",
      (T841,), 'KILLED'),
 
+    # Expected KILLED and measured SURVIVED on its first run, because the arm
+    # meant to catch it checked only the box's CENTRE -- and pads stacked at
+    # one point share a centre by definition, so a centre check passes on
+    # every wrong hit among exactly the pads the key was rekeyed for. The arm
+    # now checks the size too. Expected first, then measured.
     ('the-pad-lookup-key-drops-the-size', 'leg',
      """    hx, hy = pad_half_extents(pad)
     return geom.pads.get((round(pad.global_x, 4), round(pad.global_y, 4),

@@ -54,6 +54,7 @@ from placement.legality import (_pad_carries_copper,          # noqa: E402
                                 build_part_pads,
                                 graded_parts_from_file,
                                 pad_box,
+                                pad_half_extents,
                                 part_copper_geometry)
 
 RUN_ALL_FAST_OK = True
@@ -291,6 +292,20 @@ def test_copper_is_the_union_of_the_pad_rects_and_each_pad_finds_its_own():
                     "its own ({}, {})".format(
                         os.path.basename(path), ref, pad.pad_number, cx, cy,
                         pad.global_x, pad.global_y))
+                # ...and its SIZE, which is the half the centre cannot see:
+                # pads stacked at one point share a centre BY DEFINITION, so
+                # a centre-only check passes on every wrong hit among exactly
+                # the pads this lookup was rekeyed for. The mutation battery
+                # caught that -- `the-pad-lookup-key-drops-the-size` survived
+                # the first version of this arm.
+                whx, why = pad_half_extents(pad)
+                assert (abs((box[2] - box[0]) / 2.0 - whx) < 1e-6
+                        and abs((box[3] - box[1]) / 2.0 - why) < 1e-6), (
+                    "{}: {} pad {} is {:.4f}x{:.4f} but was handed a "
+                    "{:.4f}x{:.4f} box -- a co-located pad's".format(
+                        os.path.basename(path), ref, pad.pad_number,
+                        whx * 2, why * 2,
+                        box[2] - box[0], box[3] - box[1]))
     assert parts > 500, 'only {} parts examined'.format(parts)
     assert pads > 5000, 'only {} pads examined'.format(pads)
     print('  PASS: {} parts, copper is the pad-rect union; {} pads each found '
