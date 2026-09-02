@@ -694,6 +694,58 @@ def board_container_refs(pcb_data, pcb_file=None) -> set:
         return set()
 
 
+def board_obstruction_rects(pcb_data, clearance: float) -> Dict[str, Tuple]:
+    """{ref: pad-COPPER bbox} -- the ONE rect a lane ledger charges (#841).
+
+    Both lane ledgers ask "what stops a track leaving this face". The answer
+    is foreign COPPER, so this is the bbox over the pads' own edges plus the
+    NPTH hole extents -- `legality.PartPads.extent`, the box the pad-legality
+    layer already grades against.
+
+    It replaces two different wrong answers, and #841 named only one of them:
+
+    * `_part_rect` below is the bbox of pad CENTRES. A 0.9mm passive terminal
+      contributes a ZERO-width obstruction. #841 assumed the pad bbox merely
+      "understates by roughly a body margin"; it understates by a whole pad.
+    * `routability.face_lane_ledger` charged the COURTYARD, justified by
+      consistency with the assembly channel rather than by what obstructs a
+      track. A courtyard is pick-and-place and rework margin, drawn
+      deliberately beyond the copper; a track may legally run under one.
+
+    Measured, escape deficit lanes with only this rect swapped (clearance
+    0.2): glasgow_revC 17 pad-centre / 61 pad-copper / 125 courtyard,
+    orangecrab_ext_pll 70 / 123 / 147, rp2350 53 / 78 / 91, watchy 25 / 62 /
+    88, tigard 41 / 48 / 75, ulx3s 0 / 5 / 19, kit-dev-coldfire 0 / 4 / 18.
+    Regenerate with `tests/measure_834_835_side_awareness.py --table D`.
+
+    Two consequences worth knowing:
+
+    * A footprint with NO pads is ABSENT from the map. That is deliberate: it
+      has no copper, so it obstructs no track, and it is also how the
+      `synthetic` +/-0.5mm fiction `legality.part_local_bounds` invents for a
+      zero-pad footprint stops reaching a lane SUPPLY -- a number
+      `options.move_blocker` turns into an instruction to move a part.
+    * `clearance` is a REAL parameter, not decoration. `PartPads.extent`
+      folds in the NPTH growth `max(0, npth_floor - clearance)`, so it is
+      clearance-dependent for parts that carry drilled holes: measured over
+      414 corpus parts, exactly 5 differ between clearance 0.0 and 0.5
+      (tigard H1-H4, rp2350 J2 -- all mounting holes), by 0.200mm. Each
+      ledger therefore passes the clearance it resolved for its own lane
+      pitch, so the two cannot silently price the same hole differently.
+
+    `legality` is imported lazily for the reason `board_side_map` gives.
+    """
+    from .legality import build_part_pads
+    fps = pcb_data.footprints or {}
+    out: Dict[str, Tuple] = {}
+    for ref, pp in build_part_pads(fps, clearance).items():
+        fp = fps[ref]
+        ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if ext is not None:
+            out[ref] = ext
+    return out
+
+
 def span_eaten(lo, hi, band, horizontal, obstacles):
     """How much of [lo, hi] the obstacles cover, and how much each took.
 
