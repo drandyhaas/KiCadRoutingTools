@@ -365,6 +365,31 @@ def the_gate_has_a_tracked_true_positive():
     check('...and with --min-supply-drop 0 the gate goes quiet again, which '
           'is what makes the share form the cause', True)
 
+    # BOTH SIDES AT THE SAME BAND. A gate is a delta, so a baseline graded at
+    # a different depth is not a stricter test -- it is a different one, and
+    # NOTHING in the printed output would show it. A board against ITSELF is
+    # the discriminator: at any band the two sides are identical, so the only
+    # way to produce a NEW row is to grade them differently.
+    #
+    # Added because the mutation battery caught this as a hole: removing
+    # `escape_band_mm` from the baseline leg alone survived every arm here.
+    run_check([sys.executable, '-X', 'utf8', tool, ok, '--baseline', ok,
+               '--gate', '--escape-band', '4.0'], accept=True)
+    check('a board against itself is silent at a DEEP band too, which is '
+          'what says the baseline leg is graded at the same band', True)
+
+    # `lost_last_lane` is MERGED into the same list the exit code tests, and
+    # nothing exercised that merge from the CLI -- the honesty test drives the
+    # predicate directly on hand-built dicts. Turning the share form off at a
+    # band where a face crosses to zero leaves lost_last_lane as the only
+    # channel that can fire, so this arm is about the merge and nothing else.
+    # Also caught as a hole by the battery.
+    r = run_check([sys.executable, '-X', 'utf8', tool, dmg, '--baseline', ok,
+                   '--gate', '--escape-band', '2.5', '--min-supply-drop', '0'],
+                  code=4, refuse='lost its last lane')
+    check('lost_last_lane still reaches the exit code through the merge',
+          'J1 N' in r.stdout, r.stdout[-300:])
+
 
 def main():
     the_arithmetic()

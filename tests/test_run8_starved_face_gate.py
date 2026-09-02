@@ -261,6 +261,34 @@ def main():
     check('...while the absolute starvation form still finds nothing',
           '0 now, 0 on the baseline' in out, out[-500:])
 
+    # THE DEMAND CONJUNCT, which only this fixture can discriminate. The share
+    # form is filtered by --min-demand and `lost_last_lane` deliberately is
+    # not, and that difference is load-bearing rather than cosmetic: without
+    # it the form fires on demand-1 diodes whose supply merely halved, and on
+    # the truth-restore control. The tracked tigard pair CANNOT pin this --
+    # measured, no face on it has both demand < 7 and a >= 20% drop -- so the
+    # arm lives here, where D21 W (demand 1, supply 8 -> 3, drop 0.625) does.
+    # The mutation battery records that removing the conjunct therefore
+    # survives on a clean clone.
+    # Scoped to the NEW lines. Every ref's per-face ledger is printed too, so
+    # a bare substring search finds `D21 W` in the routine listing whatever
+    # the gate decided -- an arm that would have passed either way.
+    def _new_lines(text):
+        return [ln for ln in text.splitlines() if ln.lstrip().startswith('NEW')]
+
+    code, out = run([boards[0], '--clearance', '0.09',
+                     '--baseline', boards[1], '--gate', '--min-demand', '1'])
+    loose = '\n'.join(_new_lines(out))
+    check('at --min-demand 1 the share form reaches the demand-1 diodes',
+          'D21 W' in loose, loose or out[-400:])
+    code, out = run([boards[0], '--clearance', '0.09',
+                     '--baseline', boards[1], '--gate'])
+    tight = '\n'.join(_new_lines(out))
+    check('...and at the default it does NOT -- the conjunct is what keeps '
+          'the form off noise', 'D21 W' not in tight, tight or '(no NEW)')
+    check('...while the real finding survives the conjunct', 'U1 E' in tight,
+          tight or '(no NEW)')
+
     control = os.path.join(wrong, 'perturbed.control.kicad_pcb')
     if os.path.isfile(control):
         code, out = run([control, '--clearance', '0.09',

@@ -153,10 +153,11 @@ ROWS = [
                 pcb_file=args.baseline)""",
      """                grid_step=grid, escape_band_mm=None,
                 pcb_file=args.baseline)""",
-     (TSTV,),
-     # Only the wk/-gated arms drive a --baseline WITH a non-default band, and
-     # they skip on a clean clone. Recorded as an expected survivor there
-     # rather than deleted: the row is the finding.
+     (T847,),
+     # The battery caught this as a HOLE and the hole was closed rather than
+     # the expectation re-recorded: a board against ITSELF at a deep band is
+     # the discriminator, since the only way to produce a NEW row there is to
+     # grade the two sides differently.
      'KILLED'),
 
     # ---- the predicate ----------------------------------------------------
@@ -170,11 +171,13 @@ ROWS = [
     ('the-share-form-drops-its-demand-conjunct', 'chk',
      "            if before <= 0 or now >= before or r['demand_nets'] < min_demand:",
      '            if before <= 0 or now >= before:',
-     (T847,),
-     # The conjunct is what separates the wrong-basin board from the truth
-     # restore; without it the control fires on demand-1 diodes. The tracked
-     # tigard arm does not exercise that, so this is expected to survive there
-     # and be caught by the glasgow control -- which is wk/-gated.
+     (TSTV,),
+     # MEASURED: no face on the tracked tigard pair has both demand < 7 and a
+     # >= 20% drop, so that pair cannot discriminate this at all. The arm
+     # lives in the wk/-gated file, where D21 W (demand 1, 8 -> 3) does. On a
+     # clean clone this row therefore SKIPS rather than judging -- which the
+     # runner reports as a survivor, and which is the honest answer: the
+     # conjunct is unpinned without the recorded boards.
      'KILLED'),
 
     ('the-share-threshold-changes', 'chk',
@@ -199,7 +202,13 @@ ROWS = [
      """        for ref, face, dem, before in []:
             if (ref, face) in seen:
                 continue""",
-     (THON,), 'KILLED'),
+     (THON, T847),
+     # The honesty test drives `lost_last_lane` directly on hand-built dicts,
+     # so it never saw the MERGE into the list the exit code reads. Closed
+     # with a CLI arm that turns the share form off at a band where a face
+     # crosses to zero, leaving this predicate as the only channel that can
+     # fire.
+     'KILLED'),
 
     ('the-gate-stops-returning-4', 'chk',
      """    if args.gate and new_starved:
