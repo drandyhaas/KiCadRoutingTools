@@ -268,6 +268,61 @@ class Schedule:
         """A crossing of two page lanes: no layer rule, no via room."""
         return bool(self.page[d]) and bool(self.page[p])
 
+    def ensure_recolor(self, cols) -> None:
+        """BRAID_WORD=1 (#622 braid-word move): swimmer x swimmer
+        crossings have a FREE orientation -- the crossing only needs
+        the two on OPPOSITE layers, but pair_layers hardcodes
+        mover-on-B/passed-on-F, so a swimmer on F crossing one on B
+        had BOTH flipped (two layer changes bought nothing). Walk the
+        fixed column order tracking each swimmer's current layer;
+        where a swimmer pair is already opposite, keep both. Every
+        other branch reproduces pair_layers exactly, and the column
+        ORDER is untouched (the fa4..fa9 lesson: order is the draw)."""
+        if os.environ.get('BRAID_WORD', '0') != '1':
+            self._recolor = {}
+            return
+        key = (id(cols), len(cols))
+        if getattr(self, '_recolor_key', None) == key:
+            return
+        cur = {nm: self.tl[nm] for nm in self.swimmers}
+        out = {}
+        for k, col in enumerate(cols):
+            for (m, p) in col:
+                pm, pp = self.page[m], self.page[p]
+                if pm and pp:
+                    continue                    # free crossing
+                if pm or pp:                    # swimmer x page: forced
+                    Lm, Lp = self.pair_layers(m, p)
+                    if pm is None:
+                        cur[m] = Lm
+                    else:
+                        cur[p] = Lp
+                    continue
+                cm = cur.get(m, self.tl.get(m, 'F.Cu'))
+                cp = cur.get(p, self.tl.get(p, 'F.Cu'))
+                if cm != cp:
+                    Lm, Lp = cm, cp             # already opposite: free
+                else:
+                    Lm, Lp = 'B.Cu', 'F.Cu'     # pair_layers' own rule
+                out[(k, m, p)] = (Lm, Lp)
+                cur[m], cur[p] = Lm, Lp
+        self._recolor = out
+        self._recolor_key = key
+        diff = sum(1 for kk, v in out.items()
+                   if v != self.pair_layers(kk[1], kk[2]))
+        print(f'  braid-word recolor: {len(out)} swimmer-pair '
+              f'crossing(s), {diff} reoriented', flush=True)
+
+    def col_layers(self, k: int, d: str, p: str) -> Tuple[str, str]:
+        """pair_layers, column-aware: under BRAID_WORD=1 the
+        recolored orientation for swimmer pairs; identical otherwise."""
+        r = getattr(self, '_recolor', None)
+        if r:
+            v = r.get((k, d, p))
+            if v is not None:
+                return v
+        return self.pair_layers(d, p)
+
     def pair_layers(self, d: str, p: str) -> Tuple[str, str]:
         """(layer of the mover, layer of the passed) at a column's
         crossing. A page lane is on its page; a swimmer takes the other

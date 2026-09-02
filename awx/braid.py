@@ -864,6 +864,8 @@ class Corridor:
         tooth: HW_COL either side of each column is the converging
         part where the two lanes are too close for one layer, and the
         via sits between. Returns (u, need)."""
+        if sched is not None:
+            sched.ensure_recolor(cols)
         u = []
         last_col, last_layer = {}, {}
         tl = self.ctx.tooth_layer
@@ -886,10 +888,10 @@ class Corridor:
                 # full pitch. A gated column also holds its neighbour
                 # off at W_GATE (prev_gate), so its via has room along
                 # the corridor on both sides.
-                def _pairs(d, p):
+                def _pairs(d, p, _k=k):
                     if sched.is_free(d, p):
                         return ((d, sched.page[d]), (p, sched.page[p]))
-                    Ld, Lp = sched.pair_layers(d, p)
+                    Ld, Lp = sched.col_layers(_k, d, p)
                     return ((d, Ld), (p, Lp))
                 changes = any(
                     last_layer.get(nm, tl.get(nm, 'F.Cu')) != L
@@ -917,7 +919,7 @@ class Corridor:
             for (d, p) in col:
                 if sched is not None and sched.is_free(d, p):
                     continue
-                Ld, Lp = sched.pair_layers(d, p) if sched else ('B.Cu', 'F.Cu')
+                Ld, Lp = sched.col_layers(k, d, p) if sched else ('B.Cu', 'F.Cu')
                 for nm, L in ((d, Ld), (p, Lp)):
                     if sched is not None and sched.page.get(nm):
                         continue                 # a page lane never changes
@@ -937,6 +939,8 @@ class Corridor:
         sp = self.spine
         M = self.members
         sched = sched or self.sched_cur
+        if sched is not None:
+            sched.ensure_recolor(cols)
         two = getattr(sched, 'two_page', False)
         n = len(cols)
         L_avail = self.L_free - RESERVE
@@ -1015,7 +1019,7 @@ class Corridor:
             for (d, p) in col:
                 # a free crossing: each lane on its page there (the
                 # router keeps a layer between requirements on its own)
-                Ld, Lp = sched.pair_layers(d, p) if sched else ('B.Cu', 'F.Cu')
+                Ld, Lp = sched.col_layers(k, d, p) if sched else ('B.Cu', 'F.Cu')
                 req[d].append((a, b, Ld))
                 req[p].append((a, b, Lp))
         # EXIT LEGS THAT CROSS LANES. In a side-exit block the lanes
