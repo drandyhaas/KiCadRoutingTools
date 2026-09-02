@@ -28,18 +28,28 @@ mistakes a synthetic number for a board measurement.
 THE SCOPE IS ASYMMETRIC AND THAT IS THE DESIGN (`PendingVias`):
 
   * the DRILL is always tested -- the balls are SMD and carry no hole, so every
-    hole in the neighbourhood is one this pass creates;
+    hole in the neighbourhood is one this pass creates, and a thinner drill is
+    a lever that can actually cure a conflict;
   * the RING is tested only when a via BULGES past its pad (clamp status
-    `'floor'`), because a via that fits inside its pad occupies no copper the
-    pad did not already occupy, so a ring test on such a pair restates the
-    board's own ball-to-ball spacing.
+    `'floor'`), because a via clamped INTO its pad asks the fab for the etch
+    pitch the footprint already demands, while a bulging one asks for a tighter
+    one -- and because a via-in-pad site has no lever at all: it is the ball
+    centre by definition and a bulging via is already at the deepest fab rung.
 
-That split is a MEASUREMENT, not a principle: swept over all 6565 physical
-(pitch, pad) combinations at clearances 0.10/0.15/0.20/0.25/0.30, the ring-only
-rejections whose own pads are NOT already sub-clearance number
-0/90/155/195/210, and 100% of them are bulging vias at every clearance.
-`TestTheRingArmIsOnlyForBulgingVias` re-derives both halves so the claim stays
-a change detector.
+AN EARLIER VERSION OF THIS FILE JUSTIFIED THAT SPLIT WITH A SWEEP -- "of the
+ring-only rejections whose pads are not already sub-clearance, 100% are bulging
+vias, at every clearance" -- and an adversarial review showed the claim is a
+TAUTOLOGY: `pitch >= pad + clearance` and `pitch < via + clearance` give
+`pad < via`, which IS the bulge, for any clamp function whatsoever. It is kept
+below AS an identity (`test_the_bulge_EQUIVALENCE_is_an_identity...`) so nobody
+re-derives it and reads it as evidence, and the contingent quantity is measured
+separately: what a bulge-blind ring arm would additionally reject.
+
+It is ALSO NOT TRUE that a fitting via adds no copper, which is what that sweep
+was standing in for. A ball pad is `['F.Cu']` and the via spans F.Cu to B.Cu,
+so on the inner layers there is no pad under the ring at all. The honest
+argument is the etch-pitch one above, not a claim that the copper is already
+there.
 
 A REFUSAL DROPS THE ESCAPE -- this pass has no re-sweep -- so the conflict
 branch descends the fab drill ladder first (`thin_drill_to_clear`). That is not
@@ -253,6 +263,27 @@ class TestTwinsShareOneHole(_TmpCase):
         self.assertAlmostEqual(add[0]['y'], 10.0, places=6)
         self.assertEqual(add[0]['net_id'], 7)
 
+    def test_there_is_no_ONE_MICRON_CLIFF(self):
+        """An exact-match twin rule had one, and an adversarial review found
+        it: two same-net sites 0.0010mm apart merged into one via and both
+        balls kept their escapes, while 0.0011mm apart DROPPED one outright --
+        because no fab rung can space two holes 1.1 um apart, so the conflict
+        branch had nothing to descend to. A 100-nanometre difference in a
+        footprint's modelling decided whether a ball escaped.
+
+        The twin rule keys on the ball's own ANCHOR radius instead (the
+        `_has_copper` spelling), so anything inside the pad is a via that
+        already connects this ball.
+
+        MUTATION: replace `anchor_tol` with `self._tol` in `verdict` -- the
+        0.0011 row dies."""
+        for sep in (0.0, 0.0005, 0.0010, 0.0011, 0.05, 0.2):
+            add, blocked, _t = _two_balls(sep, 0.5, same_net=True)
+            self.assertEqual(
+                (len(add), len(blocked)), (1, 0),
+                f'same-net balls {sep}mm apart (well inside a 0.5mm pad) '
+                f'gave {len(add)} via(s) and {len(blocked)} dropped escape(s)')
+
     def test_two_NETS_at_one_site_are_a_conflict_not_a_twin(self):
         """One hole cannot carry two nets. MUTATION: key the twin test on
         position alone and drop the net comparison."""
@@ -261,17 +292,83 @@ class TestTwinsShareOneHole(_TmpCase):
                          'two different nets are sharing one hole, which is a '
                          'short, or the second was silently skipped')
 
-    def test_the_pre_620_pass_STACKED_them(self):
-        """The behaviour being replaced, asserted from the writer's side so the
-        improvement is not just a claim: two identical dicts at one point are
-        two `(via ...)` s-exprs, because `kicad_writer` does not dedupe.
+    def test_no_two_vias_share_a_point(self):
+        """MUTATION: append without consulting `_pending` -- duplicates return.
 
-        This arm pins that the FIX does not produce them. MUTATION: append
-        without consulting `_pending` -- duplicates return."""
+        An earlier docstring here claimed this arm asserted "from the writer's
+        side", which it never did -- it only checks the dicts. A reviewer
+        checked the underlying claim instead and it holds:
+        `add_tracks_and_vias_to_pcb` on `splitflap_driver` with two identical
+        via dicts emits TWO `(via ...)` at one point. The claim is true and is
+        pinned by `test_the_writer_really_does_not_dedupe` below, which calls
+        the writer rather than describing it."""
         add, _b, _t = _two_balls(0.0, 0.5, same_net=True)
         keys = [(round(v['x'], 6), round(v['y'], 6), v['net_id']) for v in add]
         self.assertEqual(len(keys), len(set(keys)),
                          'stacked same-net vias at one point are back')
+
+    def test_the_writer_really_does_not_dedupe(self):
+        """The premise the twin rule rests on, CALLED rather than asserted
+        about. If the writer ever grows a dedupe, sharing one via stops being
+        an improvement over stacking two and this file's argument changes.
+
+        MUTATION: none -- this pins a fact about a different module."""
+        from kicad_writer import add_tracks_and_vias_to_pcb
+        board = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), 'kicad_files',
+            'splitflap_driver.kicad_pcb')
+        if not os.path.isfile(board):
+            self.skipTest('fixture board missing')
+        with open(board, encoding='utf-8') as f:
+            before = f.read().count('(via')
+        via = {'x': 100.0, 'y': 100.0, 'size': 0.4, 'drill': 0.2,
+               'layers': ['F.Cu', 'B.Cu'], 'net_id': 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, 'w.kicad_pcb')
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                add_tracks_and_vias_to_pcb(board, out, [],
+                                           [dict(via), dict(via)])
+            with open(out, encoding='utf-8') as f:
+                after = f.read().count('(via')
+        self.assertEqual(after - before, 2,
+                         'the writer now dedupes identical vias, so stacking '
+                         'is no longer the thing the twin rule avoids')
+
+    def test_the_surviving_twin_via_is_the_TIGHTER_pad_s_clamp(self):
+        """Which via survives a merge used to be whichever route arrived first,
+        so two coincident same-net pads of 0.25 and 0.60 kept a 0.45 via that
+        bulges past the 0.25 pad -- the #202 violation `clamp_via_to_pad`
+        exists to prevent, re-created by the merge. Found by an adversarial
+        review. Asserted in BOTH orders, because the defect was order-only and
+        one order passed the whole time.
+
+        MUTATION: delete the `_pending.tighten` block -- the big-pad-first
+        order ships a 0.45 via."""
+        for order in ((0.25, 0.60), (0.60, 0.25)):
+            a = _ball(10.0, 10.0, 7, order[0], 'A1')
+            b = _ball(10.0, 10.0, 7, order[1], 'A2')
+            ra = FanoutRoute(pad=a, pad_pos=(10.0, 10.0),
+                             stub_end=(10.5, 10.5), exit_pos=(11.0, 10.5),
+                             layer='B.Cu')
+            rb = FanoutRoute(pad=b, pad_pos=(10.0, 10.0),
+                             stub_end=(10.5, 9.5), exit_pos=(11.0, 9.5),
+                             layer='B.Cu')
+            pcb = make_pcb(board_info=BoardInfo(
+                layers={}, copper_layers=list(CU),
+                board_bounds=(0.0, 0.0, 20.0, 20.0)),
+                vias=[], segments=[], pads_by_net={7: [a, b]},
+                source_path='', zones=[])
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                add, _rm, blocked = manage_vias([ra, rb], pcb, 'F.Cu', 0.45,
+                                                0.2, 0.1)
+            self.assertEqual((len(add), len(blocked)), (1, 0),
+                             f'order {order}: the twins did not merge')
+            self.assertLessEqual(
+                add[0]['size'], min(order) + 1e-9,
+                f'order {order}: the surviving via is {add[0]["size"]}mm, '
+                f'which bulges past the {min(order)}mm pad (#202)')
 
 
 class TestTheLadderKeepsTheEscape(_TmpCase):
@@ -299,6 +396,28 @@ class TestTheLadderKeepsTheEscape(_TmpCase):
         self.assertGreaterEqual(round(gap, 6), H2H,
                                 f'the thinned pair still ships {gap:.4f}mm of '
                                 f'hole-to-hole against a {H2H}mm floor')
+
+    def test_the_THINNED_drill_is_what_gets_recorded(self):
+        """The pending record must carry the drill that actually ships, or the
+        NEXT candidate is spaced against a hole that does not exist. Passing
+        the pre-thin drill is over-strict rather than unsafe, which is why no
+        arm caught it until a reviewer mutated exactly that line.
+
+        Asserted through behaviour: a third ball placed just outside the
+        THINNED floor and just inside the ORIGINAL one must be accepted.
+
+        MUTATION: `_pending.add(..., v_drill_before_thinning, ...)`."""
+        p = PendingVias(H2H, 0.1)
+        p.add(10.0, 10.0, 0.32, 0.15, 7)         # as if thinned 0.17 -> 0.15
+        # 0.36 clears 0.15/2 + 0.17/2 + 0.20 = 0.36 exactly, and clears the
+        # all-thinned floor 0.35; it would NOT clear 0.17/0.17 (0.37).
+        self.assertEqual(p.verdict(10.36, 10.0, 0.32, 0.17, 8)[0], 'clear')
+        stale = PendingVias(H2H, 0.1)
+        stale.add(10.0, 10.0, 0.32, 0.17, 7)     # the un-thinned record
+        self.assertEqual(stale.verdict(10.36, 10.0, 0.32, 0.17, 8)[0],
+                         'conflict',
+                         'the two records are indistinguishable here, so this '
+                         'arm cannot detect a stale drill')
 
     def test_the_escalation_is_DISCLOSED(self):
         """A silent tier escalation is a fab cost the operator did not choose.
@@ -410,58 +529,81 @@ class TestTheRingArmIsOnlyForBulgingVias(_TmpCase):
                          'a FITTING via pair is refused on ring clearance -- '
                          'the phantom rejection the scope exists to avoid')
 
-    def test_the_sweep_THIS_SCOPE_RESTS_ON_still_says_so(self):
-        """The scope decision is a measurement, so re-derive it here rather
-        than quoting it in prose. A number that lives only in a terminal is
-        exactly the kind that goes stale inside a confident comment.
+    def test_the_bulge_EQUIVALENCE_is_an_identity_not_a_measurement(self):
+        """An earlier version of this file swept 6565 (pitch, pad) pairs and
+        reported "of the ring-only rejections whose pads are not already
+        sub-clearance, 100% are bulging vias, at every clearance" as the
+        measurement the scope rested on. An adversarial review showed it is a
+        TAUTOLOGY, and the honest thing is to keep it -- as an identity, so
+        nobody re-derives it and mistakes it for evidence:
 
-        For every physically possible (pitch, pad) -- pad < pitch, so the balls
-        do not overlap -- classify the pair the way the two candidate rules
-        would. The claim: of the pairs a RING rule would reject and the DRILL
-        rule would not, every one whose own pads are NOT already sub-clearance
-        is a BULGING via. If that ever stops holding, the ring arm's `bulges`
-        condition is refusing (or admitting) something new and this file's
-        argument for it no longer applies.
+            ring-only rejection   =>  pitch <  via + clearance
+            pads not sub-clearance =>  pitch >= pad + clearance
+            therefore                  pad  <  via, which IS the bulge
 
-        MUTATION: none in the engine -- this arm guards the DESIGN. It fails if
-        `clamp_via_to_pad` or the fab ladder changes shape, which is precisely
-        when the scope wants re-deciding."""
-        recorded = {0.10: 0, 0.15: 90, 0.20: 155, 0.25: 195, 0.30: 210}
-        pitches = [round(0.20 + i * 0.01, 4) for i in range(101)]
-        pads = [round(0.05 + i * 0.01, 4) for i in range(116)]
+        It holds for ANY clamp function, so this arm proves it with clamps that
+        have nothing to do with the real one. If it ever fails, the two
+        definitions have drifted apart and the whole framing needs redoing.
+
+        MUTATION: none. This arm guards a claim, not a branch."""
+        clamps = {'huge': lambda p: 5.0, 'tiny': lambda p: 0.01,
+                  'triple': lambda p: 3 * p, 'exact': lambda p: p,
+                  'real': lambda p: _clamped(p)[0]}
+        for name, via_of in clamps.items():
+            for clearance in (0.05, 0.10, 0.20, 0.35, 0.50):
+                bad = []
+                for i in range(20, 121):
+                    pitch = round(i * 0.01, 4)
+                    for j in range(5, 121):
+                        psize = round(j * 0.01, 4)
+                        if psize >= pitch:
+                            continue
+                        vs = via_of(psize)
+                        if pitch >= vs + clearance - 1e-9:
+                            continue                   # not a ring rejection
+                        if pitch - psize < clearance - 1e-9:
+                            continue                   # pads already that close
+                        if vs <= psize + 1e-9:
+                            bad.append((pitch, psize, vs))
+                self.assertEqual(
+                    bad, [], f'clamp {name!r} at clearance {clearance}: '
+                             f'{len(bad)} ring-only non-phantom pair(s) that '
+                             f'do NOT bulge, e.g. {bad[:2]} -- the identity '
+                             f'this file documents has broken')
+
+    def test_what_a_BULGE_BLIND_ring_arm_would_additionally_reject(self):
+        """The contingent quantity the tautology above is not. How many real
+        (pitch, pad) combinations does the shipped arm KEEP that a ring arm
+        without the `bulges` condition would refuse? That number is the cost of
+        the alternative design, and unlike the identity it can move.
+
+        Counted over the same grid at the CLI-default clearance and at three
+        wider ones. Recorded, so a change in `clamp_via_to_pad` or the fab
+        ladder shows up here as a moved number rather than silently."""
+        recorded = {0.10: 150, 0.15: 310, 0.20: 495, 0.25: 705}
         for clearance, expect in sorted(recorded.items()):
-            ring_only_real = 0
-            not_bulging = []
+            extra = 0
             combos = 0
-            for pitch in pitches:
-                for psize in pads:
+            for i in range(20, 121):
+                pitch = round(i * 0.01, 4)
+                for j in range(5, 121):
+                    psize = round(j * 0.01, 4)
                     if psize >= pitch:
                         continue
                     combos += 1
                     vs, vd, _st, _r = _clamped(psize)
-                    d_bad = pitch < vd + H2H - 1e-9
-                    r_bad = pitch < vs + clearance - 1e-9
-                    if d_bad or not r_bad:
-                        continue
-                    if pitch - psize < clearance - 1e-9:
-                        continue                       # phantom: pads already
-                    ring_only_real += 1
-                    if vs <= psize + 1e-9:
-                        not_bulging.append((pitch, psize, vs, vd))
+                    if pitch < vd + H2H - 1e-9:
+                        continue          # the drill arm refuses it anyway
+                    if pitch < vs + clearance - 1e-9 and vs <= psize + 1e-9:
+                        extra += 1        # ring-blind would refuse; we keep
             self.assertEqual(combos, 6565,
-                             'the sweep grid moved; the recorded counts below '
-                             'are about a different population')
+                             'the grid moved; the counts here are about a '
+                             'different population')
             self.assertEqual(
-                not_bulging, [],
-                f'at clearance {clearance}: {len(not_bulging)} ring-only '
-                f'rejection(s) are NOT bulging vias, e.g. {not_bulging[:3]} -- '
-                f'the `bulges` condition now excludes a real catch, so the '
-                f'drill-only-unless-bulging scope needs re-deciding')
-            self.assertEqual(
-                ring_only_real, expect,
-                f'at clearance {clearance} the sweep now finds '
-                f'{ring_only_real} ring-only real rejections, not the '
-                f'{expect} this scope was chosen against')
+                extra, expect,
+                f'at clearance {clearance} a bulge-blind ring arm would '
+                f'additionally refuse {extra} combination(s), not the {expect} '
+                f'recorded when this scope was chosen')
 
     def test_the_ring_arm_is_foreign_net_only(self):
         """Same-net copper in contact is not a clearance violation. Distance
@@ -556,30 +698,49 @@ class TestPendingViasItself(unittest.TestCase):
         failure is reproducible.
 
         MUTATION: shrink the window (drop the `self._clearance` term, or use
-        `d` instead of `d/2 + max/2`) -- this arm dies."""
-        rng = random.Random(620)
-        for trial in range(200):
-            h2h = rng.choice((0.15, 0.20, 0.30))
-            clearance = rng.choice((0.10, 0.20))
-            p = PendingVias(h2h, clearance)
-            rows = []
-            for _ in range(rng.randint(1, 25)):
-                x = round(rng.uniform(0.0, 3.0), 4)
-                y = round(rng.uniform(0.0, 3.0), 4)
-                s = rng.choice((0.25, 0.30, 0.45))
-                d = rng.choice((0.15, 0.20, 0.30))
-                n = rng.randint(1, 3)
-                b = rng.random() < 0.5
-                cand = (x, y, s, d, n, b)
-                got = p.verdict(*cand)[0]
-                want = _brute(rows, cand, h2h, clearance)
-                self.assertEqual(got, want,
-                                 f'trial {trial}: broad phase disagrees with '
-                                 f'brute force at {cand} over {len(rows)} '
-                                 f'placed')
-                if got == 'clear':
-                    p.add(*cand)
-                    rows.append(cand)
+        `d` instead of `d/2 + max/2`) -- this arm dies.
+
+        THE PARAMETER GRID IS THE TEST. An earlier version of this arm swept
+        drills 0.15/0.20/0.30 against clearances 0.10/0.20 and named that
+        second mutation in its own docstring while being UNABLE TO KILL IT:
+        with those numbers the ring term always dominated the max(), so the
+        drill half of the window was never load-bearing and could be corrupted
+        freely. An adversarial review found it, and the fix is not a new
+        assertion but a grid where each term binds in turn -- drills that
+        exceed every ring, rings that exceed every drill, and floors of zero.
+        Several seeds, because one seed is a sample of one."""
+        for seed in (620, 1, 7, 12345, 99991):
+            rng = random.Random(seed)
+            for trial in range(120):
+                # Ranges chosen so the drill term and the ring term each
+                # dominate the window in some trials, and neither always.
+                h2h = rng.choice((0.0, 0.05, 0.20, 0.30, 1.10))
+                clearance = rng.choice((0.0, 0.02, 0.10, 0.20, 0.90))
+                p = PendingVias(h2h, clearance)
+                rows = []
+                for _ in range(rng.randint(1, 25)):
+                    x = round(rng.uniform(-2.0, 3.0), 4)
+                    y = round(rng.uniform(-2.0, 3.0), 4)
+                    s = round(rng.choice((0.05, 0.25, 0.45, 1.20, 2.40)), 4)
+                    d = round(rng.choice((0.0, 0.05, 0.20, 1.10, 2.40)), 4)
+                    n = rng.randint(1, 3)
+                    b = rng.random() < 0.5
+                    cand = (x, y, s, d, n, b)
+                    got = p.verdict(*cand)[0]
+                    # Feed the brute force the SAME rows in the SAME order the
+                    # scan sees them (x-sorted). The window is what is under
+                    # test; iteration order is not, and at a zero floor two
+                    # rows can both sit inside the site tolerance, where first-
+                    # hit-wins would make an order difference look like a
+                    # window bug.
+                    want = _brute(list(p._rows), cand, h2h, clearance)
+                    self.assertEqual(got, want,
+                                     f'seed {seed} trial {trial}: broad phase '
+                                     f'disagrees with brute force at {cand} '
+                                     f'over {len(rows)} placed')
+                    if got == 'clear':
+                        p.add(*cand)
+                        rows.append(cand)
 
     def test_it_uses_math_hypot_not_numpy(self):
         """#786/#787 closed on the finding that numpy's hypot is not CPython's
@@ -611,8 +772,10 @@ def _brute(rows, cand, h2h, clearance, tol=1e-6, site_tol=0.001):
     best = None
     for (ox, oy, os_, od, onet, obulges) in rows:
         dist = math.hypot(ox - x, oy - y)
+        if onet == net and dist <= site_tol:
+            return 'twin'
         if dist <= site_tol:
-            return 'twin' if onet == net else 'conflict'
+            return 'conflict'
         if dist < d / 2 + od / 2 + h2h - tol:
             if best is None or dist < best:
                 best = dist

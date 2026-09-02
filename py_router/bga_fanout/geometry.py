@@ -306,30 +306,50 @@ class PendingVias:
     So two vias placed in one call were spaced against the board and against
     nothing else. This is the missing half.
 
-    WHAT IS TESTED, AND WHY IT IS NOT SYMMETRIC (measured, not assumed):
+    WHAT IS TESTED, AND WHY IT IS NOT SYMMETRIC:
 
     * **The drill, always.** The balls are SMD and carry no hole, so every hole
-      in the neighbourhood is one this pass is creating. A drill pair too close
-      is never a condition the board shipped.
-    * **The ring, only when a via BULGES past its pad.** ``clamp_via_to_pad``
-      shrinks a via-in-pad into its ball pad first, and a via that fits inside
-      its pad occupies no copper the pad did not already occupy -- so a ring
-      test on such a pair only restates the board's own ball-to-ball spacing,
-      and rejects escapes over a condition neither the fab nor ``check_drc``
-      would attribute to the fanout. When the pad is smaller than the deepest
-      fab rung's via, the clamp gives up and holds the floor via (status
-      ``'floor'``, which the pass already warns about because it "still bulges
-      past the pad edge"). That one really does add copper, and is tested.
+      in the neighbourhood is one this pass is creating: a drill pair too close
+      is never a condition the board shipped. It is also the arm with a LEVER --
+      a thinner drill can cure it (``thin_drill_to_clear``), and a hole pair
+      below the fab floor is not a DRC opinion but an unbuildable board.
+    * **The ring, only when a via BULGES past its pad** (clamp status
+      ``'floor'``: the ball pad is smaller than the deepest fab rung's via, so
+      ``clamp_via_to_pad`` gives up and holds the floor, which the pass already
+      warns "still bulges past the pad edge").
 
-      Swept over all 6565 physical (pitch, pad) combinations at clearances
-      0.10 / 0.15 / 0.20 / 0.25 / 0.30: of the pairs a ring test would reject
-      and the drill test would not, the ones whose own pads are NOT already
-      sub-clearance number 0 / 90 / 155 / 195 / 210 -- and **every one of them
-      is a bulging via** (clamp status ``'floor'``, 100% at every clearance).
-      That measurement is what the split above is for; an earlier draft of this
-      class tested the drill only and justified it with a claim -- "a clamped
-      via never adds copper" -- that is true of the clamp and false of the
-      floor case it silently included.
+      The reason is NOT that a fitting via's ring is free. Two things are true
+      at once and only the second is a justification:
+
+        - Ring-to-ring spacing for a via clamped into its pad EQUALS the
+          footprint's own pad-to-pad spacing, because both features sit at ball
+          centres and the via is no wider than the pad. So the fanout is asking
+          the fab for an etch pitch the footprint already demands. A bulging via
+          asks for a TIGHTER one, which the board's own geometry does not
+          demonstrate is achievable. That is the line the split is drawn on.
+        - It is NOT true that a fitting via adds no copper. A ball pad is
+          ``['F.Cu']``; the via spans F.Cu to B.Cu. On the inner layers and
+          B.Cu there is no pad under the ring at all, so at the same spacing
+          the copper IS new, and ``check_drc``'s VIA-VIA arm can legitimately
+          flag it. An earlier draft of this docstring called such a pair
+          "phantom" on the strength of the F.Cu picture, and an adversarial
+          review was right to refuse that.
+
+      There is also no lever on this arm: a via-in-pad site is the ball centre
+      by definition, and a bulging via is already at the deepest fab rung, so
+      neither moving nor shrinking is available. Refusing removes an escape and
+      nothing else. That is why the arm is narrow and why it is disclosed.
+
+      AN EARLIER DRAFT CITED A SWEEP HERE -- "of the ring-only rejections whose
+      pads are not already sub-clearance, 100% are bulging vias, at every
+      clearance" -- and presented it as the measurement the scope rested on.
+      **It is a tautology**, and is recorded here so nobody re-derives it and
+      believes it: a ring-only rejection needs ``pitch < via + clearance``, and
+      "pads not already sub-clearance" is ``pitch >= pad + clearance``; together
+      those give ``pad < via``, which IS the bulge condition. It holds for any
+      clamp function whatsoever. ``tests/test_620_pending_via_pairs.py`` now
+      pins it AS an identity, and measures the thing that is actually
+      contingent: what a bulge-blind ring arm would additionally reject.
 
     The ring arm is foreign-net only: same-net copper in contact is not a
     clearance violation. (``would_overlap_existing_via``'s board-facing test is
@@ -359,6 +379,31 @@ class PendingVias:
     def __len__(self):
         return len(self._xs)
 
+    def tighten(self, x, y, size, drill):
+        """Shrink the via recorded at (x, y) to `size`/`drill`.
+
+        The twin merge keeps ONE via for two routes, and which one it keeps was
+        whichever arrived first -- so two coincident same-net pads of 0.25 and
+        0.60 gave a 0.45 via when the big pad went first, bulging past the
+        small pad and re-creating exactly the #202 violation
+        ``clamp_via_to_pad`` exists to prevent. An adversarial review found it.
+        The surviving via must be the TIGHTER pad's clamp, so the caller
+        tightens on a twin hit. Returns True if anything changed.
+
+        `_max_drill`/`_max_size` are deliberately NOT lowered here: they only
+        size the broad-phase window, and leaving them high makes the window
+        wider than needed, which cannot miss a conflict. Recomputing them would
+        be the only way to make them wrong.
+        """
+        for i, (ox, oy, os_, od, onet, ob) in enumerate(self._rows):
+            if ox == x and oy == y:
+                if size < os_ - 1e-12 or drill < od - 1e-12:
+                    self._rows[i] = (ox, oy, min(size, os_), min(drill, od),
+                                     onet, ob)
+                    return True
+                return False
+        return False
+
     def add(self, x, y, size, drill, net_id, bulges=False):
         """Record a via this call has committed."""
         d = drill or 0.0
@@ -371,23 +416,37 @@ class PendingVias:
         if s > self._max_size:
             self._max_size = s
 
-    def verdict(self, x, y, size, drill, net_id, bulges=False, tol=1e-6):
+    def verdict(self, x, y, size, drill, net_id, bulges=False, tol=1e-6,
+                anchor_tol=None):
         """How a candidate at (x, y) relates to what this call already placed.
+
+        ``anchor_tol`` is the candidate BALL's own anchor radius -- the same
+        ``max(size_x, size_y) / 2 + 0.01`` the downstream ball-anchor test
+        (``_has_copper``) uses to decide whether a via connects a ball. Default
+        ``site_tol`` (1 um) if not given.
 
         Returns ``(verdict, detail)``:
 
         ``('clear', None)``
             nothing committed so far is in the way.
-        ``('twin', (x, y))``
-            the SAME net already has a via at this exact site. The two routes
-            want ONE physical hole, not two -- an exposed pad modelled as an
-            F.Cu + B.Cu pair puts two routes at one coordinate (5 of this
-            repo's 22 boards do it; ``interf_u`` BUS1 has 31 such sites on one
-            component). Distance 0 is below every threshold, so a plain spacing
-            test makes twins refuse each other and takes their net with them,
-            while the honest answer -- one via serving both routes -- is
-            strictly better than today's, which appends a second identical dict
-            that the writer emits as a second ``(via ...)`` at the same point.
+        ``('twin', (x, y, size, drill))``
+            the SAME net already has a via INSIDE this ball's pad, so that via
+            already connects this ball and a second hole would buy nothing. Two
+            routes, one physical hole. An exposed pad modelled as an F.Cu +
+            B.Cu pair puts two routes at one coordinate (5 of this repo's 22
+            boards do it; ``interf_u`` BUS1 has 31 such sites on one
+            component), and distance 0 is below every threshold, so a plain
+            spacing test makes twins refuse each other and takes their net with
+            them -- while one via serving both routes is strictly better than
+            today's, which appends a second identical dict that the writer
+            emits as a second ``(via ...)`` at the same point.
+
+            KEYED ON THE ANCHOR RADIUS, NOT ON AN EXACT MATCH. An exact-match
+            rule has a 1 um cliff: an adversarial review found same-net sites
+            0.0010mm apart merging into one via while 0.0011mm apart DROPPED an
+            escape outright, because no fab rung can space two holes 1.1 um
+            apart. Anything inside the ball's own pad is a via that anchors it,
+            which is the question actually being asked.
         ``('conflict', (reason, x, y))``
             that via is closer than a floor allows. A DIFFERENT net at the same
             site lands here, not in ``'twin'``: two nets sharing one hole is a
@@ -395,18 +454,21 @@ class PendingVias:
         """
         d = drill or 0.0
         s = size or 0.0
+        atol = self._tol if anchor_tol is None else max(anchor_tol, self._tol)
         # Broad phase: nothing outside this x-window can be within either floor
-        # of the candidate, whatever its y.
+        # of the candidate, whatever its y. `atol` is in it because a twin can
+        # sit further out than either floor when the pad is large.
         window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,
-                     s / 2.0 + self._max_size / 2.0 + self._clearance)
+                     s / 2.0 + self._max_size / 2.0 + self._clearance,
+                     atol)
         lo = bisect.bisect_left(self._xs, x - window)
         hi = bisect.bisect_right(self._xs, x + window)
         best = None
         for (ox, oy, os_, od, onet, obulges) in self._rows[lo:hi]:
             dist = math.hypot(ox - x, oy - y)
+            if onet == net_id and dist <= atol:
+                return 'twin', (ox, oy, os_, od)
             if dist <= self._tol:
-                if onet == net_id:
-                    return 'twin', (ox, oy)
                 return 'conflict', ("two nets would share one hole", ox, oy)
             need = d / 2.0 + od / 2.0 + self._h2h
             if dist < need - tol:

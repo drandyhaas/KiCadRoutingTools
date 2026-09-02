@@ -665,12 +665,23 @@ def manage_vias(
     #620 contributor measured as pure loss, and their measurement is why this
     has a ladder and a same-site rule at all.
 
-    RESIDUAL, named rather than hidden: a conflict is resolved against the vias
-    committed SO FAR, while the two whole-net drops that run after this
-    function returns (`esc_dropped`, and the via-vs-foreign-track pass) can
-    later delete a via a refusal was measured against. Twins are immune -- same
-    net, dropped together -- but a distinct-pair loser is not recoverable once
-    its tracks are gone.
+    THREE RESIDUALS, named rather than hidden. An adversarial review found the
+    second and third; all are deterministic, none is a correctness bug, and
+    each costs escapes in a case no in-repo board reaches.
+
+    1. A conflict is resolved against the vias committed SO FAR, while the two
+       whole-net drops that run after this function returns (`esc_dropped`, and
+       the via-vs-foreign-track pass) can later delete a via a refusal was
+       measured against. Twins are immune -- same net, dropped together -- but
+       a distinct-pair loser is not recoverable once its tracks are gone.
+    2. The loser of a conflict is whichever route arrives LATER, with no
+       tiebreak. Route order is a deterministic list order, so the output is
+       reproducible, but it is not escape-maximising: three balls in a row at
+       0.30mm pitch keep 2 escapes in four of six route permutations and 1 in
+       the two that place the middle ball first.
+    3. A refusal costs the net's WHOLE fanout, not the one ball, because the
+       caller drops every route of a blocked net (the #508 coherence rule at
+       this function's call site). The disclosure below says so.
 
     `via_in_pad_conflict`'s drill floor was the OTHER gap here -- priced at
     the flat `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the
@@ -939,8 +950,13 @@ def manage_vias(
                 # Placed AFTER them so the board keeps its present precedence
                 # -- this only decides among sites THIS call is creating.
                 _bulges = status == 'floor'
+                # The candidate ball's anchor radius, spelled the way the
+                # downstream ball-anchor test spells it (`_has_copper`): a via
+                # this far in is a via that connects this ball.
+                _atol = max(route.pad.size_x, route.pad.size_y) / 2 + 0.01
                 _v, _detail = _pending.verdict(pad_x, pad_y, v_size, v_drill,
-                                               route.net_id, _bulges)
+                                               route.net_id, _bulges,
+                                               anchor_tol=_atol)
                 if _v == 'twin':
                     # Two routes, one physical hole. Both keep their tracks and
                     # both anchor to the via already committed here: the ball-
@@ -948,6 +964,22 @@ def manage_vias(
                     # inside the pad, and this is that via. Today's code
                     # appends a second identical dict and the writer, which
                     # does not dedupe, emits both as stacked copper.
+                    #
+                    # The SURVIVOR must be the tighter pad's clamp. Which via
+                    # survived used to be whichever route arrived first, so two
+                    # coincident same-net pads of 0.25 and 0.60 kept a 0.45 via
+                    # bulging past the 0.25 pad -- the #202 violation
+                    # `clamp_via_to_pad` exists to prevent, re-created by the
+                    # merge. Tighten instead.
+                    _tx, _ty, _ts, _td = _detail
+                    if _pending.tighten(_tx, _ty, v_size, v_drill):
+                        for _v_dict in vias_to_add:
+                            if (_v_dict['x'] == _tx and _v_dict['y'] == _ty
+                                    and _v_dict['net_id'] == route.net_id):
+                                _v_dict['size'] = min(_v_dict['size'], v_size)
+                                _v_dict['drill'] = min(_v_dict['drill'],
+                                                       v_drill)
+                                break
                     _twin_shared += 1
                     continue
                 if _v == 'conflict':
@@ -959,7 +991,7 @@ def manage_vias(
                         v_drill, floors, rung,
                         lambda cand: _pending.verdict(
                             pad_x, pad_y, v_size, cand, route.net_id,
-                            _bulges)[0] == 'clear')
+                            _bulges, anchor_tol=_atol)[0] == 'clear')
                     if _thin is None:
                         via_blocked_routes.append(route)
                         _pending_refused.append(
@@ -1024,10 +1056,13 @@ def manage_vias(
         print(f"  #620: {_twin_shared} coincident same-net site(s) share one "
               f"via instead of stacking two")
     if _thinned:
+        # The SET of drills, not min(): several rungs can be used in one run
+        # and "thinned to 0.15mm" would misdescribe a via thinned to 0.17.
+        _to = ', '.join(f"{d:g}" for d in sorted({t[1] for t in _thinned}))
         warn_fab_escalation(
-            f"{len(_thinned)} via-in-pad drill(s) thinned to "
-            f"{min(t[1] for t in _thinned):g}mm to hold the {_h2h:g}mm "
-            f"hole-to-hole floor ({_h2h_src}) against this run's own vias")
+            f"{len(_thinned)} via-in-pad drill(s) thinned to {_to}mm to hold "
+            f"the {_h2h:g}mm hole-to-hole floor ({_h2h_src}) against this "
+            f"run's own vias")
     if _pending_refused:
         _names = sorted({n for n, _r in _pending_refused})
         _reasons = sorted({r for _n, r in _pending_refused})
@@ -1037,6 +1072,12 @@ def manage_vias(
               f"is thin enough ({'; '.join(_reasons)}); retry with "
               f"--escape-method underpad, a smaller --via-drill, or a fab tier "
               f"whose floor this pitch can meet: {', '.join(_names)}")
+        # The caller drops the whole NET of a blocked route (#508 coherence:
+        # `blocked_net_ids` removes every route of that net plus its tracks),
+        # so one refused ball costs its net's entire fanout. Named here
+        # because the count above reads like a per-ball cost and is not.
+        print(f"           each of those nets loses its WHOLE fanout, not "
+              f"just the refused ball ({len(_names)} net(s))")
     if vias_to_remove:
         print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
     if via_blocked_routes:
