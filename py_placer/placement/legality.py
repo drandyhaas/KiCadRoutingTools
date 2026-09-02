@@ -45,6 +45,12 @@ EPS = 1e-6
 CONTAINER_RATIO = 0.5
 
 BOTH_SIDES = frozenset(('F', 'B'))
+# #834: interned so `PartPads.pad_sides` allocates none of these per part --
+# `pair_shortfall` intersects them in `quench.candidate_valid`'s inner loop,
+# and a board contributes a few hundred parts.
+FRONT_ONLY = frozenset(('F',))
+BACK_ONLY = frozenset(('B',))
+NO_SIDES = frozenset()
 
 
 # --- rect primitives ---------------------------------------------------------
@@ -1904,7 +1910,8 @@ class PartPads:
     __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
                  'holes_local', 'holes_extent', 'n_pads', '_pad_cache',
                  '_hole_cache', '_keepout_cache', '_ext_cache', 'pad_floors',
-                 'max_floor', 'clearance', 'hole_reach', 'holes_req')
+                 'max_floor', 'clearance', 'hole_reach', 'holes_req',
+                 'pad_sides', '_ext_side_cache')
 
     def __init__(self, fp, clearance: float, model=None,
                  copper_holes: bool = True, npth_floor: float = None):
@@ -2046,8 +2053,20 @@ class PartPads:
                 continue
             copper = [l for l in p.layers if str(l).endswith('.Cu')]
             through = (p.drill or 0) > 0
-            pside = None if through else (
-                'B' if any(str(l).startswith('B') for l in copper) else 'F')
+            # #834: a pad on BOTH faces reads as through, not as back-only.
+            # An SMD pad listed on `*.Cu` (or explicitly on F.Cu and B.Cu) is
+            # not drilled, so the old expression fell to its `'B'` arm and
+            # declared the F copper away. That was harmless while the
+            # over-cap branch ignored sides entirely; once `pair_shortfall`
+            # SKIPS a pair whose pad sides are disjoint, it becomes a false
+            # ACCEPT -- which this module's contract forbids outright (see the
+            # class docstring: it may falsely reject, never falsely accept).
+            # Measured a no-op on the corpus: zero such pads on any of the 22
+            # tracked boards, so this is hardening, not a behaviour change.
+            _b = any(str(l).startswith('B') for l in copper)
+            _f = any(not str(l).startswith('B') for l in copper)
+            pside = (None if (through or (_b and _f))
+                     else ('B' if _b else 'F'))
             tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
             c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
             hx, hy = p.size_x / 2.0, p.size_y / 2.0
@@ -2083,10 +2102,28 @@ class PartPads:
             over = (_kr + self.clearance) - _er
             if over > self.hole_reach:
                 self.hole_reach = over
+        # #834: the board sides this part's COPPER PADS occupy -- a through
+        # pad (`pside is None`) occupies both. Deliberately NOT
+        # `sides_occupied(self.side, self.has_tht)`, which answers the BODY
+        # question and is always a superset: glasgow_revC's J5 has pads on F
+        # only but two NPTH holes, so its body occupies both faces, and
+        # pricing pad clearance at the body's answer would make this fix inert
+        # on the one over-cap part in the corpus that carries holes.
+        _sides = set()
+        for _t in self.pads_local:
+            if _t[5] is None:
+                _sides = BOTH_SIDES
+                break
+            _sides.add(_t[5])
+        self.pad_sides = (BOTH_SIDES if _sides is BOTH_SIDES else
+                          FRONT_ONLY if _sides == {'F'} else
+                          BACK_ONLY if _sides == {'B'} else
+                          BOTH_SIDES if _sides else NO_SIDES)
         self._pad_cache: Dict[float, list] = {}
         self._hole_cache: Dict[float, list] = {}
         self._keepout_cache: Dict[float, list] = {}
         self._ext_cache: Dict[float, Tuple[float, float, float, float]] = {}
+        self._ext_side_cache: Dict[Tuple[float, str], tuple] = {}
 
     def _delta_key(self, rot: float) -> float:
         return round(((rot or 0.0) - self.seed_rot) % 360, 3)
@@ -2189,6 +2226,52 @@ class PartPads:
 
     def extent(self, x: float, y: float, rot: float):
         e = self.extent_local(rot)
+        if e is None:
+            return None
+        return (x + e[0], y + e[1], x + e[2], y + e[3])
+
+    def extent_local_side(self, rot: float, side: str):
+        """`extent_local`, restricted to the pads that occupy `side` (#834).
+
+        The over-cap branch of `pair_shortfall` grades a pair on the gap
+        between EXTENT boxes, and a whole-part extent spans both faces -- so a
+        BGA on F was charged for a part on B whenever the pad-pair product
+        crossed `PAIR_TEST_CAP`, and only then. This is the same box, built
+        over the pads that `_sides_interact` would have admitted.
+
+        Holes go into BOTH sides' boxes: a drill removes copper on every
+        layer, so it is not a side's to exclude. That also makes this box
+        equal to `extent_local` for a part whose pads all occupy one side --
+        which is why no same-side pair can move (measured: every one of the 35
+        same-side over-cap pairs on the tracked corpus, at four rotations, is
+        bit-identical).
+
+        `holes_extent` is rotated INLINE here for the same reason
+        `extent_local` does it: `hole_circles()` serves `holes_local`, the
+        keep-OUT radii, and substituting them would inflate every extent on
+        every board.
+        """
+        key = (self._delta_key(rot), side)
+        ext = self._ext_side_cache.get(key)
+        if ext is None:
+            xs0, ys0, xs1, ys1 = [], [], [], []
+            for ox, oy, HX, HY, _n, _s in self._rotated(rot):
+                if not _sides_interact(_s, side):
+                    continue
+                xs0.append(ox - HX); ys0.append(oy - HY)
+                xs1.append(ox + HX); ys1.append(oy + HY)
+            rad = math.radians(-key[0])
+            hc, hs = math.cos(rad), math.sin(rad)
+            for ox, oy, r in self.holes_extent:
+                cx, cy = ox * hc - oy * hs, ox * hs + oy * hc
+                xs0.append(cx - r); ys0.append(cy - r)
+                xs1.append(cx + r); ys1.append(cy + r)
+            ext = () if not xs0 else (min(xs0), min(ys0), max(xs1), max(ys1))
+            self._ext_side_cache[key] = ext
+        return ext or None
+
+    def extent_side(self, x: float, y: float, rot: float, side: str):
+        e = self.extent_local_side(rot, side)
         if e is None:
             return None
         return (x + e[0], y + e[1], x + e[2], y + e[3])
@@ -2327,6 +2410,40 @@ class LegalityContext:
             return ZERO_SHORTFALL
         rects_a = pa.pad_rects(xa, ya, ra)
         rects_b = pb.pad_rects(xb, yb, rb)
+        # #834: two parts whose pads share no copper face cannot interact
+        # through the PAD channel at all, so answer it here rather than in
+        # either branch below.
+        #
+        # This is EXACT, not conservative, which is what licenses it without
+        # an EPS. `_sides_interact(a, b)` is `a is None or b is None or
+        # a == b`, and a member of `pad_sides` is never None, so: if some pad
+        # pair passes that filter then either one side is None (and that pad
+        # contributes BOTH sides) or the two are equal -- either way the sets
+        # intersect; and if a side s is in both sets then each part has a pad
+        # with pside in {None, s}, which `_sides_interact` admits. Disjoint
+        # therefore holds if and only if the per-pad sweep below would find
+        # zero interacting pairs, so this returns exactly what it returns.
+        #
+        # Placed AFTER the broad-phase early-out and after the rect lists so
+        # only pairs that were about to run the O(n*m) loop pay for the
+        # intersection -- measured on ulx3s, ~0.14us against 310us for one
+        # 778-pad-pair sweep it replaces.
+        #
+        # The HOLE channel is still measured: `reach` above includes
+        # `hole_reach`, so a cross-side pair that interacts ONLY through a
+        # drill survives the broad phase and lands here, and an NPTH hole
+        # pierces both faces (see `footprint_has_through_pads`). Returning a
+        # blanket ZERO_SHORTFALL here would delete #761's channel for exactly
+        # those pairs. The singleton is returned only when neither part has a
+        # hole, where `_hole_shortfall` is 0.0 by construction -- and that is
+        # worth doing, because `pads_ok` short-circuits on its IDENTITY.
+        if not (pa.pad_sides & pb.pad_sides):
+            if not pa.holes_local and not pb.holes_local:
+                return ZERO_SHORTFALL
+            return PairShortfall(0.0, False,
+                                 _hole_shortfall(pa, xa, ya, ra, rects_b,
+                                                 pb, xb, yb, rb, rects_a),
+                                 False)
         if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
             # Extent-level verdict for the PAD channel only: charge the extent
             # shortfall as pad shortfall so the baseline comparison still
@@ -2344,7 +2461,38 @@ class LegalityContext:
             # fire for exactly the dense connectors that carry mounting holes,
             # and that is corpus-reachable, not theoretical: J5 is the one part
             # on the 22 tracked boards whose product exceeds the cap.
-            g = rect_gap(ea, eb)
+            #
+            # ...which was wrong, and is corrected here (#834): 38 pairs on
+            # NINE of those boards exceed the cap, and J5 is not even the only
+            # over-cap part on glasgow (U1 x U30 is 83 x 121). The hole
+            # argument above still holds -- J5 remains the only over-cap part
+            # that CARRIES holes, which is what that paragraph is really
+            # about. Re-derive both with
+            # `tests/measure_834_835_side_awareness.py --table A`.
+            #
+            # The gap is taken PER SHARED SIDE, because the extent boxes above
+            # span both faces and a pair reaching this branch may share only
+            # one. Charging the whole-extent gap here priced a part on B
+            # against a BGA on F -- the same pair the per-pad sweep below
+            # discards on `_sides_interact` -- so the verdict turned on the
+            # pad-pair PRODUCT, a performance switch, rather than on physics.
+            # `min` because the pair interacts on whichever shared face brings
+            # them closest; `default` because a bare `min()` over an empty
+            # generator raises inside `quench.candidate_valid`'s inner loop,
+            # and "the disjoint case already returned above" is exactly the
+            # kind of unreachability that ships as a crash.
+            #
+            # `pad_overlap` and `stack` follow the same g. `stack` becoming
+            # side-aware is the correction, not a side effect: the per-pad
+            # sweep below sets it only AFTER `_sides_interact`, and
+            # `render_placement` already prints front-to-back overlaps as
+            # "opposite faces, NOT a conflict" while this branch refused them.
+            g = min((rect_gap(pa.extent_side(xa, ya, ra, s),
+                              pb.extent_side(xb, yb, rb, s))
+                     for s in ('F', 'B')
+                     if pa.extent_side(xa, ya, ra, s) is not None
+                     and pb.extent_side(xb, yb, rb, s) is not None),
+                    default=rect_gap(ea, eb))
             return PairShortfall(max(0.0, pad_reach - g), g < 0.0,
                                  _hole_shortfall(pa, xa, ya, ra, rects_b,
                                                  pb, xb, yb, rb, rects_a),
