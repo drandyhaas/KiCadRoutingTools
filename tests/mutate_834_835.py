@@ -199,8 +199,10 @@ ROWS = [
      'SURVIVED'),
 
     ('the-sides-map-is-not-threaded-into-the-ledger', 'esc',
-     """                       sides=sides, containers=containers)""",
-     """                       sides=None, containers=containers)""",
+     """                       sides=sides, containers=containers,
+                       obstruction_rects=orects)""",
+     """                       sides=None, containers=containers,
+                       obstruction_rects=orects)""",
      (T835,),
      # Inert by construction: `part_escape` builds its own map when given
      # None. Recorded so that if the fallback is ever removed -- making the
@@ -267,8 +269,8 @@ ROWS = [
      (T835,), 'KILLED'),
 
     ('routability-stops-exempting-containers', 'rou',
-     """                 and g.ref not in _containers]""",
-     """                 and g.ref not in ()]""",
+     """                 and g.ref not in _containers and g.ref in _geom]""",
+     """                 and g.ref not in () and g.ref in _geom]""",
      (T835,),
      # Expected SURVIVED on the reasoning that only `escape` is asserted on;
      # measured KILLED, because `test_face_lane_ledger_side_test_is_symmetric`
