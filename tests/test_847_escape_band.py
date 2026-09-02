@@ -308,6 +308,64 @@ def the_cli_can_reach_the_band():
               a.get('min_demand') == 7, a.get('min_demand'))
 
 
+# --------------------------------------- a true positive a clean clone can run
+
+def the_gate_has_a_tracked_true_positive():
+    """#847's headline loss, closed on TRACKED boards.
+
+    The issue's complaint is that `check_channels --gate` has no known true
+    positive on the copper instrument, and that the one fixture it had lives
+    in gitignored `wk/` -- so a clean clone skips it and CI has never executed
+    the assertion either way.
+
+    `tests/fixtures/run23/tigard_{damaged,placed}.kicad_pcb` are TRACKED, and
+    under the share predicate the damaged board fails the gate at the SHIPPED
+    band while the undamaged one against itself does not. That is the whole
+    property, on boards anyone gets from a checkout.
+
+    Worth knowing why this was not available before: under the shipped
+    predicate this pair reports `0 now, 0 on the baseline, 0 NEW` and exit 0.
+    Nothing about it is new geometry -- U3's east face was already falling
+    27 -> 13 lanes against a demand of 9. No predicate could see it.
+    """
+    print('the gate has a true positive a clean clone can run')
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import run_utils
+    from run_utils import check as run_check
+
+    tool = run_utils.tool('check_channels.py')
+    fix = os.path.join(ROOT, 'tests', 'fixtures', 'run23')
+    dmg = run_utils.evidence(os.path.join(fix, 'tigard_damaged.kicad_pcb'),
+                             'the damaged fixture')
+    ok = run_utils.evidence(os.path.join(fix, 'tigard_placed.kicad_pcb'),
+                            'the undamaged fixture')
+
+    # code=4 AND the reason. A bare non-zero cannot tell "the gate fired" from
+    # "the CLI died before parsing its arguments", and this repo has shipped
+    # exactly that mistake.
+    r = run_check([sys.executable, '-X', 'utf8', tool, dmg,
+                   '--baseline', ok, '--gate'], code=4, refuse='NEW')
+    check('a tracked damaged board fails the gate at the shipped band',
+          True)
+    check('...on U3 east, the face that lost the escape',
+          'U3 E' in r.stdout and '27 -> 13' in r.stdout, r.stdout[-400:])
+    check('...via the SHARE form, since supply never reached zero',
+          'of its escape' in r.stdout
+          and '0 now, 0 on the baseline' in r.stdout, r.stdout[-400:])
+
+    run_check([sys.executable, '-X', 'utf8', tool, ok,
+               '--baseline', ok, '--gate'], accept=True)
+    check('...while the undamaged board against itself does not', True)
+
+    # And the negative control that matters most: turning the predicate off
+    # must restore the old verdict, which is what says the SHARE form is what
+    # catches this rather than something else that changed along the way.
+    run_check([sys.executable, '-X', 'utf8', tool, dmg, '--baseline', ok,
+               '--gate', '--min-supply-drop', '0'], accept=True)
+    check('...and with --min-supply-drop 0 the gate goes quiet again, which '
+          'is what makes the share form the cause', True)
+
+
 def main():
     the_arithmetic()
     print()
@@ -318,6 +376,8 @@ def main():
     where_the_floor_decides()
     print()
     the_cli_can_reach_the_band()
+    print()
+    the_gate_has_a_tracked_true_positive()
     print()
     if FAILURES:
         print(f'FAIL: {len(FAILURES)} check(s): {", ".join(FAILURES)}')
