@@ -128,10 +128,29 @@ def _fanout(pcb, ref, net_filter=None, layer=None, vip=False):
 
 def _erased(pcb, ref):
     """The sets the ENGINE erased on the run that just happened."""
-    return qfn_fanout.LAST_ERASED_SETS
+    return getattr(qfn_fanout, 'LAST_ERASED_SETS', {})
 
 
-def _pairs(pcb, tracks):
+def _fanned(pcb, ref):
+    """The net-id set `nets_to_route` erased, from the engine where it can be.
+
+    On a build that does NOT publish `LAST_ERASED_SETS` -- i.e. the RED arm,
+    with this fix reverted -- fall back to the footprint's own nets. That
+    fallback is a SUPERSET of `fanned_nets` (it keeps net 0, `unconnected-*`
+    and `center` pads that `pad_infos` drops), so it can only over-count. That
+    is the right direction for a RED arm, where the expectation is zero, and it
+    is never used on the GREEN arm. Without this the whole file dies on an
+    AttributeError, which reports a BROKEN TEST as though it were a satisfied
+    guard -- the exact failure mode CLAUDE.md's `run_utils.check` exists to
+    prevent.
+    """
+    got = getattr(qfn_fanout, 'LAST_ERASED_SETS', {}).get('nets')
+    if got is not None:
+        return got
+    return {p.net_id for p in pcb.footprints[ref].pads if p.net_id}
+
+
+def _pairs(pcb, tracks, ref=None):
     """Emitted stubs inside the floor of erased copper on a DIFFERENT net.
 
     Graded with check_drc's own predicates, so this cannot drift away from what
@@ -139,7 +158,8 @@ def _pairs(pcb, tracks):
     """
     from check_drc import check_via_segment_overlap, check_pad_segment_overlap
     from geometry_utils import segment_to_segment_distance
-    fanned = qfn_fanout.LAST_ERASED_SETS.get('nets') or set()
+    fanned = _fanned(pcb, ref) if ref else (
+        getattr(qfn_fanout, 'LAST_ERASED_SETS', {}).get('nets') or set())
     cu = list(pcb.board_info.copper_layers or [])
     nv = ns = npd = 0
     for t in tracks:
@@ -182,6 +202,12 @@ def test_erasure_injection_and_control():
     nid_b = next(n for n, net in pcb.nets.items() if net.name == b)
 
     tracks, vias, dropped = _fanout(pcb, "U3", [a, b])
+    check("the engine publishes LAST_ERASED_SETS, so every check below grades "
+          "against the set `nets_to_route` actually erased rather than a proxy "
+          "for it (absent = this file falls back to a superset and says so, "
+          "instead of dying on an AttributeError and reporting a broken test "
+          "as a satisfied guard)",
+          getattr(qfn_fanout, 'LAST_ERASED_SETS', {}).get('nets') is not None)
     check("baseline: both nets escape, nothing dropped",
           (len(tracks), len(vias), sorted(dropped)) == (2, 2, []),
           f"{len(tracks)}/{len(vias)}/{sorted(dropped)}")
@@ -216,7 +242,7 @@ def test_erasure_injection_and_control():
 
     # -- 2. OUTCOME + counter-guard.
     t2, v2, d2 = _fanout(p2, "U3", [a, b])
-    nv, ns, npd = _pairs(p2, t2)
+    nv, ns, npd = _pairs(p2, t2, "U3")
     check("no emitted stub is inside the injected via's clearance floor",
           (nv, ns, npd) == (0, 0, 0), f"via/seg/pad = {nv}/{ns}/{npd}")
     check(f"counter-guard: net A ({a}) is DROPPED, not silently re-routed -- "
@@ -278,7 +304,7 @@ def test_halves_are_independent_and_not_additive():
         pcb = parse_kicad_pcb(U2BOARD)
         tracks, vias, dropped = _fanout(pcb, "U2")
         got = (len(tracks), len(vias), len(dropped))
-        gp = _pairs(pcb, tracks)
+        gp = _pairs(pcb, tracks, "U2")
         check(f"arm={arm:8}: tally {expect}", got == expect, f"got {got}")
         check(f"arm={arm:8}: residual via/seg/pad = "
               f"{pairs[0]}/{pairs[1]}/{pairs[2]}",
@@ -298,7 +324,7 @@ def test_measured_boards():
         pcb = parse_kicad_pcb(board)
         tracks, vias, dropped = _fanout(pcb, ref)
         got = (len(tracks), len(vias), len(dropped))
-        gp = _pairs(pcb, tracks)
+        gp = _pairs(pcb, tracks, ref)
         name = os.path.basename(board).replace('.kicad_pcb', '')
         check(f"{name} {ref}: no emitted stub sits inside erased copper's "
               f"floor (was via/seg/pad {pre[0]}/{pre[1]}/{pre[2]} pre-fix)",
