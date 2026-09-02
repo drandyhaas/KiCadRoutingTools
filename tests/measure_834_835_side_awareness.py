@@ -21,6 +21,14 @@ Three tables:
      face, and charges from a neighbour that CONTAINS the escaping part.
   C  the per-board deficit-parts/worst pair that `docs/placement-predictors.md`
      tabulates, so that table can be re-derived rather than hand-edited.
+  D  the three-rectangle census (#841): both lane ledgers under each of the
+     three boxes the tree contains for a neighbour -- the bbox of pad CENTRES
+     (`escape._part_rect`, what escape charged), the pad COPPER box
+     (`legality.part_copper_geometry`, what both charge now) and the COURTYARD
+     (`GradedPart.rect`, what `face_lane_ledger` charged). This is what makes
+     the #841 decision RE-DERIVABLE: before it, the argument for one rect over
+     another lived in two code comments that disagreed with each other.
+     Not in the default `--table ABC`: it runs each ledger three times.
 
 NOT named `test_*.py`: `tests/run_all.py` does not collect it. It asserts
 nothing, and table B runs the full escape ledger on every corpus board (minutes).
@@ -171,6 +179,84 @@ def table_b(path):
             'cross_side_witnesses': witnesses}
 
 
+#: The three boxes the tree contains for "what does a neighbour contribute".
+#: Named here rather than inline so the census and the prose cannot drift.
+RECTS = ('centres', 'copper', 'courtyard')
+
+
+def _rect_maps(pcb, path):
+    """{kind: {ref: rect}} for the three candidate obstruction rectangles."""
+    from placement.legality import (graded_parts_from_file,
+                                    part_copper_geometry)
+    geom = part_copper_geometry(pcb.footprints or {}, CLEARANCE)
+    return {
+        'centres': {r: E._part_rect(f)
+                    for r, f in (pcb.footprints or {}).items() if f.pads},
+        'copper': {r: g.rect for r, g in geom.items()},
+        'courtyard': {g.ref: g.rect for g in graded_parts_from_file(pcb, path)},
+    }
+
+
+def table_d(path):
+    """Both lane ledgers under each of the three neighbour rectangles (#841).
+
+    The rect is swapped by substitution INSIDE the shared kernel, so the only
+    thing that varies is which box a neighbour contributes -- the escaping
+    part's own geometry is held. #841's verification section is explicit that
+    swapping both at once reports the change in the opposite direction, and
+    that is how it was first mis-measured.
+
+    So the `centres` column is NOT "the ledger before #841": the subject rect
+    stays at the pad-copper box in every arm, which is why tigard reads 37 here
+    and 41 in a pre-#841 run. Read the columns against EACH OTHER, which is the
+    comparison the decision rests on, not against a historical number.
+
+    The DEMAND pair is printed for the same reason it is asserted in
+    `tests/test_835_escape_side_aware.py`: demand and interior pads are
+    properties of the escaping part's own pad lattice, so they must be
+    IDENTICAL down each row. A column where they move is a run in which the
+    subject geometry leaked into the neighbour arm, and every deficit above it
+    is then measuring two things at once.
+
+    A ref with no rect of a given kind is DROPPED for that arm and counted, not
+    silently skipped: the courtyard arm carries every footprint, the copper and
+    centre arms carry only those with pads, and the difference is exactly each
+    board's `synthetic` set.
+    """
+    from placement import routability as R
+    pcb = parse_kicad_pcb(path)
+    maps = _rect_maps(pcb, path)
+    refs = E.fine_pitch_parts(pcb)
+    real = E.span_eaten
+    out = {}
+    for kind in RECTS:
+        rects = maps[kind]
+        def swap(lo, hi, band, horizontal, obstacles, _r=rects):
+            return real(lo, hi, band, horizontal,
+                        [(ref, _r[ref]) for ref, _x in obstacles if ref in _r])
+        E.span_eaten = swap
+        try:
+            led = E.escape_ledger(pcb, pcb_file=path)
+            tot = deficit_totals(led)
+            fine = 0
+            for ref in refs:
+                for row in R.face_lane_ledger(pcb, ref, clearance=CLEARANCE,
+                                              track_width=CLEARANCE,
+                                              grid_step=0.05, pcb_file=path):
+                    fine += row['deficit_finest_grid']
+        finally:
+            E.span_eaten = real
+        out[kind] = {
+            'escape_lanes': tot['lanes'],
+            'escape_parts': tot['parts'],
+            'lane_ledger_deficit_finest': fine,
+            'rects': len(rects),
+            'demand': sum(f.demand for p in led for f in p.faces),
+            'interior_pads': sum(p.interior_pads for p in led),
+        }
+    return out
+
+
 def table_c(path):
     """`docs/placement-predictors.md`'s deficit-parts / worst pair."""
     pcb = parse_kicad_pcb(path)
@@ -193,6 +279,8 @@ def measure(paths, tables):
                 row['B'] = table_b(path)
             if 'C' in tables:
                 row['C'] = table_c(path)
+            if 'D' in tables:
+                row['D'] = table_d(path)
         except Exception as exc:                             # noqa: BLE001
             row['error'] = '{}: {}'.format(type(exc).__name__, exc)
         out['boards'][name] = row
@@ -244,6 +332,35 @@ def report(doc, tables):
             if c:
                 print('   {:<34} {} / {}'.format(
                     name, c['deficit_parts'], c['worst_deficit']))
+    if 'D' in tables:
+        print()
+        print('TABLE D -- the three neighbour rectangles (#841)')
+        print('   escape deficit lanes | face_lane_ledger deficit at the '
+              'finest grid')
+        print('{:<34} {:>21} {:>21} {:>21}'.format(
+            'board', 'pad CENTRES', 'pad COPPER (now)', 'COURTYARD'))
+        for name, row in sorted(doc['boards'].items()):
+            d = row.get('D')
+            if not d:
+                continue
+            cells = []
+            for kind in RECTS:
+                k = d[kind]
+                cells.append('{:>9} | {:<9}'.format(
+                    k['escape_lanes'], k['lane_ledger_deficit_finest']))
+            print('{:<34} {:>21} {:>21} {:>21}'.format(name, *cells))
+        print()
+        print('   DEMAND must not move with the rect -- it is a netlist fact.')
+        print('{:<34} {:>21} {:>21} {:>21}'.format(
+            'board', 'demand/interior', 'demand/interior', 'demand/interior'))
+        for name, row in sorted(doc['boards'].items()):
+            d = row.get('D')
+            if not d:
+                continue
+            cells = ['{:>9}/{:<9}'.format(d[k]['demand'],
+                                          d[k]['interior_pads'])
+                     for k in RECTS]
+            print('{:<34} {:>21} {:>21} {:>21}'.format(name, *cells))
     for name, row in sorted(doc['boards'].items()):
         if 'error' in row:
             print('   ERROR {:<30} {}'.format(name, row['error']))
@@ -327,7 +444,7 @@ def main():
         if not paths:
             print('no tracked board matched {}'.format(sorted(want)))
             return 2
-    tables = ''.join(t for t in 'ABC' if t in args.table.upper())
+    tables = ''.join(t for t in 'ABCD' if t in args.table.upper())
     doc = measure(paths, tables)
     report(doc, tables)
     if args.out:
