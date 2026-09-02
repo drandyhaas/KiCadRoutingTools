@@ -58,11 +58,17 @@ ROWS = [
     # --- the classifier ---------------------------------------------------
     ('the-owner-scan-forgets-the-reference', 'pa',
      "        if pts:\n"
-     "            owners.setdefault(_footprint_reference(fp_text)[0], "
-     "[]).extend(pts)\n",
+     "            owners.setdefault(_key, []).extend(pts)\n",
      "        if False:\n"
-     "            owners.setdefault(_footprint_reference(fp_text)[0], "
-     "[]).extend(pts)\n",
+     "            owners.setdefault(_key, []).extend(pts)\n",
+     (T829,), 'KILLED'),
+
+    # #726 keys a duplicated reference's second block `TP4~2`. Key the owner
+    # map by the RAW name instead and the flag lands on whichever block won the
+    # footprints dict -- not necessarily the one that draws the outline.
+    ('the-owner-map-ignores-duplicate-disambiguation', 'pa',
+     "            zip(spans, disambiguate_references(raws))]\n",
+     "            zip(spans, raws)]\n",
      (T829,), 'KILLED'),
 
     ('every-owner-is-structural', 'pa',
@@ -173,9 +179,11 @@ ROWS = [
     # --- the writer -------------------------------------------------------
     ('the-writer-skips-instead-of-raising', 'wr',
      "            raise OutlineOwnerMove(\n"
-     "                f\"{ref} draws the board outline (Edge.Cuts geometry outside \"\n",
+     "                f\"{key} draws the board outline (Edge.Cuts geometry "
+     "outside \"\n",
      "            continue\n            raise OutlineOwnerMove(\n"
-     "                f\"{ref} draws the board outline (Edge.Cuts geometry outside \"\n",
+     "                f\"{key} draws the board outline (Edge.Cuts geometry "
+     "outside \"\n",
      (T829,), 'KILLED'),
 
     ('the-writer-backstop-is-gone', 'wr',
@@ -216,9 +224,8 @@ ROWS = [
 
     # --- the parser refactor must not break what it touched ---------------
     ('the-reference-helper-drops-the-6-7-spelling', 'pa',
-     "        ref_match = re.search(r'\\(fp_text\\s+reference\\s+\"([^\"]+)\"', "
-     "fp_text)\n",
-     "        ref_match = None\n",
+     "_FP_REF_LEGACY_RE = re.compile(r'\\(fp_text\\s+reference\\s+\"([^\"]+)\"')\n",
+     "_FP_REF_LEGACY_RE = re.compile(r'THIS_WILL_NEVER_MATCH')\n",
      (TREF, T550), 'KILLED'),
 ]
 
