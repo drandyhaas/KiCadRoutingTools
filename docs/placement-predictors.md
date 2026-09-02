@@ -202,11 +202,29 @@ one board where the term is exactly inert, so its two arms would be identical:
 |---|---|---|---|
 | kit-dev-coldfire | 0 / 0 | 88 of 160 (55%) | **18.15 mm** (U301) |
 | esp_prog | 0 / 0 | 3 of 16 (19%) | 2.48 mm (U1) |
-| rp2350_fpga_eensy_prePlane | 9 / **14** | **0 of 61** | -- |
-| orangecrab_ext_pll | 21 / 10 | 2 of 154 (1%) | 1.38 mm (J2) |
-| ulx3s | 4 / 8 | 6 of 226 (3%) | 3.03 mm (U2) |
-| glasgow_revC | 14 / 3 | 1 of 257 (0%) | 1.50 mm (J5) |
+| rp2350_fpga_eensy_prePlane | 8 / **11** | **0 of 61** | -- |
+| orangecrab_ext_pll | 18 / 9 | 2 of 154 (1%) | 1.38 mm (J2) |
+| ulx3s | 0 / 0 | 6 of 226 (3%) | 3.03 mm (U2) |
+| glasgow_revC | 14 / 2 | 1 of 257 (0%) | 1.50 mm (J5) |
 | tigard | 8 / 3 | 4 of 85 (5%) | 1.51 mm (U5) |
+
+**Re-measured after #835** (2026-09-02); the deficit column moved and the
+argument above it moved with it. Every escape deficit was previously charged on
+XY overlap alone, so a neighbour on the opposite board face, or a module
+outline the part sits inside, counted as a blocker. Regenerate with
+`python3 -X utf8 tests/measure_834_835_side_awareness.py --table BC`.
+
+The recorded transitions: **ulx3s 4 / 8 -> 0 / 0** (all six of its deficit
+faces were charged across the board), orangecrab 21 / 10 -> 18 / 9, glasgow
+14 / 3 -> 14 / 2, rp2350 9 / 14 -> 8 / 11 (its U8 is a Teensy module whose pad
+bbox encloses five other parts). tigard, kit-dev-coldfire and esp_prog do not
+move.
+
+**This strengthens the point the paragraph above makes rather than weakening
+it.** ulx3s becomes a THIRD board reporting zero escape deficit while the term
+fires on 6 of its 226 parts, so the instrument the placement A/B has is now
+inert on three of the seven boards rather than two. The board with the worst
+remaining deficit, rp2350, is still the one board where the term never fires.
 
 U301 is the 144-pin Xilinx that `docs/placement-optimization.md` already
 records as unable to satisfy a 6.5 mm halo on a dense board. This term asks it

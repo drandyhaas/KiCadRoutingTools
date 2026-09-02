@@ -901,8 +901,11 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     Rail nets (fanout > DISPLACEMENT_MAX_FANOUT) are not demand: planes
     feed them, not face escapes. Tap/via lane consumption is v2.
     """
-    from placement.legality import (build_part_pads, footprint_side,
-                                    graded_parts_from_file, rect_gap)
+    from placement.legality import (build_part_pads, container_refs,
+                                    footprint_has_through_pads, footprint_side,
+                                    graded_parts_from_file, rect_gap,
+                                    sides_occupied)
+    from .escape import span_eaten
 
     fps = pcb_data.footprints or {}
     fp = fps.get(ref)
@@ -948,36 +951,56 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     band = (escape_band_mm if escape_band_mm is not None
             else max(1.0, 4 * pitch_routed))
 
-    own_side = footprint_side(fp)
-    neighbors = [g for g in graded_parts_from_file(pcb_data, pcb_file)
-                 if g.ref != ref and own_side in g.sides]
+    # #835: the SYMMETRIC side test, `own & other`, not `own_side in g.sides`.
+    # The one-sided form charges a through-hole part only for neighbours on
+    # its `footprint_side`, though its leads occupy both faces -- measured on
+    # rp2350, that drops the B-side U1 from the drilled U6's blockers, losing
+    # a real obstruction. `sides_occupied` is what every other pair predicate
+    # in the package uses (`legality.pair_min_gap`, `pair_channel_widths`
+    # below).
+    #
+    # ...and containers are exempt here for the same reason they are exempt in
+    # the courtyard channel and now in `escape`: a module-outline footprint
+    # covering half the board is a frame the part sits inside, not a body
+    # parked off its face.
+    own_sides = sides_occupied(footprint_side(fp),
+                               footprint_has_through_pads(fp))
+    _graded = graded_parts_from_file(pcb_data, pcb_file)
+    _containers = container_refs(pcb_data, _graded)
+    neighbors = [g for g in _graded
+                 if g.ref != ref and (own_sides & g.sides)
+                 and g.ref not in _containers]
 
     out = []
     for fname, (x0, y0, x1, y1) in faces.items():
         horiz = (y0 == y1)
         length = (x1 - x0) if horiz else (y1 - y0)
+        lo, hi = (x0, x1) if horiz else (y0, y1)
         if horiz:
-            band_rect = ((x0, y0 - band, x1, y0) if fname == 'N'
-                         else (x0, y0, x1, y0 + band))
+            band_across = ((y0 - band, y0) if fname == 'N'
+                           else (y0, y0 + band))
         else:
-            band_rect = ((x0 - band, y0, x0, y1) if fname == 'W'
-                         else (x0, y0, x1 + band, y1))
-        eaten = []
-        covered = 0.0
-        for g in neighbors:
-            rct = g.rect
-            if rect_gap(rct, band_rect) >= 0:
-                continue
-            if horiz:
-                span = (min(rct[2], x1) - max(rct[0], x0))
-            else:
-                span = (min(rct[3], y1) - max(rct[1], y0))
-            if span <= 0:
-                continue
-            lanes = span / pitch_routed
-            covered += span
-            eaten.append((g.ref, round(lanes, 2)))
-        eaten.sort(key=lambda t: -t[1])
+            band_across = ((x0 - band, x0) if fname == 'W'
+                           else (x0, x0 + band))
+        # #835: ONE obstruction kernel, shared with `escape._blocked_span`.
+        # What it fixes here is the double charge: this loop accumulated
+        # `covered += span` per neighbour, so two bodies covering the same
+        # stretch were billed twice and a face could be reported as more than
+        # fully blocked -- measured, glasgow_revC's J1 east accumulated
+        # 11.82mm of cover on a 9.64mm face, which only `max(0.0, length -
+        # covered)` kept from going negative. The kernel unions the intervals
+        # and clamps to the span, so an impossible total is impossible rather
+        # than absorbed.
+        #
+        # The neighbour RECTANGLE stays the courtyard, deliberately: this
+        # ledger and `escape` disagree about that and the disagreement is not
+        # settled here. Measured, swapping escape onto courtyards moves it by
+        # 3-6x on five boards (glasgow 19 -> 126, kit-dev 0 -> 43), which is a
+        # different instrument rather than a refinement. The kernel takes the
+        # rects from its caller precisely so that choice stays a caller's.
+        covered, order = span_eaten(lo, hi, band_across, horiz,
+                                    [(g.ref, g.rect) for g in neighbors])
+        eaten = [(r, round(mm / pitch_routed, 2)) for r, mm in order]
         usable = max(0.0, length - covered)
         supply_routed = int(usable // pitch_routed)
         supply_fine = int(usable // pitch_fine)
@@ -991,6 +1014,33 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                     'deficit_finest_grid': max(0, n_demand - supply_fine),
                     'eaten_by': eaten[:8],
                     'taps_not_modeled': True})
+    # SHARED WITH `escape` (#835): the obstruction arithmetic -- the
+    # interval union, the clamp, the symmetric side test and the container
+    # exemption -- is one kernel, `escape.span_eaten`, because the two ledgers
+    # were answering the same question three different ways. What the union
+    # fixes here: this loop billed `covered += span` per neighbour, so
+    # glasgow_revC's J1 east summed 12.42mm of cover on a 9.64mm face and
+    # `max(0.0, length - covered)` absorbed the impossible total as supply 0.
+    # Unioned it is 8.23mm and supply 3.
+    #
+    # NOT shared, and the difference is the point: the neighbour RECTANGLE.
+    # This ledger charges the courtyard, `escape` the pad bbox. Measured on
+    # THIS branch, swapping only the neighbour rect moves the escape ledger on
+    # SEVEN boards -- glasgow_revC 17 -> 125 deficit lanes, watchy 25 -> 88,
+    # orangecrab 70 -> 147, tigard 41 -> 75, rp2350 53 -> 91, and
+    # kit-dev-coldfire 0 -> 18 and ulx3s 0 -> 19, which stop being
+    # zero-deficit boards. That is a different instrument rather than a
+    # refinement. The two are also
+    # answering different questions: what obstructs a TRACK is foreign COPPER,
+    # what obstructs a PART is a foreign BODY, and a courtyard is an assembly
+    # keep-out drawn deliberately beyond the copper. Which of the two a LANE
+    # ledger should use is a real question and is filed separately.
+    #
+    # Also still different, and deliberately: the demand model (this one takes
+    # nets with >= 2 owners and <= DISPLACEMENT_MAX_FANOUT, escape takes an
+    # `ignore_net_ids` list and an interior bucket) and the grid quantization
+    # below.
+    #
     # NO LAYER TERM HERE, deliberately (#700). `escape.FaceLedger` gained
     # `via_slots` / `supply_other_max` / `deficit_floor`; this ledger did not,
     # because its supplies are GRID-QUANTIZED (`_quantized_pitch` above) while

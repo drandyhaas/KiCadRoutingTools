@@ -17,7 +17,11 @@ Three things make this honest rather than a plausible number:
   manufacture deficits on a fine board and hide them on a coarse one.
 * **`blockers` names who ate the lanes.** A count says a face is short; the
   blocker list says which neighbouring part to move. That is the difference
-  between a signal and an action, and it is the field to read first.
+  between a signal and an action, and it is the field to read first. It is
+  only that if the names are real: until #835 a neighbour was charged on XY
+  overlap alone, so a part on the far side of the board -- copper these tracks
+  never share -- and a module outline the part sits INSIDE were both named as
+  the one to move. On ulx3s every reported deficit was one of those.
 * **Interior pads count toward NO face.** A pad boxed in by its neighbours does
   not escape sideways at all -- it needs a via. Rolling it into a face's demand
   would blame the face for a fanout problem. Reported separately.
@@ -88,13 +92,25 @@ class FaceLedger:
         """Vias that fit in ONE row along this face -- UNOBSTRUCTED.
 
         Measured on `span_mm`, not on `span_mm - blocked_mm`, and the
-        asymmetry with `supply` on the same row is deliberate. `blocked_mm`
-        comes from `_blocked_span`, which is side-blind and container-blind:
-        on rp2350, U8's pad rect CONTAINS U6's, so 6.90 of a 6.90mm face is
-        charged to it, and one of that face's four blockers sits on the
-        opposite board side. Feeding that into an upper bound turns the bound
-        into a lower one with no warning. Over-stating is inside this term's
-        contract -- it may never be used to PASS a face; under-stating is not.
+        asymmetry with `supply` on the same row is deliberate: over-stating is
+        inside this term's contract -- it may never be used to PASS a face --
+        and under-stating is not. Feeding a `blocked_mm` that is too large into
+        an UPPER bound turns it into a lower one with no warning.
+
+        The original reason was that `_blocked_span` was "side-blind and
+        container-blind", citing rp2350's U6: 6.90 of a 6.90mm face charged
+        because U8's pad rect contains it, and a blocker on the opposite board
+        side. #835 fixed both, so that reason is gone, and the witness was
+        wrong about the side half anyway -- U6 is DRILLED, so it occupies both
+        faces and its B-side blocker U1 was charged correctly.
+
+        The asymmetry stays, on the argument rather than the example.
+        `blocked_mm` is still a pad-BBOX model of a neighbour, which for a
+        perimeter-pad part reads as a solid block; and `supply` is a floor
+        while this is a ceiling, so they may not be built from the same
+        subtraction even when both are sound. Post-#835, U6 is
+        supply 2/11/10/12 against demand 13/13/14/14 -- still the board's worst
+        part, and no longer fully blocked.
 
         ONE ROW, and the arithmetic is the reason rather than the caution. A
         second-row via must be reached BETWEEN two first-row vias: the copper
@@ -643,13 +659,111 @@ def _face_geometry(rect, face) -> Tuple[float, float, float, float]:
             'east': (maxx, miny, maxx, maxy)}[face]
 
 
-def _blocked_span(pcb_data, ref, rect, face, reach, courtyards=None):
-    """How much of a face's span is unusable, and WHO took it.
+def board_side_map(pcb_data) -> Dict[str, frozenset]:
+    """{ref: frozenset} of the board sides each footprint obstructs (#835).
 
-    A neighbour parked off a face does not merely crowd it -- its own body
-    occupies the channel the escaping tracks need. The overlap of the
-    neighbour's extent with the face's span, projected onto the face, is what
-    those tracks cannot use.
+    Computed ONCE per ledger and threaded down: `_blocked_span` runs per part
+    per face and walks every footprint, so resolving this inside it would
+    rebuild the map `targets * 4` times. Measured on glasgow that is ~50% on
+    top of the whole ledger; hoisted it is 0.1-0.7ms against 11-55ms.
+
+    `placement.legality` is imported lazily, as this module imports
+    `routing_defaults` and `fab_tiers`: escape.py keeps a stdlib-only import
+    surface at module scope. There is no cycle -- `legality` imports neither
+    `escape` nor anything heavy at module scope.
+    """
+    from .legality import (footprint_has_through_pads, footprint_side,
+                           sides_occupied)
+    return {r: sides_occupied(footprint_side(f), footprint_has_through_pads(f))
+            for r, f in pcb_data.footprints.items()}
+
+
+def board_container_refs(pcb_data, pcb_file=None) -> set:
+    """Refs the courtyard channel already treats as containers (#835).
+
+    Delegates to `legality.container_refs` rather than re-deriving the test,
+    so a part cannot be a frame to one channel and a blocker to the other.
+    """
+    from .legality import container_refs, graded_parts_from_file
+    try:
+        return container_refs(pcb_data,
+                              graded_parts_from_file(pcb_data, pcb_file))
+    except Exception:                                        # noqa: BLE001
+        # A board whose local bounds cannot be resolved keeps today's
+        # answer -- nothing exempt -- rather than losing the whole ledger.
+        return set()
+
+
+def span_eaten(lo, hi, band, horizontal, obstacles):
+    """How much of [lo, hi] the obstacles cover, and how much each took.
+
+    The shared obstruction kernel (#835). `obstacles` is `[(ref, rect)]`;
+    WHICH neighbours are in it, and which rectangle each contributes, is the
+    caller's decision -- see `_blocked_span` below (pad bboxes, side- and
+    container-filtered) and `routability.face_lane_ledger` (courtyards). The
+    two callers deliberately disagree about that choice and agree about this
+    arithmetic, which is the half they were getting different answers for.
+
+    Returns `(blocked_mm, ((ref, mm), ...))`, the pairs ordered by how much
+    each took so the first name is the one to move.
+
+    Intervals are UNIONED, so two neighbours covering the same stretch are
+    charged once. That is the correction: without it a face can be reported as
+    more than fully blocked, and an over-100% total silently becomes "supply 0"
+    rather than an error. Measured, glasgow_revC's J1 east has NINE neighbours
+    covering 12.42mm of a 9.64mm face -- summed that is supply 0, unioned it is
+    8.23mm and supply 3. (Nine, not the eight `face_lane_ledger` reports: its
+    `eaten_by` is truncated to the top 8 for display, so counting that list
+    undercounts the obstruction and sums to 11.48mm rather than 12.42mm.)
+
+    Corpus-wide over the git-tracked boards: 25 of the 388 faces the ESCAPE
+    ledger reports have neighbours covering the same stretch twice, and
+    `face_lane_ledger` has 506 of 5276 taken over every footprint. Regenerate
+    both by instrumenting this function -- the counts are scope-dependent, and
+    an unscoped one is not a number.
+
+    The `min(blocked, hi - lo)` below is BELT AND BRACES, and provably so while
+    the union stands: every interval is already clipped to [lo, hi] as it is
+    built, so their union is a subset of [lo, hi] and cannot measure more than
+    `hi - lo`. It is kept because it is the guard that binds the moment the
+    union is removed, and a mutation that drops it is recorded as an expected
+    survivor rather than deleted (`tests/mutate_834_835.py`). Do not read it as
+    the thing that fixed the 12.42-on-9.64 number; the union is.
+    """
+    intervals: List[Tuple[float, float, str]] = []
+    for ref, (oxmin, oymin, oxmax, oymax) in obstacles:
+        across = (oymin, oymax) if horizontal else (oxmin, oxmax)
+        if across[1] < band[0] or across[0] > band[1]:
+            continue                              # not in the escape band
+        along = (oxmin, oxmax) if horizontal else (oymin, oymax)
+        a, b = max(lo, along[0]), min(hi, along[1])
+        if b > a:
+            intervals.append((a, b, ref))
+
+    intervals.sort()
+    blocked = 0.0
+    cur_a = cur_b = None
+    for a, b, _name in intervals:
+        if cur_a is None:
+            cur_a, cur_b = a, b
+        elif a <= cur_b:
+            cur_b = max(cur_b, b)
+        else:
+            blocked += cur_b - cur_a
+            cur_a, cur_b = a, b
+    if cur_a is not None:
+        blocked += cur_b - cur_a
+
+    by_ref: Dict[str, float] = {}
+    for a, b, name in intervals:
+        by_ref[name] = by_ref.get(name, 0.0) + (b - a)
+    order = tuple((r, by_ref[r])
+                  for r in sorted(by_ref, key=lambda r: (-by_ref[r], r)))
+    return min(blocked, hi - lo), order
+
+
+def face_band(rect, face, reach):
+    """`(lo, hi, band, horizontal)` for one face -- the kernel's coordinates.
 
     `reach` is how far off the face to look: past that, a track has room to
     turn and the neighbour is no longer on the escape path.
@@ -665,46 +779,63 @@ def _blocked_span(pcb_data, ref, rect, face, reach, courtyards=None):
         band = (minx - reach, minx)
     else:
         band = (maxx, maxx + reach)
+    return lo, hi, band, horizontal
 
-    intervals: List[Tuple[float, float, str]] = []
+
+def _blocked_span(pcb_data, ref, rect, face, reach, courtyards=None,
+                  sides=None, containers=None):
+    """How much of a face's span is unusable, and WHO took it.
+
+    A neighbour parked off a face does not merely crowd it -- its own body
+    occupies the channel the escaping tracks need. The overlap of the
+    neighbour's extent with the face's span, projected onto the face, is what
+    those tracks cannot use.
+
+    Two neighbours are NOT in the way, and were charged anyway (#835):
+
+    * one that shares no board face with the escaping part. Copper on the far
+      side is copper these tracks never have to share, and a THT part occupies
+      both faces -- which is why the test is the symmetric `own & other` over
+      `sides_occupied(...)`, the predicate the rest of the package uses
+      (`legality.pair_min_gap`, `routability.pair_channel_widths`), rather
+      than `face_lane_ledger`'s one-sided `own_side in g.sides`. Measured on
+      rp2350, U6 is drilled and so occupies both faces: the symmetric form
+      keeps all four of its blockers, the one-sided form would drop the B-side
+      U1, losing a real obstruction.
+    * a CONTAINER -- a module-outline footprint hosting the design, which by
+      `legality.CONTAINER_RATIO` covers at least half the board. It is not
+      parked off this face; the escaping part is inside it. rp2350's U8 is a
+      Teensy module whose 66 perimeter pads bound 17.3 x 34.1mm of mostly
+      empty interior, and every part under it was charged its whole face.
+      `legality.py`'s own comment already says pairs with a container member
+      are exempt from the courtyard channels EVERYWHERE; escape is the channel
+      that never got the exemption.
+
+    `sides` / `containers` are the per-board maps `escape_ledger` computes once
+    (see `board_side_map`). Both are looked up with `.get`, and a ref they do
+    not name is charged exactly as before -- a caller passing a partial map
+    must not silently lose an obstruction.
+    """
+    lo, hi, band, horizontal = face_band(rect, face, reach)
+    own = None if sides is None else sides.get(ref)
+
+    obstacles = []
     for other in sorted(pcb_data.footprints):
         if other == ref:
             continue
         ofp = pcb_data.footprints[other]
         if not ofp.pads:
             continue
-        oxmin, oymin, oxmax, oymax = _part_rect(ofp)
-        across = (oymin, oymax) if horizontal else (oxmin, oxmax)
-        if across[1] < band[0] or across[0] > band[1]:
-            continue                              # not in the escape band
-        along = (oxmin, oxmax) if horizontal else (oymin, oymax)
-        a, b = max(lo, along[0]), min(hi, along[1])
-        if b > a:
-            intervals.append((a, b, other))
+        if own is not None:
+            oth = sides.get(other)
+            if oth is not None and not (own & oth):
+                continue
+        if containers is not None and other in containers:
+            continue
+        obstacles.append((other, _part_rect(ofp)))
 
-    # Union the intervals so two overlapping neighbours are not double-charged.
-    intervals.sort()
-    blocked = 0.0
-    who: List[str] = []
-    cur_a = cur_b = None
-    for a, b, name in intervals:
-        who.append(name)
-        if cur_a is None:
-            cur_a, cur_b = a, b
-        elif a <= cur_b:
-            cur_b = max(cur_b, b)
-        else:
-            blocked += cur_b - cur_a
-            cur_a, cur_b = a, b
-    if cur_a is not None:
-        blocked += cur_b - cur_a
-    # Deduped and ordered by how much each took, so the first name is the one
-    # to move.
-    by_ref: Dict[str, float] = {}
-    for a, b, name in intervals:
-        by_ref[name] = by_ref.get(name, 0.0) + (b - a)
-    order = sorted(by_ref, key=lambda r: (-by_ref[r], r))
-    return min(blocked, hi - lo), tuple(order)
+    blocked, order = span_eaten(lo, hi, band, horizontal, obstacles)
+    return blocked, tuple(r for r, _mm in order)
 
 
 def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
@@ -713,7 +844,10 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                 via_pitch_mm: Optional[float] = None,
                 signal_layers: int = 1,
                 signal_layers_source: str = 'unknown',
-                plane_layers_found: Sequence[str] = ()) -> PartEscape:
+                plane_layers_found: Sequence[str] = (),
+                sides: Optional[Dict[str, frozenset]] = None,
+                containers: Optional[set] = None,
+                pcb_file: Optional[str] = None) -> PartEscape:
     """The full per-face ledger for one part.
 
     `ignore_net_ids` drops plane-routed rails, exactly as elsewhere in this
@@ -732,6 +866,13 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     rect = _part_rect(fp)
     pitch = pad_pitch(fp)
     reach = reach_mm if reach_mm is not None else max(lane * 4.0, 1.0)
+    # #835: resolved ONCE per part, not once per face. `escape_ledger` passes
+    # both maps in; a direct caller gets them built here so this stays a
+    # standalone entry point.
+    if sides is None:
+        sides = board_side_map(pcb_data)
+    if containers is None:
+        containers = board_container_refs(pcb_data, pcb_file)
 
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
     interior: List[int] = []
@@ -749,7 +890,9 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     for f in FACES:
         x1, y1, x2, y2 = _face_geometry(rect, f)
         span = math.hypot(x2 - x1, y2 - y1)
-        blocked, blockers = _blocked_span(pcb_data, ref, rect, f, reach)
+        blocked, blockers = _blocked_span(pcb_data, ref, rect, f, reach,
+                                          sides=sides,
+                                          containers=containers)
         usable = max(0.0, span - blocked)
         nets = tuple(sorted(set(demand[f])))
         faces.append(FaceLedger(
@@ -801,10 +944,14 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
     nsig, source, planes = signal_layer_count(
         pcb_data, signal_layers=signal_layers, plane_layers=plane_layers)
     targets = list(refs) if refs is not None else fine_pitch_parts(pcb_data)
+    # #835: both per-board maps resolved ONCE, then threaded into every part.
+    sides = board_side_map(pcb_data)
+    containers = board_container_refs(pcb_data, pcb_file)
     out = [part_escape(pcb_data, r, pitch_mm=lane,
                        ignore_net_ids=ignore_net_ids, reach_mm=reach_mm,
                        via_pitch_mm=vpitch, signal_layers=nsig,
-                       signal_layers_source=source, plane_layers_found=planes)
+                       signal_layers_source=source, plane_layers_found=planes,
+                       sides=sides, containers=containers)
            for r in targets if r in pcb_data.footprints]
     # Sorted by the OWN-LAYER deficit, unchanged. It selects `escape_lanes[:10]`
     # and board_brief's `worst[:WORST_N]`, and feeds

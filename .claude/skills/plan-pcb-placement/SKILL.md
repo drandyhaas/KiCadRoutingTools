@@ -1349,8 +1349,17 @@ ordering experiments proving this on a face whose ledger would have said it in
 seconds).
 
 Read **`blockers` first** — it names the neighbouring parts whose bodies ate the
-lanes, which is the move to make. `U9 west: supply 6 < demand 14 … 15.35mm of
-that face is taken by SD1` is an instruction; "west face is short" is not.
+lanes, which is the move to make. `U6 north: supply 2 < demand 13 … 5.41mm of
+that face is taken by U1, U7, C6` is an instruction; "north face is short" is
+not.
+
+A blocker is only actionable if it is real, and until #835 it often was not.
+The example this page used to give was the defect itself: the part and the
+neighbour it named sat on OPPOSITE copper faces, never shared copper, and each
+was charged the other's whole body across the board. Two neighbours are skipped
+now — one that shares no face with the part (a drilled part occupies both), and
+a module outline the part sits *inside* rather than beside. On a back-heavy
+board that can be every deficit it reported.
 Interior pads are reported separately and are a **fanout** question, not a lane
 one — they need a via, not a channel.
 

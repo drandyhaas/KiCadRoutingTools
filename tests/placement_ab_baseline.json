@@ -55,27 +55,27 @@
   "board": "ulx3s.kicad_pcb",
   "mark": "regress",
   "off": {
-   "crossings": 2429,
+   "crossings": 2418,
    "health_block_displacement_max_mm": 18.9597,
    "health_bus_foreign_crossings": 62,
-   "hpwl": 7493.73,
-   "intent_errors": 4,
+   "hpwl": 7476.69,
+   "intent_errors": 3,
    "intent_errors_by_rule": {
-    "zone_containment": 4
+    "zone_containment": 3
    },
-   "intent_errors_enforced": 4,
+   "intent_errors_enforced": 3,
    "intent_errors_other": 0
   },
   "on": {
-   "crossings": 2442,
-   "health_block_displacement_max_mm": 16.9877,
-   "health_bus_foreign_crossings": 55,
-   "hpwl": 7428.07,
-   "intent_errors": 4,
+   "crossings": 2438,
+   "health_block_displacement_max_mm": 19.9557,
+   "health_bus_foreign_crossings": 65,
+   "hpwl": 7549.43,
+   "intent_errors": 3,
    "intent_errors_by_rule": {
-    "zone_containment": 4
+    "zone_containment": 3
    },
-   "intent_errors_enforced": 4,
+   "intent_errors_enforced": 3,
    "intent_errors_other": 0
   }
  },
@@ -165,22 +165,22 @@
   "board": "ulx3s.kicad_pcb",
   "mark": "regress",
   "off": {
-   "crossings": 2429,
+   "crossings": 2418,
    "health_block_displacement_max_mm": 18.9597,
    "health_bus_foreign_crossings": null,
-   "hpwl": 7493.73,
-   "intent_errors": 4,
+   "hpwl": 7476.69,
+   "intent_errors": 3,
    "intent_errors_by_rule": {
-    "zone_containment": 4
+    "zone_containment": 3
    },
-   "intent_errors_enforced": 4,
+   "intent_errors_enforced": 3,
    "intent_errors_other": 0
   },
   "on": {
-   "crossings": 2449,
+   "crossings": 2438,
    "health_block_displacement_max_mm": 20.9521,
    "health_bus_foreign_crossings": null,
-   "hpwl": 7571.85,
+   "hpwl": 7554.74,
    "intent_errors": 0,
    "intent_errors_by_rule": {},
    "intent_errors_enforced": 0,
