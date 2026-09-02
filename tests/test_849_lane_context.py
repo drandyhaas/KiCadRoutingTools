@@ -71,10 +71,24 @@ reason they are not holes -- `tolerant=` changes nothing on a board whose
 pads all model, and dropping `parts=` from `part_copper_geometry` is a
 performance regression only, which no assertion should claim to detect.
 
-Every one of the other eleven is killed by this file, and nine of them by the
-two arms that do not compare values: the parse counts. That is the ratio to
-notice -- if arms 2, 10 and 11 were removed, most of this battery would go
-green against a broken hoist.
+WHICH ARM KILLS WHICH ROW, measured the same way (each mutation applied, this
+file run, the FAIL lines recorded) -- because "the tests kill it" says nothing
+about whether the right test kills it:
+
+    parse counts (arms 2, 11)   context-accepted-then-ignored,
+                                sweep-context-rebuilt-inside-the-loop,
+                                anchor-channels-drop-the-context
+    golden (arm 10)             net-owners-sees-one-footprint,
+                                containers-are-never-exempt
+    the refusals (arms 3-5)     guard-forgets-the-board / -file / -clearance
+    pair_channel_widths (arm 8) graded-order-reversed
+    a raised ValueError         parts-at-a-foreign-clearance (#841's own
+                                guard), baseline-sweep-reuses-the-board-context
+
+Not one of the eleven is killed by arms 1 or 9, the two equivalence arms --
+which is the point: both sides of an equivalence run through `LaneContext`,
+so a mutation to what it BUILDS moves both equally. Arms 1 and 9 are there to
+catch a hoist that changes an answer, and nothing here does.
 
 Run: python3 -X utf8 tests/test_849_lane_context.py
 """
@@ -117,11 +131,15 @@ DENSE = os.path.join(ROOT, 'kicad_files',
 #: equally and the check still passes. A value recorded from before the change
 #: is the only oracle that does not move with it.
 #:
-#: tigard U3's west face is why the `eaten_by` list is pinned and not just its
-#: length: eight blockers at exactly 2.56 lanes is a TIE SET, and
-#: `eaten.sort(key=-lanes)` is not stable across a reordered neighbour list.
-#: The order below is `graded_parts_from_file`'s -- `sorted(footprints.items())`
-#: -- and a hoist that reordered it would be invisible in every number.
+#: `eaten_by` is pinned as an ordered list rather than a count, but NOT because
+#: the order is fragile -- it is not. `escape.span_eaten` returns its pairs
+#: sorted by `(-mm, ref)`, so tigard U3's west face (eight blockers at exactly
+#: 2.56 lanes, a real tie set) is ordered by REF NAME and is invariant under
+#: any reordering of the neighbour list. I asserted the opposite here first,
+#: and the battery disproved it: `graded-order-reversed` does not fail this
+#: arm, it fails arm 8. The list stays pinned because it is free and it is
+#: eight more values; the ORDER claim is retracted, and where the reordering
+#: is actually visible is recorded in the attribution table above.
 GOLDEN_PRE_HOIST = {
     'rp2350_fpga_eensy_prePlane:U2': [
         ('N', 7, 3, 4, [('C24', 4.2), ('C22', 1.6), ('C23', 0.8)]),
