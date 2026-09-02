@@ -290,8 +290,16 @@ def _q2_reuse_end_to_end():
             via_size=0.45, via_drill=0.25, allow_via_in_pad=True)
 
     got = (len(vias), len(dropped), len(tracks))
-    check('U2 underpad reuse: 28 vias / 12 dropped / 30 tracks',
-          got == (28, 12, 30), f"got {got[0]} / {got[1]} / {got[2]}")
+    # #619 moved this pin: the escape now tests its pad->via stub against the
+    # copper `nets_to_route` erased from the obstacle map (pre-existing vias,
+    # tracks and pads on the OTHER nets in this same fanout call), which it
+    # never did before, so escapes that were only reachable THROUGH that copper
+    # are withdrawn. On this configuration 28/12/30 -> 18/22/20. The reuse
+    # behaviour this section exists to pin is unchanged -- see the named
+    # DATA_30 check below, which still passes.
+    check('U2 underpad reuse: 18 vias / 22 dropped / 20 tracks '
+          '(was 28 / 12 / 30 before the #619 erased-copper gate)',
+          got == (18, 22, 20), f"got {got[0]} / {got[1]} / {got[2]}")
     # The specific net the regression cost, named -- a count can drift back
     # into place for an unrelated reason, this cannot.
     check('Net-(U2A-DATA_30) keeps its escape (it reuses an existing via)',
