@@ -564,6 +564,22 @@ Each lap:
    courtyard kisses (corpus: 235), so the loop's advisory fix-list is the pairs
    NEW relative to the input, never a shipped design's own geometry.
 
+   **`check_channels --gate` now catches a face that LOST most of its escape,
+   not only one that reached zero (#847).** The old predicates were both
+   zero-crossings, and a zero-crossing on a falling quantity is masked exactly
+   when the baseline falls too — so a face going supply 43 → 28 against a
+   demand of 12 lost 35% of its escape and nothing reported it. `--min-supply-
+   drop` (default 0.20) is that threshold; the printed line names the share and
+   both supplies, and `--json` keeps `lost_escape_share` as its own key so you
+   can tell WHICH predicate fired. Read it as a move target the same way as a
+   starved face: the `eaten_by` refs on that row are what to move.
+
+   `--escape-band MM` exposes how deep off a face neighbours are charged
+   (default `max(1.0, 4 × lane pitch)`, printed with its source). **Do not
+   deepen it to make the gate more sensitive** — measured, deepening it raises
+   the false-positive rate, and at 2.0 mm a legitimate restore reports a 0.435
+   loss of escape. It is a screening depth, not a safety margin.
+
 2. **Fix iteration** — one ladder invocation targeting the NAMED findings: blocking
    body pairs and pad/hole conflicts go to `place_reconstruct` (full stages if
    structure moved, `--stages legalize` for local residue — the repair census

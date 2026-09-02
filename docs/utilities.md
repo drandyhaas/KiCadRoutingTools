@@ -1242,6 +1242,79 @@ See [Fab Tier Options](configuration.md#fab-tier-options) for the full floor
 tables and how the CLIs enforce these floors (they **error** if a size/clearance
 param is set below the active floor).
 
+## Lane Ledger (`check_channels.py`)
+
+The **per-face** pre-route instrument: for every fine-pitch part, how many
+tracks can physically leave each face (supply) against how many nets must
+(demand), plus who ate the difference. A face in deficit *at the finest legal
+grid* is a floorplan fact no routing parameter can fix, and its `eaten_by`
+refs are the fix loop's move targets.
+
+```bash
+python3 -X utf8 py_tools/check_channels.py <board> [--baseline BEFORE --gate]
+```
+
+**Report-only by default.** With `--gate` the exits are **4** (a NEW starved
+face against `--baseline`), **3** (nothing had a ledger, so the gate did not
+run — this is *not* a pass), and **2** (unreadable board). Without `--gate`
+it is 0 throughout.
+
+### The escape band
+
+Supply is not just face length over lane pitch: a neighbour parked off the
+face eats part of it. The **escape band** is how deep off the face a neighbour
+is looked for at all — past that depth a track has room to turn, and the
+neighbour is no longer on the escape path.
+
+| | |
+|---|---|
+| resolved by | `placement.escape.escape_band()`, shared by both lane ledgers |
+| value | `max(1.0 mm, 4 × lane pitch)` |
+| flag | `--escape-band MM` |
+| reported | on the header line, in `--json` as `escape_band`, and per row |
+
+The reported `source` names the term that decided — `lanes`, `floor`, or
+`caller` — because a band the board's own pitch produced and one the 1.0 mm
+floor produced are different measurements. On the tracked corpus **the floor
+decides on exactly one board** (`routed_output`); everywhere else `4 × lane`
+is already larger.
+
+Two things worth knowing before tuning it (#847):
+
+* **The two ledgers resolve the band from different pitches**, and this is
+  reported rather than hidden. `escape` uses the raw `track + clearance`;
+  `routability` uses the grid-quantized pitch. They disagree on 19 of the 22
+  tracked boards (2.2 mm against 2.4 mm at the `routing_defaults` fallback).
+  The `basis` field says which.
+* **Deepening the band raises the false-positive rate.** Measured in
+  `tests/measure_847_calibration.py`: at a 2.0 mm band the legitimate-restore
+  control itself reports a 0.435 loss of escape. The band is a screening
+  depth, not a safety margin to be increased.
+
+### What the `--gate` delta actually asks
+
+Three predicates, and the exits report all three merged while `--json` keeps
+them apart:
+
+| predicate | fires when | filtered by `--min-demand`? |
+|---|---|---|
+| `_starved_faces` | supply is **0** and demand ≥ `--min-demand` | yes |
+| `lost_last_lane` | supply crossed **to** 0 from non-zero | no, deliberately |
+| `lost_escape_share` | supply fell by ≥ `--min-supply-drop` (0.20) | yes |
+
+The third exists because the first two are **zero-crossings**, and a
+zero-crossing on a falling quantity is masked exactly when the baseline falls
+too. Measured: a face at supply 43 → 28 against a demand of 12 lost 35% of its
+escape and no predicate could see it, because 28 still exceeds 12. The
+absolute forms are unchanged and `_deficit_faces` is still a report; only the
+delta channel gained the share form.
+
+Calibration for that 0.20, with both denominators named, is
+`tests/measure_847_calibration.py` and the JSON committed beside it. The
+`--min-demand` default of 7 is **not** re-derivable from the corpus — 5, 7 and
+9 fire on the same two boards — so it is left where it is rather than re-pinned
+on a measurement that cannot tell them apart.
+
 ## Pocket Census (`check_pockets.py`)
 
 The **aggregate** pre-route instrument: the board binned into windows, each
