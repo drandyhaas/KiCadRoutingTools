@@ -152,8 +152,8 @@ ROWS = [
     # ERROR as a kill, so they would have reported KILLED forever while
     # measuring nothing. The BROKEN-anchor guard cannot catch this: it
     # validates the string being REPLACED, not the replacement. Found by a
-    # pre-push review, and the reason `_verify_mutants_are_not_crashes` below
-    # now exists.
+    # pre-push review, and the reason the runner below reports CRASH as its own
+    # verdict instead of folding a NameError into KILLED.
     ('broad-phase-window-drops-the-halving', 'geo',
      _WINDOW,
      '        window = max(d + self._h2h,\n'
@@ -408,6 +408,34 @@ ROWS = [
 ]
 
 
+def _head():
+    p = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True,
+                       text=True, cwd=_ROOT)
+    return (p.stdout or '').strip()
+
+
+def _warn_if_head_moved(before):
+    """A commit made WHILE this battery ran may have captured a mutant.
+
+    The dirty-tree refusal above checks at START. It cannot see a `git add -A`
+    that lands between a rewrite and the `finally` restore -- and that is not
+    hypothetical: `h2h-decline-not-disclosed`'s edit was committed into an
+    unrelated PR that way, silencing a disclosure print in underpad.py for two
+    commits. One writer per tree; this says so out loud when the rule is broken.
+    """
+    after = _head()
+    if before and after and before != after:
+        print('\n*** HEAD MOVED DURING THIS RUN (%s -> %s) ***'
+              % (before[:8], after[:8]))
+        print('    A commit made while files were mutated may have captured a')
+        print('    MUTANT. Check every target before trusting this run:')
+        for v in TARGETS.values():
+            print('      git diff %s -- %s' % (before[:8],
+                                               os.path.relpath(v, _ROOT)))
+        return True
+    return False
+
+
 def _dirty(path):
     p = subprocess.run(['git', 'status', '--porcelain', '--', path],
                        capture_output=True, text=True, cwd=_ROOT)
@@ -426,6 +454,7 @@ def run(only=None):
                   % os.path.basename(path))
             return 2
 
+    head_before = _head()
     orig = {k: io.open(v, encoding='utf-8', newline='').read()
             for k, v in TARGETS.items()}
     results = []
@@ -494,7 +523,8 @@ def run(only=None):
              sum(1 for r in results if r[1] == r[2] == 'SURVIVED'), broken))
     if wrong or broken:
         print('%d row(s) did not match their expectation' % (wrong + broken))
-    return 1 if (wrong or broken) else 0
+    moved = _warn_if_head_moved(head_before)
+    return 1 if (wrong or broken or moved) else 0
 
 
 def main():
