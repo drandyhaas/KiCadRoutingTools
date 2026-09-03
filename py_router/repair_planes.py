@@ -3454,6 +3454,8 @@ Examples:
               f"classes honoured (pass --clearance-ceiling to cap every class).")
     if _ceiling is not None:
         args.clearance = min(args.clearance, _ceiling)
+        if env_knobs.CLEARANCE_LEGACY_CEILING and _dflt_clr is not None:
+            args.clearance = min(_dflt_clr, _ceiling)   # pre-#530: run = min(Default, ceiling)
         print(f"--clearance-ceiling {_ceiling}: every net class is capped at it (#439).")
     # Shared resolver (list_nets.resolve_cli_floor); see route_planes.py -- a
     # DECLARED 0.0 is "no edge rule of its own", not a rule of zero, so the

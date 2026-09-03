@@ -72,6 +72,43 @@ def main():
             fails.append("knob run did not cap the power class at 0.15")
         if 'KICAD_CLEARANCE_LEGACY_CEILING' not in r2.stdout:
             fails.append("knob run did not disclose the knob in its ENV KNOBS line")
+
+        # The pre-#530 reading also lowered the RUN clearance to min(Default
+        # class, ceiling): a project whose Default class an earlier step lowered
+        # to 0.1 routed at 0.1 under --clearance 0.2 (watchy, rp2040_dev). Under
+        # the knob the run must do the same; without it, --clearance IS the
+        # Default class for the run (decision 2) and the run stays at 0.2.
+        low = os.path.join(td, 'low.kicad_pcb')
+        saved_dc = dict(ca.DEFAULT_CLASS)
+        ca.DEFAULT_CLASS['clearance'] = 0.1
+        ca.NETS[3] = 'P1'
+        try:
+            ca.write_board(low, footprints=fps,
+                           classes=[{'name': 'power', 'clearance': 0.3, 'track_width': 0.3,
+                                     'via_diameter': 0.6, 'via_drill': 0.3, 'priority': 0}],
+                           patterns=[('P*', 'power')])
+        finally:
+            ca.DEFAULT_CLASS.clear()
+            ca.DEFAULT_CLASS.update(saved_dc)
+            ca.NETS.clear()
+            ca.NETS.update(saved)
+
+        def _run_low(out, env_extra):
+            env = dict(os.environ)
+            env.pop('KICAD_CLEARANCE_LEGACY_CEILING', None)
+            env.update(env_extra)
+            return subprocess.run([sys.executable, '-X', 'utf8',
+                                   os.path.join(ROOT, 'py_router', 'route.py'), low, out,
+                                   '--nets', 'A', 'P1', '--clearance', '0.2'],
+                                  capture_output=True, text=True, encoding='utf-8',
+                                  errors='replace', cwd=ROOT, env=env)
+
+        r3 = _run_low(os.path.join(td, 'o3.kicad_pcb'), {'KICAD_CLEARANCE_LEGACY_CEILING': '1'})
+        if '"min_clearance_used": 0.1' not in r3.stdout:
+            fails.append("knob run on a Default-0.1 project did not route at min(Default, ceiling) = 0.1")
+        r4 = _run_low(os.path.join(td, 'o4.kicad_pcb'), {})
+        if '"min_clearance_used": 0.2' not in r4.stdout:
+            fails.append("plain run on a Default-0.1 project did not route at the explicit 0.2")
     if fails:
         print("FAIL:\n  " + "\n  ".join(fails))
         return 1

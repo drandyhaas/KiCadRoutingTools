@@ -2062,6 +2062,8 @@ Examples:
               f"other classes are honoured (pass --clearance-ceiling to cap every class).")
     if _ceiling is not None:
         args.clearance = min(args.clearance, _ceiling)
+        if env_knobs.CLEARANCE_LEGACY_CEILING and _dflt_clr is not None:
+            args.clearance = min(_dflt_clr, _ceiling)   # pre-#530: run = min(Default, ceiling)
         print(f"--clearance-ceiling {_ceiling}: every net class is capped at it (#439).")
     # #441: a diff-pair coupling gap below clearance is graded as a clearance
     # violation by KiCad (P<->N are different nets). Raise the gap to the clearance

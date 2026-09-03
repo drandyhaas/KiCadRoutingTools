@@ -6341,6 +6341,11 @@ For differential pair routing, use route_diff.py:
         args.clearance = min(args.clearance, _ceiling)
         print(f"--clearance-ceiling {_ceiling}: every net class is capped at it and the "
               f"output project's classes are clamped down to it (#439).")
+        if env_knobs.CLEARANCE_LEGACY_CEILING and _dflt_clr is not None:
+            # the pre-#530 reading in full: the RUN clearance was
+            # min(Default class, ceiling) too, so a late chain step saying 0.2
+            # on a project an earlier step lowered to 0.09 routed at 0.09.
+            args.clearance = min(_dflt_clr, _ceiling)
     # Both floors go through the SHARED resolver (list_nets.resolve_cli_floor),
     # so a declared 0 -- KiCad's "not configured" -- reads as UNSET here exactly
     # as it does on the placement half of the loop. Read straight, these two
