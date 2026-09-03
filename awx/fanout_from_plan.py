@@ -244,7 +244,11 @@ schoice, choice, lp, report = pe.plan_ends(
     smenu, dmenu, launch, sgrid.bbox, dgrid.bbox, buses=buses,
     tooth_layer0=tooth0, src_seed=src_seed,
     # the 'spend' objective only when the source moves will be APPLIED
-    objective='spend' if SOURCE else 'floor', model=model)
+    # SRC_OBJECTIVE=floor|spend overrides the SOURCE-implied objective:
+    # measured 0903 on a fresh seed, 'spend' alone (no apply) cost K28
+    # 34 -> 48 and K35 84 -> 96, while the apply recovered 14 at K35
+    objective=os.environ.get('SRC_OBJECTIVE') or ('spend' if SOURCE else 'floor'),
+    model=model)
 if TWO_PAGE_PLAN and choice:
     # STEP 3: pages from the braid's own orders for THIS choice, and
     # each page net's escape re-picked to its page layer at both ends
@@ -624,7 +628,10 @@ def copy_pro(src_board, dst_board):
 
 
 board = base
-if SOURCE and schoice:
+if SOURCE and schoice and os.environ.get('SRC_APPLY') != 'none':
+    # SRC_APPLY=none: the SOURCE objective ('spend') without the apply --
+    # the A/B that separates the plan's source DECISIONS from the
+    # objective switch that comes with SOURCE=1
     import statistics
     from collections import Counter
     src_nets = [nm for nm in schoice if nm in src_pad and src_pad[nm] is not None]
@@ -650,68 +657,239 @@ if SOURCE and schoice:
     for nm in src_nets:
         print(f'    {nm}: {src_seed[nm]} -> {schoice[nm]}')
     src_tracks = []
-    # dogbones and via-in-pads FIRST: their stubs are short and sit
-    # against the pad, and the dogbone engine does not keep its 45-degree
-    # stub clear of an earlier pass's surface escape running through the
-    # same row gap (K15: 9 grazes SDQM0/SDQ15). The channel escapes go
-    # last and route round whatever copper is there.
-    for kind, method in (('via_in_pad', 'underpad'), ('dogbone', 'dogbone'),
-                         ('surface', 'channel')):
-        nets_k = [nm for nm in src_nets if schoice[nm].kind == kind]
-        if not nets_k:
-            continue
-        pcb_k = parse_kicad_pcb(board)
-        fp_k = pcb_k.footprints[sref]
-        if kind != 'surface' or TWO_PAGE_PLAN:
-            # DIRECT EMIT. The escape engines optimise for "escaped",
-            # not "delivered on layer L": measured at K11 the underpad
-            # passes escaped every ball ON F with 0 vias -- the
-            # planned B tooth never existed and the braid opened
-            # exactly those nets. A via/dogbone MOVE carries its own
-            # geometry (legs + via site), clear()-checked against the
-            # static copper and lanes_free-checked against the other
-            # moves, so it is laid verbatim.
-            tr, va, vr, fl = [], [], [], []
-            for nm in nets_k:
-                m = schoice[nm]
-                nid = byname[nm][0]
-                for (a_, b_, L_) in m.legs:
-                    tr.append({'start': a_, 'end': b_, 'width': tw,
-                               'layer': L_, 'net_id': nid})
-                if m.site is not None:
-                    va.append({'x': m.site[0], 'y': m.site[1], 'size': vs,
-                               'drill': vd, 'layers': ['F.Cu', 'B.Cu'],
-                               'net_id': nid})
-        else:
-            hints_k = {pad_key(src_pad[nm]): schoice[nm].direction
-                       for nm in nets_k}
-            # the plan's exit LINE too: it checked that exact gap against
-            # the static copper (a foreign via in the next gap grazed the
-            # engine's own pick of gap -- K15 SDQ8 vs SDQS1N)
-            lines_k = {pad_key(src_pad[nm]): (schoice[nm].exit_pt[1]
-                                              if schoice[nm].direction in ('left', 'right')
-                                              else schoice[nm].exit_pt[0])
-                       for nm in nets_k}
-            tr, va, vr, fl = generate_bga_fanout(
-                fp_k, pcb_k, net_filter=nets_k, layers=['F.Cu', 'B.Cu'],
-                track_width=tw, clearance=0.1, via_size=vs, via_drill=vd,
-                exit_margin=0.5, escape_method=method, plane_drop='off',
-                escape_dir_hints=hints_k, escape_line_hints=lines_k)
-        nxt = f'{stem}_src_{kind}.kicad_pcb'
+    if os.environ.get('SRC_APPLY', 'engine') == 'engine':
+        # WHOLE-ARRAY ENGINE PASS (0903): the source apply the way the
+        # dest side has always worked. The incremental form above/below
+        # (strip the CHANGED nets, lay them against frozen neighbours)
+        # was measured harmful on a sound seed (fresh-fanned U1: K28 34
+        # -> 49v/11 drc, K35 84/1 -> 74/6 open/14 drc, K41 2 open ->
+        # 4 open/10 drc) for a structural reason: the plan's obstacle
+        # model EXCLUDES every planned net (assumed re-laid), so a
+        # menu never sees an unmoved neighbour's real stub -- SCAS's
+        # re-slot landed on SA7's stub, all 11 K28 violations. Here
+        # EVERY planned net's source stub is stripped and the array is
+        # fanned in ONE engine pass with the plan's direction, exit
+        # line and layer as hints (changed nets from their choice,
+        # unchanged from their seed), so legality comes from the
+        # engine's own checks; a net the engine cannot deliver gets
+        # its seed stub back (rip only what you re-lay). SRC_APPLY=
+        # incremental keeps the old path for A/B.
+        import re as _re
+        src_all = [nm for nm in smenu if src_pad.get(nm) is not None
+                   and src_pad[nm].component_ref == sref]
+        choice_of = {nm: (schoice.get(nm) or src_seed.get(nm))
+                     for nm in src_all}
+        src_all = [nm for nm in src_all if choice_of[nm] is not None]
+        fp_s = pcb.footprints[sref]
+        _xs = [q.global_x for q in fp_s.pads]
+        _ys = [q.global_y for q in fp_s.pads]
+        _RW = (min(_xs) - 1.6, min(_ys) - 1.6, max(_xs) + 1.6, max(_ys) + 1.6)
+
+        def _in_rw(x, y):
+            return _RW[0] <= x <= _RW[2] and _RW[1] <= y <= _RW[3]
+
+        def _strip_window(txt_, token, nid_, full_):
+            out_, i_ = [], 0
+            while True:
+                j_ = txt_.find('(' + token, i_)
+                if j_ < 0:
+                    out_.append(txt_[i_:])
+                    break
+                k_, d_ = j_, 0
+                while True:
+                    ch = txt_[k_]
+                    if ch == '(':
+                        d_ += 1
+                    elif ch == ')':
+                        d_ -= 1
+                        if d_ == 0:
+                            break
+                    k_ += 1
+                blk = txt_[j_:k_ + 1]
+                m1 = _re.search(r'\(net (\d+)\)', blk)
+                m2 = _re.search(r'\(net "([^"]+)"\)', blk)
+                hit = (m1 and int(m1.group(1)) == nid_) or \
+                      (m2 and m2.group(1) == full_)
+                pts = _re.findall(r'\((?:start|end|at) ([-\d.]+) ([-\d.]+)',
+                                  blk)
+                if hit and pts and all(_in_rw(float(x), float(y))
+                                       for x, y in pts):
+                    out_.append(txt_[i_:j_].rstrip(' \t'))
+                    e_ = k_ + 1
+                    if e_ < len(txt_) and txt_[e_] == '\n':
+                        e_ += 1
+                    i_ = e_
+                else:
+                    out_.append(txt_[i_:k_ + 1])
+                    i_ = k_ + 1
+            return ''.join(out_)
+        txt = open(base, encoding='utf-8').read()
+        for nm in src_all:
+            nid_, net_ = byname[nm]
+            for token in ('segment', 'via'):
+                txt = _strip_window(txt, token, nid_, net_.name)
+        board = stem + '_src0.kicad_pcb'
+        with open(board, 'w', encoding='utf-8') as f:
+            f.write(txt)
+        copy_pro(base, board)
+        pcb_s = parse_kicad_pcb(board)
+        fp_s = pcb_s.footprints[sref]
+        hints_s = {pad_key(src_pad[nm]): choice_of[nm].direction
+                   for nm in src_all}
+        lines_s = {pad_key(src_pad[nm]): (
+            choice_of[nm].exit_pt[1]
+            if choice_of[nm].direction in ('left', 'right')
+            else choice_of[nm].exit_pt[0]) for nm in src_all}
+        layers_s = {pad_key(src_pad[nm]): choice_of[nm].layer
+                    for nm in src_all}
+        n_changed = sum(1 for nm in src_all if nm in schoice)
+        print(f'  engine pass: {len(src_all)} source net(s) in one '
+              f'fanout ({n_changed} changed by the plan)')
+        tr, va, vr, fl = generate_bga_fanout(
+            fp_s, pcb_s, net_filter=src_all, layers=['F.Cu', 'B.Cu'],
+            track_width=tw, clearance=0.1, via_size=vs, via_drill=vd,
+            exit_margin=0.5, escape_method='auto', plane_drop='off',
+            escape_dir_hints=hints_s, escape_line_hints=lines_s,
+            escape_layer_hints=layers_s)
+        nxt = stem + '_src_engine.kicad_pcb'
         if tr:
             add_tracks_and_vias_to_pcb(
                 board, nxt, tr, va, vr,
-                net_id_to_name={i: n.name for i, n in pcb_k.nets.items()})
+                net_id_to_name={i: n.name for i, n in pcb_s.nets.items()})
         else:
             import shutil
             shutil.copy(board, nxt)
         copy_pro(board, nxt)
-        print(f'  {kind} -> {method}: {len(nets_k)} net(s), {len(tr)} tracks, '
-              f'{len(va)} vias, {len(fl)} failed'
-              + (f' ({", ".join(sorted(fl)[:6])})' if fl else ''))
+        fl = set(fl)
+        if fl:
+            # a net the engine could not deliver as ASKED gets a
+            # hint-free engine escape on the new board first (legal by
+            # construction against the copper just laid); only if that
+            # fails does the seed's stub come back. Measured: a blind
+            # seed restore put SBA0's old stub on SCAS's new one -- the
+            # incremental path's collision class, 10 drc at K35.
+            fl_short = [x.rsplit('/', 1)[-1] for x in fl]
+            pcb_f = parse_kicad_pcb(nxt)
+            tr2, va2, vr2, fl2 = generate_bga_fanout(
+                pcb_f.footprints[sref], pcb_f, net_filter=fl_short,
+                layers=['F.Cu', 'B.Cu'], track_width=tw, clearance=0.1,
+                via_size=vs, via_drill=vd, exit_margin=0.5,
+                escape_method='auto', plane_drop='off')
+            if tr2:
+                nxt2 = stem + '_src_free.kicad_pcb'
+                add_tracks_and_vias_to_pcb(
+                    nxt, nxt2, tr2, va2, vr2,
+                    net_id_to_name={i: n.name for i, n in pcb_f.nets.items()})
+                copy_pro(nxt, nxt2)
+                nxt = nxt2
+                src_tracks.extend(tr2)
+            print(f'  engine fallback (hint-free) for {sorted(fl_short)}: '
+                  f'{len(tr2)} tracks, {len(fl2)} still failed')
+            import surgical as _sg
+            for nm in sorted(set(x.rsplit('/', 1)[-1] for x in fl2)):
+                if nm not in byname:
+                    continue
+                nxt2 = stem + f'_src_restore_{nm}.kicad_pcb'
+                _sg.swap_stub(nxt, base, nm, nxt2)
+                copy_pro(nxt, nxt2)
+                nxt = nxt2
+            fl = set(fl2)
+            # VERIFY the fallback copper: the engine's hint-free leg can
+            # still cross a neighbour's fresh stub inside the ball's own
+            # keep-out lens (measured: SBA0's fallback across SDQ6, 20
+            # drc). A fallback/restored net that check_drc pairs with
+            # anything is stripped back to its bare ball -- an honest
+            # open the braid's retry can close, never a shipped overlap.
+            chk = [x.rsplit('/', 1)[-1] for x in fl_short]
+            bad = [nm for nm in chk if nm in byname and _sg.drc_partners(nxt, nm)]
+            if bad:
+                pcb_b = parse_kicad_pcb(nxt)
+                for nm in bad:
+                    nid_b, net_b = byname[nm]
+                    txt_b = open(nxt, encoding='utf-8').read()
+                    for token in ('segment', 'via'):
+                        txt_b = _strip_window(txt_b, token, nid_b, net_b.name)
+                    nxt2 = stem + f'_src_unfanned_{nm}.kicad_pcb'
+                    with open(nxt2, 'w', encoding='utf-8') as f:
+                        f.write(txt_b)
+                    copy_pro(nxt, nxt2)
+                    nxt = nxt2
+                print(f'  fallback copper collides for {bad}: left UNFANNED '
+                      f'(open) rather than shipped overlapping')
+                del pcb_b
+        print(f'  engine -> {len(tr)} tracks, {len(va)} vias, '
+              f'{len(fl)} failed (seed restored)'
+              + (f': {", ".join(sorted(x.rsplit("/", 1)[-1] for x in fl))}'
+                 if fl else ''))
         src_tracks.extend(tr)
         board = nxt
-    obeyed(src_tracks, {nm: schoice[nm] for nm in src_nets}, src_pad, 'source')
+        obeyed(src_tracks, {nm: choice_of[nm] for nm in src_all}, src_pad,
+               'source')
+    else:
+        src_tracks = []
+        # dogbones and via-in-pads FIRST: their stubs are short and sit
+        # against the pad, and the dogbone engine does not keep its 45-degree
+        # stub clear of an earlier pass's surface escape running through the
+        # same row gap (K15: 9 grazes SDQM0/SDQ15). The channel escapes go
+        # last and route round whatever copper is there.
+        for kind, method in (('via_in_pad', 'underpad'), ('dogbone', 'dogbone'),
+                             ('surface', 'channel')):
+            nets_k = [nm for nm in src_nets if schoice[nm].kind == kind]
+            if not nets_k:
+                continue
+            pcb_k = parse_kicad_pcb(board)
+            fp_k = pcb_k.footprints[sref]
+            if kind != 'surface' or TWO_PAGE_PLAN:
+                # DIRECT EMIT. The escape engines optimise for "escaped",
+                # not "delivered on layer L": measured at K11 the underpad
+                # passes escaped every ball ON F with 0 vias -- the
+                # planned B tooth never existed and the braid opened
+                # exactly those nets. A via/dogbone MOVE carries its own
+                # geometry (legs + via site), clear()-checked against the
+                # static copper and lanes_free-checked against the other
+                # moves, so it is laid verbatim.
+                tr, va, vr, fl = [], [], [], []
+                for nm in nets_k:
+                    m = schoice[nm]
+                    nid = byname[nm][0]
+                    for (a_, b_, L_) in m.legs:
+                        tr.append({'start': a_, 'end': b_, 'width': tw,
+                                   'layer': L_, 'net_id': nid})
+                    if m.site is not None:
+                        va.append({'x': m.site[0], 'y': m.site[1], 'size': vs,
+                                   'drill': vd, 'layers': ['F.Cu', 'B.Cu'],
+                                   'net_id': nid})
+            else:
+                hints_k = {pad_key(src_pad[nm]): schoice[nm].direction
+                           for nm in nets_k}
+                # the plan's exit LINE too: it checked that exact gap against
+                # the static copper (a foreign via in the next gap grazed the
+                # engine's own pick of gap -- K15 SDQ8 vs SDQS1N)
+                lines_k = {pad_key(src_pad[nm]): (schoice[nm].exit_pt[1]
+                                                  if schoice[nm].direction in ('left', 'right')
+                                                  else schoice[nm].exit_pt[0])
+                           for nm in nets_k}
+                tr, va, vr, fl = generate_bga_fanout(
+                    fp_k, pcb_k, net_filter=nets_k, layers=['F.Cu', 'B.Cu'],
+                    track_width=tw, clearance=0.1, via_size=vs, via_drill=vd,
+                    exit_margin=0.5, escape_method=method, plane_drop='off',
+                    escape_dir_hints=hints_k, escape_line_hints=lines_k)
+            nxt = f'{stem}_src_{kind}.kicad_pcb'
+            if tr:
+                add_tracks_and_vias_to_pcb(
+                    board, nxt, tr, va, vr,
+                    net_id_to_name={i: n.name for i, n in pcb_k.nets.items()})
+            else:
+                import shutil
+                shutil.copy(board, nxt)
+            copy_pro(board, nxt)
+            print(f'  {kind} -> {method}: {len(nets_k)} net(s), {len(tr)} tracks, '
+                  f'{len(va)} vias, {len(fl)} failed'
+                  + (f' ({", ".join(sorted(fl)[:6])})' if fl else ''))
+            src_tracks.extend(tr)
+            board = nxt
+        obeyed(src_tracks, {nm: schoice[nm] for nm in src_nets}, src_pad,
+               'source')
     pcb = parse_kicad_pcb(board)
 
 fp = pcb.footprints[dref]
