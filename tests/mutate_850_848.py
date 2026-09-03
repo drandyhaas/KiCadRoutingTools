@@ -22,16 +22,14 @@ gate to pass UNMUTATED first; drop `__pycache__` before and after every row and
 run children with `-B`; treat exit 77 from every witness as UNDECIDED rather
 than a kill; restore in a `finally`.
 
-RECORDED at 9a0f6ce2 -- **22 rows, 22 killed, 0 survived, 0 undecided, 0
-broken, 0 disagreeing with expectation.**
+RECORDED at the tip -- see the commit that adds this line for the counts.
 
-The three newest rows (`the-two-boxes-collapse-back-to-one`,
-`the-face-comes-from-the-netted-box`,
-`the-interiority-question-uses-the-part-box`) exist because an independent
-reviewer found the defect they guard, not because a battery run did: the
-netted-pad box is right for "can this pad get out sideways at all" and wrong
-for "which side of the part is it on", and a QFN's east pin was being sent
-north off a 0.8 x 1.75mm sliver of its own four netted pads.
+Six rows that guarded a `_assignment_rect` experiment were REMOVED with it:
+that change measured the face against the union of the NETTED pads' copper,
+and an independent reviewer showed it reclassifies genuinely interior pads as
+escaping. `qfn_interior_pads` U1 -- the fixture that exists for this exact
+case -- lost four of its five interior pads to it. The experiment is reverted;
+its rows went with it rather than being left to guard code that is gone.
 
 THE FIRST RUN of the 19-row table was 18 killed / 1 survived / 1 disagreeing,
 and that disagreement was A HOLE IN MY OWN TESTS, not a wrong expectation. It
@@ -89,33 +87,16 @@ ROWS = [
      " fallback_rect=ext)",
      (T850,), 'KILLED'),
 
-    ('face_of-gets-the-rect-not-the-copper', 'esc',
-     "    return (min(b[0] for b in netted), min(b[1] for b in netted),\n"
-     "            max(b[2] for b in netted), max(b[3] for b in netted))",
-     "    return geom.rect if geom is not None else (\n"
-     "        min(b[0] for b in netted), min(b[1] for b in netted),\n"
-     "        max(b[2] for b in netted), max(b[3] for b in netted))",
-     (T850,), 'KILLED'),
-
-    ('the-assignment-box-goes-back-to-every-pad', 'esc',
-     "    netted = [b for p, b in boxes\n"
-     "              if b is not None and getattr(p, 'net_id', 0)]",
-     "    netted = [b for p, b in boxes if b is not None]",
-     (T850, T835), 'KILLED'),
-
-    ('the-assignment-box-uses-pad-centres', 'esc',
-     "    return (min(b[0] for b in netted), min(b[1] for b in netted),\n"
-     "            max(b[2] for b in netted), max(b[3] for b in netted))\n",
-     "    _c = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in netted]\n"
-     "    return (min(c[0] for c in _c), min(c[1] for c in _c),\n"
-     "            max(c[0] for c in _c), max(c[1] for c in _c))\n",
-     (T850,), 'KILLED'),
-
     ('pad_box-is-dropped-so-it-degrades-to-centres', 'esc',
-     "    boxes = [(p, None if geom is None else _pad_box(geom, p))"
-     " for p in pads]",
-     "    boxes = [(p, None) for p in pads]",
+     "        box = None if geom is None else _pad_box(geom, pad)\n"
+     "        out.append((pad, face_of(pad, rect, pitch, pad_box=box)))",
+     "        out.append((pad, face_of(pad, rect, pitch)))",
      (T850, T841), 'KILLED'),
+
+    ('face_of-gets-the-rect-not-the-copper', 'esc',
+     "    rect = fallback_rect if geom is None else geom.copper",
+     "    rect = fallback_rect if geom is None else geom.rect",
+     (T850,), 'KILLED'),
 
     ('the-tolerance-becomes-the-lane', 'esc',
      "    pitch = pad_pitch(fp)\n"
@@ -166,30 +147,6 @@ ROWS = [
      "        if face is None and 2 <= len(owners) <= DISPLACEMENT_MAX_FANOUT:\n"
      "            interior_pads += 1\n"
      "            interior_nets.add(nid)",
-     (T850,), 'KILLED'),
-
-    ('the-two-boxes-collapse-back-to-one', 'esc',
-     "    out = [(pad, face_of(pad, rect, pitch, pad_box=box,\n"
-     "                         face_rect=None if part == rect else part))\n"
-     "           for pad, box in boxes]",
-     "    out = [(pad, face_of(pad, rect, pitch, pad_box=box))\n"
-     "           for pad, box in boxes]",
-     (T850,), 'KILLED'),
-
-    ('the-face-comes-from-the-netted-box', 'esc',
-     "    if face_rect is not None:\n"
-     "        d = _dist(face_rect)",
-     "    if False:\n"
-     "        d = _dist(face_rect)",
-     (T850,), 'KILLED'),
-
-    ('the-interiority-question-uses-the-part-box', 'esc',
-     "    d = _dist(rect)\n"
-     "    if min(d.values()) > tol:\n"
-     "        return None",
-     "    d = _dist(rect if face_rect is None else face_rect)\n"
-     "    if min(d.values()) > tol:\n"
-     "        return None",
      (T850,), 'KILLED'),
 
     ('the-face-map-swaps-N-and-S', 'esc',

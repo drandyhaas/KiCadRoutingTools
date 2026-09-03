@@ -657,7 +657,7 @@ def _part_rect(fp) -> Tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def face_of(pad, rect, pitch, pad_box=None, face_rect=None) -> Optional[str]:
+def face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
     """Which face a pad escapes through, or None when it is interior.
 
     A pad on the bounding box escapes through the side it sits on; a corner pad
@@ -688,88 +688,22 @@ def face_of(pad, rect, pitch, pad_box=None, face_rect=None) -> Optional[str]:
     disagreed between the two ledgers was not this arithmetic but the PAIRING
     of rect, pad box and pitch it is fed, and that pairing is the invariant.
     """
+    minx, miny, maxx, maxy = rect
     tol = max(pitch / 2.0, INTERIOR_EPS)
-    box = (pad_box if pad_box is not None
-           else (pad.global_x, pad.global_y, pad.global_x, pad.global_y))
-
-    def _dist(r):
-        minx, miny, maxx, maxy = r
-        return {'west': box[0] - minx, 'east': maxx - box[2],
-                'north': box[1] - miny, 'south': maxy - box[3]}
-
-    d = _dist(rect)
-    if min(d.values()) > tol:
-        return None
-    # TWO BOXES, TWO QUESTIONS, when the caller supplies `face_rect` (#850).
-    # `rect` answers "can this pad get out sideways at all"; `face_rect`
-    # answers "which side of the PART is it on". They are the same box on
-    # most parts, and must not be when the netted pads are a strict subset:
-    # see `_assignment_rect`, which measured a QFN's four netted pins against
-    # a 0.8 x 1.75mm sliver of themselves and pointed one of them NORTH off
-    # the part's east edge.
-    if face_rect is not None:
-        d = _dist(face_rect)
+    px0, py0, px1, py1 = (pad_box if pad_box is not None
+                          else (pad.global_x, pad.global_y,
+                                pad.global_x, pad.global_y))
+    d = {'west': px0 - minx, 'east': maxx - px1,
+         'north': py0 - miny, 'south': maxy - py1}
     near = min(d.values())
+    if near > tol:
+        return None
     # Ties resolve by FACES order, not by dict order, so the answer does not
     # depend on how the pads were enumerated.
     for f in FACES:
         if abs(d[f] - near) < 1e-9:
             return f
     return None
-
-
-def _assignment_rect(boxes, geom, fallback_rect):
-    """The box a pad's face is measured AGAINST: the NETTED pads' copper.
-
-    Not `CopperGeometry.copper`, which is every pad's copper, and the
-    difference is not academic. Measured on ulx3s U1 -- an LFE5U BGA with 379
-    netted balls -- eight UNNETTED 0.127 x 0.508mm oval alignment marks sit
-    0.954mm outside the ball field on all four sides and set the whole box by
-    themselves. Against that box every one of the 379 balls is INTERIOR, so
-    the part reports demand 0 on all four faces: a 379-ball BGA that asks
-    nothing of its channels. `check_channels` then published `ulx3s` at zero
-    deficit, which is the "sweep of green numbers on a ledger that has stopped
-    looking" #841 measured, reached by a different route.
-
-    An unnetted pad cannot demand a lane, so it may not decide where the pads
-    that can are pointing. `copper`'s load-bearing invariant survives in the
-    form that matters: every edge of THIS box is attained by some NETTED pad,
-    so a netted edge pad is at distance exactly 0 -- which is the property
-    `face_of` rests on.
-
-    Deliberately NOT the caller's `ignore_net_ids` set as well: netted-or-not
-    is a fact about the BOARD, while the ignore list is a fact about the call,
-    and a reference frame that moves with a flag is not one. So a plane rail's
-    pad still helps set the box it is then dropped from.
-
-    Measured over the 22 tracked boards, 6 of 97 fine-pitch refs have a box
-    set by an unnetted pad, and only ulx3s U1 is inverted by it; the other
-    five (four synthetic qfn fixtures and watchy J3) have 0 or 5 netted pads
-    interior either way.
-    """
-    netted = [b for p, b in boxes
-              if b is not None and getattr(p, 'net_id', 0)]
-    if not netted and geom is None:
-        # No pad model at all: the caller's own box, over pad CENTRES. Falling
-        # back to EVERY pad's centre rather than to `fallback_rect` when no pad
-        # is netted, because `fallback_rect` is optional and a None reaching
-        # `face_of` is a TypeError rather than a degraded answer. Unreachable
-        # from the three in-repo callers, all of which pass a real rect; it is
-        # written for the promise, not for a case that exists.
-        centres = [(p.global_x, p.global_y) for p, _b in boxes
-                   if getattr(p, 'net_id', 0)]
-        if not centres:
-            centres = [(p.global_x, p.global_y) for p, _b in boxes]
-        if not centres:
-            return fallback_rect
-        return (min(c[0] for c in centres), min(c[1] for c in centres),
-                max(c[0] for c in centres), max(c[1] for c in centres))
-    if not netted:
-        # Modelled, but no netted pad carries copper -- nothing to classify,
-        # and the whole-part box is the answer this always gave.
-        return geom.copper
-    return (min(b[0] for b in netted), min(b[1] for b in netted),
-            max(b[2] for b in netted), max(b[3] for b in netted))
 
 
 class FaceAssignment(NamedTuple):
@@ -823,13 +757,11 @@ def assign_faces(fp, geom, *, lane_mm, fallback_rect=None) -> FaceAssignment:
     source = 'pad_lattice'
     if pitch == float('inf'):
         pitch, source = lane_mm, 'lane_fallback'
-    pads = list(fp.pads or [])
-    boxes = [(p, None if geom is None else _pad_box(geom, p)) for p in pads]
-    rect = _assignment_rect(boxes, geom, fallback_rect)
-    part = (fallback_rect if geom is None else geom.copper)
-    out = [(pad, face_of(pad, rect, pitch, pad_box=box,
-                         face_rect=None if part == rect else part))
-           for pad, box in boxes]
+    rect = fallback_rect if geom is None else geom.copper
+    out = []
+    for pad in (fp.pads or []):
+        box = None if geom is None else _pad_box(geom, pad)
+        out.append((pad, face_of(pad, rect, pitch, pad_box=box)))
     return FaceAssignment(faces=tuple(out), pitch_mm=pitch,
                           pitch_source=source)
 

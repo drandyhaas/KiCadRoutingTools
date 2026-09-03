@@ -167,21 +167,6 @@ def measure(path):
                       if any(n == ref for n, _v in r['eaten_by'])
                       and any(b != g.rect for b in g.rect_sides.values())})
 
-    # ...and the assignment box set by an UNNETTED pad (the third finding).
-    unnetted = []
-    for ref in refs:
-        g = geom.get(ref)
-        if g is None:
-            continue
-        pairs = [(p, L.pad_box(g, p)) for p in fps[ref].pads]
-        if E._assignment_rect(pairs, g, None) != g.copper:
-            n_old = sum(1 for p, b in pairs if p.net_id and E.face_of(
-                p, g.copper, E.pad_pitch(fps[ref]), pad_box=b) is None)
-            n_new = sum(1 for p, f in E.assign_faces(
-                fps[ref], g, lane_mm=TRACK + CLEARANCE).faces
-                if p.net_id and f is None)
-            unnetted.append('%s %d->%d' % (ref, n_old, n_new))
-
     return {
         'refs': len(refs),
         'demand_before': dem_b, 'demand_after': dem_a,
@@ -193,7 +178,6 @@ def measure(path):
         'deficit_848_before': dfc848b, 'deficit_848_after': dfc_a,
         'escape_deficit': esc_deficit,
         'side_box_refs': boxes, 'side_charged_refs': charged,
-        'unnetted_box': unnetted,
     }
 
 
@@ -237,15 +221,6 @@ def table_demand(rows):
     print('  `escape.FACES` tie order MOVE a net between faces; only the')
     print('  interior bucket takes one off. A report of the falls alone has')
     print('  measured half the change.')
-    print('\n  ASSIGNMENT BOX SET BY AN UNNETTED PAD (netted pads interior,')
-    print('  all-pad box -> netted-pad box):')
-    any_un = False
-    for name, d in rows:
-        if d['unnetted_box']:
-            any_un = True
-            print('    %-28s %s' % (name[:28], ', '.join(d['unnetted_box'])))
-    if not any_un:
-        print('    none')
 
 
 def table_side(rows):

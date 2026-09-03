@@ -76,17 +76,8 @@ EXPECTED = {
 #: from `EXPECTED` because a deficit that falls can mean the instrument got
 #: honest OR that it stopped counting nets, and only this pair tells them
 #: apart.
-#: *After #850* (2026-09-03): `ulx3s` moves 149 -> 216 demand and 402 -> 335
-#: interior on BOTH arms, and `rp2350`/`tigard` move on the pad-centre arm
-#: only. The mover is `escape._assignment_rect`: the box a pad's face is
-#: measured against is now the union of the NETTED pads' copper, not of every
-#: pad's. Eight UNNETTED 0.127 x 0.508mm oval alignment marks on ulx3s U1 sat
-#: 0.954mm outside its ball field on all four sides and set the whole box, so
-#: all 379 of its netted balls were interior and the part reported demand 0 on
-#: every face. 67 outer-ring balls come back. The direction rule below is
-#: unaffected and still holds on every board.
 DEMAND = {
-    'ulx3s': (216, 335),
+    'ulx3s': (149, 402),
     'orangecrab_ext_pll': (234, 306),
     'glasgow_revC': (307, 108),
     'rp2350_fpga_eensy_prePlane': (130, 37),
@@ -99,21 +90,12 @@ DEMAND = {
 #: The same pair BEFORE #841 touched the subject rect, i.e. pad centres
 #: measured against the pad-centre box. The direction between the two is the
 #: assertion; the values are the change detector.
-#:
-#: *After #850* (2026-09-03): this arm moves too, and it should. The
-#: netted-pad box (`escape._assignment_rect`) is applied on THIS path as well
-#: -- which pads define the reference frame is not a question about whether a
-#: pad model exists. ulx3s 149 -> 216 / 406 -> 339, rp2350 122 -> 128 / 46 ->
-#: 40, tigard 102 -> 104 / 20 -> 18; the five other boards are unmoved.
-#: (tigard's demand reads 104 on THIS arm and 103 on the copper arm above --
-#: the one ref corpus-wide where the per-face net SUM is not monotone between
-#: the two pairings. The mechanism is in the arm's docstring.)
 DEMAND_AT_PAD_CENTRES = {
-    'ulx3s': (216, 339),
+    'ulx3s': (149, 406),
     'orangecrab_ext_pll': (232, 309),
     'glasgow_revC': (305, 116),
-    'rp2350_fpga_eensy_prePlane': (128, 40),
-    'tigard': (104, 18),
+    'rp2350_fpga_eensy_prePlane': (122, 46),
+    'tigard': (102, 20),
     'splitflap_driver': (0, 0),
     'watchy': (113, 1),
     'kit-dev-coldfire-xilinx_5213': (207, 0),
@@ -202,27 +184,6 @@ def test_no_blocker_is_ever_on_a_face_the_part_does_not_occupy():
           .format(charges, checked))
 
 
-def _faced(pcb, _name, lane, *, centres):
-    """(ref, pad, face) for every NETTED pad, at one of the two pairings.
-
-    The pad population, which is what the direction rule below is actually
-    about. `centres=True` is the pre-#841 pairing (pad centres against the
-    pad-centre box), reached the same way the arm reaches it -- with no
-    geometry -- so the two arms differ in exactly one thing.
-    """
-    from placement.legality import part_copper_geometry
-    geom = None if centres else part_copper_geometry(pcb.footprints, 0.2)
-    out = []
-    for ref in E.fine_pitch_parts(pcb):
-        fp = pcb.footprints[ref]
-        asg = E.assign_faces(fp, None if geom is None else geom.get(ref),
-                             lane_mm=lane, fallback_rect=E._part_rect(fp))
-        for pad, face in asg.faces:
-            if getattr(pad, 'net_id', 0):
-                out.append((ref, pad, face))
-    return out
-
-
 def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
     """#841's own tripwire, and the reason `DEMAND` is pinned apart from
     `EXPECTED`.
@@ -235,26 +196,8 @@ def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
     where it should be.
 
     The DIRECTION is the assertion: a bigger box with the same tolerance can
-    only pull pads ONTO faces, never off them, so the netted pads ON A FACE
-    never fall and interior pads never grow.
-
-    *After #850* (2026-09-03) the direction is asserted on the PAD POPULATION,
-    where it is true, rather than on the per-face distinct-net SUM, where it
-    is not. Demand is `sum over faces of len(distinct nets on that face)`, and
-    #850 decoupled which FACE a pad points at (the part's copper box) from
-    whether it can escape at all (the netted-pad box) -- so a net can now move
-    to a face it was ALREADY counted on, and the sum falls by one while no pad
-    leaves a face. Measured, that happens on exactly one ref corpus-wide:
-    tigard J1 west, 1 -> 0, taking the board 104 -> 103. Both monotone
-    quantities hold on all eight boards with zero violations (netted pads on
-    a face: ulx3s 247 -> 251, orangecrab 304 -> 307, glasgow 344 -> 352,
-    rp2350 150 -> 153, the rest equal; interior: 339 -> 335, 309 -> 306,
-    116 -> 108, 40 -> 37, the rest equal).
-
-    The sum was never the property -- it was a consequence of face selection
-    and interiority sharing one box, and it stopped being one. The recorded
-    values in `DEMAND` / `DEMAND_AT_PAD_CENTRES` still pin it exactly; it is
-    only the >= that moved to the pad count.
+    only pull pads ONTO faces, never off them, so demand never falls and
+    interior pads never grow.
 
     Both sides are MEASURED. The pad-centre arm is reached through the
     documented empty-map fallback -- `obstruction_rects={}` puts the subject
@@ -289,17 +232,10 @@ def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
                     for r in E.fine_pitch_parts(pcb)]
         before = (sum(f.demand for p in base_led for f in p.faces),
                   sum(p.interior_pads for p in base_led))
-        # THE DIRECTION, on the two quantities that are actually monotone --
-        # the PAD population, not the per-face distinct-net sum. See the
-        # `*After #850*` note below for why the sum is not one of them.
-        faced_b = sum(1 for _r, _p, f in _faced(pcb, name, lane, centres=True)
-                      if f)
-        faced_a = sum(1 for _r, _p, f in _faced(pcb, name, lane, centres=False)
-                      if f)
-        assert faced_a >= faced_b, (
-            '{}: netted pads ON A FACE FELL {} -> {}. A larger subject box '
-            'cannot take a pad off a face; the demand model has gone blind'
-            .format(name, faced_b, faced_a))
+        assert got[0] >= before[0], (
+            '{}: demand FELL {} -> {}. A larger subject box cannot take a pad '
+            'off a face; the demand model has gone blind'
+            .format(name, before[0], got[0]))
         assert got[1] <= before[1], (
             '{}: interior pads GREW {} -> {}, same reason'
             .format(name, before[1], got[1]))

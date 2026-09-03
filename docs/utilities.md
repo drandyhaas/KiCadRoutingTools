@@ -1264,7 +1264,16 @@ it is 0 throughout.
 Demand is *"nets with a pad **on** this face"*, and "on" is
 `placement.escape.assign_faces` — the same rule the escape ledger uses
 (#850). Each pad is measured by its **own copper edge** against the box over
-the part's **netted** pad copper, within `max(pad_pitch / 2, 0.001 mm)`.
+the part's pad copper (`CopperGeometry.copper`), within
+`max(pad_pitch / 2, 0.001 mm)`.
+
+**A known limit of that box, since it is a box and not an occupancy test:** a
+few small pads lying outside the main pad field set it for everything inside.
+On `ulx3s` U1 — an LFE5U BGA — eight *unnetted* 0.127 × 0.508 mm alignment
+marks sit 0.954 mm beyond the ball field on all four sides, and all 379 netted
+balls therefore read as interior, so the part reports demand 0 on every face.
+That predates both ledgers and this section does not fix it; it is recorded
+here because the number is published and a reader should know what it means.
 
 **A pad that is not on any edge of that box is INTERIOR**, and counts toward
 no face's demand. It cannot leave sideways at any pitch — it needs a via — and
@@ -1302,7 +1311,7 @@ printed text, not its JSON.
 *Before #850* this ledger took `min` over the distance from each pad's
 **centre** to the whole-part extent edge, with no tolerance and no interior
 case, so every netted pad was demand on some face. Corpus-wide that was 2034
-face-demand nets against 1203, and 478 deficit lanes at the finest grid
+face-demand nets against 1142, and 478 deficit lanes at the finest grid
 against 199; the boards where the two instruments most disagreed (ulx3s,
 haasoscope_pro_max, routed_output — 68 / 44 / 44 lanes short here against 0 on
 the escape ledger) now agree. Regenerate with

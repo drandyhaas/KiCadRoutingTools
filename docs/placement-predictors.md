@@ -238,15 +238,18 @@ that tip with the two commands named above: every deficit / worst pair is
 identical, the 72.2% share is identical, and so is 14 of the 80 uncharged
 pairs.
 
-The reason is worth knowing, because "the demand model changed and the
-demand-derived table did not" reads like an error. This page reports
-`deficit = demand - supply`, and the parts whose demand moves hardest have
-supply to spare, so neither number reaches a deficit. On this page's own
-instrument, ulx3s U1 goes from 0 face-demand nets to 18 / 18 / 13 / 18
-(N / E / S / W) against a supply of 21 / 31 / 31 / 29 -- deficit 0 on every
-face before and after. And the one board whose argument here turns on demand,
-kit-dev-coldfire, has no interior pads at all: 0 of its 244 netted pads, on
-either of its two fine-pitch parts.
+The reason is that this page reports the ESCAPE ledger, and #850 changed only
+`routability.face_lane_ledger` -- it moved that instrument onto the rule this
+one already used, rather than changing this one. Every number here is
+re-derived at the tip and identical.
+
+Worth knowing while reading the ulx3s rows in particular: `escape` reports
+ulx3s U1 with demand 0 on all four faces and 379 of its 379 netted balls
+interior, because the box each pad is measured against is set by eight
+UNNETTED 0.127 x 0.508mm alignment marks sitting 0.954mm outside the ball
+field. A bounding box cannot tell eight corner marks from an enclosing ring.
+That is older than either ledger and is filed rather than fixed here; the
+board's `1 / 5` row above comes from its other parts.
 
 **What that does to the argument, stated rather than absorbed.** The
 "already charged" share falls 93.6% -> 72.2%, and the pairs the halo misses

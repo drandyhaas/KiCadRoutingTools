@@ -14,9 +14,9 @@ What is asserted, and why each arm is here rather than implied:
     resolver that filled the row is true by construction and sees nothing --
     the mistake that passed for six commits on #841's branch. This arm patches
     `escape.face_of` and inspects what it was HANDED: the rect by OBJECT
-    IDENTITY against the netted-pad box (not `==`: on a part with no NPTH and
-    no unnetted pad the three candidate boxes coincide, so equality cannot
-    bite), the pitch, and a real `pad_box` for every netted pad.
+    IDENTITY against `CopperGeometry.copper` (not `==`: on a part with no NPTH
+    `rect` and `copper` coincide, so equality would pass against either), the
+    pitch, and a real `pad_box` for every netted pad.
 
  2. CONSERVATION. Every netted pad is on exactly one face or interior, and the
     published `interior_pads` is the count the spy saw. Arm 1 checks what the
@@ -55,17 +55,13 @@ What is asserted, and why each arm is here rather than implied:
     (N, S, W, E) to `escape.FACES` order (N, E, S, W). Invisible on a corpus
     board where no tie is exact.
 
- 8. THE UNNETTED-PAD BOX. Eight unnetted alignment marks on ulx3s U1 set the
-    box for 379 netted balls and made every one of them interior. This arm is
-    the true positive for `_assignment_rect`.
-
- 9. THE GATE DID NOT GO QUIET. All three `check_channels` gate predicates read
+ 8. THE GATE DID NOT GO QUIET. All three `check_channels` gate predicates read
     `demand_nets` and two threshold at `GATE_MIN_DEMAND = 7`, so a demand-only
     fall can silence a true positive with no output line saying a face left
     the gate. The tracked `tests/fixtures/run23` tigard pair is the only
     clean-clone positive `--gate` has.
 
-10. THE STARVED BUDGET. Arm 9 shows the positive survived; this shows it was
+ 9. THE STARVED BUDGET. Arm 9 shows the positive survived; this shows it was
     not bought by inventing negatives elsewhere.
 
 Run: python3 -X utf8 tests/test_850_demand_face_of.py
@@ -91,6 +87,14 @@ from placement import routability as R                       # noqa: E402
 
 SKIP_EXIT = 77
 FAILURES = []
+#: Every passing `check()`, so this file REPORTS its own total rather than
+#: stating one in prose. An earlier draft named a count I had got by counting
+#: `check(...)` call SITES; several are inside loops over boards, refs and
+#: pads, so the number emitted is larger and moves with the corpus. An
+#: independent fact-check caught it. A count maintained by hand is a claim;
+#: this one is a measurement.
+PASSED = []
+SECTIONS = 9
 
 #: One basis, stated. `part_copper_geometry`'s NPTH hole extents grow below
 #: 0.20mm clearance, so a census at another clearance is a different census.
@@ -109,8 +113,16 @@ LANE = dict(clearance=CLR, track_width=TRK, grid_step=GRID)
 #:               not looking, and it is why `interior_demand_nets` is
 #:               published beside `interior_pads`.
 #:   glasgow U1  UNCHANGED, same reason, with 27 interior pads.
-#:   ulx3s U1    214 -> 61, the largest fall on the corpus, and the row that
-#:               nearly shipped as 214 -> 0: see arm 8.
+#:   ulx3s U1    214 -> 0, the largest fall on the corpus and the one that is
+#:               NOT a clean result: all 379 of its netted balls read as
+#:               interior, because eight unnetted 0.127 x 0.508mm alignment
+#:               marks sit 0.954mm outside its ball field and set the box.
+#:               `escape` has reported it that way since it was written and
+#:               this PR does not change it -- #850 is about the two ledgers
+#:               AGREEING, and here they now agree on a number that is wrong
+#:               for a reason older than either of them. Filed separately with
+#:               the measurement; see the PR body. Pinned here so the day it
+#:               is fixed, this row fails and says so.
 #:   watchy U1   N 1->2, W 1->0 -- a net MOVED between faces, which the
 #:               tolerance and the `escape.FACES` tie order both do and the
 #:               interior bucket cannot. The part total falls by 1 while one
@@ -124,33 +136,10 @@ GOLDEN = {
     'glasgow_revC:U1': ({'N': 7, 'S': 10, 'W': 7, 'E': 12},
                         {'N': 7, 'S': 10, 'W': 7, 'E': 12}, 27, 0),
     'ulx3s:U1': ({'N': 64, 'S': 20, 'W': 63, 'E': 67},
-                 {'N': 17, 'S': 10, 'W': 18, 'E': 16}, 312, 145),
+                 {'N': 0, 'S': 0, 'W': 0, 'E': 0}, 379, 206),
     'watchy:U1': ({'N': 1, 'S': 1, 'W': 1, 'E': 0},
                   {'N': 2, 'S': 1, 'W': 0, 'E': 0}, 0, 0),
 }
-
-#: Refs whose ASSIGNMENT box is set by an unnetted pad (arm 8), and how many
-#: of their netted pads that pushed interior. Only ulx3s U1 is inverted by it.
-UNNETTED_BOX = {
-    'ulx3s:U1': (379, 312),
-    'qfn_interior_pads:U1': (5, 1),
-    'qfn_csi_underpad_diff:U1': (0, 0),
-    'qfn_diffpair_escape:U1': (0, 0),
-    'qfn_underpad_coupling:U1': (0, 0),
-    'watchy:J3': (0, 0),
-}
-
-
-#: Every passing `check()`, so this file REPORTS its own total rather than
-#: stating one in prose. An earlier draft of the docstring above named a count
-#: I had got by counting `check(...)` call sites in the source -- but several
-#: are inside loops over boards, refs and pads, so the number actually emitted
-#: is larger and moves whenever the corpus does. An independent fact-check
-#: caught it (45 stated, 61 emitted at the time). A count maintained by hand
-#: is a claim; this one is a measurement.
-PASSED = []
-SECTIONS = 10
-
 
 def check(name, cond, detail=''):
     if cond:
@@ -189,10 +178,9 @@ def the_spy_and_conservation(boards):
         seen = []
         real = E.face_of
 
-        def spy(pad, rect, pitch, pad_box=None, face_rect=None):
-            seen.append((pad, rect, pitch, pad_box, face_rect))
-            return real(pad, rect, pitch, pad_box=pad_box,
-                        face_rect=face_rect)
+        def spy(pad, rect, pitch, pad_box=None):
+            seen.append((pad, rect, pitch, pad_box))
+            return real(pad, rect, pitch, pad_box=pad_box)
 
         E.face_of = spy
         try:
@@ -205,40 +193,22 @@ def the_spy_and_conservation(boards):
         check('spy: %s %s -- the kernel was called once per pad' % (name, ref),
               len(seen) == len(fp.pads),
               '%d calls for %d pads' % (len(seen), len(fp.pads)))
-        # THE PAIRING, checked TWO ways, because the obvious one is true by
-        # construction. Calling `_assignment_rect` to build the expectation
-        # makes this arm blind to a mutation OF `_assignment_rect` -- measured:
-        # replacing it with `geom.rect` or `geom.copper` leaves this equality
-        # passing (the golden and the unnetted-box arms are what kill those).
-        # What it DOES catch, and is here for, is `face_lane_ledger` growing
-        # its own box back and handing the kernel something else.
-        want = E._assignment_rect(
-            [(p, L.pad_box(ctx.geom[ref], p)) for p in fp.pads],
-            ctx.geom[ref], None)
-        check('spy: %s %s -- the ledger did not build its own box' % (name, ref),
-              all(r == want for _p, r, _pi, _b, _fr in seen),
-              'want %r, saw %r' % (want, {r for _p, r, _pi, _b, _fr in seen}))
-        # ...and the INVARIANT, derived from the pads rather than from the
-        # function: every edge of the box `face_of` measures against is
-        # attained by some NETTED pad, and no netted pad lies outside it. That
-        # is the property `face_of`'s docstring rests on -- it is what puts an
-        # edge pad at distance exactly 0 -- and it is FALSE for `geom.copper`
-        # on a part whose box is set by an unnetted pad, which is #850's own
-        # ulx3s finding.
-        # ...and `face_rect`: supplied only when the netted box is a strict
-        # subset of the part's copper, and then it IS the part's copper. The
-        # two questions are answered against two boxes, and a caller that
-        # collapsed them back to one is what sent a QFN's east pin north.
-        fr = {id(f) for _p, _r, _pi, _b, f in seen}
-        check('spy: %s %s -- face_rect is the PART box when it differs, and '
-              'absent when it does not' % (name, ref),
-              (fr == {id(ctx.geom[ref].copper)}
-               if want != ctx.geom[ref].copper else fr == {id(None)}),
-              'netted %r part %r face_rects %r'
-              % (want, ctx.geom[ref].copper,
-                 {_f for _p, _r, _pi, _b, _f in seen}))
-        rects = [r for _p, r, _pi, _b, _fr in seen]
-        nb = [L.pad_box(ctx.geom[ref], p) for p in fp.pads if p.net_id]
+        # THE PAIRING: the box is `CopperGeometry.copper` BY OBJECT IDENTITY,
+        # not by equality. On a part with no NPTH the `rect` and `copper`
+        # boxes coincide, so `==` would pass against either and this arm would
+        # be blind to the one pairing mistake that matters -- which is why the
+        # NPTH refs are in the list above.
+        want = ctx.geom[ref].copper
+        check('spy: %s %s -- measured against the part COPPER box, by identity'
+              % (name, ref),
+              all(r is want for _p, r, _pi, _b in seen),
+              'want %r, saw %r' % (want, {r for _p, r, _pi, _b in seen}))
+        # ...and the INVARIANT that `face_of`'s docstring rests on, derived
+        # from the pads rather than from the function: every edge of the box
+        # it measures against is attained by some pad, which is what puts an
+        # edge pad at distance exactly 0.
+        rects = [r for _p, r, _pi, _b in seen]
+        nb = [L.pad_box(ctx.geom[ref], p) for p in fp.pads]
         nb = [b for b in nb if b is not None]
         if rects and nb:
             r = rects[0]
@@ -248,20 +218,20 @@ def the_spy_and_conservation(boards):
                          and b[2] <= r[2] + 1e-9 and b[3] <= r[3] + 1e-9
                          for b in nb)
             check('spy: %s %s -- every edge of that box is attained by a '
-                  'NETTED pad, and none lies outside it' % (name, ref),
+                  'pad, and none lies outside it' % (name, ref),
                   attained and inside,
                   'rect %r attained=%s inside=%s' % (r, attained, inside))
         check('spy: %s %s -- at the part\'s own pad pitch' % (name, ref),
-              all(abs(pi - E.pad_pitch(fp)) < 1e-12 for _p, _r, pi, _b, _fr in seen)
+              all(abs(pi - E.pad_pitch(fp)) < 1e-12 for _p, _r, pi, _b in seen)
               and abs(rows[0]['face_pitch_mm'] - round(E.pad_pitch(fp), 4)) < 1e-9,
               'pad_pitch %r, row %r' % (E.pad_pitch(fp), rows[0]['face_pitch_mm']))
         check('spy: %s %s -- every netted pad got its own copper box'
               % (name, ref),
-              all(b is not None for p, _r, _pi, b, _fr in seen if p.net_id),
+              all(b is not None for p, _r, _pi, b in seen if p.net_id),
               '%d netted pads with no box'
-              % sum(1 for p, _r, _pi, b, _fr in seen if p.net_id and b is None))
+              % sum(1 for p, _r, _pi, b in seen if p.net_id and b is None))
         # 2. CONSERVATION.
-        faced = sum(1 for (_p, _r, _pi, _b, _fr), (pad, f)
+        faced = sum(1 for (_p, _r, _pi, _b), (pad, f)
                     in zip(seen, E.assign_faces(fp, ctx.geom[ref],
                                                 lane_mm=1.0).faces)
                     if pad.net_id and f is not None)
@@ -404,93 +374,6 @@ EXTENT_FACES = {
 }
 
 
-#: Refs where a netted pad's face was decided by an edge of the NETTED-pad
-#: sliver rather than by the part's own copper box, before the two-box split.
-#: `{board:ref: {pad_number: face}}` -- the face each moved to, which is the
-#: right one.
-#: The pad named is the NORTHERNMOST of that ref's netted column -- the one
-#: sitting on the netted sliver's own north edge, tied at distance 0 with the
-#: part's real east edge, which `escape.FACES` order then resolved north.
-SLIVER_FACES = {
-    'qfn_csi_underpad_diff:U1': {'32': 'east', '29': 'east'},
-    'qfn_underpad_coupling:U1': {'17': 'east', '24': 'east'},
-}
-
-
-def the_face_comes_from_the_part_box(boards):
-    """A netted pad's FACE is the nearest face of the part's own copper box.
-
-    THIS ARM EXISTS BECAUSE AN INDEPENDENT REVIEWER FOUND ITS ABSENCE, on the
-    commit that introduced `_assignment_rect`. That commit made the box a pad
-    is measured against the union of the NETTED pads' copper -- which is right
-    for the question *"can this pad get out sideways at all"*, and wrong for
-    *"which side of the part is it on"* whenever the netted pads are a strict
-    subset.
-
-    Measured: `qfn_csi_underpad_diff` U1 is a QFN-48 with four netted pins,
-    all four flush against its EAST edge. The netted box is a 0.8 x 1.75mm
-    sliver of just those four, so pad 32 -- the northernmost of them -- sits
-    on the sliver's own NORTH edge at distance 0, ties with the real east edge
-    at distance 0, and `escape.FACES` order sends it north. Off the part's
-    east side, onto a face it does not touch. `eaten_by` and every downstream
-    move target follow the face, so this is a fix aimed at the wrong side of
-    the part.
-
-    Nothing caught it: `UNNETTED_BOX` above checks interior COUNTS (0 and 0,
-    unmoved), the golden's five refs are all fully-netted or BGA-shaped, and
-    the 19-row mutation battery had no row for it. The measure script did
-    print the raw signal -- `rise=1` on this board -- and nothing asked
-    whether the rise was geometrically sound.
-
-    So `face_of` now takes `face_rect`: `rect` answers interiority, `face_rect`
-    answers which face, and they differ exactly when the netted subset is
-    strict. The invariant below is the general form, checked on every netted
-    pad of every fine-pitch ref rather than only on the two refs that moved.
-    """
-    part_wrong, checked = [], 0
-    for name, path in sorted(boards.items()):
-        pcb = parse_kicad_pcb(path)
-        ctx = R.board_lane_context(pcb, CLR, pcb_file=path)
-        for ref in E.fine_pitch_parts(pcb):
-            g = ctx.geom.get(ref)
-            fp = pcb.footprints[ref]
-            if g is None:
-                continue
-            for pad, face in E.assign_faces(fp, g, lane_mm=TRK + CLR).faces:
-                if not pad.net_id or face is None:
-                    continue
-                checked += 1
-                # The nearest face of the PART box, tie-broken the same way.
-                b = L.pad_box(g, pad) or (pad.global_x, pad.global_y,
-                                          pad.global_x, pad.global_y)
-                d = {'west': b[0] - g.copper[0], 'east': g.copper[2] - b[2],
-                     'north': b[1] - g.copper[1], 'south': g.copper[3] - b[3]}
-                near = min(d.values())
-                want = next(f for f in E.FACES if abs(d[f] - near) < 1e-9)
-                if face != want:
-                    part_wrong.append((name, ref, pad.pad_number, face, want))
-    check('part box: every netted pad is on the nearest face of the PART\'s '
-          'own copper box, not of the netted-pad subset',
-          not part_wrong, '%d wrong: %r' % (len(part_wrong), part_wrong[:6]))
-    check('part box: ...and it checked a real population', checked > 1000,
-          '%d pads' % checked)
-    # ...and the two refs that actually moved, named, so the arm is a change
-    # detector and not only an invariant.
-    for key, want in sorted(SLIVER_FACES.items()):
-        name, ref = key.split(':')
-        path = boards.get(name)
-        if path is None:
-            check('sliver: %s present' % name, False)
-            continue
-        pcb = parse_kicad_pcb(path)
-        g = L.part_copper_geometry(pcb.footprints, CLR)[ref]
-        faces = {p.pad_number: f for p, f in E.assign_faces(
-            pcb.footprints[ref], g, lane_mm=TRK + CLR).faces}
-        got = {n: faces.get(n) for n in want}
-        check('sliver: %s -- the pad on the sliver\'s edge points at the '
-              'part\'s face' % key, got == want, '%r != %r' % (got, want))
-
-
 def the_face_geometry_is_still_the_extent(boards):
     """`length_mm` comes from `pp.extent`, NOT from the copper box.
 
@@ -600,40 +483,6 @@ def the_tie_break(tmpdir):
                                                              faces))
 
 
-# --- 8. the unnetted-pad box ------------------------------------------------
-
-def the_unnetted_box(boards):
-    seen = {}
-    for key, want in sorted(UNNETTED_BOX.items()):
-        name, ref = key.split(':')
-        path = boards.get(name)
-        if path is None:
-            check('unnetted box: %s present' % name, False)
-            continue
-        pcb = parse_kicad_pcb(path)
-        fp = pcb.footprints[ref]
-        geom = L.part_copper_geometry(pcb.footprints, CLR)[ref]
-        boxes = [(p, L.pad_box(geom, p)) for p in fp.pads]
-        netted_box = E._assignment_rect(boxes, geom, None)
-        check('unnetted box: %s\'s box is INSET from the all-pad box' % key,
-              netted_box != geom.copper,
-              '%r == %r' % (netted_box, geom.copper))
-        n_all = sum(1 for p, f in E.assign_faces(
-            fp, geom, lane_mm=0.4).faces if p.net_id and f is None)
-        # ...and the same part measured against the all-pad box, which is
-        # what shipped before this commit.
-        n_old = sum(1 for p in fp.pads if p.net_id
-                    and E.face_of(p, geom.copper, E.pad_pitch(fp),
-                                  pad_box=L.pad_box(geom, p)) is None)
-        seen[key] = (n_old, n_all)
-    check('unnetted box: the recorded netted-pad-interior census',
-          seen == UNNETTED_BOX, '%r != %r' % (seen, UNNETTED_BOX))
-    check('unnetted box: ulx3s U1 was ALL-interior and is not any more',
-          seen.get('ulx3s:U1', (0, 0))[0] == 379
-          and seen.get('ulx3s:U1', (0, 1))[1] < 379,
-          '%r' % (seen.get('ulx3s:U1'),))
-
-
 # --- 9-10. the gate ---------------------------------------------------------
 
 def the_gate_still_fires():
@@ -693,14 +542,10 @@ def main():
     only_demand_moved(boards)
     print('5b. the face geometry is still the extent')
     the_face_geometry_is_still_the_extent(boards)
-    print('5c. the face comes from the part box, not the netted sliver')
-    the_face_comes_from_the_part_box(boards)
     print('6-7. the face map and the tie-break')
     with tempfile.TemporaryDirectory() as td:
         the_face_map(td)
         the_tie_break(td)
-    print('8. the unnetted-pad assignment box')
-    the_unnetted_box(boards)
     print('9. the gate still fires')
     the_gate_still_fires()
     print('10. the starved budget')
