@@ -1,7 +1,11 @@
-2becea8f 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
-Audit e239e067..2becea8f on branch worktree-constraints-dru (10 commits, the
+52c83e63 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit e239e067..52c83e63 on branch worktree-constraints-dru (10 commits, the
 #530/#842/#857/#856/#770 design-rules rework; docs/design-rules-proposal.md).
-ONE GAP FOUND AND FIXED IN-RANGE (fc36e578). Seven gates green, run live.
+TWO GAPS FOUND AND FIXED IN-RANGE (fc36e578; 52c83e63: the GUI QFN path fed
+the escalation policy the Basic tab's width, the CLI fed it nothing -- both
+now feed the QFN width, test_fanout_rotated_gui re-run 10/10 without the
+clamp line, wx-free twin test_530_qfn_width_stale_minimum). Seven gates
+green, run live.
 
 THE SURFACE, checked mechanically, not assumed:
 
