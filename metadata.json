@@ -38,6 +38,21 @@
       "download_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "download_size": 0,
       "install_size": 0
+    },
+    {
+      "version": "0.22.0",
+      "status": "testing",
+      "kicad_version": "9.0",
+      "runtime": "swig",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "download_url": "https://github.com/drandyhaas/KiCadRoutingTools/releases/download/v0.22.0/KiCadRoutingTools-0.22.0.zip",
+      "download_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "download_size": 0,
+      "install_size": 0
     }
   ]
 }
