@@ -22,9 +22,12 @@ verified against the 9.0 and master sources on 2026-09-03:
                                                  the fields it sets
     3  zone local clearance: max(result, zone clearance)
     4  kind in {clearance, diff_pair_gap}: max(result, rules.min_clearance)
-       -- the ONLY kinds with a post-loop board floor. A later rule may take
-       track_width / via_diameter / hole_size / hole_to_hole / hole_clearance /
-       edge_clearance BELOW the Board Setup minimum, and KiCad grades the rule.
+       -- the ONLY kinds with a post-loop board floor, and MEASURED on the
+       installed KiCad 10.0.0 it floors a net-class value and a pad override
+       but NOT an explicit custom rule (tests/oracle/constraint_agreement.py).
+       A later rule may take track_width / via_diameter / hole_size /
+       hole_to_hole / hole_clearance / edge_clearance BELOW the Board Setup
+       minimum too, and KiCad grades the rule.
     5  fab profile floor (THIS TOOL ONLY, raise-only, disclosed when it binds)
 
 Net classes: a net in several classes gets an AGGREGATE class that takes each
@@ -912,6 +915,7 @@ class DesignRules:
 
         # 2c. custom rules, file order, per field, last wins.
         disallow: set = set()
+        min_from_rule = False
         for rule in self.rules:
             if rule.unsupported or kind not in rule.constraints:
                 continue
@@ -925,6 +929,8 @@ class DesignRules:
             for f in ('min', 'opt', 'max'):
                 if f in spec:
                     cur[f] = spec[f]
+                    if f == 'min':
+                        min_from_rule = True
             source = f'rule "{rule.name}"'
 
         if kind == 'disallow':
@@ -937,9 +943,15 @@ class DesignRules:
                     if cur['min'] is None or x.local_clearance > cur['min']:
                         cur['min'] = x.local_clearance
                         source = 'zone clearance'
+                        min_from_rule = False
 
-        # 4. the ONLY post-loop board floors KiCad applies.
-        if kind in ('clearance', 'diff_pair_gap') and board_min_clr:
+        # 4. the ONLY post-loop board floors KiCad applies -- and MEASURED on
+        # KiCad 10.0.0 (tests/oracle/constraint_agreement.py rows
+        # board_min_clearance_floors_class / _vs_rule / pad_override_below_
+        # board_min): rules.min_clearance floors a net-class value and a pad
+        # override, but an EXPLICIT custom rule below it wins. (The 9.0
+        # source reads as unconditional; the installed engine is the spec.)
+        if kind in ('clearance', 'diff_pair_gap') and board_min_clr and not min_from_rule:
             if cur['min'] is None or cur['min'] < board_min_clr:
                 cur['min'] = board_min_clr
                 source = 'board minimum'

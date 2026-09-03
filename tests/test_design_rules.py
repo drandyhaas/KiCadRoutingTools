@@ -182,11 +182,24 @@ class Precedence(unittest.TestCase):
         self.assertEqual(dr.resolve('clearance', a, a).min, 0.2)
         self.assertIn('HV', dr.resolve('clearance', a, b).source)
 
-    def test_board_min_clearance_is_a_post_loop_floor_over_class_and_rule(self):
-        dr = _rules(board_min={'min_clearance': 0.2},
-                    classes={'Default': {'clearance': 0.1}},
-                    dru='(version 1)(rule "r" (constraint clearance (min 0.05mm)))')
+    def test_board_min_clearance_floors_a_class_value(self):
+        # harness row board_min_clearance_floors_class (KiCad 10.0.0: AGREE)
+        dr = _rules(board_min={'min_clearance': 0.2}, classes={'Default': {'clearance': 0.1}})
         self.assertEqual(dr.resolve('clearance', dr.item_for_net(1), dr.item_for_net(1)).min, 0.2)
+
+    def test_board_min_clearance_does_NOT_floor_an_explicit_rule(self):
+        # harness row board_min_clearance_vs_rule: KiCad 10.0.0 enforces the
+        # 0.12 rule under a 0.25 board minimum (measured, bisected to ~0.119).
+        dr = _rules(board_min={'min_clearance': 0.25},
+                    classes={'Default': {'clearance': 0.2}},
+                    dru='(version 1)(rule "r" (constraint clearance (min 0.12mm)))')
+        self.assertEqual(dr.resolve('clearance', dr.item_for_net(1), dr.item_for_net(1)).min, 0.12)
+
+    def test_board_min_clearance_floors_a_pad_override(self):
+        # harness row pad_override_below_board_min (KiCad 10.0.0: AGREE)
+        dr = _rules(board_min={'min_clearance': 0.15}, classes={'Default': {'clearance': 0.2}})
+        pad = _item(2, type='pad', clearance_override=0.1)
+        self.assertEqual(dr.resolve('clearance', dr.item_for_net(1), pad).min, 0.15)
 
     def test_size_board_minimum_is_overridden_by_a_later_rule_in_either_direction(self):
         # KiCad: TRACK_WIDTH has NO post-loop floor; the board minimum is only
