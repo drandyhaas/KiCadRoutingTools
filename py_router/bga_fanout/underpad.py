@@ -2617,7 +2617,7 @@ def generate_underpad_escape(footprint: Footprint,
         # to the main router if that finds nothing either.
         _n_coupled_declined = len(h2h_stats['coupled_pairs'])
         if h2h_stats['sites'] or _n_coupled_declined:
-            _unused = (f"  Under-pad: {h2h_stats['sites']} via-in-pad centre site(s)"
+            print(f"  Under-pad: {h2h_stats['sites']} via-in-pad centre site(s)"
                   f" and {_n_coupled_declined} coupled pair(s) declined by the"
                   f" {_h2h:g}mm hole-to-hole floor ({_h2h_src}); the levers are"
                   f" a smaller --via-drill, a fab tier whose floor this pitch"

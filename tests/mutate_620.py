@@ -251,14 +251,17 @@ ROWS = [
      '                    else:',
      (T620,), 'KILLED'),
 
+    # Both anchors sit one indent deeper since the post-tighten reach re-check
+    # put the branch body inside an `else:`. Re-pointed after that landed, not
+    # when written -- the file's own rule, and it caught these two.
     ('twin-appends-a-second-via-anyway', 'bga',
-     "                    _twin_shared += 1\n                    continue",
-     '                    _twin_shared += 1',
+     "                        _twin_shared += 1\n                        continue",
+     '                        _twin_shared += 1',
      (T620,), 'KILLED'),
 
     ('twin-keeps-the-FIRST-via-not-the-tighter', 'bga',
-     '                    if _pending.tighten(_tx, _ty, v_size, v_drill):',
-     '                    if False:',
+     '                        if _pending.tighten(_tx, _ty, v_size, v_drill):',
+     '                        if False:',
      (T620,), 'KILLED'),
 
     # --- THE LADDER ---------------------------------------------------------
