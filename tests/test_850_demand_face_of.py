@@ -122,7 +122,7 @@ LANE = dict(clearance=CLR, track_width=TRK, grid_step=GRID)
 #:               AGREEING, and here they now agree on a number that is wrong
 #:               for a reason older than either of them. Filed separately with
 #:               the measurement; see the PR body. Pinned here so the day it
-#:               is fixed, this row fails and says so.
+#:               is fixed, this row fails and says so. Filed as #862.
 #:   watchy U1   N 1->2, W 1->0 -- a net MOVED between faces, which the
 #:               tolerance and the `escape.FACES` tie order both do and the
 #:               interior bucket cannot. The part total falls by 1 while one

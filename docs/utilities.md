@@ -1272,8 +1272,9 @@ few small pads lying outside the main pad field set it for everything inside.
 On `ulx3s` U1 — an LFE5U BGA — eight *unnetted* 0.127 × 0.508 mm alignment
 marks sit 0.954 mm beyond the ball field on all four sides, and all 379 netted
 balls therefore read as interior, so the part reports demand 0 on every face.
-That predates both ledgers and this section does not fix it; it is recorded
-here because the number is published and a reader should know what it means.
+That predates both ledgers and this section does not fix it -- **#862** --
+and it is recorded here because the number is published and a reader should
+know what it means.
 
 **A pad that is not on any edge of that box is INTERIOR**, and counts toward
 no face's demand. It cannot leave sideways at any pitch — it needs a via — and

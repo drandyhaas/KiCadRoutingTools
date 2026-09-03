@@ -248,8 +248,8 @@ ulx3s U1 with demand 0 on all four faces and 379 of its 379 netted balls
 interior, because the box each pad is measured against is set by eight
 UNNETTED 0.127 x 0.508mm alignment marks sitting 0.954mm outside the ball
 field. A bounding box cannot tell eight corner marks from an enclosing ring.
-That is older than either ledger and is filed rather than fixed here; the
-board's `1 / 5` row above comes from its other parts.
+That is older than either ledger and is filed as **#862** rather than fixed
+here; the board's `1 / 5` row above comes from its other parts.
 
 **What that does to the argument, stated rather than absorbed.** The
 "already charged" share falls 93.6% -> 72.2%, and the pairs the halo misses
