@@ -68,16 +68,16 @@ DEFAULT_CLASS = {
 NETS = {1: 'A', 2: 'B', 3: 'C'}
 
 
-def _fp(ref, x, y, net_id, net_name, pad_clearance=None, size=1.0):
+def _fp(ref, x, y, net_id, net_name, pad_clearance=None, size=1.0, layer='F.Cu'):
     clr = f" (clearance {pad_clearance})" if pad_clearance is not None else ""
     return f'''
-  (footprint "Probe:Pad" (layer "F.Cu") (at {x} {y})
+  (footprint "Probe:Pad" (layer "{layer}") (at {x} {y})
     (property "Reference" "{ref}" (at 0 -1.5 0) (layer "F.SilkS") (hide yes)
       (effects (font (size 1 1) (thickness 0.15))))
     (property "Value" "P" (at 0 1.5 0) (layer "F.Fab") (hide yes)
       (effects (font (size 1 1) (thickness 0.15))))
     (attr smd)
-    (pad "1" smd rect (at 0 0) (size {size} {size}) (layers "F.Cu") (net {net_id} "{net_name}"){clr})
+    (pad "1" smd rect (at 0 0) (size {size} {size}) (layers "{layer}") (net {net_id} "{net_name}"){clr})
   )'''
 
 

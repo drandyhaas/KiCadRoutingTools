@@ -1670,6 +1670,23 @@ def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     return merged
 
 
+def _per_net_via_config(config: GridRouteConfig, pcb_data, net_id: int) -> GridRouteConfig:
+    """#530 decision 4: the config this net is searched and emitted with --
+    its own via geometry (config.net_via_sizes) and the obstacle map's
+    via-legality rung for that geometry (obstacle_cache.rung_for_net). The
+    run config is returned untouched for a net at the run's via."""
+    sizes = getattr(config, 'net_via_sizes', None)
+    if not sizes or net_id not in sizes:
+        return config
+    try:
+        from obstacle_cache import rung_for_net
+        d, h = sizes[net_id]
+        return replace(config, via_size=float(d), via_drill=float(h),
+                       via_rung=rung_for_net(config, pcb_data, net_id))
+    except Exception:                                          # noqa: BLE001
+        return config
+
+
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
@@ -1702,6 +1719,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 derivation then aims at two fragments of the same trunk while
                 the rescued island is dropped entirely.
     """
+    # #530 decision 4: this net's own via geometry + legality rung.
+    config = _per_net_via_config(config, pcb_data, net_id)
     # Find endpoints (segments or pads)
     if sources_override is not None and targets_override is not None:
         sources, targets, error = list(sources_override), list(targets_override), None
@@ -4242,9 +4261,11 @@ def route_multipoint_taps(
             _rc = np.array(ring_cells, dtype=np.int32)
             obstacles.remove_blocked_vias_batch(_rc)
             try:    # #568: mirror of the ring's small stamp (refcount balance)
-                from obstacle_map import _rung_small_armed as _rsa
+                from obstacle_map import _rung_small_armed as _rsa, _mirror_rungs_remove
                 if _rsa() and hasattr(obstacles, 'remove_blocked_vias_small_batch'):
                     obstacles.remove_blocked_vias_small_batch(_rc)
+                else:
+                    _mirror_rungs_remove(obstacles, _rc)   # #530 per-net rungs
             except (AttributeError, ImportError):
                 pass
 
@@ -4326,10 +4347,12 @@ def _route_multipoint_taps_impl(
     _vv_radius = (config.via_size + config.clearance) * coord.inv_step
 
     try:        # #568: armed once per tap run (see the ring mirror below)
-        from obstacle_map import _rung_small_armed as _rsa
+        from obstacle_map import _rung_small_armed as _rsa, _extra_rungs as _xr
         _small_rung_on = _rsa() and hasattr(obstacles, 'add_blocked_via_small')
+        _extra_rung_n = 0 if _small_rung_on else _xr(obstacles)   # #530 per-net rungs
     except ImportError:
         _small_rung_on = False
+        _extra_rung_n = 0
 
     def _register_inprogress_via(v):
         vgx, vgy = coord.to_grid(v.x, v.y)
@@ -4355,6 +4378,8 @@ def _route_multipoint_taps_impl(
                     # wrapper's finally removes both maps' cells (#309).
                     if _small_rung_on:
                         obstacles.add_blocked_via_small(vgx + ex, vgy + ey)
+                    for _r in range(1, _extra_rung_n + 1):   # #530 per-net rungs
+                        obstacles.add_blocked_via_rung(_r, vgx + ex, vgy + ey)
                     # Ref-counted raw add: the wrapper removes these on exit so
                     # they can't leak into a persistent working map (#309).
                     if _ring_cells is not None:

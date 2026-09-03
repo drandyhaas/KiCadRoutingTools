@@ -383,6 +383,7 @@ search speed on proximity-heavy boards.
 | `meander_amplitude` | `1.0` | Meander height |
 | `meander_spacing` | `2.0` | Centre-to-centre pitch of adjacent meander arms, in multiples of the net's routed track width (#501) |
 | `net_layer_widths` | `{}` | Per-net per-layer widths reapplied from stored `.kicad_pro` impedance declarations on a redo (#521); outranks the netclass scalar |
+| `net_via_sizes` | `{}` | `{net_id: (via_size, via_drill)}` for nets whose resolved class / rule via geometry differs from the call's `via_size`/`via_drill` (#530 decision 4). `config.net_via(net_id)` returns the pair a net draws. The obstacle cache keeps one via-legality **rung** per distinct pair (`obstacle_cache.via_rungs`, rung 0 = the call's size; rust `add_blocked_via_rung` / `is_via_blocked_rung`), every add/remove is mirrored into all rungs, and `route_net_with_obstacles` selects the net's rung before the search. Needs `grid_router` 0.22.0+; `route.py` prints a note and routes at the call size on an older binary |
 | `time_matching` | `False` | Match propagation delay instead of length |
 | `time_match_tolerance` | `1.0` | Allowed spread (picoseconds) |
 

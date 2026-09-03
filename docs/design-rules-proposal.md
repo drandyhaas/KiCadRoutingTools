@@ -735,6 +735,14 @@ A two-board result is not a default change.
 Phases 2 and 3 are the ones users are waiting on and do not depend on phase 4; they can
 ship on the resolver's shims.
 
+**Status (branch `worktree-constraints-dru`, 2026-09-03):** phases 0, 1, 2, 3, 4, 5
+and 7 are implemented and committed on the branch (phase 5 without the aspect-ratio
+check, #502, and without the `annular_width` resolver kind, which the fab ladder's
+`annular` floor still covers). Phase 6 is not started. The GUI engine parity gate,
+the rp2350 live-chain gate, the settings round-trip and the 21-row agreement harness
+are green on the branch head. The crate is 0.22.0 with `/VERSION` 0.22.0; `metadata.json`
+and the per-platform binaries are the release step, not done on the branch.
+
 ---
 
 ## 9. Decisions taken (Andy, 2026-09-03)

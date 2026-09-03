@@ -350,6 +350,19 @@ class GridRouteConfig:
     # The legacy per-channel maps above are being migrated onto it; consumers
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
+    # #530 decision 4: per-net VIA geometry {net_id: (diameter, drill)} for
+    # nets whose resolved draw size differs from via_size/via_drill (their
+    # net class or a .kicad_dru via_diameter/hole_size rule). Filled by
+    # batch_route when --via-size was omitted (via_from_class); empty when
+    # the operator gave an explicit via, which applies to every net. The
+    # search prices each such net at its own via through the obstacle map's
+    # via-legality RUNGS (obstacle_cache.via_rungs) and emits vias at it.
+    net_via_sizes: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+
+    def net_via(self, net_id: int) -> Tuple[float, float]:
+        """(diameter, drill) this net's vias are drawn at."""
+        v = self.net_via_sizes.get(net_id) if self.net_via_sizes else None
+        return (float(v[0]), float(v[1])) if v else (self.via_size, self.via_drill)
 
     def rule_floors(self, net_id: int, layer: Optional[str] = None) -> Dict[str, float]:
         """The .kicad_dru / Board Setup size minimums that bind ``net_id`` (on

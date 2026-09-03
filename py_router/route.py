@@ -434,6 +434,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # #530: cap every auto-read net class at this clearance (the
                 # explicit --clearance-ceiling). None = honour the classes.
                 clearance_ceiling: Optional[float] = None,
+                # #530 decision 4: --via-size/--via-drill omitted -> each net's
+                # via is its own class / rule draw size (config.net_via_sizes).
+                via_from_class: bool = False,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -842,7 +845,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # under "use netclass values". Nets whose width equals the Default
             # class's carry no entry (they route at config.track_width, as
             # before); a rule with layer-scoped opts fills net_layer_widths.
-            _per_net, _per_layer = {}, {}
+            _per_net, _per_layer, _per_net_via = {}, {}, {}
             try:
                 from design_rules import DesignRules as _DR
                 _dr = _DR.from_project(
@@ -864,6 +867,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     if w_all is not None and (_dflt_w is None or abs(w_all - _dflt_w) > 1e-9
                                               or nid in _per_layer):
                         _per_net[nid] = w_all
+                    # #530 decision 4: the net's own VIA draw size (class
+                    # via_diameter/via_drill, a rule's via_diameter/hole_size
+                    # opt, clamped into the rule's min/max), only when the
+                    # operator gave no --via-size/--via-drill.
+                    if via_from_class:
+                        _vd = _dr.draw_size('via_diameter', nid, default=None)
+                        _vh = _dr.draw_size('hole_size', nid, default=None)
+                        if _vd and _vh and _vh < _vd and (
+                                abs(_vd - via_size) > 1e-9 or abs(_vh - via_drill) > 1e-9):
+                            _per_net_via[nid] = (round(_vd, 4), round(_vh, 4))
             except Exception as _dre:                          # noqa: BLE001
                 print(f"Warning: design-rule widths unavailable ({_dre}); "
                       f"falling back to the net-class map.")
@@ -1141,6 +1154,27 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 net_layer_widths_map[_nid] = dict(_bl)
     if net_layer_widths_map:
         config_kwargs['net_layer_widths'] = net_layer_widths_map
+    # #530 decision 4: per-net via geometry -> config.net_via_sizes (the
+    # obstacle map grows one via-legality rung per distinct size; a 0.21.x
+    # router binary without rung support routes single-rung, announced).
+    if via_from_class and _per_net_via:
+        try:
+            import grid_router as _gr
+            _rung_ok = hasattr(_gr.GridObstacleMap, 'add_blocked_vias_rung_batch')
+        except Exception:                                      # noqa: BLE001
+            _rung_ok = False
+        if _rung_ok:
+            config_kwargs['net_via_sizes'] = dict(_per_net_via)
+            _sizes = sorted({v for v in _per_net_via.values()}, reverse=True)
+            print(f"Per-net via sizes for {len(_per_net_via)} net(s) from their "
+                  f"net class / rules: {', '.join(f'{d:g}/{h:g}' for d, h in _sizes)} "
+                  f"(run via {via_size:g}/{via_drill:g}); one via-legality rung "
+                  f"per size (#530).")
+        else:
+            print(f"NOTE: {len(_per_net_via)} net(s) declare their own via size, but the "
+                  f"loaded grid_router binary predates via rungs (needs 0.22.0+); "
+                  f"routing every net at {via_size:g}/{via_drill:g}. Run "
+                  f"build_router.py --from-source.")
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     # #581: an active (> 0) same-net pad via clearance keeps EVERY via this
@@ -6262,6 +6296,9 @@ For differential pair routing, use route_diff.py:
     # uses this bit to floor impedance-solved widths at the fab tier instead of
     # the resolved default width. Captured before the fill below overwrites None.
     _tw_explicit = args.track_width is not None
+    # #530 decision 4: likewise for the via -- omitted, each net's via is its
+    # own class / rule draw size (per-net via rungs in the obstacle map).
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     # track_width / via_size / via_drill: when omitted, default to the board's OWN
     # Default net-class value (else the routing_defaults constant), so a bare route
     # uses the board's own geometry -- parity with the GUI's per-control override.
@@ -6678,6 +6715,7 @@ For differential pair routing, use route_diff.py:
                 layers=args.layers,
                 track_width=args.track_width,
                 track_width_from_class=not _tw_explicit,
+                via_from_class=not _vs_explicit,
                 impedance=args.impedance,
                 coplanar_gap=args.coplanar_gap,
                 coplanar_nets=args.coplanar_nets,

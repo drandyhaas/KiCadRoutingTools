@@ -113,8 +113,8 @@ python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-rerou
 | `--impedance` | - | Target single-ended impedance in ohms (calculates width per layer from stackup) |
 | `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance of the **Default net class** for this run, in mm; nets in other classes route at their own class clearance (pairwise `max`, as KiCad's DRC does). **Omitted** → the board's own Default class from the sibling `.kicad_pro`. Since #530 this no longer caps the other classes; use `--net-clearances <json>` for explicit per-net values |
 | `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). GUI: the **Class ceiling** checkbox next to Min Clearance |
-| `--via-size` | 0.5 | Via outer diameter in mm |
-| `--via-drill` | 0.3 | Via drill diameter in mm |
+| `--via-size` | Default net-class via (else 0.5) | Via outer diameter in mm. **Given** → every net's vias are this size. **Omitted** → each net's vias are drawn at its **own** net class / `.kicad_dru` `via_diameter` (#530 decision 4): the router carries one via-legality map per distinct via geometry on the board (`grid_router` 0.22.0+; an older binary routes every net at the Default class size and says so) |
+| `--via-drill` | Default net-class drill (else 0.3) | Via drill diameter in mm; per-net exactly like `--via-size` |
 | `--grid-step` | 0.1 | Grid resolution in mm |
 
 **Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
