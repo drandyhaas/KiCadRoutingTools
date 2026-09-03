@@ -382,6 +382,15 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
 
     from fab_tiers import may_narrow
     fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
+    # #530: the rescue's clearance may step down only to THIS net's own floors
+    # -- its class clearance for a non-Default net (KiCad grades it there and
+    # the writeback never lowers a non-Default class), plus .kicad_dru rules.
+    # core1106_cam: a MIPI_DIFF (0.15) net rescued at 0.10 landed 0.12 from a
+    # GND via -> 9 KiCad items graded at the class.
+    try:
+        fab_clear = max(fab_clear, config.rule_floors(net_id).get('clearance', 0.0))
+    except Exception:                                          # noqa: BLE001
+        pass
     nominal_w = config.get_net_track_width(net_id, config.layers[0])
     # Floor rule (2026-08-06): min(nominal, fab_track, netclass width) --
     # a class-declared width is designer intent and may sit below the

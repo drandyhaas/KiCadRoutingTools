@@ -75,6 +75,15 @@ def main():
     clrs21 = [c.clearance for c in fine_tap_configs(cfg, _Pad(21), pcb)]
     if not clrs21 or min(clrs21) > 0.1 + 1e-9:
         fails.append(f"fine_tap_configs for a Default-only net no longer reaches the fab floor: {clrs21}")
+    # the net rescue ladder (net_rescue._rescue_rungs) -- the path that
+    # actually produced core1106_cam's 0.12 mm MIPI copper
+    from net_rescue import _rescue_rungs
+    rr = [r.clearance for r in _rescue_rungs(cfg, 0.05, pcb, 7)]
+    if not rr or min(rr) < 0.15 - 1e-9:
+        fails.append(f"_rescue_rungs for a class-0.15 net stepped below it: {rr}")
+    rr21 = [r.clearance for r in _rescue_rungs(cfg, 0.05, pcb, 21)]
+    if not rr21 or min(rr21) > 0.1 + 1e-9:
+        fails.append(f"_rescue_rungs for a Default-only net no longer reaches the fab floor: {rr21}")
     if fails:
         print("FAIL:\n  " + "\n  ".join(fails))
         return 1
