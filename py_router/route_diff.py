@@ -918,7 +918,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         # Only resolve per-pair geometry when a flag was OMITTED (from_class). When
         # both were explicit, pair_diff_geom stays empty and every pair routes at the
         # global config exactly as before -- no per-pair replace(), byte-identical.
-        if diff_pair_width_from_class or diff_pair_gap_from_class:
+        # #530: ...or when a pair's own NET CLASS clearance sits above the gap.
+        # #441 floors the gap at the run clearance because KiCad grades P<->N
+        # under the clearance rule; with classes honoured (decision 2) the
+        # clearance KiCad applies to a DDMI pair is the DDMI class's, and the
+        # old cap-every-class writeback no longer lowers that class to the gap
+        # (schoko: 12 pairs routed at gap 0.1 under a 0.125 class -> 177
+        # intra-pair clearance violations, 0 before). Floor each pair's gap at
+        # max(class clearance of P, of N) through the same per-pair geometry
+        # machinery, so the pair reserves and routes its wider channel.
+        if diff_pair_width_from_class or diff_pair_gap_from_class or net_clearances:
             try:
                 from list_nets import read_design_rules, resolve_net_class, fab_floors
                 _rules = read_design_rules(input_file) if input_file else {}
@@ -938,7 +947,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 _g = _c.get('diff_pair_gap') if diff_pair_gap_from_class else None
                 _ew = max(_w if _w is not None else config.track_width, _wfloor)
                 _eg = max(_g if _g is not None else config.diff_pair_gap, _gfloor)
+                _pclr = max((net_clearances or {}).get(_pair.p_net_id) or 0.0,
+                            (net_clearances or {}).get(_pair.n_net_id) or 0.0)
+                if _pclr > _eg + 1e-9:
+                    print(f"  #530: {_pn}: coupling gap {_eg:.4g} mm raised to its net-class "
+                          f"clearance {_pclr:.4g} mm (KiCad grades P<->N as clearance).")
+                    _eg = _pclr
                 geom = (round(_ew, 4), round(_eg, 4))
+                if geom == _global_geom and not (diff_pair_width_from_class
+                                                 or diff_pair_gap_from_class):
+                    continue    # explicit geometry, nothing raised: stay byte-identical
                 pair_diff_geom[_pair.p_net_id] = geom
                 # Build one base obstacle map per DISTINCT geometry (dedup; ~1-3 classes).
                 if geom not in diff_pair_base_obstacles_by_geom:
