@@ -964,10 +964,16 @@ def _blocked_span(pcb_data, ref, rect, face, reach,
       both faces -- which is why the test is the symmetric `own & other` over
       `sides_occupied(...)`, the predicate the rest of the package uses
       (`legality.pair_min_gap`, `routability.pair_channel_widths`), rather
-      than `face_lane_ledger`'s one-sided `own_side in g.sides`. Measured on
-      rp2350, U6 is drilled and so occupies both faces: the symmetric form
-      keeps all four of its blockers, the one-sided form would drop the B-side
-      U1, losing a real obstruction.
+      than the one-sided `own_side in g.sides` this function and
+      `face_lane_ledger` both used to apply. Measured on rp2350, U6 is drilled
+      and so occupies both faces: the symmetric form keeps all four of its
+      blockers, the one-sided form would drop the B-side U1, losing a real
+      obstruction. (`face_lane_ledger` has been on the symmetric form since
+      #835 too; this paragraph named it as the one-sided example for four
+      commits after that stopped being true.)
+
+    ...and what a charged neighbour CONTRIBUTES is the box over the sides it
+    SHARES, not over all its pads (#848). `rect_on_sides` unions them.
     * a CONTAINER -- a module-outline footprint hosting the design, which by
       `legality.CONTAINER_RATIO` covers at least half the board. It is not
       parked off this face; the escaping part is inside it. rp2350's U8 is a
@@ -990,6 +996,7 @@ def _blocked_span(pcb_data, ref, rect, face, reach,
     no `PartPads` behind them, and their recorded numbers are pad-centre
     numbers by construction.
     """
+    from .legality import rect_on_sides as _rect_on_sides
     lo, hi, band, horizontal = face_band(rect, face, reach)
     own = None if sides is None else sides.get(ref)
 
@@ -1000,15 +1007,24 @@ def _blocked_span(pcb_data, ref, rect, face, reach,
         ofp = pcb_data.footprints[other]
         if not ofp.pads:
             continue
+        oth = None if own is None else sides.get(other)
         if own is not None:
-            oth = sides.get(other)
             if oth is not None and not (own & oth):
                 continue
         if containers is not None and other in containers:
             continue
         g = (None if obstruction_rects is None
              else obstruction_rects.get(other))
-        obstacles.append((other, g.rect if g is not None else _part_rect(ofp)))
+        # #848: charge the SHARED sides, not the whole part. `own & oth` is
+        # the intersection this loop already computed to decide WHETHER the
+        # neighbour is in the way; charging its whole pad box afterwards bills
+        # the escaping part for copper on a face it never shares. `None` when
+        # either side is unknown keeps today's whole-part answer -- a caller
+        # with a partial map must not silently lose an obstruction, the same
+        # rule the three `.get`s above follow.
+        shared = None if (own is None or oth is None) else (own & oth)
+        obstacles.append((other, _rect_on_sides(g, shared)
+                          if g is not None else _part_rect(ofp)))
 
     blocked, order = span_eaten(lo, hi, band, horizontal, obstacles)
     return blocked, tuple(r for r, _mm in order)

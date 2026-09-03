@@ -1119,7 +1119,8 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     feed them, not face escapes. Tap/via lane consumption is v2.
     """
     from placement.legality import (footprint_has_through_pads,
-                                    footprint_side, sides_occupied)
+                                    footprint_side, rect_on_sides,
+                                    sides_occupied)
     from .escape import escape_band as _escape_band, span_eaten
 
     fps = pcb_data.footprints or {}
@@ -1204,10 +1205,26 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # the two interf_u boards 1 each), the +/-0.5mm fiction
     # `grade_body_overlap` already refuses to gate on. See
     # `legality.part_copper_geometry` for the full census.
+    #
+    # #848: and what a charged neighbour CONTRIBUTES is the box over the sides
+    # it SHARES with the escaping part, not over all its pads. The filter one
+    # line down is already per-side; the rectangle was not, so an F.Cu part
+    # escaping past a B.Cu connector with a few through pins was charged the
+    # connector's whole back-side pad field -- copper these tracks never have
+    # to share. `rect_on_sides` unions the shared sides and falls back to the
+    # whole box whenever either side is unknown. Holes are in BOTH side boxes
+    # (a drill removes copper on every layer), which is why this is very nearly
+    # inert: 18 (ref, side) boxes differ corpus-wide, 3 are ever charged
+    # against a face in deficit, and no board's deficit moves.
     _geom = ctx.geom
-    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
-                 if g.ref != ref and (own_sides & g.sides)
-                 and g.ref not in _containers and g.ref in _geom]
+    neighbors = []
+    for g in _graded:
+        if g.ref == ref or g.ref in _containers or g.ref not in _geom:
+            continue
+        shared = own_sides & g.sides
+        if not shared:
+            continue
+        neighbors.append((g.ref, rect_on_sides(_geom[g.ref], shared)))
 
     out = []
     for fname, (x0, y0, x1, y1) in faces.items():

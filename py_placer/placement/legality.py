@@ -2376,6 +2376,25 @@ class CopperGeometry(NamedTuple):
     #: pad-CENTRE bbox instead -- today's answer, kept for the caller that has
     #: no `PartPads` behind its footprints.
     modelled: bool
+    #: `{'F': rect, 'B': rect}` -- `rect` restricted to the pads that occupy
+    #: each board side (#848), from `PartPads.extent_side`. A side the part's
+    #: pad model does not reach is ABSENT; `{}` when `modelled` is False.
+    #: Read it through `rect_on_sides`, never directly.
+    #:
+    #: What it is for: the side FILTER in both lane ledgers is already
+    #: per-side (`own & other` over `sides_occupied`, #835), but the rectangle
+    #: each charged was the whole part -- so an F.Cu part escaping past a B.Cu
+    #: connector with a few through pins was charged the connector's entire
+    #: back-side pad field, copper those tracks never have to share.
+    #:
+    #: HOLES ARE IN BOTH BOXES (see `extent_local_side`): a drill removes
+    #: copper on every layer, so it is not a side's to exclude. That is also
+    #: why this is very nearly inert -- measured over the tracked corpus at
+    #: clearance 0.2, 18 (ref, side) boxes differ from `rect` at all, 3 are
+    #: ever charged against a face in deficit, and no board's reported deficit
+    #: moves. It is correct and it is cheap; it is here to be right before a
+    #: board exercises it, not because a board does today.
+    rect_sides: Dict[str, Tuple[float, float, float, float]]
 
 
 def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
@@ -2440,7 +2459,7 @@ def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
             ys = [p.global_y for p in fp.pads]
             centre = (min(xs), min(ys), max(xs), max(ys))
             out[ref] = CopperGeometry(ref=ref, rect=centre, copper=centre,
-                                      pads={}, modelled=False)
+                                      pads={}, modelled=False, rect_sides={})
             continue
         boxes = [(r[0], r[1], r[2], r[3])
                  for r in pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)]
@@ -2475,9 +2494,51 @@ def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
                 qhx, qhy = pad_half_extents(q)
                 rects[(round(q.global_x, 4), round(q.global_y, 4),
                        round(qhx, 4), round(qhy, 4))] = box
+        # #848: the same box per board SIDE. Built here rather than at the
+        # ledgers because BOTH of them charge `rect` today -- `escape.
+        # _blocked_span` and `routability.face_lane_ledger` -- and a per-side
+        # rect in one of them re-opens the disagreement #841 closed.
+        # `extent_side` is memoized per (delta-rot, side) inside `PartPads`, so
+        # this is two cached lookups per part.
+        rot = fp.rotation or 0.0
+        sides_ext = {}
+        for _side in ('F', 'B'):
+            _e = pp.extent_side(fp.x, fp.y, rot, _side)
+            if _e is not None:
+                sides_ext[_side] = _e
         out[ref] = CopperGeometry(ref=ref, rect=ext, copper=copper,
-                                  pads=rects, modelled=True)
+                                  pads=rects, modelled=True,
+                                  rect_sides=sides_ext)
     return out
+
+
+def rect_on_sides(geom: CopperGeometry, sides=None
+                  ) -> Tuple[float, float, float, float]:
+    """`geom`'s obstruction box over the board sides in `sides` (#848).
+
+    The copper analogue of `rect_on` above, which makes exactly this
+    distinction for COURTYARDS: a part's own side gets its whole body, the
+    opposite side gets only what reaches through. Both lane ledgers already
+    decide WHETHER to charge a neighbour with `own & other` over
+    `sides_occupied`; this is what they charge once they have.
+
+    `sides=None` means "every side" and returns `geom.rect` -- today's answer,
+    and the answer for a caller with no side map. So does an empty union and
+    one naming only sides this part's PAD model does not reach: `g.sides` is
+    courtyard-derived while `rect_sides` is pad-derived, and the two can
+    legitimately disagree. A caller must never silently LOSE an obstruction,
+    which is the same rule `_blocked_span` states for its three `.get` maps.
+
+    Union, not intersection: a through-hole part occupying {F, B} and charged
+    against a part occupying both contributes what it has on either.
+    """
+    if not sides or not geom.rect_sides:
+        return geom.rect
+    boxes = [geom.rect_sides[s] for s in sides if s in geom.rect_sides]
+    if not boxes:
+        return geom.rect
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
 def pad_box(geom: CopperGeometry, pad) -> Optional[Tuple[float, float,
