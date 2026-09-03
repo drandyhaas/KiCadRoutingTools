@@ -362,3 +362,54 @@ def realize_relay(best, fo, nm, relfo, stem, dst='DU1', max_blockers=2):
     if not braid_one(scr, ','.join(group), stem + '_b1', dst=dst):
         return None
     return stem + '_b1.kicad_pcb', group
+
+
+def stub_asks(board, names, refs=('U1', 'DU1'), reach=1.6):
+    """Each net's delivered escape ask at each array, read off the
+    copper: {net: {ref: (side, coord, layer)}} -- the stub's free end
+    inside the array's rip window (degree-1 vertex farthest from the
+    array centre), its layer, the face it is nearest, and its
+    coordinate along that face. The shape a plan can be ANCHORED to."""
+    p = parse_kicad_pcb(board)
+    short = {i: n.name.rsplit('/', 1)[-1] for i, n in p.nets.items()}
+    want = set(names)
+    out = {}
+    for ref in refs:
+        fp = p.footprints.get(ref)
+        if fp is None:
+            continue
+        xs = [q.global_x for q in fp.pads]
+        ys = [q.global_y for q in fp.pads]
+        bb = (min(xs), min(ys), max(xs), max(ys))
+        RW = (bb[0] - reach, bb[1] - reach, bb[2] + reach, bb[3] + reach)
+        cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+        nids = {q.net_id for q in fp.pads if short.get(q.net_id) in want}
+        deg, lay = {}, {}
+        for s in p.segments:
+            if s.net_id not in nids:
+                continue
+            for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
+                if not (RW[0] <= x <= RW[2] and RW[1] <= y <= RW[3]):
+                    continue
+                k = (s.net_id, round(x, 3), round(y, 3))
+                deg[k] = deg.get(k, 0) + 1
+                lay[k] = s.layer
+        for v in p.vias:
+            if v.net_id in nids and RW[0] <= v.x <= RW[2] \
+                    and RW[1] <= v.y <= RW[3]:
+                k = (v.net_id, round(v.x, 3), round(v.y, 3))
+                deg[k] = deg.get(k, 0) + 2
+        ends = {}
+        for (nid, x, y), d in deg.items():
+            if d != 1:
+                continue
+            r = (x - cx) ** 2 + (y - cy) ** 2
+            if nid not in ends or r > ends[nid][0]:
+                ends[nid] = (r, x, y, lay.get((nid, x, y), 'F.Cu'))
+        for nid, (_r, x, y, L) in ends.items():
+            dist = {'left': abs(x - bb[0]), 'right': abs(x - bb[2]),
+                    'up': abs(y - bb[1]), 'down': abs(y - bb[3])}
+            side = min(dist, key=dist.get)
+            coord = y if side in ('left', 'right') else x
+            out.setdefault(short[nid], {})[ref] = (side, round(coord, 3), L)
+    return out

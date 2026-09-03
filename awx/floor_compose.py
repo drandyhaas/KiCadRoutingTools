@@ -58,6 +58,9 @@ ap.add_argument('--top', type=int, default=2)
 ap.add_argument('--pairs-try', type=int, default=8)
 ap.add_argument('--src', default='U1')
 ap.add_argument('--dst', default='DU1')
+ap.add_argument('--plan-menu', action='store_true',
+                help="add the plan's escape_moves menu (surface/dogbone/"
+                     "via-in-pad per ball) as relay asks, judged by realization")
 ap.add_argument('--no-nest', action='store_true',
                 help='skip the nest-model wrap asks')
 ap.add_argument('--only', default='',
@@ -125,6 +128,56 @@ def nest_asks(board, menu):
                         + ['--side', side, '--coord', f'{coord:.2f}',
                            '--layer', L]))
     say(f'  nest asks: {sum(len(v) for v in out.values())} candidates '
+        f'over {len(out)} nets')
+    return out
+
+
+def plan_asks(board, fo, menu):
+    """The PLAN's own source/dest menu (escape_moves: surface, dogbone,
+    via-in-pad moves per ball) as relay asks -- enumerated against the
+    RECORD's real copper (own net excluded, every other net's stub and
+    lane an obstacle), not the plan's exclude-all model. This is the
+    realization-judged seat for the plan's source refinement: each ask
+    is relayed, braided alone against frozen copper, graded and judged,
+    instead of priced with everyone else fixed (the fallacy that
+    predicted 39 vias and realized 58 at K28)."""
+    try:
+        import escape_moves as em
+        import braid as te
+    except Exception as e:
+        say(f'  plan menu unavailable ({e})')
+        return {}
+    pcb = sg.parse_kicad_pcb(board)
+    short = {i: n.name.rsplit('/', 1)[-1] for i, n in pcb.nets.items()}
+    out = {}
+    cache = {}
+
+    def obs(nid, L):
+        if (nid, L) not in cache:
+            cache[(nid, L)] = te.build_obstacles(pcb, nid, {nid}, L)
+        return cache[(nid, L)]
+    for ref in (a.src, a.dst):
+        fp = pcb.footprints[ref]
+        grid = em.grid_of(fp)
+        for q in fp.pads:
+            nm = short.get(q.net_id)
+            if nm not in nets:
+                continue
+            nid = q.net_id
+            moves = em.enumerate_moves(
+                q, grid, ['F.Cu', 'B.Cu'],
+                lambda p1, p2, L, _n=nid: obs(_n, L).seg_clear(p1, p2),
+                lambda p1, L, _n=nid: not (obs(_n, L).point_violation(
+                    p1, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0])
+            for m in moves:
+                coord = (m.exit_pt[1] if m.direction in ('left', 'right')
+                         else m.exit_pt[0])
+                out.setdefault(nm, []).append((
+                    f'P{ref[0]}{m.kind[0]}{m.direction[0]}{m.layer[0]}',
+                    (['--ref', a.dst] if ref == a.dst else [])
+                    + ['--side', m.direction, '--coord', f'{coord:.2f}',
+                       '--layer', m.layer]))
+    say(f'  plan asks: {sum(len(v) for v in out.values())} candidates '
         f'over {len(out)} nets')
     return out
 
@@ -209,10 +262,12 @@ for rnd in range(a.rounds):
     if a.only:
         names = [n for n in names if n in a.only.split(',')]
     NA = nest_asks(best, menu) if not a.no_nest else {}
+    PA = plan_asks(best, fo, menu) if a.plan_menu else {}
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
         res = list(ex.map(
             lambda nm: (nm, sweep_net(rnd, best, fo, menu, nm,
-                                      NA.get(nm, ()))), names))
+                                      list(NA.get(nm, ()))
+                                      + list(PA.get(nm, ())))), names))
     cands = {}
     for nm, lst in res:
         rows = []
@@ -322,3 +377,21 @@ gf = sg.grade(out, NETS)
 Jf = Judge(out, nets, a.src, a.dst)
 say(f'FINAL {out}: grade {gf} floor {Jf.floor_total} changes '
     f'{Jf.act_total} (fo {fo})')
+# ---- ANCHORS: the accepted assignment as asks a from-scratch plan can
+# pin (fanout_from_plan --src-anchors). Only what changed vs the input
+# fanout board -- the plan keeps its own choice for the rest.
+try:
+    asks0 = sg.stub_asks(a.fo, nets, (a.src, a.dst))
+    asks1 = sg.stub_asks(fo, nets, (a.src, a.dst))
+    anchors = {}
+    for nm, ends in asks1.items():
+        for ref, ask in ends.items():
+            if asks0.get(nm, {}).get(ref) != ask:
+                anchors.setdefault(nm, {})[ref] = dict(
+                    side=ask[0], coord=ask[1], layer=ask[2])
+    apath = f'tmp/{a.tag}_anchors.json'
+    json.dump(anchors, open(apath, 'w'), indent=1)
+    say(f'anchors: {apath} ({sum(len(v) for v in anchors.values())} '
+        f'changed ask(s) over {len(anchors)} nets)')
+except Exception as e:
+    say(f'anchors emit skipped ({e})')
