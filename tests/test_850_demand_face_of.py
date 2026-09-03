@@ -41,6 +41,11 @@ What is asserted, and why each arm is here rather than implied:
     nothing else; without this arm, a change that also moved the face GEOMETRY
     would satisfy arm 4 with a compensating supply change.
 
+5b. ...and the face GEOMETRY is still `pp.extent`, asserted on the five refs
+    where the extent and the copper box actually differ. Arm 5 cannot see
+    that: a mutation moving `ext` to the copper box moves BOTH of its arms
+    equally. The mutation battery found this absence -- see the arm.
+
  6. THE FACE MAP, on a fixture with a DIFFERENT count on each face. An
     inverted `{'north': 'S'}` preserves every total, every conservation law
     and the interior equality; only an asymmetric per-face expectation catches
@@ -361,6 +366,64 @@ def only_demand_moved(boards):
           moved > 50, '%d faces moved' % moved)
 
 
+#: Fine-pitch refs whose `CopperGeometry.rect` and `.copper` actually DIFFER,
+#: with the face length the WHOLE-PART extent gives, in row order N, S, W, E.
+#: Five refs corpus-wide; everywhere else the two boxes coincide and no
+#: assertion can tell them apart.
+EXTENT_FACES = {
+    'rp2350_fpga_eensy_prePlane:J2': [6.071, 6.071, 3.023, 3.023],
+    'watchy:SW1': [3.5, 3.5, 6.8, 6.8],
+    'watchy:SW2': [3.5, 3.5, 6.8, 6.8],
+    'watchy:SW3': [3.5, 3.5, 6.8, 6.8],
+    'watchy:SW4': [3.5, 3.5, 6.8, 6.8],
+}
+
+
+def the_face_geometry_is_still_the_extent(boards):
+    """`length_mm` comes from `pp.extent`, NOT from the copper box.
+
+    THIS ARM EXISTS BECAUSE THE MUTATION BATTERY FOUND ITS ABSENCE. The row
+    `the-face-geometry-moves-to-the-copper-box` -- which builds `faces` from
+    `ctx.geom[ref].copper` instead of `pp.extent` -- SURVIVED the first run,
+    against two witnesses that both should have caught it:
+
+    * `only_demand_moved` above toggles the face RULE and diffs the static
+      keys. The mutation moves `length_mm` in BOTH arms equally, so the diff
+      stays empty. That is #849's own warning -- an equivalence check cannot
+      see a change that moves both of its sides -- landing in my arm.
+    * `test_849_lane_context`'s `GOLDEN_PRE_HOIST` pins `supply_*` and
+      `eaten_by` against b5c567c7 on rp2350 U2 and tigard U3. Neither part
+      carries an NPTH hole, so `rect == copper` on both and the mutation is a
+      value no-op on exactly the two refs that are pinned.
+
+    So the property needs asserting where the two boxes differ, and there are
+    only five such refs on the whole tracked corpus (the 12-edge NPTH census
+    in `CopperGeometry.copper`'s docstring). On rp2350 J2 the extent is up to
+    1.372mm wider per side than the copper.
+    """
+    for key, want in sorted(EXTENT_FACES.items()):
+        name, ref = key.split(':')
+        path = boards.get(name)
+        if path is None:
+            check('extent faces: %s present' % name, False)
+            continue
+        pcb = parse_kicad_pcb(path)
+        ctx = R.board_lane_context(pcb, CLR, pcb_file=path)
+        g = ctx.geom.get(ref)
+        rows = _rows(pcb, ref, path, ctx)
+        if g is None or not rows:
+            check('extent faces: %s has geometry and a ledger' % key, False)
+            continue
+        # The precondition, asserted rather than assumed: if a future corpus
+        # or clearance change made these two boxes equal, this arm would pass
+        # while measuring nothing.
+        check('extent faces: %s -- rect and copper DIFFER, so the arm bites'
+              % key, g.rect != g.copper, 'both %r' % (g.rect,))
+        got = [r['length_mm'] for r in rows]
+        check('extent faces: %s -- length_mm is the EXTENT face, not the '
+              'copper one' % key, got == want, '%r != %r' % (got, want))
+
+
 # --- 6-7. the face map and the tie-break, on fixtures -----------------------
 
 def _pad(num, x, y, *, w=0.4, h=0.4, net=0):
@@ -516,6 +579,8 @@ def main():
     the_golden(boards)
     print('5. isolation: only demand moved')
     only_demand_moved(boards)
+    print('5b. the face geometry is still the extent')
+    the_face_geometry_is_still_the_extent(boards)
     print('6-7. the face map and the tie-break')
     with tempfile.TemporaryDirectory() as td:
         the_face_map(td)

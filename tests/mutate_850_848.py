@@ -22,31 +22,32 @@ gate to pass UNMUTATED first; drop `__pycache__` before and after every row and
 run children with `-B`; treat exit 77 from every witness as UNDECIDED rather
 than a kill; restore in a `finally`.
 
-RECORDED at c6fa95d9 -- 18 rows, 18 killed, 0 survived, 0 undecided, 0 broken,
-0 disagreeing with expectation.
+RECORDED at bcb722d3 -- 19 rows, 18 killed, 1 survived, 0 undecided, 0 broken,
+1 disagreeing with expectation. Re-run after the hole below was closed: 19
+rows, 19 killed, 0 disagreeing.
 
-The FIRST run of this table was 15 killed / 3 disagreeing, and all three
-disagreements were holes in my own tests rather than wrong expectations. They
-are named here because a battery that only ever reports a clean sweep is not
-evidence that it can find anything:
+THE ONE DISAGREEMENT WAS A HOLE IN MY OWN TESTS, not a wrong expectation, and
+it is recorded here because a battery that only ever reports a clean sweep is
+not evidence that it can find anything.
 
-  * `interior-nets-and-demand-nets-swapped` SURVIVED. Both keys were
-    published but nothing compared them, so swapping two numbers in the row
-    dict changed no assertion. `test_850`'s golden now pins the PAIR
-    (`interior_pads`, `interior_demand_nets`) per ref, and tigard U3 (18
-    interior pads, 0 nets lost) versus rp2350 U2 (25, 13) is what makes the
-    two distinguishable -- a board where they happened to be equal would not
-    have closed it.
-  * `interior-demand-does-not-subtract-the-faces` SURVIVED. The line that
-    removes nets which still have a pad ON a face was deletable, because
-    every pinned ref either lost all of a net's pads or none. tigard U3 is
-    now pinned at `interior_demand_nets == 0` WITH 18 interior pads, which is
-    exactly that case and only that case.
-  * `face-pitch-reports-the-lane` SURVIVED. `face_pitch_mm` was published and
-    unread. `test_850`'s spy now asserts it against `escape.pad_pitch(fp)`,
-    and the fixture boards include tigard U3 whose pad pitch is 0.033mm --
-    nowhere near any lane, so a lane substituted for it cannot pass by
-    coincidence.
+`the-face-geometry-moves-to-the-copper-box` builds `faces` from
+`ctx.geom[ref].copper` instead of `pp.extent` -- so the face LENGTH, the
+escape band and the obstruction span all move to a smaller box. It SURVIVED,
+against two witnesses that each should have caught it and each could not:
+
+  * `test_850`'s isolation arm toggles the face RULE and diffs the static row
+    keys between the two arms. The mutation moves `length_mm` in BOTH arms
+    equally, so the diff stays empty. That is #849's own warning about
+    equivalence checks -- both sides move together -- landing in my arm.
+  * `test_849`'s `GOLDEN_PRE_HOIST` pins `supply_*` and `eaten_by` against
+    b5c567c7 on rp2350 U2 and tigard U3. Neither carries an NPTH hole, so
+    `rect == copper` on both and the mutation is a value no-op on exactly the
+    two refs that are pinned.
+
+Closed by `test_850`'s `the_face_geometry_is_still_the_extent`, which asserts
+`length_mm` against the extent-derived face on the FIVE refs corpus-wide where
+the two boxes actually differ (rp2350 J2, watchy SW1-SW4), and asserts the
+precondition `rect != copper` first so it cannot pass while measuring nothing.
 """
 import argparse
 import glob
