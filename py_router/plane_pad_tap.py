@@ -222,6 +222,7 @@ def fine_tap_configs(config: GridRouteConfig, pad: Pad, pcb_data: PCBData):
         return
     # Narrow the tap track to fit between fine-pitch pads, never below the fab
     # floor (raised to the board's own minimum under --escalation board).
+    fab_track = config.track_floor(getattr(pad, 'net_id', 0) or 0, None, fab_track)  # #530
     fine_track = max(fab_track, min(min(pad.size_x, pad.size_y), config.track_width))
     note_narrowing(getattr(pad, 'net_id', None), 'track_width', config.track_width,
                    fine_track, 'fine-pitch tap')
@@ -1362,7 +1363,9 @@ def tap_pad_with_escalation(
         # escalation_rungs: empty under --escalation off (the via then stays
         # at the caller's size), raised to the board's minimums under board.
         cvs, cvd, vstatus, vrung = clamp_via_to_pad(
-            via_size, via_drill, pad, escalation_rungs(n_layers))
+            via_size, via_drill, pad,
+            escalation_rungs(n_layers, extra_floors=config.rule_floors(
+                getattr(pad, 'net_id', 0) or 0)))
         # Only adopt the clamp when it genuinely produces a SMALLER via than the
         # caller's -- a pad the caller's via already fits ('fits'), or a pad so
         # small the clamp can't shrink below the fab floor it's already at, leaves

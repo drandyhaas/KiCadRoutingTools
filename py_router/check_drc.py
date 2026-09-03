@@ -2086,9 +2086,40 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
         eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
         eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
+        # #530: the board's OWN size minimums -- Board Setup rules.min_* and
+        # every .kicad_dru track_width / via_diameter / hole_size rule, resolved
+        # per net and layer in KiCad's order, raised to the fab floor -- are
+        # what KiCad grades. An explicit --min-* flag still overrides.
+        _size_rules = None
+        try:
+            from design_rules import DesignRules as _DR
+            _size_rules = _DR.from_project(pcb_data, pcb_file, fab_floor=fab,
+                                           copper_layers=copper_layers)
+            if not (_size_rules.board_min or _size_rules.rules):
+                _size_rules = None
+        except Exception as _dre:                              # noqa: BLE001
+            if not quiet:
+                print(f"  (design-rule size floors unavailable: {_dre})")
+            _size_rules = None
+
+        def _track_floor(seg):
+            if min_track_width is not None or _size_rules is None:
+                return eff_min_track
+            v = _size_rules.floor('track_width', seg.net_id, seg.layer)
+            return v if v is not None else eff_min_track
+
+        def _via_floors(via):
+            if _size_rules is None:
+                return eff_min_via_dia, eff_min_via_drill
+            d = (eff_min_via_dia if min_via_diameter is not None
+                 else (_size_rules.floor('via_diameter', via.net_id, type='via') or eff_min_via_dia))
+            h = (eff_min_via_drill if min_via_drill is not None
+                 else (_size_rules.floor('hole_size', via.net_id, type='via') or eff_min_via_drill))
+            return d, h
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
-                  f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm")
+                  f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm"
+                  + ("; per-net board/rule minimums applied (#530)" if _size_rules else ""))
 
     # Helper to check if a net_id matches the filter patterns
     def net_matches_filter(net_id: int) -> bool:
@@ -3232,7 +3263,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         for seg in pcb_data.segments:
             if matching_net_ids is not None and seg.net_id not in matching_net_ids:
                 continue
-            too_thin, shortfall = check_track_width(seg, eff_min_track, size_margin)
+            _tf = _track_floor(seg)
+            too_thin, shortfall = check_track_width(seg, _tf, size_margin)
             if too_thin:
                 net_name = pcb_data.nets.get(seg.net_id, None)
                 net_str = net_name.name if net_name else f"net_{seg.net_id}"
@@ -3241,15 +3273,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'net1': net_str,
                     'layer': seg.layer,
                     'width': seg.width,
-                    'min_width': eff_min_track,
+                    'min_width': _tf,
                     'shortfall_mm': shortfall,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                 })
         for via in pcb_data.vias:
             if matching_net_ids is not None and via.net_id not in matching_net_ids:
                 continue
+            _vd, _vh = _via_floors(via)
             dia_bad, drill_bad, dia_short, drill_short = check_via_size(
-                via, eff_min_via_dia, eff_min_via_drill, size_margin)
+                via, _vd, _vh, size_margin)
             if dia_bad or drill_bad:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
@@ -3258,7 +3291,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'type': 'via-size',
                         'net1': net_str,
                         'size': via.size,
-                        'min_size': eff_min_via_dia,
+                        'min_size': _vd,
                         'shortfall_mm': dia_short,
                         'via_loc': (via.x, via.y),
                     })
@@ -3267,7 +3300,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'type': 'via-drill-size',
                         'net1': net_str,
                         'drill': via.drill,
-                        'min_drill': eff_min_via_drill,
+                        'min_drill': _vh,
                         'shortfall_mm': drill_short,
                         'via_loc': (via.x, via.y),
                     })

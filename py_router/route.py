@@ -828,10 +828,41 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             from fab_tiers import fab_floor_min as _tier_min
             _adv_tw = _tier_min(_ncl).get('track_width', _twfloor)
             net_track_widths = {}
-            for nid, w in net_track_width_map_by_id(
-                    input_file,
-                    {nid: n.name for nid, n in pcb_data.nets.items()}
-            ).items():
+            # #530: the per-net DRAW width is the resolver's `opt` -- the
+            # aggregate net class's track_width, overridden by any .kicad_dru
+            # (constraint track_width (opt ...)) that matches the net, clamped
+            # into the rule's min/max -- exactly what KiCad's own router draws
+            # under "use netclass values". Nets whose width equals the Default
+            # class's carry no entry (they route at config.track_width, as
+            # before); a rule with layer-scoped opts fills net_layer_widths.
+            _per_net, _per_layer = {}, {}
+            try:
+                from design_rules import DesignRules as _DR
+                _dr = _DR.from_project(
+                    pcb_data, input_file,
+                    fab_floor=fab_floors(_ncl),
+                    copper_layers=list(getattr(pcb_data.board_info, 'copper_layers', None)
+                                       or (layers or [])))
+                _dflt_w = _dr.classes.get('Default', {}).get('track_width')
+                _cu = [l for l in (getattr(pcb_data.board_info, 'copper_layers', None)
+                                   or (layers or [])) if str(l).endswith('.Cu')]
+                for nid in pcb_data.nets:
+                    if nid == 0:
+                        continue
+                    w_all = _dr.draw_size('track_width', nid)
+                    by_layer = {l: _dr.draw_size('track_width', nid, l) for l in _cu}
+                    by_layer = {l: w for l, w in by_layer.items() if w is not None}
+                    if by_layer and len(set(by_layer.values())) > 1:
+                        _per_layer[nid] = by_layer
+                    if w_all is not None and (_dflt_w is None or abs(w_all - _dflt_w) > 1e-9
+                                              or nid in _per_layer):
+                        _per_net[nid] = w_all
+            except Exception as _dre:                          # noqa: BLE001
+                print(f"Warning: design-rule widths unavailable ({_dre}); "
+                      f"falling back to the net-class map.")
+                _per_net = dict(net_track_width_map_by_id(
+                    input_file, {nid: n.name for nid, n in pcb_data.nets.items()}))
+            for nid, w in _per_net.items():
                 w2 = max(w, _adv_tw)
                 if w2 < _twfloor - 1e-9:
                     _wfe435(f"netclass width net_{nid}")
@@ -1093,6 +1124,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if coplanar_net_ids and coplanar_layer_widths:
         config_kwargs['coplanar_net_ids'] = coplanar_net_ids
         config_kwargs['coplanar_layer_widths'] = coplanar_layer_widths
+    # #530: layer-scoped .kicad_dru width opts (e.g. a 50R class drawn 0.2 on
+    # outer and 0.11 on inner layers) ride the same per-net per-layer channel,
+    # only when the operator gave no --track-width and no --impedance (both
+    # outrank a draw default) and #521 did not already pin the net.
+    if track_width_from_class and impedance is None:
+        for _nid, _bl in (_per_layer or {}).items():
+            if _nid not in net_layer_widths_map:
+                net_layer_widths_map[_nid] = dict(_bl)
     if net_layer_widths_map:
         config_kwargs['net_layer_widths'] = net_layer_widths_map
     if collect_stats:

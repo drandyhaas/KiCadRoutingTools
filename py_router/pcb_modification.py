@@ -1200,7 +1200,12 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
             rx2, ry2 = into_pad_frame_point(x2, y2, pad)
             d, _ = segment_to_rect_distance(rx1, ry1, rx2, ry2, pad.global_x, pad.global_y,
                                             pad.size_x / 2, pad.size_y / 2)
-            if d < config.pad_override_clearance(_req(nid), pad) + half:
+            # A pad override REPLACES the pair value, floored at the board
+            # minimum (KiCad, measured). No config in this scope: the
+            # module helper with the board's memoised rules.min_clearance.
+            from design_rules import override_clearance, board_min_clearance_cached
+            if d < override_clearance(_req(nid), board_min_clearance_cached(pcb_data),
+                                      pad) + half:
                 return False
     # Other-net copper pours (planes): a connector must not enter or graze them.
     zones = getattr(pcb_data, 'zones', None)

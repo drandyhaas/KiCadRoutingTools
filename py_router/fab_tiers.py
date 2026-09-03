@@ -335,16 +335,19 @@ def _tier_rungs(copper_layer_count, tier, overrides):
     return rungs
 
 
-def _apply_board_floors(rungs):
-    """'board' policy: no rung may sit below a floor the board declares.
-    Raising a rung can make two rungs identical; collapse those."""
-    if not _BOARD_FLOORS:
+def _apply_board_floors(rungs, floors=None):
+    """'board' policy: no rung may sit below a floor the board declares
+    (``floors`` defaults to the process-wide board floors; a caller may pass
+    the per-net .kicad_dru floors on top). Raising a rung can make two rungs
+    identical; collapse those."""
+    floors = _BOARD_FLOORS if floors is None else floors
+    if not floors:
         return rungs
     out = []
     for r in rungs:
         rr = dict(r)
-        for k, v in _BOARD_FLOORS.items():
-            if k in rr and rr[k] < v:
+        for k, v in floors.items():
+            if k in rr and v is not None and rr[k] < v:
                 rr[k] = v
         if not out or rr != out[-1]:
             out.append(rr)
@@ -376,15 +379,24 @@ def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
     return rungs
 
 
-def escalation_rungs(copper_layer_count, tier=None, overrides=None):
+def escalation_rungs(copper_layer_count, tier=None, overrides=None,
+                     extra_floors=None):
     """The rungs a DESCENT site may step down through: ``fab_floor_ladder``
     under ``board`` / ``fab``, and NOTHING under ``off`` (an empty list --
     every site that walks it then keeps the requested geometry and reports).
     Every site that shrinks a via or narrows a track walks this, never the
-    ladder directly, so the policy is one decision in one place."""
+    ladder directly, so the policy is one decision in one place.
+
+    ``extra_floors`` (a FLOOR_KEYS dict, e.g. ``GridRouteConfig.rule_floors``
+    for the net being descended) raises the rungs further under ``board``:
+    the .kicad_dru minimums that bind THIS net, which the process-wide board
+    floors cannot carry because they are per net and per layer."""
     if not may_narrow():
         return []
-    return fab_floor_ladder(copper_layer_count, tier, overrides)
+    rungs = fab_floor_ladder(copper_layer_count, tier, overrides)
+    if extra_floors and _ESCALATION == 'board':
+        rungs = _apply_board_floors(rungs, extra_floors)
+    return rungs
 
 
 def fab_floors(copper_layer_count, tier=None, overrides=None):

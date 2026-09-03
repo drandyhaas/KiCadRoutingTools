@@ -607,8 +607,9 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     ncu = len(layers) or 2
     cands = [rec]
     # escalation_rungs, not the ladder: empty under --escalation off, raised
-    # to the board's own minimums under board (#857).
-    for f in escalation_rungs(ncu):
+    # to the board's own minimums under board (#857) and the net's rule
+    # minimums (#530).
+    for f in escalation_rungs(ncu, extra_floors=config.rule_floors(net_id)):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
@@ -719,7 +720,9 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     `floor` defaults to the board's fab track-width minimum (issue #176): necking
     to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
     if floor is None:
-        floor = _fab_track_floor(pcb_data)
+        # #530: the fab floor raised to this net's own rule / board minimum.
+        floor = config.track_floor(net_id, None, _fab_track_floor(pcb_data)) \
+            if hasattr(config, 'track_floor') else _fab_track_floor(pcb_data)
     # #436: neck against the moving net's own class floor, folding each foreign
     # object's class excess, so a terminal grazing a wider (controlled-impedance)
     # neighbour necks to the pairwise max(classOwn, classForeign), not the flat
@@ -2466,7 +2469,7 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # under board). The advanced rung is the more-costly small via 'auto'
     # escalates to (#237/#857).
     from fab_tiers import escalation_rungs, note_narrowing
-    ladder = escalation_rungs(ncu)
+    ladder = escalation_rungs(ncu, extra_floors=config.rule_floors(net_id))
     candidates = [(config.via_size, config.via_drill, False)]
     candidates += [(f['via_diameter'], f['via_drill'], i > 0)
                    for i, f in enumerate(ladder)]

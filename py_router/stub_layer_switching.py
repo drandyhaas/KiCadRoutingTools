@@ -875,7 +875,7 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
     n_layers = len(getattr(_bi, 'copper_layers', None) or []) or 2
     # escalation_rungs: empty under --escalation off, raised to the board's own
     # minimums under board (#857).
-    ladder = escalation_rungs(n_layers)
+    ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id))
     candidates = [(config.via_size, config.via_drill)]
     candidates += [(f['via_diameter'], f['via_drill']) for f in ladder
                    if f['via_diameter'] < config.via_size - 1e-9]

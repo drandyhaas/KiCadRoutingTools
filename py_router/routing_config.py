@@ -351,6 +351,42 @@ class GridRouteConfig:
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
 
+    def rule_floors(self, net_id: int, layer: Optional[str] = None) -> Dict[str, float]:
+        """The .kicad_dru / Board Setup size minimums that bind ``net_id`` (on
+        ``layer`` when given), in fab_tiers FLOOR_KEYS vocabulary, for the
+        descent sites: a rescue may narrow a track or shrink a via only down
+        to these under ``--escalation board``. Empty when the board declares
+        none, or under ``--escalation fab`` (which may go below them)."""
+        rules = self.rules
+        if rules is None or not (getattr(rules, 'rules', None) or getattr(rules, 'board_min', None)):
+            return {}
+        try:
+            from fab_tiers import get_escalation_policy
+            if get_escalation_policy()[0] == 'fab':
+                return {}
+        except Exception:                                      # noqa: BLE001
+            return {}
+        out = {}
+        try:
+            tw = rules.floor('track_width', net_id, layer)
+            if tw:
+                out['track_width'] = tw
+            vd = rules.floor('via_diameter', net_id, layer, type='via')
+            if vd:
+                out['via_diameter'] = vd
+            hs = rules.floor('hole_size', net_id, layer, type='via')
+            if hs:
+                out['via_drill'] = hs
+        except Exception:                                      # noqa: BLE001
+            return {}
+        return out
+
+    def track_floor(self, net_id: int, layer: Optional[str], fab_value: float) -> float:
+        """The narrowest track a descent may deliver on ``net_id``: the fab
+        floor raised to the net's own rule / board minimum (see rule_floors)."""
+        rf = self.rule_floors(net_id, layer).get('track_width')
+        return max(fab_value, rf) if rf else fab_value
+
     def pad_override_clearance(self, base: float, pad, other_pad=None) -> float:
         """The pair clearance against ``pad`` (and ``other_pad``) once a pad /
         footprint clearance OVERRIDE is applied: KiCad's max(overrides) floored

@@ -391,6 +391,10 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     rescue_track = min(nominal_w, fab_track,
                        (config.netclass_width_floors or {}).get(
                            net_id, nominal_w))
+    # #530: never below the net's own .kicad_dru / Board Setup minimum.
+    _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
+    if _rf:
+        rescue_track = min(nominal_w, max(rescue_track, _rf))
     power_widths = dict(config.power_net_widths)
     power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
     if not may_narrow():
@@ -419,8 +423,8 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     from fab_tiers import escalation_rungs, warn_fab_escalation
     n_layers = len(pcb_data.board_info.copper_layers) or 2
     # escalation_rungs: empty under --escalation off, raised to the board's
-    # own minimums under board (#857).
-    _ladder = escalation_rungs(n_layers)
+    # own minimums under board (#857) and to this net's rule minimums (#530).
+    _ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id))
     for floor in _ladder:
         v_dia, v_drill = floor['via_diameter'], floor['via_drill']
         if v_dia >= config.via_size - 1e-9:
@@ -1368,11 +1372,16 @@ def _escalation_ladder(config, pcb_data, net_id):
     w0 = config.get_net_track_width(net_id, config.layers[0])
     w_floor = min(w0, fab_track,
                   (config.netclass_width_floors or {}).get(net_id, w0))
+    # #530: never below the net's own .kicad_dru / Board Setup minimum.
+    _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
+    if _rf:
+        w_floor = min(w0, max(w_floor, _rf))
     width_travel = w0 - w_floor > 1e-9
 
     n_layers = len(pcb_data.board_info.copper_layers) or 2
-    # escalation_rungs: raised to the board's own minimums under board (#857).
-    ladder = escalation_rungs(n_layers)
+    # escalation_rungs: raised to the board's own minimums under board (#857)
+    # and to this net's rule minimums (#530).
+    ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id))
     via_rungs = [(f['via_diameter'], f['via_drill']) for f in ladder
                  if f['via_diameter'] < config.via_size - 1e-9]
     if not width_travel and not via_rungs:

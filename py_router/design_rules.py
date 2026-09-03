@@ -1102,6 +1102,19 @@ def board_min_clearance_for(pcb_data, board_path=None):
         return 0.0
 
 
+def board_min_clearance_cached(pcb_data) -> float:
+    """``board_min_clearance_for`` memoised on the PCBData object, for hot
+    per-connector callers that have no GridRouteConfig in scope."""
+    v = getattr(pcb_data, '_krt_board_min_clearance', None)
+    if v is None:
+        v = board_min_clearance_for(pcb_data)
+        try:
+            pcb_data._krt_board_min_clearance = v
+        except Exception:                                      # noqa: BLE001
+            pass
+    return v
+
+
 def _netclass_dict(nc) -> dict:
     """A live NETCLASS -> the same dict shape the file loader builds."""
     def g(name, has=None):
