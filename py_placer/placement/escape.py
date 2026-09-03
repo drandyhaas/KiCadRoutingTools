@@ -750,9 +750,16 @@ def _assignment_rect(boxes, geom, fallback_rect):
     netted = [b for p, b in boxes
               if b is not None and getattr(p, 'net_id', 0)]
     if not netted and geom is None:
-        # No pad model at all: the caller's own box, over pad CENTRES.
+        # No pad model at all: the caller's own box, over pad CENTRES. Falling
+        # back to EVERY pad's centre rather than to `fallback_rect` when no pad
+        # is netted, because `fallback_rect` is optional and a None reaching
+        # `face_of` is a TypeError rather than a degraded answer. Unreachable
+        # from the three in-repo callers, all of which pass a real rect; it is
+        # written for the promise, not for a case that exists.
         centres = [(p.global_x, p.global_y) for p, _b in boxes
                    if getattr(p, 'net_id', 0)]
+        if not centres:
+            centres = [(p.global_x, p.global_y) for p, _b in boxes]
         if not centres:
             return fallback_rect
         return (min(c[0] for c in centres), min(c[1] for c in centres),
