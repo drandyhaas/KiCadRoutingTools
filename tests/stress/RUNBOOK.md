@@ -790,12 +790,15 @@ boards" and "which commit broke connectivity".
   The knob is for replay arms only; a real run wanting that reading passes
   `--clearance-ceiling`.
 
-  Likewise for the pre-#857 escalation ladder: `KICAD_FAB_TIER_DEFAULT=auto
-  KICAD_ESCALATION_DEFAULT=fab` default the two flags a manifest omits to the
-  old behaviour (standard escalating to advanced, below the board's declared
-  minimums). All three together replay a pre-#530 manifest under the old
-  policy on the new engine -- the engine-only arm of a three-way A/B (old
-  engine / new engine old policy / new engine new policy).
+  Likewise for the escalation ladder: `KICAD_FAB_TIER_DEFAULT` and
+  `KICAD_ESCALATION_DEFAULT` set the default of the two flags a manifest
+  omits. The shipped defaults are now `auto` / `fab` (the pre-#857 ladder,
+  disclosed), so the knobs matter when a future default moves again or an
+  arm wants the hard tier (`standard` / `board`) on manifests that pass
+  neither flag. The clearance knob plus these two replayed the pre-#530
+  manifests under the old policy on the new engine -- the engine-only arm of
+  the 2026-09-03 four-way A/B (old engine / new engine old policy / new
+  engine new policy), which read -3 real DRC / -11 incomplete nets.
 
 ### Rules that make these trustworthy
 

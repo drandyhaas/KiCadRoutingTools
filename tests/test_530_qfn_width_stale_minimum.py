@@ -29,9 +29,12 @@ SEG_W = re.compile(r'\(segment\b.*?\(width ([0-9.]+)\)', re.S)
 
 
 def _run(board, out, width):
+    # --escalation board explicitly: the stale-minimum rule is the BOARD
+    # policy's (under the default `fab` there is no board floor to drop).
     r = subprocess.run([sys.executable, '-X', 'utf8',
                         os.path.join(ROOT, 'py_router', 'qfn_fanout.py'), board,
-                        '-o', out, '-c', 'U2', '-w', str(width)],
+                        '-o', out, '-c', 'U2', '-w', str(width),
+                        '--escalation', 'board'],
                        capture_output=True, text=True, encoding='utf-8',
                        errors='replace', cwd=ROOT)
     widths = sorted({float(w) for w in SEG_W.findall(open(out).read())}) \

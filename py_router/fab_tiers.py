@@ -52,6 +52,8 @@ so ``from list_nets import fab_floors`` keeps working.
 
 import collections
 import os
+
+import routing_defaults as defaults
 import re
 
 # Flat floor keys every tier dict carries. Also the set an override file may set.
@@ -97,7 +99,10 @@ _FAB_FLOORS = {
 
 TIERS = ('standard', 'advanced', 'auto')
 ESCALATION_POLICIES = ('off', 'board', 'fab')
-DEFAULT_ESCALATION = 'board'
+# The defaults live in routing_defaults (ONE place, read by the CLIs and the
+# GUI alike); these names are the module's view of them.
+DEFAULT_TIER = defaults.FAB_TIER
+DEFAULT_ESCALATION = defaults.ESCALATION
 
 # .kicad_pro board.design_settings.rules key -> FLOOR_KEYS entry, for the
 # 'board' policy. min_clearance is included: KiCad enforces it as the one
@@ -123,7 +128,7 @@ BOARD_RULE_TO_FLOOR_KEY = {
 # value. The in-process GUI avoids one tab's custom file leaking into the next by
 # re-setting the tier from its own config at the start of every routing action.
 # NOTE: process-wide, not thread-local -- engines run serially.
-_DEFAULT_TIER = 'standard'
+_DEFAULT_TIER = DEFAULT_TIER
 _DEFAULT_OVERRIDES = {}
 _escalation_warned = set()
 
@@ -140,7 +145,7 @@ def set_default_fab_tier(tier, overrides=None):
     """Set the process-wide active fab tier (and custom overrides). Resets the
     per-run escalation-warning dedupe so a new run warns afresh."""
     global _DEFAULT_TIER, _DEFAULT_OVERRIDES
-    _DEFAULT_TIER = tier or 'standard'
+    _DEFAULT_TIER = tier or DEFAULT_TIER
     _DEFAULT_OVERRIDES = dict(overrides or {})
     _escalation_warned.clear()
 
@@ -682,7 +687,7 @@ def warn_fab_escalation(context):
     _escalation_warned.add(context)
     print(f"  WARNING: {context}: escalated standard->advanced fab floor "
           f"(0.25/0.15 via etc., more costly to fab); --fab-tier auto permitted "
-          f"it. Pass --fab-tier standard (the default) for a hard floor, or "
+          f"it. Pass --fab-tier standard for a hard floor, or "
           f"--fab-overrides to pin your own floor")
     if not _escalation_lever_said:
         _escalation_lever_said.append(True)
@@ -741,19 +746,19 @@ def add_fab_tier_args(parser, *, include_escalation=True):
     # ladder ('auto' + 'fab') like-for-like. An explicit flag still wins; an
     # unknown value is ignored. Disclosed by the ENV KNOBS line like every
     # KICAD_* variable. Never for a real run -- pass the flags.
-    _tier_dflt = os.environ.get('KICAD_FAB_TIER_DEFAULT', 'standard')
+    _tier_dflt = os.environ.get('KICAD_FAB_TIER_DEFAULT', DEFAULT_TIER)
     if _tier_dflt not in TIERS:
-        _tier_dflt = 'standard'
+        _tier_dflt = DEFAULT_TIER
     _esc_dflt = os.environ.get('KICAD_ESCALATION_DEFAULT', DEFAULT_ESCALATION)
     if _esc_dflt not in ESCALATION_POLICIES:
         _esc_dflt = DEFAULT_ESCALATION
     parser.add_argument(
         '--fab-tier', choices=list(TIERS), default=_tier_dflt,
-        help="JLC fab capability floor (default standard). 'standard' = the cheap "
-             "no-extra-cost floor, HARD; 'advanced' = tight 0.25/0.15 via etc. (more "
-             "costly), hard; 'auto' = standard, escalating to advanced (warned and "
-             "counted in the run summary) when a fine-pitch fan-out or last-resort "
-             "via cannot fit at the standard floor -- the pre-#857 behaviour, now opt-in.")
+        help=f"JLC fab capability floor (default {DEFAULT_TIER}). 'auto' = the cheap standard "
+             "floor, escalating to advanced (0.25/0.15 via etc., more costly; warned "
+             "and counted in the run summary) when a fine-pitch fan-out, plane tap or "
+             "last-resort via cannot fit at the standard floor; 'standard' and "
+             "'advanced' are HARD floors that never escalate.")
     parser.add_argument(
         '--fab-overrides', metavar='FILE', default=None,
         help="Path to a fab-floor override file (key=value lines, e.g. "
@@ -764,8 +769,8 @@ def add_fab_tier_args(parser, *, include_escalation=True):
     if include_escalation:
         parser.add_argument(
             '--escalation', choices=list(ESCALATION_POLICIES), default=_esc_dflt,
-            help="How far below a REQUESTED size a failing net may be retried "
-                 "(default board). 'off': never -- sizes and clearances are exact, "
+            help=f"How far below a REQUESTED size a failing net may be retried "
+                 f"(default {DEFAULT_ESCALATION}). 'off': never -- sizes and clearances are exact, "
                  "a net that cannot complete at them fails and is reported. 'board': "
                  "down to the board's own declared floors (Board Setup rules.min_*; "
                  "an unset key falls back to the fab tier floor), i.e. what KiCad's "
@@ -792,7 +797,7 @@ def set_fab_tier_from_config(config):
     'fab_overrides_path', 'escalation' and 'board_floors' (a FLOOR_KEYS dict
     the GUI reads off the live board). Tolerates a missing or unreadable
     override file (warns, falls back to the bare tier)."""
-    tier = (config.get('fab_tier') or 'standard')
+    tier = (config.get('fab_tier') or DEFAULT_TIER)
     path = (config.get('fab_overrides_path') or '').strip()
     overrides = {}
     if path:
@@ -812,7 +817,7 @@ def set_fab_tier_from_config(config):
 def fab_tier_from_args(args):
     """Resolve ``(tier, overrides_dict)`` from parsed args; load the override file
     once. The override file (if any) overlays whichever tier was selected."""
-    tier = getattr(args, 'fab_tier', 'standard') or 'standard'
+    tier = getattr(args, 'fab_tier', DEFAULT_TIER) or DEFAULT_TIER
     path = getattr(args, 'fab_overrides', None)
     if path and not os.path.isfile(path):
         raise SystemExit(f"error: --fab-overrides file not found: {path}")

@@ -130,9 +130,9 @@ vias and clearances *down toward* when it needs to. It is shared by every CLI
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--fab-tier` | `standard` | `standard` (no extra fab cost, hard), `advanced` (tighter, "more costly", hard) or `auto` (standard, escalating to advanced when a fine-pitch fan-out or last-resort via cannot fit; warned and counted) |
+| `--fab-tier` | `auto` | `auto` (the standard floor, escalating to advanced when a fine-pitch fan-out, plane tap or last-resort via cannot fit; warned and counted), `standard` (no extra fab cost, **hard**) or `advanced` (tighter, "more costly", **hard**) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
-| `--escalation` | `board` | How far below a **requested** size a failing net may be retried: `off` (never; the net fails and is reported), `board` (down to the board's own Board Setup minimums, i.e. what KiCad's DRC accepts; an unset key falls back to the fab tier floor), `fab` (down to the fab tier floor, below the board's own minimums) |
+| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums, i.e. what KiCad's DRC accepts; an unset key falls back to the fab tier floor), `off` (never; the net fails and is reported) |
 | `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired |
 
 The tier is a **floor ladder**:
@@ -142,20 +142,25 @@ The tier is a **floor ladder**:
   floor since #857: nothing on the board goes below it.
 - **`advanced`** — the JLC "more costly" floor (track/clearance 0.10/0.10 on 2-layer,
   0.0762/0.09 on 4+; via 0.25 / drill 0.15). A **hard** floor.
-- **`auto`** — the old default: `standard` first, **escalating to `advanced`** (one
-  warning line per context, and a count in the run summary) when a fine-pitch fan-out
-  or a last-resort via genuinely cannot fit at the standard floor. Opt-in, because
-  the default used to change what the board costs without saying so anywhere a
-  harness could see it (149 silent escalations on one board, #857).
+- **`auto`** — the default: `standard` first, **escalating to `advanced`** (one
+  warning line per context, and a count in the run summary) when a fine-pitch fan-out,
+  a plane tap or a last-resort via genuinely cannot fit at the standard floor. This
+  is what maximises completion; what #857 changed is the disclosure — the escalation
+  used to change what the board costs without saying so anywhere a harness could see
+  it (149 silent escalations on one board), and now every one is counted and named.
+  Pass `standard` or `advanced` for a hard floor that never escalates.
 
 **Escalation policy** (`--escalation`, the same choice on the GUI's Route tab) is
 orthogonal to the tier and bounds every place the engine narrows a track, shrinks a
 via or tightens a clearance to complete a net: the per-net rescue, the terminal
 escalation, the terminal graze neck, fine-pitch plane taps, via-in-pad clamps and
-last-resort vias. Under the default `board`, a descent stops at the board's own
-`rules.min_*` (Board Setup > Constraints), so the output is DRC-clean against the
-input project by construction; a minimum the board leaves unset (KiCad writes 0)
-falls back to the fab tier floor for that key. A board minimum bounds descents only
+last-resort vias. Under the default `fab`, a descent may go down to the fab tier
+floor, below the board's own declared minimums (the writeback then lowers the
+project's `rules.min_*` to match, as before); this is the completion-first setting.
+Under `board`, a descent stops at the board's own `rules.min_*` (Board Setup >
+Constraints), so the output is DRC-clean against the input project by construction;
+a minimum the board leaves unset (KiCad writes 0) falls back to the fab tier floor
+for that key. A board minimum bounds descents only
 when the run's own request respects it: a request already below the declared
 minimum (the stock 0.5 mm via on a project nobody edited, routed with
 `--via-size 0.3`) marks that minimum as stale for the run, is said so on the
@@ -169,7 +174,7 @@ geometry fails and is reported.
 narrowing with net / kind / requested / delivered / site, the fab-tier escalation
 count, and the `.kicad_dru` rules the tool could not honour), an `escalations`
 count in `JSON_SUMMARY_MIN`, and one end-of-run line (`Design rules [--escalation
-board, --fab-tier standard]: 7 feature(s) on 3 net(s) delivered below the requested
+fab, --fab-tier auto]: 7 feature(s) on 3 net(s) delivered below the requested
 size (...)`). `--strict-sizes` makes that line a non-zero exit.
 
 | Floor (per layer count) | standard | advanced |

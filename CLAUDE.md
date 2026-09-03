@@ -112,6 +112,19 @@ Validate routed boards against the *real* spec, with the right checker — most
     aspirational" workflow. GUI: the **Class ceiling** checkbox with Min Clearance.
   - **Both omitted** → base = the board's Default class, else
     `routing_defaults.CLEARANCE` 0.25; classes preserved.
+  - **Sizes and escalation (#857/#530):** `--fab-tier` / `--escalation` default to
+    `auto` / `fab` — the standard floor escalating to advanced when a fan-out, plane
+    tap or last-resort via cannot fit, and descents allowed below the board's own
+    declared minimums to the tier floor. Completion first, DISCLOSED: every
+    narrowing is in `JSON_SUMMARY.design_rules`, the end-of-run `Design rules [...]`
+    line and `--strict-sizes` (exit 3). `standard` / `advanced` are HARD tiers and
+    `board` / `off` the bounded policies, opt-in. **The two defaults live in
+    `routing_defaults.py` (`FAB_TIER`, `ESCALATION`) and nowhere else** — the CLIs
+    read them through `fab_tiers.DEFAULT_TIER` / `DEFAULT_ESCALATION`, the GUI
+    controls select them from the same constants. An explicit `--track-width` /
+    `--via-size` / `--clearance` is drawn as asked, floored only at the PHYSICAL fab
+    floor; a request below a stock Board Setup minimum marks that minimum stale for
+    the run (said so on the console) rather than being pinned up to it.
   - The PLACEMENT CLI `place_fanout_clearance.py` keeps its `--clearance` = ceiling
     contract (#768/#769, pinned by its test family); the GUI fanout tab prices that
     ceiling from the Min Clearance override alone (`placement_clearance_ceiling`).

@@ -750,6 +750,14 @@ and the per-platform binaries are the release step, not done on the branch.
 1. **Default escalation policy: `board`.** The board's declared floors are the user's
    stated acceptance; keys the board leaves unset fall back to the fab tier floor for
    that key, disclosed. `off` and `fab` remain available on every front.
+   **Amended 2026-09-03 after the sets 1-5 A/B (Andy): the defaults are `--fab-tier
+   auto` and `--escalation fab`** -- the pre-#857 ladder, so default completion is
+   maximal -- with everything the branch adds kept: the ledger, the `design_rules`
+   summary block, the end-of-run line and `--strict-sizes`. The hard tiers and the
+   `board` / `off` policies are the opt-in for a run that must not narrow. Measured
+   reason: with the hard tier and `board` policy as defaults the 74-board corpus read
+   +73 real DRC / +313 incomplete nets against 0.21.4, all of it policy (the engine-only
+   arm under the old policy read -3 / -11).
 2. **`--clearance` means the Default class clearance.** Non-Default classes are honoured
    pairwise as KiCad does. The #439 cap-every-class behaviour becomes the explicit
    `--clearance-ceiling` (and a second GUI checkbox). The switch ships gated by the

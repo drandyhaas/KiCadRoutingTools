@@ -147,7 +147,9 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=8.2,
         truth={'headline': 0,
-               'quality': {'vias': 33, 'copper_mm': 345.52, 'segments': 373}},
+               # re-recorded 2026-09-03 with the #530 defaults --fab-tier auto /
+               # --escalation fab (the pre-#857 ladder): 33/345.52/373 -> 39/353.93/256
+               'quality': {'vias': 39, 'copper_mm': 353.93, 'segments': 256}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 127.48707486477095, 'overlap_area': 1.1400451712000104,
@@ -160,7 +162,8 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=11.2,
         truth={'headline': 0,
-               'quality': {'vias': 29, 'copper_mm': 341.07, 'segments': 288}},
+               # re-recorded 2026-09-03 (auto/fab defaults): 29/341.07/288 -> 32/327.31/282
+               'quality': {'vias': 32, 'copper_mm': 327.31, 'segments': 282}},
         predictors={
             'crossings': 50, 'hpwl': 252.34828000000005,
             'halo': 130.46454030971682, 'overlap_area': 1.1400451712000104,
@@ -209,7 +212,8 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=9.5,
         truth={'headline': 0,
-               'quality': {'vias': 32, 'copper_mm': 347.03, 'segments': 270}},
+               # re-recorded 2026-09-03 (auto/fab defaults): 32/347.03/270 -> 31/341.99/263
+               'quality': {'vias': 31, 'copper_mm': 341.99, 'segments': 263}},
         predictors={
             'crossings': 23, 'hpwl': 260.0687799999999,
             'halo': 101.01900525631262, 'overlap_area': 1.0,

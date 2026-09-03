@@ -38,11 +38,11 @@ def _parse(env, argv):
 def main():
     fails = []
     cases = [
-        ({}, [], ('standard', fab_tiers.DEFAULT_ESCALATION), "unset env"),
+        ({}, [], (fab_tiers.DEFAULT_TIER, fab_tiers.DEFAULT_ESCALATION), "unset env"),
         ({'KICAD_FAB_TIER_DEFAULT': 'auto', 'KICAD_ESCALATION_DEFAULT': 'fab'}, [],
          ('auto', 'fab'), "env auto/fab"),
         ({'KICAD_FAB_TIER_DEFAULT': 'bogus', 'KICAD_ESCALATION_DEFAULT': 'nope'}, [],
-         ('standard', fab_tiers.DEFAULT_ESCALATION), "bogus env ignored"),
+         (fab_tiers.DEFAULT_TIER, fab_tiers.DEFAULT_ESCALATION), "bogus env ignored"),
         ({'KICAD_FAB_TIER_DEFAULT': 'auto', 'KICAD_ESCALATION_DEFAULT': 'fab'},
          ['--fab-tier', 'advanced', '--escalation', 'off'], ('advanced', 'off'), "explicit wins"),
     ]

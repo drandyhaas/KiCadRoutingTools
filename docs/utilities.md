@@ -664,7 +664,7 @@ Options:
                       (#360/#424). Per-net counts land in
                       JSON_SUMMARY.plane_drop; KICAD_FANOUT_PLANE_DROP=0/1
                       overrides the flag (the recorded-manifest A/B switch)
-  --fab-tier {standard,advanced,auto}  JLC fab capability floor (default: standard)
+  --fab-tier {standard,advanced,auto}  JLC fab capability floor (default: auto)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
                       (see [Fab Tier Options](configuration.md#fab-tier-options))
 ```

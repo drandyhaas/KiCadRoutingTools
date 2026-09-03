@@ -32,7 +32,7 @@ from routing_config import GridRouteConfig
 from plane_pad_tap import tap_pad_with_escalation, try_tap_pad
 import fab_tiers
 # #857: the clamp under test descends the standard->advanced ladder, which is
-# the AUTO tier's; the default standard tier is a hard floor now.
+# the AUTO tier's; pinned explicitly so the test does not ride the default tier.
 fab_tiers.set_default_fab_tier('auto')
 
 

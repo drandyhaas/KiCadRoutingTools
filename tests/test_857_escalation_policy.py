@@ -55,7 +55,8 @@ def main():
         return 0
     fails = []
     with tempfile.TemporaryDirectory() as td:
-        # --- default: board policy, project-less board -> fab floor, DISCLOSED
+        # --- default: fab policy on the auto tier (completion first, Andy
+        # 2026-09-03), project-less board -> fab floor, DISCLOSED
         r, data = _run(td, [])
         if r.returncode != 0:
             print(r.stdout[-3000:])
@@ -66,8 +67,8 @@ def main():
             print("  SKIP: the fixture routed 5.0mm without the rescue; policy untestable here")
             return 0
         w = next(iter((rescue.get('widths') or {}).values()), {})
-        if dr.get('escalation_policy') != 'board' or dr.get('fab_tier') != 'standard':
-            fails.append(f"default policy/tier reported as {dr.get('escalation_policy')}/{dr.get('fab_tier')}")
+        if dr.get('escalation_policy') != 'fab' or dr.get('fab_tier') != 'auto':
+            fails.append(f"default policy/tier reported as {dr.get('escalation_policy')}/{dr.get('fab_tier')}, expected fab/auto")
         if not dr.get('count'):
             fails.append(f"a thinner delivery ({w}) was not COUNTED in design_rules: {dr}")
         if not any(row.get('kind') == 'track_width' for row in dr.get('narrowed', [])):
@@ -75,8 +76,20 @@ def main():
         m = re.search(r'JSON_SUMMARY_MIN: (\{.*\})', r.stdout)
         if not m or not json.loads(m.group(1)).get('escalations'):
             fails.append("JSON_SUMMARY_MIN carries no escalations count")
-        if 'Design rules [--escalation board' not in r.stdout:
-            fails.append("no end-of-run design-rules line was printed")
+        if 'Design rules [--escalation fab, --fab-tier auto]' not in r.stdout:
+            fails.append("no end-of-run design-rules line was printed for the default policy")
+
+        # --- the HARD tier + board policy, opted into: same disclosure, and no
+        # fab-tier escalation may fire
+        r, data = _run(td, ['--escalation', 'board', '--fab-tier', 'standard'])
+        if r.returncode != 0:
+            print(r.stdout[-3000:])
+            return 1
+        dr = data.get('design_rules') or {}
+        if dr.get('escalation_policy') != 'board' or dr.get('fab_tier') != 'standard':
+            fails.append(f"explicit policy/tier reported as {dr.get('escalation_policy')}/{dr.get('fab_tier')}")
+        if 'Design rules [--escalation board, --fab-tier standard]' not in r.stdout:
+            fails.append("no end-of-run design-rules line was printed for the explicit hard tier")
         if dr.get('fab_tier_escalations'):
             fails.append("a fab-tier escalation fired under the hard standard tier")
 
@@ -125,7 +138,8 @@ def main():
     if fails:
         print("FAIL:\n  " + "\n  ".join(fails))
         return 1
-    print("PASS: escalation board (default) narrows only to the board's declared floor and "
+    print("PASS: the default (fab policy, auto tier) narrows to the fab floor and discloses it; "
+          "the opted-in board policy on the hard standard tier narrows only to the board's declared floor and "
           "discloses it; off narrows nothing and fails honestly; --strict-sizes exits 3")
     return 0
 

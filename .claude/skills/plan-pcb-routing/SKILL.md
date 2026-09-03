@@ -582,9 +582,11 @@ to TIGHTEN the grade — it is a FLOOR, `max(-c, classA, classB)`, not an
 override, so a value at or below the board's netclasses changes nothing.
 See Step 6.
 
-**`check_drc.py -c` is NOT `route.py --clearance`.** On route.py the flag is a
-**ceiling over every class** (`--clearance` caps each net at `min(its class,
---clearance)`). On `check_drc` it is only the **global fallback**, and a netclass
+**`check_drc.py -c` is NOT `route.py --clearance`.** On route.py the flag is the
+**Default net class's clearance for the run** (#530): nets in other classes route
+at their own class clearance, pairwise `max` as KiCad's DRC does, and the old
+cap-every-class reading (`min(its class, --clearance)`, clamping the project's
+classes down too) is the explicit `--clearance-ceiling`. On `check_drc` it is only the **global fallback**, and a netclass
 override still wins — the tool prints `Required clearance: 0.1600mm
 (local/netclass override; global 0.1500mm)` and grades at 0.16 no matter what
 `-c` says. Measured on one board: 7 violations at `-c 0.16`, the same 7 at

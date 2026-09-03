@@ -34,7 +34,7 @@ from kicad_parser import parse_kicad_pcb
 from list_nets import fab_floors, fab_floor_min, fab_floor_ladder
 import fab_tiers
 # #857: this test exercises the standard->advanced descent, which is the
-# AUTO tier's; the default standard tier is a hard floor now.
+# AUTO tier's; pinned explicitly so the test does not ride the default tier.
 fab_tiers.set_default_fab_tier('auto')
 from bga_fanout import generate_bga_fanout
 from bga_fanout.geometry import clamp_via_to_pad

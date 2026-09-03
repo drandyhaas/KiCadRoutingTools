@@ -548,16 +548,25 @@ class RoutingDialog(wx.Dialog):
         }
         params = [
             ('track_width', 'Track Width (mm):', defaults.TRACK_WIDTH, "Width of routed traces"),
-            ('clearance', 'Min Clearance (mm):', defaults.CLEARANCE, "Minimum spacing between traces and other copper"),
-            ('via_size', 'Via Size (mm):', defaults.VIA_SIZE, "Outer diameter of vias"),
-            ('via_drill', 'Via Drill (mm):', defaults.VIA_DRILL, "Drill hole diameter for vias"),
+            ('clearance', 'Min Clearance (mm):', defaults.CLEARANCE,
+             "Copper clearance of the DEFAULT net class for this run (checked = this value, "
+             "unchecked = the board's Default class). Nets in other classes keep their own "
+             "class clearance, pairwise as KiCad's DRC grades them; tick 'Class ceiling' to "
+             "cap every class at this value instead (the CLI's --clearance-ceiling)."),
+            ('via_size', 'Via Size (mm):', defaults.VIA_SIZE,
+             "Via outer diameter. Checked = every net's vias are this size; unchecked = each "
+             "net draws its own net-class / .kicad_dru via size (the Default class for "
+             "Default nets), routed through per-net via-legality maps."),
+            ('via_drill', 'Via Drill (mm):', defaults.VIA_DRILL,
+             "Via drill diameter; per net exactly like Via Size when unchecked."),
             ('hole_to_hole_clearance', 'Min Hole Clearance (mm):', defaults.HOLE_TO_HOLE_CLEARANCE, "Minimum spacing between via/pad drill holes"),
         ]
         # Each geometry floor is a "checkbox + spinctrl" row like the edge control
         # (#439): unchecked = default from the board (Default net-class for
         # track/clearance/via, board Constraint for the hole floor); checking the
-        # box overrides with the typed value. Checking the CLEARANCE box is also
-        # the "clamp non-Default net-classes" switch (== CLI passing --clearance).
+        # box overrides with the typed value. #530: the CLEARANCE box sets the
+        # Default class for the run (== CLI --clearance); capping every class is
+        # the separate 'Class ceiling' box (== --clearance-ceiling).
         for name, label, default, tooltip in params:
             r = defaults.PARAM_RANGES[name]
             grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -606,13 +615,13 @@ class RoutingDialog(wx.Dialog):
 
         grid.Add(wx.StaticText(parent, label="Fab Tier:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.fab_tier = wx.Choice(parent, choices=["standard", "advanced", "auto"])
-        self.fab_tier.SetSelection(0)
+        self.fab_tier.SetStringSelection(defaults.FAB_TIER)
         self.fab_tier.SetToolTip(
-            "JLC fab capability floor. standard = no-extra-cost, a HARD floor; "
-            "advanced = tight 0.25/0.15 via etc. (more costly), hard; auto = standard, "
-            "escalating to advanced (warned and counted in the run summary) when a "
-            "fine-pitch fan-out or last-resort via cannot fit at the standard floor "
-            "(the old default, opt-in since #857). Same as the CLI --fab-tier.")
+            "JLC fab capability floor. auto (the default) = the no-extra-cost standard "
+            "floor, escalating to advanced (0.25/0.15 via etc., more costly; warned and "
+            "counted in the run summary) when a fine-pitch fan-out, plane tap or "
+            "last-resort via cannot fit; standard and advanced are HARD floors that "
+            "never escalate. Same as the CLI --fab-tier.")
         self.fab_tier.Bind(wx.EVT_CHOICE, self._revalidate_fab_floors)
         grid.Add(self.fab_tier, 0, wx.EXPAND)
 
@@ -621,15 +630,15 @@ class RoutingDialog(wx.Dialog):
         # as the CLI --escalation.
         grid.Add(wx.StaticText(parent, label="Escalation:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.escalation = wx.Choice(parent, choices=["off", "board", "fab"])
-        self.escalation.SetSelection(1)
+        self.escalation.SetStringSelection(defaults.ESCALATION)
         self.escalation.SetToolTip(
             "How far below a requested size a failing net may be retried. off: never "
             "-- sizes and clearances are exact, a net that cannot complete at them "
-            "fails and is reported. board (default): down to the board's own "
-            "declared floors (Board Setup > Constraints; an unset key falls back to "
-            "the fab tier floor), i.e. what KiCad's DRC accepts. fab: down to the "
-            "fab tier floor, below the board's own minimums. Every descent is "
-            "counted in the run summary. Same as the CLI --escalation.")
+            "fails and is reported. board: down to the board's own declared floors "
+            "(Board Setup > Constraints; an unset key falls back to the fab tier "
+            "floor), i.e. what KiCad's DRC accepts. fab (default): down to the fab "
+            "tier floor, below the board's own minimums -- completion first. Every "
+            "descent is counted in the run summary. Same as the CLI --escalation.")
         self.escalation.Bind(wx.EVT_CHOICE, self._on_escalation_changed)
         grid.Add(self.escalation, 0, wx.EXPAND)
 
@@ -738,8 +747,8 @@ class RoutingDialog(wx.Dialog):
         """The Escalation choice as the engine's policy string."""
         ctrl = getattr(self, 'escalation', None)
         if ctrl is None:
-            return 'board'
-        return ctrl.GetString(ctrl.GetSelection()) or 'board'
+            return defaults.ESCALATION
+        return ctrl.GetString(ctrl.GetSelection()) or defaults.ESCALATION
 
     def _board_floor_dict(self):
         """The live board's Board Setup minimums in fab_tiers FLOOR_KEYS
@@ -1263,11 +1272,13 @@ class RoutingDialog(wx.Dialog):
         self.fix_drc_check = wx.CheckBox(options_scroll, label="Fix DRC settings after routing")
         self.fix_drc_check.SetValue(True)
         self.fix_drc_check.SetToolTip(
-            "After routing, loosen the live board's DRC Board Setup floors + Default "
-            "net class + non-routing severities to the values just routed to (issue "
-            "#160), so a manual DRC flags only genuine problems instead of stock-"
-            "default noise. The board's next save persists it. Mirrors the CLI's "
-            "auto-fix (route.py, off via --no-fix-drc-settings)")
+            "After routing, lower the live board's DRC Board Setup floors and the "
+            "Default net class's CLEARANCE to the values just routed to (issue #160), "
+            "so a manual DRC flags only genuine problems instead of stock-default "
+            "noise. Never lowers net-class track/via draw sizes and never touches "
+            "severities (#842/#856; see 'Relax DRC severities'). The board's next "
+            "save persists it. Mirrors the CLI's auto-fix (route.py, off via "
+            "--no-fix-drc-settings)")
         options_inner.Add(self.fix_drc_check, 0, wx.ALL, 3)
 
         # Guide corridor: follow a user-drawn polyline (issue #7)
@@ -2700,9 +2711,9 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetValue(False)  # match creation default + CLI (--add-teardrops off)
         # #856: severity relaxation is opt-in per step (CLI --relax-drc-severities off).
         self.relax_drc_severities_check.SetValue(False)
-        # #857: the CLI defaults -- --fab-tier standard, --escalation board.
-        self.fab_tier.SetStringSelection('standard')
-        self.escalation.SetStringSelection('board')
+        # #857/#530: the CLI defaults, from the one place they live.
+        self.fab_tier.SetStringSelection(defaults.FAB_TIER)
+        self.escalation.SetStringSelection(defaults.ESCALATION)
         # #530: no class ceiling unless a plan asks (clearance_ceiling param).
         self.clearance_ceiling_check.SetValue(False)
         self.power_nets_ctrl.SetValue("")
@@ -2733,7 +2744,7 @@ class RoutingDialog(wx.Dialog):
         self.turn_cost.SetValue(defaults.TURN_COST)
         self.direction_preference_cost.SetValue(defaults.DIRECTION_PREFERENCE_COST)
         self.ordering_strategy.SetSelection(0)
-        self.fab_tier.SetSelection(0)
+        self.fab_tier.SetStringSelection(defaults.FAB_TIER)
         self.fab_overrides_path.SetValue("")
         self.bga_proximity_radius.SetValue(defaults.BGA_PROXIMITY_RADIUS)
         self.bga_proximity_cost.SetValue(defaults.BGA_PROXIMITY_COST)
