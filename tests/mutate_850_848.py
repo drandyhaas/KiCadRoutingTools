@@ -22,13 +22,21 @@ gate to pass UNMUTATED first; drop `__pycache__` before and after every row and
 run children with `-B`; treat exit 77 from every witness as UNDECIDED rather
 than a kill; restore in a `finally`.
 
-RECORDED at bcb722d3 -- 19 rows, 18 killed, 1 survived, 0 undecided, 0 broken,
-1 disagreeing with expectation. Re-run after the hole below was closed: 19
-rows, 19 killed, 0 disagreeing.
+RECORDED at 9a0f6ce2 -- **22 rows, 22 killed, 0 survived, 0 undecided, 0
+broken, 0 disagreeing with expectation.**
 
-THE ONE DISAGREEMENT WAS A HOLE IN MY OWN TESTS, not a wrong expectation, and
-it is recorded here because a battery that only ever reports a clean sweep is
-not evidence that it can find anything.
+The three newest rows (`the-two-boxes-collapse-back-to-one`,
+`the-face-comes-from-the-netted-box`,
+`the-interiority-question-uses-the-part-box`) exist because an independent
+reviewer found the defect they guard, not because a battery run did: the
+netted-pad box is right for "can this pad get out sideways at all" and wrong
+for "which side of the part is it on", and a QFN's east pin was being sent
+north off a 0.8 x 1.75mm sliver of its own four netted pads.
+
+THE FIRST RUN of the 19-row table was 18 killed / 1 survived / 1 disagreeing,
+and that disagreement was A HOLE IN MY OWN TESTS, not a wrong expectation. It
+is recorded here because a battery that only ever reports a clean sweep is not
+evidence that it can find anything.
 
 `the-face-geometry-moves-to-the-copper-box` builds `faces` from
 `ctx.geom[ref].copper` instead of `pp.extent` -- so the face LENGTH, the
