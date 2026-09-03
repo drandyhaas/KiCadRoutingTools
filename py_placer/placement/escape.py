@@ -657,7 +657,7 @@ def _part_rect(fp) -> Tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
+def face_of(pad, rect, pitch, pad_box=None, face_rect=None) -> Optional[str]:
     """Which face a pad escapes through, or None when it is interior.
 
     A pad on the bounding box escapes through the side it sits on; a corner pad
@@ -688,16 +688,28 @@ def face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
     disagreed between the two ledgers was not this arithmetic but the PAIRING
     of rect, pad box and pitch it is fed, and that pairing is the invariant.
     """
-    minx, miny, maxx, maxy = rect
     tol = max(pitch / 2.0, INTERIOR_EPS)
-    px0, py0, px1, py1 = (pad_box if pad_box is not None
-                          else (pad.global_x, pad.global_y,
-                                pad.global_x, pad.global_y))
-    d = {'west': px0 - minx, 'east': maxx - px1,
-         'north': py0 - miny, 'south': maxy - py1}
-    near = min(d.values())
-    if near > tol:
+    box = (pad_box if pad_box is not None
+           else (pad.global_x, pad.global_y, pad.global_x, pad.global_y))
+
+    def _dist(r):
+        minx, miny, maxx, maxy = r
+        return {'west': box[0] - minx, 'east': maxx - box[2],
+                'north': box[1] - miny, 'south': maxy - box[3]}
+
+    d = _dist(rect)
+    if min(d.values()) > tol:
         return None
+    # TWO BOXES, TWO QUESTIONS, when the caller supplies `face_rect` (#850).
+    # `rect` answers "can this pad get out sideways at all"; `face_rect`
+    # answers "which side of the PART is it on". They are the same box on
+    # most parts, and must not be when the netted pads are a strict subset:
+    # see `_assignment_rect`, which measured a QFN's four netted pins against
+    # a 0.8 x 1.75mm sliver of themselves and pointed one of them NORTH off
+    # the part's east edge.
+    if face_rect is not None:
+        d = _dist(face_rect)
+    near = min(d.values())
     # Ties resolve by FACES order, not by dict order, so the answer does not
     # depend on how the pads were enumerated.
     for f in FACES:
@@ -807,7 +819,9 @@ def assign_faces(fp, geom, *, lane_mm, fallback_rect=None) -> FaceAssignment:
     pads = list(fp.pads or [])
     boxes = [(p, None if geom is None else _pad_box(geom, p)) for p in pads]
     rect = _assignment_rect(boxes, geom, fallback_rect)
-    out = [(pad, face_of(pad, rect, pitch, pad_box=box))
+    part = (fallback_rect if geom is None else geom.copper)
+    out = [(pad, face_of(pad, rect, pitch, pad_box=box,
+                         face_rect=None if part == rect else part))
            for pad, box in boxes]
     return FaceAssignment(faces=tuple(out), pitch_mm=pitch,
                           pitch_source=source)

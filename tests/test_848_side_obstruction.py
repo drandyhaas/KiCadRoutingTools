@@ -99,8 +99,16 @@ CENSUS = {
 #: arms in one process instead -- see `the_deficit_did_not_move`.
 
 
+#: See the same note in `test_850_demand_face_of.py`: the file reports its own
+#: check total, because several `check(...)` calls are inside loops and a
+#: hand-maintained count drifts (26 stated, 28 emitted, per a fact-check).
+PASSED = []
+SECTIONS = 6
+
+
 def check(name, cond, detail=''):
     if cond:
+        PASSED.append(name)
         print('  PASS  %s' % name)
     else:
         FAILURES.append(name)
@@ -433,9 +441,11 @@ def main():
     print('6. the deficit half of the prediction')
     the_deficit_did_not_move(boards)
     if FAILURES:
-        print('\nFAIL: %d check(s): %s' % (len(FAILURES), ', '.join(FAILURES)))
+        print('\nFAIL: %d of %d check(s): %s'
+              % (len(FAILURES), len(FAILURES) + len(PASSED),
+                 ', '.join(FAILURES)))
         return 1
-    print('\nOK')
+    print('\nOK -- %d checks in %d sections' % (len(PASSED), SECTIONS))
     return 0
 
 

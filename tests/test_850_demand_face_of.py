@@ -141,8 +141,20 @@ UNNETTED_BOX = {
 }
 
 
+#: Every passing `check()`, so this file REPORTS its own total rather than
+#: stating one in prose. An earlier draft of the docstring above named a count
+#: I had got by counting `check(...)` call sites in the source -- but several
+#: are inside loops over boards, refs and pads, so the number actually emitted
+#: is larger and moves whenever the corpus does. An independent fact-check
+#: caught it (45 stated, 61 emitted at the time). A count maintained by hand
+#: is a claim; this one is a measurement.
+PASSED = []
+SECTIONS = 10
+
+
 def check(name, cond, detail=''):
     if cond:
+        PASSED.append(name)
         print('  PASS  %s' % name)
     else:
         FAILURES.append(name)
@@ -177,9 +189,10 @@ def the_spy_and_conservation(boards):
         seen = []
         real = E.face_of
 
-        def spy(pad, rect, pitch, pad_box=None):
-            seen.append((pad, rect, pitch, pad_box))
-            return real(pad, rect, pitch, pad_box=pad_box)
+        def spy(pad, rect, pitch, pad_box=None, face_rect=None):
+            seen.append((pad, rect, pitch, pad_box, face_rect))
+            return real(pad, rect, pitch, pad_box=pad_box,
+                        face_rect=face_rect)
 
         E.face_of = spy
         try:
@@ -203,8 +216,8 @@ def the_spy_and_conservation(boards):
             [(p, L.pad_box(ctx.geom[ref], p)) for p in fp.pads],
             ctx.geom[ref], None)
         check('spy: %s %s -- the ledger did not build its own box' % (name, ref),
-              all(r == want for _p, r, _pi, _b in seen),
-              'want %r, saw %r' % (want, {r for _p, r, _pi, _b in seen}))
+              all(r == want for _p, r, _pi, _b, _fr in seen),
+              'want %r, saw %r' % (want, {r for _p, r, _pi, _b, _fr in seen}))
         # ...and the INVARIANT, derived from the pads rather than from the
         # function: every edge of the box `face_of` measures against is
         # attained by some NETTED pad, and no netted pad lies outside it. That
@@ -212,7 +225,19 @@ def the_spy_and_conservation(boards):
         # edge pad at distance exactly 0 -- and it is FALSE for `geom.copper`
         # on a part whose box is set by an unnetted pad, which is #850's own
         # ulx3s finding.
-        rects = [r for _p, r, _pi, _b in seen]
+        # ...and `face_rect`: supplied only when the netted box is a strict
+        # subset of the part's copper, and then it IS the part's copper. The
+        # two questions are answered against two boxes, and a caller that
+        # collapsed them back to one is what sent a QFN's east pin north.
+        fr = {id(f) for _p, _r, _pi, _b, f in seen}
+        check('spy: %s %s -- face_rect is the PART box when it differs, and '
+              'absent when it does not' % (name, ref),
+              (fr == {id(ctx.geom[ref].copper)}
+               if want != ctx.geom[ref].copper else fr == {id(None)}),
+              'netted %r part %r face_rects %r'
+              % (want, ctx.geom[ref].copper,
+                 {_f for _p, _r, _pi, _b, _f in seen}))
+        rects = [r for _p, r, _pi, _b, _fr in seen]
         nb = [L.pad_box(ctx.geom[ref], p) for p in fp.pads if p.net_id]
         nb = [b for b in nb if b is not None]
         if rects and nb:
@@ -227,16 +252,16 @@ def the_spy_and_conservation(boards):
                   attained and inside,
                   'rect %r attained=%s inside=%s' % (r, attained, inside))
         check('spy: %s %s -- at the part\'s own pad pitch' % (name, ref),
-              all(abs(pi - E.pad_pitch(fp)) < 1e-12 for _p, _r, pi, _b in seen)
+              all(abs(pi - E.pad_pitch(fp)) < 1e-12 for _p, _r, pi, _b, _fr in seen)
               and abs(rows[0]['face_pitch_mm'] - round(E.pad_pitch(fp), 4)) < 1e-9,
               'pad_pitch %r, row %r' % (E.pad_pitch(fp), rows[0]['face_pitch_mm']))
         check('spy: %s %s -- every netted pad got its own copper box'
               % (name, ref),
-              all(b is not None for p, _r, _pi, b in seen if p.net_id),
+              all(b is not None for p, _r, _pi, b, _fr in seen if p.net_id),
               '%d netted pads with no box'
-              % sum(1 for p, _r, _pi, b in seen if p.net_id and b is None))
+              % sum(1 for p, _r, _pi, b, _fr in seen if p.net_id and b is None))
         # 2. CONSERVATION.
-        faced = sum(1 for (_p, _r, _pi, _b), (pad, f)
+        faced = sum(1 for (_p, _r, _pi, _b, _fr), (pad, f)
                     in zip(seen, E.assign_faces(fp, ctx.geom[ref],
                                                 lane_mm=1.0).faces)
                     if pad.net_id and f is not None)
@@ -377,6 +402,93 @@ EXTENT_FACES = {
     'watchy:SW3': [3.5, 3.5, 6.8, 6.8],
     'watchy:SW4': [3.5, 3.5, 6.8, 6.8],
 }
+
+
+#: Refs where a netted pad's face was decided by an edge of the NETTED-pad
+#: sliver rather than by the part's own copper box, before the two-box split.
+#: `{board:ref: {pad_number: face}}` -- the face each moved to, which is the
+#: right one.
+#: The pad named is the NORTHERNMOST of that ref's netted column -- the one
+#: sitting on the netted sliver's own north edge, tied at distance 0 with the
+#: part's real east edge, which `escape.FACES` order then resolved north.
+SLIVER_FACES = {
+    'qfn_csi_underpad_diff:U1': {'32': 'east', '29': 'east'},
+    'qfn_underpad_coupling:U1': {'17': 'east', '24': 'east'},
+}
+
+
+def the_face_comes_from_the_part_box(boards):
+    """A netted pad's FACE is the nearest face of the part's own copper box.
+
+    THIS ARM EXISTS BECAUSE AN INDEPENDENT REVIEWER FOUND ITS ABSENCE, on the
+    commit that introduced `_assignment_rect`. That commit made the box a pad
+    is measured against the union of the NETTED pads' copper -- which is right
+    for the question *"can this pad get out sideways at all"*, and wrong for
+    *"which side of the part is it on"* whenever the netted pads are a strict
+    subset.
+
+    Measured: `qfn_csi_underpad_diff` U1 is a QFN-48 with four netted pins,
+    all four flush against its EAST edge. The netted box is a 0.8 x 1.75mm
+    sliver of just those four, so pad 32 -- the northernmost of them -- sits
+    on the sliver's own NORTH edge at distance 0, ties with the real east edge
+    at distance 0, and `escape.FACES` order sends it north. Off the part's
+    east side, onto a face it does not touch. `eaten_by` and every downstream
+    move target follow the face, so this is a fix aimed at the wrong side of
+    the part.
+
+    Nothing caught it: `UNNETTED_BOX` above checks interior COUNTS (0 and 0,
+    unmoved), the golden's five refs are all fully-netted or BGA-shaped, and
+    the 19-row mutation battery had no row for it. The measure script did
+    print the raw signal -- `rise=1` on this board -- and nothing asked
+    whether the rise was geometrically sound.
+
+    So `face_of` now takes `face_rect`: `rect` answers interiority, `face_rect`
+    answers which face, and they differ exactly when the netted subset is
+    strict. The invariant below is the general form, checked on every netted
+    pad of every fine-pitch ref rather than only on the two refs that moved.
+    """
+    part_wrong, checked = [], 0
+    for name, path in sorted(boards.items()):
+        pcb = parse_kicad_pcb(path)
+        ctx = R.board_lane_context(pcb, CLR, pcb_file=path)
+        for ref in E.fine_pitch_parts(pcb):
+            g = ctx.geom.get(ref)
+            fp = pcb.footprints[ref]
+            if g is None:
+                continue
+            for pad, face in E.assign_faces(fp, g, lane_mm=TRK + CLR).faces:
+                if not pad.net_id or face is None:
+                    continue
+                checked += 1
+                # The nearest face of the PART box, tie-broken the same way.
+                b = L.pad_box(g, pad) or (pad.global_x, pad.global_y,
+                                          pad.global_x, pad.global_y)
+                d = {'west': b[0] - g.copper[0], 'east': g.copper[2] - b[2],
+                     'north': b[1] - g.copper[1], 'south': g.copper[3] - b[3]}
+                near = min(d.values())
+                want = next(f for f in E.FACES if abs(d[f] - near) < 1e-9)
+                if face != want:
+                    part_wrong.append((name, ref, pad.pad_number, face, want))
+    check('part box: every netted pad is on the nearest face of the PART\'s '
+          'own copper box, not of the netted-pad subset',
+          not part_wrong, '%d wrong: %r' % (len(part_wrong), part_wrong[:6]))
+    check('part box: ...and it checked a real population', checked > 1000,
+          '%d pads' % checked)
+    # ...and the two refs that actually moved, named, so the arm is a change
+    # detector and not only an invariant.
+    for key, want in sorted(SLIVER_FACES.items()):
+        name, ref = key.split(':')
+        path = boards.get(name)
+        if path is None:
+            check('sliver: %s present' % name, False)
+            continue
+        pcb = parse_kicad_pcb(path)
+        g = L.part_copper_geometry(pcb.footprints, CLR)[ref]
+        faces = {p.pad_number: f for p, f in E.assign_faces(
+            pcb.footprints[ref], g, lane_mm=TRK + CLR).faces}
+        got = {n: faces.get(n) for n in want}
+        check('sliver: %s -- the pad on the sliver\'s edge points at the '
+              'part\'s face' % key, got == want, '%r != %r' % (got, want))
 
 
 def the_face_geometry_is_still_the_extent(boards):
@@ -581,6 +693,8 @@ def main():
     only_demand_moved(boards)
     print('5b. the face geometry is still the extent')
     the_face_geometry_is_still_the_extent(boards)
+    print('5c. the face comes from the part box, not the netted sliver')
+    the_face_comes_from_the_part_box(boards)
     print('6-7. the face map and the tie-break')
     with tempfile.TemporaryDirectory() as td:
         the_face_map(td)
@@ -592,9 +706,11 @@ def main():
     print('10. the starved budget')
     the_starved_budget(boards)
     if FAILURES:
-        print('\nFAIL: %d check(s): %s' % (len(FAILURES), ', '.join(FAILURES)))
+        print('\nFAIL: %d of %d check(s): %s'
+              % (len(FAILURES), len(FAILURES) + len(PASSED),
+                 ', '.join(FAILURES)))
         return 1
-    print('\nOK')
+    print('\nOK -- %d checks in %d sections' % (len(PASSED), SECTIONS))
     return 0
 
 

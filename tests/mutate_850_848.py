@@ -160,6 +160,30 @@ ROWS = [
      "            interior_nets.add(nid)",
      (T850,), 'KILLED'),
 
+    ('the-two-boxes-collapse-back-to-one', 'esc',
+     "    out = [(pad, face_of(pad, rect, pitch, pad_box=box,\n"
+     "                         face_rect=None if part == rect else part))\n"
+     "           for pad, box in boxes]",
+     "    out = [(pad, face_of(pad, rect, pitch, pad_box=box))\n"
+     "           for pad, box in boxes]",
+     (T850,), 'KILLED'),
+
+    ('the-face-comes-from-the-netted-box', 'esc',
+     "    if face_rect is not None:\n"
+     "        d = _dist(face_rect)",
+     "    if False:\n"
+     "        d = _dist(face_rect)",
+     (T850,), 'KILLED'),
+
+    ('the-interiority-question-uses-the-part-box', 'esc',
+     "    d = _dist(rect)\n"
+     "    if min(d.values()) > tol:\n"
+     "        return None",
+     "    d = _dist(rect if face_rect is None else face_rect)\n"
+     "    if min(d.values()) > tol:\n"
+     "        return None",
+     (T850,), 'KILLED'),
+
     ('the-face-map-swaps-N-and-S', 'esc',
      "FACE_LETTER = {'north': 'N', 'east': 'E', 'south': 'S', 'west': 'W'}",
      "FACE_LETTER = {'north': 'S', 'east': 'E', 'south': 'N', 'west': 'W'}",

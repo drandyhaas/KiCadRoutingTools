@@ -1291,6 +1291,14 @@ it came from the part's pad lattice or fell back to the lane. This is a
 reason: two ledgers graded at different bases are not comparable, and until
 #847 nothing in the output said which either used.
 
+The three interior keys and the two pitch keys were **added** to the row by
+#850, and `--json` dumps rows verbatim, so that is a published-schema change.
+It is additive: the three in-repo readers of `ledgers`
+(`tests/test_849_lane_context.py`, `tests/test_847_escape_band.py`,
+`tests/test_run6_check_channels.py`) all read named keys rather than asserting
+a key set, and the skill drivers use the tool through its exit code and its
+printed text, not its JSON.
+
 *Before #850* this ledger took `min` over the distance from each pad's
 **centre** to the whole-part extent edge, with no tolerance and no interior
 case, so every netted pad was demand on some face. Corpus-wide that was 2034
