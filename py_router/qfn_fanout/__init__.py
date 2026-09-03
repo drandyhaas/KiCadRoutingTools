@@ -62,6 +62,54 @@ LAST_ERASED_SETS: Dict = {}
 LAST_UNDERPAD_REPORT: Dict = {}
 
 
+def axis_offset_ladder(pad_width, via_size, step, mode='near'):
+    """Signed offsets along the escape axis, under KICAD_QFN_ONPAD_REACH (#846).
+
+    `mode` orders them: 'in' sweeps inward (toward the chip) first, 'near'
+    alternates nearest first.
+
+    NOT an "on-pad ladder", though it was called `_onpad` and documented as one.
+    Only k = 0 is guaranteed on the pad. The increment is the INTER-NET stagger
+    -- the centre-to-centre a via needs from a DIFFERENT net's via at this pitch
+    -- and on a fine-pitch part that exceeds the pad: on routed_output's QFN-76
+    (pitch 0.40, via 0.45, clearance 0.1) step is 0.4275 against a pad whose
+    escape-axis extent is 0.875, so rung 1 lands 0.0100 mm inside the pad EDGE,
+    rung 2 is 0.8550 mm out and rung 8 reaches +-3.4199 mm.
+
+    Those rungs ARE load-bearing, measured: with --allow-via-in-pad this ladder
+    is tried first and won 66 of 84 accepted offsets on routed_output U2 and
+    every one on tigard, qfn_underpad_coupling and qfn_diffpair_escape, and it
+    owns the longest emitted stub there (2.9924 mm, pad 65, k = 7). Confining it
+    to the pad regressed 1 of 5 boards ('pad') and 3 of 5 ('barrel') in
+    tests/sweep_846_onpad_ladder.py, so the default is 'full': the ladder is
+    right and the NAME was wrong.
+
+    KICAD_QFN_ONPAD_REACH picks the arm -- 'full' (default), 'pad' (the via
+    CENTRE stays on the pad), 'barrel' (the whole barrel does). An unrecognised
+    value is 'full', so a typo cannot silently shorten the ladder.
+
+    Module-level, and the engine's only source for these offsets, because a
+    test that restates the arithmetic cannot detect the arithmetic changing:
+    the first draft of tests/test_846_onpad_ladder_reach.py rebuilt the ladder
+    from the same formula and every knob row of tests/mutate_846.py SURVIVED.
+
+    Whether a via that lands here is IN a pad is not decided here -- the commit
+    loop asks `via_overlaps_pad`, the fab question.
+    """
+    seq = [0.0]
+    if mode == 'in':
+        seq += [-k * step for k in range(1, 9)] + [k * step for k in range(1, 9)]
+    else:                                   # 'near'
+        for k in range(1, 9):
+            seq += [k * step, -k * step]
+    reach = {'pad': pad_width / 2.0,
+             'barrel': pad_width / 2.0 - via_size / 2.0,
+             }.get(env_knobs.QFN_ONPAD_REACH)
+    if reach is not None:
+        seq = [d for d in seq if abs(d) <= reach + 1e-9]
+    return seq
+
+
 def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
     """Move a shortened fan tip back ONTO the routing grid (#446).
 
@@ -687,36 +735,6 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
 
-    def _axis_offsets(mode):
-        # Signed offsets along the escape axis, ordered by `mode`: 'in' sweeps
-        # inward (toward the chip) first, 'near' alternates nearest first.
-        #
-        # NOT an "on-pad ladder", though it was called `_onpad` and documented
-        # as one (#846). Only k = 0 is guaranteed on the pad. The increment is
-        # `step`, which is the INTER-NET stagger -- the centre-to-centre a via
-        # needs from a DIFFERENT net's via at this pitch -- and on a fine-pitch
-        # part that exceeds the pad: on routed_output's QFN-76 (pitch 0.40, via
-        # 0.45, clearance 0.1) step is 0.4275 against a pad whose escape-axis
-        # extent is 0.875, so k = 1 is already off the pad's centre by half its
-        # length and k = 8 reaches +-3.42 mm.
-        #
-        # These ARE load-bearing, measured: with --allow-via-in-pad this ladder
-        # is tried first and won 66 of 84 accepted offsets on routed_output U2
-        # and every one on tigard, qfn_underpad_coupling and
-        # qfn_diffpair_escape. It also owns the longest emitted stub there
-        # (2.9924 mm, pad 65, k = 7). So the name was the wrong half: the
-        # offsets stay, and what they are is now stated.
-        #
-        # Whether a via that lands here is IN a pad is not decided here -- the
-        # commit loop asks `via_overlaps_pad`, the fab question (#846).
-        seq = [0.0]
-        if mode == 'in':
-            seq += [-k * step for k in range(1, 9)] + [k * step for k in range(1, 9)]
-        else:                                   # 'near'
-            for k in range(1, 9):
-                seq += [k * step, -k * step]
-        return seq
-
     def candidate_offsets(pad_width, mode):
         # `outward` starts past the pad body and always clears it. With
         # --allow-via-in-pad we ALSO offer the axis ladder, which starts ON the
@@ -728,15 +746,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         outward = [base + k * step for k in range(0, 9)]
         if not allow_via_in_pad:
             return outward
-        # #846 A/B arm (KICAD_QFN_ONPAD_REACH): confine the axis ladder to what
-        # its old name claimed. 'full' -- the default and today's behaviour --
-        # applies no limit; an unrecognised value is 'full'.
-        axis = _axis_offsets('near' if mode == 'out' else mode)
-        _reach = {'pad': pad_width / 2.0,
-                  'barrel': pad_width / 2.0 - via_size / 2.0,
-                  }.get(env_knobs.QFN_ONPAD_REACH)
-        if _reach is not None:
-            axis = [d for d in axis if abs(d) <= _reach + 1e-9]
+        axis = axis_offset_ladder(pad_width, via_size, step,
+                                  'near' if mode == 'out' else mode)
         if mode == 'out':
             return outward + axis
         return axis + outward

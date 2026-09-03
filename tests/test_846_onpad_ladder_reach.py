@@ -73,37 +73,91 @@ def check(name, ok, detail=''):
           + (' -- ' + detail if detail else ''))
 
 
-def offsets_for(arm, pad_width=0.875, via=0.45, clearance=0.1, pitch=0.40):
-    """Ask the engine's own ladder, in a CHILD process.
+PROBE = (
+    'import os, sys, json, math\n'
+    'R = sys.argv[1]\n'
+    'sys.path[:0] = [R, os.path.join(R, "py_router"), '
+    'os.path.join(R, "py_tools")]\n'
+    'import env_knobs\n'
+    'from qfn_fanout import axis_offset_ladder\n'
+    'pad_width, via, clearance, pitch = (float(a) for a in sys.argv[2:6])\n'
+    'need = via + clearance\n'
+    'stagger = (math.sqrt(max(0.0, need * need - pitch * pitch)) + 0.05\n'
+    '           if need > pitch else 0.0)\n'
+    'step = max(stagger, 0.05, 0.05)\n'
+    'axis = axis_offset_ladder(pad_width, via, step)\n'
+    'print(json.dumps({"knob": env_knobs.QFN_ONPAD_REACH, "n": len(axis),\n'
+    '                  "max": max(abs(d) for d in axis), "step": step}))\n'
+)
 
-    A child, because env_knobs reads every knob ONCE at import: two arms in one
-    process would both see whichever value was set first.
+
+def offsets_for(arm, pad_width=0.875, via=0.45, clearance=0.1, pitch=0.40):
+    """The ladder the ENGINE builds, under `arm`, in a CHILD process.
+
+    It CALLS `qfn_fanout.axis_offset_ladder` -- the engine's only source for
+    these offsets -- rather than restating its arithmetic. The first draft of
+    this file rebuilt the ladder from the same formula, and every knob row of
+    tests/mutate_846.py SURVIVED: a test that mirrors the code it grades cannot
+    detect that code changing. Only `step` is computed here, and it is a
+    property of the fixture geometry, not of the thing under test.
+
+    A child process because env_knobs reads every knob ONCE at import, so two
+    arms in one process would both see whichever value was set first.
     """
-    src = (
-        'import os, sys, json, math\n'
-        'R = %r\n'
-        'sys.path[:0] = [R, os.path.join(R, "py_router"), '
-        'os.path.join(R, "py_tools")]\n'
-        'import env_knobs\n'
-        'step = max(math.sqrt(max(0.0, (%f + %f) ** 2 - %f ** 2)) + 0.05\n'
-        '           if (%f + %f) > %f else 0.0, 0.05, 0.05)\n'
-        'axis = [0.0]\n'
-        'for k in range(1, 9):\n'
-        '    axis += [k * step, -k * step]\n'
-        'reach = {"pad": %f / 2.0, "barrel": %f / 2.0 - %f / 2.0}.get(\n'
-        '    env_knobs.QFN_ONPAD_REACH)\n'
-        'if reach is not None:\n'
-        '    axis = [d for d in axis if abs(d) <= reach + 1e-9]\n'
-        'print(json.dumps({"knob": env_knobs.QFN_ONPAD_REACH, '
-        '"n": len(axis), "max": max(abs(d) for d in axis), "step": step}))\n'
-    ) % (ROOT, via, clearance, pitch, via, clearance, pitch,
-         pad_width, pad_width, via)
     env = dict(os.environ)
     env['KICAD_QFN_ONPAD_REACH'] = arm
-    p = subprocess.run([sys.executable, '-X', 'utf8', '-c', src],
+    p = subprocess.run([sys.executable, '-X', 'utf8', '-c', PROBE, ROOT,
+                        str(pad_width), str(via), str(clearance), str(pitch)],
                        capture_output=True, text=True, env=env, cwd=ROOT)
     if p.returncode != 0:
         raise AssertionError('probe failed: ' + (p.stderr or p.stdout)[-300:])
+    import json as _j
+    return _j.loads(p.stdout.strip().splitlines()[-1])
+
+
+ENGINE_PROBE = (
+    'import os, sys, json, math, io, contextlib\n'
+    'R = sys.argv[1]\n'
+    'sys.path[:0] = [R, os.path.join(R, "py_router"), '
+    'os.path.join(R, "py_tools")]\n'
+    'from kicad_parser import parse_kicad_pcb\n'
+    'from qfn_fanout import generate_qfn_fanout\n'
+    'pcb = parse_kicad_pcb(os.path.join(R, "kicad_files", sys.argv[2]))\n'
+    'fp = pcb.footprints[sys.argv[3]]\n'
+    'buf = io.StringIO()\n'
+    'with contextlib.redirect_stdout(buf):\n'
+    '    tracks, vias, dropped = generate_qfn_fanout(\n'
+    '        fp, pcb, net_filter=None, layer="F.Cu", track_width=0.1,\n'
+    '        clearance=0.1, grid_step=0.05, escape_method="underpad",\n'
+    '        via_size=0.45, via_drill=0.25, allow_via_in_pad=True)\n'
+    'own = {}\n'
+    'for p in fp.pads:\n'
+    '    if p.net_id:\n'
+    '        own.setdefault(p.net_id, []).append(p)\n'
+    'worst = 0.0\n'
+    'for v in vias:\n'
+    '    c = own.get(v["net_id"])\n'
+    '    if not c:\n'
+    '        continue\n'
+    '    pad = min(c, key=lambda q: math.hypot(q.global_x - v["x"],\n'
+    '                                          q.global_y - v["y"]))\n'
+    '    worst = max(worst, math.hypot(v["x"] - pad.global_x,\n'
+    '                                  v["y"] - pad.global_y))\n'
+    'print(json.dumps({"vias": len(vias), "dropped": len(dropped),\n'
+    '                  "max_offset": round(worst, 4)}))\n'
+)
+
+
+def engine_for(arm, board='tigard', ref='U3'):
+    """A REAL escape under `arm`: what the knob does to EMITTED copper."""
+    env = dict(os.environ)
+    env['KICAD_QFN_ONPAD_REACH'] = arm
+    p = subprocess.run([sys.executable, '-X', 'utf8', '-c', ENGINE_PROBE, ROOT,
+                        board + '.kicad_pcb', ref],
+                       capture_output=True, text=True, env=env, cwd=ROOT)
+    if p.returncode != 0:
+        raise AssertionError('engine probe failed: '
+                             + (p.stderr or p.stdout)[-400:])
     import json as _j
     return _j.loads(p.stdout.strip().splitlines()[-1])
 
@@ -152,6 +206,30 @@ def main():
     loud = offsets_for('  PAD ')
     check('the knob is case- and whitespace-insensitive',
           loud['n'] == pad['n'], f"n={loud['n']} vs pad {pad['n']}")
+
+    # And end to end, on real copper: the ladder is what the escape actually
+    # uses, so the knob must move the EMITTED vias, not just a list. tigard U3
+    # is 0.5mm-pitch with 0.80 x 0.25 leads.
+    e_full = engine_for('full')
+    e_barrel = engine_for('barrel')
+    check('the knob reaches emitted copper, not just the offset list',
+          e_barrel['max_offset'] != e_full['max_offset'],
+          f"full max_offset={e_full['max_offset']} vias={e_full['vias']} "
+          f"vs barrel max_offset={e_barrel['max_offset']} "
+          f"vias={e_barrel['vias']}")
+    # MEASURED, and the opposite of the intuition that shortening a ladder
+    # shortens stubs: on tigard U3 confining the axis ladder pushes the worst
+    # offset from 0.3000 to 0.7500, because the escape then falls through to
+    # the OUTWARD ladder, whose first rung is already past the pad edge
+    # (base = pad_width/2 + via/2 + clearance = 0.725). Confining the "on-pad"
+    # ladder does not produce more on-pad vias -- it produces further-out ones.
+    check('confining the axis ladder LENGTHENS stubs (the fallback is the '
+          'outward ladder)',
+          e_barrel['max_offset'] > e_full['max_offset'],
+          f"full={e_full['max_offset']} barrel={e_barrel['max_offset']}")
+    check('`full` is the shipped default, and it is the arm the A/B kept',
+          engine_for('full') == engine_for('nonsense-value'),
+          'an unrecognised value no longer behaves as `full` END TO END')
 
     bad = [n for n, ok in CHECKS if not ok]
     print(f"\n{'FAIL' if bad else 'PASS'}  #846 ladder reach: "
