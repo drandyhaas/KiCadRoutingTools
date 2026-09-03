@@ -2865,7 +2865,7 @@ def setup(board, names, dest, log, cluster=6.0):
     # relax algorithm changes; per-net entries so a different K
     # fills in only what is missing. json round-trips floats exactly
     # (repr), so the cached run stays bit-identical.
-    TAUT_CACHE_VERSION = 1
+    TAUT_CACHE_VERSION = 2   # 2: taut_clean reseeds (0902)
     log('taut paths...')
     import json as _json
     _tc_path = os.path.splitext(board)[0] + '.taut.json'
@@ -2946,9 +2946,18 @@ def setup(board, names, dest, log, cluster=6.0):
     # as a knob for study; unset = default, control re-verified 50/0
     # exact.
     _vc = os.environ.get('BRAID_VIA_COST')
+    # BRAID_H_WEIGHT: the A* heuristic weight of every connect()
+    # search (repo default 2.3, the #586 corpus dose-response peak --
+    # a greedy weighted A*; the lane router keeps the FIRST route it
+    # finds). Queued by the user 0902: does a less greedy search (1.5)
+    # find the shorter / fewer-via lane the 2.3 search skips? Unset =
+    # default, bit-identical.
+    _hw = os.environ.get('BRAID_H_WEIGHT')
     ctx.cfg = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
                              grid_step=0.025,
-                             **({'via_cost': float(_vc)} if _vc else {}))
+                             **({'via_cost': float(_vc)} if _vc else {}),
+                             **({'heuristic_weight': float(_hw)}
+                                if _hw else {}))
     ctx.base_segments = list(pcb.segments)
     ctx.base_vias = list(pcb.vias)
     ctx.laid = []

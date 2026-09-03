@@ -32,13 +32,35 @@ def taut_paths(nets: Sequence[str],
                obs_for: Callable[[str], 'ts.Obstacles'],
                log=None) -> Dict[str, List[Pt]]:
     """One taut string per net, tooth -> ball, avoiding static copper."""
+    import taut_clean as tc
     out = {}
     for nm in nets:
-        pts, iters = ts.relax(ends[nm][0], ends[nm][1], obs_for(nm))
+        # CLEANLINESS, not convergence (user, 0902): relax can settle
+        # in a stable cycle THROUGH a thin foreign capsule and report
+        # success; relax_clean asserts point_violation None along the
+        # whole string and reseeds around the offender (wrong SECTOR,
+        # never a realisation problem). An INVALID string is a loud
+        # line, never a silent spine input.
+        pts, iters, status, n_re = tc.relax_clean(
+            ends[nm][0], ends[nm][1], obs_for(nm))
         out[nm] = pts
         if log:
             log(f'  {nm}: {ts.polyline_len(pts):.2f} mm, {len(pts)} pts, '
-                f'{iters} iters')
+                f'{iters} iters'
+                + (f', {status} ({n_re} reseed)' if status != 'clean'
+                   else ''))
+        if status == 'reseeded':
+            print(f'TAUT RESEEDED: {nm} ({n_re} reseed(s))', flush=True)
+        elif status == 'violating':
+            print(f'TAUT VIOLATING: {nm} -- {tc.relax_clean.last} '
+                  '(assert-only; TAUT_RESEED=1 reseeds)', flush=True)
+        elif status == 'tolerated':
+            print(f'TAUT tolerated: {nm} -- {tc.relax_clean.last}',
+                  flush=True)
+        elif status == 'INVALID':
+            print(f'TAUT INVALID: {nm} -- no clean homotopy sector found '
+                  f'after {n_re} reseed(s); spine input violates copper: '
+                  f'{tc.relax_clean.last}', flush=True)
     return out
 
 
