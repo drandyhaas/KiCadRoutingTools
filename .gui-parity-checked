@@ -1,11 +1,16 @@
-52c83e63 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
-Audit e239e067..52c83e63 on branch worktree-constraints-dru (10 commits, the
+1fb9b57e 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit e239e067..1fb9b57e on branch worktree-constraints-dru (10 commits, the
 #530/#842/#857/#856/#770 design-rules rework; docs/design-rules-proposal.md).
 TWO GAPS FOUND AND FIXED IN-RANGE (fc36e578; 52c83e63: the GUI QFN path fed
 the escalation policy the Basic tab's width, the CLI fed it nothing -- both
 now feed the QFN width, test_fanout_rotated_gui re-run 10/10 without the
 clamp line, wx-free twin test_530_qfn_width_stale_minimum). Seven gates
-green, run live.
+green, run live. Later in-range (dbe07fa0..1fb9b57e): corpus-A/B fixes, all
+ENGINE-side and shared by both fronts (route_diff pair-gap floor + the
+multipoint hand-off, rule_floors class clearance, rescue/tap ladders), plus
+the KICAD_CLEARANCE_LEGACY_CEILING replay knob (CLI mains only BY DESIGN:
+replay arms, never a real run). test_gui_engine_parity re-run at 1fb9b57e:
+copper IDENTICAL 1259/128.
 
 THE SURFACE, checked mechanically, not assumed:
 
