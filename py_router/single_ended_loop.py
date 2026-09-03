@@ -1555,6 +1555,23 @@ def route_single_ended_nets(
                                  (result.get('blocked_cells_backward') or []))
                 if not _cells301:
                     _cells301 = list(locals().get('blocked_cells') or [])
+                # #652: say WHY nothing is rippable when the answer is
+                # "this ball never got an escape". Placed before the #301 hint
+                # because it is the actionable one -- #301 names copper to rip,
+                # and there is none to rip here.
+                try:
+                    from routing_diagnostics import fanout_dropped_ball_hint
+                    _h652, _v652 = fanout_dropped_ball_hint(
+                        pcb_data, config, net_id, net_name,
+                        return_verdict=True)
+                    if _h652:
+                        _c652 = condense_hint(_h652)
+                        if _c652:
+                            print(f"  {_c652}")
+                        record_net_event(state, net_id, "fanout_dropped",
+                                         _v652)
+                except Exception:
+                    pass
                 hint301, blockers301 = preexisting_blocker_hint(
                     _cells301, config, pcb_data, net_id,
                     routed_net_ids=state.routed_net_ids, return_names=True)

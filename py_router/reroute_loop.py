@@ -760,6 +760,20 @@ def run_reroute_loop(
                         if _boxin:
                             record_net_event(state, ripped_net_id,
                                              "boxed_in_static", _boxin)
+                        try:   # #652
+                            from routing_diagnostics import (
+                                fanout_dropped_ball_hint)
+                            _h652, _v652 = fanout_dropped_ball_hint(
+                                pcb_data, config, ripped_net_id,
+                                ripped_net_name, return_verdict=True)
+                            if _h652:
+                                _c652 = condense_hint(_h652)
+                                if _c652:
+                                    print(f"  {_c652}")
+                                record_net_event(state, ripped_net_id,
+                                                 "fanout_dropped", _v652)
+                        except Exception:
+                            pass
                     # Remove from pending_multipoint_nets to prevent Phase 3 from
                     # trying to route taps for a net with no main route.
                     if ripped_net_id in state.pending_multipoint_nets:
