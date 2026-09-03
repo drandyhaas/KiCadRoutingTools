@@ -58,20 +58,34 @@ ROWS = [
 
     # The scoping half: `via_in_pad_sites` breaks on the FIRST same-net pad it
     # overlaps, which need not be the pad this leg escapes -- and the clamp is
-    # applied to `pi.pad`. Classifying by a neighbour and clamping to this one
-    # is the shape the fix had to avoid.
+    # applied to `pi.pad`. Classifying by a neighbour while clamping to this
+    # one is the shape the fix had to avoid, and why the commit loop passes
+    # `pi.pad` rather than calling `via_in_pad_sites`.
+    #
+    # SURVIVED, and kept for the reason rather than deleted. On every board in
+    # the set the two spellings agree: the nets being escaped have ONE pad on
+    # the fanned footprint, and where they do not (tigard's GND, which owns the
+    # 4.35mm exposed pad as well as leads) the via overlaps both, so the
+    # BOOLEAN is the same and the clamp target is `pi.pad` either way. Killing
+    # it needs a via overlapping a same-net NEIGHBOUR but not its own pad,
+    # which no in-repo board produces. This row is a change detector for the
+    # day one does -- deleting it is how that becomes folklore.
     ('classification-scoped-to-ANY-same-net-pad', 'qfn',
      _CLASSIFY,
      '            if any(via_overlaps_pad(_q, vx, vy, via_size)\n'
      '                   for _q in pcb_data.pads_by_net.get(pi.pad.net_id, ())):',
-     (T846,), 'KILLED'),
+     (T846,), 'SURVIVED'),
 
+    # A disclosure count, not a behaviour: the emitted copper is identical
+    # either way, so no test that grades the BOARD can see it. Kept because a
+    # number a reader is told to watch move is worth a row saying which kind of
+    # thing it is.
     ('offcentre-count-never-incremented', 'qfn',
      '                if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:\n'
      '                    offcentre_n += 1',
      '                if False:\n'
      '                    offcentre_n += 1',
-     (T846,), 'SURVIVED'),   # a disclosure count, not a behaviour -- see below
+     (T846,), 'SURVIVED'),
 
     # --- #846: fab_notes owns ONE predicate --------------------------------
     ('fab-note-stops-calling-the-shared-predicate', 'fab',

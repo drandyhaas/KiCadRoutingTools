@@ -56,6 +56,12 @@ CASES = [
     ('qfn_underpad_coupling', 'U1', ['SIG*'], 'F.Cu', 0.1, 0.12),
     ('qfn_diffpair_escape', 'U1', ['DP1*'], 'F.Cu', 0.1, 0.15),
     ('tigard', 'U3', None, 'F.Cu', 0.1, 0.10),
+    # Carries the OPPOSITE population -- 14 vias, none of which overlaps its
+    # pad -- and it is here for that. Without it a mutation that clamps
+    # EVERYTHING (`if True:`) is invisible, because every via on the three
+    # boards above does overlap: measured, that row SURVIVED until this
+    # board was added.
+    ('routed_output', 'U2', ['Net-(U2A-*)'], 'B.Cu', 0.1, 0.10),
 ]
 
 CHECKS = []
@@ -93,6 +99,7 @@ def run(board, ref, nets, layer, tw, clr):
 
 def main():
     ran = 0
+    seen = {'offcentre': 0, 'disjoint': 0}
     for board, ref, nets, layer, tw, clr in CASES:
         got = run(board, ref, nets, layer, tw, clr)
         if got is None:
@@ -129,13 +136,8 @@ def main():
               f'them off centre)', not bad,
               f'unclamped: {bad[:6]}' if bad else '')
 
-        # 2. The rig must actually contain the case, or check 1 is vacuous --
-        #    the trap the BGA half of test_fanout_via_in_pad_clamp guards and
-        #    its QFN half did not.
-        check(f'{board} {ref}: the run contains at least one OFF-CENTRE '
-              f'overlapping via', offcentre,
-              'nothing here exercises #846' if not offcentre else
-              f'max offset {max(d for _v, _p, d in offcentre):.4f} mm')
+        seen['offcentre'] += len(offcentre)
+        seen['disjoint'] += len(disjoint)
 
         # 3. The engine and the FAB NOTE agree, via for via. They are the two
         #    consumers that used to disagree; the note is derived from the
@@ -160,6 +162,15 @@ def main():
         check(f'{board} {ref}: escapes are unchanged by the clamp '
               f'({len(vias)} vias, {len(dropped)} dropped)',
               len(vias) + len(dropped) > 0)
+
+    # The rig must contain BOTH populations, or the per-board checks above are
+    # half vacuous -- the trap the BGA half of test_fanout_via_in_pad_clamp
+    # guards and its QFN half did not. Asserted across the set rather than per
+    # board, because no single board carries both.
+    check('the run exercises OFF-CENTRE overlapping vias (the #846 case)',
+          seen['offcentre'], f"{seen['offcentre']} of them")
+    check('...and DISJOINT vias, so "clamp everything" is detectable',
+          seen['disjoint'], f"{seen['disjoint']} of them")
 
     # 6. THE 12.5 MICRON CASE, stated as geometry rather than as an outcome:
     #    pad centres are off the routing lattice, so snap() cannot place a via
