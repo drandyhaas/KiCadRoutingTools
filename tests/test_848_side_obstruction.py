@@ -95,14 +95,8 @@ CENSUS = {
     'watchy': {'J2/B', 'SW1/B', 'SW2/B', 'SW3/B', 'SW4/B'},
 }
 
-#: Sum of `deficit_finest_grid` over every fine-pitch ref, at CLR/TRK/GRID.
-#: UNMOVED by #848 on all 22 boards -- the half of the issue's prediction that
-#: held. Boards absent from this map are 0 and stay 0.
-DEFICIT_FINEST = {
-    'glasgow_revC': 75, 'orangecrab_ext_pll': 147, 'rp2350_fpga_eensy_prePlane': 53,
-    'tigard': 37, 'watchy': 10, 'ulx3s': 68, 'haasoscope_pro_max_test': 44,
-    'routed_output': 44,
-}
+#: Section 6 deliberately holds NO recorded deficit table. It measures both
+#: arms in one process instead -- see `the_deficit_did_not_move`.
 
 
 def check(name, cond, detail=''):
@@ -376,8 +370,8 @@ def the_semantics(tmpdir):
 
 # --- 6. the deficit half of the issue's prediction --------------------------
 
-def the_deficit_did_not_move(boards):
-    moved = {}
+def _deficits(boards):
+    out = {}
     for name, path in sorted(boards.items()):
         pcb = parse_kicad_pcb(path)
         ctx = R.board_lane_context(pcb, CLR, pcb_file=path)
@@ -387,10 +381,38 @@ def the_deficit_did_not_move(boards):
                                         track_width=TRK, grid_step=GRID,
                                         pcb_file=path, context=ctx):
                 tot += r['deficit_finest_grid']
-        if tot != DEFICIT_FINEST.get(name, 0):
-            moved[name] = (DEFICIT_FINEST.get(name, 0), tot)
-    check('the deficit is unmoved on all 22 boards, as #848 predicted',
-          not moved, 'moved: %r' % (moved,))
+        if tot:
+            out[name] = tot
+    return out
+
+
+def the_deficit_did_not_move(boards):
+    """#848's own prediction, measured by TOGGLING #848 -- not by a constant.
+
+    An earlier draft of this arm pinned the per-board deficit totals as
+    literals recorded at the #848 tip. That is a recording of the whole
+    ENGINE, not of #848: the very next commit (#850, the demand half) moved
+    every one of them and this arm failed for a reason it does not name. A
+    change detector that fires on unrelated changes is not a change detector.
+
+    So both arms are measured in ONE process: `rect_on_sides` charged
+    per-shared-side, and then monkeypatched back to the whole-part box, which
+    is the state before #848. Whatever else has moved since moves both.
+    """
+    now = _deficits(boards)
+    real = L.rect_on_sides
+    try:
+        L.rect_on_sides = lambda geom, sides=None: geom.rect
+        before = _deficits(boards)
+    finally:
+        L.rect_on_sides = real
+    check('the deficit is unmoved by #848 on all 22 boards, as it predicted',
+          now == before,
+          'per-shared-side %r\nwhole-part      %r' % (now, before))
+    # ...and the arm is not vacuous: SOMETHING must be in deficit, or an
+    # engine that reported zero everywhere would satisfy the equality.
+    check('and the corpus carries a deficit for that to be a statement about',
+          sum(now.values()) > 100, 'total %d' % sum(now.values()))
 
 
 def main():

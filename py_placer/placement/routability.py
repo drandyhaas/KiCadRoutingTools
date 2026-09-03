@@ -1105,9 +1105,20 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     """Per-face escape supply/demand for one part (SKILL's lane ledger, v1).
 
     For each face (N/S/E/W of the part's pad extent):
-      demand        signal nets with a pad NEAREST this face and at least
-                    one pad on another part (they must escape somewhere,
-                    and this face is where their pad points).
+      demand        signal nets with a pad ON this face and at least one pad
+                    on another part (they must escape somewhere, and this
+                    face is where their pad points). "On" is
+                    `escape.assign_faces` (#850), the rule the escape ledger
+                    uses: the pad's own copper edge against the part's copper
+                    box, within `max(pad_pitch/2, INTERIOR_EPS)`. A pad boxed
+                    in on every side is INTERIOR -- it cannot leave sideways
+                    at any pitch and needs a via -- and counts toward no
+                    face's demand. It was "NEAREST this face", which has no
+                    interior case at all, so a BGA's inner balls were demand
+                    on whichever edge they happened to sit closest to.
+      interior      how many pads that was, and how many nets the faces lost
+                    to them (`interior_pads` / `interior_nets` /
+                    `interior_demand_nets`).
       supply        face length / lane pitch, minus lanes covered by
                     NEIGHBOR bodies inside the escape band. Reported at
                     the ROUTED grid and at the FINEST legal grid -- a
@@ -1121,7 +1132,8 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     from placement.legality import (footprint_has_through_pads,
                                     footprint_side, rect_on_sides,
                                     sides_occupied)
-    from .escape import escape_band as _escape_band, span_eaten
+    from .escape import (FACE_LETTER, assign_faces as _assign_faces,
+                         escape_band as _escape_band, span_eaten)
 
     fps = pcb_data.footprints or {}
     fp = fps.get(ref)
@@ -1148,23 +1160,67 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
              'S': (ext[0], ext[3], ext[2], ext[3]),
              'W': (ext[0], ext[1], ext[0], ext[3]),
              'E': (ext[2], ext[1], ext[2], ext[3])}
+    pitch_routed = _quantized_pitch(track_width, clearance, grid_step)
+
+    # #850: THE FACE RULE IS `escape.assign_faces`, the one this ledger's
+    # counterpart uses. What stood here was a third answer to the same
+    # question: `min` over `abs(pad CENTRE - ext edge)`, with no tolerance and
+    # no interior bucket, so EVERY netted pad was demand on some face -- a
+    # BGA's inner balls included, which cannot escape sideways at any pitch
+    # and need a via. `escape` reports those separately and says why: rolling
+    # one into a face's demand blames the face for a fanout problem.
+    #
+    # Three things change with the rule, and they do not all push one way:
+    #   * the pad is measured by its own COPPER EDGE against
+    #     `CopperGeometry.copper`, not by its centre against the hole-inclusive
+    #     `extent`. Note both halves -- measuring a CENTRE against a copper box
+    #     is the mis-pairing `escape.face_of` measured at 244 interior pads on
+    #     one board, and it reads as a fix.
+    #   * a `max(pad_pitch/2, INTERIOR_EPS)` tolerance, so a pad row that is
+    #     not perfectly collinear still counts.
+    #   * ties resolve in `escape.FACES` order (N, E, S, W) rather than by this
+    #     dict's insertion order (N, S, W, E).
+    # The first two can only move a pad OFF a face; the last MOVES it between
+    # two, so a face's demand can rise. The row order below is unchanged.
+    #
+    # `ext` is deliberately still the whole-part `PartPads.extent`: the face
+    # GEOMETRY, its length and the obstruction band are what they were, and
+    # only assignment moved. That separation is what makes it checkable that
+    # this commit changed the demand model and nothing else.
+    own = ctx.geom.get(ref)
+    asg = _assign_faces(fp, own, lane_mm=pitch_routed, fallback_rect=ext)
+
     demand: Dict[str, set] = {f: set() for f in faces}
-    for pad in (fp.pads or []):
+    interior_pads = 0
+    interior_nets: set = set()
+    interior_demand: set = set()
+    for pad, face in asg.faces:
         nid = pad.net_id
         if not nid:
             continue
+        # GEOMETRY FIRST, THE NET FILTER SECOND. The other way round, the
+        # published interior count would be over the owner-filtered subset and
+        # would not be comparable with `escape.PartEscape.interior_pads`,
+        # which is #850's own stated verification. So `interior_pads` counts
+        # the same population escape counts, and `interior_demand_nets` is the
+        # part of it this ledger's demand model would otherwise have charged.
+        if face is None:
+            interior_pads += 1
+            interior_nets.add(nid)
         owners = net_owners.get(nid, set())
         if len(owners) < 2:
             continue                      # nowhere to escape to
         if len(owners) > DISPLACEMENT_MAX_FANOUT:
             continue                      # rail: plane-fed, not face-fed
-        d_edges = {'N': abs(pad.global_y - ext[1]),
-                   'S': abs(pad.global_y - ext[3]),
-                   'W': abs(pad.global_x - ext[0]),
-                   'E': abs(pad.global_x - ext[2])}
-        demand[min(d_edges, key=d_edges.get)].add(nid)
+        if face is None:
+            interior_demand.add(nid)
+            continue
+        demand[FACE_LETTER[face]].add(nid)
+    # A net with one pad interior and another on a face is NOT lost demand --
+    # it still has to leave through that face. Only the nets with no pad on
+    # any face are.
+    interior_demand -= set().union(*demand.values()) if demand else set()
 
-    pitch_routed = _quantized_pitch(track_width, clearance, grid_step)
     pitch_fine = _quantized_pitch(track_width, clearance,
                                   FINEST_LEGAL_GRID_MM)
     # #847: ONE resolver, shared with `escape.part_escape`. Both open-coded
@@ -1271,7 +1327,35 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                     # now nothing in the output said which band either used.
                     'escape_band_mm': round(_band.mm, 4),
                     'escape_band_source': _band.source,
-                    'escape_band_basis': _band.basis})
+                    'escape_band_basis': _band.basis,
+                    # #850: PART-level facts, repeated on all four rows the
+                    # way `escape_band_mm` above already is, because the row
+                    # is what `check_channels --json` publishes and a caller
+                    # holding one row must be able to read them.
+                    #
+                    # `interior_pads` counts netted pads that escape through
+                    # NO face -- the same population `escape.PartEscape.
+                    # interior_pads` counts, and equal to it for the same ref
+                    # at the same clearance. That equality is the assertion
+                    # that says these two instruments were reconciled rather
+                    # than merely moved closer.
+                    #
+                    # `interior_demand_nets` is what the four faces LOST: the
+                    # nets that clear this ledger's own 2..DISPLACEMENT_MAX_
+                    # FANOUT owner filter and have no pad on any face. It is
+                    # not decoration. Demand falling with nothing in the
+                    # output naming where it went is how a ledger stops
+                    # looking and reads as a fix.
+                    'interior_pads': interior_pads,
+                    'interior_nets': len(interior_nets),
+                    'interior_demand_nets': len(interior_demand),
+                    # ...and the tolerance the face rule ran at. The two
+                    # ledgers resolve different LANES (#847) and this is a
+                    # second, separate basis: the part's own pad pitch, or
+                    # this ledger's quantized lane when the pad lattice
+                    # yields none. Reported for the same reason the band is.
+                    'face_pitch_mm': round(asg.pitch_mm, 4),
+                    'face_pitch_source': asg.pitch_source})
     # SHARED WITH `escape` (#835): the obstruction arithmetic -- the
     # interval union, the clamp, the symmetric side test and the container
     # exemption -- is one kernel, `escape.span_eaten`, because the two ledgers
@@ -1310,10 +1394,20 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # band dependence, and says the band needs its own re-derivation -- the
     # band floor and the neighbour rect are one model.
     #
-    # Also still different, and deliberately: the demand model (this one takes
-    # nets with >= 2 owners and <= DISPLACEMENT_MAX_FANOUT, escape takes an
-    # `ignore_net_ids` list and an interior bucket) and the grid quantization
-    # below.
+    # ...and since #850 the FACE RULE is shared too -- `escape.assign_faces`,
+    # so a pad points at the same face in both instruments and an interior pad
+    # is interior in both. `interior_pads` on the rows above equals
+    # `escape.PartEscape.interior_pads` for the same ref at the same
+    # clearance, which is the assertion that says so.
+    #
+    # Still different, and deliberately: WHICH NETS each ledger asks about.
+    # This one takes nets with >= 2 owners and <= DISPLACEMENT_MAX_FANOUT;
+    # escape takes an `ignore_net_ids` list from its caller. Those are two
+    # answers to "which nets need a lane", not two answers to "where does this
+    # pad point", and only the second was a disagreement. Also still separate:
+    # the grid quantization below, and the FACE pitch the tolerance is
+    # resolved from -- reported per row as `face_pitch_mm` /
+    # `face_pitch_source`, the same treatment #847 gave the band.
     #
     # NO LAYER TERM HERE, deliberately (#700). `escape.FaceLedger` gained
     # `via_slots` / `supply_other_max` / `deficit_floor`; this ledger did not,
