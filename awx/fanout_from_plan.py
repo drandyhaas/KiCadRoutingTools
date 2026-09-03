@@ -573,6 +573,31 @@ for nm, m in choice.items():
     # and so the via floor -- is actually made of.
     lines[k] = m.exit_pt[1] if m.direction in ('left', 'right') \
         else m.exit_pt[0]
+# ASKS DUMP: what the plan asked per net at each array -- side, gap
+# line, layer, page -- next to the fanout board ({stem}_asks.json).
+# plan_search reads it to tell a deviation whose plan is identical to
+# another's (a no-op) from a real alternative; audits grade the
+# fanout's obedience against it.
+try:
+    import json as _json
+    _pp = (globals().get('PLAN_PAGES_ROUNDS') or [{}])[-1]
+    _asks = {}
+    for nm, m in choice.items():
+        _asks.setdefault(nm, {})[dref] = dict(
+            side=m.direction, line=(m.exit_pt[1] if m.direction in ('left', 'right')
+                                    else m.exit_pt[0]),
+            layer=m.layer, kind=m.kind, page=_pp.get(nm))
+    for nm, m in schoice.items():
+        _asks.setdefault(nm, {})[sref] = dict(
+            side=m.direction, line=(m.exit_pt[1] if m.direction in ('left', 'right')
+                                    else m.exit_pt[0]),
+            layer=m.layer, kind=m.kind, page=_pp.get(nm))
+    _ap = os.path.splitext(out_path)[0] + '_asks.json'
+    with open(_ap, 'w', encoding='utf-8') as _f:
+        _json.dump(_asks, _f, indent=1)
+    print(f'asks dumped: {_ap} ({len(_asks)} nets)')
+except Exception as _e:
+    print(f'asks dump skipped ({_e})')
 print(f'\nplan: {len(hints)} berth escape directions '
       + ', '.join(f'{d}:{sum(1 for v in hints.values() if v == d)}'
                   for d in sorted(set(hints.values()))))
