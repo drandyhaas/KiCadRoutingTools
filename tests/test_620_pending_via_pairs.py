@@ -86,7 +86,7 @@ from kicad_parser import Pad, BoardInfo, parse_kicad_pcb        # noqa: E402
 from synth import make_pcb                                       # noqa: E402
 import fab_tiers                                                 # noqa: E402
 from fab_tiers import fab_floor_ladder, fab_floor_min            # noqa: E402
-from bga_fanout import manage_vias                               # noqa: E402
+from bga_fanout import manage_vias, ball_has_copper             # noqa: E402
 from bga_fanout.types import FanoutRoute                         # noqa: E402
 from bga_fanout.geometry import (PendingVias, thin_drill_to_clear,  # noqa: E402
                                  clamp_via_to_pad, via_anchors_route)
@@ -440,6 +440,52 @@ class TestTwinsShareOneHole(_TmpCase):
                 f'VR201 route at {r.pad_pos} is stranded: nearest via is '
                 f'{min(math.hypot(v["x"] - r.pad_pos[0], v["y"] - r.pad_pos[1]) for v in add):.4f}'
                 f'mm away, reach is {add[0]["size"] / 2 + 0.125:.4f}mm')
+
+    def test_the_DOWNSTREAM_ball_anchor_test_asks_reach_too(self):
+        """#854's second site, and the one that made the stranding silent.
+
+        `ball_has_copper` is what decides whether an unescaped extra ball gets
+        strapped to its net's fanout. Its VIA arm used to ask
+        `max(size_x, size_y) / 2 + 0.01` in BOTH axes -- the scalar-radius shape
+        PR #852's review had already removed from `PendingVias.verdict` -- and
+        the twin branch cites it by name as its justification: "the ball-anchor
+        test downstream looks for a via inside the pad, and this is that via".
+        So fixing `verdict` alone leaves a swallowed ball reading as ANCHORED
+        and never strapped: two graders agreeing in the wrong direction.
+
+        The numbers are the maintainer's own repro. A 1.0mm pad's old tolerance
+        is 0.51mm, so a via 0.4mm away -- with a 0.225mm ring, touching nothing
+        on the inner layer -- passed.
+
+        This arm exists because the mutation row for that revert SURVIVED while
+        the predicate was a closure: nothing could call it.
+
+        MUTATION: revert the via arm to the pad box -- this arm dies."""
+        pad = _ball(10.0, 10.0, 7, 1.0, 'BIG')
+        far = [{'net_id': 7, 'x': 10.4, 'y': 10.0, 'size': 0.45}]
+        self.assertFalse(
+            ball_has_copper(pad, far, [], 0.1),
+            'a via 0.4mm from this ball, ring 0.225mm, counts as its copper -- '
+            'the ball will never be strapped and ships unconnected')
+        near = [{'net_id': 7, 'x': 10.1, 'y': 10.0, 'size': 0.45}]
+        self.assertTrue(ball_has_copper(pad, near, [], 0.1),
+                        'a via that DOES reach the ball is not credited')
+        self.assertFalse(
+            ball_has_copper(pad, [dict(near[0], net_id=8)], [], 0.1),
+            'a FOREIGN-net via is credited as this ball\'s copper')
+        # The track arm keeps the pad-box tolerance on purpose: a track
+        # endpoint anywhere on the pad copper does connect it.
+        on_pad = [{'net_id': 7, 'layer': 'F.Cu', 'start': (10.4, 10.0),
+                   'end': (12.0, 10.0)}]
+        self.assertTrue(
+            ball_has_copper(pad, [], on_pad, 0.1),
+            'a track ENDPOINT on this ball pad is no longer credited -- the '
+            'via fix was applied to the wrong arm')
+        off_layer = [{'net_id': 7, 'layer': 'In1.Cu', 'start': (10.4, 10.0),
+                      'end': (12.0, 10.0)}]
+        self.assertFalse(
+            ball_has_copper(pad, [], off_layer, 0.1),
+            'copper crossing the pad on ANOTHER layer counts as a connection')
 
     def test_an_OBLONG_pad_does_not_swallow_its_NEIGHBOUR(self):
         """The regression an adversarial review found in the twin rule's first

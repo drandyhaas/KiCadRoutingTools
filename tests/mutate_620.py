@@ -217,16 +217,17 @@ ROWS = [
     # invisible downstream: fixing `verdict` alone leaves `_has_copper`
     # agreeing with the old answer, so nothing straps the swallowed ball.
     ('ball-anchor-test-reverted-to-the-pad-box', 'bga',
-     "                if any(_v['net_id'] == _p.net_id\n"
-     "                       and via_anchors_route(_v['x'], _v['y'],\n"
-     "                                             _v.get('size') or 0.0,\n"
-     "                                             (_p.global_x, _p.global_y), _tw)\n"
-     '                       for _v in vias_to_add):',
-     "                if any(_v['net_id'] == _p.net_id\n"
-     "                       and abs(_v['x'] - _p.global_x) < tol\n"
-     "                       and abs(_v['y'] - _p.global_y) < tol\n"
-     '                       for _v in vias_to_add):',
-     (T620, T756), 'KILLED'),
+     "    if any(v['net_id'] == pad.net_id\n"
+     "           and via_anchors_route(v['x'], v['y'], v.get('size') or 0.0,\n"
+     "                                 (pad.global_x, pad.global_y), "
+     "track_width)\n"
+     '           for v in vias):',
+     "    tol = max(pad.size_x, pad.size_y) / 2 + 0.01\n"
+     "    if any(v['net_id'] == pad.net_id\n"
+     "           and abs(v['x'] - pad.global_x) < tol\n"
+     "           and abs(v['y'] - pad.global_y) < tol\n"
+     '           for v in vias):',
+     (T620,), 'KILLED'),
 
     ('twin-appends-a-second-via-anyway', 'bga',
      "                    _twin_shared += 1\n                    continue",

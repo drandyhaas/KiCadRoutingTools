@@ -615,6 +615,55 @@ def create_single_ended_route(
 _H2H_ANNOUNCED = set()
 
 
+def ball_has_copper(pad, vias, tracks, track_width: float = 0.0) -> bool:
+    """Is this ball connected by copper THIS PASS placed?
+
+    Layer-aware: an SMD ball is connected by a net VIA that REACHES it (a via
+    spans every layer) or by a net track ENDPOINT on its own layer -- copper
+    merely crossing the pad on an inner layer is not a connection. Drilled or
+    '*.Cu' balls conduct on every layer.
+
+    The two arms ask different questions on purpose, and the difference is the
+    #854 fix:
+
+    * The VIA arm asks REACH (``via_anchors_route``). It used to ask
+      ``max(size_x, size_y) / 2 + 0.01`` in BOTH axes -- the scalar-radius shape
+      PR #852's review removed from ``PendingVias.verdict``, surviving here as
+      the DOWNSTREAM ball-anchor test that rule appeals to by name. Two graders
+      agreeing in the wrong direction is why the stranding was silent: on the
+      issue's own repro that tolerance is 0.51mm, so a ball whose only via sat
+      0.4mm away read as ANCHORED and ``_strap_unescaped_extras`` never strapped
+      it.
+    * The TRACK arm keeps the pad-box tolerance. "Is there a track endpoint at
+      this pad" is a different question, and an endpoint anywhere on the pad
+      copper does connect it.
+
+    Module-level rather than a closure because a predicate nothing can call is
+    a predicate nothing tests: as a closure it survived a mutation that reverted
+    the via arm to the old box.
+    """
+    if any(v['net_id'] == pad.net_id
+           and via_anchors_route(v['x'], v['y'], v.get('size') or 0.0,
+                                 (pad.global_x, pad.global_y), track_width)
+           for v in vias):
+        return True
+    tol = max(pad.size_x, pad.size_y) / 2 + 0.01
+    pad_layer = None
+    for lay in (pad.layers or []):
+        if lay.endswith('.Cu') and not lay.startswith('*'):
+            pad_layer = lay
+            break
+    any_layer = pad_layer is None or (pad.drill or 0) > 0
+    return any(
+        t['net_id'] == pad.net_id
+        and (any_layer or t['layer'] == pad_layer) and (
+            (abs(t['start'][0] - pad.global_x) < tol
+             and abs(t['start'][1] - pad.global_y) < tol)
+            or (abs(t['end'][0] - pad.global_x) < tol
+                and abs(t['end'][1] - pad.global_y) < tol))
+        for t in tracks)
+
+
 def manage_vias(
     routes: List[FanoutRoute],
     pcb_data: 'PCBData',
@@ -2962,47 +3011,9 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _escaped_names = {n for n in ({_p.net_name for _p in _extras}
                                           | set())
                               if n not in failed_nets}
-            def _has_copper(_p):
-                # Layer-aware: an SMD ball is connected by a net VIA that
-                # REACHES its pad (the via spans all layers) or a net track
-                # endpoint ON ITS OWN layer -- copper crossing the pad on an
-                # inner layer is not a connection. Drilled / '*.Cu' balls
-                # conduct on every layer.
-                #
-                # #854: the via arm used to ask `max(size_x, size_y) / 2 + 0.01`
-                # in BOTH axes -- the scalar-radius shape PR #852's review
-                # removed from `PendingVias.verdict`, surviving here as the
-                # DOWNSTREAM anchor test that rule appeals to by name. Two
-                # graders agreeing in the wrong direction is why the stranding
-                # was silent: on the issue's own repro that tol is 0.51mm, so a
-                # ball whose only via sits 0.4mm away read as ANCHORED and
-                # `_strap_unescaped_extras` never strapped it. Both ask
-                # `via_anchors_route` now. The TRACK arm below keeps `tol`: it
-                # asks a different question (is a track ENDPOINT at this pad),
-                # and a track endpoint anywhere on the pad does connect it.
-                tol = max(_p.size_x, _p.size_y) / 2 + 0.01
-                if any(_v['net_id'] == _p.net_id
-                       and via_anchors_route(_v['x'], _v['y'],
-                                             _v.get('size') or 0.0,
-                                             (_p.global_x, _p.global_y), _tw)
-                       for _v in vias_to_add):
-                    return True
-                _pl = None
-                for _l in (_p.layers or []):
-                    if _l.endswith('.Cu') and not _l.startswith('*'):
-                        _pl = _l
-                        break
-                any_layer = _pl is None or (_p.drill or 0) > 0
-                return any(
-                    _t['net_id'] == _p.net_id
-                    and (any_layer or _t['layer'] == _pl) and (
-                        (abs(_t['start'][0] - _p.global_x) < tol
-                         and abs(_t['start'][1] - _p.global_y) < tol)
-                        or (abs(_t['end'][0] - _p.global_x) < tol
-                            and abs(_t['end'][1] - _p.global_y) < tol))
-                    for _t in tracks)
             _bare = [_p for _p in _extras
-                     if _p.net_name in _escaped_names and not _has_copper(_p)]
+                     if _p.net_name in _escaped_names
+                     and not ball_has_copper(_p, vias_to_add, tracks, _tw)]
             if _bare:
                 _prog(f"strapping {len(_bare)} unescaped extra ball(s)...")
                 _n_strap, _still = _strap_unescaped_extras(
