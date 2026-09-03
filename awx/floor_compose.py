@@ -242,6 +242,15 @@ def apply_grade(cand, relfo, label, best, g0, J):
                 and Jc.floor_total < J.floor_total):
         keep = f'tmp/{a.tag}_acc_{label}.kicad_pcb'
         shutil.copy(cand, keep)
+        # the DRC floor rides in the sibling .kicad_pro (#441): a bare
+        # board copy grades at the STOCK 0.2 class -- measured 4593
+        # phantom violations on a clean 62-via board
+        for ext in ('.kicad_pro', '.kicad_prl'):
+            sib = os.path.splitext(cand)[0] + ext
+            if not os.path.exists(sib):
+                sib = os.path.splitext(a.best)[0] + ext
+            if os.path.exists(sib):
+                shutil.copy(sib, os.path.splitext(keep)[0] + ext)
         say(f'  APPLIED {label}: floor {J.floor_total} -> '
             f'{Jc.floor_total}, grade {g0} -> {gc}')
         return keep, gc, Jc
