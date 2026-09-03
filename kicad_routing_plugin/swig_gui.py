@@ -3428,14 +3428,19 @@ class RoutingDialog(wx.Dialog):
                         class_clearance_cache[cname] = params.get('clearance', config['clearance'])
                     else:
                         class_clearance_cache[cname] = config['clearance']
-                # Build net_clearances for ALL nets
+                # Build net_clearances for every NON-Default net (#530 decision 2,
+                # mirroring list_nets.net_clearance_map_by_id): the run's clearance
+                # IS the Default class this run, so a Default-only net takes the
+                # base and gets no entry -- an entry at the class's STORED value
+                # would route it at that instead of the requested one.
                 for net_name, net_id in net_name_to_id.items():
                     cname = all_net_to_class.get(net_name, 'Default')
+                    if cname == 'Default':
+                        continue
                     net_clearances[net_id] = class_clearance_cache.get(cname, config['clearance'])
-                # #439: checking the Min Clearance override box (== the CLI passing
-                # --clearance) makes that base clearance the ceiling -- cap each class
-                # at min(class, clearance). Unchecked = classes routed at their own
-                # (board Default-derived) clearance, no clamp.
+                # #530: the Class ceiling box (== the CLI passing --clearance-ceiling)
+                # caps each class at min(class, clearance). Unchecked = every
+                # other class routed at its own clearance, no clamp.
                 if config.get('clamp_netclasses', False):
                     _base_clr = config['clearance']
                     net_clearances = {nid: min(clr, _base_clr)
@@ -3563,6 +3568,10 @@ class RoutingDialog(wx.Dialog):
                     # instead of the default width (#610 -- the engine guards the
                     # netclass path itself, so no impedance term here anymore).
                     track_width_from_class=not self.track_width_check.GetValue(),
+                    # #530 decision 4: unchecked Via Size/Drill == the CLI
+                    # omitting --via-size/--via-drill -> per-net class vias.
+                    via_from_class=not (self.via_size_check.GetValue()
+                                        or self.via_drill_check.GetValue()),
                     clearance=clearance,
                     via_size=via_size,
                     via_drill=via_drill,

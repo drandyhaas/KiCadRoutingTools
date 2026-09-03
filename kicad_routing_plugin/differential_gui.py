@@ -939,8 +939,12 @@ class DifferentialTab(wx.Panel):
                         class_clearance_cache[cname] = params.get('clearance', _diff_clearance)
                     else:
                         class_clearance_cache[cname] = _diff_clearance
+                # #530 decision 2 (mirrors list_nets.net_clearance_map_by_id):
+                # a Default-only net takes the run's clearance and gets NO entry.
                 for net in self.pcb_data.nets.values():
                     cname = all_net_to_class.get(net.name, 'Default')
+                    if cname == 'Default':
+                        continue
                     net_clearances[net.net_id] = class_clearance_cache.get(
                         cname, _diff_clearance)
                 if config.get('clamp_netclasses', False):
