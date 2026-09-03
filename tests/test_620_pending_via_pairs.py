@@ -310,6 +310,58 @@ class TestTwinsShareOneHole(_TmpCase):
                     for pos in ((10.0, 10.0), (10.9, 10.0))),
                 'an emitted via anchors no route')
 
+    def test_TIGHTENING_the_survivor_must_not_break_the_reach(self):
+        """The interaction #854 created, found by review before any board hit.
+
+        `verdict` decides 'twin' from the COMMITTED via's size, and the branch
+        then calls `tighten` to replace it with the tighter pad's clamp (#202,
+        so the shared via cannot bulge past the smaller pad). A smaller barrel
+        reaches less far -- so a merge can be justified by a via that, once
+        tightened, no longer touches the second route's track start. That is
+        the very stranding #854 is about, recreated by the fix for it. It could
+        not happen under the old pad-BOX rule, which does not depend on via
+        size at all, so the hazard is new with this change.
+
+        The numbers: a 0.60 via committed at (0, 0), a second route 0.30mm away
+        with a 0.30mm track. Reach is 0.30 + 0.15 = 0.45 >= 0.30, so it is a
+        twin. Tighten to that route's 0.25 clamp and reach becomes
+        0.125 + 0.15 = 0.275 < 0.30 -- it no longer reaches.
+
+        MUTATION: drop the post-tighten re-check in the twin branch."""
+        p = PendingVias(0.20, 0.25)
+        p.add(0.0, 0.0, 0.60, 0.30, 7)
+        self.assertEqual(
+            p.verdict(0.30, 0.0, 0.25, 0.15, 7, track_width=0.30)[0], 'twin',
+            'the rig no longer produces a twin here, so it cannot detect the '
+            'shrink breaking one')
+        self.assertFalse(
+            via_anchors_route(0.0, 0.0, min(0.60, 0.25), (0.30, 0.0), 0.30),
+            'the rig no longer SHRINKS out of reach, so it tests nothing')
+        big = _ball(0.0, 0.0, 7, 1.40, 'BIG')
+        small = _ball(0.30, 0.0, 7, 0.25, 'SML')
+        r_big = FanoutRoute(pad=big, pad_pos=(0.0, 0.0), stub_end=(0.0, 1.0),
+                            exit_pos=(0.0, 1.5), layer='B.Cu')
+        r_small = FanoutRoute(pad=small, pad_pos=(0.30, 0.0),
+                              stub_end=(0.30, -1.0), exit_pos=(0.30, -1.5),
+                              layer='B.Cu')
+        pcb = make_pcb(board_info=BoardInfo(layers={}, copper_layers=list(CU),
+                                            board_bounds=(-5.0, -5.0,
+                                                          5.0, 5.0)),
+                       vias=[], segments=[], pads_by_net={7: [big, small]},
+                       source_path='', zones=[])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            add, _rm, _blocked = manage_vias([r_big, r_small], pcb, 'F.Cu',
+                                             0.60, 0.30, 0.25,
+                                             track_width=0.30)
+        for r in (r_big, r_small):
+            self.assertTrue(
+                any(via_anchors_route(v['x'], v['y'], v['size'], r.pad_pos,
+                                      0.30) for v in add),
+                f'route at {r.pad_pos} has no via reaching its track start '
+                f'after the merge tightened the shared one: '
+                f'{[(v["x"], v["y"], v["size"]) for v in add]}')
+
     def test_the_REACH_term_in_the_broad_phase_window(self):
         """`verdict`'s window is `max(drill term, ring term, reach term)`, and
         the reach term (widest committed via + half a track) is the one nothing

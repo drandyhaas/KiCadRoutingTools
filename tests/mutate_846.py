@@ -246,13 +246,22 @@ def run(only=None):
             for o, nw in edits:
                 mutated = mutated.replace(o, nw, 1)
             io.open(path, 'w', encoding='utf-8', newline='').write(mutated)
-            killed, failed = False, []
+            killed, failed, crashed = False, [], False
             for t in tests:
                 p = subprocess.run([sys.executable, '-X', 'utf8', t],
                                    capture_output=True, text=True,
                                    encoding='utf-8', errors='replace',
                                    timeout=1800, cwd=_ROOT)
                 out = (p.stderr or '') + (p.stdout or '')
+                # A mutant that makes the ENGINE crash proves nothing about
+                # the test's discrimination -- a non-zero exit scores as a kill
+                # either way. Three rows of mutate_620 spent a commit in
+                # exactly that state (`NameError: ahx` after this PR deleted
+                # the name their REPLACEMENT text used), reporting KILLED while
+                # measuring nothing. The BROKEN-anchor guard cannot see it: it
+                # validates the string being replaced, not the replacement.
+                if 'NameError' in out or 'AttributeError' in out:
+                    crashed = True
                 if p.returncode:
                     killed = True
                 failed += ['%s::%s' % (os.path.basename(t)[5:8],
@@ -261,8 +270,10 @@ def run(only=None):
                            for l in out.splitlines()
                            if l.strip().startswith(('FAIL:', 'ERROR:'))]
             io.open(path, 'w', encoding='utf-8', newline='').write(base)
-            results.append((name, 'KILLED' if killed else 'SURVIVED', expect,
-                            '%d' % len(failed), failed))
+            results.append((name,
+                            'CRASH' if crashed else
+                            ('KILLED' if killed else 'SURVIVED'),
+                            expect, '%d' % len(failed), failed))
     finally:
         for k, v in TARGETS.items():
             io.open(v, 'w', encoding='utf-8', newline='').write(orig[k])
@@ -279,7 +290,7 @@ def run(only=None):
             print('%s      %s' % (' ' * w, f))
     killed = sum(1 for r in results if r[1] == 'KILLED')
     survived = sum(1 for r in results if r[1] == 'SURVIVED')
-    broken = sum(1 for r in results if r[1] == 'BROKEN')
+    broken = sum(1 for r in results if r[1] in ('BROKEN', 'CRASH'))
     print('\n%d rows: %d killed, %d survived (%d of them expected), %d broken'
           % (len(results), killed, survived,
              sum(1 for r in results if r[1] == r[2] == 'SURVIVED'), broken))

@@ -541,7 +541,7 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
 
 
 def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
-                             return_verdict=False):
+                             return_verdict=False, plane_like_pads=6):
     """`no rippable blockers found` is TRUE. It is also useless (#652).
 
     A ball the fanout dropped is removed from the output, and every later
@@ -580,13 +580,28 @@ def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
     pad, ref = bare[0]
     where = f"{ref}.{pad.pad_number}"
     name = net_name or pad.net_name or f"net{net_id}"
+    # A net with many pads is usually plane-destined, and telling its owner to
+    # re-run the FANOUT is the wrong remedy: on a pre-plane board `zones` is
+    # empty, so `entombed_bare_pads` cannot tell a dropped signal ball from a
+    # GND ball waiting for its pour, and measured, power/ground dominates that
+    # population (118 of 120 hits on orangecrab_ext_pll). The observation is
+    # the same either way -- this pad owns no copper -- so the hint is not
+    # suppressed; the ADVICE is what changes. 6 is `fanout_candidate_nets`'
+    # own plane_min_pads, so the two agree about what looks like a plane.
+    n_pads = len(pcb_data.pads_by_net.get(net_id, []))
+    plane_like = n_pads >= plane_like_pads
+    remedy = ("re-create the plane for this net (route_planes.py), or fan it "
+              "out explicitly" if plane_like else
+              "re-run the fanout for this net (bga_fanout.py / qfn_fanout.py "
+              "--escape-method underpad, or a smaller --via-size)")
     hint = (f"Hint: pad {where} is a fanout-dropped ball (no escape stub) -- "
             f"it sits inside {ref}'s pad field with no copper of {name} "
-            f"attached, so no rip authority or retry can reach it. Re-run the "
-            f"fanout for this net (bga_fanout.py / qfn_fanout.py "
-            f"--escape-method underpad, or a smaller --via-size).")
+            f"attached, so no rip authority or retry can reach it"
+            + (f". {name} has {n_pads} pads, so it looks plane-destined: "
+               f"{remedy}." if plane_like else f". {remedy[0].upper()}"
+               f"{remedy[1:]}."))
     return _ret(hint, {'verdict': 'fanout_dropped', 'pad': where,
-                       'component': ref,
+                       'component': ref, 'plane_like': plane_like,
                        'pads': [f"{r}.{p.pad_number}" for p, r in bare[:6]]})
 
 

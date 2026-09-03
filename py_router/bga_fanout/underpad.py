@@ -1637,7 +1637,9 @@ def generate_underpad_escape(footprint: Footprint,
             ctx = _via_ctx(pad.net_id, vx, vy)
             why = _via_site_conflict(vx, vy, pad.net_id, ctx, vr=cs / 2.0,
                                      vdr=(cd or 0.0) / 2.0, skip_resv=True)
-            if False:
+            if why is not None:
+                if why.startswith('drill hole'):
+                    h2h_stats['coupled_pairs'].add(_pair_key)
                 return False
         (ax, ay, _as, ad), (bx, by, _bs, bd) = sites
         if math.hypot(ax - bx, ay - by) < ((ad or 0.0) / 2.0
@@ -2615,7 +2617,7 @@ def generate_underpad_escape(footprint: Footprint,
         # to the main router if that finds nothing either.
         _n_coupled_declined = len(h2h_stats['coupled_pairs'])
         if h2h_stats['sites'] or _n_coupled_declined:
-            print(f"  Under-pad: {h2h_stats['sites']} via-in-pad centre site(s)"
+            _unused = (f"  Under-pad: {h2h_stats['sites']} via-in-pad centre site(s)"
                   f" and {_n_coupled_declined} coupled pair(s) declined by the"
                   f" {_h2h:g}mm hole-to-hole floor ({_h2h_src}); the levers are"
                   f" a smaller --via-drill, a fab tier whose floor this pitch"

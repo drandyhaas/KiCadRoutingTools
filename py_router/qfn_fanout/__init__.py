@@ -952,6 +952,9 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         print(f"    dropped (no clear via offset): {dropped}")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    # Cleared HERE and repopulated in the same breath, but the engine
+    # entry point clears it too: a caller that runs two components in one
+    # process must not read the first one's numbers for the second.
     LAST_UNDERPAD_REPORT.clear()
     LAST_UNDERPAD_REPORT.update({
         'via_in_pad': vip_n,

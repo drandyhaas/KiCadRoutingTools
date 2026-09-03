@@ -279,6 +279,16 @@ def entombed_bare_pads(pcb_data, net_ids, *, reach: float = 0.05,
 
     Returns ``[(pad, footprint_ref), ...]``.
 
+    NOTE ON WHAT THIS POPULATION LOOKS LIKE, measured before trusting it: on a
+    pre-plane board it is dominated by power and ground. orangecrab_ext_pll
+    gives 120 hits of which 118 are GND / P1.1V / P1.35V / P3.3V; ulx3s gives
+    305, 141 of them GND / +1V1 / +3V3. Those balls are not wrong -- they
+    really do own no copper -- but their FIX is a plane drop, not a re-run of
+    the fanout, and `pcb_data.zones` is empty at that point in the chain so the
+    pour exemption above cannot tell them apart. Callers that turn this into
+    advice must say so: `routing_diagnostics.fanout_dropped_ball_hint` names
+    the plane route for a net with `plane_like_pads` or more pads.
+
     Arguments that are deliberately explicit rather than shared constants:
 
     * ``reach`` -- how close copper must be to count as attached. This repo
@@ -329,15 +339,33 @@ def entombed_bare_pads(pcb_data, net_ids, *, reach: float = 0.05,
         pads = [p for p in fp.pads if p.net_id is not None]
         if len(pads) < min_package_pads:
             continue
+        # Nothing below can report a pad of a net this footprint does not
+        # carry, and the pitch sweep is the expensive part -- so ask first.
+        # Without this the cost is O(failing nets x whole board): measured
+        # 3-5 ms per call on corpus boards, and it scales with FOOTPRINT
+        # count, not with the net being asked about.
+        if not any(p.net_id in want for p in pads):
+            continue
         xs = [p.global_x for p in pads]
         ys = [p.global_y for p in pads]
         x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
         # The band an outer ring occupies, as a pitch: the smallest non-zero
         # centre-to-centre between pads of this footprint.
+        #
+        # Swept over ALL pads, in x order, with early exit -- not over the
+        # first 60 in FILE order, which an earlier draft did. That was
+        # measurably wrong: on glasgow_revC U1 (87 pads) the truncated prefix
+        # gives 0.5000 where the true minimum is 0.4031, a 24% overestimate
+        # that widens `band` and silences the hint on pads it should reach.
+        # And it was order-dependent, which a geometric predicate must not be.
         pitch = 0.0
-        for i, a in enumerate(pads[:60]):
-            for b in pads[i + 1:60]:
-                d = math.hypot(a.global_x - b.global_x, a.global_y - b.global_y)
+        order = sorted(pads, key=lambda p: (p.global_x, p.global_y))
+        for i, a in enumerate(order):
+            for b in order[i + 1:]:
+                dx = b.global_x - a.global_x
+                if pitch and dx >= pitch:
+                    break          # x-sorted: no later pad can be closer
+                d = math.hypot(dx, a.global_y - b.global_y)
                 if d > 1e-6 and (pitch == 0.0 or d < pitch):
                     pitch = d
         band = pitch * 1.1 + inset

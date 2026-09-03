@@ -146,23 +146,31 @@ ROWS = [
      (T620,), 'KILLED'),
 
     # --- THE BROAD PHASE. The rows an earlier test could not kill. ----------
+    # #854 note: these three replacements used to end in `ahx`, the name the
+    # anchor-box rule bound. This PR deleted it, which silently turned all
+    # three into CRASH mutants -- `NameError: ahx` -- and the runner counts an
+    # ERROR as a kill, so they would have reported KILLED forever while
+    # measuring nothing. The BROKEN-anchor guard cannot catch this: it
+    # validates the string being REPLACED, not the replacement. Found by a
+    # pre-push review, and the reason `_verify_mutants_are_not_crashes` below
+    # now exists.
     ('broad-phase-window-drops-the-halving', 'geo',
      _WINDOW,
      '        window = max(d + self._h2h,\n'
      '                     s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
-     '                     ahx)',
+     '                     self._max_size / 2.0 + tw / 2.0)',
      (T620,), 'KILLED'),
 
     ('broad-phase-window-drops-the-ring-term', 'geo',
      _WINDOW,
      '        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n'
-     '                     ahx)',
+     '                     self._max_size / 2.0 + tw / 2.0)',
      (T620,), 'KILLED'),
 
     ('broad-phase-window-drops-the-drill-term', 'geo',
      _WINDOW,
      '        window = max(s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
-     '                     ahx)',
+     '                     self._max_size / 2.0 + tw / 2.0)',
      (T620,), 'KILLED'),
 
     # #854 RE-POINTED this row rather than retiring it: the window's third
@@ -227,6 +235,20 @@ ROWS = [
      "           and abs(v['x'] - pad.global_x) < tol\n"
      "           and abs(v['y'] - pad.global_y) < tol\n"
      '           for v in vias):',
+     (T620,), 'KILLED'),
+
+    # #854: `tighten` shrinks the survivor, and a smaller barrel reaches less
+    # far, so the merge can be justified by a via that no longer reaches once
+    # tightened. Impossible under the old pad-BOX rule (a box does not depend
+    # on via size), so this row exists because the rule changed.
+    ('post-tighten-reach-recheck-deleted', 'bga',
+     '                    if not via_anchors_route(_tx, _ty, min(_ts, v_size),\n'
+     "                                             (pad_x, pad_y), track_width):\n"
+     "                        _v = 'clear'\n"
+     '                    else:',
+     '                    if False:\n'
+     "                        _v = 'clear'\n"
+     '                    else:',
      (T620,), 'KILLED'),
 
     ('twin-appends-a-second-via-anyway', 'bga',
@@ -421,13 +443,20 @@ def run(only=None):
             for o, nw in edits:
                 mutated = mutated.replace(o, nw, 1)
             io.open(path, 'w', encoding='utf-8', newline='').write(mutated)
-            killed, failed = False, []
+            killed, failed, crashed = False, [], False
             for t in tests:
                 p = subprocess.run([sys.executable, '-X', 'utf8', t],
                                    capture_output=True, text=True,
                                    encoding='utf-8', errors='replace',
                                    timeout=1800, cwd=_ROOT)
                 out = (p.stderr or '') + (p.stdout or '')
+                # A mutant that makes the ENGINE crash proves nothing about
+                # the test's discrimination -- the runner would score the
+                # non-zero exit as a kill either way. Three rows here spent a
+                # commit in exactly that state (`NameError: ahx`), reporting
+                # KILLED while measuring nothing, so it is now its own verdict.
+                if 'NameError' in out or 'AttributeError' in out:
+                    crashed = True
                 if p.returncode:
                     killed = True
                 failed += ['%s::%s' % (os.path.basename(t)[5:8],
@@ -436,8 +465,10 @@ def run(only=None):
                            for l in out.splitlines()
                            if l.startswith(('FAIL:', 'ERROR:'))]
             io.open(path, 'w', encoding='utf-8', newline='').write(base)
-            results.append((name, 'KILLED' if killed else 'SURVIVED', expect,
-                            '%d' % len(failed), failed))
+            results.append((name,
+                            'CRASH' if crashed else
+                            ('KILLED' if killed else 'SURVIVED'),
+                            expect, '%d' % len(failed), failed))
     finally:
         for k, v in TARGETS.items():
             io.open(v, 'w', encoding='utf-8', newline='').write(orig[k])
@@ -454,7 +485,7 @@ def run(only=None):
             print('%s      %s' % (' ' * w, f))
     killed = sum(1 for r in results if r[1] == 'KILLED')
     survived = sum(1 for r in results if r[1] == 'SURVIVED')
-    broken = sum(1 for r in results if r[1] == 'BROKEN')
+    broken = sum(1 for r in results if r[1] in ('BROKEN', 'CRASH'))
     print('\n%d rows: %d killed, %d survived (%d of them expected), %d broken'
           % (len(results), killed, survived,
              sum(1 for r in results if r[1] == r[2] == 'SURVIVED'), broken))

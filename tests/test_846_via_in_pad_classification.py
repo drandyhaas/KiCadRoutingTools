@@ -62,17 +62,24 @@ from list_nets import fab_floor_min                            # noqa: E402
 GRID = 0.05
 VIA_SIZE, VIA_DRILL = 0.45, 0.20
 
-# board, ref, net filter, layer, track, clearance
+# board, ref, nets, layer, track, clearance, EXPECTED (vias, dropped)
+#
+# The expected pair is the whole point of #846's neutrality claim: the clamp
+# only ever SHRINKS a via, which relaxes every clearance and hole-to-hole term,
+# so no escape can be lost. An earlier draft asserted `len(vias) + len(dropped)
+# > 0` under the label "escapes are unchanged", which would have passed on
+# (0 vias, 36 dropped). These numbers are the pre-change measurement on
+# upstream/main e239e067.
 CASES = [
-    ('qfn_underpad_coupling', 'U1', ['SIG*'], 'F.Cu', 0.1, 0.12),
-    ('qfn_diffpair_escape', 'U1', ['DP1*'], 'F.Cu', 0.1, 0.15),
-    ('tigard', 'U3', None, 'F.Cu', 0.1, 0.10),
+    ('qfn_underpad_coupling', 'U1', ['SIG*'], 'F.Cu', 0.1, 0.12, (8, 0)),
+    ('qfn_diffpair_escape', 'U1', ['DP1*'], 'F.Cu', 0.1, 0.15, (2, 0)),
+    ('tigard', 'U3', None, 'F.Cu', 0.1, 0.10, (48, 0)),
     # Carries the OPPOSITE population -- 14 vias, none of which overlaps its
     # pad -- and it is here for that. Without it a mutation that clamps
     # EVERYTHING (`if True:`) is invisible, because every via on the three
     # boards above does overlap: measured, that row SURVIVED until this
     # board was added.
-    ('routed_output', 'U2', ['Net-(U2A-*)'], 'B.Cu', 0.1, 0.10),
+    ('routed_output', 'U2', ['Net-(U2A-*)'], 'B.Cu', 0.1, 0.10, (14, 22)),
 ]
 
 CHECKS = []
@@ -111,7 +118,7 @@ def run(board, ref, nets, layer, tw, clr):
 def main():
     ran = 0
     seen = {'offcentre': 0, 'disjoint': 0}
-    for board, ref, nets, layer, tw, clr in CASES:
+    for board, ref, nets, layer, tw, clr, expect in CASES:
         got = run(board, ref, nets, layer, tw, clr)
         if got is None:
             print(f"  (skipping {board}: not present)")
@@ -170,9 +177,12 @@ def main():
 
         # 5. Nothing was lost. Shrinking a via only relaxes clearance and
         #    hole-to-hole, so the escape count cannot move.
-        check(f'{board} {ref}: escapes are unchanged by the clamp '
+        check(f'{board} {ref}: escapes match the PRE-change measurement '
               f'({len(vias)} vias, {len(dropped)} dropped)',
-              len(vias) + len(dropped) > 0)
+              (len(vias), len(dropped)) == expect,
+              f'expected {expect} on upstream/main e239e067 -- the clamp only '
+              f'shrinks vias, which relaxes every clearance term, so no '
+              f'escape may be lost'),
 
     # The rig must contain BOTH populations, or the per-board checks above are
     # half vacuous -- the trap the BGA half of test_fanout_via_in_pad_clamp
@@ -188,7 +198,7 @@ def main():
     #    within POSITION_TOLERANCE of one, and the old centre test could never
     #    fire there however centred the chosen offset was.
     off_lattice = {}
-    for board, ref, _n, _l, _t, _c in CASES:
+    for board, ref, _n, _l, _t, _c, _e in CASES:
         path = os.path.join(ROOT, 'kicad_files', board + '.kicad_pcb')
         if not os.path.exists(path):
             continue

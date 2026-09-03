@@ -1016,14 +1016,14 @@ def manage_vias(
                                                route.net_id, _bulges,
                                                track_width=track_width)
                 if _v == 'twin':
-                    # Two routes, one physical hole. Both keep their tracks
-                    # and both anchor to the via already committed here --
-                    # which is now true by construction, because 'twin' means
-                    # that via REACHES this route's track start (#854), and the
-                    # downstream ball-anchor test (`_has_copper`) asks the same
-                    # question of the same via. Today's code
-                    # appends a second identical dict and the writer, which
-                    # does not dedupe, emits both as stacked copper.
+                    # Two routes, one physical hole. Both keep their tracks and
+                    # both anchor to the via already committed here, because
+                    # 'twin' means that via REACHES this route's track start
+                    # (#854), and the downstream ball-anchor test
+                    # (`ball_has_copper`) asks the same question of the same
+                    # via. Today's code appends a second identical dict and the
+                    # writer, which does not dedupe, emits both as stacked
+                    # copper.
                     #
                     # The SURVIVOR must be the tighter pad's clamp. Which via
                     # survived used to be whichever route arrived first, so two
@@ -1031,17 +1031,36 @@ def manage_vias(
                     # bulging past the 0.25 pad -- the #202 violation
                     # `clamp_via_to_pad` exists to prevent, re-created by the
                     # merge. Tighten instead.
+                    #
+                    # BUT TIGHTENING CAN BREAK THE REACH THAT JUSTIFIED THE
+                    # MERGE, and only since #854: `verdict` decided 'twin' from
+                    # the COMMITTED via's size, and `tighten` then replaces it
+                    # with min(that, this route's clamp) -- a smaller barrel
+                    # reaches less far. Under the old pad-BOX rule this could
+                    # not happen, because a box test does not depend on via
+                    # size, so the interaction is new. A pre-push review found
+                    # it before any board did (no corpus twin is far enough
+                    # from its pad for the shrink to matter -- every one sits
+                    # at distance 0). Re-check after the shrink and fall
+                    # through to the normal path, where this route gets its own
+                    # via. Skipping the tighten instead would ship the #202
+                    # bulge; refusing the merge is the honest half.
                     _tx, _ty, _ts, _td = _detail
-                    if _pending.tighten(_tx, _ty, v_size, v_drill):
-                        for _v_dict in vias_to_add:
-                            if (_v_dict['x'] == _tx and _v_dict['y'] == _ty
-                                    and _v_dict['net_id'] == route.net_id):
-                                _v_dict['size'] = min(_v_dict['size'], v_size)
-                                _v_dict['drill'] = min(_v_dict['drill'],
-                                                       v_drill)
-                                break
-                    _twin_shared += 1
-                    continue
+                    if not via_anchors_route(_tx, _ty, min(_ts, v_size),
+                                             (pad_x, pad_y), track_width):
+                        _v = 'clear'
+                    else:
+                        if _pending.tighten(_tx, _ty, v_size, v_drill):
+                            for _v_dict in vias_to_add:
+                                if (_v_dict['x'] == _tx and _v_dict['y'] == _ty
+                                        and _v_dict['net_id'] == route.net_id):
+                                    _v_dict['size'] = min(_v_dict['size'],
+                                                          v_size)
+                                    _v_dict['drill'] = min(_v_dict['drill'],
+                                                           v_drill)
+                                    break
+                        _twin_shared += 1
+                        continue
                 if _v == 'conflict':
                     # A refusal here drops the escape -- there is no re-sweep
                     # -- so descend the fab ladder's drill floors first. The

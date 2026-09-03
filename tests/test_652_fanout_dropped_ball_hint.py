@@ -106,14 +106,23 @@ def _package(net_of_centre=X, *, attach=None, zone=False, drill=0.0,
             pads.append(p)
             by_net.setdefault(net, []).append(p)
     # X needs a second pad so it is a routable net at all (#472: a single-pad
-    # net's ball is trivially bare and disabled two zones spuriously).
+    # net's ball is trivially bare and disabled two zones spuriously). It goes
+    # in a SEPARATE footprint -- an earlier draft appended it to U1's own pad
+    # list, which stretched U1's bounding box from 3.5-6.5 to 3.5-12.0 and made
+    # the far pad read as a second entombed ball. That defect was load-bearing
+    # in the wrong direction: it is what killed the outer-ring mutation row,
+    # so with the fixture correct that row would have started SURVIVING
+    # silently. Found by a pre-push review.
+    far_pads = []
     for k in range(centre_net_pads - 1):
         far = make_pad(net_of_centre, 12.0 + k, 5.0, ref='U2', num=f'{k}',
                        net_name='X', size_x=0.3, size_y=0.3)
-        pads.append(far)
+        far_pads.append(far)
         by_net.setdefault(net_of_centre, []).append(far)
     fp = Footprint(reference='U1', footprint_name='test:QFN', x=5.0, y=5.0,
                    rotation=0.0, layer='F.Cu', pads=pads)
+    fp2 = Footprint(reference='U2', footprint_name='test:R', x=12.0, y=5.0,
+                    rotation=0.0, layer='F.Cu', pads=far_pads)
     segs = list(attach or [])
     zones = []
     if zone:
@@ -124,7 +133,7 @@ def _package(net_of_centre=X, *, attach=None, zone=False, drill=0.0,
                    copper_layers=['F.Cu', 'B.Cu'],
                    board_bounds=(0.0, 0.0, 14.0, 10.0))
     return make_pcb(nets={net_of_centre: make_net(net_of_centre, 'X')},
-                    footprints={'U1': fp}, segments=segs,
+                    footprints={'U1': fp, 'U2': fp2}, segments=segs,
                     pads_by_net=by_net, board_info=bi, zones=zones)
 
 
@@ -176,13 +185,29 @@ def main():
 
     # 7. an OUTER-RING ball. Reachable through the edge band; only entombed
     #    balls are unreachable by construction.
+    #
+    #    The edge pad needs a SECOND pad on its net, or `min_net_pads` filters
+    #    it before the band test is ever evaluated and this check passes for a
+    #    reason that has nothing to do with the band. It did exactly that in an
+    #    earlier draft -- deleting the band exemption left it green -- so the
+    #    rig now proves the band is what does the work: the same pad IS
+    #    reported once the band is removed.
     outer = _package()
     edge = [p for p in outer.footprints['U1'].pads
             if p.net_id != X and abs(p.global_x - 3.5) < 1e-9][0]
+    mate = make_pad(edge.net_id, 12.0, 8.0, ref='U2', num='m',
+                    net_name=edge.net_name, size_x=0.3, size_y=0.3)
+    outer.pads_by_net.setdefault(edge.net_id, []).append(mate)
+    outer.footprints['U2'].pads.append(mate)
+    reported = [p for p, _r in entombed_bare_pads(outer, [edge.net_id, X])]
     check('an outer-ring bare ball is not reported',
-          not any(p is edge for p, _r in entombed_bare_pads(
-              outer, [edge.net_id, X])),
-          'the edge band exemption is gone')
+          not any(p is edge for p in reported),
+          f'reported {[p.pad_number for p in reported]}')
+    check('...and it is the BAND that exempts it, not the pad-count filter',
+          any(p is edge for p, _r in entombed_bare_pads(
+              outer, [edge.net_id, X], inset=-999.0)),
+          'removing the band exemption does not report the edge pad, so '
+          'check 7 passes for some other reason and tests nothing')
 
     # 8. a board with no package at all.
     tiny = make_pcb(nets={X: make_net(X, 'X')},
