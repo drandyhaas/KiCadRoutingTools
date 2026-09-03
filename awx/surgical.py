@@ -142,13 +142,20 @@ def grade_full(board, nets_csv):
     return tuple(int(x) for x in m.groups()), opens
 
 
-def braid_one(board, nets_csv, out, dst='DU1', env=None):
+def braid_one(board, nets_csv, out, dst='DU1', env=None, pages=None):
     """Braid the named net(s) alone on `board` (everything else is
     frozen copper). True when the braid wrote out.kicad_pcb and
-    refused nothing."""
+    refused nothing. `pages` ({net: 'F.Cu'|'B.Cu'|None}) pins the
+    ride through the board's pages sidecar (a surgical PAGE FLIP --
+    the move class the K35 floor gap lives in: the human rides SDQ7
+    and the SDQM/SDQ2/SDQ13 group on a constant layer, 0 changes);
+    None = free braid (any stale sidecar removed)."""
     side = os.path.splitext(board)[0] + '.pages.json'
     if os.path.exists(side):
         os.remove(side)
+    if pages is not None:
+        import json
+        json.dump(pages, open(side, 'w'), indent=1)
     env = dict(env or os.environ, TWO_PAGE='1')
     r = subprocess.run(
         [PY, os.path.join(HERE, 'braid.py'), '--board', board,
@@ -287,3 +294,71 @@ def rescue_close(cand, fo, base_open, nets_csv, tag, dst='DU1'):
         if len(opens3) < len(opens):
             return stem + '.kicad_pcb', g3, opens3
     return cand, g, opens
+
+
+def relay_surgical(best, fo, nm, largs, stem):
+    """Relay net nm's stub IN THE RECORD'S WORLD: strip its lane from
+    `best` (stubs restored from fo), run relay_net on THAT board, so
+    the engine and the collision check see every other net's frozen
+    LANE, not just its fanout stub. Measured need (K35 SA5 north/B):
+    relayed on the fanout board the stub was DRC-clean, swapped into
+    the record it lay under SCKE0's B lane -- 9 contact overlaps, the
+    floor drop 62 -> 60 vetoed on drc in every single and pair that
+    carried it. Returns (delivered_key, rel_board, new_fo) -- rel is
+    the braid-ready candidate world (nm has stubs only), new_fo the
+    fanout lineage carrying nm's new stubs -- or None."""
+    scr0 = stem + '_scr0.kicad_pcb'
+    swap_stub(best, fo, nm, scr0)
+    rel = stem + '_rel.kicad_pcb'
+    key = relay(scr0, nm, largs, rel)
+    if key is None:
+        return None
+    newfo = stem + '_fo.kicad_pcb'
+    swap_stub(fo, rel, nm, newfo)
+    pro = os.path.splitext(fo)[0] + '.kicad_pro'
+    if os.path.exists(pro):
+        import shutil
+        shutil.copy(pro, os.path.splitext(newfo)[0] + '.kicad_pro')
+    return key, rel, newfo
+
+
+def drc_partners(board, nm):
+    """Nets whose copper check_drc pairs with nm's on `board`, from
+    the checker's own report (grade at the loops' 0.1 / margin 0.1)."""
+    r = subprocess.run(
+        [PY, os.path.join(HERE, '..', 'py_router', 'check_drc.py'), board,
+         '--clearance', '0.1', '--clearance-margin', '0.1'],
+        capture_output=True, text=True)
+    out = set()
+    for m in re.finditer(r'^\s*(/\S.*?) <-> (/.*?)\s*$', r.stdout, re.M):
+        a_, b_ = (x.rsplit('/', 1)[-1] for x in m.groups())
+        if a_ == nm and b_ != nm:
+            out.add(b_)
+        elif b_ == nm and a_ != nm:
+            out.add(a_)
+    return sorted(out)
+
+
+def realize_relay(best, fo, nm, relfo, stem, dst='DU1', max_blockers=2):
+    """Realize a relayed stub SURGICALLY, with its BLOCKERS: swap nm's
+    new stubs into the record; if check_drc pairs them with other
+    nets' frozen copper (the stub was laid on the fanout board, where
+    those nets have only stubs -- K35 SA5 north/B lay under SCKE0's B
+    lane, 9 contact overlaps), rip those nets' lanes too (stubs
+    restored from fo) and braid the mover WITH them as one group.
+    Returns (board, moved_nets) or None. A relay whose stub collides
+    with more than max_blockers lanes is refused (that is a re-plan,
+    not a move)."""
+    scr = stem + '_scr.kicad_pcb'
+    swap_stub(best, relfo, nm, scr)
+    blockers = drc_partners(scr, nm)
+    if len(blockers) > max_blockers:
+        return None
+    for b in blockers:
+        nxt = stem + f'_scr_{b}.kicad_pcb'
+        swap_stub(scr, fo, b, nxt)
+        scr = nxt
+    group = [nm] + blockers
+    if not braid_one(scr, ','.join(group), stem + '_b1', dst=dst):
+        return None
+    return stem + '_b1.kicad_pcb', group

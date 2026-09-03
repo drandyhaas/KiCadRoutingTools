@@ -219,10 +219,14 @@ for pss in range(a.passes):
             if k2 in seen:
                 continue
             seen.add(k2)
-            cand = realize(best, relfo, [m], f'tmp/{a.tag}_b1')
-            if cand is None:
+            rr = sg.realize_relay(best, fo, m, relfo, f'tmp/{a.tag}_b1',
+                                  dst=a.dst)
+            if rr is None:
                 say(f'  {m} {label}: braid refused')
                 continue
+            cand = rr[0]
+            if len(rr[1]) > 1:
+                say(f'  {m} {label}: moved with blockers {rr[1][1:]}')
             r = accept_if_better(cand, f'{m}_{label}', best, g0, J)
             if r:
                 best, g0, J = r

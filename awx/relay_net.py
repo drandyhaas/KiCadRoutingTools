@@ -182,16 +182,91 @@ for nm in nets:
     dir_h[k] = side
     lay_h[k] = lay
     slot_h[k] = (side, coord - a.slot_w / 2, coord + a.slot_w / 2)
-tracks, vias_add, vias_rm, failed = bf.generate_bga_fanout(
-    pcb.footprints[a.ref], pcb, net_filter=nets,
-    layers=['F.Cu', 'B.Cu'], track_width=0.1, clearance=0.1,
-    via_size=0.45, via_drill=0.25, exit_margin=0.5,
-    escape_method='underpad', plane_drop='off',
-    escape_dir_hints=dir_h, escape_layer_hints=lay_h,
-    escape_slot_hints=slot_h)
-if failed:
+
+
+def _p2s(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 <= 0:
+        return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    return ((px - ax - t * dx) ** 2 + (py - ay - t * dy) ** 2) ** 0.5
+
+
+def _s2s(a1, a2, b1, b2):
+    def ccw(p, q, r):
+        return (r[1] - p[1]) * (q[0] - p[0]) > (q[1] - p[1]) * (r[0] - p[0])
+    if ccw(a1, b1, b2) != ccw(a2, b1, b2) and ccw(a1, a2, b1) != ccw(a1, a2, b2):
+        return 0.0
+    return min(_p2s(*a1, *b1, *b2), _p2s(*a2, *b1, *b2),
+               _p2s(*b1, *a1, *a2), _p2s(*b2, *a1, *a2))
+
+
+def _collides(tracks, vias_add, pcb_, clearance=0.1):
+    """The relayed copper against the board's OTHER-net copper: the
+    first (kind, net) it grazes, or None. Measured need (K35 SA5
+    north/B ask): the engine laid the escape run straight through
+    SCKE0's B stub -- 9 contact-class overlaps the loops then paid a
+    braid + a judge for, and vetoed on drc every time."""
+    own = {t['net_id'] for t in tracks} | {v['net_id'] for v in vias_add}
+    for t in tracks:
+        a1, a2 = tuple(t['start']), tuple(t['end'])
+        need_t = t['width'] / 2.0 + clearance - 1e-6
+        for s in pcb_.segments:
+            if s.net_id in own or s.layer != t['layer']:
+                continue
+            if _s2s(a1, a2, (s.start_x, s.start_y), (s.end_x, s.end_y)) \
+                    < need_t + s.width / 2.0:
+                return 'track', s.net_id
+        for v in pcb_.vias:
+            if v.net_id in own:
+                continue
+            if _p2s(v.x, v.y, *a1, *a2) < need_t + v.size / 2.0:
+                return 'via', v.net_id
+    for v in vias_add:
+        need_v = v['size'] / 2.0 + clearance - 1e-6
+        for s in pcb_.segments:
+            if s.net_id in own:
+                continue
+            if _p2s(v['x'], v['y'], s.start_x, s.start_y, s.end_x, s.end_y) \
+                    < need_v + s.width / 2.0:
+                return 'via-track', s.net_id
+        for w in pcb_.vias:
+            if w.net_id in own:
+                continue
+            if ((v['x'] - w.x) ** 2 + (v['y'] - w.y) ** 2) ** 0.5 \
+                    < need_v + w.size / 2.0:
+                return 'via-via', w.net_id
+    return None
+
+
+# the ask's slot, retried along the face when the engine's copper
+# collides with a neighbour's stub (the engine does not see it there)
+slot_h0 = dict(slot_h)
+tracks = vias_add = vias_rm = None
+for shift in (0.0, 0.2, -0.2, 0.4, -0.4, 0.6, -0.6):
+    slot_h = {k: (sd, lo + shift, hi + shift)
+              for k, (sd, lo, hi) in slot_h0.items()}
+    tracks, vias_add, vias_rm, failed = bf.generate_bga_fanout(
+        pcb.footprints[a.ref], pcb, net_filter=nets,
+        layers=['F.Cu', 'B.Cu'], track_width=0.1, clearance=0.1,
+        via_size=0.45, via_drill=0.25, exit_margin=0.5,
+        escape_method='underpad', plane_drop='off',
+        escape_dir_hints=dir_h, escape_layer_hints=lay_h,
+        escape_slot_hints=slot_h)
+    if failed:
+        os.remove(stripped)
+        sys.exit(f'RELAY FAILED: engine could not escape {failed}')
+    hit = _collides(tracks, vias_add, pcb)
+    if hit is None:
+        if shift:
+            print(f'slot shifted {shift:+.1f} to clear a neighbour')
+        break
+    print(f'slot {shift:+.1f}: relayed copper grazes {hit[0]} of net '
+          f'{pcb.nets[hit[1]].name.rsplit("/", 1)[-1]}')
+else:
     os.remove(stripped)
-    sys.exit(f'RELAY FAILED: engine could not escape {failed}')
+    sys.exit('RELAY COLLIDES: every slot shift grazes a neighbour')
 add_tracks_and_vias_to_pcb(
     stripped, a.out, tracks, vias_add, vias_rm,
     net_id_to_name={i: n.name for i, n in pcb.nets.items()})

@@ -99,11 +99,12 @@ for rnd in range(a.rounds):
                     os.remove(out)
                     continue
                 seen.add(k2)
-            scr = f'tmp/{a.tag}_scr.kicad_pcb'
-            swap_stub(best, out, nm, scr)
-            if not braid_one(scr, nm, f'tmp/{a.tag}_b1'):
+            # blocker-aware realization (surgical.realize_relay)
+            rr = sg.realize_relay(best, fo, nm, out, f'tmp/{a.tag}_b1',
+                                  dst=a.dst)
+            if rr is None:
                 continue
-            b1 = f'tmp/{a.tag}_b1.kicad_pcb'
+            b1 = rr[0]
             nf = J.swap_floor(b1, nm)
             if nf is not None and nf < J.floor_total:
                 found.append((nf, nm, label, out))
