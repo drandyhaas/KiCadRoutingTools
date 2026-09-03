@@ -236,10 +236,43 @@ def bus_sides(menu: Dict[str, List[Move]],
                     xs += sum(1 for other in placed
                               if geo.paths_cross(leg, other))
             scored.append((s + cross_weight * xs, d, why, xs, pick))
+        key = ','.join(sorted(bus))
+        if _DUMP is not None:
+            _DUMP[key] = dict(
+                n=len(bus),
+                alts=[(d, round(c, 1), x) for c, d, _w, x, _p in scored],
+                refused=[d for d in ('left', 'right', 'up', 'down')
+                         if not any(r[1] == d for r in scored)])
+        # PLAN_FORCE_SIDES (0903, plan_search.py): {bus key: side |
+        # 'free'} -- a candidate assignment realized and judged through
+        # the CHAIN, so the plan's cost is not the judge of its own asks
+        forced = _FORCE.get(key)
+        if forced == 'free':
+            if log:
+                log(f'  bus[{len(bus)}] FORCED free (no side)')
+            continue
+        if forced:
+            hit = [r for r in scored if r[1] == forced]
+            if hit:
+                scored = hit
+            elif all(any(m.direction == forced for m in menu.get(n, ()))
+                     for n in bus):
+                # not certified: forced anyway when every member has a
+                # move there -- capacity is what the chain will judge
+                pick = {n: min((m for m in menu[n] if m.direction == forced),
+                               key=lambda m, _n=n: cost_fn(_n, m))
+                        for n in bus}
+                scored = [(sum(cost_fn(n, m) for n, m in pick.items()),
+                           forced, 'FORCED uncertified', 0, pick)]
+            elif log:
+                log(f'  bus[{len(bus)}] FORCED {forced}: no move for '
+                    'some member, plan choice kept')
         if not scored:
             continue
         scored.sort(key=lambda r: r[0])
         s, best, why, xs, pick = scored[0]
+        if _DUMP is not None:
+            _DUMP[key]['chosen'] = best
         if log:
             alt = ', '.join(f'{d}:{c:.0f}(+{x} cross)'
                             for c, d, _w, x, _p in scored[1:])
@@ -251,6 +284,22 @@ def bus_sides(menu: Dict[str, List[Move]],
         if geo is not None:
             placed.extend(geo.leg(n, pick[n]) for n in bus)
     return out
+
+
+import json as _json
+_FORCE = (_json.load(open(os.environ['PLAN_FORCE_SIDES']))
+          if os.environ.get('PLAN_FORCE_SIDES') else {})
+_DUMP = {} if os.environ.get('PLAN_DUMP_BUSES') else None
+
+
+def dump_buses():
+    """Write the per-bus alternatives the last bus_sides call saw
+    (PLAN_DUMP_BUSES=path): for each bus (keyed by its sorted members)
+    the certified sides with their plan cost and crossings, the refused
+    sides, and the side chosen."""
+    if _DUMP is not None:
+        with open(os.environ['PLAN_DUMP_BUSES'], 'w') as f:
+            _json.dump(_DUMP, f, indent=1)
 
 
 def _other(layer: str, layers=('F.Cu', 'B.Cu')) -> str:

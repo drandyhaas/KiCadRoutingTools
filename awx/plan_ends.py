@@ -249,7 +249,7 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         # JOINERS between faces by the braid's schedule -- the decision
         # the projection got wrong (K28 SWE/SCAS)
         dst_choice, un = sm.select(dst_menu, launch, keep_out=dst_box,
-                                   buses=buses, tooth_layer=tooth)
+                                   buses=buses, tooth_layer=tooth, log=log)
         if not dst_choice:
             break
         if model is not None:

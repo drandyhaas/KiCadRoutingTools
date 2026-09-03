@@ -576,6 +576,13 @@ for nm, m in choice.items():
 print(f'\nplan: {len(hints)} berth escape directions '
       + ', '.join(f'{d}:{sum(1 for v in hints.values() if v == d)}'
                   for d in sorted(set(hints.values()))))
+if os.environ.get('PLAN_DUMP_BUSES'):
+    import select_moves as _sm2
+    _sm2.dump_buses()
+if os.environ.get('PLAN_ONLY') == '1':
+    # the plan only (plan_search.py enumerates candidates from the
+    # bus dump without paying for the fanout)
+    sys.exit(0)
 
 DIRS = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
 
