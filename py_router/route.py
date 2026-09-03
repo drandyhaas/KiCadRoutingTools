@@ -323,6 +323,15 @@ def _emit_summary_min(gate_report: Optional[dict] = None,
         _min = summary_min(_m)
         if status is not None:
             _min['status'] = status
+        try:
+            from fab_tiers import escalation_summary, escalation_report_line
+            _es = escalation_summary()
+            _min['escalations'] = _es['count'] + _es['fab_tier_escalations']
+            _line = escalation_report_line()
+            if _line:
+                print(f"  {_line}")
+        except Exception:                                       # noqa: BLE001
+            pass
         if gate_report and gate_report.get('verdict') == 'reject':
             _min['improvement_gate'] = 'reverted'
         print("JSON_SUMMARY_MIN: " + json.dumps(_min, sort_keys=True))
@@ -814,8 +823,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # min(nominal, fab_track, netclass width), never below the
             # advanced tier; dipping below standard prints the same fab
             # warning the via rungs use.
-            _adv_tw = _tier_floors(_ncl, tier='advanced') \
-                .get('track_width', _twfloor)
+            # The DEEPEST rung of the ACTIVE tier: advanced under --fab-tier
+            # auto, the tier's own floor when it is hard (#857).
+            from fab_tiers import fab_floor_min as _tier_min
+            _adv_tw = _tier_min(_ncl).get('track_width', _twfloor)
             net_track_widths = {}
             for nid, w in net_track_width_map_by_id(
                     input_file,
@@ -3640,6 +3651,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # taps below the nominal). Grade/check_drc the board at this floor.
         'min_clearance_used': __import__('clearance_ledger').effective(clearance),
     }
+    # #857/#842/#530: the escalation policy, every feature delivered below its
+    # requested size, every fab-tier escalation, and the .kicad_dru rules this
+    # tool could not honour -- the block a harness reads instead of grepping.
+    try:
+        from fab_tiers import escalation_summary
+        _dr = escalation_summary()
+        _rules = getattr(config, 'rules', None)
+        if _rules is not None:
+            _dr['unsupported_rules'] = [n for n, _why in _rules.unsupported()]
+        summary['design_rules'] = _dr
+    except Exception as _dre:                                   # noqa: BLE001
+        summary['design_rules'] = {'error': str(_dre)}
     if impedance_width_clamped:
         # #610: layers whose impedance-solved width was clamped UP to the
         # width floor, {layer: [solved_mm, floor_mm]}. Those layers route at
@@ -6235,6 +6258,9 @@ For differential pair routing, use route_diff.py:
         args.input_file, 'board_edge_clearance', args.board_edge_clearance,
         defaults.BOARD_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
+    # #857: the escalation policy + the board's own rules.min_* floors, set
+    # once per run like the tier (every descent site reads them).
+    __import__('fab_tiers').set_policy_from_args(args, args.input_file)
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),
@@ -6769,4 +6795,12 @@ For differential pair routing, use route_diff.py:
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+    # #857: --strict-sizes turns any delivery below a requested size, or any
+    # fab-tier escalation, into a non-zero exit so a harness needs no grep.
+    if getattr(args, 'strict_sizes', False):
+        from fab_tiers import escalation_summary, escalation_report_line
+        _es = escalation_summary()
+        if _es['count'] or _es['fab_tier_escalations']:
+            print(f"  --strict-sizes: {escalation_report_line()}")
+            sys.exit(3)
 

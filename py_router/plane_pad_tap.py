@@ -214,8 +214,17 @@ def fine_tap_configs(config: GridRouteConfig, pad: Pad, pcb_data: PCBData):
     lives in one place. Replaces the single hard-coded fine-parameter jump (#226)."""
     fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
     fine_grid = min(config.grid_step, FINE_TAP_GRID_STEP)
-    # Narrow the tap track to fit between fine-pitch pads, never below the fab floor.
+    from fab_tiers import may_narrow, note_narrowing
+    if not may_narrow():
+        # --escalation off: the finer grid is the only retry; width and
+        # clearance stay exactly what the caller asked for.
+        yield replace(config, grid_step=fine_grid)
+        return
+    # Narrow the tap track to fit between fine-pitch pads, never below the fab
+    # floor (raised to the board's own minimum under --escalation board).
     fine_track = max(fab_track, min(min(pad.size_x, pad.size_y), config.track_width))
+    note_narrowing(getattr(pad, 'net_id', None), 'track_width', config.track_width,
+                   fine_track, 'fine-pitch tap')
     for clearance in _clearance_ladder(config.clearance, fab_clear, FINE_TAP_CLEARANCE_STEPS):
         yield replace(config, grid_step=fine_grid, clearance=clearance,
                       track_width=fine_track)
@@ -1347,11 +1356,13 @@ def tap_pad_with_escalation(
         # Shrink BOTH the emitted via (scalar args) AND config.via_size, which
         # find_via_position / build_via_obstacle_map use for the placement halo.
         from bga_fanout.geometry import clamp_via_to_pad
-        from list_nets import fab_floor_ladder, warn_fab_escalation
+        from list_nets import escalation_rungs, warn_fab_escalation
         fine_via_size, fine_via_drill = via_size, via_drill
         n_layers = len(pcb_data.board_info.copper_layers) or 2
+        # escalation_rungs: empty under --escalation off (the via then stays
+        # at the caller's size), raised to the board's minimums under board.
         cvs, cvd, vstatus, vrung = clamp_via_to_pad(
-            via_size, via_drill, pad, fab_floor_ladder(n_layers))
+            via_size, via_drill, pad, escalation_rungs(n_layers))
         # Only adopt the clamp when it genuinely produces a SMALLER via than the
         # caller's -- a pad the caller's via already fits ('fits'), or a pad so
         # small the clamp can't shrink below the fab floor it's already at, leaves

@@ -27,7 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import routing_defaults as defaults
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from net_queries import matches_net_filter
-from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
+from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation  # noqa: F401
+from list_nets import escalation_rungs
 from kicad_writer import add_tracks_and_vias_to_pcb
 from bga_fanout.types import (
     create_track,
@@ -881,7 +882,9 @@ def manage_vias(
     # fab-tier ladder so the clamp escalates standard->advanced when a sub-0.45mm
     # pad can't take the standard via (issue #237).
     copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
-    floors = fab_floor_ladder(copper)
+    # escalation_rungs: empty under --escalation off (the clamp then holds the
+    # nominal via), raised to the board's own minimums under board (#857).
+    floors = escalation_rungs(copper)
     clamped_count = 0
     floor_pads = 0
     escalated_count = 0
@@ -2060,9 +2063,10 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
     tw0 = up_kw['track_width']
     vs0, vd0 = up_kw['via_size'], up_kw['via_drill']
     cl0 = up_kw['clearance']
-    # Ladder rungs strictly smaller than what we just tried.
+    # Ladder rungs strictly smaller than what we just tried (none under
+    # --escalation off; raised to the board's minimums under board).
     rungs = []
-    for f in fab_floor_ladder(ncu):
+    for f in escalation_rungs(ncu):
         tw = min(tw0, f['track_width'])
         vs, vd = min(vs0, f['via_diameter']), min(vd0, f['via_drill'])
         cl = min(cl0, f['clearance'])
@@ -2361,7 +2365,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
     # Pair re-runs go straight to the tightest rung (same reasoning as the
     # shrink rescue: an intermediate rung cannot fit where the floor does not).
     floor = None
-    for f in fab_floor_ladder(ncu):
+    for f in escalation_rungs(ncu):
         floor = f
     tw = min(up_kw['track_width'], floor['track_width']) if floor else up_kw['track_width']
     vs = min(up_kw['via_size'], floor['via_diameter']) if floor else up_kw['via_size']
@@ -4402,6 +4406,7 @@ def main():
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.pcb)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     set_default_fab_tier(*fab_tier_from_args(args))
+    __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),

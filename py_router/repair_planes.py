@@ -2574,10 +2574,12 @@ def repair_planes(
         # 0.25/0.15 via 'standard' escalates to, #237). A fine-pitch pad flanked by
         # other-net copper often cannot take the nominal via but fits a smaller
         # fab-legal one; we never go below the deepest fab floor.
-        from list_nets import fab_floor_ladder, warn_fab_escalation
+        from list_nets import escalation_rungs, warn_fab_escalation, note_narrowing
         _ncu = len([l for l in (pcb_data.board_info.copper_layers or routing_layers)
                     if l.endswith('.Cu')]) or 2
-        _ladder = fab_floor_ladder(_ncu)
+        # escalation_rungs: empty under --escalation off, raised to the
+        # board's own minimums under board (#857).
+        _ladder = escalation_rungs(_ncu)
         _cands = [(via_size, via_drill, False)]
         _cands += [(f['via_diameter'], f['via_drill'], _i > 0)
                    for _i, f in enumerate(_ladder)]
@@ -2710,6 +2712,8 @@ def repair_planes(
                                 warn_fab_escalation(
                                     f"last-resort plane via for net "
                                     f"{net_id} ({vtry}/{dtry}mm)")
+                            note_narrowing(net_id, 'via_diameter', via_size, vtry,
+                                           'last-resort plane via')
                             break
                     if result is not None and result.success \
                             and result.via is not None:
@@ -3453,6 +3457,7 @@ Examples:
         args.input_file, 'board_edge_clearance', args.board_edge_clearance,
         defaults.PLANE_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
+    __import__('fab_tiers').set_policy_from_args(args, args.input_file)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),

@@ -863,7 +863,7 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
 
     Deterministic pure function of board state: validate_swap and
     apply_stub_layer_switch both call it and get the same answer."""
-    from fab_tiers import fab_floor_ladder, warn_fab_escalation
+    from fab_tiers import escalation_rungs, warn_fab_escalation, note_narrowing
     # `or 2` is the documented "layer count unknown -> assume 2" default, but
     # it was only reachable for an EMPTY copper_layers list: a PCBData whose
     # board_info is absent raised AttributeError instead (c5509b7 gave this
@@ -873,7 +873,9 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
     # loosest (safest) tier to assume when the board does not say.
     _bi = getattr(pcb_data, 'board_info', None)
     n_layers = len(getattr(_bi, 'copper_layers', None) or []) or 2
-    ladder = fab_floor_ladder(n_layers)
+    # escalation_rungs: empty under --escalation off, raised to the board's own
+    # minimums under board (#857).
+    ladder = escalation_rungs(n_layers)
     candidates = [(config.via_size, config.via_drill)]
     candidates += [(f['via_diameter'], f['via_drill']) for f in ladder
                    if f['via_diameter'] < config.via_size - 1e-9]
@@ -883,8 +885,10 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
             via_size=v_dia)
         if clear:
             if i > 0:
-                if v_dia < ladder[0]['via_diameter'] - 1e-9:
+                if ladder and v_dia < ladder[0]['via_diameter'] - 1e-9:
                     warn_fab_escalation(f"layer-switch pad via (net {net_id})")
+                note_narrowing(net_id, 'via_diameter', config.via_size, v_dia,
+                               'layer-switch pad via')
                 print(f"      layer-switch via stepped down to "
                       f"{v_dia:g}/{v_drill:g} at ({pad_x:.2f},{pad_y:.2f}) "
                       f"(nominal {config.via_size:g} does not fit)")

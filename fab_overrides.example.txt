@@ -5,10 +5,16 @@
 # or in the GUI:                  Basic tab -> "Fab Overrides File" -> Browse...
 #
 # It OVERLAYS the selected --fab-tier: only the values listed here change; every
-# other floor comes from the base tier (standard unless --fab-tier advanced).
+# other floor comes from the base tier (standard unless --fab-tier advanced/auto).
 # Supplying an override file PINS the floor to one hard rung -- it disables the
-# automatic standard->advanced escalation, because this file states YOUR exact fab
-# capability. Copy this file, delete the lines you don't need, and edit the rest.
+# standard->advanced escalation of --fab-tier auto, because this file states YOUR
+# exact fab capability. (Since #857 the plain standard tier is hard on its own;
+# the file is for declaring DIFFERENT numbers, not for forbidding escalation.)
+# Copy this file, delete the lines you don't need, and edit the rest.
+#
+# How far a failing net may be narrowed toward these floors is a separate
+# choice: --escalation off | board (default: the board's own Board Setup
+# minimums) | fab (these floors).
 #
 # Format: one "key = value" (mm) per line. "key: value" and "key value" also work.
 # Everything after "#" is a comment. Values must be > 0. Unknown keys are warned

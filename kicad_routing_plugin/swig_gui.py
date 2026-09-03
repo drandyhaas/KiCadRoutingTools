@@ -517,15 +517,10 @@ class RoutingDialog(wx.Dialog):
         param_box = wx.StaticBox(panel, label="Parameters")
         param_box_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
 
-        # Obey design rule constraints checkbox
-        self.obey_drc_check = wx.CheckBox(panel, label="Obey design rule constraints")
-        self.obey_drc_check.SetValue(True)
-        self.obey_drc_check.SetToolTip(
-            "Enforce KiCad's board-level minimum constraints from Board Setup → Design Rules"
-        )
-        self.obey_drc_check.Bind(wx.EVT_CHECKBOX, self._on_obey_drc_changed)
-        param_box_sizer.Add(self.obey_drc_check, 0, wx.ALL, 5)
-
+        # ("Obey design rule constraints" used to live here. It never reached
+        # the engine -- it only clamped these spin controls to the board's
+        # minimums -- and is replaced by the Escalation choice below, which
+        # is what actually bounds the router; the clamp now follows it.)
         param_scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
         param_scroll.SetScrollRate(0, 10)
         param_inner = wx.BoxSizer(wx.VERTICAL)
@@ -591,14 +586,33 @@ class RoutingDialog(wx.Dialog):
         # optional override file overlays the selected tier (only the keys it lists)
         # and disables escalation. One shared control read by every tab.
         grid.Add(wx.StaticText(parent, label="Fab Tier:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.fab_tier = wx.Choice(parent, choices=["standard", "advanced"])
+        self.fab_tier = wx.Choice(parent, choices=["standard", "advanced", "auto"])
         self.fab_tier.SetSelection(0)
         self.fab_tier.SetToolTip(
-            "JLC fab capability floor. standard = no-extra-cost, escalates to advanced "
-            "(with a warning) when a fine-pitch fan-out needs it; advanced = tight "
-            "0.25/0.15 via etc. (more costly), a hard floor.")
+            "JLC fab capability floor. standard = no-extra-cost, a HARD floor; "
+            "advanced = tight 0.25/0.15 via etc. (more costly), hard; auto = standard, "
+            "escalating to advanced (warned and counted in the run summary) when a "
+            "fine-pitch fan-out or last-resort via cannot fit at the standard floor "
+            "(the old default, opt-in since #857). Same as the CLI --fab-tier.")
         self.fab_tier.Bind(wx.EVT_CHOICE, self._revalidate_fab_floors)
         grid.Add(self.fab_tier, 0, wx.EXPAND)
+
+        # Escalation policy (#857/#842): how far below a REQUESTED size a failing
+        # net may be retried. One shared control read by every tab, the same
+        # as the CLI --escalation.
+        grid.Add(wx.StaticText(parent, label="Escalation:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.escalation = wx.Choice(parent, choices=["off", "board", "fab"])
+        self.escalation.SetSelection(1)
+        self.escalation.SetToolTip(
+            "How far below a requested size a failing net may be retried. off: never "
+            "-- sizes and clearances are exact, a net that cannot complete at them "
+            "fails and is reported. board (default): down to the board's own "
+            "declared floors (Board Setup > Constraints; an unset key falls back to "
+            "the fab tier floor), i.e. what KiCad's DRC accepts. fab: down to the "
+            "fab tier floor, below the board's own minimums. Every descent is "
+            "counted in the run summary. Same as the CLI --escalation.")
+        self.escalation.Bind(wx.EVT_CHOICE, self._on_escalation_changed)
+        grid.Add(self.escalation, 0, wx.EXPAND)
 
         # Override file: a recent-files dropdown (favourites) + Browse... file picker.
         grid.Add(wx.StaticText(parent, label="Fab Overrides File:"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -694,10 +708,36 @@ class RoutingDialog(wx.Dialog):
             "static copper)")
         grid.Add(self.ripup_blocker_select, 0, wx.EXPAND)
 
-    def _on_obey_drc_changed(self, event):
-        """Handle checkbox toggle - apply board minimums if enabled."""
-        if self.obey_drc_check.GetValue():
+    def _escalation_policy(self):
+        """The Escalation choice as the engine's policy string."""
+        ctrl = getattr(self, 'escalation', None)
+        if ctrl is None:
+            return 'board'
+        return ctrl.GetString(ctrl.GetSelection()) or 'board'
+
+    def _board_floor_dict(self):
+        """The live board's Board Setup minimums in fab_tiers FLOOR_KEYS
+        vocabulary (only keys declared > 0), for --escalation board."""
+        mins = _get_board_minimum_constraints() or {}
+        out = {}
+        for src, key in (('min_clearance', 'clearance'),
+                         ('min_track_width', 'track_width'),
+                         ('min_via_size', 'via_diameter'),
+                         ('min_via_drill', 'via_drill'),
+                         ('min_hole_to_hole', 'hole_to_hole'),
+                         ('min_copper_edge_clearance', 'board_edge')):
+            v = mins.get(src)
+            if isinstance(v, (int, float)) and v > 1e-9:
+                out[key] = float(v)
+        return out
+
+    def _on_escalation_changed(self, event):
+        """Escalation choice changed: under off/board the typed sizes are
+        clamped to the board's minimums (they would be floored there anyway)."""
+        if self._escalation_policy() != 'fab':
             self._apply_board_minimums_to_controls()
+        if event is not None:
+            event.Skip()
 
     def _fab_floored(self, ctrl_name, val):
         """Pin ``val`` UP to the fab floor for ``ctrl_name`` (the fab can't make
@@ -858,7 +898,7 @@ class RoutingDialog(wx.Dialog):
                     "Min Clearance", wx.OK | wx.ICON_WARNING)
                 return
 
-        if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
+        if self._escalation_policy() == 'fab':
             event.Skip()
             return
 
@@ -906,7 +946,7 @@ class RoutingDialog(wx.Dialog):
         Called when dialog opens, before values are displayed to user.
         Silently adjusts values to meet board minimums.
         """
-        if not (hasattr(self, 'obey_drc_check') and self.obey_drc_check.GetValue()):
+        if self._escalation_policy() == 'fab':
             return
 
         minimums = _get_board_minimum_constraints()
@@ -1117,7 +1157,7 @@ class RoutingDialog(wx.Dialog):
         override file changes (an override can RAISE a floor above the current value)."""
         pinned = []
         for name in ('track_width', 'clearance', 'via_size', 'via_drill',
-                     'hole_to_hole_clearance'):
+                     'hole_to_hole_clearance', 'board_edge_clearance'):
             ctrl = getattr(self, name, None)
             floor = self._fab_floor_for_ctrl(name)
             if ctrl is not None and floor is not None and ctrl.GetValue() < floor - 1e-9:
@@ -1758,6 +1798,8 @@ class RoutingDialog(wx.Dialog):
                 'grid_step': self.grid_step.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
+                'escalation': self._escalation_policy(),
+                'board_floors': self._board_floor_dict(),
                 # Edge.Cuts keep-out for QFN escape stubs/vias (issue #288);
                 # 0 = fall back to the copper clearance inside generate_qfn_fanout.
                 'board_edge_clearance': self._effective_board_edge_clearance(),
@@ -1861,6 +1903,8 @@ class RoutingDialog(wx.Dialog):
                 'clamp_netclasses': self.clearance_check.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
+                'escalation': self._escalation_policy(),
+                'board_floors': self._board_floor_dict(),
                 # #489 section 9: planes_gui already READ config['add_teardrops']
                 # for the create path, but nothing ever supplied it, so the
                 # checkbox was dead here. Both plane modes get it now.
@@ -2618,6 +2662,9 @@ class RoutingDialog(wx.Dialog):
         self.add_teardrops_check.SetValue(False)  # match creation default + CLI (--add-teardrops off)
         # #856: severity relaxation is opt-in per step (CLI --relax-drc-severities off).
         self.relax_drc_severities_check.SetValue(False)
+        # #857: the CLI defaults -- --fab-tier standard, --escalation board.
+        self.fab_tier.SetStringSelection('standard')
+        self.escalation.SetStringSelection('board')
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
@@ -2974,6 +3021,8 @@ class RoutingDialog(wx.Dialog):
             'ordering_strategy': self.ordering_strategy.GetString(self.ordering_strategy.GetSelection()),
             'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
             'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
+            'escalation': self._escalation_policy(),
+            'board_floors': self._board_floor_dict(),
             'stub_proximity_radius': self.stub_proximity_radius.GetValue(),
             'stub_proximity_cost': self.stub_proximity_cost.GetValue(),
             'power_tap_neckdown': self.power_tap_neckdown_check.GetValue(),

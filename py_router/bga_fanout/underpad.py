@@ -752,7 +752,10 @@ def generate_underpad_escape(footprint: Footprint,
     # real (smaller) via -- letting neighbouring escapes route past it. Done
     # per-pad, so on a mixed-pad-size array only the small pads get smaller vias.
     _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
-    floors = fab_floor_ladder(_copper)
+    from list_nets import escalation_rungs
+    # escalation_rungs: empty under --escalation off, raised to the board's
+    # own minimums under board (#857).
+    floors = escalation_rungs(_copper)
     clamp_stats = {'clamped': 0, 'floor': 0, 'escalated': 0}
     # #618's policy answer: DISCLOSE. Sites this engine declines to put a
     # via-in-pad on because their hole is inside the hole-to-hole floor --

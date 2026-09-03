@@ -91,6 +91,9 @@ from bga_fanout.geometry import (PendingVias, thin_drill_to_clear,  # noqa: E402
 
 CU = ('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu')
 H2H = fab_floor_min(len(CU))['hole_to_hole']          # 0.20, standard tier
+# #857: the standard tier is a HARD floor now; these tests exercise the
+# standard->advanced descent, which lives under --fab-tier auto.
+fab_tiers.set_default_fab_tier('auto')
 LADDER = fab_floor_ladder(len(CU))
 
 
@@ -162,6 +165,9 @@ class _TmpCase(unittest.TestCase):
         # escalated. Clearing here is what makes the transcript arms
         # independent of test ORDER.
         fab_tiers._escalation_warned.clear()
+        # #857: the descent under test is the auto tier's.
+        fab_tiers.set_default_fab_tier('auto')
+        fab_tiers.set_escalation_policy('fab')
 
     def board(self, name, **rules):
         return _stub_board(self._tmp, name, rules)

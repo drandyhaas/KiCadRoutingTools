@@ -599,14 +599,16 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     the fab-floor ladder's smaller vias (shrink-to-fit, same spirit as #189's
     escalation); return the first that clears foreign copper mm-exactly, or
     None when nothing fits (caller keeps the registered size -- honest DRC)."""
-    from fab_tiers import fab_floor_ladder
+    from fab_tiers import escalation_rungs
     import routing_defaults as defaults
     clearance = config.clearance
     eps = defaults.UNBLOCK_REFIT_MARGIN_MM
     layers = [l for l in (pcb_data.board_info.copper_layers or []) if l.endswith('.Cu')]
     ncu = len(layers) or 2
     cands = [rec]
-    for f in fab_floor_ladder(ncu):
+    # escalation_rungs, not the ladder: empty under --escalation off, raised
+    # to the board's own minimums under board (#857).
+    for f in escalation_rungs(ncu):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
@@ -759,6 +761,14 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                 continue
             new_w = max(floor, 2.0 * allowed_half)
             if new_w < s.width - 1e-9:
+                # --escalation off: a graze that only a narrower terminal can
+                # clear is a refusal, not narrower copper. It joins the hard
+                # list so the caller fails the route and reports it (#842).
+                from fab_tiers import may_narrow, note_narrowing
+                if not may_narrow():
+                    hard.append((s, d_raw))
+                    continue
+                note_narrowing(net_id, 'track_width', s.width, new_w, 'terminal neck')
                 s.width = round(new_w, 4)
                 necked += 1
     return necked, hard
@@ -2451,9 +2461,12 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     inflight_vias, inflight_segments = inflight_copper_dicts(pcb_data)
     ncu = len([l for l in layer_names if l.endswith('.Cu')]) or 2
     # Forced last-resort via sizes, largest first: the configured via, then the
-    # active fab-tier floor ladder (nominal floor, then any escalation rung). The
-    # advanced rung is the more-costly small via 'standard' escalates to (#237).
-    ladder = fab_floor_ladder(ncu)
+    # rungs the escalation policy allows (nominal floor, then any escalation
+    # rung; nothing under --escalation off; raised to the board's own minimums
+    # under board). The advanced rung is the more-costly small via 'auto'
+    # escalates to (#237/#857).
+    from fab_tiers import escalation_rungs, note_narrowing
+    ladder = escalation_rungs(ncu)
     candidates = [(config.via_size, config.via_drill, False)]
     candidates += [(f['via_diameter'], f['via_drill'], i > 0)
                    for i, f in enumerate(ladder)]
@@ -2501,6 +2514,8 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
                     continue
                 if (vd, dr) in escalated_pair:
                     warn_fab_escalation(f"last-resort via for net {net_id} ({vd}/{dr}mm)")
+                note_narrowing(net_id, 'via_diameter', config.via_size, vd,
+                               'last-resort via-in-pad')
                 _used_radius = _radius
                 break
         if tap_res is not None and tap_res.success and tap_res.via is not None:

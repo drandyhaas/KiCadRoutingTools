@@ -403,6 +403,16 @@ Where a board leaves a minimum unset (KiCad writes 0; 96 of 445 corpus boards fo
 says so in the disclosure. This keeps today's completion rate on undeclared boards while
 never crossing a floor a user did declare.
 
+**A board minimum bounds descents only when the run's own request respects it**
+(decided during implementation, 2026-09-03). A request already below the declared
+minimum, e.g. `--via-size 0.3` on a project still carrying KiCad's stock
+`min_via_diameter` 0.5, marks that minimum as stale for the run: it is announced on the
+console, descents for that key bound at the fab floor instead, and the request is never
+pinned up to the board minimum (only to the fab floor, as today). The alternative,
+KiCad's interactive-router rule of `max(board minimum, requested)`, would have rerouted
+most corpus commands at stock minimums nobody had edited, which is not what those
+commands asked for.
+
 Escalation is **per failing net and per attempt** (the rescue ladders already are);
 it never changes the run's nominal `config.track_width`, and the terminal-graze neck
 (`_neck_terminal_grazes`) becomes an escalation like the others: under `off` a graze

@@ -36,7 +36,8 @@ def get_dialog_settings(dialog):
             dialog.ripup_abandon_metric.GetSelection()),
         'ripup_blocker_select': dialog.ripup_blocker_select.GetString(
             dialog.ripup_blocker_select.GetSelection()),
-        'obey_design_rules': dialog.obey_drc_check.GetValue(),
+        # #857: the escalation policy (replaces the retired 'obey_design_rules').
+        'escalation': dialog.escalation.GetString(dialog.escalation.GetSelection()),
 
         # Layer selections
         'layers': [layer for layer, cb in dialog.layer_checks.items() if cb.GetValue()],
@@ -318,8 +319,15 @@ def restore_dialog_settings(dialog, settings):
         dialog.ripup_abandon_metric.SetStringSelection(settings['ripup_abandon_metric'])
     if 'ripup_blocker_select' in settings:
         dialog.ripup_blocker_select.SetStringSelection(settings['ripup_blocker_select'])
-    if 'obey_design_rules' in settings:
-        dialog.obey_drc_check.SetValue(settings['obey_design_rules'])
+    # 'obey_design_rules' (legacy key, <= v0.21.5) is intentionally not
+    # restored: the checkbox never reached the engine and is replaced by the
+    # Escalation choice (#857).
+    if 'escalation' in settings:
+        try:
+            if dialog.escalation.FindString(str(settings['escalation'])) != wx.NOT_FOUND:
+                dialog.escalation.SetStringSelection(str(settings['escalation']))
+        except Exception:
+            pass
 
     # Restore layer selections
     if 'layers' in settings:

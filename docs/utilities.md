@@ -37,7 +37,7 @@ Options:
   --check-pad-edge          Also check pad-to-board-edge clearance. Off by default:
                             pad-edge violations are almost always pre-existing
                             edge-connector pads, not router-introduced.
-  --fab-tier {standard,advanced}  JLC fab capability floor the size checks grade against
+  --fab-tier {standard,advanced,auto}  JLC fab capability floor the size checks grade against
                             (default: standard). Pass the tier the board was routed to so
                             legitimately-escalated fine geometry is not flagged
   --fab-overrides FILE      Fab-floor override file overlaying the selected --fab-tier
@@ -664,7 +664,7 @@ Options:
                       (#360/#424). Per-net counts land in
                       JSON_SUMMARY.plane_drop; KICAD_FANOUT_PLANE_DROP=0/1
                       overrides the flag (the recorded-manifest A/B switch)
-  --fab-tier {standard,advanced}  JLC fab capability floor (default: standard)
+  --fab-tier {standard,advanced,auto}  JLC fab capability floor (default: standard)
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
                       (see [Fab Tier Options](configuration.md#fab-tier-options))
 ```
@@ -1229,11 +1229,18 @@ script can import it without the PCB parser, and it exposes the two flags
 all add through its `add_fab_tier_args()` helper (so the flag is identical
 everywhere).
 
-- **`--fab-tier standard`** (default) — the cheap, no-extra-cost floor. Routing
-  prefers it but **auto-escalates to `advanced` (printing a one-line warning)**
-  when a fine-pitch fan-out genuinely cannot escape at the standard floor.
+- **`--fab-tier standard`** (default) — the cheap, no-extra-cost floor. A
+  **hard** floor since #857.
 - **`--fab-tier advanced`** — JLC's tighter, "more costly" floor (0.25 via /
-  0.15 drill, 0.09–0.10 mm track/clearance). A **hard** floor: no escalation.
+  0.15 drill, 0.09–0.10 mm track/clearance). A **hard** floor.
+- **`--fab-tier auto`** — `standard`, **escalating to `advanced`** (one warning
+  per context, counted in the run summary) when a fine-pitch fan-out or a
+  last-resort via genuinely cannot fit at the standard floor. The old default,
+  now opt-in.
+- **`--escalation off|board|fab`** (default `board`) — how far below a
+  *requested* size a failing net may be retried; see
+  [Fab Tier Options](configuration.md#fab-tier-options). `--strict-sizes` turns
+  any such delivery into exit code 3.
 
 `--fab-overrides FILE` overlays the selected tier with a plain, human-editable
 `key = value` file — only the floor values listed change; the rest come from the
@@ -1246,8 +1253,11 @@ template listing every key and the built-in tier values ships as
 [`fab_overrides.example.txt`](../fab_overrides.example.txt) in the repo root.
 
 ```bash
-# Route to the cheap floor (default); dense fan-outs warn when they escalate
+# Route to the cheap floor (default, hard)
 python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+
+# Let dense fan-outs escalate to the advanced via (warned + counted)
+python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier auto
 
 # Opt the whole board into the tighter, more-costly floor
 python3 py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced

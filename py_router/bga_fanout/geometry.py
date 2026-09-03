@@ -107,6 +107,11 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
     pad_min = min(pad.size_x, pad.size_y)
     if via_size <= pad_min + 1e-9:
         return via_size, via_drill, 'fits', 0
+    if not floors:
+        # --escalation off: no rung may be descended, so the via keeps the
+        # caller's size (it bulges; the caller's 'floor' disclosure says so).
+        return via_size, via_drill, 'floor', 0
+    from fab_tiers import note_narrowing
 
     # First rung whose smallest manufacturable via fits this pad.
     for rung, fab in enumerate(floors):
@@ -123,10 +128,14 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
         # Keep the configured drill, only thinning it as far as the ring needs, and
         # never below this rung's drill floor.
         new_drill = max(min(via_drill, new_size - 2 * min_annular), floor_drill)
+        note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size, new_size,
+                       'via-in-pad clamp')
         return new_size, round(new_drill, 4), 'clamped', rung
 
     # Even the deepest rung's via bulges past this pad: hold it at that floor.
     deepest = len(floors) - 1
+    note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size,
+                   floors[deepest]['via_diameter'], 'via-in-pad clamp (floor)')
     return floors[deepest]['via_diameter'], floors[deepest]['via_drill'], 'floor', deepest
 
 

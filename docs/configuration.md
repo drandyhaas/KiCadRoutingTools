@@ -129,17 +129,47 @@ vias and clearances *down toward* when it needs to. It is shared by every CLI
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--fab-tier` | `standard` | `standard` (no extra fab cost) or `advanced` (tighter, "more costly") |
+| `--fab-tier` | `standard` | `standard` (no extra fab cost, hard), `advanced` (tighter, "more costly", hard) or `auto` (standard, escalating to advanced when a fine-pitch fan-out or last-resort via cannot fit; warned and counted) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
+| `--escalation` | `board` | How far below a **requested** size a failing net may be retried: `off` (never; the net fails and is reported), `board` (down to the board's own Board Setup minimums, i.e. what KiCad's DRC accepts; an unset key falls back to the fab tier floor), `fab` (down to the fab tier floor, below the board's own minimums) |
+| `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired |
 
 The tier is a **floor ladder**:
 
 - **`standard`** — the cheap floor (per layer count: 2-layer track/clearance 0.127/0.127,
-  4+ layer 0.0889/0.10; via 0.45 / drill 0.20; via hole-to-hole 0.20). Routing prefers
-  it but **auto-escalates to the `advanced` floor — printing a one-line warning** — when a
-  fine-pitch fan-out genuinely cannot escape at the standard floor.
+  4+ layer 0.0889/0.10; via 0.45 / drill 0.20; via hole-to-hole 0.20). A **hard**
+  floor since #857: nothing on the board goes below it.
 - **`advanced`** — the JLC "more costly" floor (track/clearance 0.10/0.10 on 2-layer,
-  0.0762/0.09 on 4+; via 0.25 / drill 0.15). A **hard** floor: no escalation.
+  0.0762/0.09 on 4+; via 0.25 / drill 0.15). A **hard** floor.
+- **`auto`** — the old default: `standard` first, **escalating to `advanced`** (one
+  warning line per context, and a count in the run summary) when a fine-pitch fan-out
+  or a last-resort via genuinely cannot fit at the standard floor. Opt-in, because
+  the default used to change what the board costs without saying so anywhere a
+  harness could see it (149 silent escalations on one board, #857).
+
+**Escalation policy** (`--escalation`, the same choice on the GUI's Route tab) is
+orthogonal to the tier and bounds every place the engine narrows a track, shrinks a
+via or tightens a clearance to complete a net: the per-net rescue, the terminal
+escalation, the terminal graze neck, fine-pitch plane taps, via-in-pad clamps and
+last-resort vias. Under the default `board`, a descent stops at the board's own
+`rules.min_*` (Board Setup > Constraints), so the output is DRC-clean against the
+input project by construction; a minimum the board leaves unset (KiCad writes 0)
+falls back to the fab tier floor for that key. A board minimum bounds descents only
+when the run's own request respects it: a request already below the declared
+minimum (the stock 0.5 mm via on a project nobody edited, routed with
+`--via-size 0.3`) marks that minimum as stale for the run, is said so on the
+console, and descents for that key bound at the fab floor instead. An explicit
+request is never pinned up to a board minimum, only to the fab floor. Under
+`off` nothing is narrowed and a net that cannot complete at the requested
+geometry fails and is reported.
+
+**Disclosure.** Every descent is recorded and reported three ways: the
+`JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every
+narrowing with net / kind / requested / delivered / site, the fab-tier escalation
+count, and the `.kicad_dru` rules the tool could not honour), an `escalations`
+count in `JSON_SUMMARY_MIN`, and one end-of-run line (`Design rules [--escalation
+board, --fab-tier standard]: 7 feature(s) on 3 net(s) delivered below the requested
+size (...)`). `--strict-sizes` makes that line a non-zero exit.
 
 | Floor (per layer count) | standard | advanced |
 |---|---|---|
@@ -167,22 +197,29 @@ repo root. (`track_width` / `clearance` are layer-dependent in the tier tables, 
 override sets one fixed value for every board — override them only if you want that.)
 
 ```bash
-# Route to the cheap floor (default); dense fan-outs warn when they escalate
+# Route to the cheap floor (default, hard); descents stop at the board's own minimums
 python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+
+# Let dense fan-outs escalate to the advanced via (warned + counted)
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier auto
 
 # Opt the whole board into the tighter, more-costly floor
 python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
+
+# Never narrow anything; fail the net instead, and make that a non-zero exit
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --escalation off --strict-sizes
 
 # Declare your own fab capability
 python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
 ```
 
-**Floor enforcement.** The CLI **errors** if `--track-width`, `--clearance`,
-`--via-size`, `--via-drill` or `--hole-to-hole-clearance` is set below the active tier's
-floor (raise the value, or declare a smaller capability with `--fab-overrides`). The GUI
-instead **pins** the corresponding Basic-tab spin control to the floor and warns. Grade
-verification (`check_drc.py`) defaults its size/clearance floors to the same tier, so
-legitimately-escalated fine geometry is not flagged.
+**Floor enforcement.** The CLI **pins** `--track-width`, `--clearance`, `--via-size`,
+`--via-drill` and `--hole-to-hole-clearance` up to the active floor with a warning when
+set below it (the tier's floor, or the board's own minimum under `--escalation board`);
+raise the value, or declare a smaller capability with `--fab-overrides`. The GUI pins
+the corresponding Basic-tab spin control the same way. Grade verification
+(`check_drc.py`) defaults its size/clearance floors to the same tier, so pass the tier
+the board was routed with.
 
 ### Post-Route DRC Settings
 

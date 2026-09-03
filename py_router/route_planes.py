@@ -4422,6 +4422,7 @@ Examples:
         args.input_file, 'board_edge_clearance', args.board_edge_clearance,
         defaults.PLANE_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
+    __import__('fab_tiers').set_policy_from_args(args, args.input_file)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),

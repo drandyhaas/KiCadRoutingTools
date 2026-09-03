@@ -453,10 +453,11 @@ def _small_via_pair(config, pcb_data):
         set_rung_unsafe(True)   # make the raw mirrors honor it too
         return None
     try:
-        from fab_tiers import fab_floor_ladder
+        from fab_tiers import escalation_rungs
         ncu = len([l for l in (pcb_data.board_info.copper_layers or [])
                    if l.endswith('.Cu')]) or 2
-        for f in fab_floor_ladder(ncu):
+        # None under --escalation off: no small-via rung exists to search at.
+        for f in escalation_rungs(ncu):
             pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
             if pair[0] < config.via_size - 1e-9:
                 return pair
