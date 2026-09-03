@@ -458,9 +458,32 @@ def report(doc):
 
 
 def diff(a, b):
+    """Report what moved between two runs -- and what it could not compare.
+
+    Two gaps here reported `0 value(s) moved` on a run that had moved plenty,
+    and both were found by #850, whose demand change is exactly the shape they
+    were blind to:
+
+    * the corpus ladder was compared on `boards_firing` alone -- the SET of
+      boards with at least one firing face. A change that took glasgow_revC
+      from 24 firing faces to 16 leaves the set identical, so the ladder read
+      as unmoved. The per-board `fires` counts are compared now.
+    * a pair present in BEFORE and absent from AFTER was silent. That is not a
+      corner case: the committed JSON was recorded with the gitignored
+      `wk/run7/glasgow_revC` family present, so on a clean clone three of its
+      six pairs simply are not there, and a comparison that quietly drops half
+      its rows and prints 0 is worse than one that refuses.
+
+    A DROPPED pair is reported and does NOT count as a movement -- it is
+    missing evidence, not evidence of sameness -- and the summary says how
+    many rows the comparison actually rested on.
+    """
     print(f"engine {a['engine_sha'][:12]} -> {b['engine_sha'][:12]}")
     la = {p['label']: p for p in a['pairs']}
-    moved = 0
+    lb = {p['label']: p for p in b['pairs']}
+    moved = compared = 0
+    for label in sorted(set(la) - set(lb)):
+        print(f"  DROPPED pair (in BEFORE, not in AFTER): {label}")
     for p in b['pairs']:
         q = la.get(p['label'])
         if q is None:
@@ -470,6 +493,7 @@ def diff(a, b):
             if band not in q['bands']:
                 continue
             x, y = q['bands'][band], p['bands'][band]
+            compared += 1
             for k in ('shipped', 'worst_drop_at_min_demand'):
                 if x[k] != y[k]:
                     moved += 1
@@ -479,7 +503,21 @@ def diff(a, b):
         moved += 1
         print(f"  corpus ladder moved: {ca.get('boards_firing')} -> "
               f"{cb.get('boards_firing')}")
-    print(f"  {moved} value(s) moved")
+    # ...and the per-board counts, which the set above cannot see.
+    ba, bb = ca.get('boards', {}) or {}, cb.get('boards', {}) or {}
+    for board in sorted(set(ba) | set(bb)):
+        fa = (ba.get(board) or {}).get('fires', {})
+        fb = (bb.get(board) or {}).get('fires', {})
+        for md in sorted(set(fa) | set(fb), key=lambda s: int(s)):
+            if fa.get(md) != fb.get(md):
+                moved += 1
+                print(f"  corpus {board} fires@demand>={md}: "
+                      f"{fa.get(md)} -> {fb.get(md)}")
+    print(f"  {moved} value(s) moved, over {compared} comparable band row(s)"
+          f" of {len(lb)} pair(s)")
+    if set(la) - set(lb):
+        print(f"  NOTE: {len(set(la) - set(lb))} pair(s) in BEFORE could not "
+              f"be compared at all -- see DROPPED above")
     return 0
 
 
