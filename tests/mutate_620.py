@@ -76,7 +76,7 @@ T756 = os.path.join(_TESTS, 'test_756_fanout_clearance_drill_floors.py')
 _WINDOW = ("        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n"
            "                     s / 2.0 + self._max_size / 2.0 + "
            "self._clearance,\n"
-           "                     ahx)")
+           "                     self._max_size / 2.0 + tw / 2.0)")
 
 # (name, target, old, new, tests, expect)
 ROWS = [
@@ -85,16 +85,16 @@ ROWS = [
      '                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, '
      'v_drill,\n'
      '                                               route.net_id, _bulges,\n'
-     '                                               anchor_box=_abox)',
+     '                                               track_width=track_width)',
      "                _v, _detail = 'clear', None",
      (T620,), 'KILLED'),
 
     ('verdict-always-clear', 'geo',
      '        d = drill or 0.0\n        s = size or 0.0\n'
-     '        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else',
+     '        tw = track_width or 0.0',
      "        return 'clear', None\n"
      '        d = drill or 0.0\n        s = size or 0.0\n'
-     '        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else',
+     '        tw = track_width or 0.0',
      (T620,), 'KILLED'),
 
     ('pending-never-records-the-committed-via', 'bga',
@@ -165,7 +165,11 @@ ROWS = [
      '                     ahx)',
      (T620,), 'KILLED'),
 
-    ('broad-phase-window-drops-the-anchor-term', 'geo',
+    # #854 RE-POINTED this row rather than retiring it: the window's third
+    # term is no longer the candidate pad's half-width but the ANCHOR REACH
+    # (widest committed via + half a track), and it is still the term nothing
+    # else makes binding -- see test_the_REACH_term_in_the_broad_phase_window.
+    ('broad-phase-window-drops-the-reach-term', 'geo',
      _WINDOW,
      '        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n'
      '                     s / 2.0 + self._max_size / 2.0 + self._clearance)',
@@ -178,27 +182,51 @@ ROWS = [
 
     # --- TWINS --------------------------------------------------------------
     ('twin-branch-refuses-instead', 'geo',
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):\n'
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):\n'
      "                return 'twin', (ox, oy, os_, od)",
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):\n'
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):\n'
      "                return 'conflict', ('same site', ox, oy)",
      (T620,), 'KILLED'),
 
     ('twin-branch-ignores-the-net', 'geo',
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
-     '            if (True\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):',
+     '            if True and via_anchors_route(ox, oy, os_, (x, y), tw):',
      (T620,), 'KILLED'),
 
     ('twin-keyed-on-the-exact-site-again', 'geo',
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
-     '            if (onet == net_id\n'
-     '                    and dist <= self._tol and abs(oy - y) <= ahy):',
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):',
+     '            if onet == net_id and dist <= self._tol:',
      (T620,), 'KILLED'),
+
+    # --- #854: a reach test is not a containment test -----------------------
+    # The row the issue asks for by name ("mutate_620.py should get a row that
+    # dies when the anchor test is widened back"). 0.5 is the BIG pad's own
+    # half-extent in the dissimilar-size arm, so this row IS that arm's defect.
+    ('twin-keyed-on-the-candidate-PAD-BOX-again', 'geo',
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):',
+     '            if (onet == net_id\n'
+     '                    and abs(ox - x) <= 0.5 and abs(oy - y) <= 0.5):',
+     (T620,), 'KILLED'),
+
+    # The SECOND copy of the same rule, which is what made the stranding
+    # invisible downstream: fixing `verdict` alone leaves `_has_copper`
+    # agreeing with the old answer, so nothing straps the swallowed ball.
+    ('ball-anchor-test-reverted-to-the-pad-box', 'bga',
+     "                if any(_v['net_id'] == _p.net_id\n"
+     "                       and via_anchors_route(_v['x'], _v['y'],\n"
+     "                                             _v.get('size') or 0.0,\n"
+     "                                             (_p.global_x, _p.global_y), _tw)\n"
+     '                       for _v in vias_to_add):',
+     "                if any(_v['net_id'] == _p.net_id\n"
+     "                       and abs(_v['x'] - _p.global_x) < tol\n"
+     "                       and abs(_v['y'] - _p.global_y) < tol\n"
+     '                       for _v in vias_to_add):',
+     (T620, T756), 'KILLED'),
 
     ('twin-appends-a-second-via-anyway', 'bga',
      "                    _twin_shared += 1\n                    continue",
