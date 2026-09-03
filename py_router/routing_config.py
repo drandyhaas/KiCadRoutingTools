@@ -344,6 +344,12 @@ class GridRouteConfig:
     # consults it (KiCad's Type=='track' binds tracks only). An empty map is
     # a strict no-op. Like the layer map: no CLI flag, no GUI control.
     track_clearances: Dict[int, float] = field(default_factory=dict)
+    # #530: the board's design rules resolved in KiCad's order
+    # (design_rules.DesignRules), installed engine-side by
+    # kicad_dru.install_layer_clearances for both fronts. None until then.
+    # The legacy per-channel maps above are being migrated onto it; consumers
+    # that resolve through it must treat None as "no rules declared".
+    rules: Optional[object] = None
 
     def track_obstacle_clearance(self, net_id: int, resolved: float) -> float:
         """Track-rule seg-vs-seg clearance against obstacle net ``net_id``:
