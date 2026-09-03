@@ -3435,6 +3435,9 @@ Examples:
                   f"{getattr(args, _pname)}mm.")
     # #530 (decision 2): --clearance sets the Default class for the run; the
     # cap-every-class behaviour (#439) is the explicit --clearance-ceiling.
+    if env_knobs.CLEARANCE_LEGACY_CEILING and getattr(args, 'clearance', None) is not None \
+            and getattr(args, 'clearance_ceiling', None) is None:
+        args.clearance_ceiling = args.clearance   # replay knob: pre-#530 reading
     _ceiling = getattr(args, 'clearance_ceiling', None)   # None iff omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling

@@ -131,6 +131,41 @@ def main():
                 fails.append(f"KiCad flags {len(items)} clearance item(s) on the class run: "
                              f"{items[0].get('description')}")
 
+        # MULTIPOINT arm (ghoul): a third terminal makes the pair a chain of
+        # legs routed by diff_pair_multipoint, which reads its geometry off the
+        # shared state -- the raised gap must reach that path too.
+        fps_mp = fps + [
+            {'ref': 'U6', 'x': 50, 'y': 10, 'net_id': 1, 'net_name': '/X_P', 'layer': 'F.Cu'},
+            {'ref': 'U7', 'x': 50, 'y': 11, 'net_id': 2, 'net_name': '/X_N', 'layer': 'F.Cu'}]
+        ca.NETS[1], ca.NETS[2] = '/X_P', '/X_N'
+        try:
+            b3 = os.path.join(td, 'mp.kicad_pcb')
+            ca.write_board(b3, footprints=fps_mp,
+                           classes=[{'name': 'pairs', 'clearance': 0.15, 'track_width': 0.1,
+                                     'via_diameter': 0.4, 'via_drill': 0.2, 'priority': 0}],
+                           patterns=[('/X_*', 'pairs')])
+        finally:
+            ca.NETS.clear()
+            ca.NETS.update(saved)
+        out3 = os.path.join(td, 'mp_out.kicad_pcb')
+        r3 = _route(b3, out3, [])
+        if r3.returncode != 0 or not os.path.exists(out3):
+            fails.append(f"multipoint run failed rc={r3.returncode}:\n{r3.stdout[-2000:]}")
+        else:
+            if 'Multi-point pair' not in r3.stdout:
+                fails.append("multipoint arm did not take the multipoint path (fixture needs a 3rd terminal)")
+            if 'raised to its net-class clearance 0.15' not in r3.stdout:
+                fails.append("multipoint run did not announce the gap raise")
+            gap3, nP3, nN3 = _min_pn_gap(out3, 1, 2)
+            if not nP3 or not nN3:
+                fails.append(f"multipoint run emitted no pair copper (P={nP3} N={nN3})")
+            elif gap3 is not None and gap3 < 0.15 - 1e-3:
+                fails.append(f"multipoint run: P<->N copper gap {gap3:.4f} < 0.15 "
+                             f"(the multipoint router ignored the per-pair geometry)")
+            items3 = _kicad_clearance_items(out3)
+            if items3:
+                fails.append(f"KiCad flags {len(items3)} clearance item(s) on the multipoint run")
+
         out2 = os.path.join(td, 'dflt_out.kicad_pcb')
         r2 = _route(b2, out2, [])
         if r2.returncode != 0 or not os.path.exists(out2):

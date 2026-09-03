@@ -773,6 +773,23 @@ boards" and "which commit broke connectivity".
   differ by more than the knob — the arm name records the sha it was launched
   at, so check that both wave dirs carry the same one.
 
+  **Manifests recorded before #530 read `--clearance` as a ceiling.** Since
+  decision 2 an explicit `--clearance` IS the Default class for the run;
+  before, it capped every class at `min(class, value)`, so a late chain step
+  saying `--clearance 0.2` after an earlier step had lowered the project's
+  Default class to 0.1 routed at 0.1. Replaying such a manifest on a post-#530
+  engine measures that semantics change on top of the engine (rp2040_dev: 3
+  nets that fit at 0.1 do not at 0.2). For an engine-only A/B ride the replay
+  knob in the arm spec:
+
+  ```bash
+  python3 tests/stress/cloud_replay_sets.py --sets set1-set5 --label legacy \
+      --env KICAD_CLEARANCE_LEGACY_CEILING=1
+  ```
+
+  The knob is for replay arms only; a real run wanting that reading passes
+  `--clearance-ceiling`.
+
 ### Rules that make these trustworthy
 
 1. **The baseline is the RECORDED RUNS, re-graded — not an archived `ab_*` wave.**
