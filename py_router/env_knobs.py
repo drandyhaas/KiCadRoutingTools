@@ -339,6 +339,19 @@ def refresh() -> None:
     g['NO_STATIC_BASE'] = _truthy('KICAD_NO_STATIC_BASE')
     g['ALLOW_STAGGERED_BGA'] = _truthy('KICAD_ALLOW_STAGGERED_BGA')
     g['QFN_UNDERPAD_NO_ALT_STAGGER'] = _truthy('QFN_UNDERPAD_NO_ALT_STAGGER')
+    # #846 how far --allow-via-in-pad's escape-axis ladder may reach:
+    # 'full' (default) | 'pad' | 'barrel'. An A/B isolation knob like
+    # KICAD_QFN_UNDERPAD_ERASED_GATE, not a behaviour choice -- the ladder was
+    # named `_onpad` and documented as on-pad offsets, but its increment is the
+    # INTER-NET stagger, which on a fine-pitch part exceeds the pad, so only
+    # k = 0 is guaranteed on it. The three arms answer "what if it meant what
+    # it said": 'pad' keeps offsets whose via CENTRE stays on the pad
+    # (|k*step| <= pad_width/2), 'barrel' keeps only those whose whole BARREL
+    # does (|k*step| <= pad_width/2 - via_size/2), which on every board
+    # measured collapses the ladder to [0.0]. The two are very different
+    # restrictions and are named separately for that reason. An unrecognised
+    # value is 'full', so a typo cannot silently shorten the ladder.
+    g['QFN_ONPAD_REACH'] = _s('KICAD_QFN_ONPAD_REACH', 'full').strip().lower()
     # #619 which halves of the nets_to_route erasure the under-pad escape tests
     # its pad->via stub against: 'all' (default) | 'via' | 'seg' | 'off'.
     # An A/B isolation knob like KICAD_NO_SOFT_JOINT_BRIDGE, not a behaviour
