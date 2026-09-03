@@ -53,6 +53,7 @@ from bga_fanout.geometry import (
     via_clears_pad_rects,
     PendingVias,
     thin_drill_to_clear,
+    via_anchors_route,
 )
 from bga_fanout.escape import (
     find_escape_channel,
@@ -621,6 +622,7 @@ def manage_vias(
     via_size: float,
     via_drill: float,
     clearance: float,
+    track_width: float = 0.0,
 ) -> Tuple[List[Dict], List[Dict], List['FanoutRoute']]:
     """
     Manage vias for fanout routes.
@@ -635,6 +637,12 @@ def manage_vias(
         via_size: Size of vias to add
         via_drill: Drill size for vias
         clearance: Minimum clearance between vias
+        track_width: Width of the tracks these routes emit. Only the same-net
+            via-merge (#854) uses it: a committed via serves another route
+            when it reaches that route's track start at via_radius +
+            track_width / 2. 0 (the default) means "the via's copper only" --
+            the conservative reading, correct for a caller that does not know
+            the width.
 
     Returns:
         Tuple of (vias_to_add, vias_to_remove, via_blocked_routes)
@@ -892,7 +900,7 @@ def manage_vias(
     # against nothing else. `PendingVias` is the missing half; what it tests
     # and what it deliberately does not is argued at its definition.
     _pending = PendingVias(_h2h, clearance)
-    _twin_shared = 0       # coincident same-net sites served by ONE hole
+    _twin_shared = 0       # routes an already-placed via REACHES (#854)
     _thinned = []          # (from, to) drills a deeper fab rung rescued
     _pending_refused = []  # (net name, reason) escapes no rung could place
 
@@ -950,20 +958,21 @@ def manage_vias(
                 # Placed AFTER them so the board keeps its present precedence
                 # -- this only decides among sites THIS call is creating.
                 _bulges = status == 'floor'
-                # The candidate ball's pad, as a RECTANGLE: a via inside it
-                # is a via that connects this ball. A scalar radius here
-                # merged two DISTINCT oblong pads into one via and stranded
-                # the loser's route -- see `PendingVias.verdict`.
-                _abox = (route.pad.size_x / 2 + 0.01,
-                         route.pad.size_y / 2 + 0.01)
+                # A committed via is this ball's only when it REACHES the
+                # track this route starts at the pad centre. Testing the
+                # candidate's pad RECTANGLE instead let a large pad swallow a
+                # smaller overlapping same-net pad's via and strand the
+                # loser's route (#854) -- see `via_anchors_route`.
                 _v, _detail = _pending.verdict(pad_x, pad_y, v_size, v_drill,
                                                route.net_id, _bulges,
-                                               anchor_box=_abox)
+                                               track_width=track_width)
                 if _v == 'twin':
-                    # Two routes, one physical hole. Both keep their tracks and
-                    # both anchor to the via already committed here: the ball-
-                    # anchor test downstream (`_has_copper`) looks for a via
-                    # inside the pad, and this is that via. Today's code
+                    # Two routes, one physical hole. Both keep their tracks
+                    # and both anchor to the via already committed here --
+                    # which is now true by construction, because 'twin' means
+                    # that via REACHES this route's track start (#854), and the
+                    # downstream ball-anchor test (`_has_copper`) asks the same
+                    # question of the same via. Today's code
                     # appends a second identical dict and the writer, which
                     # does not dedupe, emits both as stacked copper.
                     #
@@ -993,7 +1002,7 @@ def manage_vias(
                         v_drill, floors, rung,
                         lambda cand: _pending.verdict(
                             pad_x, pad_y, v_size, cand, route.net_id,
-                            _bulges, anchor_box=_abox)[0] == 'clear')
+                            _bulges, track_width=track_width)[0] == 'clear')
                     if _thin is None:
                         via_blocked_routes.append(route)
                         _pending_refused.append(
@@ -1055,8 +1064,8 @@ def manage_vias(
     # this run's own vias meeting each other, which the reader cannot act on in
     # the same way: the levers are the pitch, the drill and the fab tier.
     if _twin_shared:
-        print(f"  #620: {_twin_shared} coincident same-net site(s) share one "
-              f"via instead of stacking two")
+        print(f"  #620: {_twin_shared} same-net route(s) reached an already "
+              f"placed via instead of stacking a second one")
     if _thinned:
         # The SET of drills, not min(): several rungs can be used in one run
         # and "thinned to 0.15mm" would misdescribe a via thinned to 0.17.
@@ -2954,14 +2963,28 @@ def _generate_bga_fanout_core(footprint: Footprint,
                                           | set())
                               if n not in failed_nets}
             def _has_copper(_p):
-                # Layer-aware: an SMD ball is connected by a net VIA inside its
-                # pad (spans all layers) or a net track endpoint ON ITS OWN
-                # layer -- copper crossing the pad on an inner layer is not a
-                # connection. Drilled / '*.Cu' balls conduct on every layer.
+                # Layer-aware: an SMD ball is connected by a net VIA that
+                # REACHES its pad (the via spans all layers) or a net track
+                # endpoint ON ITS OWN layer -- copper crossing the pad on an
+                # inner layer is not a connection. Drilled / '*.Cu' balls
+                # conduct on every layer.
+                #
+                # #854: the via arm used to ask `max(size_x, size_y) / 2 + 0.01`
+                # in BOTH axes -- the scalar-radius shape PR #852's review
+                # removed from `PendingVias.verdict`, surviving here as the
+                # DOWNSTREAM anchor test that rule appeals to by name. Two
+                # graders agreeing in the wrong direction is why the stranding
+                # was silent: on the issue's own repro that tol is 0.51mm, so a
+                # ball whose only via sits 0.4mm away read as ANCHORED and
+                # `_strap_unescaped_extras` never strapped it. Both ask
+                # `via_anchors_route` now. The TRACK arm below keeps `tol`: it
+                # asks a different question (is a track ENDPOINT at this pad),
+                # and a track endpoint anywhere on the pad does connect it.
                 tol = max(_p.size_x, _p.size_y) / 2 + 0.01
                 if any(_v['net_id'] == _p.net_id
-                       and abs(_v['x'] - _p.global_x) < tol
-                       and abs(_v['y'] - _p.global_y) < tol
+                       and via_anchors_route(_v['x'], _v['y'],
+                                             _v.get('size') or 0.0,
+                                             (_p.global_x, _p.global_y), _tw)
                        for _v in vias_to_add):
                     return True
                 _pl = None
@@ -3602,7 +3625,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # Via management: add vias where needed, remove unnecessary ones
         _prog("placing vias...")
         vias_to_add, vias_to_remove, via_blocked_routes = manage_vias(
-            routes, pcb_data, layers[0], via_size, via_drill, clearance
+            routes, pcb_data, layers[0], via_size, via_drill, clearance,
+            track_width=track_width
         )
 
         # Routes whose required via-in-pad would hit an immovable foreign pad
@@ -3703,7 +3727,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # guard below, which previously scanned pre-repair vias against
         # post-repair tracks.
         vias_to_add, vias_to_remove, _reblocked = manage_vias(
-            best_routes, pcb_data, layers[0], via_size, via_drill, clearance)
+            best_routes, pcb_data, layers[0], via_size, via_drill, clearance,
+            track_width=track_width)
         if _reblocked:
             from bga_fanout.reroute import _remove_route_tracks
             _rb_net_ids = {r.net_id for r in _reblocked}
