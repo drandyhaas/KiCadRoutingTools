@@ -306,6 +306,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from geometry_utils import segment_to_segment_distance
     from bga_fanout.reroute import _seg_hits_pad
     from bga_fanout.geometry import clamp_via_to_pad
+    from fab_notes import via_overlaps_pad
     from list_nets import fab_floor_ladder, fab_floor_min, warn_fab_escalation
     from routing_config import GridRouteConfig
 
@@ -314,7 +315,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # the active fab-tier ladder so the clamp escalates standard->advanced (#237).
     _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
     floors = fab_floor_ladder(_copper)
-    clamp_n = floor_n = escalated_n = 0
+    clamp_n = floor_n = escalated_n = offcentre_n = 0
 
     # Only the nets we're escaping right now are exempt from the obstacle map --
     # the chip's OTHER nets (a routed neighbour pair, a crossing track) must
@@ -851,8 +852,27 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 tracks.append({'start': (px, py), 'end': (vx, vy),
                                'width': track_width, 'layer': footprint.layer,
                                'net_id': pi.pad.net_id})
-                v_size, v_drill = via_size, via_drill   # off-pad via: not in a pad
-            else:
+            # Whether a STUB is needed and whether the via is IN THE PAD are
+            # two questions, and this loop used to answer both with one 0.001mm
+            # centre-coincidence test (#846). They come apart in two ways:
+            #
+            #  * `snap()` quantises the via COORDINATE to the routing grid
+            #    (0.05 by default) while pad centres are off-lattice on real
+            #    parts -- 76 of 77 pads on routed_output's QFN-76, 6 of 6 on
+            #    qfn_diffpair_escape -- so the genuinely centred rung lands
+            #    0.0125mm out, 12.5x POSITION_TOLERANCE. The via-in-pad branch
+            #    was unreachable by construction on those boards.
+            #  * an offset rung can put the barrel well inside the pad without
+            #    the centre being on it at all.
+            #
+            # Either way the via shipped at NOMINAL size with no #202 clamp,
+            # free to bulge past the pad -- while `print_via_in_pad_note` below
+            # counted the very same via as needing IPC-4761 Type VII, because
+            # it asks the fab question: does the BARREL overlap the copper. The
+            # commit loop now calls that same predicate, on the pad this leg is
+            # escaping (`via_in_pad_sites` scans every same-net pad and would
+            # classify against a NEIGHBOUR's, then clamp to this one's).
+            if via_overlaps_pad(pi.pad, vx, vy, via_size):
                 # via-in-pad: clamp to the pad edge so it never bulges past it (#202)
                 v_size, v_drill, status, rung = clamp_via_to_pad(via_size, via_drill, pi.pad, floors)
                 if status == 'clamped':
@@ -861,6 +881,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                     floor_n += 1
                 if rung > 0:
                     escalated_n += 1
+                if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
+                    offcentre_n += 1
+            else:
+                v_size, v_drill = via_size, via_drill   # off-pad via: not in a pad
             vias.append({'x': vx, 'y': vy, 'size': v_size, 'drill': v_drill,
                          'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})
 
@@ -872,6 +896,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         print(f"    dropped (no clear via offset): {dropped}")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    if offcentre_n:
+        # Disclosed separately, not folded into the line above: these are the
+        # vias #846 was about -- overlapping their pad while OFF its centre,
+        # which the old test could not see. A reader has to be able to watch
+        # this number move.
+        print(f"    {offcentre_n} of them sit OFF the pad centre (#846); "
+              f"before, those shipped unclamped")
     # The FAB requirement this escape may have just created (#489 §8). Emitted
     # from the shared engine path so the GUI fanout tab reports it too.
     from fab_notes import print_via_in_pad_note
