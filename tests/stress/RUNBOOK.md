@@ -790,6 +790,13 @@ boards" and "which commit broke connectivity".
   The knob is for replay arms only; a real run wanting that reading passes
   `--clearance-ceiling`.
 
+  Likewise for the pre-#857 escalation ladder: `KICAD_FAB_TIER_DEFAULT=auto
+  KICAD_ESCALATION_DEFAULT=fab` default the two flags a manifest omits to the
+  old behaviour (standard escalating to advanced, below the board's declared
+  minimums). All three together replay a pre-#530 manifest under the old
+  policy on the new engine -- the engine-only arm of a three-way A/B (old
+  engine / new engine old policy / new engine new policy).
+
 ### Rules that make these trustworthy
 
 1. **The baseline is the RECORDED RUNS, re-graded — not an archived `ab_*` wave.**

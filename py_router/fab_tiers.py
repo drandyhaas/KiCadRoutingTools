@@ -735,8 +735,20 @@ def add_fab_tier_args(parser, *, include_escalation=True):
     """Add ``--fab-tier`` / ``--fab-overrides`` (and, for the routing CLIs,
     ``--escalation`` / ``--strict-sizes``) to an argparse parser. Shared by
     every routing/DRC CLI so the flags are identical everywhere."""
+    # Replay knobs (#530 corpus A/B): KICAD_FAB_TIER_DEFAULT / KICAD_ESCALATION_DEFAULT
+    # set the DEFAULT of the two flags when a command omits them, so a
+    # cloud_replay_sets --env arm can replay pre-#857 manifests under the old
+    # ladder ('auto' + 'fab') like-for-like. An explicit flag still wins; an
+    # unknown value is ignored. Disclosed by the ENV KNOBS line like every
+    # KICAD_* variable. Never for a real run -- pass the flags.
+    _tier_dflt = os.environ.get('KICAD_FAB_TIER_DEFAULT', 'standard')
+    if _tier_dflt not in TIERS:
+        _tier_dflt = 'standard'
+    _esc_dflt = os.environ.get('KICAD_ESCALATION_DEFAULT', DEFAULT_ESCALATION)
+    if _esc_dflt not in ESCALATION_POLICIES:
+        _esc_dflt = DEFAULT_ESCALATION
     parser.add_argument(
-        '--fab-tier', choices=list(TIERS), default='standard',
+        '--fab-tier', choices=list(TIERS), default=_tier_dflt,
         help="JLC fab capability floor (default standard). 'standard' = the cheap "
              "no-extra-cost floor, HARD; 'advanced' = tight 0.25/0.15 via etc. (more "
              "costly), hard; 'auto' = standard, escalating to advanced (warned and "
@@ -751,7 +763,7 @@ def add_fab_tier_args(parser, *, include_escalation=True):
              "fab_overrides.example.txt for the format and every key.")
     if include_escalation:
         parser.add_argument(
-            '--escalation', choices=list(ESCALATION_POLICIES), default=DEFAULT_ESCALATION,
+            '--escalation', choices=list(ESCALATION_POLICIES), default=_esc_dflt,
             help="How far below a REQUESTED size a failing net may be retried "
                  "(default board). 'off': never -- sizes and clearances are exact, "
                  "a net that cannot complete at them fails and is reported. 'board': "
