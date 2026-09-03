@@ -351,6 +351,18 @@ class GridRouteConfig:
     # that resolve through it must treat None as "no rules declared".
     rules: Optional[object] = None
 
+    def pad_override_clearance(self, base: float, pad, other_pad=None) -> float:
+        """The pair clearance against ``pad`` (and ``other_pad``) once a pad /
+        footprint clearance OVERRIDE is applied: KiCad's max(overrides) floored
+        at rules.min_clearance, REPLACING ``base`` (design_rules.override_clearance).
+        ``base`` is returned unchanged when neither pad carries one, so a board
+        without overrides is byte-identical to before."""
+        from design_rules import override_clearance
+        rules = self.rules
+        bm = (rules.board_min.get('min_clearance', 0.0) if rules is not None
+              and getattr(rules, 'board_min', None) else 0.0)
+        return override_clearance(base, bm, pad, other_pad)
+
     def track_obstacle_clearance(self, net_id: int, resolved: float) -> float:
         """Track-rule seg-vs-seg clearance against obstacle net ``net_id``:
         max(resolved, the track-rule value) -- raise-only, one dict lookup per

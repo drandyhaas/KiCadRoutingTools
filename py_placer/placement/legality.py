@@ -1535,7 +1535,9 @@ class PadClearanceModel:
 
         base = max(global clearance, netclass(a), netclass(b))
         eff  = <.kicad_dru layer rules over the SHARED copper layers>   # REPLACES
-        eff  = max(eff, lc_a, lc_b)                                     # override wins
+        eff  = max(lc_a, lc_b, rules.min_clearance) if either pad has an
+               override, else eff                                       # override REPLACES
+                                                                        # (KiCad 10, measured)
 
     #768: when the caller passes a `ceiling` -- a `--clearance` it will then
     CLAMP the output project's classes down to -- the netclass term alone is
@@ -1568,7 +1570,7 @@ class PadClearanceModel:
 
     __slots__ = ('base', 'net_floor', 'layer_rules', 'board_copper',
                  'active', 'notes', 'ceiling', '_pair_cache',
-                 'track_rules', 'net_classes')
+                 'track_rules', 'net_classes', 'board_min_clearance')
 
     def __init__(self, base: float, net_floor=None, layer_rules=None,
                  board_copper=(), has_overrides: bool = False,
@@ -1594,6 +1596,8 @@ class PadClearanceModel:
         # DOES ask reads `track_rules` directly -- see `track_pair`.
         self.track_rules = list(track_rules or [])
         self.net_classes = dict(net_classes or {})
+        # rules.min_clearance: the floor under a pad override (set by for_board).
+        self.board_min_clearance = 0.0
         self.active = bool(self.net_floor or self.layer_rules or has_overrides)
         self.notes = []
         self._pair_cache = {}
@@ -1738,6 +1742,13 @@ class PadClearanceModel:
                     track_rules=track_rules, net_classes=net_classes,
                     has_overrides=has_overrides, ceiling=ceiling)
         model.notes = notes
+        if has_overrides and path:
+            try:
+                from design_rules import board_min_clearance_for
+                model.board_min_clearance = board_min_clearance_for(pcb_data, path)
+            except Exception as exc:                            # noqa: BLE001
+                notes.append('rules.min_clearance unread (%s: %s)'
+                             % (type(exc).__name__, exc))
         return model
 
     # -- per-pad --------------------------------------------------------------
@@ -1806,10 +1817,16 @@ class PadClearanceModel:
                 # REPLACE: a rule may raise OR lower, and either way it is the
                 # rule that decided the value.
                 eff, src = cached, 'layer rule'
-        if fa.lc > eff:
-            eff, src = fa.lc, 'pad override'
-        if fb.lc > eff:
-            eff, src = fb.lc, 'pad override'
+        # A pad / footprint clearance OVERRIDE REPLACES the class / rule value,
+        # floored at rules.min_clearance -- KiCad returns before it looks at
+        # either (drc_engine.cpp; measured on KiCad 10.0.0 by
+        # tests/oracle/constraint_agreement.py). It may therefore LOWER the
+        # pair below the class: 2932 pads on 48 corpus boards declare exactly
+        # that (fine-pitch BGA/QFN). Same helper as check_drc and the router.
+        lc = max(fa.lc, fb.lc)
+        if lc > 0.0:
+            bm = getattr(self, 'board_min_clearance', 0.0) or 0.0
+            eff, src = (lc if lc >= bm else bm), 'pad override'
         if eff <= self.base + 1e-9:
             # check_drc's `_mark_required` threshold exactly, not legality's
             # 1e-6 EPS: a requirement between the two would be disclosed by one

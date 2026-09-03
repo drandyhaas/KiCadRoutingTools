@@ -824,8 +824,11 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # rule replaces the net/class fallback; the pad's local keep-clear stays a
     # hard floor on top. Layers sharing a resolved value share one
     # rasterization -- a board without rules takes the old single-margin path.
+    # A pad override REPLACES the resolved value, floored at the board
+    # minimum (KiCad semantics, measured) -- parity with _add_pad_obstacle.
     def _layer_clr(layer_name):
-        return max(config.layer_clearance(layer_name, clearance), lc)
+        return config.pad_override_clearance(
+            config.layer_clearance(layer_name, clearance), pad)
 
     def _clr_groups(expanded):
         groups = {}
@@ -837,10 +840,9 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
     def _via_clr(expanded):
         return max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
-                   default=max(clearance, lc))
+                   default=config.pad_override_clearance(clearance, pad))
 
-    if lc > clearance:
-        clearance = lc
+    clearance = config.pad_override_clearance(clearance, pad)
 
     # Custom comb/finger pads: rasterize the real copper polygon(s), leaving the
     # finger channels open, instead of the bounding box (issue #188). This is the

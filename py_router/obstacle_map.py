@@ -3320,12 +3320,14 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     lc = getattr(pad, 'local_clearance', 0.0) or 0.0
 
     # #498 per-layer .kicad_dru rules: resolve the pair clearance PER LAYER (a
-    # layer rule REPLACES the net/class fallback; the pad's local keep-clear
-    # stays a hard floor on top -- KiCad gives local overrides precedence over
-    # custom rules). Layers sharing a resolved value share one rasterization,
-    # so a board without rules takes exactly the old single-margin path.
+    # layer rule REPLACES the net/class fallback). A pad OVERRIDE then
+    # REPLACES that, floored at rules.min_clearance -- KiCad returns before it
+    # looks at a class or a rule (design_rules.override_clearance, measured on
+    # KiCad 10). Layers sharing a resolved value share one rasterization, so a
+    # board without rules or overrides takes exactly the old single-margin path.
     def _layer_clr(layer_name):
-        return max(config.layer_clearance(layer_name, clearance), lc)
+        return config.pad_override_clearance(
+            config.layer_clearance(layer_name, clearance), pad)
 
     def _clr_groups(expanded):
         groups = {}
@@ -3460,9 +3462,9 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
     clearance = max((config.layer_clearance(l, clearance)
                      for l in expanded_layers if l.endswith('.Cu')),
                     default=clearance)
-    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
-    if lc > clearance:
-        clearance = lc
+    # A pad override REPLACES the resolved value (floored at the board
+    # minimum), it is not a floor on top of it -- KiCad semantics, measured.
+    clearance = config.pad_override_clearance(clearance, pad)
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)
     elif pad.shape == 'roundrect':

@@ -2049,14 +2049,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             return _layer_cl(layer, base)
         return base
 
+    # A pad / footprint clearance OVERRIDE replaces the class/rule value,
+    # floored at rules.min_clearance (KiCad 10, measured by
+    # tests/oracle/constraint_agreement.py) -- the same helper the router's
+    # obstacle stamps use, so the two cannot drift.
+    from design_rules import override_clearance as _override_clr, \
+        board_min_clearance_for as _bm_for
+    _board_min_clr = _bm_for(pcb_data, pcb_file)
+
     def _pad_pair_cl(pad, other_net: int, layer: str = None, other_pad=None) -> float:
         eff = _pair_cl(pad.net_id, other_net)
         if layer is not None:
             eff = _layer_cl(layer, eff)
         else:
             eff = _pads_cl(eff, pad, other_pad)
-        lc = getattr(pad, 'local_clearance', 0.0) or 0.0
-        return lc if lc > eff else eff
+        return _override_clr(eff, _board_min_clr, pad, other_pad)
 
     def _mark_required(v: dict, eff: float) -> dict:
         # Attribute above-global requirements (local override / netclass) in
@@ -2553,8 +2560,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     if pair_key in pad_pad_checked:
                         continue
                     pad_pad_checked.add(pair_key)
-                    _lc2 = getattr(pad2, 'local_clearance', 0.0) or 0.0
-                    _eff = max(_pad_pair_cl(pad1, pad2_net, other_pad=pad2), _lc2)
+                    # both pads' overrides are folded in by _pad_pair_cl
+                    _eff = _pad_pair_cl(pad1, pad2_net, other_pad=pad2)
                     has_violation, overlap, closest_pt = check_pad_pad_overlap(
                         pad1, pad2, _eff, routing_layers, clearance_margin)
                     if has_violation:

@@ -1056,6 +1056,52 @@ class DesignRules:
         }
 
 
+def override_clearance(base, board_min_clearance, *pads):
+    """KiCad's pad/footprint clearance OVERRIDE semantics for a pair whose
+    resolved (class / rule) clearance is ``base``: when any pad in ``pads``
+    carries a positive ``local_clearance`` (its own or its footprint's
+    ``(clearance ...)``), the pair clearance IS max(overrides), floored at
+    rules.min_clearance -- the engine returns before it looks at a class or a
+    rule, so an override BELOW the class wins (drc_engine.cpp, measured on
+    KiCad 10.0.0 by tests/oracle/constraint_agreement.py rows
+    pad_override_below_class / pad_override_beats_rule /
+    pad_override_below_board_min). With no override, ``base``.
+
+    Before this the whole tree priced a pad override as max(base, lc), which
+    is right for a ZONE's local clearance and wrong for a pad's: 2932 pads on
+    48 corpus boards declare an override below their class (fine-pitch
+    BGA/QFN footprints), so those escapes were priced wider than KiCad
+    requires and check_drc flagged copper KiCad accepts."""
+    lc = 0.0
+    for p in pads:
+        if p is None:
+            continue
+        v = getattr(p, 'local_clearance', 0.0) or 0.0
+        if v > lc:
+            lc = v
+    if lc <= 0.0:
+        return base
+    bm = board_min_clearance or 0.0
+    return lc if lc >= bm else bm
+
+
+def board_min_clearance_for(pcb_data, board_path=None):
+    """rules.min_clearance of the board beside ``board_path`` /
+    ``pcb_data.source_path`` (0.0 when undeclared or unreadable) -- the floor
+    ``override_clearance`` applies. A stdlib JSON read, no parser."""
+    path = board_path or getattr(pcb_data, 'source_path', '') or ''
+    if not path:
+        return 0.0
+    pro = os.path.splitext(path)[0] + '.kicad_pro'
+    try:
+        with open(pro, encoding='utf-8') as f:
+            proj = json.load(f)
+        v = ((proj.get('board') or {}).get('design_settings') or {}).get('rules', {}).get('min_clearance')
+        return float(v) if isinstance(v, (int, float)) and v > 0 else 0.0
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+
+
 def _netclass_dict(nc) -> dict:
     """A live NETCLASS -> the same dict shape the file loader builds."""
     def g(name, has=None):
