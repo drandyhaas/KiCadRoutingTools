@@ -130,6 +130,8 @@ FLAG_PARAMS = {
     '--fab-overrides': 'fab_overrides_path',
     # #857: the escalation policy (the GUI Choice of the same name).
     '--escalation': 'escalation',
+    # #530: the explicit class ceiling (Min Clearance + the ceiling box).
+    '--clearance-ceiling': 'clearance_ceiling',
     # #856: opt-in severity relaxation (the GUI checkbox of the same name).
     '--relax-drc-severities': 'relax_drc_severities',
 }

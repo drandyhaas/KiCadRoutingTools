@@ -93,25 +93,29 @@ Validate routed boards against the *real* spec, with the right checker — most
   writing, and whatever still stacks (e.g. two same-net barrels at one point with
   DIFFERENT drill/size, which is a fab question, not a bookkeeping one) is named
   in the summary rather than shipped silently.
-- **Net classes are RESPECTED (PR392), and `--clearance` is a pure CEILING over ALL
-  of them (#439).** The router honors KiCad's pairwise `max(classA, classB)` between
-  nets of different classes — including copper routed earlier in the SAME call (in-run)
-  — pricing each foreign obstacle at `config.obstacle_clearance(net_id)` (see
-  `docs/api-routing-config.md`). `route.py` / `route_diff.py` / the fanout and plane
-  scripts **always auto-read** every net's class clearance from the sibling `.kicad_pro`
-  (override with `--net-clearances <json>`; all-Default boards are inert). **The
-  PRESENCE of `--clearance` is the clamp switch, and there is nothing special about the
-  Default class:**
-  - **`--clearance` GIVEN** → it is a ceiling on *every* class (Default included): each
-    net routes and grades at `min(its class, --clearance)` (the base/Default-net
-    clearance is `min(Default class, --clearance)`; non-Default classes are capped in
-    the map). A class tighter than `--clearance` survives; a looser one is capped. The
-    output `.kicad_pro` writeback clamps every class DOWN to the routed floor so KiCad
-    grades exactly what was routed.
-  - **`--clearance` OMITTED** → no ceiling: each net routes at its OWN net-class
-    clearance (base = the board's Default class, else `routing_defaults.CLEARANCE`
-    0.25), and the writeback PRESERVES the classes. This is how you honor a genuine
-    impedance board's class spec — just don't pass `--clearance`.
+- **Net classes are RESPECTED (PR392); `--clearance` sets the DEFAULT class and
+  `--clearance-ceiling` caps every class (#530 decision 2, replacing #439's implicit
+  switch).** The router honors KiCad's pairwise `max(classA, classB)` between nets of
+  different classes — including copper routed earlier in the SAME call (in-run) —
+  pricing each foreign obstacle at `config.obstacle_clearance(net_id)` (see
+  `docs/api-routing-config.md`). `route.py` / `route_diff.py` / the plane scripts
+  **always auto-read** every net's class clearance from the sibling `.kicad_pro`
+  (override with `--net-clearances <json>`; all-Default boards are inert). On the
+  ROUTING CLIs and the GUI routing tabs:
+  - **`--clearance X`** → the Default net class routes at X this run (above OR below
+    the board's Default class; it is written back lower-only). Other classes route at
+    their OWN clearance, honoured, as KiCad's own router does. GUI: the Min Clearance
+    override alone.
+  - **`--clearance-ceiling X`** → every class (Default included) is capped at
+    `min(its class, X)` in the map and the `.kicad_pro` writeback clamps every class
+    DOWN to it, so KiCad grades exactly what was routed — the "stock classes are
+    aspirational" workflow. GUI: the **Class ceiling** checkbox with Min Clearance.
+  - **Both omitted** → base = the board's Default class, else
+    `routing_defaults.CLEARANCE` 0.25; classes preserved.
+  - The PLACEMENT CLI `place_fanout_clearance.py` keeps its `--clearance` = ceiling
+    contract (#768/#769, pinned by its test family); the GUI fanout tab prices that
+    ceiling from the Min Clearance override alone (`placement_clearance_ceiling`).
+    Gated by the phase-7 corpus A/B in `docs/design-rules-proposal.md` before merge.
   - **`place_fanout_clearance.py` obeys the same two branches (#768/#769)**, and
     it is the only PLACEMENT step that does, because it is the only one that
     lays copper (the #313 via nudge) and therefore the only one that writes a

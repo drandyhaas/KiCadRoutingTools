@@ -1775,8 +1775,13 @@ class FanoutTab(wx.Panel):
                 # places is how they came apart here in the first place --
                 # but it is inert today, and an earlier draft of this
                 # comment implied otherwise.
-                'clamp_netclasses': shared.get('clamp_netclasses', False),
-                'clearance_ceiling': shared.get('clearance_ceiling'),
+                # #530: the PLACEMENT ceiling -- place_fanout_clearance.py's
+                # --clearance is a ceiling by contract (#768), so this tab
+                # follows the Min Clearance override alone.
+                'clamp_netclasses': shared.get('placement_clamp_netclasses',
+                                               shared.get('clamp_netclasses', False)),
+                'clearance_ceiling': shared.get('placement_clearance_ceiling',
+                                                shared.get('clearance_ceiling')),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2157,7 +2162,8 @@ class FanoutTab(wx.Panel):
                 # Default False, not True: an absent key means the operator
                 # never ticked the override, and the safe reading of that is
                 # "honour the board", which is what an omitted CLI flag means.
-                netclass_ceiling=fanout_config.get('clearance_ceiling'),
+                netclass_ceiling=fanout_config.get('placement_clearance_ceiling',
+                                                   fanout_config.get('clearance_ceiling')),
                 grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
                 # #733: the plugin used to pass NOTHING here, so it silently took
                 # the signature default whatever the board or the operator said,
@@ -2368,8 +2374,11 @@ class FanoutTab(wx.Panel):
             # first cut of the ceiling gate came to be INERT on the standalone
             # and plan-executor path while looking correct on the inline one --
             # the same shape as the #693 finding the parity ledger records.
-            'clamp_netclasses': shared.get('clamp_netclasses', False),
-            'clearance_ceiling': shared.get('clearance_ceiling'),
+            # #530: placement ceiling semantics (see the BGA dict above).
+            'clamp_netclasses': shared.get('placement_clamp_netclasses',
+                                           shared.get('clamp_netclasses', False)),
+            'clearance_ceiling': shared.get('placement_clearance_ceiling',
+                                            shared.get('clearance_ceiling')),
             'fix_drc_settings': shared.get('fix_drc_settings', True),
         })
         from .gui_utils import redirect_prints_to_log, refill_all_zones

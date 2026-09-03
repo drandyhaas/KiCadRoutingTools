@@ -1153,6 +1153,14 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     # Machine-readable record of what this call wrote, for the run summary
     # (JSON_SUMMARY_MIN.project_writes). Replaced per call, never appended.
     LAST_PROJECT_WRITES[:] = list(changes)
+    if _origin_seeded:
+        # Custody: the board's ORIGINAL floors are recorded on the first
+        # writeback even when nothing else moved. (#856 made a no-change run
+        # common -- severities used to guarantee a write -- and the origin
+        # must not depend on some other key having changed.)
+        proj.setdefault("kicad_routing_tools", {})["fab_floor_origin"] = _origin
+        changes = list(changes) + ["kicad_routing_tools.fab_floor_origin: recorded"]
+        LAST_PROJECT_WRITES[:] = list(changes)
     if not changes:
         if verbose:
             print(f"  DRC settings already consistent ({out_pro})")
@@ -1163,8 +1171,6 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
                                               _origin):
                 print(line)
         return out_pro
-    if _origin_seeded:
-        proj.setdefault("kicad_routing_tools", {})["fab_floor_origin"] = _origin
     # Atomic replace (#513 item 12): a kill mid-dump must not leave a
     # truncated/unparseable project stranding the DRC floor.
     _tmp_pro = out_pro + ".tmp"

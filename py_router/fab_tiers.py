@@ -439,20 +439,35 @@ _PARAM_FLOOR_KEY = {
 }
 
 
+def physical_fab_floor(copper_layer_count, overrides=None):
+    """The smallest geometry the fab can PHYSICALLY make, whatever tier is
+    selected: the override file when one is given (it states the user's exact
+    limits), else the advanced rung. The TIER bounds what the router may
+    descend to on its own (escalation_rungs); an EXPLICIT request is checked
+    against this physical floor, so `--via-size 0.3` under the hard standard
+    tier is accepted as asked (and announced as below the tier), not pinned up
+    to 0.45 -- the request is the operator declaring their fab can do it, the
+    same reading the stale-board-minimum rule gives a request below a stock
+    Board Setup minimum. Grading (check_drc) uses the same floor."""
+    if overrides is None:
+        overrides = _DEFAULT_OVERRIDES
+    if overrides:
+        return _tier_rungs(copper_layer_count, 'standard', overrides)[0]
+    return _tier_rungs(copper_layer_count, 'advanced', None)[0]
+
+
 def fab_floor_for_param(param_name, copper_layer_count, tier=None, overrides=None):
-    """The FAB floor (deepest reachable value) for a routing parameter, or None
-    if the parameter has no fab floor: the smallest value the fab can actually
-    make for the active tier. Deliberately the raw tier floor, NOT the
-    board-raised one: a board's declared minimum bounds automatic DESCENTS
-    (see set_policy_from_args), it does not pin an explicit request up."""
+    """The PHYSICAL fab floor for a routing parameter (physical_fab_floor), or
+    None if the parameter has no fab floor. Deliberately neither the tier's
+    nor the board-raised floor: a board's declared minimum bounds automatic
+    DESCENTS (see set_policy_from_args) and the tier bounds them too; neither
+    pins an explicit request up."""
     key = _PARAM_FLOOR_KEY.get(param_name)
     if key is None:
         return None
-    if tier is None:
-        tier = _DEFAULT_TIER
-        if overrides is None:
-            overrides = _DEFAULT_OVERRIDES
-    return _tier_rungs(copper_layer_count, tier, overrides)[-1].get(key)
+    if overrides is None and tier is None:
+        overrides = _DEFAULT_OVERRIDES
+    return physical_fab_floor(copper_layer_count, overrides).get(key)
 
 
 def count_copper_layers_in_file(pcb_path):
@@ -740,6 +755,14 @@ def add_fab_tier_args(parser, *, include_escalation=True):
                  "an unset key falls back to the fab tier floor), i.e. what KiCad's "
                  "DRC accepts. 'fab': down to the fab tier floor, below the board's "
                  "own minimums. Every descent is counted in JSON_SUMMARY design_rules.")
+        parser.add_argument(
+            '--clearance-ceiling', type=float, default=None, metavar='MM',
+            help="Cap EVERY net class (Default included) at this copper clearance for "
+                 "the run and clamp the output project's classes down to it -- the "
+                 "'stock net classes are aspirational' workflow. This is what "
+                 "--clearance used to do implicitly (#439); --clearance now sets only "
+                 "the Default class for the run and honours the other classes, as "
+                 "KiCad does.")
         parser.add_argument(
             '--strict-sizes', action='store_true',
             help="Exit non-zero (3) when any feature was delivered below its requested "

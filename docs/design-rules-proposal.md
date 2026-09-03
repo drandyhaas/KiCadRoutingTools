@@ -434,8 +434,15 @@ channel instead of shipping narrowed copper.
 is `auto`, so all 18 descent sites become inert by construction, exactly the mechanism
 `--fab-overrides` uses today. Each site's "no rung left" path must become a **reported
 refusal**, which `thin_drill_to_clear` and the BGA "escape dropped" disclosure already
-model. `enforce_fab_floors` and the GUI's `_fab_floored` pin to the *selected* rung,
-so `--via-size 0.25` under `standard` is refused up front.
+model.
+
+**Explicit requests are checked against the physical floor, not the tier** (decided
+during implementation, 2026-09-03). `enforce_fab_floors`, the GUI's `_fab_floored` and
+`check_drc`'s size floors use `physical_fab_floor` (the override file, else the
+advanced rung). The tier bounds only automatic descents. Pinning `--via-size 0.3` up to
+the standard tier's 0.45 would have rerouted every recorded command that asks for a
+0.3 via and then had the grader flag the vias it asked for; the request is the operator
+declaring their fab can make it, the same reading the stale-board-minimum rule gives.
 
 **Disclosure**, one shape for every front:
 

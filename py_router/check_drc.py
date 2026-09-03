@@ -2082,7 +2082,15 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # for 'standard' that's the advanced rung it escalates to (0.25 dia / 0.15
         # drill on 4+ layers), so legitimately-escalated fine vias aren't flagged;
         # for 'advanced'/overrides it's the hard floor (issue #237).
-        fab = fab_floor_min(copper_count)
+        # #857/#530: the PHYSICAL fab floor (the override file, else the
+        # advanced rung), not the selected tier's: the tier bounds what the
+        # router may descend to on its own, while an explicit --via-size 0.3
+        # is accepted as asked, so grading at the tier would flag every via
+        # the operator requested. The board's own minimums (below) are what
+        # KiCad grades; `--fab-tier advanced` and `--fab-overrides` still
+        # tighten this through physical_fab_floor.
+        from fab_tiers import physical_fab_floor
+        fab = physical_fab_floor(copper_count)
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
         eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
         eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']

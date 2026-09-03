@@ -585,6 +585,25 @@ class RoutingDialog(wx.Dialog):
         # fan-out can't escape at the standard floor; 'advanced' is a hard floor. An
         # optional override file overlays the selected tier (only the keys it lists)
         # and disables escalation. One shared control read by every tab.
+        # #530 (decision 2): the class CEILING. Checked (with Min Clearance),
+        # every net class is capped at the Min Clearance value and the output
+        # project's classes are clamped down to it -- the CLI's
+        # --clearance-ceiling, which is what the Min Clearance override alone
+        # used to mean (#439). Unchecked, Min Clearance is the Default class's
+        # clearance for the run and the other classes are honoured, as KiCad does.
+        grid.Add(wx.StaticText(parent, label="Class ceiling:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.clearance_ceiling_check = wx.CheckBox(
+            parent, label="Min Clearance caps every net class")
+        self.clearance_ceiling_check.SetValue(False)
+        self.clearance_ceiling_check.SetToolTip(
+            "With the Min Clearance override: cap EVERY net class (Default included) "
+            "at that value for the run and clamp the project's classes down to it -- "
+            "the 'stock net classes are aspirational' workflow, the CLI's "
+            "--clearance-ceiling. Unchecked (default), Min Clearance sets only the "
+            "Default class and the other classes route at their own clearance, as "
+            "KiCad's own router does.")
+        grid.Add(self.clearance_ceiling_check, 0, wx.EXPAND)
+
         grid.Add(wx.StaticText(parent, label="Fab Tier:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.fab_tier = wx.Choice(parent, choices=["standard", "advanced", "auto"])
         self.fab_tier.SetSelection(0)
@@ -708,6 +727,13 @@ class RoutingDialog(wx.Dialog):
             "static copper)")
         grid.Add(self.ripup_blocker_select, 0, wx.EXPAND)
 
+    def _ceiling_on(self):
+        """True when Min Clearance is a CEILING over every net class (#439):
+        both the Min Clearance override and the class-ceiling box are checked."""
+        cc = getattr(self, 'clearance_ceiling_check', None)
+        mc = getattr(self, 'clearance_check', None)
+        return bool(cc is not None and cc.GetValue() and mc is not None and mc.GetValue())
+
     def _escalation_policy(self):
         """The Escalation choice as the engine's policy string."""
         ctrl = getattr(self, 'escalation', None)
@@ -786,12 +812,11 @@ class RoutingDialog(wx.Dialog):
         when the board value is unavailable, and is pinned UP to the fab floor."""
         if getattr(self, name + '_check').GetValue():
             val = getattr(self, name).GetValue()
-            # #439 B: Min Clearance is a pure CEILING on every class incl. Default, so
-            # the base clearance is min(Default class, override) -- exactly like the
-            # CLI's args.clearance = min(_dflt_clr, _ceiling). An override ABOVE the
-            # board's Default class therefore never loosens the base (the interactive
-            # validation warns + pins it; this is the route-time safety net).
-            if name == 'clearance':
+            # #530 (decision 2): the Min Clearance override is the DEFAULT
+            # class's clearance for this run, exactly like the CLI's --clearance
+            # -- it may sit above OR below the board's Default class. Capping
+            # every class is the separate "ceiling" checkbox (--clearance-ceiling).
+            if name == 'clearance' and self._ceiling_on():
                 dflt = (_get_netclass_parameters('Default') or {}).get('clearance')
                 if dflt is not None and val > dflt:
                     val = dflt
@@ -875,13 +900,14 @@ class RoutingDialog(wx.Dialog):
                 "Fab Floor", wx.OK | wx.ICON_WARNING)
             return
 
-        # #439 B: the Min Clearance override is a pure CEILING. A value ABOVE the
-        # board's Default net-class clearance has no effect on the base clearance
-        # (nets never route looser than their own class -- min(Default, override), as
-        # in the CLI). Pin it to the Default class and warn, so what you enter routes.
+        # #439 B: WITH the class-ceiling box, Min Clearance is a pure CEILING. A
+        # value ABOVE the board's Default net-class clearance has no effect on
+        # the base clearance then (min(Default, ceiling), as the CLI). Pin it to
+        # the Default class and warn, so what you enter routes. Without the
+        # ceiling box the value IS the Default class for the run (#530).
         if ctrl_name == 'clearance' and ctrl is not None \
                 and getattr(self, 'clearance_check', None) is not None \
-                and self.clearance_check.GetValue():
+                and self.clearance_check.GetValue() and self._ceiling_on():
             dflt = (_get_netclass_parameters('Default') or {}).get('clearance')
             if dflt is not None and ctrl.GetValue() > dflt + 1e-9:
                 self._drc_validating = True
@@ -1829,7 +1855,7 @@ class RoutingDialog(wx.Dialog):
                 # -- and the cap pass needs it for exactly that:
                 # unchecked means the board's own classes stand, so they are
                 # what the pass must price at.
-                'clamp_netclasses': self.clearance_check.GetValue(),
+                'clamp_netclasses': self._ceiling_on(),
                 # #768: the CEILING itself, and it must be the RAW override
                 # rather than `_effective_clearance()`. That helper already
                 # returns min(Default class, override), which is correct for the
@@ -1839,8 +1865,16 @@ class RoutingDialog(wx.Dialog):
                 # which gives this the same one-value contract `--clearance`
                 # has -- the presence of a value IS the switch.
                 'clearance_ceiling': (self.clearance.GetValue()
-                                      if self.clearance_check.GetValue()
+                                      if self._ceiling_on()
                                       else None),
+                # The PLACEMENT ceiling (#768): place_fanout_clearance.py's
+                # own --clearance is still a ceiling by contract, so the
+                # fanout tab's cap pass follows the Min Clearance override
+                # alone, without the routing tabs' class-ceiling box.
+                'placement_clearance_ceiling': (self.clearance.GetValue()
+                                                if self.clearance_check.GetValue()
+                                                else None),
+                'placement_clamp_netclasses': self.clearance_check.GetValue(),
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
@@ -1900,7 +1934,7 @@ class RoutingDialog(wx.Dialog):
                 # #581: one via-in-pad policy for every step (Basic tab).
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
                 'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
-                'clamp_netclasses': self.clearance_check.GetValue(),
+                'clamp_netclasses': self._ceiling_on(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
@@ -2665,6 +2699,8 @@ class RoutingDialog(wx.Dialog):
         # #857: the CLI defaults -- --fab-tier standard, --escalation board.
         self.fab_tier.SetStringSelection('standard')
         self.escalation.SetStringSelection('board')
+        # #530: no class ceiling unless a plan asks (clearance_ceiling param).
+        self.clearance_ceiling_check.SetValue(False)
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
@@ -3048,7 +3084,7 @@ class RoutingDialog(wx.Dialog):
             'add_teardrops': self.add_teardrops_check.GetValue(),
             'fix_drc_settings': self.fix_drc_check.GetValue(),
             'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
-            'clamp_netclasses': self.clearance_check.GetValue(),
+            'clamp_netclasses': self._ceiling_on(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
             'guide_corridor_layer': self.guide_corridor_layer_ctrl.GetValue().strip() or defaults.GUIDE_CORRIDOR_LAYER,

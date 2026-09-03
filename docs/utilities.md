@@ -1161,13 +1161,13 @@ complete one when the input has none). Pass `--no-fix-drc-settings` to skip it, 
 that writes the project prints one `PROJECT_WRITES_JSON: {...}` line listing
 what it changed, so a harness can see it without grepping prose.
 
-When routing used an explicit `--clearance` ceiling, the writeback also **clamps**
-each NON-Default net class' **clearance** DOWN to the routed value (#439), so
-KiCad grades the copper at what was actually routed rather than at the (usually
-aspirational) stock class. When `--clearance` was omitted the classes are
-preserved (each net routed at its own class). There is no separate flag — the
-`--clearance` ceiling is the switch; in the GUI, checking the **Min Clearance**
-override box is the equivalent (unchecked = honor classes, checked = clamp).
+When routing used `--clearance-ceiling` (#530; formerly the implicit meaning of
+`--clearance`, #439), the writeback also **clamps** each NON-Default net class'
+**clearance** DOWN to the ceiling, so KiCad grades the copper at what was
+actually routed rather than at the (usually aspirational) stock class. Without
+it the classes are preserved (each net routed at its own class; `--clearance`
+alone sets only the Default class). In the GUI the **Class ceiling** checkbox
+next to Min Clearance is the switch.
 
 The **GUI plugin** does the equivalent on the live board via the pcbnew API
 (`BOARD_DESIGN_SETTINGS` + the Default net class clearance) after routing, and

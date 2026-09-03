@@ -183,14 +183,21 @@ def test_param_floors(v):
     # at/above floor -> no violation
     if ft.check_param_floors(4, 'auto', via_size=0.25, track_width=0.0762):
         fails.append("at-floor values wrongly flagged")
-    # ...and under the HARD standard tier a 0.25 via IS below the floor (#857:
-    # the CLI used to accept --via-size 0.25 under standard without a word).
-    if {n for n, _, _ in ft.check_param_floors(4, 'standard', via_size=0.25)} != {'via_size'}:
-        fails.append("standard tier accepted a 0.25 via below its hard 0.45 floor")
+    # ...and an EXPLICIT request is checked against the PHYSICAL floor (the
+    # advanced rung), not the selected tier's: --via-size 0.25 under the hard
+    # standard tier is accepted (the tier only bounds automatic descents).
+    if ft.check_param_floors(4, 'standard', via_size=0.25):
+        fails.append("an explicit 0.25 via was pinned up under the standard tier")
+    if {n for n, _, _ in ft.check_param_floors(4, 'standard', via_size=0.2)} != {'via_size'}:
+        fails.append("a 0.2 via below the physical 0.25 floor was not flagged")
+    if ft.physical_fab_floor(4)['via_diameter'] != 0.25 or \
+            ft.physical_fab_floor(4, {'via_diameter': 0.4})['via_diameter'] != 0.4:
+        fails.append("physical_fab_floor is not the advanced rung / the override file")
     # enforce pins up to the floor and reports the clamp (issue #237: warn + pin,
     # don't abort the run -- the fab can't make sub-floor, so clamp and continue).
     pinned = ft.enforce_fab_floors(4, 'standard', via_drill=0.05)
-    if pinned.get('via_drill') != ft.fab_floor_min(4, 'standard')['via_drill']:
+    # pinned to the PHYSICAL floor (the advanced rung's drill), not the tier's
+    if pinned.get('via_drill') != ft.physical_fab_floor(4)['via_drill']:
         fails.append(f"enforce_fab_floors did not pin sub-floor via_drill up to "
                      f"the floor (got {pinned})")
     # at/above-floor params return no clamps

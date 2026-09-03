@@ -117,6 +117,9 @@ _NO_PAIRS_MATCHED = False
 
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
+                # #530: cap every auto-read net class at this clearance (the
+                # explicit --clearance-ceiling). None = honour the classes.
+                clearance_ceiling: Optional[float] = None,
                 layer_costs: Optional[List[float]] = None,
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
@@ -339,10 +342,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 # aspirational). A caller that wants the full classes (routed without a
                 # --clearance ceiling) passes an explicit uncapped map, so this internal
                 # fallback always caps.
-                net_clearances = {nid: min(clr, clearance)
-                                  for nid, clr in net_clearances.items()}
-                print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
-                      f"capped at clearance {clearance}mm (#439; cross-class max(A,B) respected).")
+                if clearance_ceiling is not None:
+                    net_clearances = {nid: min(clr, clearance_ceiling)
+                                      for nid, clr in net_clearances.items()}
+                    print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
+                          f"capped at the ceiling {clearance_ceiling}mm (#439; cross-class "
+                          f"max(A,B) respected).")
+                else:
+                    print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
+                          f"honoured as declared (KiCad pairwise max).")
         except Exception as _e:
             print(f"Warning: could not auto-read netclass clearances ({_e}).")
             net_clearances = None
@@ -1772,10 +1780,10 @@ Examples:
                              "matching 'route_planes --zone-clearance' and verify with "
                              "'check_impedance.py --coplanar-gap'. Requires --impedance.")
     parser.add_argument("--clearance", type=float, default=None,
-                        help="Copper clearance CEILING in mm. When given, every net class "
-                             "(Default included) is capped at min(class, this). When OMITTED, "
-                             "each net routes at its own net-class clearance (base = the board's "
-                             f"Default class from the sibling .kicad_pro, else {defaults.CLEARANCE}). "
+                        help="Copper clearance of the DEFAULT net class for this run, in mm; "
+                             "other classes route at their own clearance (pairwise max). When "
+                             f"OMITTED, the board's Default class, else {defaults.CLEARANCE}. "
+                             "--clearance-ceiling caps every class (the old #439 behaviour). "
                              "Use --net-clearances <json> for explicit per-net values.")
     parser.add_argument("--net-clearances", metavar="JSON", default=None,
                         help="Explicit override for the cross-class clearance map: a JSON object "
@@ -2015,19 +2023,25 @@ Examples:
     # --clearance given -> pure ceiling on EVERY class (Default included): base =
     # min(Default class, ceiling), non-Default capped at the ceiling. Omitted -> no
     # ceiling: each net routes at its own class (base = board Default class).
-    _ceiling = args.clearance                       # None iff --clearance omitted
+    # #530 (decision 2): --clearance sets the Default class for the run; the
+    # cap-every-class behaviour (#439) is the explicit --clearance-ceiling.
+    _ceiling = getattr(args, 'clearance_ceiling', None)   # None iff omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     _dflt_clr = board_default_netclass_clearance(args.input_file)
-    if _ceiling is None:
+    if args.clearance is None:
         args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
         print(f"--clearance not given; honoring net classes with base = "
               f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
               f"clearance {args.clearance}mm.")
     else:
-        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+        print(f"--clearance {args.clearance}: the Default net class routes at it this run; "
+              f"other classes are honoured (pass --clearance-ceiling to cap every class).")
+    if _ceiling is not None:
+        args.clearance = min(args.clearance, _ceiling)
+        print(f"--clearance-ceiling {_ceiling}: every net class is capped at it (#439).")
     # #441: a diff-pair coupling gap below clearance is graded as a clearance
     # violation by KiCad (P<->N are different nets). Raise the gap to the clearance
     # floor now that both are resolved -- BOTH the engine call below and the

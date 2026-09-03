@@ -93,6 +93,8 @@ def get_dialog_settings(dialog):
         # use the board's own value). Restored to also enable/disable the spinctrl.
         'track_width_override': dialog.track_width_check.GetValue(),
         'clearance_override': dialog.clearance_check.GetValue(),
+        # #530: the class-ceiling box (the CLI's --clearance-ceiling).
+        'clearance_ceiling_check': dialog.clearance_ceiling_check.GetValue(),
         'via_size_override': dialog.via_size_check.GetValue(),
         'via_drill_override': dialog.via_drill_check.GetValue(),
         'hole_to_hole_clearance_override': dialog.hole_to_hole_clearance_check.GetValue(),
@@ -432,6 +434,8 @@ def restore_dialog_settings(dialog, settings):
     if 'clearance_override' in settings:
         dialog.clearance_check.SetValue(settings['clearance_override'])
         dialog.clearance.Enable(settings['clearance_override'])
+    if 'clearance_ceiling_check' in settings:
+        dialog.clearance_ceiling_check.SetValue(bool(settings['clearance_ceiling_check']))
     if 'via_size_override' in settings:
         dialog.via_size_check.SetValue(settings['via_size_override'])
         dialog.via_size.Enable(settings['via_size_override'])

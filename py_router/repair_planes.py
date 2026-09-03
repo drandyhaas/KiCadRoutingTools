@@ -3319,7 +3319,7 @@ Examples:
 
     # Clearance options
     parser.add_argument("--clearance", type=float, default=None,
-                        help="Trace-to-trace clearance CEILING in mm. When given, every net class (Default included) is capped at min(class, this) and the writeback clamps. When OMITTED, each net routes at its own net-class clearance (base = the board's Default class, else 0.25).")
+                        help="Trace-to-trace clearance of the DEFAULT net class for this run, in mm; other classes are honoured (pairwise max). When OMITTED, the board's Default class, else 0.25. --clearance-ceiling caps every class (the old #439 behaviour) and the writeback clamps.")
     parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE,
                         help="Zone fill clearance around obstacles in mm (default: 0.2)")
     # #381 D9: accept route_planes.py's --plane-track-via-clearance spelling too
@@ -3433,19 +3433,25 @@ Examples:
             print(f"--{_pname.replace('_', '-')} not given; using "
                   f"{'the board Default net-class' if _v is not None else 'the fallback'} "
                   f"{getattr(args, _pname)}mm.")
-    _ceiling = args.clearance                       # None iff --clearance omitted
+    # #530 (decision 2): --clearance sets the Default class for the run; the
+    # cap-every-class behaviour (#439) is the explicit --clearance-ceiling.
+    _ceiling = getattr(args, 'clearance_ceiling', None)   # None iff omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     _dflt_clr = board_default_netclass_clearance(args.input_file)
-    if _ceiling is None:
+    if args.clearance is None:
         args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
         print(f"--clearance not given; honoring net classes with base = "
               f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
               f"clearance {args.clearance}mm.")
     else:
-        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+        print(f"--clearance {args.clearance}: the Default net class at it this run; other "
+              f"classes honoured (pass --clearance-ceiling to cap every class).")
+    if _ceiling is not None:
+        args.clearance = min(args.clearance, _ceiling)
+        print(f"--clearance-ceiling {_ceiling}: every net class is capped at it (#439).")
     # Shared resolver (list_nets.resolve_cli_floor); see route_planes.py -- a
     # DECLARED 0.0 is "no edge rule of its own", not a rule of zero, so the
     # plane inset stays PLANE_EDGE_CLEARANCE as the GUI's plane tab already had

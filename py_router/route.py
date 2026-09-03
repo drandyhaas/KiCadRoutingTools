@@ -431,6 +431,9 @@ def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
+                # #530: cap every auto-read net class at this clearance (the
+                # explicit --clearance-ceiling). None = honour the classes.
+                clearance_ceiling: Optional[float] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -788,11 +791,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             from list_nets import net_clearance_map_by_id
             net_clearances = net_clearance_map_by_id(
                 input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
-            if net_clearances:
-                net_clearances = {nid: min(clr, clearance)
+            if net_clearances and clearance_ceiling is not None:
+                # #439 ceiling, now only when explicitly asked for (#530).
+                net_clearances = {nid: min(clr, clearance_ceiling)
                                   for nid, clr in net_clearances.items()}
                 print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
-                      f"capped at clearance {clearance}mm (#439).")
+                      f"capped at the ceiling {clearance_ceiling}mm (#439).")
+            elif net_clearances:
+                print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
+                      f"honoured as declared (KiCad pairwise max).")
         except Exception as _e:
             print(f"Warning: could not auto-read netclass clearances ({_e}); "
                   f"routing at the uniform clearance.")
@@ -5972,11 +5979,13 @@ For differential pair routing, use route_diff.py:
                              "Given: only matching nets get CPW widths; the rest stay "
                              "microstrip.")
     parser.add_argument("--clearance", type=float, default=None,
-                        help="Copper clearance CEILING in mm. When given, every net class "
-                             "(Default included) is capped at min(class, this). When OMITTED, "
-                             "each net routes at its own net-class clearance (base = the board's "
-                             f"Default class from the sibling .kicad_pro, else {defaults.CLEARANCE}). "
-                             "Use --net-clearances <json> for explicit per-net values.")
+                        help="Copper clearance of the DEFAULT net class for this run, in mm. "
+                             "Nets in other classes route at their own class clearance "
+                             "(pairwise max, as KiCad does). When OMITTED, the board's Default "
+                             f"class from the sibling .kicad_pro, else {defaults.CLEARANCE}. "
+                             "To cap EVERY class at one value (the old #439 behaviour) pass "
+                             "--clearance-ceiling. Use --net-clearances <json> for explicit "
+                             "per-net values.")
     parser.add_argument("--via-size", type=float, default=None,
                         help="Via outer diameter in mm. Default: the board's Default net-class "
                              f"via_diameter (sibling .kicad_pro), else {defaults.VIA_SIZE}.")
@@ -6270,20 +6279,28 @@ For differential pair routing, use route_diff.py:
     # (Default-class nets) is min(Default class, ceiling), and non-Default classes are
     # capped at the ceiling in the map below. Omitted -> no ceiling: every net routes
     # at its own class (base = the board's Default class).
-    _ceiling = args.clearance                       # None iff --clearance omitted
+    # #530 (decision 2): --clearance is the DEFAULT CLASS clearance for this run
+    # (KiCad semantics: other classes are honoured pairwise). The old cap-every-
+    # class behaviour (#439) is the explicit --clearance-ceiling.
+    _ceiling = getattr(args, 'clearance_ceiling', None)   # None iff omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     _dflt_clr = board_default_netclass_clearance(args.input_file)
-    if _ceiling is None:
+    if args.clearance is None:
         args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
         print(f"--clearance not given; honoring net classes with base = "
               f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
               f"clearance {args.clearance}mm.")
     else:
+        print(f"--clearance {args.clearance}: the Default net class routes at it this run; "
+              f"other classes are honoured (pass --clearance-ceiling to cap every class).")
+    if _ceiling is not None:
         # min(Default class, ceiling) so Default is capped like every other class.
-        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+        args.clearance = min(args.clearance, _ceiling)
+        print(f"--clearance-ceiling {_ceiling}: every net class is capped at it and the "
+              f"output project's classes are clamped down to it (#439).")
     # Both floors go through the SHARED resolver (list_nets.resolve_cli_floor),
     # so a declared 0 -- KiCad's "not configured" -- reads as UNSET here exactly
     # as it does on the placement half of the loop. Read straight, these two
@@ -6638,7 +6655,7 @@ For differential pair routing, use route_diff.py:
                                    for nid, clr in _net_clearances_map.items()}
         if _net_clearances_map:
             _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})
-            _mode = (f"capped at --clearance {args._clearance_ceiling}"
+            _mode = (f"capped at --clearance-ceiling {args._clearance_ceiling}"
                      if args._clamp_netclasses
                      else "honored in full (--clearance omitted)")
             print(f"Netclass clearances for {len(_net_clearances_map)} net(s), {_mode} "

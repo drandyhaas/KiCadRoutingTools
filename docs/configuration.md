@@ -111,7 +111,8 @@ python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-rerou
 |--------|---------|-------------|
 | `--track-width` | 0.3 | Track width in mm (ignored if `--impedance` specified) |
 | `--impedance` | - | Target single-ended impedance in ohms (calculates width per layer from stackup) |
-| `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance **ceiling** in mm. **Given** → every net class (Default included) is capped at `min(class, --clearance)` and the output `.kicad_pro` clamps to the routed floor. **Omitted** → each net routes at its own net-class clearance and the classes are preserved (base = the board's own Default class from the sibling `.kicad_pro`) (#439). Use `--net-clearances <json>` for explicit per-net values |
+| `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance of the **Default net class** for this run, in mm; nets in other classes route at their own class clearance (pairwise `max`, as KiCad's DRC does). **Omitted** → the board's own Default class from the sibling `.kicad_pro`. Since #530 this no longer caps the other classes; use `--net-clearances <json>` for explicit per-net values |
+| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). GUI: the **Class ceiling** checkbox next to Min Clearance |
 | `--via-size` | 0.5 | Via outer diameter in mm |
 | `--via-drill` | 0.3 | Via drill diameter in mm |
 | `--grid-step` | 0.1 | Grid resolution in mm |
@@ -213,13 +214,16 @@ python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --escalation 
 python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
 ```
 
-**Floor enforcement.** The CLI **pins** `--track-width`, `--clearance`, `--via-size`,
-`--via-drill` and `--hole-to-hole-clearance` up to the active floor with a warning when
-set below it (the tier's floor, or the board's own minimum under `--escalation board`);
-raise the value, or declare a smaller capability with `--fab-overrides`. The GUI pins
-the corresponding Basic-tab spin control the same way. Grade verification
-(`check_drc.py`) defaults its size/clearance floors to the same tier, so pass the tier
-the board was routed with.
+**Floor enforcement.** An explicit `--track-width`, `--clearance`, `--via-size`,
+`--via-drill` or `--hole-to-hole-clearance` is checked against the **physical** fab
+floor (the `--fab-overrides` file when given, else the advanced rung: 0.25/0.15 via,
+0.09–0.10 mm track/clearance) and **pinned** up to it with a warning when set below.
+The selected tier and the board's own minimums bound what the router may descend to
+on its own, never an explicit request: `--via-size 0.3` under the hard `standard` tier
+is routed at 0.3 as asked (no automatic descent below it), exactly as a request below a
+stock Board Setup minimum is. The GUI pins the corresponding Basic-tab spin control the
+same way. Grade verification (`check_drc.py`) grades sizes at the board's own minimums
+and rules (what KiCad grades) raised to the same physical floor.
 
 ### Post-Route DRC Settings
 

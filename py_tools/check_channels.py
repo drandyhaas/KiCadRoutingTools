@@ -353,9 +353,14 @@ def main():
     # tool has no such pass, so it wraps here. Pinned regardless of SOURCE: a
     # --clearance 0.05 typed on the CLI is exactly as unetchable as a declared
     # one, which is how enforce_fab_floors treats an explicit flag too.
-    from fab_tiers import fab_floor_min, count_copper_layers_in_file
+    # #857: the PHYSICAL fab floor (override file, else the advanced rung),
+    # not the selected tier's -- the tier bounds automatic descents, and a
+    # prediction is not a descent. Keeps this CLI and the library ledger
+    # (which takes the lane geometry verbatim) agreeing at any explicit value
+    # the fab can etch.
+    from fab_tiers import physical_fab_floor, count_copper_layers_in_file
     try:
-        _fab = fab_floor_min(count_copper_layers_in_file(args.board))
+        _fab = physical_fab_floor(count_copper_layers_in_file(args.board))
     except Exception:                                          # noqa: BLE001
         _fab = {}
     for _nm, _key, _val, _src in (('clearance', 'clearance', clearance, clr_src),
