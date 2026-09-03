@@ -394,7 +394,11 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     if not may_narrow():
         return []
     rungs = fab_floor_ladder(copper_layer_count, tier, overrides)
-    if extra_floors and _ESCALATION == 'board':
+    # Per-net floors apply under EVERY policy; GridRouteConfig.rule_floors is
+    # the policy-aware side (it omits the .kicad_dru minimums under ``fab``,
+    # which may go below them, but always carries a non-Default net's own
+    # class clearance -- a grading floor the writeback never lowers, #530).
+    if extra_floors:
         rungs = _apply_board_floors(rungs, extra_floors)
     return rungs
 

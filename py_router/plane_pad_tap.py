@@ -223,6 +223,13 @@ def fine_tap_configs(config: GridRouteConfig, pad: Pad, pcb_data: PCBData):
     # Narrow the tap track to fit between fine-pitch pads, never below the fab
     # floor (raised to the board's own minimum under --escalation board).
     fab_track = config.track_floor(getattr(pad, 'net_id', 0) or 0, None, fab_track)  # #530
+    # #530: the tap's clearance may step down only to the tapped net's own
+    # floors (its class clearance for a non-Default net, .kicad_dru rules).
+    try:
+        fab_clear = max(fab_clear, config.rule_floors(getattr(pad, 'net_id', 0) or 0)
+                        .get('clearance', 0.0))
+    except Exception:                                          # noqa: BLE001
+        pass
     fine_track = max(fab_track, min(min(pad.size_x, pad.size_y), config.track_width))
     note_narrowing(getattr(pad, 'net_id', None), 'track_width', config.track_width,
                    fine_track, 'fine-pitch tap')

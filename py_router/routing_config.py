@@ -370,16 +370,24 @@ class GridRouteConfig:
         descent sites: a rescue may narrow a track or shrink a via only down
         to these under ``--escalation board``. Empty when the board declares
         none, or under ``--escalation fab`` (which may go below them)."""
+        out = {}
+        # #530 (corpus A/B, core1106_cam): a net in a NON-Default class is graded
+        # by KiCad at that class's clearance whatever this run narrowed to --
+        # the writeback lowers only the Default class (decision 2) -- so no
+        # automatic clearance descent for the net may go below its own class.
+        # Applies under EVERY policy: this is a grading floor, not a fab one.
+        cc = self.net_clearances.get(net_id) if self.net_clearances else None
+        if cc:
+            out['clearance'] = float(cc)
         rules = self.rules
         if rules is None or not (getattr(rules, 'rules', None) or getattr(rules, 'board_min', None)):
-            return {}
+            return out
         try:
             from fab_tiers import get_escalation_policy
             if get_escalation_policy()[0] == 'fab':
-                return {}
+                return out
         except Exception:                                      # noqa: BLE001
-            return {}
-        out = {}
+            return out
         try:
             tw = rules.floor('track_width', net_id, layer)
             if tw:
@@ -391,7 +399,7 @@ class GridRouteConfig:
             if hs:
                 out['via_drill'] = hs
         except Exception:                                      # noqa: BLE001
-            return {}
+            return out
         return out
 
     def track_floor(self, net_id: int, layer: Optional[str], fab_value: float) -> float:
