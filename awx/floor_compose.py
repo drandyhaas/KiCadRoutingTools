@@ -58,6 +58,8 @@ ap.add_argument('--top', type=int, default=2)
 ap.add_argument('--pairs-try', type=int, default=8)
 ap.add_argument('--src', default='U1')
 ap.add_argument('--dst', default='DU1')
+ap.add_argument('--no-nest', action='store_true',
+                help='skip the nest-model wrap asks')
 ap.add_argument('--only', default='',
                 help='comma list: sweep only these nets (smoke)')
 a = ap.parse_args()
@@ -78,7 +80,56 @@ def vias_of(board, nm):
     return len(sg._collect(txt, 'via', sg._matcher(nid, name)))
 
 
-def sweep_net(rnd, best, fo, menu, nm):
+def nest_asks(board, menu):
+    """The NEST model's wrap recommendations as relay asks, per net:
+    the shift-minimized position ('m'), the arc-end position ('e',
+    analyze without minimize_shifts) and the array's back third ('b',
+    improve_k's fallback), each at both layers. The crossing-SET
+    family: the group-page probe showed no page assignment drops K35,
+    the human's SDQ7 has 5 crossings to our 13 -- wraps are the move
+    that changes which nets cross which."""
+    try:
+        from plan_nest import analyze
+    except Exception as e:
+        say(f'  nest model unavailable ({e})')
+        return {}
+    out = {}
+    for variant, mins in (('m', True), ('e', False)):
+        try:
+            nr = analyze(board, nets, a.src, a.dst, minimize_shifts=mins)
+        except Exception as e:
+            say(f'  nest analyze failed ({e})')
+            return out
+        for m, (end, side, coord) in nr.get('asks', {}).items():
+            ref = a.src if end == 'src' else a.dst
+            for L in ('F.Cu', 'B.Cu'):
+                out.setdefault(m, []).append((
+                    f'N{variant}{end[0]}{side[0]}{L[0]}',
+                    (['--ref', a.dst] if ref == a.dst else [])
+                    + ['--side', side, '--coord', f'{coord:.2f}',
+                       '--layer', L]))
+        if variant == 'e':
+            for m, (tag, _mm, _solo) in nr.get('moves', {}).items():
+                if '-wrap' not in tag:
+                    continue
+                end, wrap = tag.split('-')
+                ref = a.src if end == 'src' else a.dst
+                W = menu.BBs[ref]
+                w = W[2] - W[0]
+                coord = W[0] + 0.25 * w if end == 'src' else W[2] - 0.25 * w
+                side = 'up' if wrap == 'wrapN' else 'down'
+                for L in ('F.Cu', 'B.Cu'):
+                    out.setdefault(m, []).append((
+                        f'Nb{end[0]}{side[0]}{L[0]}',
+                        (['--ref', a.dst] if ref == a.dst else [])
+                        + ['--side', side, '--coord', f'{coord:.2f}',
+                           '--layer', L]))
+    say(f'  nest asks: {sum(len(v) for v in out.values())} candidates '
+        f'over {len(out)} nets')
+    return out
+
+
+def sweep_net(rnd, best, fo, menu, nm, extra=()):
     """All of one net's candidates, relayed + realized on the frozen
     record. Returns [(label, relfo, b1)]. Resumable: an existing b1
     is reused."""
@@ -96,7 +147,7 @@ def sweep_net(rnd, best, fo, menu, nm):
                                 pages={nm: pg}):
                 continue
         out.append((label, fo, b1))
-    for label, largs in menu.cands(nm):
+    for label, largs in list(menu.cands(nm)) + list(extra):
         stem = f'tmp/{a.tag}_r{rnd}_{nm}_{label}'
         relfo = stem + '_fo.kicad_pcb'
         b1 = stem + '_b1.kicad_pcb'
@@ -157,9 +208,11 @@ for rnd in range(a.rounds):
     names = sorted(J.paths)
     if a.only:
         names = [n for n in names if n in a.only.split(',')]
+    NA = nest_asks(best, menu) if not a.no_nest else {}
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
         res = list(ex.map(
-            lambda nm: (nm, sweep_net(rnd, best, fo, menu, nm)), names))
+            lambda nm: (nm, sweep_net(rnd, best, fo, menu, nm,
+                                      NA.get(nm, ()))), names))
     cands = {}
     for nm, lst in res:
         rows = []
