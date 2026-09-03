@@ -340,8 +340,17 @@ for rnd in range(a.rounds):
         n2, _f2, _v2, l2, relfo2, _b2 = c2
         label = f'r{rnd}_{n1}_{l1}+{n2}_{l2}'
         say(f'  pair {n1} {l1} + {n2} {l2}: predicted {jf}')
-        # compose the fanout: n2's ask relayed on n1's relayed board
-        largs2 = next(la for lb, la in menu.cands(n2) if lb == l2)
+        # compose the fanout: n2's ask relayed on n1's relayed board.
+        # The ask may come from ANY family -- the faces menu, the nest
+        # asks or the plan-menu asks (a 'P...' label raised
+        # StopIteration here on the 60-via K35 board); a page flip has
+        # no relay form and cannot be composed this way.
+        largs2 = next((la for lb, la in list(menu.cands(n2))
+                       + list(NA.get(n2, ())) + list(PA.get(n2, ()))
+                       if lb == l2), None)
+        if largs2 is None:
+            say(f'    {l2} has no relay form; pair skipped')
+            continue
         relfo12 = f'tmp/{a.tag}_{label}_fo.kicad_pcb'
         if sg.relay(relfo1, n2, largs2, relfo12) is None:
             say('    relay of the second net missed on the composed fo')
