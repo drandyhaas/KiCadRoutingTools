@@ -186,6 +186,35 @@ def main():
           worst, '; '.join(f'{b}: {n}/{t} off-lattice, up to {m:.4f} mm'
                            for b, (n, t, m) in off_lattice.items()))
 
+    # 7. THE PREDICATE ITSELF: overlap is a BARREL question, not a centre one.
+    #    A via whose centre sits outside the pad can still land copper in it,
+    #    and that joint needs Type VII exactly as much -- #695's finding, and
+    #    why fab_notes credits the barrel radius. No board in the table above
+    #    happens to contain the case (every selected offset there keeps its
+    #    CENTRE on the pad), so a mutation dropping the radius survived the
+    #    board arms. It is asserted directly instead.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from synth import make_pad as _make_pad
+    lead = _make_pad(1, 0.0, 0.0, ref='U1', num='1', net_name='X',
+                     size_x=0.25, size_y=0.80)
+    outside = 0.20         # pad half-width is 0.125, so the CENTRE is off it
+    check('a via whose CENTRE is off the pad but whose BARREL overlaps it '
+          'counts as via-in-pad',
+          via_overlaps_pad(lead, outside, 0.0, VIA_SIZE),
+          f'centre {outside} mm out on a {lead.size_x} mm-wide lead; the '
+          f'{VIA_SIZE} barrel reaches {outside - VIA_SIZE / 2:+.4f} mm')
+    from check_drc import point_to_pad_distance as _p2p
+    check('...and it is the BARREL that credits it: the via CENTRE is '
+          'outside that pad',
+          _p2p(outside, 0.0, lead) > 0.0,
+          f'centre-to-pad distance {_p2p(outside, 0.0, lead):.4f} mm -- if '
+          f'this were 0 the arm above would pass without the barrel radius, '
+          f'and the mutation dropping it would survive')
+    far = 0.60             # beyond pad half-width + barrel radius
+    check('a via genuinely clear of the pad is NOT via-in-pad',
+          not via_overlaps_pad(lead, far, 0.0, VIA_SIZE),
+          f'{far} mm out; the barrel reaches {far - VIA_SIZE / 2:.4f} mm')
+
     if not ran:
         print('SKIP: no corpus board present')
         return 77

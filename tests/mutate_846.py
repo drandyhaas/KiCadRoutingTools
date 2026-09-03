@@ -88,24 +88,35 @@ ROWS = [
 
     # --- #846: the ladder reach knob ---------------------------------------
     ('ladder-reach-filter-deleted', 'qfn',
-     '        if _reach is not None:\n'
-     '            axis = [d for d in axis if abs(d) <= _reach + 1e-9]',
-     '        if False:\n'
-     '            axis = [d for d in axis if abs(d) <= _reach + 1e-9]',
+     '    if reach is not None:\n'
+     '        seq = [d for d in seq if abs(d) <= reach + 1e-9]',
+     '    if False:\n'
+     '        seq = [d for d in seq if abs(d) <= reach + 1e-9]',
      (TLAD,), 'KILLED'),
 
     ('unrecognised-knob-value-shortens-the-ladder', 'qfn',
-     "        _reach = {'pad': pad_width / 2.0,\n"
-     "                  'barrel': pad_width / 2.0 - via_size / 2.0,\n"
-     "                  }.get(env_knobs.QFN_ONPAD_REACH)",
-     "        _reach = {'full': None,\n"
-     "                  'barrel': pad_width / 2.0 - via_size / 2.0,\n"
-     "                  }.get(env_knobs.QFN_ONPAD_REACH, pad_width / 2.0)",
+     "    reach = {'pad': pad_width / 2.0,\n"
+     "             'barrel': pad_width / 2.0 - via_size / 2.0,\n"
+     "             }.get(env_knobs.QFN_ONPAD_REACH)",
+     "    reach = {'full': None,\n"
+     "             'barrel': pad_width / 2.0 - via_size / 2.0,\n"
+     "             }.get(env_knobs.QFN_ONPAD_REACH, pad_width / 2.0)",
      (TLAD,), 'KILLED'),
 
     ('pad-and-barrel-arms-collapsed-into-one', 'qfn',
-     "                  'barrel': pad_width / 2.0 - via_size / 2.0,",
-     "                  'barrel': pad_width / 2.0,",
+     "             'barrel': pad_width / 2.0 - via_size / 2.0,",
+     "             'barrel': pad_width / 2.0,",
+     (TLAD,), 'KILLED'),
+
+    # The engine must have ONE source for these offsets. A second copy inside
+    # candidate_offsets is how the first draft of the ladder test came to
+    # mirror the engine instead of calling it, and every knob row survived.
+    ('candidate_offsets-grows-its-own-copy-of-the-ladder', 'qfn',
+     "        axis = axis_offset_ladder(pad_width, via_size, step,\n"
+     "                                  'near' if mode == 'out' else mode)",
+     "        axis = [0.0]\n"
+     "        for _k in range(1, 9):\n"
+     "            axis += [_k * step, -_k * step]",
      (TLAD,), 'KILLED'),
 
     # --- #652: the predicate ------------------------------------------------
