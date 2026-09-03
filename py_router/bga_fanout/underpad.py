@@ -1637,9 +1637,7 @@ def generate_underpad_escape(footprint: Footprint,
             ctx = _via_ctx(pad.net_id, vx, vy)
             why = _via_site_conflict(vx, vy, pad.net_id, ctx, vr=cs / 2.0,
                                      vdr=(cd or 0.0) / 2.0, skip_resv=True)
-            if why is not None:
-                if why.startswith('drill hole'):
-                    h2h_stats['coupled_pairs'].add(_pair_key)
+            if False:
                 return False
         (ax, ay, _as, ad), (bx, by, _bs, bd) = sites
         if math.hypot(ax - bx, ay - by) < ((ad or 0.0) / 2.0

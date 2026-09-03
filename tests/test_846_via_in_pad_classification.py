@@ -16,20 +16,31 @@ THE MEASUREMENT, AS RUN (upstream/main e239e067, --escape-method underpad
     tigard U3                    48       28                  20         0
     qfn_diffpair_escape U1        2        0                   2         0
     qfn_underpad_coupling U1      8        0                   8         0
-    qfn_interior_pads U1 (INT*)   2        2                   0         0
 
-The "OVERLAP-off-centre" column is what this fix moves: 30 vias across three
-tracked boards that overlap the copper of the pad they escape while sitting off
-its centre. Before, every one of them shipped unclamped.
+Every row is a board this file RUNS, so the table is re-derived on each
+invocation rather than remembered. (An earlier draft carried a fifth row,
+qfn_interior_pads under a ``--nets INT*`` filter, which no arm here reproduced
+-- with the whole net set that board reads 6 vias / 0 centred / 6 overlapping.
+A measured row nothing re-measures is how a table starts drifting.)
+
+The "OVERLAP-off-centre" column is what this fix moves: 30 vias across three of
+the four boards, overlapping the copper of the pad they escape while sitting off
+its centre. Before, every one of them shipped unclamped. routed_output is here
+for the OPPOSITE population -- 14 vias, none overlapping -- because without it a
+mutation that clamps everything is invisible.
 
 WHY THE CENTRED COLUMN IS MOSTLY ZERO -- the part the issue did not name.
 ``snap()`` quantises the via COORDINATE to the routing grid (0.05 default),
 while real pad centres are not on that lattice: measured, 76 of 77 pads on
-routed_output's QFN-76, 6 of 6 on qfn_diffpair_escape, 8 of 8 on
-qfn_underpad_coupling, 16 of 66 on tigard. On those boards the genuinely
-centred rung lands **0.0125 mm** from the pad centre -- 12.5x
-POSITION_TOLERANCE -- so the via-in-pad branch was unreachable by construction,
-even for the offset the ladder calls 0.
+routed_output's QFN-76, 6 of 6 on qfn_diffpair_escape and 8 of 8 on
+qfn_underpad_coupling all sit **0.0125 mm** off it -- 12.5x POSITION_TOLERANCE
+-- so on those three the via-in-pad branch was unreachable by construction, even
+for the offset the ladder calls 0.
+
+tigard is the control that keeps this honest: 50 of its 66 pads ARE on the
+lattice (the 16 that are not sit 0.01178-0.03536 mm off), and it duly produced
+28 centred vias. The defect is board-dependent, not universal, and the boards it
+bites are the ones whose pad centres are off-grid.
 
 Run: python3 tests/test_846_via_in_pad_classification.py
 """

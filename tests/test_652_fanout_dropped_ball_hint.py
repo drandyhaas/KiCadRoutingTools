@@ -224,6 +224,68 @@ def main():
           f'results_data={rd.get("fanout_dropped")} -- an empty match on both '
           f'sides is a vacuous pass, so a non-empty list is required')
 
+    # 10. EVERY WIRED SITE MUST RESOLVE ITS NAMES. The hint blocks sit inside
+    #     `try/except Exception: pass` -- the pattern the #103 hints use so a
+    #     diagnosis can never break a routing path -- which also means a
+    #     NameError there is SILENT: the hint simply never fires and nothing
+    #     says so. That is not hypothetical; the diff_pair_loop site was
+    #     written with a bare `record_net_event` that is not imported in that
+    #     module, and only this check caught it.
+    import ast
+    sites = {
+        'py_router/single_ended_loop.py': ['pcb_data', 'config', 'net_id',
+                                           'net_name', 'state',
+                                           'condense_hint',
+                                           'record_net_event'],
+        'py_router/reroute_loop.py': ['pcb_data', 'config', 'ripped_net_id',
+                                      'ripped_net_name', 'state',
+                                      'condense_hint', 'record_net_event'],
+        'py_router/phase3_routing.py': ['pcb_data', 'config', 'victim_id',
+                                        'victim_name', 'state',
+                                        'record_net_event'],
+        'py_router/diff_pair_loop.py': ['pcb_data', 'config', 'pair', 'state'],
+    }
+    unresolved, wired = [], 0
+    for rel, names in sites.items():
+        src = io.open(os.path.join(ROOT, rel), encoding='utf-8').read()
+        tree = ast.parse(src)
+        hits = [i for i, ln in enumerate(src.splitlines(), 1)
+                if '_h652, _v652 = fanout_dropped_ball_hint(' in ln]
+        if not hits:
+            unresolved.append(f'{rel}: NOT WIRED')
+            continue
+        wired += 1
+        mod = set()
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    mod.add((a.asname or a.name).split('.')[0])
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)):
+                mod.add(n.name)
+        for line in hits:
+            fn = None
+            for n in ast.walk(tree):
+                if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and n.lineno <= line <= (n.end_lineno or 0)):
+                    if fn is None or n.lineno > fn.lineno:
+                        fn = n
+            bound = set(mod)
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                    bound.add(n.id)
+                if isinstance(n, ast.arg):
+                    bound.add(n.arg)
+                if isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for a in n.names:
+                        bound.add((a.asname or a.name).split('.')[0])
+            unresolved += [f'{rel}:{line} {fn.name}: {x}'
+                           for x in names if x not in bound]
+    check('all FOUR sites that print `no rippable blockers found` are wired, '
+          'and every name they use resolves',
+          wired == 4 and not unresolved,
+          f'wired={wired}/4; unresolved={unresolved}')
+
     bad = [n for n, ok in CHECKS if not ok]
     print(f"\n{'FAIL' if bad else 'PASS'}  #652 fanout-dropped diagnosis: "
           f"{len(CHECKS) - len(bad)}/{len(CHECKS)} checks")

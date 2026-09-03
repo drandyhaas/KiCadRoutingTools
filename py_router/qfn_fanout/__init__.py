@@ -76,13 +76,18 @@ def axis_offset_ladder(pad_width, via_size, step, mode='near'):
     escape-axis extent is 0.875, so rung 1 lands 0.0100 mm inside the pad EDGE,
     rung 2 is 0.8550 mm out and rung 8 reaches +-3.4199 mm.
 
-    Those rungs ARE load-bearing, measured: with --allow-via-in-pad this ladder
-    is tried first and won 66 of 84 accepted offsets on routed_output U2 and
-    every one on tigard, qfn_underpad_coupling and qfn_diffpair_escape, and it
-    owns the longest emitted stub there (2.9924 mm, pad 65, k = 7). Confining it
-    to the pad regressed 1 of 5 boards ('pad') and 3 of 5 ('barrel') in
-    tests/sweep_846_onpad_ladder.py, so the default is 'full': the ladder is
-    right and the NAME was wrong.
+    Those rungs ARE load-bearing, measured by
+    `tests/sweep_846_onpad_ladder.py` -- committed, so this stays checkable
+    rather than remembered: confining the ladder regressed escapes on 1 of 5
+    boards ('pad': routed_output U2, 15 -> 10) and 3 of 5 ('barrel'), improved
+    none, and left drc_grazes identical arm-to-arm. So the default is 'full' --
+    the ladder is right and the NAME was wrong.
+
+    It is also where the long stubs come from, which is what #846 reports: on
+    routed_output U2 the longest EMITTED stub is 3.0125 mm against a 0.875 mm
+    pad. (An earlier draft of this docstring said 2.9924 mm -- that is the
+    ladder's requested OFFSET at k = 7, before `snap()` puts the via on the
+    routing grid, not the copper that shipped.)
 
     KICAD_QFN_ONPAD_REACH picks the arm -- 'full' (default), 'pad' (the via
     CENTRE stays on the pad), 'barrel' (the whole barrel does). An unrecognised
