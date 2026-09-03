@@ -230,6 +230,24 @@ kit-dev-coldfire 0 / 0 -> 1 / 7, glasgow 14 / 2 -> 16 / 4, rp2350 8 / 11 ->
 10 / 13, orangecrab 18 / 9 -> 20 / 10, tigard 8 / 3 -> 9 / 8, watchy 4 / 4 ->
 6 / 9; only esp_prog stays at 0 / 0.
 
+*After #850* (2026-09-03) **nothing on this page moved, and that is a
+measurement rather than an omission.** #850 changed which face a pad points
+at in both ledgers -- corpus-wide, face demand fell from 2034 nets to 1203 --
+and it moved neither column of either table above. Both were re-derived at
+that tip with the two commands named above: every deficit / worst pair is
+identical, the 72.2% share is identical, and so is 14 of the 80 uncharged
+pairs.
+
+The reason is worth knowing, because "the demand model changed and the
+demand-derived table did not" reads like an error. This page reports
+`deficit = demand - supply`, and the parts whose demand moves hardest have
+supply to spare, so neither number reaches a deficit. On this page's own
+instrument, ulx3s U1 goes from 0 face-demand nets to 18 / 18 / 13 / 18
+(N / E / S / W) against a supply of 21 / 31 / 31 / 29 -- deficit 0 on every
+face before and after. And the one board whose argument here turns on demand,
+kit-dev-coldfire, has no interior pads at all: 0 of its 244 netted pads, on
+either of its two fine-pitch parts.
+
 **What that does to the argument, stated rather than absorbed.** The
 "already charged" share falls 93.6% -> 72.2%, and the pairs the halo misses
 that the demand term WOULD reach go from 0 of 26 to 14 of 93. So the first
