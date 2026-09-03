@@ -4264,8 +4264,7 @@ def route_multipoint_taps(
                 from obstacle_map import _rung_small_armed as _rsa, _mirror_rungs_remove
                 if _rsa() and hasattr(obstacles, 'remove_blocked_vias_small_batch'):
                     obstacles.remove_blocked_vias_small_batch(_rc)
-                else:
-                    _mirror_rungs_remove(obstacles, _rc)   # #530 per-net rungs
+                _mirror_rungs_remove(obstacles, _rc)   # #530 per-net rungs
             except (AttributeError, ImportError):
                 pass
 
@@ -4347,12 +4346,12 @@ def _route_multipoint_taps_impl(
     _vv_radius = (config.via_size + config.clearance) * coord.inv_step
 
     try:        # #568: armed once per tap run (see the ring mirror below)
-        from obstacle_map import _rung_small_armed as _rsa, _extra_rungs as _xr
+        from obstacle_map import _rung_small_armed as _rsa, _per_net_rungs as _pnr
         _small_rung_on = _rsa() and hasattr(obstacles, 'add_blocked_via_small')
-        _extra_rung_n = 0 if _small_rung_on else _xr(obstacles)   # #530 per-net rungs
+        _pn_rungs = list(_pnr(obstacles))   # #530 per-net rungs (above the small map)
     except ImportError:
         _small_rung_on = False
-        _extra_rung_n = 0
+        _pn_rungs = []
 
     def _register_inprogress_via(v):
         vgx, vgy = coord.to_grid(v.x, v.y)
@@ -4378,7 +4377,7 @@ def _route_multipoint_taps_impl(
                     # wrapper's finally removes both maps' cells (#309).
                     if _small_rung_on:
                         obstacles.add_blocked_via_small(vgx + ex, vgy + ey)
-                    for _r in range(1, _extra_rung_n + 1):   # #530 per-net rungs
+                    for _r in _pn_rungs:   # #530 per-net rungs
                         obstacles.add_blocked_via_rung(_r, vgx + ex, vgy + ey)
                     # Ref-counted raw add: the wrapper removes these on exit so
                     # they can't leak into a persistent working map (#309).

@@ -2283,29 +2283,40 @@ def _ledger_close(obstacles, pre, tag: str):
     _oc.ledger_raw_delta(obstacles, f"{tag} @ {site}", st[0] - pre[0], st[1] - pre[1])
 
 
-def _extra_rungs(obstacles) -> int:
-    """#530: number of via-legality rungs beyond rung 0 the working map carries
-    (0 on a single-rung map or a 0.21.x binary). Raw copper adds mirror their
-    full-size via cells into EVERY rung, as the #568 small mirror does."""
+def _per_net_rungs(obstacles) -> range:
+    """#530: the PER-NET via-legality rungs the working map carries (empty on
+    a single-rung map or a 0.21.x binary). Rung 0 is the run's via; when the
+    #568 small map is armed it holds rung 1 (obstacle_cache.via_rungs keeps
+    that slot for it) and its own mirror stamps it, so per-net rungs start at
+    2 -- otherwise at 1. Raw copper adds mirror their full-size via cells into
+    every per-net rung, the same conservative over-block the small mirror
+    applies (never wrong; a rung-r search near raw copper is not told the
+    cells are legal)."""
     try:
-        return max(0, int(obstacles.rung_count()) - 1)
+        n = int(obstacles.rung_count())
     except Exception:                                          # noqa: BLE001
-        return 0
+        return range(0)
+    return range(2 if _rung_small_armed() else 1, n)
+
+
+def _extra_rungs(obstacles) -> int:
+    """Number of per-net rungs (see _per_net_rungs)."""
+    return len(_per_net_rungs(obstacles))
 
 
 def _mirror_rungs_add(obstacles, cells) -> None:
-    n = _extra_rungs(obstacles)
-    if n and len(cells):
+    rs = _per_net_rungs(obstacles)
+    if len(rs) and len(cells):
         arr = np.asarray(cells, dtype=np.int32)
-        for r in range(1, n + 1):
+        for r in rs:
             obstacles.add_blocked_vias_rung_batch(r, arr)
 
 
 def _mirror_rungs_remove(obstacles, cells) -> None:
-    n = _extra_rungs(obstacles)
-    if n and len(cells):
+    rs = _per_net_rungs(obstacles)
+    if len(rs) and len(cells):
         arr = np.asarray(cells, dtype=np.int32)
-        for r in range(1, n + 1):
+        for r in rs:
             obstacles.remove_blocked_vias_rung_batch(r, arr)
 
 
@@ -2405,8 +2416,7 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
             if _rung_small_armed():
                 obstacles.add_blocked_vias_small_batch(
                     np.array(_small, dtype=np.int32))
-            else:
-                _mirror_rungs_add(obstacles, np.array(_small, dtype=np.int32))
+            _mirror_rungs_add(obstacles, np.array(_small, dtype=np.int32))  # per-net rungs
     _ledger_close(obstacles, _pre, "add_vias_list")
 
 
@@ -2478,8 +2488,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
                  else _small_arrs[0])
         if _rung_small_armed():
             obstacles.add_blocked_vias_small_batch(np.asarray(_sall, dtype=np.int32))
-        else:
-            _mirror_rungs_add(obstacles, np.asarray(_sall, dtype=np.int32))
+        _mirror_rungs_add(obstacles, np.asarray(_sall, dtype=np.int32))  # per-net rungs
     _ledger_close(obstacles, _pre, "add_segments_list")
 
 
@@ -2546,8 +2555,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
-        else:
-            _mirror_rungs_remove(obstacles, vias_array)   # #530
+        _mirror_rungs_remove(obstacles, vias_array)   # #530 per-net rungs
     _ledger_close(obstacles, _pre, "remove_segments_list")
 
 
@@ -2641,8 +2649,7 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
-        else:
-            _mirror_rungs_remove(obstacles, vias_array)   # #530
+        _mirror_rungs_remove(obstacles, vias_array)   # #530 per-net rungs
     _ledger_close(obstacles, _pre, "remove_vias_list")
 
 
@@ -2708,8 +2715,7 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
         try:
             if _rung_small_armed():
                 obstacles.add_blocked_vias_small_batch(_pad_cells)
-            else:
-                _mirror_rungs_add(obstacles, _pad_cells)   # #530
+            _mirror_rungs_add(obstacles, _pad_cells)   # #530 per-net rungs
         except (AttributeError, NameError):
             pass
 
