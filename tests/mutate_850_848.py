@@ -22,7 +22,8 @@ gate to pass UNMUTATED first; drop `__pycache__` before and after every row and
 run children with `-B`; treat exit 77 from every witness as UNDECIDED rather
 than a kill; restore in a `finally`.
 
-RECORDED at the tip -- see the commit that adds this line for the counts.
+RECORDED at 093f5f36 -- **17 rows, 17 killed, 0 survived, 0 undecided, 0
+broken, 0 disagreeing with expectation.**
 
 Six rows that guarded a `_assignment_rect` experiment were REMOVED with it:
 that change measured the face against the union of the NETTED pads' copper,
