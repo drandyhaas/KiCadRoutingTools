@@ -1808,6 +1808,10 @@ class RoutingDialog(wx.Dialog):
             layer_costs = self._selected_layer_costs()
             return {
                 'track_width': self._effective_track_width(),
+                # #861: where that width came from, so the fanout log can say
+                # "0.2 mm from the board's Default net class" instead of
+                # leaving the user to guess why a typed 3 mil was not used.
+                'track_width_from_class': not self.track_width_check.GetValue(),
                 'clearance': self._effective_clearance(),
                 'via_size': self._effective_via_size(),
                 'via_drill': self._effective_via_drill(),
