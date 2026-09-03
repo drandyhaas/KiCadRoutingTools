@@ -1,3 +1,64 @@
+2becea8f 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit e239e067..2becea8f on branch worktree-constraints-dru (10 commits, the
+#530/#842/#857/#856/#770 design-rules rework; docs/design-rules-proposal.md).
+ONE GAP FOUND AND FIXED IN-RANGE (fc36e578). Seven gates green, run live.
+
+THE SURFACE, checked mechanically, not assumed:
+
+  * NEW CLI FLAGS (route / route_diff / route_planes / repair_planes / bga and
+    qfn fanout, via fab_tiers.add_fab_tier_args): --escalation {off,board,fab}
+    (default board), --clearance-ceiling (the old cap-every-class meaning of
+    --clearance), --strict-sizes (exit 3 when anything narrowed), --fab-tier
+    gains 'auto' (the old escalating ladder; standard/advanced are now hard).
+    route.py: --relax-drc-severities. fix_kicad_drc_settings standalone:
+    --relax-severities. Every one reaches the dialog: 'escalation' wx.Choice
+    replaces the Obey-DRC box, 'clearance_ceiling_check' (Class ceiling) next
+    to Min Clearance, 'relax_drc_severities_check', fab_tier choice carries
+    'auto'. manifest_to_plan FLAG_PARAMS carries all of them (plan parity gate
+    below); settings_persistence saves/restores all of them (roundtrip gate).
+  * ENGINE KWARGS at the front-end boundary: batch_route gains
+    clearance_ceiling and via_from_class; GridRouteConfig gains rules,
+    net_via_sizes. swig_gui passes both; planes_gui threads clearance_ceiling;
+    fanout_gui keeps the PLACEMENT CLI's ceiling semantics through the
+    placement_clearance_ceiling / placement_clamp_netclasses shared keys
+    (test_768_cap_ceiling_real_dialog pins that).
+  * SHARED CONFIG KEYS (get_shared_params): escalation, board_floors,
+    clearance_ceiling, clamp_netclasses (now == the Class ceiling box),
+    placement_clearance_ceiling, placement_clamp_netclasses.
+  * DEFAULT DRIFT: routing_defaults.py unchanged. The MEANING of --clearance
+    changed on both fronts together (Default class only; #530 decision 2).
+  * SEMANTIC GAP FOUND: the three GUI net_clearances builders (route, planes,
+    diff tabs) put Default-only nets into the map at the class's STORED
+    clearance; the CLI's net_clearance_map_by_id omits them. The old always-on
+    cap hid it; with the cap behind the Class-ceiling box the GUI arm routed a
+    different board (1237 vs 1259 segments). Fixed in fc36e578; copper sets
+    IDENTICAL after.
+  * NEW POST-PASS: none. The design-rules line / JSON_SUMMARY design_rules
+    block / PROJECT_WRITES_JSON are report-only; the writeback changes
+    (netclass sizes never lowered, min_clearance capped at the smallest pad
+    override, severities gated) are inside fix_kicad_drc_settings, shared by
+    both fronts (gui_utils.board_minima_from_live feeds the override cap).
+  * RUST: grid_router 0.22.0 rung API; python selects the path by capability
+    (hasattr add_blocked_vias_rung_batch), both fronts alike.
+
+GATES, on a clean tree, KiCad python 10.0.0 + wx probed live first:
+
+  test_manifest_plan_parity      OK (placement tools refused loudly)
+  test_cli_postpass_coverage     exit 0, no new CLI-only pass
+  test_settings_roundtrip        clean (save, restore, legacy, re-save)
+  test_gui_engine_parity         PARITY; copper sets IDENTICAL (1259 seg /
+                                 128 via both arms); kwargs diff: only
+                                 same_net_pad_clearance None vs -1.0, which
+                                 batch_route resolves identically
+  test_gui_livechain_rp2350      PASS (both chains clean at every stage)
+  test_fanout_rotated_gui        10/10
+  test_768_cap_ceiling_real_dialog  ALL PASS
+
+NOT covered by these gates: diff-pair / impedance params (the engine gate's
+plan is signal + plane). differential_gui's builder got the same Default-only
+fix as swig_gui by inspection + the shared kwargs path, not a routed A/B.
+
+----------------------------------------------------------------------------
 166255d0 2026-09-01 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
 Audit 31004f43..166255d0 on main (129 commits, the whole v0.21.4..v0.21.5
 range). NO GAP FOUND. Six gates green, run live -- not carried.
