@@ -1369,8 +1369,13 @@ class DifferentialTab(wx.Panel):
                 _dp_gap = cfg.get('diff_pair_gap')
                 if _dp_gap is not None and cfg.get('clearance'):
                     _dp_gap = max(_dp_gap, cfg.get('clearance'))
+                # #856: severities only on explicit request; {} = untouched.
+                # The diff-pair gap/width class values are draw defaults and are
+                # no longer written (the #842 ratchet); kwargs kept for the
+                # shared signature.
+                _sev = severity_plan() if cfg.get('relax_drc_severities') else {}
                 if apply_targets_to_board(
-                        board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
+                        board, targets, _sev,
                         diff_pair_gap=_dp_gap,
                         diff_pair_width=cfg.get('track_width'),
                         clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):

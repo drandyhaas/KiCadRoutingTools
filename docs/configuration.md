@@ -197,7 +197,8 @@ live board via the pcbnew API.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--no-fix-drc-settings` | off (fix is on) | Do **not** adjust the output's `.kicad_pro` DRC constraints afterwards; leave KiCad's stock floors |
-| `--keep-thermal` | off | Leave `starved_thermal` (thermal-relief) severity untouched instead of demoting it to a warning |
+| `--relax-drc-severities` | off | ALSO lower the project's DRC severities for the non-routing categories (courtyard shapes, solder-mask bridges, footprint/library issues incl. `annular_width` → ignore; `starved_thermal`, `courtyards_overlap` → warning). Off by default (#856): a routing step never changes what the project counts as a violation unless asked; the previous values are kept under `kicad_routing_tools.saved_severities` |
+| `--keep-thermal` | off | Deprecated no-op (with `--relax-drc-severities`, leaves `starved_thermal` untouched) |
 | `--enable-used-layers` | off | Add any layer the board uses but is missing from its `(layers)` table back into the `.kicad_pcb`, so KiCad stops flagging `item_on_disabled_layer`. Off by default because it edits the board, not just DRC settings |
 
 ### Power Net Options

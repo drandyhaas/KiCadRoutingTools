@@ -289,6 +289,8 @@ _PARAM_CONTROL_ALIASES = {
     # carry it under the fallthrough name `fab_overrides`; the control is
     # fab_overrides_path. New conversions emit fab_overrides_path directly.
     'fab_overrides': 'fab_overrides_path',
+    # #856: the opt-in severity relaxation checkbox (Options tab).
+    'relax_drc_severities': 'relax_drc_severities_check',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).

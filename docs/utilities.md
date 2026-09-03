@@ -1064,12 +1064,19 @@ defaults, which produce noise in two ways:
    neither creates nor fixes — often dominate the report (e.g. ~200 annular +
    ~150 library markers on the orangecrab stress board).
 
-The script sets the relevant **Constraints / Net Classes** to the per-object
-minima the board uses — copper `min_clearance` (+ Default net-class clearance),
+The script sets the relevant **Constraints** to the per-object minima the board
+uses — copper `min_clearance` (+ the Default net-class **clearance**),
 `min_hole_to_hole`, `min_hole_clearance`, `min_copper_edge_clearance`, and the
-min track / via / drill / annular sizes — sets the courtyard / solder-mask /
-footprint severities to `ignore`, and demotes `starved_thermal` (thermal-relief
-spoke shortfall) from error to a **warning** (`--keep-thermal` keeps it an error).
+min track / via / drill / annular sizes. The net-class `track_width`,
+`via_diameter`, `via_drill` and `diff_pair_*` values are **never written**: KiCad
+loads them as draw defaults (`opt`), not DRC minimums, so lowering them prevents
+no violation and rewrites the designer's intent — one 0.127 mm neck used to make
+the Default class 0.127 mm and every later run then routed at it (#842).
+Severities are **untouched unless you pass `--relax-severities`** (#856); with
+it, the courtyard / solder-mask / footprint categories go to `ignore`,
+`starved_thermal` and `courtyards_overlap` to `warning`, each change is printed,
+and the previous value is recorded under `kicad_routing_tools.saved_severities`
+so it can be restored.
 For the **size** floors (track / via / drill) it uses the **smaller** of the
 routing param you pass and the smallest such object actually on the board, so a
 later coarse step (say a 0.3 mm repair pass) can't raise the floor above 0.127 mm
@@ -1120,12 +1127,17 @@ Options:
   --track-width MM      Min track width (default: smallest track on the board)
   --via-size MM         Min via diameter (default: smallest via on the board)
   --via-drill MM        Min hole/drill diameter (default: smallest drill on the board)
-  --keep-courtyards     Do not ignore the courtyard categories
-  --keep-mask           Do not ignore solder_mask_bridge
-  --keep-footprint      Do not ignore footprint/library categories
-                        (annular_width, lib_footprint_issues, lib_footprint_mismatch)
-  --keep-thermal        Keep starved_thermal an error (default: demote to warning)
-  --ignore CAT [CAT...] Additional severity categories to set to "ignore"
+  --relax-severities    ALSO lower the non-routing DRC severities (off by default,
+                        #856): courtyard / solder-mask / footprint categories ->
+                        ignore, starved_thermal and courtyards_overlap -> warning.
+                        Previous values are kept in kicad_routing_tools.saved_severities
+  --keep-courtyards     With --relax-severities: do not ignore the courtyard categories
+  --keep-mask           With --relax-severities: do not ignore solder_mask_bridge
+  --keep-footprint      With --relax-severities: do not ignore footprint/library
+                        categories (annular_width, lib_footprint_issues, lib_footprint_mismatch)
+  --keep-thermal        With --relax-severities: keep starved_thermal an error
+  --ignore CAT [CAT...] Additional severity categories to set to "ignore" (works
+                        with or without --relax-severities)
   --ignore-warnings     Set EVERY category currently at "warning" severity to
                         "ignore" (hides all warning markers; errors untouched)
   --dry-run             Print what would change without writing
@@ -1144,35 +1156,41 @@ step** (issue #160), pinning the floors to the clearances/sizes they just routed
 with, so the written project is DRC-consistent by default. If the output is a new
 file with no project yet, they copy the input board's `.kicad_pro` (or seed a
 complete one when the input has none). Pass `--no-fix-drc-settings` to skip it, or
-`--keep-thermal` to leave `starved_thermal` at its original severity instead of
-demoting it to a warning (all four routing CLIs accept both flags).
+`--relax-drc-severities` to ALSO lower the non-routing severities (off by default,
+#856; `--keep-thermal` is accepted as a deprecated no-op). Every routing step
+that writes the project prints one `PROJECT_WRITES_JSON: {...}` line listing
+what it changed, so a harness can see it without grepping prose.
 
 When routing used an explicit `--clearance` ceiling, the writeback also **clamps**
-each NON-Default net class' clearance/track/via floor DOWN to the routed value
-(#439), so KiCad grades the copper at what was actually routed rather than at the
-(usually aspirational) stock class. When `--clearance` was omitted the classes are
+each NON-Default net class' **clearance** DOWN to the routed value (#439), so
+KiCad grades the copper at what was actually routed rather than at the (usually
+aspirational) stock class. When `--clearance` was omitted the classes are
 preserved (each net routed at its own class). There is no separate flag — the
 `--clearance` ceiling is the switch; in the GUI, checking the **Min Clearance**
 override box is the equivalent (unchecked = honor classes, checked = clamp).
 
 The **GUI plugin** does the equivalent on the live board via the pcbnew API
-(`BOARD_DESIGN_SETTINGS` + the Default net class + severities) after routing, and
+(`BOARD_DESIGN_SETTINGS` + the Default net class clearance) after routing, and
 marks the board modified so your next save keeps it. A single **"Fix DRC settings
 after routing"** checkbox on the **Route tab** controls this for every routing
 action in the dialog — single-ended routing, differential pairs, and plane
-create/repair all read that one shared toggle (it is on by default); a **"Keep
-thermal-relief DRC severity"** checkbox on the **Advanced options tab** is the GUI
-counterpart of `--keep-thermal` (off by default). Both front-ends share the same
-target-computing logic (`compute_targets` / `severity_plan` in
-`fix_kicad_drc_settings.py`) and differ only in how they apply it (`.kicad_pro`
-file vs. pcbnew API).
+create/repair all read that one shared toggle (it is on by default); a **"Relax
+non-routing DRC severities in the project"** checkbox on the **Advanced options
+tab** is the GUI counterpart of `--relax-drc-severities` (off by default). Both
+front-ends share the same target-computing logic (`compute_targets` /
+`severity_plan` in `fix_kicad_drc_settings.py`) and differ only in how they apply
+it (`.kicad_pro` file vs. pcbnew API).
 
 ### Examples
 
 ```bash
-# Default: derive floors from the board's own minima + project clearance; ignore
-# courtyard, solder-mask and footprint/library (annular_width, lib_footprint_*) noise
+# Default: derive floors from the board's own minima + project clearance;
+# severities untouched
 python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb
+
+# Also silence the courtyard, solder-mask and footprint/library
+# (annular_width, lib_footprint_*) categories -- explicit opt-in
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --relax-severities
 
 # Pin every floor to the routing parameters you gave route.py (recommended)
 python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb \
@@ -1189,13 +1207,13 @@ python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --hole-clearance 0.
 python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --ignore-warnings
 
 # Keep courtyard checks, ignore only the mask bridges plus one extra category
-python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --keep-courtyards --ignore starved_thermal
+python3 py_router/fix_kicad_drc_settings.py routed.kicad_pcb --relax-severities --keep-courtyards --ignore starved_thermal
 ```
 
 ### Output
 
 Prints each change (`min_hole_clearance: 0.25 -> 0.0889 mm`,
-`severity[courtyards_overlap]: error -> ignore`, …) and a reminder to reopen the
+`severity[solder_mask_bridge]: error -> ignore`, …) and a reminder to reopen the
 board. On a typical dense BGA board this turns a ~300-violation DRC into the few
 dozen genuine routing errors (clearance + shorts + real sub-floor hole clearance).
 

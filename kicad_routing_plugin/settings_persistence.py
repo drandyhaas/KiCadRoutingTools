@@ -49,7 +49,7 @@ def get_dialog_settings(dialog):
         'move_text_check': dialog.move_text_check.GetValue(),
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
         'fix_drc_settings': dialog.fix_drc_check.GetValue(),
-        'keep_thermal': dialog.keep_thermal_check.GetValue(),
+        'relax_drc_severities': dialog.relax_drc_severities_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -336,8 +336,11 @@ def restore_dialog_settings(dialog, settings):
         dialog.add_teardrops_check.SetValue(settings['add_teardrops_check'])
     if 'fix_drc_settings' in settings:
         dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
-    if 'keep_thermal' in settings:
-        dialog.keep_thermal_check.SetValue(settings['keep_thermal'])
+    # 'keep_thermal' (legacy key, <= v0.21.5) is intentionally not restored:
+    # the control it drove is gone (#856 -- routing steps no longer touch DRC
+    # severities), replaced by the opt-in below.
+    if 'relax_drc_severities' in settings:
+        dialog.relax_drc_severities_check.SetValue(settings['relax_drc_severities'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:

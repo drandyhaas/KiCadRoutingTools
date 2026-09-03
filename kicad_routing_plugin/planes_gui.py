@@ -1685,8 +1685,10 @@ class PlanesTab(wx.Panel):
                     via_diameter=cfg.get('via_size'),
                     via_drill=cfg.get('via_drill'),
                     fab_edge=fab_edge_floor())
+                # #856: severities only on explicit request; {} = untouched.
+                _sev = severity_plan() if cfg.get('relax_drc_severities') else {}
                 if apply_targets_to_board(
-                        board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
+                        board, targets, _sev,
                         clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the plane routing values")

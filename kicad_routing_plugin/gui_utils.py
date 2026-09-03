@@ -837,13 +837,12 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                         iu = board_min_iu if iu is None else min(iu, board_min_iu)
                     if get() > iu:
                         set_(iu)
+                # Clearance only: the class track/via/drill are DRAW defaults
+                # (KiCad loads them SetOpt, not SetMin). Lowering them to the
+                # board's smallest object was the #842 ratchet -- one 0.127
+                # neck made the Default class 0.127 and every later run
+                # routed at it. Parity with fix_kicad_drc_settings.
                 _nc_lower(_nc.GetClearance, _nc.SetClearance, clearance)
-                _nc_lower(_nc.GetTrackWidth, _nc.SetTrackWidth,
-                          track_width, min_w)
-                _nc_lower(_nc.GetViaDiameter, _nc.SetViaDiameter,
-                          via_size, min_via)
-                _nc_lower(_nc.GetViaDrill, _nc.SetViaDrill,
-                          via_drill, min_drill)
         except Exception:
             pass
         # #782: the NON-Default classes. Delegated, never re-implemented -- this

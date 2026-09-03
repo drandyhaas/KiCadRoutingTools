@@ -1458,14 +1458,18 @@ class RoutingDialog(wx.Dialog):
         drc_label.SetFont(drc_label.GetFont().Bold())
         options_inner.Add(drc_label, 0, wx.LEFT | wx.TOP, 3)
 
-        self.keep_thermal_check = wx.CheckBox(options_scroll, label="Keep thermal-relief DRC severity")
-        self.keep_thermal_check.SetValue(False)
-        self.keep_thermal_check.SetToolTip(
-            "When 'Fix DRC settings after routing' runs (Basic tab), by default it "
-            "demotes the starved_thermal DRC category to a warning. Check this to "
-            "leave thermal-relief severity untouched (matches the CLI's "
-            "--keep-thermal). Off by default.")
-        options_inner.Add(self.keep_thermal_check, 0, wx.ALL, 3)
+        self.relax_drc_severities_check = wx.CheckBox(
+            options_scroll, label="Relax non-routing DRC severities in the project")
+        self.relax_drc_severities_check.SetValue(False)
+        self.relax_drc_severities_check.SetToolTip(
+            "When 'Fix DRC settings after routing' runs (Basic tab), ALSO lower the "
+            "project's DRC severities for categories routing cannot fix: courtyard "
+            "shapes, solder-mask bridges and footprint/library issues (incl. "
+            "annular_width) -> ignore; starved_thermal and courtyards_overlap -> "
+            "warning. OFF by default (#856): a routing step never changes what the "
+            "project counts as a violation unless asked. Matches the CLI's "
+            "--relax-drc-severities; the previous values are kept in the project.")
+        options_inner.Add(self.relax_drc_severities_check, 0, wx.ALL, 3)
 
         options_inner.AddSpacer(10)
 
@@ -1853,7 +1857,7 @@ class RoutingDialog(wx.Dialog):
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 # #581: one via-in-pad policy for every step (Basic tab).
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
-                'keep_thermal': self.keep_thermal_check.GetValue(),
+                'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
                 'clamp_netclasses': self.clearance_check.GetValue(),
                 'fab_tier': self.fab_tier.GetString(self.fab_tier.GetSelection()),
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
@@ -2612,6 +2616,8 @@ class RoutingDialog(wx.Dialog):
         self.enable_layer_switch.SetValue(True)
         self.move_text_check.SetValue(True)
         self.add_teardrops_check.SetValue(False)  # match creation default + CLI (--add-teardrops off)
+        # #856: severity relaxation is opt-in per step (CLI --relax-drc-severities off).
+        self.relax_drc_severities_check.SetValue(False)
         self.power_nets_ctrl.SetValue("")
         self.power_widths_ctrl.SetValue("")
         self.no_bga_zones_ctrl.SetValue("")  # empty == CLI default (None: keep BGA zones)
@@ -2992,7 +2998,7 @@ class RoutingDialog(wx.Dialog):
             # Options
             'add_teardrops': self.add_teardrops_check.GetValue(),
             'fix_drc_settings': self.fix_drc_check.GetValue(),
-            'keep_thermal': self.keep_thermal_check.GetValue(),
+            'relax_drc_severities': self.relax_drc_severities_check.GetValue(),
             'clamp_netclasses': self.clearance_check.GetValue(),
             # Guide corridor (issue #7)
             'guide_corridor_enabled': self.guide_corridor_check.GetValue(),
@@ -3917,8 +3923,10 @@ class RoutingDialog(wx.Dialog):
                     via_diameter=config.get('via_size'),
                     via_drill=config.get('via_drill'),
                     fab_edge=fab_edge_floor())
+                # #856: severities only on explicit request; {} = untouched.
+                _sev = severity_plan() if config.get('relax_drc_severities') else {}
                 drc_changes = apply_targets_to_board(
-                    board, targets, severity_plan(keep_thermal=config.get('keep_thermal', False)),
+                    board, targets, _sev,
                     clamp_nondefault_netclasses=config.get('clamp_netclasses', False))
                 if drc_changes:
                     board.SetModified()
