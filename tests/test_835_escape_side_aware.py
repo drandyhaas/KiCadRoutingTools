@@ -76,8 +76,17 @@ EXPECTED = {
 #: from `EXPECTED` because a deficit that falls can mean the instrument got
 #: honest OR that it stopped counting nets, and only this pair tells them
 #: apart.
+#: *After #850* (2026-09-03): `ulx3s` moves 149 -> 216 demand and 402 -> 335
+#: interior on BOTH arms, and `rp2350`/`tigard` move on the pad-centre arm
+#: only. The mover is `escape._assignment_rect`: the box a pad's face is
+#: measured against is now the union of the NETTED pads' copper, not of every
+#: pad's. Eight UNNETTED 0.127 x 0.508mm oval alignment marks on ulx3s U1 sat
+#: 0.954mm outside its ball field on all four sides and set the whole box, so
+#: all 379 of its netted balls were interior and the part reported demand 0 on
+#: every face. 67 outer-ring balls come back. The direction rule below is
+#: unaffected and still holds on every board.
 DEMAND = {
-    'ulx3s': (149, 402),
+    'ulx3s': (216, 335),
     'orangecrab_ext_pll': (234, 306),
     'glasgow_revC': (307, 108),
     'rp2350_fpga_eensy_prePlane': (130, 37),
@@ -90,12 +99,18 @@ DEMAND = {
 #: The same pair BEFORE #841 touched the subject rect, i.e. pad centres
 #: measured against the pad-centre box. The direction between the two is the
 #: assertion; the values are the change detector.
+#:
+#: *After #850* (2026-09-03): this arm moves too, and it should. The
+#: netted-pad box (`escape._assignment_rect`) is applied on THIS path as well
+#: -- which pads define the reference frame is not a question about whether a
+#: pad model exists. ulx3s 149 -> 216 / 406 -> 339, rp2350 122 -> 128 / 46 ->
+#: 40, tigard 102 -> 103 / 20 -> 18; the five other boards are unmoved.
 DEMAND_AT_PAD_CENTRES = {
-    'ulx3s': (149, 406),
+    'ulx3s': (216, 339),
     'orangecrab_ext_pll': (232, 309),
     'glasgow_revC': (305, 116),
-    'rp2350_fpga_eensy_prePlane': (122, 46),
-    'tigard': (102, 20),
+    'rp2350_fpga_eensy_prePlane': (128, 40),
+    'tigard': (103, 18),
     'splitflap_driver': (0, 0),
     'watchy': (113, 1),
     'kit-dev-coldfire-xilinx_5213': (207, 0),
