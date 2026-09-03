@@ -56,7 +56,7 @@ def _via_width(via):
         return via.GetWidth()
 
 from .fanout_gui import NetSelectionPanel
-from .gui_utils import StdoutRedirector
+from .gui_utils import StdoutRedirector, board_minima_from_live
 from .settings_persistence import get_dialog_settings, restore_dialog_settings
 
 
@@ -4007,7 +4007,9 @@ class RoutingDialog(wx.Dialog):
                     track_width=config.get('track_width'),
                     via_diameter=config.get('via_size'),
                     via_drill=config.get('via_drill'),
-                    fab_edge=fab_edge_floor())
+                    fab_edge=fab_edge_floor(),
+                    # #530: caps min_clearance at the smallest pad override
+                    minima=board_minima_from_live(board))
                 # #856: severities only on explicit request; {} = untouched.
                 _sev = severity_plan() if config.get('relax_drc_severities') else {}
                 drc_changes = apply_targets_to_board(

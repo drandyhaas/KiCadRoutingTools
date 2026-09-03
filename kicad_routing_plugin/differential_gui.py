@@ -28,7 +28,7 @@ for _sib in ('py_placer', 'py_tools'):
 
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
-from .gui_utils import StdoutRedirector
+from .gui_utils import StdoutRedirector, board_minima_from_live
 
 
 def parse_diff_pairs_result(value):
@@ -1360,7 +1360,9 @@ class DifferentialTab(wx.Panel):
                     track_width=cfg.get('track_width'),
                     via_diameter=cfg.get('via_size'),
                     via_drill=cfg.get('via_drill'),
-                    fab_edge=fab_edge_floor())
+                    fab_edge=fab_edge_floor(),
+                    # #530: caps min_clearance at the smallest pad override
+                    minima=board_minima_from_live(board))
                 # #441: record the coupling gap at >= clearance, matching the gap
                 # the engine actually routed to (batch_route_diff_pairs floors gap
                 # up to clearance because KiCad grades P<->N coupling under the plain

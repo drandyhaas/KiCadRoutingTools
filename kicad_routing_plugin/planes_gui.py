@@ -32,7 +32,7 @@ for _sib in ('py_placer', 'py_tools'):
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
 from .fanout_gui import NetSelectionPanel
-from .gui_utils import StdoutRedirector
+from .gui_utils import StdoutRedirector, board_minima_from_live
 
 
 def _live_board_edge_clearance():
@@ -1684,7 +1684,9 @@ class PlanesTab(wx.Panel):
                     track_width=cfg.get('track_width'),
                     via_diameter=cfg.get('via_size'),
                     via_drill=cfg.get('via_drill'),
-                    fab_edge=fab_edge_floor())
+                    fab_edge=fab_edge_floor(),
+                    # #530: caps min_clearance at the smallest pad override
+                    minima=board_minima_from_live(board))
                 # #856: severities only on explicit request; {} = untouched.
                 _sev = severity_plan() if cfg.get('relax_drc_severities') else {}
                 if apply_targets_to_board(

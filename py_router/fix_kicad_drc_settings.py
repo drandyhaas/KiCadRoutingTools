@@ -574,6 +574,16 @@ def scan_board_minima(pcb_path: str):
                 hole.append(pad.drill)
     if hole:
         out["min_through_hole_diameter"] = min(hole)
+    # #530: the smallest pad / footprint clearance OVERRIDE on copper pads.
+    # KiCad floors an override at rules.min_clearance (measured, KiCad 10), so
+    # a project whose min_clearance sits ABOVE an override the router honoured
+    # flags the copper routed at it. The writeback caps min_clearance here.
+    ovr = [pad.local_clearance for fp in pcb.footprints.values() for pad in fp.pads
+           if (getattr(pad, "local_clearance", 0) or 0) > 0
+           and getattr(pad, "pad_type", "") != "np_thru_hole"
+           and any(str(l).endswith(".Cu") for l in (getattr(pad, "layers", None) or []))]
+    if ovr:
+        out["min_pad_clearance_override"] = min(ovr)
     return out
 
 
@@ -593,6 +603,14 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     targets = {}
     if clearance is not None:
         targets["min_clearance"] = clearance
+        # #530: never above the smallest pad clearance override the router
+        # honoured -- KiCad floors an override at min_clearance (measured), so
+        # a higher floor would flag copper routed correctly at the override.
+        # rules.min_clearance is only a floor; the class clearances carry the
+        # real requirement, so this costs nothing.
+        _ovr = minima.get("min_pad_clearance_override")
+        if _ovr is not None and _ovr > 0 and clearance > _ovr:
+            targets["min_clearance"] = round(float(_ovr), 6)
     # Hole/copper clearance: explicit value, else the copper-clearance floor.
     hole_clr = hole_clearance if hole_clearance is not None else clearance
     if hole_clr is not None:
