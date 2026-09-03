@@ -1,5 +1,5 @@
-1fb9b57e 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
-Audit e239e067..1fb9b57e on branch worktree-constraints-dru (10 commits, the
+c61dd168 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit e239e067..c61dd168 on branch worktree-constraints-dru (10 commits, the
 #530/#842/#857/#856/#770 design-rules rework; docs/design-rules-proposal.md).
 TWO GAPS FOUND AND FIXED IN-RANGE (fc36e578; 52c83e63: the GUI QFN path fed
 the escalation policy the Basic tab's width, the CLI fed it nothing -- both
@@ -10,7 +10,12 @@ ENGINE-side and shared by both fronts (route_diff pair-gap floor + the
 multipoint hand-off, rule_floors class clearance, rescue/tap ladders), plus
 the KICAD_CLEARANCE_LEGACY_CEILING replay knob (CLI mains only BY DESIGN:
 replay arms, never a real run). test_gui_engine_parity re-run at 1fb9b57e:
-copper IDENTICAL 1259/128.
+copper IDENTICAL 1259/128. c61dd168 moved the tier/escalation DEFAULTS to
+auto/fab on BOTH fronts from ONE place (routing_defaults.FAB_TIER /
+ESCALATION; the GUI controls select those constants at creation and in both
+reset paths), refreshed the tooltips of every control whose meaning the
+branch changed, and re-ran the engine parity gate: copper IDENTICAL 1259/128;
+settings round-trip, manifest plan parity and the 768 dialog gate green.
 
 THE SURFACE, checked mechanically, not assumed:
 
