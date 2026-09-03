@@ -45,6 +45,12 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 FACES = ('north', 'east', 'south', 'west')
 
+#: This module's face names -> the letters `routability.face_lane_ledger`
+#: publishes (#850). ONE mapping, because the two ledgers name the same four
+#: faces differently and its rows are a published JSON schema
+#: (`check_channels --json`, key `ledgers`), so the letters stay.
+FACE_LETTER = {'north': 'N', 'east': 'E', 'south': 'S', 'west': 'W'}
+
 # A pad is "interior" when it is not on the part's own pad bounding box, i.e.
 # it has neighbours on every side and cannot leave sideways at any pitch.
 INTERIOR_EPS = 0.001
@@ -651,7 +657,7 @@ def _part_rect(fp) -> Tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def _face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
+def face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
     """Which face a pad escapes through, or None when it is interior.
 
     A pad on the bounding box escapes through the side it sits on; a corner pad
@@ -674,6 +680,13 @@ def _face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
     `pad_box=None` is the caller that has no rect for this pad -- a copper-less
     pad, or a part whose model could not be built. It degrades to the pad's
     centre, which is what this function always did.
+
+    PUBLIC since #850, because `routability.face_lane_ledger` bucketed pads to
+    faces with its own rule -- pad CENTRES against the hole-inclusive `rect`,
+    no tolerance, no interior bucket -- and neither file recorded that the
+    other existed. Reach it through `assign_faces` rather than directly: what
+    disagreed between the two ledgers was not this arithmetic but the PAIRING
+    of rect, pad box and pitch it is fed, and that pairing is the invariant.
     """
     minx, miny, maxx, maxy = rect
     tol = max(pitch / 2.0, INTERIOR_EPS)
@@ -691,6 +704,66 @@ def _face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
         if abs(d[f] - near) < 1e-9:
             return f
     return None
+
+
+class FaceAssignment(NamedTuple):
+    """Every pad of one part and the face it escapes through (#850)."""
+    #: `((pad, face | None), ...)` in `fp.pads` order. `None` is INTERIOR: the
+    #: pad is not on the part's own copper box, so it cannot leave sideways at
+    #: any pitch and needs a via. Rolling one into a face's demand blames the
+    #: face for a fanout problem.
+    faces: Tuple[Tuple[object, Optional[str]], ...]
+    #: The tolerance pitch `face_of` ran at, and where it came from.
+    pitch_mm: float
+    pitch_source: str            # 'pad_lattice' | 'lane_fallback'
+
+
+def assign_faces(fp, geom, *, lane_mm, fallback_rect=None) -> FaceAssignment:
+    """THE face rule: which face each of `fp`'s pads escapes through.
+
+    One function because the disagreement #850 names is not in `face_of`'s
+    arithmetic -- it is in what the caller PAIRS with it. Three copies of this
+    loop existed, and each paired differently:
+
+    * `part_escape` measured each pad's own copper box against
+      `CopperGeometry.copper`, with `max(pad_pitch/2, INTERIOR_EPS)` tolerance.
+    * `routability.face_lane_ledger` measured pad CENTRES against the
+      hole-inclusive `PartPads.extent`, with no tolerance and no interior
+      bucket -- so every netted pad was demand on some face, a BGA's inner
+      balls included.
+    * `tests/stress/demand_halo_study.py` carried a third, whose own docstring
+      called that "the defect #841 exists to remove".
+
+    Getting the pairing wrong is not a small error: measure a pad's CENTRE
+    against a copper box and every pad moves half its own width inside the
+    part, which on one corpus board makes all 244 of them interior -- demand 0,
+    deficit 0, and a sweep of green numbers on a ledger that has stopped
+    looking. See `face_of`.
+
+    `geom` is the part's own `CopperGeometry`, or None for a part whose pad
+    model could not be built; then `fallback_rect` is measured against pad
+    CENTRES, which is what both callers did for such a part before this
+    existed.
+
+    `lane_mm` is used only when the pad lattice yields no pitch -- fewer than
+    two pads, or every pad sharing one x and one y (a thermal pad drawn as
+    several rects). `pitch_source` says which happened, because the two
+    ledgers resolve DIFFERENT lanes (raw `track + clearance` here,
+    grid-quantized in `routability`) and an unreported basis difference is
+    exactly what #847 was about.
+    """
+    from .legality import pad_box as _pad_box
+    pitch = pad_pitch(fp)
+    source = 'pad_lattice'
+    if pitch == float('inf'):
+        pitch, source = lane_mm, 'lane_fallback'
+    rect = fallback_rect if geom is None else geom.copper
+    out = []
+    for pad in (fp.pads or []):
+        box = None if geom is None else _pad_box(geom, pad)
+        out.append((pad, face_of(pad, rect, pitch, pad_box=box)))
+    return FaceAssignment(faces=tuple(out), pitch_mm=pitch,
+                          pitch_source=source)
 
 
 def _face_geometry(rect, face) -> Tuple[float, float, float, float]:
@@ -1098,21 +1171,21 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     # disagree about where the channel between them is. `_part_rect` is the
     # fallback for a footprint whose pad model could not be built -- today's
     # answer for exactly the parts that get today's neighbour rect too.
-    from .legality import pad_box as _pad_box
     own = obstruction_rects.get(ref)
     rect = own.rect if own is not None else _part_rect(fp)
-    assign_rect = own.copper if own is not None else rect
 
+    # #850: the face rule is `assign_faces`, shared with
+    # `routability.face_lane_ledger`, which had its own. This is the same
+    # pairing this loop did inline -- `copper` for assignment, `rect` for the
+    # face geometry below -- and the arm that says so is a bit-identical sweep
+    # of every published escape number over the tracked corpus.
+    asg = assign_faces(fp, own, lane_mm=lane, fallback_rect=rect)
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
     interior: List[int] = []
-    for pad in fp.pads:
+    for pad, face in asg.faces:
         nid = getattr(pad, 'net_id', 0)
         if not nid or nid in ignored:
             continue
-        box = None if own is None else _pad_box(own, pad)
-        face = _face_of(pad, assign_rect,
-                        pitch if pitch != float('inf') else lane,
-                        pad_box=box)
         if face is None:
             interior.append(nid)
         else:
