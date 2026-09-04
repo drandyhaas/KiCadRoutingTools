@@ -790,6 +790,16 @@ boards" and "which commit broke connectivity".
   The knob is for replay arms only; a real run wanting that reading passes
   `--clearance-ceiling`.
 
+  **The recorded manifests were rewritten on 2026-09-03** (`runs_set*/*/
+  redo_commands.sh`, 1509 lines in 400 manifests): on `route.py`,
+  `route_diff.py`, `route_planes.py` and `repair_planes.py` every
+  `--clearance X` became `--clearance-ceiling X`, which is exactly the reading
+  those runs were recorded under. Fanout, placement and grading commands keep
+  `--clearance`. So a plain replay of a recorded manifest routes like the
+  record without the knob; the knob remains for manifests recorded elsewhere.
+  Graders that read the routed floor off a manifest accept either spelling
+  (`ab_replay_grade.route_clearance`).
+
   Likewise for the escalation ladder: `KICAD_FAB_TIER_DEFAULT` and
   `KICAD_ESCALATION_DEFAULT` set the default of the two flags a manifest
   omits. The shipped defaults are now `auto` / `fab` (the pre-#857 ladder,

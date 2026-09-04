@@ -441,7 +441,7 @@ rip-up cannot re-route the impedance nets at the wrong width, and counted as
 # Step 2b: impedance-controlled single-ended nets (e.g. the antenna feed), on an
 # outer layer over the GND pour created in Step 1c; short/direct is the router default.
 python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_imp.kicad_pcb \
-    --nets RF --impedance 50 --layers F.Cu --clearance <floor> ...
+    --nets RF --impedance 50 --layers F.Cu --clearance-ceiling <floor> ...
 ```
 
 **Differential impedance pairs** keep being routed in the diff-pair step (Step 2),

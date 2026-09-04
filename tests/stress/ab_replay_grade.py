@@ -54,7 +54,9 @@ def route_clearance(manifest_txt, default="0.1"):
     plus planes at 0.1); grade at the MINIMUM so copper laid at the tightest
     clearance isn't phantom-flagged at a looser one (see grade-drc-at-routed-
     clearance: grading tigard at 0.15 vs its real 0.1 invents ~600 violations)."""
-    vals = [float(v) for v in re.findall(r"--clearance\s+(\d[\d.]*)", manifest_txt)]
+    # #530: the recorded manifests carry --clearance-ceiling on the routing
+    # steps (the pre-#530 reading); either spelling names the routed floor.
+    vals = [float(v) for v in re.findall(r"--clearance(?:-ceiling)?\s+(\d[\d.]*)", manifest_txt)]
     return str(min(vals)) if vals else default
 
 

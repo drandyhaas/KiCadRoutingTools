@@ -1056,7 +1056,7 @@ exactly the failed and blocker nets the router reported:
 
 ```bash
 python3 -X utf8 py_placer/place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
-    --route-args '--nets "*" "!GND" "!VCC" --clearance <floor> --max-ripup 10' \
+    --route-args '--nets "*" "!GND" "!VCC" --clearance-ceiling <floor> --max-ripup 10' \
     --max-displacement 3 --max-target-pins 40 --ratsnest-screen 20 \
     --lock <refs from 0b> --ignore-nets GND VCC
 ```

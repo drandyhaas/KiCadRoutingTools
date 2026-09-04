@@ -112,6 +112,16 @@ Validate routed boards against the *real* spec, with the right checker — most
     aspirational" workflow. GUI: the **Class ceiling** checkbox with Min Clearance.
   - **Both omitted** → base = the board's Default class, else
     `routing_defaults.CLEARANCE` 0.25; classes preserved.
+  - **In a CHAIN, pass `--clearance-ceiling <floor>`, not `--clearance`.** The
+    ceiling reading (`min(project's Default class, value)` for the run, every
+    class capped) is what 0.21.4 did for a bare `--clearance`, and a late step
+    saying 0.2 on a project an earlier step lowered to 0.1 then keeps routing
+    at 0.1. A bare `--clearance 0.2` now routes at 0.2 there, which is wider
+    than the chain's own floor -- measured on the sets 1-5 corpus as +28 real
+    DRC / +83 open nets (arm E vs arm D, 2026-09-03). The recorded manifests
+    were rewritten to the ceiling on their routing steps that day, and the
+    routing skills pass it; `tests/stress/ab_replay_grade.route_clearance`
+    reads either spelling.
   - **Sizes and escalation (#857/#530):** `--fab-tier` / `--escalation` default to
     `auto` / `fab` — the standard floor escalating to advanced when a fan-out, plane
     tap or last-resort via cannot fit, and descents allowed below the board's own
