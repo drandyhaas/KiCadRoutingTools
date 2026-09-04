@@ -49,9 +49,19 @@ POSE_TOL_DEG = 1e-3
 
 
 def poses(path):
+    """{ref: (x, y, rotation, side)}.
+
+    The SIDE is the fourth element since #714 gave `write_placed_output` a
+    real layer flip. A flip that holds its pose changes the delivered board
+    and moves none of x/y/rot, so a three-element pose made it invisible to
+    this audit -- and this audit's whole job is to reconcile what changed
+    against what a declared lever claimed. `perturb`'s `layer_flip` produces
+    exactly that board.
+    """
     from kicad_parser import parse_kicad_pcb
+    from placement.legality import footprint_side
     pcb = parse_kicad_pcb(path)
-    return {r: (f.x, f.y, f.rotation or 0.0)
+    return {r: (f.x, f.y, f.rotation or 0.0, footprint_side(f))
             for r, f in pcb.footprints.items()}
 
 
@@ -75,8 +85,10 @@ def moved_refs(a, b):
             # under its own name, by the caller.
             continue
         drot = abs(((pa[2] - pb[2]) + 180.0) % 360.0 - 180.0)
+        # The side term is an OR, not a tolerance: a flip in place moves
+        # nothing else, so without it the part reads as untouched (#714).
         if (abs(pa[0] - pb[0]) > POSE_TOL_MM or abs(pa[1] - pb[1]) > POSE_TOL_MM
-                or drot > POSE_TOL_DEG):
+                or drot > POSE_TOL_DEG or pa[3] != pb[3]):
             out.append(ref)
     return out
 
@@ -207,12 +219,16 @@ def audit(workdir, delivered=None):
         lever = row.get('lever')
         ok = bool(row.get('declared')) and lever in PV.LEVER_REGISTRY
         _poses = row.get('poses_written') or {}
+        # #714's separate key, read with a bare `.get`: it is absent on every
+        # row written before that change, and a claim carrying no side is
+        # `unverifiable` for the side rather than a mismatch.
+        _sides = row.get('sides_written') or {}
         _wrote_this = (not _names_delivered) or _same_file(row.get('path'))
         for ref in row.get('refs_moved') or ():
             if ok:
                 claimed[ref] = lever or row.get('caller', '<unknown>')
                 if _wrote_this and ref in _poses:
-                    claim_pose[ref] = _poses[ref]
+                    claim_pose[ref] = tuple(_poses[ref]) + (_sides.get(ref),)
             else:
                 undeclared.setdefault(ref, lever or row.get(
                     'caller', '<unknown>'))
@@ -232,13 +248,18 @@ def audit(workdir, delivered=None):
         if want is None:
             unverifiable.append(ref)
             continue
-        got = _dp.get(ref)            # poses() -> (x, y, rotation)
+        got = _dp.get(ref)            # poses() -> (x, y, rotation, side)
         if got is None:
             continue
+        # `want[3]` is None on a claim that named no side -- every pre-#714
+        # row, and every write that did not flip. A None claim is not a
+        # mismatch; it simply says nothing about the side, which is the same
+        # thing `unverifiable_claims` already says about a missing pose.
         if (abs(got[0] - want[0]) > _TOL_MM
                 or abs(got[1] - want[1]) > _TOL_MM
                 or abs(((got[2] or 0.0) - want[2] + 180.0) % 360.0 - 180.0)
-                > _TOL_DEG):
+                > _TOL_DEG
+                or (want[3] is not None and got[3] != want[3])):
             drifted.append(ref)
 
     unclaimed = sorted(r for r in moved if r not in claimed)

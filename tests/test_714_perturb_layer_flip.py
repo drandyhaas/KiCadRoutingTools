@@ -178,6 +178,28 @@ def main():
             if row2 is not None and row2.get('sides_written'):
                 problems.append("a write with no side key recorded a side: "
                                 f"{row2.get('sides_written')}")
+        # ...and the AUDIT that consumes the ledger must see the flip too. Its
+        # `poses()` compared (x, y, rotation) only, so a part flipped in place --
+        # exactly what this kind produces -- read as untouched, and an unclaimed
+        # flip could never be a VIOLATION. The ledger half of that was fixed in
+        # #714; this is the other half, and it lives here because this is the one
+        # place in the tree that builds a flipped board and a ledger together.
+        try:
+            sys.path.insert(0, os.path.join(TESTS, 'stress'))
+            import provenance_audit as PA
+            _sp, _dp = PA.poses(staged), PA.poses(ledger_out)
+            _moved = PA.moved_refs(_sp, _dp)
+            if ref not in _moved:
+                problems.append(
+                    f"provenance_audit.moved_refs does not see {ref} as changed, "
+                    f"though it was flipped: a flip holds x/y/rot, so an audit "
+                    f"comparing only those grades a flipped board as untouched")
+            if len(_sp.get(ref, ())) < 4:
+                problems.append("provenance_audit.poses() carries no side, so the "
+                                "check above can only pass by accident")
+        except ImportError as exc:                                   # noqa: BLE001
+            problems.append(f"BROKEN TEST: cannot import provenance_audit: {exc}")
+
     except Exception as exc:                                     # noqa: BLE001
         import traceback
         traceback.print_exc()
@@ -186,13 +208,44 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+
+    # A kind whose applied dose is 0 BY CONSTRUCTION must not be drawn by a
+    # consumer that gates on the applied dose. `qualify_subject` drew from
+    # `P.KINDS`, so adding `layer_flip` silently spent 1 draw in 6 on a kind
+    # its material gate can never pass -- a discarded draw and a draw that
+    # failed to land are indistinguishable in its output, so the land rate it
+    # exists to measure just got quietly worse.
+    #
+    # Asserted as a SHAPE, not as an absence: a new zero-dose kind added later
+    # fails here rather than silently rejoining the draw.
+    try:
+        sys.path.insert(0, os.path.join(TESTS, 'stress'))
+        import qualify_subject as QS
+        unknown = [k for k in QS.DOSED_KINDS if k not in KINDS]
+        if unknown:
+            problems.append(f"qualify_subject.DOSED_KINDS names kinds perturb "
+                            f"does not have: {unknown}")
+        if 'layer_flip' in QS.DOSED_KINDS:
+            problems.append("qualify_subject draws `layer_flip`, whose "
+                            "applied dose is 0 by construction, so its "
+                            "material gate can never pass")
+        missing = [k for k in KINDS
+                   if k not in QS.DOSED_KINDS and k != 'layer_flip']
+        if missing:
+            problems.append(f"perturb kinds absent from "
+                            f"qualify_subject.DOSED_KINDS with no reason "
+                            f"recorded: {missing}")
+    except ImportError as exc:                                   # noqa: BLE001
+        problems.append(f"BROKEN TEST: cannot import qualify_subject: {exc}")
+
     if problems:
         print(f"FAIL: {len(problems)} problem(s)")
         for p in problems[:25]:
             print("  " + p)
         return 1
     print(f"PASS: layer_flip flipped exactly its {len(flipped)} members, "
-          f"left {len(b) - len(flipped)} alone, and the control is unmoved")
+          f"left {len(b) - len(flipped)} alone, the control is unmoved, and "
+          f"no dose-gated consumer draws it")
     return 0
 
 

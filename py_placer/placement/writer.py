@@ -783,6 +783,21 @@ def write_placed_output(input_file: str, output_file: str,
             - new_x: float (mm)
             - new_y: float (mm)
             - new_rotation: float (degrees)
+            - new_side: 'F' or 'B', OPTIONAL (#714). Absent or None leaves the
+              footprint's `(layer ...)` alone and the write is byte-identical
+              to one built before this existed -- which is what keeps the ~20
+              producers of these dicts unchanged. Present and DIFFERENT from
+              the block's current side, the whole footprint is mirrored to the
+              other face: pad layers, local y, angles, graphics, justify. Any
+              value other than 'F'/'B' raises at the boundary; `'B.Cu'` is the
+              mistake a caller actually makes. A construct the mirror cannot
+              express raises `SideFlipUnsupported` rather than being skipped,
+              because this function returns True unconditionally and a
+              half-mirrored footprint is indistinguishable from success at
+              every call site.
+              `new_rotation` still means the FINAL orientation; pcbnew's
+              `Flip` negates it and this does not, so the same call cannot
+              mean different things depending on the input side.
 
     Returns:
         True if output was written successfully
