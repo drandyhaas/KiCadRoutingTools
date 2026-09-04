@@ -146,11 +146,13 @@ REGISTRY = {
         'hang_detector',
         'SAVE_BOARD_UI_TIMEOUT_S = 120 on `done.wait(timeout_s)`, marshalling '
         'a SaveBoard onto the wx main thread (#688). The timeout is passed '
-        'POSITIONALLY, so `timeout=` never matched it. NOTE, and it is a real '
-        'weakness rather than a clean pass: its expiry returns a bare False '
-        'that a caller cannot tell from a wx save exception -- the shape this '
-        'category exists to forbid. Left as-is here because changing the GUI '
-        'save path is outside #713; filed as the follow-up named in the PR.'),
+        'POSITIONALLY, so `timeout=` never matched it. Its expiry used to '
+        'return a bare False a caller could not tell from a wx save '
+        'exception -- the shape this category exists to forbid; #828 added '
+        'save_board_on_ui_thread_ex, whose SaveStatus names `timeout` '
+        '(this machine, this moment) apart from `save_failed` (this board), '
+        'and both callers now branch on it. tests/test_828_ui_thread_save_'
+        'status.py pins the three arms wx-free.'),
 
     # --- filesystem timestamps, not our elapsed time ------------------------
     'py_router/animate_route.py': (

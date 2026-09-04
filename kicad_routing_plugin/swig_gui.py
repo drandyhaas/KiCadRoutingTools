@@ -3522,8 +3522,10 @@ class RoutingDialog(wx.Dialog):
                     # caught the worker inside SaveBoard while the UI thread
                     # sat in ShowModal). save_board_via_ui_thread marshals it
                     # to the main thread and, if that thread is not pumping,
-                    # times out and returns False so we degrade to the
-                    # post-apply oracle instead of hanging the session.
+                    # times out so we degrade to the post-apply oracle instead
+                    # of hanging the session. #828: the status beside the bool
+                    # says WHICH refusal it was, and this site used to say
+                    # nothing at all -- the one the #688 py-spy dump named.
                     #
                     # aSkipSettings (inside the helper): the oracle leg needs
                     # the copper, not a .kicad_pro. KiCad 10's implicit
@@ -3534,8 +3536,12 @@ class RoutingDialog(wx.Dialog):
                     # and with no C++ handler above this worker thread, that
                     # throw aborts ALL of KiCad. Snapshots must always skip
                     # the settings save.
-                    from .gui_utils import save_board_via_ui_thread
-                    if not save_board_via_ui_thread(_p, _b):
+                    from .gui_utils import save_board_via_ui_thread_ex
+                    _ok688, _sst688 = save_board_via_ui_thread_ex(_p, _b)
+                    if not _ok688:
+                        print(f"(plane-finalize oracle: live board not staged "
+                              f"-- {_sst688.why()}; degrading to the "
+                              f"post-apply oracle)")
                         # NamedTemporaryFile already created the file; the
                         # engine only cleans up paths we hand back, so drop
                         # it here rather than leaking one temp per run.

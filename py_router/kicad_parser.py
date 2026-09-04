@@ -5445,6 +5445,13 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # unchanged board is byte-stable, so memoize here on the saved BYTES:
     # unchanged board -> hash hit -> cached islands, changed board -> miss.
     _live_fill_memo = {}
+    # #828: set once a marshalled save has THROWN on this board. A SaveBoard
+    # exception is a fact about the board, not the moment, so every later
+    # oracle round would pay the same doomed attempt (and a CallAfter to the UI
+    # thread) for the same answer. A TIMEOUT is deliberately NOT recorded here:
+    # it says only that the UI thread was not pumping just then, and the next
+    # round may well succeed.
+    _live_fill_dead = {}
 
     def _warn_live_fill_fallback(why):
         """LOUD fallback (review DRC-4): the in-process filler sees live
@@ -5464,13 +5471,21 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
               f"project state at board LOAD time -- a netclass this run "
               f"lowered is invisible to it (GUI/CLI fill divergence).")
 
-    def _live_fill(_board=board, _memo=_live_fill_memo):
+    def _live_fill(_board=board, _memo=_live_fill_memo, _dead=_live_fill_dead):
         import copy as _copy
         import hashlib
         import tempfile
         from kicad_exact_fill import live_fill_islands, refill_islands_ex
         tmp = None
         try:
+            if _dead:
+                # #828: the staged save threw on this board earlier in this
+                # build; do not retry what will throw again. Still LOUD, since
+                # every arrival here is the stale-clearance divergence.
+                _warn_live_fill_fallback(
+                    f"{_dead['why']}; not retried -- a SaveBoard exception is "
+                    f"a fact about this board, not about this moment (#828)")
+                return live_fill_islands(_board)
             import pcbnew as _pcbnew
             fd, tmp = tempfile.mkstemp(suffix='.kicad_pcb')
             os.close(fd)
@@ -5486,13 +5501,18 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # plane_fragility -- every oracle round), which in the GUI means the
             # routing WORKER thread. A worker-thread SaveBoard is what deadlocked
             # the plugin on Windows, so marshal it to the wx main thread; on the
-            # CLI (no wx) the helper calls straight through. Returning False here
-            # falls through to the in-process fill below, which is exactly the
-            # documented fallback.
-            from ui_thread import save_board_on_ui_thread as _save688
-            if not _save688(tmp, _board, label=" live-fill"):
-                raise RuntimeError("could not save the live board on the UI "
-                                   "thread (#688 guard)")
+            # CLI (no wx) the helper calls straight through. A refusal falls
+            # through to the in-process fill below, which is exactly the
+            # documented fallback -- and (#828) the warning names WHICH refusal:
+            # a timeout is this machine not pumping right now (retry next
+            # round), a save exception is this board (never retry).
+            from ui_thread import save_board_on_ui_thread_ex as _save688
+            _ok688, _sst688 = _save688(tmp, _board, label=" live-fill")
+            if not _ok688:
+                if _sst688.reason == 'save_failed':
+                    _dead['why'] = _sst688.why()
+                _warn_live_fill_fallback(f"{_sst688.why()} (#688 guard)")
+                return live_fill_islands(_board)
             _pro = stage_live_project_rules(tmp, _board)
             _h = hashlib.sha256()
             with open(tmp, 'rb') as _fh:

@@ -52,7 +52,7 @@ sys.path.insert(0, os.path.join(ROOT, "py_router"))
 
 import pcbnew  # noqa: E402
 import wx  # noqa: E402
-from ui_thread import save_board_on_ui_thread  # noqa: E402
+from ui_thread import save_board_on_ui_thread, save_board_on_ui_thread_ex  # noqa: E402
 
 BOARD = os.path.join(ROOT, "kicad_files", "splitflap_driver.kicad_pcb")
 
@@ -101,7 +101,12 @@ def main():
 
     def _worker2():
         t0 = time.monotonic()
-        box2["ok"] = save_board_on_ui_thread(out2, board, timeout_s=2)
+        # #828: the _ex form, so the REASON is checked too -- a timeout must
+        # come back as 'timeout', not as a bare False a caller cannot tell
+        # from a SaveBoard exception. The bool wrapper's identity contract is
+        # pinned wx-free in tests/test_828_ui_thread_save_status.py.
+        box2["ok"], box2["status"] = save_board_on_ui_thread_ex(
+            out2, board, timeout_s=2)
         box2["elapsed"] = time.monotonic() - t0
 
     t2 = threading.Thread(target=_worker2, daemon=True)
@@ -114,6 +119,10 @@ def main():
         if box2.get("ok") is not False:
             fails.append(f"expected False when the UI thread never pumps, "
                          f"got {box2.get('ok')!r}")
+        _st = box2.get("status")
+        if _st is None or _st.reason != "timeout" or not _st.is_timeout:
+            fails.append(f"expected SaveStatus reason 'timeout' when the UI "
+                         f"thread never pumps, got {_st!r} (#828)")
         if not (2.0 <= box2.get("elapsed", 0) < 20):
             fails.append(f"timeout took {box2.get('elapsed')}s, expected ~2s")
     try:
