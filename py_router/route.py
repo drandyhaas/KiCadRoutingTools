@@ -4292,7 +4292,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if env_knobs.OBSTACLE_AUDIT:
         from obstacle_cache import run_obstacle_audit
         run_obstacle_audit(base_obstacles, state.working_obstacles,
-                           state.net_obstacles_cache)
+                           state.net_obstacles_cache,
+                           pcb_data=pcb_data, config=config)
 
     # #348 (glasgow /SCL): END-OF-RUN RECONCILIATION. Mid-run rip churn can
     # leave a victim net partially connected whose gap is trivially routable
