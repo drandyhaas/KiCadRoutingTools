@@ -71,6 +71,7 @@ LEG = os.path.join(ROOT, 'py_placer', 'placement', 'legality.py')
 CHK = os.path.join(ROOT, 'py_tools', 'check_channels.py')
 TARGETS = {'esc': ESC, 'rou': ROU, 'leg': LEG, 'chk': CHK}
 
+T862 = os.path.join(ROOT, 'tests', 'test_862_enclosure.py')
 T850 = os.path.join(ROOT, 'tests', 'test_850_demand_face_of.py')
 T848 = os.path.join(ROOT, 'tests', 'test_848_side_obstruction.py')
 T849 = os.path.join(ROOT, 'tests', 'test_849_lane_context.py')
@@ -81,17 +82,27 @@ T841 = os.path.join(ROOT, 'tests', 'test_841_obstruction_rect.py')
 ROWS = [
     # ---- #850: the shared face rule ---------------------------------------
     ('the-ledger-goes-back-to-pad-centres', 'rou',
-     "    own = ctx.geom.get(ref)\n"
-     "    asg = _assign_faces(fp, own, lane_mm=pitch_routed, fallback_rect=ext)",
-     "    own = ctx.geom.get(ref)\n"
-     "    asg = _assign_faces(fp, None, lane_mm=pitch_routed,"
-     " fallback_rect=ext)",
+     # RE-ANCHORED for #862, which added the corridor basis to this call.
+     # The MUTATION is unchanged: hand the ledger no geometry, so it falls
+     # back to pad CENTRES measured against the extent.
+     "    asg = _assign_faces(fp, own, lane_mm=pitch_routed, fallback_rect=ext,\n"
+     "                        clearance=clearance, track_width=track_width)",
+     "    asg = _assign_faces(fp, None, lane_mm=pitch_routed, fallback_rect=ext,\n"
+     "                        clearance=clearance, track_width=track_width)",
      (T850,), 'KILLED'),
 
     ('pad_box-is-dropped-so-it-degrades-to-centres', 'esc',
+     # RE-ANCHORED for #862, which split this loop body into a box call and
+     # a corridor rescue. The MUTATION is unchanged: drop the per-pad copper
+     # box so every distance is measured from the pad CENTRE. It disables
+     # the rescue too, and that is the honest shape rather than a widened
+     # mutation -- with no per-pad rect there is nothing to run a corridor
+     # on, which is exactly what `assign_faces` already does for a part
+     # whose pad model could not be built.
      "        box = None if geom is None else _pad_box(geom, pad)\n"
-     "        out.append((pad, face_of(pad, rect, pitch, pad_box=box)))",
-     "        out.append((pad, face_of(pad, rect, pitch)))",
+     "        bf = face_of(pad, rect, pitch, pad_box=box)",
+     "        box = None\n"
+     "        bf = face_of(pad, rect, pitch, pad_box=box)",
      (T850, T841), 'KILLED'),
 
     ('face_of-gets-the-rect-not-the-copper', 'esc',
@@ -165,6 +176,115 @@ ROWS = [
      "    ext = (ctx.geom[ref].copper if ref in ctx.geom else ext)\n"
      "    faces = {'N': (ext[0], ext[1], ext[2], ext[1]),",
      (T850, T849), 'KILLED'),
+
+    # ---- #862: the enclosure corridor -------------------------------------
+    #
+    # WITNESS BASES ARE CHOSEN PER ROW, NOT DEFAULTED. The corpus does not
+    # discriminate every one of these at every basis, and a row killed at a
+    # basis where it is a value no-op is killed by luck. `test_862` runs at
+    # 0.09/0.10, 0.20/0.20, 0.25/0.30 AND 0.40/0.40 for exactly this reason;
+    # the comment on each row says what only it can see.
+
+    # Kills at every basis: ulx3s U1 goes straight back to 379 interior.
+    ('the-corridor-half-is-never-consulted', 'esc',
+     "        if bf is None and corridor is not None and box is not None:",
+     "        if False:",
+     (T862, T850), 'KILLED'),
+
+    # THE ROW A NAIVE WITNESS SURVIVES. Making the corridor a REPLACEMENT for
+    # the box test instead of a second sufficient condition leaves ulx3s U1 at
+    # 308 and qfn_interior_pads U1 at 5 -- both named witnesses agree -- and
+    # is caught only by the direction arm, and only at a basis where the two
+    # rules differ at all. Measured: identical at 0.09/0.10 (both 1953), and
+    # at 0.20/0.20 the replacement GAINS interior pads on orangecrab U10 and
+    # rp2350 U4, a 0.325mm part whose central 0.82mm GND pad sits 0.0699mm
+    # from the copper box and whose axis-aligned corridor is closed by its
+    # flanking pads once inflated.
+    ('the-corridor-replaces-the-box-instead-of-uniting', 'esc',
+     "    esc = FACES\n"
+     "    if near > tol:",
+     "    esc = FACES\n"
+     "    if True:",
+     (T862,), 'KILLED'),
+
+    # The clearance inflation. Kills on qfn_interior_pads (5 -> 0) and tigard
+    # (18 -> 4): without it the gaps between a QFN's pins read as passable.
+    ('the-corridor-forgets-the-clearance', 'esc',
+     "                       grow=self.clearance)",
+     "                       grow=0.0)",
+     (T862,), 'KILLED'),
+
+    # THE SECOND NAIVE-WITNESS SURVIVOR. The epsilon only bites where a free
+    # run lands EXACTLY on the threshold, which over this corpus is clearance
+    # 0.05 and 0.40 and nowhere else. Every basis anything actually routes at
+    # is blind to it. Killed only by test_862's 0.40/0.40 row, where a bare
+    # comparison puts 33 of ulx3s U1's recovered balls back (308 -> 341)
+    # because a nominally 0.4mm pad's span subtracts to 0.39999999999997726.
+    ('the-threshold-epsilon-is-dropped', 'esc',
+     "        return run >= self.track_width - FREE_RUN_EPS",
+     "        return run >= self.track_width",
+     (T862,), 'KILLED'),
+
+    # The band overlap turned CLOSED. Its real stake is not a few pads: the
+    # obstacle list includes the pad's OWN rect, so a closed test blocks every
+    # pad against itself and the union collapses to the box rule exactly --
+    # 2054 interior at every basis, both named witnesses still reading 308 and
+    # 5, every corpus golden still green. Only the unit arms and the
+    # rescue-count arms see it.
+    ('the-band-overlap-becomes-closed', 'esc',
+     "        if across[1] <= band[0] or across[0] >= band[1]:",
+     "        if across[1] < band[0] or across[0] > band[1]:",
+     (T862,), 'KILLED'),
+
+    # The strip. A pitch-wide window is not a refinement, it is a different
+    # rule: measured, it takes ulx3s U1 from 308 to 0 at clearance 0.09, i.e.
+    # it erases the very finding #862 is about while looking generous.
+    ('the-strip-becomes-a-pitch-wide-window', 'esc',
+     "    lo, hi = (px0, px1) if horizontal else (py0, py1)",
+     "    cx, cy = (px0 + px1) / 2.0, (py0 + py1) / 2.0\n"
+     "    lo, hi = ((cx - 0.4, cx + 0.4) if horizontal else (cy - 0.4, cy + 0.4))",
+     (T862,), 'KILLED'),
+
+    # `free_run` must answer the largest CONTIGUOUS run, not the total. This
+    # is a value NO-OP at 0.20/0.20 and 0.25/0.30 -- two half-gaps only fail
+    # to make a lane where the gaps are tight -- so its witness is the
+    # 0.09/0.10 row, where it breaks qfn_interior_pads (5 -> 2), tigard
+    # (18 -> 16) and glasgow_revC U1 (27 -> 26).
+    ('the-free-run-becomes-the-total-free-span', 'esc',
+     "    intervals.sort()\n"
+     "    best = 0.0\n"
+     "    cur = lo\n"
+     "    for a, b in intervals:\n"
+     "        if a > cur:\n"
+     "            best = max(best, a - cur)\n"
+     "        cur = max(cur, b)\n"
+     "    return max(best, hi - cur)",
+     "    intervals.sort()\n"
+     "    best = 0.0\n"
+     "    cur = lo\n"
+     "    for a, b in intervals:\n"
+     "        if a > cur:\n"
+     "            best += a - cur\n"
+     "        cur = max(cur, b)\n"
+     "    return best + max(0.0, hi - cur)",
+     (T862,), 'KILLED'),
+
+    # The two ledgers must price ONE corridor. Feeding the routability side
+    # its grid-quantized pitch instead of the raw track width leaves every
+    # named witness intact and breaks only the reconciliation -- which is the
+    # whole point of #850, and the reason that arm now passes `track_width`.
+    ('the-ledgers-price-different-corridors', 'rou',
+     "                        clearance=clearance, track_width=track_width)",
+     "                        clearance=clearance, track_width=pitch_routed)",
+     (T850, T862), 'KILLED'),
+
+    # The basis must be PUBLISHED. Without it a reader diffing two runs cannot
+    # tell a placement that moved from a basis that moved.
+    ('the-published-basis-is-dropped', 'rou',
+     "                    'face_corridor_track_mm': round(asg.corridor_track_mm, 4),",
+     "                    'face_corridor_track_mm': 0.0,",
+     (T862,), 'KILLED'),
+
 
     # ---- #848: the per-side neighbour rect --------------------------------
     ('the-per-side-union-collapses-to-the-whole-part', 'leg',
