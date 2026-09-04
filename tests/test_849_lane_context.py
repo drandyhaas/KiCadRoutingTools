@@ -126,7 +126,11 @@ DENSE = os.path.join(ROOT, 'kicad_files',
 
 #: Ledger rows recorded from the PARENT commit b5c567c7, before any of this
 #: existed: `(face, demand_nets, supply_routed_grid, supply_finest_grid,
-#: eaten_by)` at LANE. This is the arm the other nine cannot be:
+#: eaten_by)` at LANE. **The `demand_nets` column has since been superseded by
+#: `DEMAND_AFTER_850` below and is no longer asserted equal -- it is asserted
+#: as the ceiling the part total stayed under.** Everything else here is still
+#: pinned exactly, and is still the pre-hoist oracle. This is the arm the other
+#: nine cannot be:
 #: every path in this file now runs through `LaneContext`, so a mutation that
 #: changes what the context BUILDS moves both arms of an equivalence check
 #: equally and the check still passes. A value recorded from before the change
@@ -156,6 +160,32 @@ GOLDEN_PRE_HOIST = {
                            ('FB2', 2.56), ('R6', 2.56)]),
         ('E', 9, 38, 43, []),
     ],
+}
+
+#: #850 moved the DEMAND column of the recording above, and moved nothing
+#: else. It is recorded here as a TRANSITION rather than edited into
+#: `GOLDEN_PRE_HOIST`, because that table's whole value is being a pre-change
+#: oracle and half of it -- supply and `eaten_by` -- is still exactly that.
+#: Editing four numbers inside it would have retired the oracle for the other
+#: sixteen at the same time, and left no record that anything happened.
+#:
+#: What moved, and why: `face_lane_ledger` now buckets pads to faces with
+#: `escape.assign_faces`, so a pad is measured by its own COPPER EDGE against
+#: the part's copper box (not its centre against the hole-inclusive extent),
+#: within `max(pad_pitch/2, INTERIOR_EPS)`, and a pad boxed in on every side
+#: is INTERIOR and counts toward no face.
+#:
+#:   rp2350 U2   N 7->5  S 13->6  W 5->2  E 6->4   (25 interior pads,
+#:                                                  13 nets left the faces)
+#:   tigard U3   UNCHANGED, and it is the more interesting row: 18 of its pads
+#:               are interior, and not one net left a face, because every one
+#:               of them has another pad that is ON a face. The interior
+#:               bucket removes a NET's demand only when the net has nowhere
+#:               else to go, which is the difference between reclassifying and
+#:               not looking.
+DEMAND_AFTER_850 = {
+    'rp2350_fpga_eensy_prePlane:U2': {'N': 5, 'S': 6, 'W': 2, 'E': 4},
+    'tigard:U3': {'N': 5, 'S': 8, 'W': 10, 'E': 9},
 }
 
 FAILURES = []
@@ -364,7 +394,7 @@ def main():
               _first_difference(mine, doc['ledgers']))
         check('...and it reported some', bool(doc['ledgers']), 'no ledgers')
 
-    print('10. the rows still equal what b5c567c7 produced, value for value')
+    print('10. the SUPPLY half still equals what b5c567c7 produced')
     for key, want in sorted(GOLDEN_PRE_HOIST.items()):
         board, ref = key.split(':')
         path = os.path.join(ROOT, 'kicad_files', board + '.kicad_pcb')
@@ -373,13 +403,27 @@ def main():
             continue
         rows = R.face_lane_ledger(parse_kicad_pcb(path), ref,
                                   **dict(LANE, pcb_file=path))
-        got = [(r['face'], r['demand_nets'], r['supply_routed_grid'],
-                r['supply_finest_grid'],
+        got = [(r['face'], r['supply_routed_grid'], r['supply_finest_grid'],
                 [(n, v) for n, v in r['eaten_by']]) for r in rows]
-        check(f'{key}: identical to the pre-hoist recording',
-              got == want,
-              '\n        '.join(f'{g} != {w}' for g, w in zip(got, want)
-                                if g != w) or f'{got} != {want}')
+        keep = [(f, sr, sf, e) for f, _d, sr, sf, e in want]
+        check(f'{key}: supply and blockers identical to the pre-hoist recording',
+              got == keep,
+              '\n        '.join(f'{g} != {w}' for g, w in zip(got, keep)
+                                if g != w) or f'{got} != {keep}')
+        # ...and the DEMAND half, which #850 moved and which therefore has to
+        # be asserted as a TRANSITION rather than dropped or re-recorded in
+        # place. `<= ` is the direction, not decoration: #850's interior
+        # bucket can only take demand off a face, while its tolerance and
+        # `escape.FACES` tie order can MOVE a net between two -- so a single
+        # face may rise, and the PART total may not.
+        got_d = {r['face']: r['demand_nets'] for r in rows}
+        was_d = {f: d for f, d, _sr, _sf, _e in want}
+        check(f'{key}: demand is the recorded #850 transition',
+              got_d == DEMAND_AFTER_850[key],
+              f'{got_d} != {DEMAND_AFTER_850[key]}')
+        check(f'{key}: ...and the part total did not grow',
+              sum(got_d.values()) <= sum(was_d.values()),
+              f'{sum(got_d.values())} > {sum(was_d.values())}')
 
     print('11. the TOOL parses the board once per board it was given')
     # In-process, because the parse count is the whole claim and it does not

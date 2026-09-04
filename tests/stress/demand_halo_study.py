@@ -98,19 +98,19 @@ def _face_demand(fp, lane, geom=None):
     the other two, which is the defect #841 exists to remove; it is threaded
     from the caller rather than rebuilt here so there is no fourth.
 
+    #850: and it is no longer a copy at all -- `escape.assign_faces` is the one
+    face rule, and this file, `part_escape` and `routability.face_lane_ledger`
+    all call it. The paragraph above is kept because it is the finding.
+
     `geom=None` keeps the old pairing, for a caller with no `PCBData`.
     """
-    from placement.legality import pad_box
     g = None if geom is None else geom.get(fp.reference)
-    rect = escape._part_rect(fp) if g is None else g.copper
-    pitch = escape.pad_pitch(fp)
+    asg = escape.assign_faces(fp, g, lane_mm=lane,
+                              fallback_rect=escape._part_rect(fp))
     per = {f: set() for f in escape.FACES}
-    for pad in fp.pads:
+    for pad, face in asg.faces:
         if not getattr(pad, 'net_id', 0):
             continue
-        face = escape._face_of(pad, rect,
-                               pitch if pitch != float('inf') else lane,
-                               pad_box=None if g is None else pad_box(g, pad))
         if face:
             per[face].add(pad.net_id)
     return max((len(v) for v in per.values()), default=0)

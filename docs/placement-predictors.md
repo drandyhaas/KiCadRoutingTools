@@ -230,6 +230,27 @@ kit-dev-coldfire 0 / 0 -> 1 / 7, glasgow 14 / 2 -> 16 / 4, rp2350 8 / 11 ->
 10 / 13, orangecrab 18 / 9 -> 20 / 10, tigard 8 / 3 -> 9 / 8, watchy 4 / 4 ->
 6 / 9; only esp_prog stays at 0 / 0.
 
+*After #850* (2026-09-03) **nothing on this page moved, and that is a
+measurement rather than an omission.** #850 changed which face a pad points
+at in both ledgers -- corpus-wide, face demand fell from 2034 nets to 1203 --
+and it moved neither column of either table above. Both were re-derived at
+that tip with the two commands named above: every deficit / worst pair is
+identical, the 72.2% share is identical, and so is 14 of the 80 uncharged
+pairs.
+
+The reason is that this page reports the ESCAPE ledger, and #850 changed only
+`routability.face_lane_ledger` -- it moved that instrument onto the rule this
+one already used, rather than changing this one. Every number here is
+re-derived at the tip and identical.
+
+Worth knowing while reading the ulx3s rows in particular: `escape` reports
+ulx3s U1 with demand 0 on all four faces and 379 of its 379 netted balls
+interior, because the box each pad is measured against is set by eight
+UNNETTED 0.127 x 0.508mm alignment marks sitting 0.954mm outside the ball
+field. A bounding box cannot tell eight corner marks from an enclosing ring.
+That is older than either ledger and is filed as **#862** rather than fixed
+here; the board's `1 / 5` row above comes from its other parts.
+
 **What that does to the argument, stated rather than absorbed.** The
 "already charged" share falls 93.6% -> 72.2%, and the pairs the halo misses
 that the demand term WOULD reach go from 0 of 26 to 14 of 93. So the first

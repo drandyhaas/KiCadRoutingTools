@@ -1287,6 +1287,66 @@ face against `--baseline`), **3** (nothing had a ledger, so the gate did not
 run — this is *not* a pass), and **2** (unreadable board). Without `--gate`
 it is 0 throughout.
 
+### Which face a pad points at, and the interior bucket
+
+Demand is *"nets with a pad **on** this face"*, and "on" is
+`placement.escape.assign_faces` — the same rule the escape ledger uses
+(#850). Each pad is measured by its **own copper edge** against the box over
+the part's pad copper (`CopperGeometry.copper`), within
+`max(pad_pitch / 2, 0.001 mm)`.
+
+**A known limit of that box, since it is a box and not an occupancy test:** a
+few small pads lying outside the main pad field set it for everything inside.
+On `ulx3s` U1 — an LFE5U BGA — eight *unnetted* 0.127 × 0.508 mm alignment
+marks sit 0.954 mm beyond the ball field on all four sides, and all 379 netted
+balls therefore read as interior, so the part reports demand 0 on every face.
+That predates both ledgers and this section does not fix it -- **#862** --
+and it is recorded here because the number is published and a reader should
+know what it means.
+
+**A pad that is not on any edge of that box is INTERIOR**, and counts toward
+no face's demand. It cannot leave sideways at any pitch — it needs a via — and
+charging a face for it blames the face for a fanout problem. On a BGA-529 that
+is 441 of 529 balls; the ledger assigns the 88 that form the perimeter.
+
+Three keys report it, on every row (they are part-level facts, repeated the
+way `escape_band_mm` is), and the tool prints them once per ref:
+
+| key | |
+|---|---|
+| `interior_pads` | netted pads on no face — **equal to `escape_ledger`'s `interior_pads` for the same ref at the same clearance** |
+| `interior_nets` | distinct nets among them |
+| `interior_demand_nets` | the subset that had **no** pad on any face, i.e. what the four faces actually lost |
+
+The third is the one to read when a demand looks low. A net with one pad
+interior and another on a face still has to leave through that face, so it is
+still demand; only a net with nowhere to go is off the books. Measured, tigard
+U3 has 18 interior pads and `interior_demand_nets` **0**.
+
+`face_pitch_mm` / `face_pitch_source` report the tolerance pitch and whether
+it came from the part's pad lattice or fell back to the lane. This is a
+**second** basis alongside the escape band's, and it is reported for the same
+reason: two ledgers graded at different bases are not comparable, and until
+#847 nothing in the output said which either used.
+
+The three interior keys and the two pitch keys were **added** to the row by
+#850, and `--json` dumps rows verbatim, so that is a published-schema change.
+It is additive: the three in-repo readers of `ledgers`
+(`tests/test_849_lane_context.py`, `tests/test_847_escape_band.py`,
+`tests/test_run6_check_channels.py`) all read named keys rather than asserting
+a key set, and the skill drivers use the tool through its exit code and its
+printed text, not its JSON.
+
+*Before #850* this ledger took `min` over the distance from each pad's
+**centre** to the whole-part extent edge, with no tolerance and no interior
+case, so every netted pad was demand on some face. Corpus-wide that was 2034
+face-demand nets against 1142, and 478 deficit lanes at the finest grid
+against 199; the boards where the two instruments most disagreed (ulx3s,
+haasoscope_pro_max, routed_output — 68 / 44 / 44 lanes short here against 0 on
+the escape ledger) now agree. Regenerate with
+`tests/measure_850_848_faces.py --table demand`, which prints the two
+ledgers' interior counts adjacent as its negative control.
+
 ### The escape band
 
 Supply is not just face length over lane pitch: a neighbour parked off the
@@ -1313,7 +1373,10 @@ Two things worth knowing before tuning it (#847):
   reported rather than hidden. `escape` uses the raw `track + clearance`;
   `routability` uses the grid-quantized pitch. They disagree on 19 of the 22
   tracked boards (2.2 mm against 2.4 mm at the `routing_defaults` fallback).
-  The `basis` field says which.
+  The `basis` field says which. Since #850 there is a **second** such basis,
+  the face tolerance's — `face_pitch_mm` / `face_pitch_source` above — and it
+  is *not* this one: it is the part's own pad pitch, which is a property of
+  the footprint rather than of the routing parameters.
 * **Deepening the band raises the false-positive rate.** Measured in
   `tests/measure_847_calibration.py`: at a 2.0 mm band the legitimate-restore
   control itself reports a 0.435 loss of escape. The band is a screening

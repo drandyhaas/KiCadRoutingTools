@@ -449,6 +449,20 @@ def main():
             print(f"  {ref} {r['face']}: demand {r['demand_nets']} "
                   f"supply {r['supply_routed_grid']}@routed"
                   f"/{r['supply_finest_grid']}@finest{eaten}{flag}")
+        # #850: the interior bucket, ONCE per ref rather than on all four
+        # rows. It is a part-level fact (the rows repeat it for a machine
+        # reading one row; a human reading four faces does not want it four
+        # times), and it is printed at all because these pads are why a face's
+        # demand is lower than the part's netted pad count. A demand that
+        # fell with nothing in the output saying where it went is how a ledger
+        # stops looking and reads as a fix.
+        if rows[0]['interior_pads']:
+            lost = rows[0]['interior_demand_nets']
+            print(f"  {ref}   interior: {rows[0]['interior_pads']} pad(s) on "
+                  f"no face -- they need a via, not a lane"
+                  + (f"; {lost} net(s) left the faces because of it"
+                     if lost else "; every one of their nets still has a pad "
+                                  "on a face, so no face lost demand"))
 
     # The absolute deficit, summarised (run-12 Tier 3.6). Printed whether or
     # not --baseline was given, and never gated -- see _deficit_faces.
