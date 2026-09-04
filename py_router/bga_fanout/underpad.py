@@ -2409,16 +2409,23 @@ def generate_underpad_escape(footprint: Footprint,
                     _pour_models[(nid, lay)] = models
 
         def _pour_covers(p):
+            """The ball's own copper layer when the (existing or declared)
+            pour's MAIN fill component reaches it there, else None."""
             lay = next((l for l in (p.layers or []) if l.endswith('.Cu')), None)
             if lay is None:
-                return False
+                return None
             for m in _pour_models.get((p.net_id, lay), ()):
                 comp = m.query_component(p.global_x, p.global_y,
                                          size=min(p.size_x, p.size_y))
                 if comp and comp == m.largest_component():
-                    return True
-            return False
+                    return lay
+            return None
 
+        # #678: every ball served by fill contact is a PROMISE a later route
+        # step must keep (its island can be carved off the sourced region
+        # by routing). Recorded per ball, keyed "REF.PAD", published in the
+        # drop report and noted for the .kicad_pro writeback.
+        _promised: Dict[str, Dict[str, str]] = {}
         _rep_nets: Dict[str, Dict[str, int]] = {}
         n_gap = n_ctr = n_exist = n_fail = n_pour = 0
         n_trk = [0]
@@ -2436,13 +2443,16 @@ def generate_underpad_escape(footprint: Footprint,
                 n_exist += 1
                 r['existing'] += 1
                 continue
-            if _pour_covers(p):
+            _pour_lay = _pour_covers(p)
+            if _pour_lay is not None:
                 # Served by the surface pour on its own layer -- no via needed.
                 # (The pad-centre tap reservation stays: if a later step's
                 # copper carves the pour away from this pad, the plane repair
                 # can still tap here.)
                 n_pour += 1
                 r['pour'] += 1
+                _promised[f"{p.component_ref}.{p.pad_number}"] = {
+                    'net': p.net_name, 'layer': _pour_lay, 'how': 'pour'}
                 continue
             # POUR-TRACK near-miss (#652): the pour's MAIN component stops
             # just short of this ball (fill eroded around a neighbouring
@@ -2494,6 +2504,9 @@ def generate_underpad_escape(footprint: Footprint,
                             [(gx, gy), (_tx, _ty)])
                         n_ptrk[0] += 1
                         r['pour_track'] = r.get('pour_track', 0) + 1
+                        _promised[f"{p.component_ref}.{p.pad_number}"] = {
+                            'net': p.net_name, 'layer': _lay,
+                            'how': 'pour_track'}
                         continue
             # TRACK-CONNECT (env-gated, KICAD_FANOUT_TRACK_CONNECT=1 arms): a through-barrel here
             # perforates EVERY foreign pour whose fill covers this (x,y) --
@@ -2606,7 +2619,19 @@ def generate_underpad_escape(footprint: Footprint,
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
                  'skipped_existing': n_exist, 'skipped_pour': n_pour,
                  'track_connects': n_trk[0],
-                 'pour_tracks': n_ptrk[0], 'failed': n_fail})
+                 'pour_tracks': n_ptrk[0], 'failed': n_fail,
+                 # #678: WHICH balls were promised, not just how many.
+                 'pour_served_pads': dict(_promised)})
+        if _promised:
+            # Engine-side note (both fronts inherit it); the step boundary
+            # that knows the output project persists it -- the CLI main next
+            # to its DRC-floor writeback, the GUI in update_live_drc_floors /
+            # the plan executor, exactly like protected nets (#521).
+            try:
+                from protected_nets import note_pour_served_pads
+                note_pour_served_pads(_promised)
+            except Exception:
+                pass
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))

@@ -227,6 +227,73 @@ def read_impedance_for_pcb_data(pcb_data, input_file: Optional[str] = None) -> D
     return read_impedance_specs(pro_path_for_board(path))
 
 
+# --- #678: pour-served balls are a COMMITMENT, carried down the chain -------
+#
+# The BGA fanout's pour-direct serves a plane-net ball by fill contact instead
+# of a drop via (measured win: 38 rail balls, 18 -> 0 gap vias). That is a
+# PROMISE about a pour that a later route step can carve up: the ball's fill
+# island gets cut off the sourced region and the refill ships it split. The
+# fanout used to record only a per-net COUNT ('pour': n), in a process-local
+# report, so no later step could tell WHICH balls were promised. The list now
+# lives here, keyed by "REF.PAD" so it survives re-parses and both parse paths:
+#
+#     {"kicad_routing_tools": {"pour_served_pads":
+#         {"U3.E5": {"net": "GND", "layer": "F.Cu", "how": "pour"}, ...}}}
+#
+# `how` is 'pour' (fill contact at the ball) or 'pour_track' (#652: a short
+# same-layer track from the ball into the fill -- the same promise, one track
+# longer). The route step's in-run plane finalize reads it back and audits
+# every promised ball against the exact fill after routing (pour_promise.py).
+# There is deliberately no CLI flag and no GUI control: a promise is a
+# commitment, and defending it is default behaviour.
+POUR_SERVED_KEY = "pour_served_pads"
+
+
+def pour_served_key(component_ref: str, pad_number: str) -> str:
+    return f"{component_ref}.{pad_number}"
+
+
+def note_pour_served_pads(mapping: Dict[str, dict]) -> None:
+    """Record balls this fanout step promised to serve by fill contact
+    ({"REF.PAD": {"net": name, "layer": layer, "how": 'pour'|'pour_track'}})."""
+    _note(POUR_SERVED_KEY, mapping)
+
+
+def consume_pour_served_pads() -> Dict[str, dict]:
+    return _consume(POUR_SERVED_KEY)
+
+
+def persist_pour_served_pads(pro_path: str, mapping: Dict[str, dict],
+                             verbose: bool = True) -> bool:
+    return _persist_map(pro_path, POUR_SERVED_KEY, mapping,
+                        "Pour-served balls (#678, defended by later route steps)",
+                        verbose)
+
+
+def read_pour_served_pads(pro_path: str) -> Dict[str, dict]:
+    """The promise list from a .kicad_pro ({} when absent/unreadable)."""
+    try:
+        if not pro_path or not os.path.isfile(pro_path):
+            return {}
+        with open(pro_path, 'r', encoding='utf-8') as f:
+            proj = json.load(f)
+        m = (proj.get(PRO_NAMESPACE) or {}).get(POUR_SERVED_KEY) or {}
+        return {str(k): dict(v) for k, v in m.items()
+                if isinstance(v, dict)} if isinstance(m, dict) else {}
+    except Exception:
+        return {}
+
+
+def read_pour_served_for_pcb_data(pcb_data, input_file: Optional[str] = None
+                                  ) -> Dict[str, dict]:
+    """Promise list for the board an engine is working on (same discovery
+    rule as read_for_pcb_data: input_file, else PCBData.source_path)."""
+    path = input_file or getattr(pcb_data, 'source_path', "") or ""
+    if not path:
+        return {}
+    return read_pour_served_pads(pro_path_for_board(path))
+
+
 def locked_net_names(pcb_data) -> Set[str]:
     """Nets with any KiCad-locked segment or via. The user pinned that copper;
     rip machinery must never strip the net (a partial rip would strand the

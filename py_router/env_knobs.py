@@ -294,6 +294,23 @@ def refresh() -> None:
     # base copper EXACTLY (6097 segments and 625 vias compared, all
     # identical). Opt-in until a corpus A/B says it pays.
     g['SLIVER_TRIM'] = _opt_in('KICAD_SLIVER_TRIM')
+    # #678 pour-promise DEFENCE (the copper-changing half: the
+    # pad-anchored custody weld links and the ship-time promise-scoped
+    # oracle weld). OPT-IN, for the reason KICAD_ORACLE_SUMMARY below
+    # records: the AUDIT is disclosure and is always on, but welding a
+    # carved-off ball back CHANGES COPPER, and no A/B has established that
+    # it pays. It is not for want of trying, and the reason is worth
+    # keeping: the orangecrab chain this was tried on CANNOT decide it.
+    # Two replays of IDENTICAL code (commit 2e15780d) over that recorded
+    # 15-command chain graded 1 vs 3 DRC and 8 vs 14 connectivity issues --
+    # that is the chain's own run-to-run spread, from the oracle/kicad-cli
+    # stage (see the repair-wobble finding: kicad-cli jitters reported
+    # anchor coordinates between identical invocations). A single-board,
+    # single-run comparison on it measures that spread, not the change. So
+    # the standing rule applies unchanged -- a default change needs a
+    # corpus A/B -- and until one exists the weld is opt-in. Disclosure is
+    # fine to make environment-dependent; copper is not.
+    g['POUR_PROMISE_WELD'] = _opt_in('KICAD_POUR_PROMISE_WELD')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
     # route.py's end-of-run oracle summary check (one staged

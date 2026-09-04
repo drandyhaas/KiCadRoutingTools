@@ -4361,6 +4361,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     #       --nets <same> <same params>
     _fin_only = os.environ.get('KICAD_FINALIZE_ONLY', '0') == '1'
     _reaudit9 = None  # #589: post-reconcile oracle re-audit context
+    # #678: the balls the fanout PROMISED to serve by fill contact (its
+    # pour-direct), read from the input's sibling .kicad_pro where the fanout
+    # step recorded them. The finalize below audits every one against the
+    # exact fill after routing and welds a carved-off ball back; the ship-
+    # time audit after the reconciliation looks once more. Both fronts: the
+    # GUI's input_file is the live project's board, whose .kicad_pro the
+    # fanout tab / plan executor wrote at their step boundary.
+    _prom678 = {}
+    _ship_scope678 = []   # the finalize's zone nets, set on both fronts
+    try:
+        from protected_nets import read_pour_served_for_pcb_data as _rps678
+        _prom678 = _rps678(pcb_data, input_file) or {}
+    except Exception:
+        _prom678 = {}
     if (os.environ.get('KICAD_CKPT_PREFINALIZE', '0') == '1'
             and output_file and not return_results and not skip_routing):
         try:
@@ -4444,6 +4458,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # sees), and the oracle is the model-independent verifier --
             # on a healthy board it costs one refill and exits at round 0.
             _zpairs_all = list(_zpairs)
+            _ship_scope678 = sorted({n for n, _l in _zpairs_all})
             if _zpairs:
                 from check_connected import check_net_connectivity as _cnc9
                 _zbn9 = {}
@@ -5074,6 +5089,74 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # them may be re-touched by the stale failure buckets.
                     if _orc.get('available'):
                         _zone_complete9 = set(_zna)
+            # #678 PROMISE DEFENCE, finalize half. Every ball the fanout
+            # promised to serve by fill contact is audited against the exact
+            # fill of the board the oracle just verified (the raster model
+            # when no file can be refilled -- disclosed as the source). A
+            # ball whose island the routing carved off the sourced region
+            # becomes ONE MORE CUSTODY LINK for the final reconciliation --
+            # anchored at the BALL, the tap site the fanout reserved for
+            # exactly this, so a via there is the drop the promise displaced
+            # and the endpoint can never be classed pad-less debris (#659).
+            # The oracle's own link for that island is anchored at a fill
+            # sample and lives or dies with the rest of its net's list; this
+            # one names the ball. Runs whatever the oracle's availability.
+            if _prom678 and _zpairs_all:
+                try:
+                    from pour_promise import (audit_pour_promises as _apo678,
+                                              format_audit as _fa678,
+                                              summary_entry as _se678)
+                    _pd678 = pcb_data
+                    if _orc_file9 and not _gui9:
+                        # CLI: the oracle edits the FILE in place and
+                        # pcb_data lags it (the reconcile re-parses for the
+                        # same reason); audit the board KiCad will refill.
+                        from kicad_parser import parse_kicad_pcb as _pk678
+                        _pd678 = _pk678(_orc_file9)
+                    _aud678 = _apo678(
+                        _pd678, _prom678, board_file=_orc_file9,
+                        project_from=input_file,
+                        zone_net_names={n for n, _l in _zpairs_all})
+                    print("  " + _fa678(_aud678, 'finalize'))
+                    summary.setdefault('pour_served', {})['finalize'] = \
+                        _se678(_aud678)
+                    try:   # GUI front reads results_data, not the summary
+                        results_data['pour_served'] = summary['pour_served']
+                    except (NameError, UnboundLocalError):
+                        pass
+                    _add678 = [d for d in _aud678['detached']
+                               if d.get('link')]
+                    # The AUDIT above is disclosure and always runs. Turning
+                    # its findings into custody links CHANGES COPPER, which
+                    # no A/B has yet shown pays -- and the chain it was tried
+                    # on cannot show it (see env_knobs.POUR_PROMISE_WELD for
+                    # the measured run-to-run spread). Opt-in until a corpus
+                    # A/B decides it.
+                    if _add678 and not env_knobs.POUR_PROMISE_WELD:
+                        print(f"  Pour-served balls (#678): {len(_add678)} "
+                              f"carved-off ball(s) on "
+                              f"{', '.join(sorted({d['net'] for d in _add678}))}"
+                              f" -- NOT welded (set KICAD_POUR_PROMISE_WELD=1 "
+                              f"to defend them)")
+                        summary['pour_served']['finalize']['weld'] = 'off'
+                        _add678 = []
+                    if _add678:
+                        _custody_links9.extend(d['link'] for d in _add678)
+                        for _d678 in _add678:
+                            if _d678['net'] not in _custody_nets9:
+                                _custody_nets9.append(_d678['net'])
+                            _zone_complete9.discard(_d678['net'])
+                        print(f"  Pour-served balls (#678): {len(_add678)} "
+                              f"pad-anchored weld link(s) on "
+                              f"{', '.join(sorted({d['net'] for d in _add678}))}"
+                              f" -- joining the final reconciliation")
+                    _nolink678 = len(_aud678['detached']) - len(_add678)
+                    if _nolink678 and env_knobs.POUR_PROMISE_WELD:
+                        print(f"  Pour-served balls (#678): {_nolink678} "
+                              f"detached ball(s) with no sourced copper to "
+                              f"weld to -- nothing to route")
+                except Exception as _pe678:
+                    print(f"  (pour-served ball audit skipped: {_pe678})")
         except Exception as _e:
             # The failure must name its blast radius: JSON_SUMMARY was
             # already printed BEFORE the finalize, so a grader reading it
@@ -5572,6 +5655,71 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # restores were incomplete). One bounded extra oracle pass over the
     # SAME nets on the final written board welds exactly that damage; on a
     # healthy board it costs one refill and exits at round 0.
+    # #678 PROMISE DEFENCE, ship half. The reconciliation above rips and
+    # reroutes WITH RIP AUTHORITY after the finalize's oracle verified the
+    # pours, and the general re-audit below is opt-in -- so a promised ball
+    # the reconcile carves off would ship silently. Audit every promise on
+    # the FINAL board (exact fill in CLI file mode; the raster model on the
+    # GUI's live board, disclosed as such), and when one is still detached
+    # run a promise-SCOPED oracle weld pass over just those nets (CLI: the
+    # weld needs a file), then audit again so the summary says what shipped.
+    if (_prom678 and _ship_scope678 and not skip_routing
+            and (output_file or return_results)):
+        try:
+            from pour_promise import (audit_pour_promises as _apo678b,
+                                      format_audit as _fa678b,
+                                      summary_entry as _se678b)
+            _file678 = output_file if (output_file
+                                       and not return_results) else None
+            _pd678b = pcb_data
+            if _file678:
+                from kicad_parser import parse_kicad_pcb as _pk678b
+                _pd678b = _pk678b(_file678)
+            _scope678 = set(_ship_scope678)
+            _aud678b = _apo678b(_pd678b, _prom678, board_file=_file678,
+                                project_from=input_file,
+                                zone_net_names=_scope678)
+            print("  " + _fa678b(_aud678b, 'ship'))
+            _rewelded678 = 0
+            # The weld needs a file AND the oracle config the finalize
+            # built (CLI file mode); the GUI gets the audit and disclosure.
+            if (_aud678b['detached'] and _file678 and _reaudit9 is not None
+                    and env_knobs.POUR_PROMISE_WELD):
+                from kicad_oracle import oracle_reconnect as _orc678
+                _nets678 = sorted({d['net'] for d in _aud678b['detached']})
+                print(f"  Pour-served balls (#678): "
+                      f"{len(_aud678b['detached'])} still detached at ship "
+                      f"-- promise-scoped oracle weld on "
+                      f"{', '.join(_nets678)}")
+                _orc678(_file678, _nets678, _reaudit9[1],
+                        track_via_clearance=defaults.PLANE_TRACK_VIA_CLEARANCE,
+                        hole_to_hole_clearance=config.hole_to_hole_clearance,
+                        cancel_check=cancel_check,
+                        project_from=input_file)
+                _pd678b = _pk678b(_file678)
+                _aud678c = _apo678b(_pd678b, _prom678, board_file=_file678,
+                                    project_from=input_file,
+                                    zone_net_names=_scope678)
+                _rewelded678 = (len(_aud678b['detached'])
+                                - len(_aud678c['detached']))
+                print("  " + _fa678b(_aud678c, 'ship, after weld'))
+                _aud678b = _aud678c
+            if _aud678b['detached'] and not env_knobs.POUR_PROMISE_WELD:
+                print(f"  Pour-served balls (#678): "
+                      f"{len(_aud678b['detached'])} still detached at ship "
+                      f"-- NOT welded (set KICAD_POUR_PROMISE_WELD=1 to "
+                      f"defend them)")
+            _ship678 = _se678b(_aud678b)
+            _ship678['rewelded'] = _rewelded678
+            _ship678['weld'] = ('on' if env_knobs.POUR_PROMISE_WELD else 'off')
+            summary.setdefault('pour_served', {})['ship'] = _ship678
+            try:   # GUI front reads results_data, not the summary
+                results_data['pour_served'] = summary['pour_served']
+            except (NameError, UnboundLocalError):
+                pass
+        except Exception as _pe678b:
+            print(f"  (pour-served ball ship audit skipped: {_pe678b})")
+
     if (_reaudit9 is not None and output_file and not return_results
             and not skip_routing
             and os.environ.get('KICAD_FINALIZE_REAUDIT', '0') == '1'):

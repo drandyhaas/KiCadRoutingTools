@@ -3017,6 +3017,19 @@ def oracle_reconnect(board_file: str, net_names, config,
     # as input copper by every cleanup, so nothing else will EVER touch it
     # and KiCad demands the link on every future run.
     _debris_resolved = set()
+    # Bind the board this pass reads (#678 fix-up). The rounds loop binds
+    # pcb_data / name_to_id at the top of each round it RUNS, so on the
+    # round-0 exit ("KiCad reports all processed nets complete") neither was
+    # ever bound -- and `if links` below is true whenever the unioned link
+    # report names ANY other net (an unrouted signal net, say). The block
+    # then died on an unbound local, and because the plane finalize wraps
+    # this whole call in one try, the FINALIZE died with it: "plane finalize
+    # pass FAILED: cannot access local variable 'name_to_id'", every zone
+    # net left unverified, custody empty. Reproduced on the #678 fixture (a
+    # complete GND pour beside eight unrouted signal nets).
+    if links and rounds == 0:
+        pcb_data = parse_kicad_pcb(board_file)
+        name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
     # NOT `if rounds and links` (#659 audit): `rounds` counts rounds the weld
     # loop ran on ITS OWN scope nets, and it is 0 whenever those were already
     # complete -- the common healthy case. daisho step 9 printed "KiCad

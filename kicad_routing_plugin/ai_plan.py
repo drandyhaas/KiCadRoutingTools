@@ -1487,12 +1487,16 @@ class PlanExecutor:
                 try:
                     from protected_nets import (consume_protection_candidates,
                                                 consume_impedance_specs,
+                                                consume_pour_served_pads,
                                                 persist_protected_nets,
                                                 persist_impedance_specs,
+                                                persist_pour_served_pads,
                                                 pro_path_for_board)
                     _pro = pro_path_for_board(board_file)
                     persist_protected_nets(_pro, consume_protection_candidates())
                     persist_impedance_specs(_pro, consume_impedance_specs())
+                    # #678: the plan's fanout steps' pour-served balls.
+                    persist_pour_served_pads(_pro, consume_pour_served_pads())
                 except Exception as _pe:
                     self.log(f"AI plan: protected-nets record skipped: {_pe}")
                 self.log(f"AI plan: recorded DRC floors in the project "
