@@ -234,7 +234,17 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
             return 'full_open'
         return 'full'
 
-    stub_segs, stub_vias = _stub_subset(pcb_data, net_id, segments, vias)
+    # #806: a pair payload carries BOTH members' copper under two ids
+    # (ripped_ids); walking only `net_id`'s pads kept the P stub and dropped
+    # the N stub. Collect the escape subset per member id.
+    stub_segs, stub_vias = [], []
+    _seen_s, _seen_v = set(), set()
+    for _nid in sorted(own):
+        _ss, _sv = _stub_subset(pcb_data, _nid, segments, vias)
+        stub_segs += [s for s in _ss if id(s) not in _seen_s]
+        _seen_s.update(id(s) for s in _ss)
+        stub_vias += [v for v in _sv if id(v) not in _seen_v]
+        _seen_v.update(id(v) for v in _sv)
     kept_s = [s for s in stub_segs
               if not _copper_conflicts(pcb_data, config, own, [s], [])]
     kept_v = [v for v in stub_vias
@@ -263,22 +273,15 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
     # obstacles for every later net this run, the cache entry keeps
     # mirroring the board, and every map op is a complete-entry add/remove
     # -- #309 ref-counts balanced by construction.
-    if working_obstacles is not None and net_obstacles_cache is not None \
-            and net_id in net_obstacles_cache:
-        from obstacle_cache import (add_net_obstacles_from_cache,
-                                    precompute_net_obstacles,
-                                    remove_net_obstacles_from_cache)
-        remove_net_obstacles_from_cache(working_obstacles,
-                                        net_obstacles_cache[net_id])
-        pcb_data.segments.extend(kept_s)
-        pcb_data.vias.extend(kept_v)
-        net_obstacles_cache[net_id] = precompute_net_obstacles(
-            pcb_data, net_id, config)
-        add_net_obstacles_from_cache(working_obstacles,
-                                     net_obstacles_cache[net_id])
-    else:
-        pcb_data.segments.extend(kept_s)
-        pcb_data.vias.extend(kept_v)
+    # #806: EVERY member id of the payload (P and N of a pair), and a net
+    # with no entry yet gets one -- rip_up_net recomputes unconditionally, so
+    # any net with a payload has an entry; this mirrors that rather than
+    # extending pcb_data with copper the map never sees.
+    pcb_data.segments.extend(kept_s)
+    pcb_data.vias.extend(kept_v)
+    from obstacle_cache import refresh_net_obstacles
+    refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
+                          config, sorted(own))
     name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else str(net_id)
     print(f"  RIP-RESTORE (#468): {name} remains UNROUTED -- kept only its "
           f"escape stub ({len(kept_s)} seg(s), {len(kept_v)} via(s)) so the "

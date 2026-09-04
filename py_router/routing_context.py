@@ -723,7 +723,9 @@ def record_diff_pair_success(
     routed_results: Dict,
     diff_pair_by_net_id: Dict,
     track_proximity_cache: Dict,
-    layer_map: Dict
+    layer_map: Dict,
+    working_obstacles=None,
+    net_obstacles_cache: Dict = None,
 ):
     """
     Record a successful diff pair route.
@@ -741,8 +743,15 @@ def record_diff_pair_success(
         diff_pair_by_net_id: Dict mapping net ID to (pair_name, pair)
         track_proximity_cache: Cache of track proximity costs
         layer_map: Layer name to index mapping
+        working_obstacles / net_obstacles_cache: the run's persistent map and
+            per-net cache (#806). When given, both members' entries are
+            refreshed from the committed copper, the same contract
+            record_single_ended_success's callers keep. None = no map.
     """
     add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+    from obstacle_cache import refresh_net_obstacles
+    refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
+                          config, (pair.p_net_id, pair.n_net_id))
 
     if pair.p_net_id in remaining_net_ids:
         remaining_net_ids.remove(pair.p_net_id)

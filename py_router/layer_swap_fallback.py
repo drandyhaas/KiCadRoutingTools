@@ -26,6 +26,23 @@ from obstacle_costs import (
 from blocking_analysis import analyze_frontier_blocking
 from history_congestion import add_history_source, record_rip   # #590
 from polarity_swap import get_canonical_net_id
+from obstacle_cache import refresh_net_obstacles as _refresh_map   # #806
+
+
+def stamp_result_copper(obstacles, result: dict, config, extra_clearance: float) -> None:
+    """Stamp a routing RESULT's copper -- segments and EVERY via it carries --
+    as obstacles on `obstacles`. For copper that is not in pcb_data yet (a
+    result the caller commits later) the pcb_data-driven stampers cannot see
+    it, so it must come from the result itself. #806: the victim-reroute
+    map inside try_fallback_layer_swap stamped the result's GND vias only,
+    dropping the pair's own P/N barrels, so a victim could land a via on
+    (or a track across) a barrel that was about to be committed."""
+    segs = (result or {}).get('new_segments') or []
+    vias = (result or {}).get('new_vias') or []
+    if segs:
+        add_segments_list_as_obstacles(obstacles, segs, config, extra_clearance)
+    if vias:
+        add_vias_list_as_obstacles(obstacles, vias, config, extra_clearance)
 
 
 def add_own_stubs_as_obstacles_for_diff_pair(obstacles, pcb_data, p_net_id: int, n_net_id: int,
@@ -199,10 +216,18 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             layer_map: dict = None,
                             target_swaps: dict = None,
                             results: list = None,
-                            obstacle_cache: dict = None):
+                            obstacle_cache: dict = None,
+                            working_obstacles=None,
+                            net_obstacles_cache: dict = None):
     """
     Try to swap the blocked side's stubs to another layer as a fallback when routing fails.
     After applying the swap, attempts rip-up and reroute if the initial route fails.
+
+    working_obstacles / net_obstacles_cache (#806): the run's persistent map
+    and per-net cache. This function rips and restores victims INLINE (not
+    through rip_up_net / restore_net, which do their own map bookkeeping),
+    so every place it changes a victim's copper on the board refreshes that
+    victim's map entry here. None = the caller keeps no persistent map.
 
     Returns:
         (success, result, vias, mods) - success bool, routing result if successful,
@@ -458,6 +483,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                             if was_in_results:
                                 results.remove(saved_result)
                             remove_route_from_pcb_data(pcb_data, saved_result)
+                            _refresh_map(working_obstacles, net_obstacles_cache,
+                                         pcb_data, config, rip_net_ids)   # #806
                             # #590: a blocker rip, done inline here rather than
                             # through rip_up_net -- charge it the same way, or
                             # this path's conflicts are invisible to history.
@@ -526,13 +553,14 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                         add_net_vias_as_obstacles(reroute_obstacles, pcb_data, pair.n_net_id, config, diff_pair_extra_clearance)
                                         if gnd_net_id is not None:
                                             add_net_vias_as_obstacles(reroute_obstacles, pcb_data, gnd_net_id, config, diff_pair_extra_clearance)
-                                            # Also add GND vias from rip_result (the just-routed pair) which aren't in pcb_data yet
-                                            gnd_vias_from_result = [v for v in rip_result.get('new_vias', []) if v.net_id == gnd_net_id]
-                                            if gnd_vias_from_result:
-                                                add_vias_list_as_obstacles(reroute_obstacles, gnd_vias_from_result, config, diff_pair_extra_clearance)
-                                        # Also add segments from rip_result (the just-routed pair) which aren't in pcb_data yet
-                                        if rip_result.get('new_segments'):
-                                            add_segments_list_as_obstacles(reroute_obstacles, rip_result['new_segments'], config, diff_pair_extra_clearance)
+                                        # The just-routed pair's copper (rip_result) is NOT in
+                                        # pcb_data yet -- the caller commits it after we return
+                                        # -- so stamp it from the result: segments AND every
+                                        # via it carries (its own P/N barrels and any GND
+                                        # return vias). #806: this used to stamp GND vias only,
+                                        # so a victim rerouted blind to the pair's own barrels.
+                                        stamp_result_copper(reroute_obstacles, rip_result, config,
+                                                            diff_pair_extra_clearance)
                                         reroute_stub_net_ids = [nid for nid in all_unrouted_net_ids
                                                                 if nid not in routed_net_ids
                                                                 and nid != ripped_pair.p_net_id
@@ -554,6 +582,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                         reroute_result = route_diff_pair_with_obstacles(pcb_data, ripped_pair, config, reroute_obstacles, base_obstacles, reroute_stubs)
                                         if reroute_result and not reroute_result.get('failed') and not reroute_result.get('probe_blocked'):
                                             add_route_to_pcb_data(pcb_data, reroute_result, debug_lines=config.debug_lines)
+                                            _refresh_map(working_obstacles, net_obstacles_cache,
+                                                         pcb_data, config, ripped_ids)   # #806
                                             # Add to results list if the ripped result was in it
                                             if ripped_was_in_results and results is not None:
                                                 results.append(reroute_result)
@@ -604,6 +634,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                                                     results.remove(new_result)
                                             # Now restore the old route
                                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                                            _refresh_map(working_obstacles, net_obstacles_cache,
+                                                         pcb_data, config, ripped_ids)   # #806
                                             if ripped_was_in_results and results is not None:
                                                 # Only append if not already in results (prevent duplicates)
                                                 if ripped_saved not in results:
@@ -624,6 +656,8 @@ def try_fallback_layer_swap(pcb_data, pair, pair_name: str, config,
                     for ripped_blocker, ripped_saved, ripped_ids, ripped_was_in_results in ripped_items:
                         if ripped_saved and ripped_ids[0] not in routed_net_ids:
                             add_route_to_pcb_data(pcb_data, ripped_saved, debug_lines=config.debug_lines)
+                            _refresh_map(working_obstacles, net_obstacles_cache,
+                                         pcb_data, config, ripped_ids)   # #806
                             if ripped_was_in_results and results is not None and ripped_saved not in results:
                                 results.append(ripped_saved)
                             for rid in ripped_ids:
