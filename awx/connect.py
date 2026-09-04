@@ -203,7 +203,10 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
             window_pts: Optional[List[Point]] = None,
             virtual_vias: Optional[List[Point]] = None,
             cache: Optional['ObsCache'] = None,
-            b_alts: Optional[List[Tuple[float, float, str]]] = None
+            b_alts: Optional[List[Tuple[float, float, str]]] = None,
+            soft: Optional[List[Tuple[Point, Point, str, float]]] = None,
+            soft_vias: Optional[List[Tuple[float, float, float]]] = None,
+            soft_cost: float = 2.0
             ) -> Optional[Tuple[List[Segment], List[Via]]]:
     """Route `net_id` from the copper end at `a` (on `a_layer`) to the
     copper end at `b` (on `b_layer`).
@@ -224,6 +227,19 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     the bounding box of the two points -- and of `window_pts`, the
     planned path, when the lane goes somewhere the two points' box
     does not cover (round the far side of an array).
+
+    `soft`: copper that is NOT an obstacle but a PRICE -- (p, q, layer,
+    width) centrelines (and `soft_vias` (x, y, size)) whose clearance
+    footprint is stamped as a per-cell cost of `soft_cost` mm-equivalent
+    instead of blocked cells. A search through soft copper finds the
+    path that crosses the FEWEST foreign lanes (a crossing runs ~18 cells
+    of footprint at the 0.025 grid, so at 2.0 it prices like a 9 mm
+    detour), and what it crosses is, by construction, the minimal set
+    of lanes that must move for this net to route: the blocker
+    discovery a rip-up needs (negotiate.py). The caller must NOT also
+    carry that copper in `pcb` (it would be blocked, not priced); pass
+    it here instead.
+
     """
     coord = GridCoord(cfg.grid_step)
     layer_map = build_layer_map(cfg.layers)
@@ -298,6 +314,9 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
         if len(keep):
             obstacles.add_blocked_vias_batch(keep)
+    if soft or soft_vias:
+        _stamp_soft(obstacles, coord, layer_map, cfg, soft or (),
+                    soft_vias or (), soft_cost)
     if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
         cells = _band_cells(coord, window, band, list(cfg.layers),
@@ -350,6 +369,62 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         return None
     return list(result.get('new_segments') or []), \
         list(result.get('new_vias') or [])
+
+
+def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
+                soft, soft_vias, soft_cost: float) -> None:
+    """Price the clearance footprint of `soft` copper per cell, per
+    layer (set_layer_proximity_batch), and of `soft_vias` on every
+    layer. The footprint is the obstacle model's own: half the copper
+    width + the clearance + half a track of the searching net -- a
+    cell whose centre lies inside it is one the hard model would have
+    blocked."""
+    from bresenham_utils import walk_line
+    cost = cfg.cell_cost(soft_cost)
+    rows = []
+    disks = {}
+
+    def disk(r_grid):
+        d = disks.get(r_grid)
+        if d is None:
+            rr = range(-r_grid, r_grid + 1)
+            d = np.array([(ex, ey) for ex in rr for ey in rr
+                          if ex * ex + ey * ey <= r_grid * r_grid],
+                         dtype=np.int64)
+            disks[r_grid] = d
+        return d
+    for (p, q, layer, w) in soft:
+        li = layer_map.get(layer)
+        if li is None:
+            continue
+        hw = coord.to_grid_dist(w / 2 + cfg.clearance + cfg.track_width / 2)
+        gx1, gy1 = coord.to_grid(p[0], p[1])
+        gx2, gy2 = coord.to_grid(q[0], q[1])
+        pts = np.asarray(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int64)
+        off = disk(hw)
+        gx = (pts[:, 0:1] + off[:, 0]).ravel()
+        gy = (pts[:, 1:2] + off[:, 1]).ravel()
+        r = np.empty((gx.size, 4), dtype=np.int64)
+        r[:, 0] = li
+        r[:, 1] = gx
+        r[:, 2] = gy
+        r[:, 3] = cost
+        rows.append(r)
+    for (x, y, size) in soft_vias:
+        hw = coord.to_grid_dist(size / 2 + cfg.clearance + cfg.track_width / 2)
+        gx0, gy0 = coord.to_grid(x, y)
+        off = disk(hw)
+        for li in range(len(cfg.layers)):
+            r = np.empty((len(off), 4), dtype=np.int64)
+            r[:, 0] = li
+            r[:, 1] = gx0 + off[:, 0]
+            r[:, 2] = gy0 + off[:, 1]
+            r[:, 3] = cost
+            rows.append(r)
+    if not rows:
+        return
+    arr = np.unique(np.concatenate(rows), axis=0).astype(np.int32)
+    obstacles.set_layer_proximity_batch(arr)
 
 
 def seg_len(segs: List[Segment]) -> float:

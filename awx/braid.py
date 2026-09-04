@@ -2752,6 +2752,10 @@ def main():
         else:
             c.run()
         corridors.append(c)
+    if os.environ.get('BRAID_NEGOTIATE', '0') == '1':
+        negotiate_refusals(ctx, corridors, names, log,
+                           rounds=int(os.environ.get('BRAID_NEG_ROUNDS', '3')),
+                           victims=int(os.environ.get('BRAID_NEG_VICTIMS', '4')))
     return write_out(a, ctx, corridors, names, log)
 
 
@@ -2978,8 +2982,69 @@ def setup(board, names, dest, log, cluster=6.0):
                                 if _hw else {}))
     ctx.base_segments = list(pcb.segments)
     ctx.base_vias = list(pcb.vias)
+    # each net's FANOUT copper, as it came: what a rip resets to
+    ctx.fo_copper = {nm: ([s for s in pcb.segments if s.net_id == byname[nm][0]],
+                          [v for v in pcb.vias if v.net_id == byname[nm][0]])
+                     for nm in names}
     ctx.laid = []
     return ctx, groups
+
+
+def negotiate_refusals(ctx, corridors, names, log, rounds=3, victims=4):
+    """The FINAL stage (BRAID_NEGOTIATE=1): every lane still refused
+    after its corridor's attempts and last call is classified by the
+    router (negotiate.py: MISSED / WALLED / BLOCKED) and, when other
+    lanes block it, those lanes -- discovered by routing through them
+    at a price, not guessed by distance -- are ripped, the refused net
+    laid, the victims re-laid, and only a strict improvement kept.
+    Fires only where something refused, so a complete run is untouched
+    by construction. Writes the outcome back into the corridors'
+    copper and the board."""
+    import negotiate as ng
+    refused = [nm for c in corridors for nm in c.refused]
+    if not refused:
+        return
+    byname, kids = ctx.byname, ctx.kids
+    fo = ctx.fo_copper
+    state, wp = {}, {}
+    for c in corridors:
+        for nm in c.members:
+            lane = (c.out_segs.get(nm) or [], c.out_vias.get(nm) or [])
+            state[nm] = (list(fo[nm][0]) + list(lane[0]),
+                         list(fo[nm][1]) + list(lane[1]))
+            wp[nm] = list(getattr(c, 'lane_xy', {}).get(nm)
+                          or [c.teeth[nm], c.stubs[nm]])
+    rest = ([s for s in ctx.pcb.segments if s.net_id not in kids],
+            [v for v in ctx.pcb.vias if v.net_id not in kids])
+    ends = {nm: (ctx.ends[nm][0], ctx.tooth_layer[nm],
+                 ctx.ends[nm][1], ctx.dest_layer[nm]) for nm in names}
+    log(f'\nNEGOTIATE: {len(refused)} refused {sorted(refused)}')
+    N = ng.Negotiator(ctx.pcb, ctx.cfg, byname, ends, fo, state, rest,
+                      log=log, window_pts=wp, b_alts=ctx.dest_alts,
+                      chains=ctx.dest_chain)
+    still = set(N.run(refused, rounds=rounds, max_victims=victims))
+    for c in corridors:
+        for nm in c.members:
+            segs, vias = ng.lane_part(fo[nm], N.state[nm])
+            c.out_segs[nm], c.out_vias[nm] = segs, vias
+            # a berth the negotiation trimmed: record the spans the
+            # non-smoothed writer must strip (note_joint's own form)
+            chain = ctx.dest_chain.get(nm) or []
+            present = {id(x) for x in N.state[nm][0]}
+            gone = [(t, p_) for (sg, t, p_) in chain if id(sg) not in present]
+            if gone:
+                ctx.trim_spans[nm] = gone
+        c.refused = [nm for nm in c.members if nm in still]
+    segs = list(rest[0])
+    vias = list(rest[1])
+    for nm in names:
+        segs.extend(N.state[nm][0])
+        vias.extend(N.state[nm][1])
+    ctx.pcb.segments, ctx.pcb.vias = segs, vias
+    for nm in still:
+        ctx.refusal_info.setdefault(nm, {})['stage'] = 'negotiated'
+    log(f'NEGOTIATE: {len(refused) - len(still)} of {len(refused)} '
+        f'recovered; still open {sorted(still)}')
 
 
 def write_out(a, ctx, corridors, names, log):
