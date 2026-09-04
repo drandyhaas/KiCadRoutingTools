@@ -220,7 +220,7 @@ def ledger_raw_delta(obstacles, site_tag: str, d_cells: int, d_vias: int) -> Non
 
 def run_obstacle_audit(base_obstacles, working_obstacles,
                        net_obstacles_cache: Dict[int, "NetObstacleData"],
-                       label: str = "") -> None:
+                       label: str = "", pcb_data=None, config=None) -> None:
     """End-of-run ref-count integrity audit (issue #309), shared by every
     front-end that maintains a persistent working map + per-net cache dict.
 
@@ -228,6 +228,13 @@ def run_obstacle_audit(base_obstacles, working_obstacles,
     map, removes every net's CURRENT cache, and compares entry counts to the
     base. Any residual in the ref-counted sets is a leak (an add not mirrored
     by a remove) or an over-decrement. Fully defensive; env-gated by callers.
+
+    With `pcb_data` and `config` it also runs the CONTENT audit (#806,
+    invariant E): the ref-count invariants above say nothing about whether
+    the cells in the map are the RIGHT cells -- a cache entry computed before
+    a net was routed, never refreshed, and removed/re-added in balance passes
+    A/B/C while the routed copper is invisible to every search on the map.
+    See `run_obstacle_content_audit`.
     """
     try:
         if base_obstacles is None or working_obstacles is None:
@@ -268,6 +275,114 @@ def run_obstacle_audit(base_obstacles, working_obstacles,
             obstacle_ledger_report(net_obstacles_cache)
     except Exception as e:
         print(f"[OBSTACLE AUDIT] skipped ({e})")
+    if pcb_data is not None and config is not None:
+        run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
+                                   pcb_data, config, label=label)
+
+
+def _cache_cells_and_vias(cd: "NetObstacleData"):
+    """A cache entry's (N,3) blocked cells and (M,2) blocked via cells, with
+    the #815 spans expanded -- the cell multiset the map actually holds."""
+    cells = [np.asarray(cd.blocked_cells, dtype=np.int64).reshape(-1, 3)]
+    spans = getattr(cd, 'blocked_cell_spans', None)
+    if spans is not None and len(spans):
+        s = np.asarray(spans, dtype=np.int64).reshape(-1, 4)
+        n = (s[:, 2] - s[:, 1] + 1)
+        gx = np.repeat(s[:, 0], n)
+        li = np.repeat(s[:, 3], n)
+        gy = np.concatenate([np.arange(lo, hi + 1) for lo, hi in zip(s[:, 1], s[:, 2])]) \
+            if len(s) else np.empty(0, dtype=np.int64)
+        cells.append(np.stack([gx, gy, li], axis=1))
+    vias = [np.asarray(cd.blocked_vias, dtype=np.int64).reshape(-1, 2)]
+    vspans = getattr(cd, 'blocked_via_spans', None)
+    if vspans is not None and len(vspans):
+        vias.append(np.asarray(expand_via_spans(np.asarray(vspans, dtype=np.int32)),
+                               dtype=np.int64).reshape(-1, 2))
+    return np.concatenate(cells), np.concatenate(vias)
+
+
+def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
+                               pcb_data, config, label: str = "") -> Optional[Dict]:
+    """Invariant E (#806): the working map BLOCKS every cell the board's
+    CURRENT copper says it should, for every net the cache tracks.
+
+    Recomputes each cached net's footprint from `pcb_data` exactly as
+    rip_up_net / restore_net do, and queries the working map cell by cell.
+    A cell the fresh footprint holds that the map does not block is an
+    UNDER-BLOCK: copper a later search on this map (a ripped victim's
+    reroute, a terminal restore, the mincut probe) will route straight
+    through. Distinct from A/B/C, which only check that adds and removes
+    balance -- a stale-but-balanced entry passes them.
+
+    Returns the counts (also printed), or None when nothing could be checked.
+    """
+    try:
+        if working_obstacles is None or not net_obstacles_cache:
+            return None
+        n_nets = n_cells = n_missing = n_vias = n_vmissing = 0
+        n_entry_stale = 0
+        stale_nets = []
+        stale_entries = []
+        for nid in sorted(net_obstacles_cache):
+            fresh = precompute_net_obstacles(pcb_data, nid, config)
+            cells, vias = _cache_cells_and_vias(fresh)
+            if len(cells):
+                cells = _unique_rows(cells.astype(np.int32))
+            if len(vias):
+                vias = _unique_rows(vias.astype(np.int32))
+            n_nets += 1
+            # Bookkeeping staleness, independent of what ELSE covers a cell:
+            # cells the board's copper says this net owns that its cache
+            # entry (= what the map was told) does not carry.
+            ent_cells, _ent_vias = _cache_cells_and_vias(net_obstacles_cache[nid])
+            ent_keys = set(map(tuple, ent_cells.tolist()))
+            entry_missing = sum(1 for c in cells.tolist() if tuple(c) not in ent_keys)
+            miss = 0
+            for gx, gy, li in cells:
+                if not working_obstacles.is_blocked(int(gx), int(gy), int(li)):
+                    miss += 1
+            vmiss = 0
+            for gx, gy in vias:
+                if not working_obstacles.is_via_blocked(int(gx), int(gy)):
+                    vmiss += 1
+            n_cells += len(cells)
+            n_vias += len(vias)
+            n_missing += miss
+            n_vmissing += vmiss
+            n_entry_stale += entry_missing
+            name = getattr(pcb_data.nets.get(nid), 'name', None) or str(nid)
+            if entry_missing:
+                stale_entries.append((name, entry_missing, len(cells)))
+            if miss or vmiss:
+                stale_nets.append((name, miss, len(cells), vmiss, len(vias)))
+        print("\n" + "=" * 60)
+        print(f"[OBSTACLE CONTENT{' ' + label if label else ''}] "
+              f"{n_nets} nets recomputed from pcb_data: {n_cells} cells checked, "
+              f"{n_missing} NOT blocked in working map; {n_vias} via cells checked, "
+              f"{n_vmissing} NOT via-blocked; {n_entry_stale} cells absent from "
+              f"their net's cache entry ({len(stale_entries)} stale entries)")
+        for name, em, c in stale_entries[:12]:
+            print(f"    stale entry {name}: {em}/{c} current cells not in its entry")
+        if len(stale_entries) > 12:
+            print(f"    ... and {len(stale_entries) - 12} more stale entries")
+        if stale_nets:
+            print(f"  UNDER-BLOCK: {len(stale_nets)} net(s) whose current copper "
+                  f"the working map does not block:")
+            for name, m, c, vm, vc in stale_nets[:12]:
+                print(f"    {name}: {m}/{c} cells, {vm}/{vc} via cells missing")
+            if len(stale_nets) > 12:
+                print(f"    ... and {len(stale_nets) - 12} more")
+        else:
+            print("  CONTENT OK: every cached net's current copper is blocked "
+                  "in the working map.")
+        print("=" * 60)
+        return {'nets': n_nets, 'cells': n_cells, 'missing': n_missing,
+                'vias': n_vias, 'via_missing': n_vmissing,
+                'entry_stale': n_entry_stale, 'stale_entries': stale_entries,
+                'stale_nets': stale_nets}
+    except Exception as e:
+        print(f"[OBSTACLE CONTENT] skipped ({e})")
+        return None
 
 
 def obstacle_ledger_report(final_cache: Dict[int, "NetObstacleData"]) -> None:
@@ -1123,6 +1238,35 @@ def update_net_obstacles_after_routing(pcb_data, net_id: int, result: Dict,
         pcb_data, net_id, config,
         extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
+
+
+def refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
+                          config, net_ids) -> None:
+    """Bring the working map's view of `net_ids` back in line with the copper
+    that is on the board NOW: remove each net's current entry, recompute it
+    from `pcb_data`, add the new entry. This is the single-ended loop's
+    contract after every commit (and rip_up_net's / restore_net's after
+    every rip and restore), spelled once.
+
+    #806: the diff-pair engine committed copper at eight sites without doing
+    this, so a routed pair's entry stayed the pre-route (stubs-only) one it
+    was built with. The ref-count invariants A/B/C held -- the stale entry
+    was removed and re-added in balance -- while measured on
+    dual_ipex_csi_interposer 30862 of 47448 cells the board's copper owned
+    were NOT blocked in the map a ripped victim's reroute searched.
+
+    A net absent from the cache gets an entry (mirrors rip_up_net, which
+    recomputes unconditionally), so restored copper of a net the run had not
+    tracked is stamped rather than silently invisible. No-op when the caller
+    has no persistent map (GUI dry paths, tests).
+    """
+    if working_obstacles is None or net_obstacles_cache is None:
+        return
+    for nid in net_ids:
+        if nid in net_obstacles_cache:
+            remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[nid])
+        net_obstacles_cache[nid] = precompute_net_obstacles(pcb_data, nid, config)
+        add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[nid])
 
 
 # =============================================================================

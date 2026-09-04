@@ -33,7 +33,7 @@ from routing_context import (
     record_single_ended_success, record_diff_pair_success,
     prepare_obstacles_inplace, restore_obstacles_inplace
 )
-from obstacle_cache import update_net_obstacles_after_routing
+from obstacle_cache import update_net_obstacles_after_routing, refresh_net_obstacles
 from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
                                record_pair_diag, blocker_names)
 from terminal_colors import RED, GREEN, RESET
@@ -876,7 +876,9 @@ def run_reroute_loop(
                 record_diff_pair_success(
                     pcb_data, result, ripped_pair, ripped_pair_name, config,
                     remaining_net_ids, routed_net_ids, routed_net_paths, routed_results,
-                    diff_pair_by_net_id, track_proximity_cache, layer_map
+                    diff_pair_by_net_id, track_proximity_cache, layer_map,
+                    working_obstacles=state.working_obstacles,            # #806
+                    net_obstacles_cache=state.net_obstacles_cache,
                 )
                 # Allow re-queuing if this pair gets ripped again later
                 queued_net_ids.discard(ripped_pair.p_net_id)
@@ -1099,6 +1101,9 @@ def run_reroute_loop(
                                 rerouted_pairs.add(ripped_pair_name)
                                 apply_polarity_swap(pcb_data, retry_result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
                                 add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                                refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,  # #806
+                                                      pcb_data, config,
+                                                      (ripped_pair.p_net_id, ripped_pair.n_net_id))
                                 from plane_fragility import fragility_on_copper_change  # #466
                                 fragility_on_copper_change(config, pcb_data,
                                                            retry_result.get('new_segments'),
@@ -1203,7 +1208,9 @@ def run_reroute_loop(
                             all_swap_vias, all_segment_modifications,
                             None, None,  # all_stubs_by_layer, stub_endpoints_by_layer
                             routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
-                            target_swaps, results=results, obstacle_cache=obstacle_cache)
+                            target_swaps, results=results, obstacle_cache=obstacle_cache,
+                            working_obstacles=state.working_obstacles,        # #806
+                            net_obstacles_cache=state.net_obstacles_cache)
 
                         if swap_success and swap_result:
                             print(f"  {GREEN}FALLBACK LAYER SWAP SUCCESS{RESET}")
@@ -1214,6 +1221,9 @@ def run_reroute_loop(
 
                             apply_polarity_swap(pcb_data, swap_result, pad_swaps, ripped_pair_name, polarity_swapped_pairs)
                             add_route_to_pcb_data(pcb_data, swap_result, debug_lines=config.debug_lines)
+                            refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,  # #806
+                                                  pcb_data, config,
+                                                  (ripped_pair.p_net_id, ripped_pair.n_net_id))
                             from plane_fragility import fragility_on_copper_change  # #466
                             fragility_on_copper_change(config, pcb_data,
                                                        swap_result.get('new_segments'),
@@ -1278,7 +1288,9 @@ def run_reroute_loop(
                         record_diff_pair_success(
                             pcb_data, hyb, ripped_pair, ripped_pair_name, config,
                             remaining_net_ids, routed_net_ids, routed_net_paths, routed_results,
-                            diff_pair_by_net_id, track_proximity_cache, layer_map)
+                            diff_pair_by_net_id, track_proximity_cache, layer_map,
+                            working_obstacles=state.working_obstacles,    # #806
+                            net_obstacles_cache=state.net_obstacles_cache)
                         queued_net_ids.discard(ripped_pair.p_net_id)
                         queued_net_ids.discard(ripped_pair.n_net_id)
                         invalidate_obstacle_cache(obstacle_cache, ripped_pair.p_net_id)
