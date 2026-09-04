@@ -218,6 +218,59 @@ kept, removed = _prune_sub_cell_slivers(NET, net_segs, [], pcb4.pads_by_net[NET]
 check(n4['link'] in kept and n4['sliver'] in removed and n4['spur'] in removed,
       "_prune_sub_cell_slivers: keeps the only-link piece, drops the two debris pieces")
 
+# ---------------------------------------------------------------------------
+# The PIPELINE default: the trim is OPT-IN, and the knob is really read.
+# Measured on orangecrab (paired route step, same input board): trimming a
+# still-being-retried net's sub-cell debris cost RAM_UDQS+ (verdict 9 -> 10),
+# while the self-pair fix alone reproduced the base copper exactly. So the
+# pipeline must pass 0.0 unless KICAD_SLIVER_TRIM is set. Observe the VALUE
+# the call site computes, not the source text: a source grep would pass on a
+# gate wired to the wrong knob.
+import importlib
+_seen = {}
+import pcb_modification as _pm
+_real_sweep = _pm.sweep_dead_ends
+
+
+def _spy(*a, **kw):
+    _seen['eps'] = kw.get('sliver_eps')
+    return _real_sweep(*a, **kw)
+
+
+import cleanup_pipeline as _cp
+import env_knobs as _ek
+for _want, _val in (('off', None), ('on', '1')):
+    if _val is None:
+        os.environ.pop('KICAD_SLIVER_TRIM', None)
+    else:
+        os.environ['KICAD_SLIVER_TRIM'] = _val
+    _ek.refresh()
+    importlib.reload(_cp)
+    _cp.sweep_dead_ends = _spy
+    _seen.clear()
+    pcb5, n5 = _fixture()
+
+    from routing_config import GridRouteConfig as _GRC
+    cfg5 = _GRC(track_width=0.15, clearance=0.15, via_size=0.4,
+                via_drill=0.2, grid_step=GRID, layers=['F.Cu', 'B.Cu'])
+    try:
+        _cp.run_post_route_cleanup([], pcb5, {NET}, cfg5,
+                                   protect_net_ids={NET})
+    except Exception as _e:            # the pipeline wants more of a board
+        _seen.setdefault('exc', repr(_e))
+    if 'eps' not in _seen:             # a vacuous pass is not a pass
+        check(False, f"pipeline reached sweep_dead_ends ({_want}) "
+                     f"[aborted: {_seen.get('exc')}]")
+    elif _want == 'off':
+        check(_seen.get('eps') in (0.0, 0),
+              f"pipeline default: sliver trim OFF (eps={_seen.get('eps')!r})")
+    else:
+        check(bool(_seen.get('eps')),
+              f"KICAD_SLIVER_TRIM=1 is READ: the pipeline passes a real "
+              f"epsilon (eps={_seen.get('eps')!r})")
+os.environ.pop('KICAD_SLIVER_TRIM', None)
+_ek.refresh()
+
 print()
 if FAILS:
     print(f"FAILED ({len(FAILS)}):")
