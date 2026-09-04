@@ -5477,6 +5477,15 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         import tempfile
         from kicad_exact_fill import live_fill_islands, refill_islands_ex
         tmp = None
+        # #831: the provider's own account of WHICH fill it returned, read by
+        # plane_fragility (`provider.last_status`) so an in-process fallback
+        # stops being reported as "the LIVE board" and a MACHINE-DEPENDENT
+        # one (the refill timed out; the UI thread did not pump) reaches the
+        # JSON summary. Published in the `finally`, so every return path
+        # below leaves an account. A function attribute on this closure, not
+        # a module global: it lives exactly as long as this PCBData.
+        _acct = {'source': 'live_board_in_process', 'refill_status': None,
+                 'why': 'no account recorded', 'machine_dependent': False}
         try:
             if _dead:
                 # #828: the staged save threw on this board earlier in this
@@ -5485,6 +5494,10 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 _warn_live_fill_fallback(
                     f"{_dead['why']}; not retried -- a SaveBoard exception is "
                     f"a fact about this board, not about this moment (#828)")
+                _acct = {'source': 'live_board_in_process',
+                         'refill_status': None,
+                         'why': f"{_dead['why']} (not retried, #828)",
+                         'machine_dependent': False}
                 return live_fill_islands(_board)
             import pcbnew as _pcbnew
             fd, tmp = tempfile.mkstemp(suffix='.kicad_pcb')
@@ -5512,6 +5525,12 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 if _sst688.reason == 'save_failed':
                     _dead['why'] = _sst688.why()
                 _warn_live_fill_fallback(f"{_sst688.why()} (#688 guard)")
+                # A UI-thread timeout is this machine not pumping right now
+                # (#828: retryable); a save exception is this board.
+                _acct = {'source': 'live_board_in_process',
+                         'refill_status': None,
+                         'why': f"{_sst688.why()} (#688 guard)",
+                         'machine_dependent': _sst688.reason == 'timeout'}
                 return live_fill_islands(_board)
             _pro = stage_live_project_rules(tmp, _board)
             _h = hashlib.sha256()
@@ -5528,11 +5547,15 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 # Deep copy on hit: a caller mutating its polygons must not
                 # poison later consumers (same contract as refill_islands'
                 # own memo).
+                _acct = {'source': 'live_board', 'refill_status': 'ok',
+                         'why': 'memo hit', 'machine_dependent': False}
                 return _copy.deepcopy(_memo[_key])
             islands, _st = refill_islands_ex(tmp)
             if islands:
                 _memo.clear()          # one board state at a time
                 _memo[_key] = _copy.deepcopy(islands)
+                _acct = {'source': 'live_board', 'refill_status': _st.reason,
+                         'why': _st.why(), 'machine_dependent': False}
                 return islands
             # #713 item 4: the LOUD fallback below fires only from `except`,
             # so a refill that RETURNED nothing -- a 300 s timeout above all --
@@ -5541,9 +5564,17 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # reached by the quieter path, and in the GUI it is reached on the
             # routing worker thread where nobody is watching for it.
             _warn_live_fill_fallback(_st.why())
+            _acct = {'source': 'live_board_in_process',
+                     'refill_status': _st.reason, 'why': _st.why(),
+                     'machine_dependent': _st.is_timeout}
         except Exception as _e:
             _warn_live_fill_fallback(f"{type(_e).__name__}: {_e}")
+            _acct = {'source': 'live_board_in_process',
+                     'refill_status': 'error',
+                     'why': f"{type(_e).__name__}: {_e}",
+                     'machine_dependent': False}
         finally:
+            _live_fill.last_status = _acct
             if tmp:
                 for _p in (tmp, os.path.splitext(tmp)[0] + '.kicad_pro',
                            os.path.splitext(tmp)[0] + '.kicad_prl'):
