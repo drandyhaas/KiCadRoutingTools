@@ -1304,14 +1304,47 @@ Demand is *"nets with a pad **on** this face"*, and "on" is
 the part's pad copper (`CopperGeometry.copper`), within
 `max(pad_pitch / 2, 0.001 mm)`.
 
-**A known limit of that box, since it is a box and not an occupancy test:** a
-few small pads lying outside the main pad field set it for everything inside.
-On `ulx3s` U1 — an LFE5U BGA — eight *unnetted* 0.127 × 0.508 mm alignment
-marks sit 0.954 mm beyond the ball field on all four sides, and all 379 netted
-balls therefore read as interior, so the part reports demand 0 on every face.
-That predates both ledgers and this section does not fix it -- **#862** --
-and it is recorded here because the number is published and a reader should
-know what it means.
+**A pad the box calls enclosed gets a second question (#862).** A box cannot
+tell a few small pads lying outside the main field from a ring that encloses
+it: on `ulx3s` U1 — an LFE5U BGA — eight *unnetted* 0.127 × 0.508 mm alignment
+marks sit 0.954 mm beyond the ball field on all four sides, so the box rule
+called all 379 netted balls interior and the part reported demand 0 on every
+face. So the rule is a **union of two sufficient conditions**: a pad escapes a
+direction when the band it must cross is shallower than the tolerance **or**
+when a track's width of clear copper crosses that band, with every other pad
+of the part — *including the unnetted ones, which still block a track* —
+inflated by the clearance. A pad that escapes in no direction is interior.
+
+The box half is kept rather than replaced, and that is deliberate. Its error is
+**one-way**: widening the box only ever increases a pad's distance to it, so it
+can manufacture a false interior and never a false escape, which is exactly the
+defect above. Keeping it also keeps the tolerance doing a job the corridor
+cannot — it is the depth below which a straight-shadow model does not apply,
+because a track turns before it has travelled that far. Measured, replacing the
+box test instead *gains* interior pads on two corpus parts whose central pad
+sits 0.07 mm from the box edge.
+
+Measured over the 22 tracked boards, 97 fine-pitch refs at clearance 0.2 /
+track 0.2: interior pads **2054 → 1953**, nine refs move and every one moves
+down. `ulx3s` U1 goes **379 → 308** — 71 balls recover, more than the 67-ball
+outer ring of its 20 × 20 lattice, because some second-row balls escape through
+sites where the outer row has no ball — and its four faces then read demand
+17/11/18/16 against supply 21/31/29/31 at the finest grid, so the board gains
+real demand and is still not short. `qfn_interior_pads` U1 stays at **5**, the
+same five pads: they sit behind that QFN's unnetted south pin row and are
+genuinely enclosed.
+
+> **`interior_pads` now depends on the clearance and the track width.**
+> Before #862 it was a function of the part's geometry alone. It is not any
+> more, because "can a track leave" is a question about track width and
+> clearance — so **a number without its basis is not a number**, and every row
+> publishes the basis it ran at. The dependence is monotone (a coarser basis
+> can only add interior pads) and bounded above by `interior_pads_box`, so *an
+> interior pad that survives the box rule is a fanout fact, not a parameter
+> fact* — the same distinction `supply_routed_grid` / `supply_finest_grid`
+> draws for supply. There is no clamp: at clearance 0.05 a 0.2 mm gap between
+> QFN pins really does pass a 0.1 mm track, and `qfn_interior_pads` U1 reading
+> 0 there is the right answer for a board etched at that floor.
 
 **A pad that is not on any edge of that box is INTERIOR**, and counts toward
 no face's demand. It cannot leave sideways at any pitch — it needs a via — and
@@ -1323,9 +1356,13 @@ way `escape_band_mm` is), and the tool prints them once per ref:
 
 | key | |
 |---|---|
-| `interior_pads` | netted pads on no face — **equal to `escape_ledger`'s `interior_pads` for the same ref at the same clearance** |
+| `interior_pads` | netted pads on no face — **equal to `escape_ledger`'s `interior_pads` for the same ref at the same clearance AND the same track width** (#862 added the second term; measured, price one ledger at track 0.2 and let the other resolve orangecrab's own 0.3 and `U3` reads 227 against 223) |
 | `interior_nets` | distinct nets among them |
 | `interior_demand_nets` | the subset that had **no** pad on any face, i.e. what the four faces actually lost |
+| `interior_pads_box` | the same count under the **box rule alone** — basis-free, and the number to read when you want the fanout fact without the parameter fact |
+| `face_corridor_escapes` | how many pads the corridor freed. `interior_pads + face_corridor_escapes == interior_pads_box` is a conservation law, not a second copy: a count that falls with nothing naming where it went is how a ledger stops looking |
+| `face_corridor_clearance_mm` / `face_corridor_track_mm` | the basis the enclosure test ran at |
+| `face_corridor_source` | `caller` when the corridor ran; `unmodelled`, `no_pad_boxes` or `not_measured` naming which degradation happened instead — three different facts, not one `unknown` |
 
 The third is the one to read when a demand looks low. A net with one pad
 interior and another on a face still has to leave through that face, so it is

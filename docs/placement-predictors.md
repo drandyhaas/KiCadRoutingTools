@@ -175,23 +175,23 @@ is not implemented, and this is the measurement rather than a preference:
 
 *It reaches few blockers the shipped halo does not already charge.* The escape
 ledger NAMES the parts eating a face in deficit. Across seven boards there are
-288 such (face, blocker) pairs, and **208 of them (72.2%) already sit inside
+291 such (face, blocker) pairs, and **209 of them (71.8%) already sit inside
 `halo_a + halo_b`** at the A/B harness's own coefficients -- the OFF arm
-already repels them. Of the 80 it does not charge, the demand term fires on
-**14 of the 93 parts involved**. Its whole mechanism is a larger quadratic on
+already repels them. Of the 82 it does not charge, the demand term fires on
+**16 of the 96 parts involved**. Its whole mechanism is a larger quadratic on
 repulsions that already exist, which is the mode
 `docs/placement-optimization.md` records as scattering the layout.
 
 | board | named blockers | already charged |
 |---|---|---|
 | rp2350_fpga_eensy_prePlane | 77 | 55 (71.4%) |
-| orangecrab_ext_pll | 88 | 53 (60.2%) |
+| orangecrab_ext_pll | 89 | 54 (60.7%) |
 | tigard | 39 | 37 (94.9%) |
 | watchy | 48 | 40 (83.3%) |
 | glasgow_revC | 27 | 18 (66.7%) |
 | kit-dev-coldfire | 8 | 5 (62.5%) |
-| ulx3s | 1 | 0 (0.0%) |
-| **total** | **288** | **208 (72.2%)** |
+| ulx3s | 3 | 0 (0.0%) |
+| **total** | **291** | **209 (71.8%)** |
 
 *And it fires where the grader is nearly blind.* The only independent escape
 instrument the placement A/B has is `health_escape_deficit_parts` /
@@ -206,7 +206,7 @@ identical:
 | esp_prog | 0 / 0 | 3 of 16 (19%) | 2.48 mm (U1) |
 | rp2350_fpga_eensy_prePlane | 10 / **13** | **0 of 61** | -- |
 | orangecrab_ext_pll | 20 / 10 | 2 of 154 (1%) | 1.38 mm (J2) |
-| ulx3s | 1 / 5 | 6 of 226 (3%) | 3.03 mm (U2) |
+| ulx3s | 2 / 5 | 6 of 226 (3%) | 3.03 mm (U2) |
 | glasgow_revC | 16 / 4 | 1 of 257 (0%) | 1.50 mm (J5) |
 | tigard | 9 / 8 | 4 of 85 (5%) | 1.51 mm (U5) |
 | watchy | 6 / 9 | 2 of 84 (2%) | 3.03 mm (J3) |
@@ -236,20 +236,42 @@ at in both ledgers -- corpus-wide, face demand fell from 2034 nets to 1203 --
 and it moved neither column of either table above. Both were re-derived at
 that tip with the two commands named above: every deficit / worst pair is
 identical, the 72.2% share is identical, and so is 14 of the 80 uncharged
-pairs.
+pairs. (Both of those numbers move at #862 -- see below. They are left here
+because this paragraph is a record of what was true at THAT tip, not a live
+figure.)
 
 The reason is that this page reports the ESCAPE ledger, and #850 changed only
 `routability.face_lane_ledger` -- it moved that instrument onto the rule this
-one already used, rather than changing this one. Every number here is
-re-derived at the tip and identical.
+one already used, rather than changing this one. Every number was re-derived
+at that tip and identical.
 
-Worth knowing while reading the ulx3s rows in particular: `escape` reports
-ulx3s U1 with demand 0 on all four faces and 379 of its 379 netted balls
-interior, because the box each pad is measured against is set by eight
+*After #862* (2026-09-04) **that stops being true, and both tables move.** The
+sentence above held because #850 changed only the other instrument. #862
+changes the rule BOTH share: a pad the copper box calls enclosed is now asked
+a second question -- is there a track's width of clear copper from its own
+edge to outside the part -- so the escape ledger this page reports moves too.
+Re-derived at the tip with the same two commands:
+
+* the deficit table: **ulx3s 1 / 5 -> 2 / 5**, and nothing else on any of the
+  eight boards. The freed pads are on U1, U9, SD1 and GPDI1, and one more of
+  that board's parts crosses into deficit; the worst deficit is unchanged.
+* the halo share: **72.2% -> 71.8%** already charged, and **14 of 80 -> 16 of
+  82** uncharged pairs the demand term reaches. Both denominators move because
+  a part with no face demand named no blockers, and four parts now do.
+
+**The direction is worth stating rather than leaving to the reader**: the
+share fell, so this re-measurement WEAKENS the "already charged" argument by
+0.4 points, the same way the #841 re-measurement did. It is recorded here for
+the same reason -- a page that only ever reports its numbers holding is not
+reporting.
+
+Worth knowing while reading the ulx3s rows in particular: `escape` USED to
+report ulx3s U1 with demand 0 on all four faces and 379 of its 379 netted
+balls interior, because the box each pad is measured against is set by eight
 UNNETTED 0.127 x 0.508mm alignment marks sitting 0.954mm outside the ball
-field. A bounding box cannot tell eight corner marks from an enclosing ring.
-That is older than either ledger and is filed as **#862** rather than fixed
-here; the board's `1 / 5` row above comes from its other parts.
+field, and a bounding box cannot tell eight corner marks from an enclosing
+ring. **#862** fixed that -- see the *After #862* paragraph below -- and U1
+now reads 308 interior with demand on all four faces.
 
 **What that does to the argument, stated rather than absorbed.** The
 "already charged" share falls 93.6% -> 72.2%, and the pairs the halo misses
