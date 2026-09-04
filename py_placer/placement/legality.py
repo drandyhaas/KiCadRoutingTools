@@ -2407,7 +2407,7 @@ class CopperGeometry(NamedTuple):
     #: HOLES ARE IN BOTH BOXES (see `extent_local_side`): a drill removes
     #: copper on every layer, so it is not a side's to exclude. That is also
     #: why this is very nearly inert -- measured over the tracked corpus at
-    #: clearance 0.2, 18 (ref, side) boxes differ from `rect` at all, 3 are
+    #: clearance 0.2, 20 (ref, side) boxes differ from `rect` at all, 3 are
     #: ever charged against a face in deficit, and no board's reported deficit
     #: moves. It is correct and it is cheap; it is here to be right before a
     #: board exercises it, not because a board does today.

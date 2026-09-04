@@ -39,6 +39,7 @@ numpy only; no networkx in the placement stack.
 """
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -241,6 +242,24 @@ class PartEscape:
     interior_pads: int        # need a via, not a lane -- a FANOUT signal
     interior_nets: Tuple[int, ...]
     plane_layers_found: Tuple[str, ...] = ()   # #700, disclosure only
+    #: #862. `interior_pads` under the BOX rule alone -- the fanout fact
+    #: without the parameter fact, since `interior_pads` now moves with the
+    #: clearance and the track width and this cannot.
+    interior_pads_box: int = 0
+    #: The basis the enclosure corridor ran at, published for the same reason
+    #: the escape band's is: two instruments that price it differently must
+    #: be able to be told apart from two boards that differ.
+    corridor_source: str = 'not_measured'
+    corridor_clearance_mm: float = 0.0
+    corridor_track_mm: float = 0.0
+    #: The TOLERANCE pitch `assign_faces` ran at, and where it came from --
+    #: NOT `pitch_mm`. They differ on a part whose pad lattice yields no
+    #: pitch: `pad_pitch` answers `inf` there and `assign_faces` substitutes
+    #: the lane. Publishing the raw one would report a basis the rule did not
+    #: use, and `float('inf')` is not JSON either -- measured, `esp_prog`'s
+    #: one-pad `Ref*` made `json.dumps(..., allow_nan=False)` raise.
+    face_pitch_mm: float = 0.0
+    face_pitch_source: str = 'unknown'
 
     @property
     def worst(self) -> Optional[FaceLedger]:
@@ -266,6 +285,22 @@ class PartEscape:
                 'faces': [f.to_dict() for f in self.faces],
                 'interior_pads': self.interior_pads,
                 'interior_nets': len(self.interior_nets),
+                # #862, and named identically to `face_lane_ledger`'s rows so
+                # the two instruments' JSON can be diffed key for key.
+                'interior_pads_box': self.interior_pads_box,
+                'face_corridor_escapes': (self.interior_pads_box
+                                          - self.interior_pads),
+                'face_corridor_source': self.corridor_source,
+                'face_corridor_clearance_mm': round(
+                    self.corridor_clearance_mm, 4),
+                'face_corridor_track_mm': round(self.corridor_track_mm, 4),
+                # #850 published these on the routability row only, so until
+                # now the two instruments could not be compared on the basis
+                # they are asserted EQUAL at. It is `face_pitch_mm`, the pitch
+                # the rule RAN at, not `pitch_mm`, the part's raw lattice
+                # pitch -- they differ wherever the lattice yields none.
+                'face_pitch_mm': round(self.face_pitch_mm, 4),
+                'face_pitch_source': self.face_pitch_source,
                 # Board-wide, so reported once rather than on all four faces.
                 'via_pitch_mm': round(f0.via_pitch_mm, 4) if f0 else 0.0,
                 'signal_layers': f0.signal_layers if f0 else 1,
@@ -311,16 +346,6 @@ def pad_pitch(fp) -> float:
     xs = sorted({round(p.local_x, 3) for p in fp.pads})
     ys = sorted({round(p.local_y, 3) for p in fp.pads})
     return min(_min_step(xs), _min_step(ys))
-
-
-def has_interior_pads(fp) -> bool:
-    xs = sorted({round(p.local_x, 3) for p in fp.pads})
-    ys = sorted({round(p.local_y, 3) for p in fp.pads})
-    if len(xs) < 3 or len(ys) < 3:
-        return False
-    minx, maxx, miny, maxy = xs[0], xs[-1], ys[0], ys[-1]
-    return any(minx < round(p.local_x, 3) < maxx
-               and miny < round(p.local_y, 3) < maxy for p in fp.pads)
 
 
 def fine_pitch_parts(pcb_data, min_pads: int = MIN_PADS) -> List[str]:
@@ -657,7 +682,8 @@ def _part_rect(fp) -> Tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
+def face_of(pad, rect, pitch, pad_box=None,
+            corridor=None) -> Optional[str]:
     """Which face a pad escapes through, or None when it is interior.
 
     A pad on the bounding box escapes through the side it sits on; a corner pad
@@ -681,6 +707,41 @@ def face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
     pad, or a part whose model could not be built. It degrades to the pad's
     centre, which is what this function always did.
 
+    `corridor` is #862's second, independent escape witness, and it makes
+    this function a UNION of two SUFFICIENT conditions rather than one test:
+    a pad escapes direction `f` when the band it must cross is shallower than
+    `tol`, OR when `PadCorridors.clear` finds a track's width of clear copper
+    across that band. `corridor=None` is byte-identical to the rule as it
+    stood before #862.
+
+    WHY A UNION, and why the box half is kept rather than replaced. The box
+    test's error is ONE-WAY: widening `rect` -- which is all an outlying
+    unnetted pad can do -- only ever INCREASES every distance in `d`, so the
+    box rule can manufacture a false INTERIOR and never a false ESCAPE. #862
+    is exactly that one direction (eight unnetted alignment marks 0.954mm
+    outside ulx3s U1's ball field, tolerance 0.400, all 379 netted balls
+    interior), so a second sufficient condition corrects it without taking on
+    a new error, and `interior_pads` is provably NON-INCREASING against the
+    rule before it.
+
+    Replacing the box test instead was measured and is worse. `tol` is not
+    noise: it is the depth below which the corridor's straight-shadow model
+    does not apply, because a track leaving a pad turns before it has
+    travelled that far. Drop it and orangecrab_ext_pll U10 and
+    rp2350_fpga_eensy_prePlane U4 each GAIN an interior pad -- both a 0.325mm
+    part with 5 copper pads, whose central GND pad (0.58 x 0.58 at 45 degrees,
+    so an 0.8202mm axis-aligned extent, which is what this test measures) sits
+    0.0699mm from the copper box on west and east, plainly on the boundary,
+    and whose axis-aligned corridor is nevertheless closed by its flanking
+    pads once they are inflated by clearance. (That divergence is basis-dependent and invisible at clearance
+    0.09, where the two rules agree exactly; it appears at 0.20.)
+
+    Because the union only ADDS escapes, the corridor is consulted only for
+    the pads the box half rejects. That is a PROOF, not an optimisation: when
+    `near <= tol` the argmin direction is itself in the escaping set, so the
+    filtered argmin is the unfiltered one and the answer is unchanged
+    whatever the corridor would say about the other three directions.
+
     PUBLIC since #850, because `routability.face_lane_ledger` bucketed pads to
     faces with its own rule -- pad CENTRES against the hole-inclusive `rect`,
     no tolerance, no interior bucket -- and neither file recorded that the
@@ -696,14 +757,129 @@ def face_of(pad, rect, pitch, pad_box=None) -> Optional[str]:
     d = {'west': px0 - minx, 'east': maxx - px1,
          'north': py0 - miny, 'south': maxy - py1}
     near = min(d.values())
+    esc = FACES
     if near > tol:
-        return None
+        if corridor is None or pad_box is None:
+            return None
+        # #862: the box said enclosed. Ask the copper instead -- for each
+        # direction, is there a clear corridor from this pad's edge to
+        # outside the part. A pad the corridor rescues is assigned to the
+        # nearest REACHABLE edge, which is the same argmin this function has
+        # always taken, over a filtered set.
+        esc = tuple(f for f in FACES if corridor.clear(f, pad_box))
+        if not esc:
+            return None
+        near = min(d[f] for f in esc)
     # Ties resolve by FACES order, not by dict order, so the answer does not
     # depend on how the pads were enumerated.
-    for f in FACES:
+    for f in esc:
         if abs(d[f] - near) < 1e-9:
             return f
     return None
+
+
+class KeyList(object):
+    """A read-only view of `seq` projected onto element `key`, for `bisect`.
+
+    `bisect` has no `key=` before Python 3.10 and this module supports
+    older interpreters; a projected view costs nothing and needs no copy.
+    """
+    __slots__ = ('seq', 'key')
+
+    def __init__(self, seq, key):
+        self.seq = seq
+        self.key = key
+
+    def __len__(self):
+        return len(self.seq)
+
+    def __getitem__(self, i):
+        return self.seq[i][self.key]
+
+
+class PadCorridors(object):
+    """One part's own pad copper, as the field each of its pads must leave.
+
+    #862. `face_of`'s box test asks whether a pad is on the part's copper
+    bounding box; a box cannot tell a few small pads lying outside the main
+    field from a ring that encloses it. This asks the question the box cannot:
+    for one direction, is there a clear corridor at least `track_width` wide
+    from this pad's own copper edge to outside the part.
+
+    It is `span_eaten`'s arithmetic turned on the part's OWN pads instead of
+    its neighbours -- via `free_run`, which answers the largest CONTIGUOUS
+    run rather than the total, because two half-gaps do not make a lane.
+
+    Built ONCE per part: `obstacles` is every copper pad rect the part has,
+    including the UNNETTED ones. That is deliberate and it is the distinction
+    a previous attempt at #862 got wrong (`_assignment_rect`, reverted in
+    39ca0b98): an unnetted pad may not DEMAND a lane, which is a fact about
+    demand, and it still BLOCKS a track, which is a fact about escape. Two
+    populations for two questions. Measured on `qfn_interior_pads` U1 -- the
+    fixture that exists for this case -- pads 34-37 sit 1.075mm inside the
+    part's south copper edge behind the QFN's unnetted south pin row, and
+    dropping unnetted copper reclassifies four of its five interior pads as
+    escaping south.
+
+    The pad under test is not filtered out of `obstacles`, and does not need
+    to be: `free_run`'s band overlap is STRICT, and the band starts at that
+    pad's own edge, so its rect touches the band at one point and is skipped.
+    Its row-mates are beside it rather than in front of it and are skipped for
+    the same reason.
+    """
+    __slots__ = ('rect', 'obstacles', 'clearance', 'track_width',
+                 '_by_x', '_by_y', '_wx', '_wy')
+
+    def __init__(self, rect, obstacles, clearance, track_width):
+        self.rect = rect
+        self.obstacles = obstacles
+        self.clearance = float(clearance)
+        self.track_width = float(track_width)
+        # A CANDIDATE INDEX, and it is exact rather than a heuristic. Only
+        # obstacles whose ALONG span overlaps the pad's strip can contribute
+        # an interval at all -- `free_run` clips every one of them to
+        # `[lo, hi]` and drops the empties -- so pre-selecting them changes
+        # no answer and is asserted to change none.
+        #
+        # It is worth having because the naive form is O(pads^2 * 4) per
+        # part and lands hardest where it buys least: haasoscope's U3 is a
+        # BGA-529 with 441 interior balls and NOTHING to rescue, and it paid
+        # 441 * 4 * 529 ~ 0.9M inner iterations for that answer -- measured,
+        # `assign_faces` on it went 0.006s -> 0.700s, and `escape_ledger` on
+        # the board 12x, on a page where `options.escape_layer_gain` calls
+        # the ledger six times per invocation.
+        #
+        # Sorted by along-min, with the widest obstacle recorded so BOTH ends
+        # of the candidate window can be bisected: an obstacle overlaps
+        # `[lo2, hi2]` only if its along-min is in `[lo2 - widest, hi2]`.
+        # On a ball grid that is one column rather than the whole part.
+        self._by_x = sorted(obstacles, key=lambda r: r[0])
+        self._by_y = sorted(obstacles, key=lambda r: r[1])
+        self._wx = max((r[2] - r[0] for r in obstacles), default=0.0)
+        self._wy = max((r[3] - r[1] for r in obstacles), default=0.0)
+
+    def _candidates(self, lo, hi, horizontal):
+        """The obstacles that can possibly clip into `[lo, hi]`."""
+        idx, widest, key = ((self._by_x, self._wx, 0) if horizontal
+                            else (self._by_y, self._wy, 1))
+        lo2 = lo - self.clearance
+        hi2 = hi + self.clearance
+        a = bisect.bisect_left(KeyList(idx, key), lo2 - widest)
+        b = bisect.bisect_right(KeyList(idx, key), hi2)
+        return idx[a:b]
+
+    def clear(self, face, pad_box):
+        """Can a track of `track_width` leave `pad_box` straight out `face`?"""
+        lo, hi, band, horizontal = pad_band(self.rect, face, pad_box)
+        if band[1] - band[0] <= 0.0:
+            return True          # already on that edge: nothing to cross
+        run = free_run(lo, hi, band, horizontal,
+                       self._candidates(lo, hi, horizontal),
+                       grow=self.clearance)
+        # The epsilon is the caller's half of the trap `FREE_RUN_EPS`
+        # documents: a nominally 0.4mm pad's span subtracts to
+        # 0.39999999999997726, so a bare `>=` refuses a track that fits.
+        return run >= self.track_width - FREE_RUN_EPS
 
 
 class FaceAssignment(NamedTuple):
@@ -716,9 +892,25 @@ class FaceAssignment(NamedTuple):
     #: The tolerance pitch `face_of` ran at, and where it came from.
     pitch_mm: float
     pitch_source: str            # 'pad_lattice' | 'lane_fallback'
+    #: The answer the BOX half alone gave, index-aligned with `faces` because
+    #: both are built in one pass over `fp.pads` (#862). NOT a count: the two
+    #: ledgers count over different populations -- `part_escape` drops
+    #: `ignore_net_ids`, `face_lane_ledger` applies an owner filter -- so a
+    #: count taken here would close the identity
+    #: `interior + rescued == interior_box` on neither of them.
+    box_faces: Tuple[Optional[str], ...] = ()
+    #: Where the corridor basis came from, so a reader can tell "nobody
+    #: asked" from "this part has no pad model" (#862). One of 'caller',
+    #: 'not_measured', 'unmodelled', 'no_pad_boxes'.
+    corridor_source: str = 'not_measured'
+    #: The basis the corridor ran at. `interior_pads` is a function of these
+    #: two since #862, where before it was a function of geometry alone.
+    corridor_clearance_mm: float = 0.0
+    corridor_track_mm: float = 0.0
 
 
-def assign_faces(fp, geom, *, lane_mm, fallback_rect=None) -> FaceAssignment:
+def assign_faces(fp, geom, *, lane_mm, fallback_rect=None,
+                 clearance=None, track_width=None) -> FaceAssignment:
     """THE face rule: which face each of `fp`'s pads escapes through.
 
     One function because the disagreement #850 names is not in `face_of`'s
@@ -758,12 +950,55 @@ def assign_faces(fp, geom, *, lane_mm, fallback_rect=None) -> FaceAssignment:
     if pitch == float('inf'):
         pitch, source = lane_mm, 'lane_fallback'
     rect = fallback_rect if geom is None else geom.copper
+
+    # #862's basis. It is a PAIR and it is refused rather than half-filled:
+    # a clearance with no threshold and a threshold with no inflation are
+    # both silently plausible wrong numbers, and this is the one function
+    # both lane ledgers share, so a check here cannot be present in one
+    # instrument and missing from the other.
+    corridor = None
+    csource = 'not_measured'
+    if clearance is None and track_width is None:
+        pass                                  # the pre-#862 answer, by request
+    elif clearance is None or track_width is None:
+        raise ValueError(
+            'assign_faces: the corridor basis is a PAIR (clearance={}, '
+            'track_width={}); one without the other would inflate obstacles '
+            'at a clearance nobody chose, or threshold a run at a width '
+            'nobody chose'.format(clearance, track_width))
+    elif track_width <= 0 or clearance < 0:
+        raise ValueError(
+            'assign_faces: track_width must be positive and clearance '
+            'non-negative (got {}, {}); a zero-width track asks a different '
+            'question -- measured, thresholding at zero takes tigard U3 from '
+            '18 interior pads to 12, glasgow_revC U1 from 27 to 26 and '
+            'qfn_interior_pads U1 from 5 to 0'.format(track_width, clearance))
+    elif geom is None:
+        csource = 'unmodelled'
+    elif not geom.pads:
+        # A part whose pad model could not be built has no obstacles to
+        # measure and no per-pad rects to measure them against. Synthesising
+        # either would be a fiction; the box half keeps today's answer.
+        csource = 'no_pad_boxes'
+    else:
+        corridor = PadCorridors(rect, tuple(geom.pads.values()),
+                                clearance, track_width)
+        csource = 'caller'
+
     out = []
+    boxes = []
     for pad in (fp.pads or []):
         box = None if geom is None else _pad_box(geom, pad)
-        out.append((pad, face_of(pad, rect, pitch, pad_box=box)))
+        bf = face_of(pad, rect, pitch, pad_box=box)
+        boxes.append(bf)
+        if bf is None and corridor is not None and box is not None:
+            bf = face_of(pad, rect, pitch, pad_box=box, corridor=corridor)
+        out.append((pad, bf))
     return FaceAssignment(faces=tuple(out), pitch_mm=pitch,
-                          pitch_source=source)
+                          pitch_source=source, box_faces=tuple(boxes),
+                          corridor_source=csource,
+                          corridor_clearance_mm=float(clearance or 0.0),
+                          corridor_track_mm=float(track_width or 0.0))
 
 
 def _face_geometry(rect, face) -> Tuple[float, float, float, float]:
@@ -935,6 +1170,124 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
                   for r in sorted(by_ref, key=lambda r: (-by_ref[r], r)))
     return min(blocked, hi - lo), order
 
+
+#: The threshold epsilon. A pad's own copper span is the strip a track has to
+#: fit in, and that span is a SUBTRACTION of two parsed millimetre
+#: coordinates: ulx3s U1's 0.4mm balls give `139.08 - 138.68 ==
+#: 0.39999999999997726`, which is `< 0.4` and NOT `>= 0.4`. Measured, a bare
+#: `>=` puts the whole outer ring of that BGA back in the interior bucket at
+#: track 0.4 while answering correctly at track 0.2 -- a rule that works at
+#: one basis and silently fails at another, which is the exact failure mode
+#: this module keeps recording. Same 1e-9 `face_of`'s tie block already uses.
+FREE_RUN_EPS = 1e-9
+
+
+def free_run(lo, hi, band, horizontal, obstacles, grow=0.0):
+    """The largest CONTIGUOUS stretch of [lo, hi] that no obstacle covers.
+
+    `span_eaten`'s other question on the same interval arithmetic. That one
+    asks how much of a span is gone; this asks whether any ONE piece of it is
+    still wide enough for a track. A sum cannot answer that -- three 0.1mm
+    gaps and one 0.3mm gap eat the same total and only one of them passes a
+    0.3mm track. Measured over the tracked corpus at clearance 0.09, taking
+    the total instead of the largest run moves nine refs and breaks both of
+    #862's oracles (`qfn_interior_pads` U1 5 -> 2, `tigard` U3 18 -> 16,
+    `glasgow_revC` U1 27 -> 26) -- and it is a value NO-OP at clearance 0.20
+    and 0.25, so a test written at the census basis alone cannot see the
+    difference.
+
+    A SIBLING of `span_eaten` rather than a flag on it. Three differences, and
+    each is a reason not to share a loop:
+
+    * **The band overlap is STRICT** (`>` / `<`, not `>=` / `<=`).
+      `span_eaten`'s obstacles are OTHER parts, which may legitimately touch
+      the band edge; these are the escaping part's OWN pads, and the band
+      starts at the escaping pad's own edge. An inclusive test therefore
+      charges the pad against ITSELF -- its rect touches the band at exactly
+      one point and covers its own strip end to end, so nothing would ever
+      escape -- and against its own ROW-MATES, which are beside it, not in
+      front of it. Strictness removes both exactly, with no self-exclusion
+      bookkeeping.
+    * **`grow` inflates each obstacle on the ALONG axis** before clipping,
+      because a track may not touch foreign copper: the run that has to hold
+      `track_width` is the gap minus one clearance on each side. It is
+      deliberately NOT applied across the band -- the band's far edge is the
+      part's copper box, which is the union of these same rects, so there is
+      nothing beyond it to grow into.
+    * **It returns a length, not `(blocked, by_ref)`.** Nothing here needs to
+      name a blocker; the blocker is the part itself.
+
+    Coordinates are `span_eaten`'s: mm, board frame, `horizontal=True` when
+    the run is measured along x. Returns `hi - lo` when nothing intersects.
+    """
+    intervals = []
+    for rect in obstacles:
+        oxmin, oymin, oxmax, oymax = rect
+        across = (oymin, oymax) if horizontal else (oxmin, oxmax)
+        if across[1] <= band[0] or across[0] >= band[1]:
+            continue                              # not in this pad's way
+        along = (oxmin, oxmax) if horizontal else (oymin, oymax)
+        a, b = max(lo, along[0] - grow), min(hi, along[1] + grow)
+        if b > a:
+            intervals.append((a, b))
+
+    intervals.sort()
+    best = 0.0
+    cur = lo
+    for a, b in intervals:
+        if a > cur:
+            best = max(best, a - cur)
+        cur = max(cur, b)
+    return max(best, hi - cur)
+
+
+def pad_band(rect, face, pad_box):
+    """`(lo, hi, band, horizontal)` for ONE pad's straight way out of `rect`.
+
+    The inward twin of `face_band`. That one looks OUTSIDE the part, for a
+    neighbour's body in the escape band; this looks INSIDE it, from the pad's
+    own copper edge to the part's own copper edge, for the part's own copper
+    -- the other half of "can a track leave this pad", and the half a bounding
+    box cannot answer. #862: eight unnetted alignment marks 0.954mm outside a
+    BGA's ball field set that box for all 379 balls, and a box cannot tell
+    eight corner dots from an enclosing ring.
+
+    `lo, hi` is the pad's OWN span on the perpendicular axis, NOT a
+    pitch-wide window centred on it. Measured, the window form is unstable:
+    at clearance 0.09 it takes ulx3s U1 to 0 interior pads, because a window
+    wider than the pad lets a pad claim a corridor its own copper does not sit
+    in front of. It is also why `pad_pitch` appears nowhere in this
+    arithmetic -- it is a MIN-consecutive-gap over projected local
+    coordinates and reads 0.100 on `qfn_interior_pads`, so anything derived
+    from it is fragile by construction.
+
+    A band of zero depth means the pad is already on that edge of the box.
+
+    A STATED LIMIT, because it is a cliff rather than a gradient: since the
+    strip IS the pad's own span, a pad NARROWER than `track_width` can never
+    be rescued, however empty the field in front of it. Physically a track
+    wider than its pad is routine (it necks down at the joint); this model
+    says no. Measured on ulx3s U1, whose balls are 0.4mm wide, at clearance
+    0.2: the corridor frees 71 balls at every track width up to and including
+    0.400, and 0 at 0.401. `check_channels` floors the track UP to the fab
+    floor, which can only move toward that edge. Widening the strip to admit
+    a necked track is a real change and would need its own evidence -- the
+    measured alternatives (a pitch-wide window, a zero threshold) both break
+    `qfn_interior_pads`, so it is not a one-line relaxation.
+    """
+    minx, miny, maxx, maxy = rect
+    px0, py0, px1, py1 = pad_box
+    horizontal = face in ('north', 'south')
+    lo, hi = (px0, px1) if horizontal else (py0, py1)
+    if face == 'north':
+        band = (miny, py0)
+    elif face == 'south':
+        band = (py1, maxy)
+    elif face == 'west':
+        band = (minx, px0)
+    else:
+        band = (px1, maxx)
+    return lo, hi, band, horizontal
 
 #: The escape band's two terms, named so a reader can tell which one decided.
 #: `4 x lane` is the model ("a track has room to turn past four lanes of
@@ -1114,6 +1467,7 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                 containers: Optional[set] = None,
                 obstruction_rects: Optional[Dict[str, Tuple]] = None,
                 clearance: Optional[float] = None,
+                track_width: Optional[float] = None,
                 pcb_file: Optional[str] = None) -> PartEscape:
     """The full per-face ledger for one part.
 
@@ -1160,10 +1514,17 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     # lane by hand while this reads the board. `escape_ledger` is where they
     # ARE tied -- it resolves `clr` once and passes both -- which is the path
     # every production caller takes.
+    # #862: the enclosure basis is a PAIR, and it is resolved ONCE here
+    # rather than inside the `obstruction_rects is None` branch, where the
+    # track width used to be read and thrown away. `interior_pads` is a
+    # function of these two now -- "can a track leave this pad" is a question
+    # about track width and clearance -- so a caller that reached this entry
+    # point without them would silently grade the enclosure at
+    # `routing_defaults`, which is the #847 failure exactly.
+    tw, clr = track_width, clearance
+    if tw is None or clr is None:
+        tw, clr = lane_pitch_parts(pcb_data, pcb_file, tw, clr)
     if obstruction_rects is None:
-        clr = clearance
-        if clr is None:
-            _tw, clr = lane_pitch_parts(pcb_data, pcb_file)
         obstruction_rects = board_copper_geometry(pcb_data, clr)
 
     # #841: the part's OWN faces are measured on the same copper box it
@@ -1179,13 +1540,26 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     # pairing this loop did inline -- `copper` for assignment, `rect` for the
     # face geometry below -- and the arm that says so is a bit-identical sweep
     # of every published escape number over the tracked corpus.
-    asg = assign_faces(fp, own, lane_mm=lane, fallback_rect=rect)
+    # #862: the enclosure half of that rule needs the basis a track is
+    # actually priced at. It is `tw`/`clr` and NOT `lane`, deliberately:
+    # `lane` is `track + clearance` here and a grid-QUANTIZED pitch in
+    # `routability`, so pricing the corridor off it would make the two
+    # ledgers disagree on `interior_pads` for every board -- the one number
+    # #850 exists to have them agree on.
+    asg = assign_faces(fp, own, lane_mm=lane, fallback_rect=rect,
+                       clearance=clr, track_width=tw)
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
     interior: List[int] = []
-    for pad, face in asg.faces:
+    interior_box = 0
+    for i, (pad, face) in enumerate(asg.faces):
         nid = getattr(pad, 'net_id', 0)
         if not nid or nid in ignored:
             continue
+        # #862: the box-rule count over the SAME population this one uses --
+        # `ignore_net_ids` dropped, which is why it cannot be taken inside
+        # `assign_faces` where neither caller's filter is known.
+        if asg.box_faces and asg.box_faces[i] is None:
+            interior_box += 1
         if face is None:
             interior.append(nid)
         else:
@@ -1215,7 +1589,13 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     return PartEscape(ref=ref, pitch_mm=pitch, faces=tuple(faces),
                       interior_pads=len(interior),
                       interior_nets=tuple(sorted(set(interior))),
-                      plane_layers_found=tuple(plane_layers_found or ()))
+                      plane_layers_found=tuple(plane_layers_found or ()),
+                      interior_pads_box=interior_box,
+                      corridor_source=asg.corridor_source,
+                      corridor_clearance_mm=asg.corridor_clearance_mm,
+                      corridor_track_mm=asg.corridor_track_mm,
+                      face_pitch_mm=asg.pitch_mm,
+                      face_pitch_source=asg.pitch_source)
 
 
 def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
@@ -1263,7 +1643,8 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
                        via_pitch_mm=vpitch, signal_layers=nsig,
                        signal_layers_source=source, plane_layers_found=planes,
                        sides=sides, containers=containers,
-                       obstruction_rects=orects)
+                       obstruction_rects=orects,
+                       clearance=clr, track_width=tw)
            for r in targets if r in pcb_data.footprints]
     # Sorted by the OWN-LAYER deficit, unchanged. It selects `escape_lanes[:10]`
     # and board_brief's `worst[:WORST_N]`, and feeds

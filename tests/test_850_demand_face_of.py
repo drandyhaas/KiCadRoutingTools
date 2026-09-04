@@ -128,6 +128,33 @@ LANE = dict(clearance=CLR, track_width=TRK, grid_step=GRID)
 #:               interior bucket cannot. The part total falls by 1 while one
 #:               face RISES, which is why nothing here asserts a per-face
 #:               ceiling.
+#: The ONE row #862 moves, asserted as a TRANSITION against `GOLDEN` rather
+#: than written over it. `GOLDEN`'s columns stay the e239e067 oracle and the
+#: #850 recording, so both remain checkable; editing four numbers inside that
+#: table would have retired it for the four rows that did NOT move and left
+#: no record that this change happened. Same shape as #849's
+#: `GOLDEN_PRE_HOIST` / `DEMAND_AFTER_850`.
+#:
+#: `ulx3s:U1` is the row the #850 PR recorded specifically so that the day
+#: #862 was fixed it would fail and say so. This is that day.
+#:
+#: What fixed it: `escape.face_of` is now a UNION -- a pad escapes when its
+#: band to the copper box is shallower than the tolerance (the old test), OR
+#: when a track's width of clear copper crosses that band. The box was set by
+#: eight UNNETTED alignment marks 0.954mm outside the ball field, and a box
+#: cannot tell eight corner dots from an enclosing ring; an occupancy test
+#: can. 71 of the 379 balls recover -- MORE than the 67-ball outer ring of the
+#: 20x20 lattice, because some second-row balls escape through sites where the
+#: outer row has no ball. 308 remain interior because they really are: their
+#: corridors are blocked by their own neighbours, and those balls need vias.
+#:
+#: The basis is part of the row now. Before #862 `interior_pads` was a
+#: function of geometry alone; since #862 it is a function of clearance and
+#: track width too, and this file's are `CLR, TRK` above.
+GOLDEN_AFTER_862 = {
+    'ulx3s:U1': ({'N': 17, 'S': 11, 'W': 18, 'E': 16}, 308, 144),
+}
+
 GOLDEN = {
     'rp2350_fpga_eensy_prePlane:U2': ({'N': 7, 'S': 13, 'W': 5, 'E': 6},
                                       {'N': 5, 'S': 6, 'W': 2, 'E': 4}, 25, 13),
@@ -178,9 +205,10 @@ def the_spy_and_conservation(boards):
         seen = []
         real = E.face_of
 
-        def spy(pad, rect, pitch, pad_box=None):
-            seen.append((pad, rect, pitch, pad_box))
-            return real(pad, rect, pitch, pad_box=pad_box)
+        def spy(pad, rect, pitch, pad_box=None, corridor=None):
+            seen.append((pad, rect, pitch, pad_box, corridor))
+            return real(pad, rect, pitch, pad_box=pad_box,
+                        corridor=corridor)
 
         E.face_of = spy
         try:
@@ -190,9 +218,20 @@ def the_spy_and_conservation(boards):
         if not rows:
             check('spy: %s %s has a ledger' % (name, ref), False)
             continue
+        # #862 made the rule a UNION, so a pad the BOX half rejects is asked
+        # a second time with a corridor. Every pad is still asked exactly
+        # once WITHOUT one, which is the property this arm was written for;
+        # the second call happens only for a pad whose first answer was None.
+        box_calls = [c for c in seen if c[4] is None]
         check('spy: %s %s -- the kernel was called once per pad' % (name, ref),
-              len(seen) == len(fp.pads),
-              '%d calls for %d pads' % (len(seen), len(fp.pads)))
+              len(box_calls) == len(fp.pads),
+              '%d box calls for %d pads' % (len(box_calls), len(fp.pads)))
+        rescue = [c for c in seen if c[4] is not None]
+        check('spy: %s %s -- only a box-interior pad is asked twice'
+              % (name, ref),
+              all(real(p, r, pi, pad_box=b) is None
+                  for p, r, pi, b, _c in rescue),
+              '%d rescue calls' % len(rescue))
         # THE PAIRING: the box is `CopperGeometry.copper` BY OBJECT IDENTITY,
         # not by equality. On a part with no NPTH the `rect` and `copper`
         # boxes coincide, so `==` would pass against either and this arm would
@@ -201,13 +240,13 @@ def the_spy_and_conservation(boards):
         want = ctx.geom[ref].copper
         check('spy: %s %s -- measured against the part COPPER box, by identity'
               % (name, ref),
-              all(r is want for _p, r, _pi, _b in seen),
-              'want %r, saw %r' % (want, {r for _p, r, _pi, _b in seen}))
+              all(r is want for _p, r, _pi, _b, _c in seen),
+              'want %r, saw %r' % (want, {r for _p, r, _pi, _b, _c in seen}))
         # ...and the INVARIANT that `face_of`'s docstring rests on, derived
         # from the pads rather than from the function: every edge of the box
         # it measures against is attained by some pad, which is what puts an
         # edge pad at distance exactly 0.
-        rects = [r for _p, r, _pi, _b in seen]
+        rects = [r for _p, r, _pi, _b, _c in seen]
         nb = [L.pad_box(ctx.geom[ref], p) for p in fp.pads]
         nb = [b for b in nb if b is not None]
         if rects and nb:
@@ -222,21 +261,23 @@ def the_spy_and_conservation(boards):
                   attained and inside,
                   'rect %r attained=%s inside=%s' % (r, attained, inside))
         check('spy: %s %s -- at the part\'s own pad pitch' % (name, ref),
-              all(abs(pi - E.pad_pitch(fp)) < 1e-12 for _p, _r, pi, _b in seen)
+              all(abs(pi - E.pad_pitch(fp)) < 1e-12 for _p, _r, pi, _b, _c in seen)
               and abs(rows[0]['face_pitch_mm'] - round(E.pad_pitch(fp), 4)) < 1e-9,
               'pad_pitch %r, row %r' % (E.pad_pitch(fp), rows[0]['face_pitch_mm']))
         check('spy: %s %s -- every netted pad got its own copper box'
               % (name, ref),
-              all(b is not None for p, _r, _pi, b in seen if p.net_id),
+              all(b is not None for p, _r, _pi, b, _c in seen if p.net_id),
               '%d netted pads with no box'
-              % sum(1 for p, _r, _pi, b in seen if p.net_id and b is None))
+              % sum(1 for p, _r, _pi, b, _c in seen if p.net_id and b is None))
         # 2. CONSERVATION.
-        faced = sum(1 for (_p, _r, _pi, _b), (pad, f)
-                    in zip(seen, E.assign_faces(fp, ctx.geom[ref],
-                                                lane_mm=1.0).faces)
-                    if pad.net_id and f is not None)
-        interior = sum(1 for pad, f in E.assign_faces(
-            fp, ctx.geom[ref], lane_mm=1.0).faces if pad.net_id and f is None)
+        # #862: at the SAME basis the ledger ran at. `assign_faces` without
+        # one answers the box rule alone, and comparing that against a row
+        # produced with a corridor would be comparing two different rules --
+        # the row would look like it had lost pads it never had.
+        asg = E.assign_faces(fp, ctx.geom[ref], lane_mm=1.0,
+                             clearance=CLR, track_width=TRK)
+        faced = sum(1 for pad, f in asg.faces if pad.net_id and f is not None)
+        interior = sum(1 for pad, f in asg.faces if pad.net_id and f is None)
         netted = sum(1 for p in fp.pads if p.net_id)
         check('conservation: %s %s -- faced + interior == netted pads'
               % (name, ref), faced + interior == netted,
@@ -264,9 +305,20 @@ def interior_equals_escape(boards):
             # caller may drop plane rails, and then the two count different
             # pads. The same `geom` at the same clearance is the second
             # control: below 0.20mm the NPTH hole extents differ.
+            #
+            # #862 ADDS A THIRD, and it is not a formality. Since the
+            # enclosure test asks whether a TRACK can leave, `interior_pads`
+            # is a function of clearance AND track width, so this claim is
+            # now "the same ref at the same clearance and the same track
+            # width". Measured: pass `track_width=TRK` and the two ledgers
+            # agree on 97 of 97 refs; leave it out and `part_escape` resolves
+            # the BOARD's own 0.3 while this ledger runs at 0.2, and
+            # orangecrab_ext_pll U3 reads 227 against the row's 223. One ref
+            # is all it takes, and nothing but this arm would have said so.
             pe = E.part_escape(pcb, ref, ignore_net_ids=(),
                                obstruction_rects=ctx.geom, sides=sides,
-                               containers=cont, clearance=CLR)
+                               containers=cont, clearance=CLR,
+                               track_width=TRK)
             if rows[0]['interior_pads'] == pe.interior_pads:
                 agree += 1
             else:
@@ -289,20 +341,48 @@ def the_golden(boards):
             continue
         rows = _rows(parse_kicad_pcb(path), ref, path)
         got = {r['face']: r['demand_nets'] for r in rows}
-        check('golden: %s demand is the recorded transition' % key, got == post,
-              '%r != %r  (was %r at e239e067)' % (got, post, pre))
+        # #862 moves exactly one of these rows. Where it does, the row's
+        # #850 columns stay asserted as history and the CURRENT expectation
+        # comes from the sibling table, together with the DIRECTION -- which
+        # is the part a plain re-record cannot state, and the part that fails
+        # if a later change moves ulx3s the wrong way.
+        after = GOLDEN_AFTER_862.get(key)
+        want_demand, want_ipads, want_ilost = (
+            after if after is not None else (post, ipads, ilost))
+        check('golden: %s demand is the recorded transition' % key,
+              got == want_demand,
+              '%r != %r  (was %r at e239e067, %r after #850)'
+              % (got, want_demand, pre, post))
+        if after is not None:
+            check('golden: %s -- #862 only ADDED demand' % key,
+                  all(got[f] >= post[f] for f in post),
+                  '%r fell against the #850 row %r' % (got, post))
+            # MEASURED against the #850 column, not `want_ipads` against
+            # `ipads`: those are two literals in this file and the check
+            # reduced to `308 < 379`, which no code change can fail. A blind
+            # review caught it. `rows[0]` is the live ledger.
+            check('golden: %s -- #862 only REMOVED interior pads' % key,
+                  rows[0]['interior_pads'] < ipads,
+                  '%r !< %d' % (rows[0]['interior_pads'], ipads))
+            check('golden: %s -- and the box count is the #850 number' % key,
+                  rows[0]['interior_pads_box'] == ipads,
+                  '%r != %d' % (rows[0]['interior_pads_box'], ipads))
         check('golden: %s interior_pads / interior_demand_nets' % key,
               (rows[0]['interior_pads'], rows[0]['interior_demand_nets'])
-              == (ipads, ilost),
+              == (want_ipads, want_ilost),
               '%r != %r' % ((rows[0]['interior_pads'],
-                             rows[0]['interior_demand_nets']), (ipads, ilost)))
+                             rows[0]['interior_demand_nets']),
+                            (want_ipads, want_ilost)))
         check('golden: %s the part total did not grow' % key,
               sum(got.values()) <= sum(pre.values()),
               '%d > %d' % (sum(got.values()), sum(pre.values())))
         if sum(got.values()) < sum(pre.values()):
             fell += 1
     # ...and the file is not measuring nothing: some ref must actually move,
-    # or every assertion above is satisfied by an inert change.
+    # or every assertion above is satisfied by an inert change. Re-checked
+    # after #862 rather than assumed: ulx3s U1's demand total is 62 against
+    # e239e067's 214, so it still counts as a fall, and rp2350 U2 is the
+    # second. The arm is unchanged and still bites.
     check('golden: the change moved at least two of the pinned refs', fell >= 2,
           '%d fell' % fell)
 
@@ -322,7 +402,8 @@ def only_demand_moved(boards):
     """
     real = E.assign_faces
 
-    def old_rule(fp, geom, *, lane_mm, fallback_rect=None):
+    def old_rule(fp, geom, *, lane_mm, fallback_rect=None,
+                 clearance=None, track_width=None):
         # `min` over |pad CENTRE - extent edge|, no tolerance, no interior --
         # `face_lane_ledger` as it stood at e239e067.
         ext = fallback_rect
@@ -334,7 +415,9 @@ def only_demand_moved(boards):
                  'east': abs(pad.global_x - ext[2])}
             out.append((pad, min(d, key=d.get)))
         return E.FaceAssignment(faces=tuple(out), pitch_mm=0.0,
-                                pitch_source='test_old_rule')
+                                pitch_source='test_old_rule',
+                                box_faces=tuple(f for _p, f in out),
+                                corridor_source='test_old_rule')
 
     drift, moved = [], 0
     for name, path in sorted(boards.items()):

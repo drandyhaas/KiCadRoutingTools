@@ -456,13 +456,28 @@ def main():
         # demand is lower than the part's netted pad count. A demand that
         # fell with nothing in the output saying where it went is how a ledger
         # stops looking and reads as a fix.
-        if rows[0]['interior_pads']:
+        if rows[0]['interior_pads'] or rows[0].get('face_corridor_escapes'):
             lost = rows[0]['interior_demand_nets']
+            # #862: how many the enclosure corridor FREED, and the basis it
+            # ran at. Without them a reader diffing two runs cannot tell a
+            # placement that moved from a basis that moved -- `interior_pads`
+            # is a function of the clearance and the track width now, where
+            # before it was a function of geometry alone.
+            freed = rows[0].get('face_corridor_escapes') or 0
+            extra = ''
+            if freed:
+                extra = (f"; {freed} more reach a face through a clear "
+                         f"corridor at track "
+                         f"{rows[0]['face_corridor_track_mm']:g}"
+                         f" / clearance "
+                         f"{rows[0]['face_corridor_clearance_mm']:g}"
+                         f" (box rule alone: {rows[0]['interior_pads_box']})")
             print(f"  {ref}   interior: {rows[0]['interior_pads']} pad(s) on "
                   f"no face -- they need a via, not a lane"
                   + (f"; {lost} net(s) left the faces because of it"
                      if lost else "; every one of their nets still has a pad "
-                                  "on a face, so no face lost demand"))
+                                  "on a face, so no face lost demand")
+                  + extra)
 
     # The absolute deficit, summarised (run-12 Tier 3.6). Printed whether or
     # not --baseline was given, and never gated -- see _deficit_faces.

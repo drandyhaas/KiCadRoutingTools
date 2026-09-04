@@ -1188,16 +1188,29 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # only assignment moved. That separation is what makes it checkable that
     # this commit changed the demand model and nothing else.
     own = ctx.geom.get(ref)
-    asg = _assign_faces(fp, own, lane_mm=pitch_routed, fallback_rect=ext)
+    # #862: `lane_mm` stays the PITCH fallback only. The enclosure basis is
+    # the raw `track_width` / `clearance` this ledger was called with, never
+    # `pitch_routed` -- that one is grid-quantized (#847), and a structural
+    # verdict that moves with `--grid-step` is exactly the confound the two
+    # supply columns exist to keep out. `escape.part_escape` resolves the
+    # same pair, so the two ledgers price one corridor.
+    asg = _assign_faces(fp, own, lane_mm=pitch_routed, fallback_rect=ext,
+                        clearance=clearance, track_width=track_width)
 
     demand: Dict[str, set] = {f: set() for f in faces}
     interior_pads = 0
+    interior_box = 0
     interior_nets: set = set()
     interior_demand: set = set()
-    for pad, face in asg.faces:
+    for i, (pad, face) in enumerate(asg.faces):
         nid = pad.net_id
         if not nid:
             continue
+        # #862: the same count under the BOX rule alone, over the same
+        # population, so the row can publish both. `interior_pads` is now a
+        # function of clearance and track width; this one is not.
+        if asg.box_faces and asg.box_faces[i] is None:
+            interior_box += 1
         # GEOMETRY FIRST, THE NET FILTER SECOND. The other way round, the
         # published interior count would be over the owner-filtered subset and
         # would not be comparable with `escape.PartEscape.interior_pads`,
@@ -1219,7 +1232,10 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # A net with one pad interior and another on a face is NOT lost demand --
     # it still has to leave through that face. Only the nets with no pad on
     # any face are.
-    interior_demand -= set().union(*demand.values()) if demand else set()
+    # `demand` is a four-key dict literal, so it is always truthy and the
+    # guard this line used to carry never bound. Dropped rather than left
+    # to read as a considered edge case.
+    interior_demand -= set().union(*demand.values())
 
     pitch_fine = _quantized_pitch(track_width, clearance,
                                   FINEST_LEGAL_GRID_MM)
@@ -1349,6 +1365,32 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
                     'interior_pads': interior_pads,
                     'interior_nets': len(interior_nets),
                     'interior_demand_nets': len(interior_demand),
+                    # #862: the same count under the BOX rule alone. Read it
+                    # when you want the fanout fact without the parameter
+                    # fact -- `interior_pads` moves with the clearance and
+                    # the track width now, and this one cannot, because
+                    # `CopperGeometry.copper` carries neither.
+                    #
+                    # `interior_pads + face_corridor_escapes ==
+                    # interior_pads_box` over this ledger's own population,
+                    # which is a conservation law rather than a second copy:
+                    # a pad that leaves the interior bucket has to be
+                    # accounted for somewhere, and a demand that fell with
+                    # nothing naming where it went is how a ledger stops
+                    # looking and reads as a fix.
+                    'interior_pads_box': interior_box,
+                    'face_corridor_escapes': interior_box - interior_pads,
+                    # ...and the basis the enclosure test ran at, so a reader
+                    # diffing two runs can tell a placement that moved from a
+                    # basis that moved. `source` says 'caller' when the
+                    # corridor actually ran, and names the degradation
+                    # otherwise ('unmodelled', 'no_pad_boxes',
+                    # 'not_measured') rather than reporting one `unknown`
+                    # for three different facts.
+                    'face_corridor_source': asg.corridor_source,
+                    'face_corridor_clearance_mm': round(
+                        asg.corridor_clearance_mm, 4),
+                    'face_corridor_track_mm': round(asg.corridor_track_mm, 4),
                     # ...and the tolerance the face rule ran at. The two
                     # ledgers resolve different LANES (#847) and this is a
                     # second, separate basis: the part's own pad pitch, or
@@ -1396,7 +1438,15 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     #
     # ...and since #850 the FACE RULE is shared too -- `escape.assign_faces`,
     # so a pad points at the same face in both instruments and an interior pad
-    # is interior in both. `interior_pads` on the rows above equals
+    # is interior in both. #862 ADDED A TERM TO THAT PRECONDITION: since the
+    # enclosure test asks whether a TRACK can leave, `interior_pads` is a
+    # function of the track width as well as the clearance, so the claim below
+    # holds for the same ref at the same clearance AND THE SAME TRACK WIDTH.
+    # Measured, that is not a formality -- price this ledger at track 0.2 and
+    # let `part_escape` resolve orangecrab_ext_pll's own 0.3, and U3 reads 227
+    # against this ledger's 223, one ref out of 97.
+    #
+    # `interior_pads` on the rows above equals
     # `escape.PartEscape.interior_pads` for the same ref at the same
     # clearance, which is the assertion that says so.
     #
