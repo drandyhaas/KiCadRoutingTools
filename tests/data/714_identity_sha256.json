@@ -1,0 +1,93 @@
+{
+ "_command": "python3 tests/test_714_identity_write_unchanged.py --write-baseline",
+ "boards": {
+  "cap_chain.kicad_pcb": {
+   "footprints": 4,
+   "sha256": "2198b0c2b740757ace7887d0b27468aadbd20f7b81dfe694d96abefd9c729d35"
+  },
+  "esp_prog.kicad_pcb": {
+   "footprints": 21,
+   "sha256": "1a5ac4dd9726baf85d67a5c6f0fe9a16803e56b5ad403c872b8375cdefad1d7d"
+  },
+  "flat_hierarchy.kicad_pcb": {
+   "footprints": 64,
+   "sha256": "a20e6e09e350d4698a1487ab6b985e159bbbf8ad0990eeaeb80f5d3cf4c0104a"
+  },
+  "glasgow_revC.kicad_pcb": {
+   "footprints": 272,
+   "sha256": "73c8f2500953bfeeeeb8d44d8293f8f10480e3f5dcafbdb9d48cb7a42ff52981"
+  },
+  "haasoscope_pro_max_test.kicad_pcb": {
+   "footprints": 8,
+   "sha256": "8ee0164efefc3d601d416010bad8f8cf202eb9db6a71938831dd18d7f317a5c5"
+  },
+  "interf_u_unrouted.kicad_pcb": {
+   "footprints": 25,
+   "sha256": "4e7495fc1957249e88444268dd275dde32657bde4dcf881b84ddd05cb0e4e7a6"
+  },
+  "interf_u_unrouted_placed.kicad_pcb": {
+   "footprints": 25,
+   "sha256": "2142e45320cbbcd26078a09c484dd023f45a1f604da8a7ce00257e8479b316a3"
+  },
+  "kit-dev-coldfire-xilinx_5213.kicad_pcb": {
+   "footprints": 160,
+   "sha256": "79474acbf9f3c4001b51c2baf03bf40c76fc5f74fda37d7bc9205cc51d79bae4"
+  },
+  "lvds_converter_dualclk.kicad_pcb": {
+   "footprints": 13,
+   "sha256": "8797c3e3c456dc9b7fb61f6a5cc6523e0064d6260eb2e519786901aba8952e33"
+  },
+  "lvds_converter_dualclk_gnd.kicad_pcb": {
+   "footprints": 13,
+   "sha256": "14c1e2ce74d2c35800882e754cc95b0b4c5bd4a80f2c5d7782857f7bd0a737c2"
+  },
+  "orangecrab_ext_pll.kicad_pcb": {
+   "footprints": 167,
+   "sha256": "92ecf93305bc29bb02e0f789e187178ff257035f35a3215028a0ae4153697aae"
+  },
+  "qfn_csi_underpad_diff.kicad_pcb": {
+   "footprints": 2,
+   "sha256": "f00842c8bbb53213a6266a5bc0826ca5b2d9c47a29d8503bdc55a180414ab8a8"
+  },
+  "qfn_diffpair_escape.kicad_pcb": {
+   "footprints": 1,
+   "sha256": "f6c2603c32c4e2dea96ceee915c878835782e2f7ac18b325c9daea56d90e942d"
+  },
+  "qfn_interior_pads.kicad_pcb": {
+   "footprints": 1,
+   "sha256": "295e640099edbde59092d46c51956302f286586dd52b73ac56bc5a8c1066d233"
+  },
+  "qfn_underpad_coupling.kicad_pcb": {
+   "footprints": 1,
+   "sha256": "865c4524fbb04e905882447774693dbf54983aeec276a3c7ad6663d301e34b5b"
+  },
+  "routed_output.kicad_pcb": {
+   "footprints": 8,
+   "sha256": "890864b4545ec26534a61741a6d488dccba5e9a90c80657ec89127087c290f56"
+  },
+  "rp2350_fpga_eensy_prePlane.kicad_pcb": {
+   "footprints": 61,
+   "sha256": "3eaf9c742345c95099284e2c69e26e8355150825de96887578501bd55b4323b1"
+  },
+  "sonde_u.kicad_pcb": {
+   "footprints": 25,
+   "sha256": "4a8a77f761a533d58357d785cc6b227745b6ebd5698f53627e79a9a6911cdf5a"
+  },
+  "splitflap_driver.kicad_pcb": {
+   "footprints": 65,
+   "sha256": "c7f2789196b073ffaaea6492ebe7873bf9336db36e9cbe3f0b8d88e01c082cb8"
+  },
+  "tigard.kicad_pcb": {
+   "footprints": 92,
+   "sha256": "cb6dd215537d8850cd8e4ef61994c568a083d3c9ee94942208a2bf4e2b3ebc47"
+  },
+  "ulx3s.kicad_pcb": {
+   "footprints": 235,
+   "sha256": "1ca4adfa5fac156f1cdd9806a14c1bc60258d33ea71046ed42bca7a06bb703d6"
+  },
+  "watchy.kicad_pcb": {
+   "footprints": 86,
+   "sha256": "24337ed88a2d875e0eb878f021d736038f159e6ecf0efa6d6ac7c6125ca172a9"
+  }
+ }
+}
