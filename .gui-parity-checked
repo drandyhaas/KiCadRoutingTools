@@ -1,5 +1,5 @@
-c61dd168 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
-Audit e239e067..c61dd168 on branch worktree-constraints-dru (10 commits, the
+aa9e25d6 2026-09-03 -- FIRST TOKEN OF THIS FILE MUST BE THE AUDITED SHA.
+Audit e239e067..aa9e25d6 on branch worktree-constraints-dru (10 commits, the
 #530/#842/#857/#856/#770 design-rules rework; docs/design-rules-proposal.md).
 TWO GAPS FOUND AND FIXED IN-RANGE (fc36e578; 52c83e63: the GUI QFN path fed
 the escalation policy the Basic tab's width, the CLI fed it nothing -- both
@@ -16,6 +16,13 @@ ESCALATION; the GUI controls select those constants at creation and in both
 reset paths), refreshed the tooltips of every control whose meaning the
 branch changed, and re-ran the engine parity gate: copper IDENTICAL 1259/128;
 settings round-trip, manifest plan parity and the 768 dialog gate green.
+c61dd168..aa9e25d6: ONE engine commit (a9607575, #864: the under-pad occupancy
+grid floor + disk memo in bga_fanout/underpad.py -- shared by both fronts, no
+parameter, no results key, no default); the rest is manifests / graders / docs
+/ skills / metadata. Gates re-run at aa9e25d6: test_fanout_rotated_gui 10/10
+(the only GUI gate that runs a fanout), test_768_cap_ceiling_real_dialog ALL
+PASS, settings round-trip clean; full suite 532/0; corpus arm final3 (rewritten
+manifests, shipped defaults) -3 real DRC / -7 open nets vs 0.21.4.
 
 THE SURFACE, checked mechanically, not assumed:
 
