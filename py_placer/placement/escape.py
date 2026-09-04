@@ -1262,6 +1262,18 @@ def pad_band(rect, face, pad_box):
     from it is fragile by construction.
 
     A band of zero depth means the pad is already on that edge of the box.
+
+    A STATED LIMIT, because it is a cliff rather than a gradient: since the
+    strip IS the pad's own span, a pad NARROWER than `track_width` can never
+    be rescued, however empty the field in front of it. Physically a track
+    wider than its pad is routine (it necks down at the joint); this model
+    says no. Measured on ulx3s U1, whose balls are 0.4mm wide, at clearance
+    0.2: the corridor frees 71 balls at every track width up to and including
+    0.400, and 0 at 0.401. `check_channels` floors the track UP to the fab
+    floor, which can only move toward that edge. Widening the strip to admit
+    a necked track is a real change and would need its own evidence -- the
+    measured alternatives (a pitch-wide window, a zero threshold) both break
+    `qfn_interior_pads`, so it is not a one-line relaxation.
     """
     minx, miny, maxx, maxy = rect
     px0, py0, px1, py1 = pad_box

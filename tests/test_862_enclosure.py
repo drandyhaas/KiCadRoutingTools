@@ -495,6 +495,19 @@ def the_two_sided_gate():
               .format(clr, trk), before == after,
               '{} -> {}'.format(before, after))
 
+    # THE CLIFF, pinned rather than described. The strip a corridor measures
+    # IS the pad's own span, so a pad narrower than `track_width` can never be
+    # rescued however empty the field in front of it -- and that is a step,
+    # not a slope. ulx3s U1's balls are 0.4mm wide: 71 recover at every track
+    # up to and including 0.400 and 0 at 0.401. `check_channels` floors the
+    # track UP to the fab floor, which can only move toward that edge, so a
+    # reader is entitled to find this out from a test rather than from a
+    # board.
+    for trk, want in ((0.30, 71), (0.40, 71), (0.401, 0), (0.50, 0)):
+        b2, u2, _n2 = _interior('ulx3s', 'U1', 0.20, trk)
+        check('ulx3s:U1 rescues {} at track {}'.format(want, trk),
+              b2 - u2 == want, 'rescued {}'.format(b2 - u2))
+
     # And the recovery on ulx3s is a real rescue, not a re-labelling: the 71
     # pads the corridor frees must all have been box-interior.
     box, un, _n = _interior('ulx3s', 'U1', 0.20, 0.20)
