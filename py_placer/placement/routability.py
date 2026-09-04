@@ -1188,7 +1188,14 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # only assignment moved. That separation is what makes it checkable that
     # this commit changed the demand model and nothing else.
     own = ctx.geom.get(ref)
-    asg = _assign_faces(fp, own, lane_mm=pitch_routed, fallback_rect=ext)
+    # #862: `lane_mm` stays the PITCH fallback only. The enclosure basis is
+    # the raw `track_width` / `clearance` this ledger was called with, never
+    # `pitch_routed` -- that one is grid-quantized (#847), and a structural
+    # verdict that moves with `--grid-step` is exactly the confound the two
+    # supply columns exist to keep out. `escape.part_escape` resolves the
+    # same pair, so the two ledgers price one corridor.
+    asg = _assign_faces(fp, own, lane_mm=pitch_routed, fallback_rect=ext,
+                        clearance=clearance, track_width=track_width)
 
     demand: Dict[str, set] = {f: set() for f in faces}
     interior_pads = 0

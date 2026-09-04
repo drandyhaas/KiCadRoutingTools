@@ -65,12 +65,17 @@ DIFF_KEYS = ('refs', 'demand_before', 'demand_after', 'deficit_before',
              'deficit_848_after', 'escape_deficit')
 
 
-def _old_face_rule(fp, geom, *, lane_mm, fallback_rect=None):
+def _old_face_rule(fp, geom, *, lane_mm, fallback_rect=None,
+                   clearance=None, track_width=None):
     """`face_lane_ledger`'s face rule as it stood at e239e067.
 
     `min` over |pad CENTRE - extent edge|: no tolerance, no interior bucket, so
     every pad lands on some face. `geom` is ignored on purpose -- the old rule
     never looked at the copper box, which is the whole point.
+
+    It takes #862's `clearance` / `track_width` and ignores those too: the
+    rule it reproduces predates the enclosure corridor as well, so the BEFORE
+    column of every table below is the pre-#850 AND pre-#862 answer.
     """
     ext = fallback_rect
     out = []
@@ -81,7 +86,9 @@ def _old_face_rule(fp, geom, *, lane_mm, fallback_rect=None):
              'east': abs(pad.global_x - ext[2])}
         out.append((pad, min(d, key=d.get)))
     return E.FaceAssignment(faces=tuple(out), pitch_mm=0.0,
-                            pitch_source='measure_old_rule')
+                            pitch_source='measure_old_rule',
+                            box_faces=tuple(f for _p, f in out),
+                            corridor_source='measure_old_rule')
 
 
 def _whole_part_rect(geom, sides=None):
@@ -149,10 +156,15 @@ def measure(path):
     for ref in refs:
         if not now.get(ref):
             continue
+        # #862: `track_width` is part of the basis now, not decoration. Leave
+        # it out and `part_escape` resolves the BOARD's own -- orangecrab
+        # resolves 0.3 against this page's 0.2 -- and this control reports a
+        # disagreement the two ledgers do not have. Measured: with it, 97 of
+        # 97 refs agree; without it, orangecrab U3 reads 227 against 223.
         int_e += E.part_escape(pcb, ref, ignore_net_ids=(),
                                obstruction_rects=ctx.geom, sides=sides,
-                               containers=cont,
-                               clearance=CLEARANCE).interior_pads
+                               containers=cont, clearance=CLEARANCE,
+                               track_width=TRACK).interior_pads
     esc = E.escape_ledger(pcb, pcb_file=path, track_width=TRACK,
                           clearance=CLEARANCE)
     esc_deficit = sum(f.deficit for p in esc for f in p.faces)

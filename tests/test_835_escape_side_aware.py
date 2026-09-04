@@ -53,8 +53,8 @@ from placement.options import deficit_totals                  # noqa: E402
 #: `python3 -X utf8 tests/measure_834_835_side_awareness.py --table B`.
 #: Boards absent from a checkout are skipped, not failed.
 EXPECTED = {
-    'ulx3s': (5, 1, 1),
-    'orangecrab_ext_pll': (115, 20, 50),
+    'ulx3s': (6, 2, 2),        # #862: 5, 1, 1 before the corridor
+    'orangecrab_ext_pll': (116, 20, 51),   # #862: 115, 20, 50 before
     'glasgow_revC': (55, 16, 25),
     'rp2350_fpga_eensy_prePlane': (79, 10, 27),
     # #835's controls were "does not move under the SIDE or CONTAINER arm",
@@ -76,11 +76,32 @@ EXPECTED = {
 #: from `EXPECTED` because a deficit that falls can mean the instrument got
 #: honest OR that it stopped counting nets, and only this pair tells them
 #: apart.
+#: RE-RECORDED FOR #862 on three of eight rows, and the five that did not
+#: move are the negative control inside the same table -- so this is a
+#: measurement of which boards have a pad the corridor can free, not a
+#: blanket refresh. Each board is graded at its OWN resolved basis (ulx3s and
+#: orangecrab resolve track 0.3 / clearance 0.25), which is why these numbers
+#: are not the census figures `tests/test_850_demand_face_of.py` records at
+#: 0.20/0.20.
+#:
+#:   ulx3s        (149, 402) -> (233, 314). 88 interior pads freed across the
+#:                board, 71 of them U1's -- the BGA whose eight UNNETTED
+#:                alignment marks set a copper box 0.954mm outside its ball
+#:                field, so the box rule called all 379 balls interior.
+#:   orangecrab   (234, 306) -> (236, 303). Three pads, two nets.
+#:   rp2350       (130, 37) -> (130, 36). One pad, and NO net lost or gained
+#:                a face: every net that pad carries has another pad already
+#:                on one.
+#:
+#: `DEMAND_AT_PAD_CENTRES` below does NOT move, and that is checkable rather
+#: than lucky: its arm passes `obstruction_rects={}`, so `geom` is None, so
+#: the corridor is never built (`corridor_source == 'unmodelled'`) and the
+#: box rule alone answers -- exactly as it did before #862.
 DEMAND = {
-    'ulx3s': (149, 402),
-    'orangecrab_ext_pll': (234, 306),
+    'ulx3s': (233, 314),
+    'orangecrab_ext_pll': (236, 303),
     'glasgow_revC': (307, 108),
-    'rp2350_fpga_eensy_prePlane': (130, 37),
+    'rp2350_fpga_eensy_prePlane': (130, 36),
     'tigard': (103, 18),
     'splitflap_driver': (0, 0),
     'watchy': (113, 1),
@@ -198,6 +219,14 @@ def test_the_demand_model_did_not_collapse_when_the_subject_rect_grew():
     The DIRECTION is the assertion: a bigger box with the same tolerance can
     only pull pads ONTO faces, never off them, so demand never falls and
     interior pads never grow.
+
+    #862 STRENGTHENS both directions rather than threatening them, and they
+    are re-checked here rather than assumed. The enclosure rule became a
+    UNION -- the old box test OR a clear corridor -- so it can only take pads
+    OUT of the interior bucket, which is the same sign as the rect change
+    this arm was written for. If either assert ever has to be weakened, that
+    is a finding about the union having become a replacement, not a number to
+    re-record.
 
     Both sides are MEASURED. The pad-centre arm is reached through the
     documented empty-map fallback -- `obstruction_rects={}` puts the subject
@@ -340,6 +369,10 @@ def test_the_ulx3s_witness_stops_charging_across_the_board():
         'ulx3s at the pad-CENTRE rect is no longer 0, so this witness no '
         'longer isolates the #841 change: {}'.format(centres))
     copper = deficit_totals(E.escape_ledger(pcb, pcb_file=path))['lanes']
+    # #862 moves this from 5 to 6: freeing interior pads on U1, U9, SD1 and
+    # GPDI1 adds demand, and one more face crosses into deficit. The
+    # `centres == 0` assert above is what keeps the witness isolated, and it
+    # is untouched -- the pad-centre arm never builds a corridor.
     assert copper == EXPECTED['ulx3s'][0], (copper, EXPECTED['ulx3s'][0])
     print('  PASS: U9<->SD1 charge each other nowhere; ulx3s is 0 at pad '
           'centres and {} at pad copper'.format(copper))

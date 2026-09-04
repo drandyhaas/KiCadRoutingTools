@@ -1376,6 +1376,7 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                 containers: Optional[set] = None,
                 obstruction_rects: Optional[Dict[str, Tuple]] = None,
                 clearance: Optional[float] = None,
+                track_width: Optional[float] = None,
                 pcb_file: Optional[str] = None) -> PartEscape:
     """The full per-face ledger for one part.
 
@@ -1422,10 +1423,17 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     # lane by hand while this reads the board. `escape_ledger` is where they
     # ARE tied -- it resolves `clr` once and passes both -- which is the path
     # every production caller takes.
+    # #862: the enclosure basis is a PAIR, and it is resolved ONCE here
+    # rather than inside the `obstruction_rects is None` branch, where the
+    # track width used to be read and thrown away. `interior_pads` is a
+    # function of these two now -- "can a track leave this pad" is a question
+    # about track width and clearance -- so a caller that reached this entry
+    # point without them would silently grade the enclosure at
+    # `routing_defaults`, which is the #847 failure exactly.
+    tw, clr = track_width, clearance
+    if tw is None or clr is None:
+        tw, clr = lane_pitch_parts(pcb_data, pcb_file, tw, clr)
     if obstruction_rects is None:
-        clr = clearance
-        if clr is None:
-            _tw, clr = lane_pitch_parts(pcb_data, pcb_file)
         obstruction_rects = board_copper_geometry(pcb_data, clr)
 
     # #841: the part's OWN faces are measured on the same copper box it
@@ -1441,7 +1449,14 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     # pairing this loop did inline -- `copper` for assignment, `rect` for the
     # face geometry below -- and the arm that says so is a bit-identical sweep
     # of every published escape number over the tracked corpus.
-    asg = assign_faces(fp, own, lane_mm=lane, fallback_rect=rect)
+    # #862: the enclosure half of that rule needs the basis a track is
+    # actually priced at. It is `tw`/`clr` and NOT `lane`, deliberately:
+    # `lane` is `track + clearance` here and a grid-QUANTIZED pitch in
+    # `routability`, so pricing the corridor off it would make the two
+    # ledgers disagree on `interior_pads` for every board -- the one number
+    # #850 exists to have them agree on.
+    asg = assign_faces(fp, own, lane_mm=lane, fallback_rect=rect,
+                       clearance=clr, track_width=tw)
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
     interior: List[int] = []
     for pad, face in asg.faces:
@@ -1525,7 +1540,8 @@ def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
                        via_pitch_mm=vpitch, signal_layers=nsig,
                        signal_layers_source=source, plane_layers_found=planes,
                        sides=sides, containers=containers,
-                       obstruction_rects=orects)
+                       obstruction_rects=orects,
+                       clearance=clr, track_width=tw)
            for r in targets if r in pcb_data.footprints]
     # Sorted by the OWN-LAYER deficit, unchanged. It selects `escape_lanes[:10]`
     # and board_brief's `worst[:WORST_N]`, and feeds
