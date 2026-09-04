@@ -36,7 +36,7 @@ RUN_ALL_TIMEOUT = 300
 
 FAILURES = []
 PASSED = []
-SECTIONS = 5
+SECTIONS = 7
 
 
 def check(name, cond, detail=''):
@@ -364,11 +364,167 @@ def the_corridor_is_only_asked_about_box_interior_pads():
           '{} pad(s) went the wrong way'.format(len(grew)))
 
 
+
+#: `{(board, ref): {basis: (box interior, union interior)}}` -- the two-sided
+#: gate, on the two boards that fail in OPPOSITE directions plus the four
+#: refs whose numbers must NOT move.
+#:
+#: Read the rows, they are the finding:
+#:   ulx3s U1   379 -> 308. An LFE5U BGA whose eight UNNETTED alignment marks
+#:              set the copper box 0.954mm outside the ball field, so the box
+#:              rule calls all 379 netted balls interior and the part reports
+#:              demand 0 on every face. 71 recover -- more than the 67-ball
+#:              outer ring of the 20x20 lattice, because some second-row balls
+#:              escape through sites where the outer row has no ball, which is
+#:              the thing a ring-vs-interior rule could not do.
+#:   qfn_interior_pads U1   5 -> 5, AND IT IS THE SAME FIVE PADS. The negative
+#:              control: pads 34-37 plus one sit behind the QFN's UNNETTED
+#:              south pin row and are genuinely enclosed. A previous attempt at
+#:              #862 (`_assignment_rect`, reverted in e1f233b4) measured
+#:              against the NETTED pads only and took this to 1. Measured, a
+#:              netted-only obstacle set still takes it to 0 today.
+#:   tigard U3 / glasgow_revC U1 / rp2350 U2 / watchy U1   unchanged, at every
+#:              basis in the envelope. Four refs that the rule must not touch.
+#:
+#: THE BASIS IS PART OF EVERY ROW, because since #862 `interior_pads` is a
+#: function of clearance and track width where before it was a function of
+#: geometry alone. 0.09/0.10 is where `check_channels` runs the corpus,
+#: 0.20/0.20 is `test_850`'s census basis, 0.25/0.30 is the CLI's own default.
+BASES = ((0.09, 0.10), (0.20, 0.20), (0.25, 0.30))
+GOLDEN_862 = {
+    ('ulx3s', 'U1'):              {b: (379, 308) for b in BASES},
+    ('qfn_interior_pads', 'U1'):  {b: (5, 5) for b in BASES},
+    ('tigard', 'U3'):             {b: (18, 18) for b in BASES},
+    ('glasgow_revC', 'U1'):       {b: (27, 27) for b in BASES},
+    ('rp2350_fpga_eensy_prePlane', 'U2'): {b: (25, 25) for b in BASES},
+    ('watchy', 'U1'):             {b: (0, 0) for b in BASES},
+}
+
+
+def _interior(board, ref, clr, trk):
+    """(box interior, union interior, the union's interior pad numbers)."""
+    from kicad_parser import parse_kicad_pcb
+    from placement import legality as L
+    key = (board, round(clr, 6))
+    if key not in _CACHE:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pcb = parse_kicad_pcb(os.path.join(root, 'kicad_files',
+                                           board + '.kicad_pcb'))
+        _CACHE[key] = (pcb, L.part_copper_geometry(pcb.footprints, clr))
+    pcb, geoms = _CACHE[key]
+    fp = pcb.footprints[ref]
+    a = E.assign_faces(fp, geoms[ref], lane_mm=trk + clr,
+                       clearance=clr, track_width=trk)
+    box = un = 0
+    names = []
+    for i, (pad, face) in enumerate(a.faces):
+        if not getattr(pad, 'net_id', 0):
+            continue
+        if a.box_faces[i] is None:
+            box += 1
+        if face is None:
+            un += 1
+            names.append(pad.pad_number)
+    return box, un, tuple(sorted(names))
+
+
+# ---------------------------------------------------------------- section 6
+def the_two_sided_gate():
+    """ulx3s must fall a long way; qfn_interior_pads must not move at all.
+
+    They fail in OPPOSITE directions, which is why the issue insists on both:
+    a rule generous enough to free the BGA's outer ring is generous enough to
+    free four pads that are genuinely walled in behind an unnetted pin row.
+    """
+    for (board, ref), rows in sorted(GOLDEN_862.items()):
+        for (clr, trk), (want_box, want_un) in sorted(rows.items()):
+            box, un, _n = _interior(board, ref, clr, trk)
+            check('{}:{} at {}/{} interior {} -> {}'
+                  .format(board, ref, clr, trk, want_box, want_un),
+                  (box, un) == (want_box, want_un),
+                  'measured {} -> {}'.format(box, un))
+
+    # A COUNT IS NOT A SET. `qfn_interior_pads` reads 5 before and 5 after,
+    # and that is only a negative control if they are the SAME five pads --
+    # the reverted experiment's census printed "5 -> 1" as a win without ever
+    # asking which four had moved.
+    from placement import legality as L
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for clr, trk in BASES:
+        pcb, geoms = _CACHE[('qfn_interior_pads', round(clr, 6))]
+        fp = pcb.footprints['U1']
+        a = E.assign_faces(fp, geoms['U1'], lane_mm=trk + clr,
+                           clearance=clr, track_width=trk)
+        before = tuple(sorted(p.pad_number for i, (p, _f)
+                              in enumerate(a.faces)
+                              if getattr(p, 'net_id', 0)
+                              and a.box_faces[i] is None))
+        after = tuple(sorted(p.pad_number for p, f in a.faces
+                             if getattr(p, 'net_id', 0) and f is None))
+        check('qfn_interior_pads:U1 keeps the SAME pads at {}/{}'
+              .format(clr, trk), before == after,
+              '{} -> {}'.format(before, after))
+
+    # And the recovery on ulx3s is a real rescue, not a re-labelling: the 71
+    # pads the corridor frees must all have been box-interior.
+    box, un, _n = _interior('ulx3s', 'U1', 0.20, 0.20)
+    check('ulx3s:U1 recovers 71 balls', box - un == 71,
+          'recovered {}'.format(box - un))
+
+
+# ---------------------------------------------------------------- section 7
+def the_band_test_is_open_not_closed():
+    """The parameter the prose never named, and it decides everything.
+
+    "An obstacle counts when its band-axis span INTERSECTS the band" can be
+    read open (positive overlap) or closed (touching counts). Open is right,
+    and the witness is real geometry: `tigard` U3's exposed pad is drawn as
+    sub-rects sitting inside a full-size EP rect, and a sub-pad shares the
+    edge y=58.225 with that rect. The EP lies entirely SOUTH of the sub-pad,
+    so it cannot block a NORTHWARD escape -- but a closed test counts it as
+    blocking a band it overlaps by exactly zero.
+
+    The stake is not a few pads. Under the closed reading, an obstacle list
+    that includes the pad's own rect -- which this one deliberately does,
+    because strictness makes self-exclusion free -- blocks every pad against
+    itself, and the union collapses to the box rule EXACTLY: 2054 interior at
+    every basis, every witness ref still reading 308 and 5, and the rule
+    doing nothing at all while every corpus golden still passes.
+    """
+    # An obstacle whose span touches the band's near edge, and one that
+    # touches its far edge, are both entirely outside it.
+    check('touching the near band edge does not block',
+          near(E.free_run(0.0, 1.0, (0.0, 1.0), True,
+                          [(0.0, 1.0, 1.0, 2.0)]), 1.0))
+    check('touching the far band edge does not block',
+          near(E.free_run(0.0, 1.0, (0.0, 1.0), True,
+                          [(0.0, -1.0, 1.0, 0.0)]), 1.0))
+    # ... while any positive overlap does.
+    check('a hair of overlap does block',
+          near(E.free_run(0.0, 1.0, (0.0, 1.0), True,
+                          [(0.0, 0.999999, 1.0, 2.0)]), 0.0))
+
+    # THE SELF-CHARGE. A pad's own rect is in the obstacle list. Its band
+    # starts at its own edge, so under the open test it contributes nothing
+    # -- and if it ever did, it would cover its own strip end to end and
+    # NOTHING would escape anywhere.
+    pad = (4.0, 4.0, 5.0, 5.0)
+    lo, hi, band, horiz = E.pad_band((0.0, 0.0, 10.0, 10.0), 'north', pad)
+    check('a pad does not block its own corridor',
+          near(E.free_run(lo, hi, band, horiz, [pad]), 1.0))
+    check('... in every direction',
+          all(near(E.free_run(*E.pad_band((0.0, 0.0, 10.0, 10.0), f, pad),
+                              obstacles=[pad]), 1.0)
+              for f in E.FACES))
+
+
 def main():
     for fn in (the_free_run_kernel, the_pad_band_geometry,
                the_basis_is_a_pair_or_it_refuses,
                the_degradation_paths_are_declared,
-               the_corridor_is_only_asked_about_box_interior_pads):
+               the_corridor_is_only_asked_about_box_interior_pads,
+               the_two_sided_gate,
+               the_band_test_is_open_not_closed):
         fn()
     for f in FAILURES:
         print('FAIL: {}'.format(f))
