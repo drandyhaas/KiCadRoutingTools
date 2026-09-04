@@ -44,7 +44,8 @@ LEG = os.path.join(_ROOT, 'py_placer', 'placement', 'legality.py')
 FLOOR = os.path.join(_ROOT, 'py_placer', 'placement', 'floorplan.py')
 OPTS = os.path.join(_ROOT, 'py_placer', 'placement', 'options.py')
 CA = os.path.join(_ROOT, 'py_tools', 'check_assembly.py')
-TARGETS = {'le': LEG, 'fp': FLOOR, 'op': OPTS, 'ca': CA}
+CC = os.path.join(_ROOT, 'py_tools', 'check_capacity.py')
+TARGETS = {'le': LEG, 'fp': FLOOR, 'op': OPTS, 'ca': CA, 'cc': CC}
 
 CEN = os.path.join(_TESTS, 'test_837_assembly_sides.py')
 CAP = os.path.join(_TESTS, 'test_capacity_options.py')
@@ -114,8 +115,8 @@ ROWS = [
      (CEN,), 'KILLED'),
 
     # `both` must RUN. Skipping it lands a DECLARED key in the abstention
-    # channel, and glasgow_revC and orangecrab_ext_pll went pass:true ->
-    # pass:false on their own emitted intents.
+    # channel: measured, `rules_skipped_arm 0 -> 7` and
+    # `boards_clean_but_ungraded 0 -> 2` (kit-dev, sonde_u).
     ('a-declared-both-skips-the-rule', 'fp',
      "        return (intent.assembly or {}).get('sides') in _ASSEMBLY_SIDES\n",
      "        return (intent.assembly or {}).get('sides') in ('F', 'B')\n",
@@ -210,6 +211,50 @@ ROWS = [
      "    for ref in [r for r, p in sorted(ctx.parts.items())\n"
      "               if p.side == other]:\n",
      (CEN,), 'SURVIVED'),
+
+    # ------------------------- rows an adversarial review found ALIVE
+    # The proposal has to hold the parts it is proposed for. The
+    # pre-existing ceil audit runs UNDECLARED, where charged == busiest, so
+    # it could not tell these apart: under `--assembly-sides F` on ulx3s the
+    # proposal would be 65.7mm for parts needing 79.7mm -- 2007mm2 short,
+    # 32%, with nothing failing.
+    ('the-proposal-is-solved-from-the-busiest-side', 'op',
+     "        exact = math.sqrt(max(0.0, charged)) + 2.0 * board_edge_clearance\n",
+     "        exact = math.sqrt(max(0.0, busiest)) + 2.0 * board_edge_clearance\n",
+     (CAP,), 'KILLED'),
+
+    # `not_modelled` inside `measured` reaches neither `format_text` nor
+    # `_digest`, so both disclosures ship only in --json -- the channel the
+    # bool type was chosen precisely so as not to depend on.
+    ('the-disclosure-goes-back-inside-measured', 'op',
+     "        'not_modelled': '; '.join(\n",
+     "        'measured_not_modelled': '; '.join(\n",
+     (CEN,), 'KILLED'),
+
+    # Forcing the bool into the digest evicts a real number: `_digest`
+    # returns `out[:max(limit, len(forced))]` and the forced list is already
+    # at the limit, so `part_area_mm2` left the text channel on 21 of 22
+    # boards.
+    ('the-basis-bool-is-forced-into-the-digest', 'op',
+     "                  'charged_area_mm2',\n",
+     "                  'charged_area_mm2', 'charged_area_is_sum',\n",
+     (CEN,), 'KILLED'),
+
+    # An intent that declares nothing is not one that declares `both`.
+    ('an-undeclared-intent-reads-as-both', 'cc',
+     "            declared = (load_intent(a.intent).assembly or {}).get('sides')\n",
+     "            declared = load_intent(a.intent).assembly_sides()\n",
+     (CEN,), 'KILLED'),
+
+    ('the-policy-source-is-not-forwarded', 'cc',
+     "        'assembly_sides_source': sides_src,\n",
+     "",
+     (CEN,), 'KILLED'),
+
+    ('the-declared-sides-are-not-forwarded', 'cc',
+     "        'assembly_sides': sides,\n",
+     "",
+     (CEN,), 'KILLED'),
 ]
 
 
