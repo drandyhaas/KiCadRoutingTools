@@ -289,8 +289,14 @@ def endpoints(pcb, names, byname, dest_ref=None):
             free.sort(key=lambda pt: -min(ts.d2(pt, (a[0], a[1]))
                                           for a in anchors))
         src = free[0]
-        tgt = max(net.pads, key=lambda p: ts.d2((p.global_x, p.global_y),
-                                                src))
+        # the far pad is one on ANOTHER component than the stub's own:
+        # a part placed right under the source ball (K51 SZQ: its ZQ
+        # resistor's pad 0.09 mm from the ball, on the back layer)
+        # made the ball itself the farthest pad by 0.1 mm, and the
+        # lane looped the net onto its own source
+        owner = _owner(src, segs, net.pads)
+        far = [p for p in net.pads if p.component_ref != owner] or net.pads
+        tgt = max(far, key=lambda p: ts.d2((p.global_x, p.global_y), src))
         ends[nm] = (src, (tgt.global_x, tgt.global_y), tgt.component_ref)
     return ends
 
@@ -354,7 +360,19 @@ def _layer_at(pcb, nid, pt, default):
         ln = math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
         if best is None or ln > best[0]:
             best = (ln, s.layer)
-    return best[1] if best else default
+    if best:
+        return best[1]
+    # no copper ends there: a bare PAD end (the far-pad fallback of
+    # endpoints) answers with its own single copper layer
+    net = pcb.nets.get(nid)
+    for p in sorted(net.pads if net else (),
+                    key=lambda q: ts.d2((q.global_x, q.global_y), pt)):
+        if abs(p.global_x - pt[0]) <= p.size_x / 2 + 0.02 \
+                and abs(p.global_y - pt[1]) <= p.size_y / 2 + 0.02:
+            cu = [L for L in p.layers if L.endswith('.Cu') and L != '*.Cu']
+            if len(cu) == 1:
+                return cu[0]
+    return default
 
 
 def _end_dir(pcb, nid, pt, pads):

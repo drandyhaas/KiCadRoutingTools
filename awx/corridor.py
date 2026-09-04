@@ -48,16 +48,22 @@ def simplify(pts: Sequence[Pt], tol: float = 0.03) -> List[Pt]:
     if len(pts) < 3:
         return pts
 
-    def rec(a, b):
+    # iterative (a spine of thousands of relaxed points overflowed the
+    # recursive form: RecursionError in a K51 corner corridor)
+    keep_idx = {0, len(pts) - 1}
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        a, b = stack.pop()
         best, bi = 0.0, -1
         for i in range(a + 1, b):
             d = ts.seg_pt_dist(pts[a], pts[b], pts[i])
             if d > best:
                 best, bi = d, i
-        if best <= tol:
-            return [pts[a], pts[b]]
-        return rec(a, bi)[:-1] + rec(bi, b)
-    out = rec(0, len(pts) - 1)
+        if best > tol:
+            keep_idx.add(bi)
+            stack.append((a, bi))
+            stack.append((bi, b))
+    out = [pts[i] for i in sorted(keep_idx)]
     # drop consecutive duplicates
     keep = [out[0]]
     for p in out[1:]:
@@ -485,6 +491,14 @@ def relax_path(init: Sequence[Pt], obs, rounds: int = 150) -> List[Pt]:
     `init`, pushed out of `obs`."""
     pts = ts.densify(list(init))
     ends = (pts[0], pts[-1])
+    # a string that does not settle -- pushed between overlapping
+    # obstacles it wanders, its length grows, densify adds points and
+    # shortcut goes quadratic (K51 corner corridor against the big
+    # corridor's tubes: hours). A relaxed path several chords long is
+    # not a corridor axis; give the chord back and let build_spine's
+    # degenerate fallback have it.
+    chord = math.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1])
+    cap = 3.0 * chord + 10.0
     it = 0
     for it in range(rounds):
         moved = 0.0
@@ -503,10 +517,14 @@ def relax_path(init: Sequence[Pt], obs, rounds: int = 150) -> List[Pt]:
                 q = (q[0] + ux * (depth + 0.01), q[1] + uy * (depth + 0.01))
             moved += math.hypot(q[0] - p[0], q[1] - p[1])
             pts[i] = q
+        if polyline_len(pts) > cap:
+            return ts.densify([ends[0], ends[1]])
         if it % 25 == 24:
             pts = ts.densify(ts.shortcut(pts, obs))
         if moved < 1e-4 * len(pts):
             break
+    if polyline_len(pts) > cap:
+        return ts.densify([ends[0], ends[1]])
     return ts.densify(ts.shortcut(pts, obs))
 
 
