@@ -366,6 +366,73 @@ def main():
     check("emit: the observed policy grades clean on every tracked board",
           not dirty, str(dirty))
 
+    # ...and it is the OBSERVED policy, not a constant. A hardcoded `both`
+    # also grades clean on every board, so the arm above cannot tell the two
+    # apart -- this one can, because 15 of the 22 tracked boards observe a
+    # single face.
+    emitted = {}
+    for path in sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
+                                              '*.kicad_pcb'))):
+        pcb = parse_kicad_pcb(path)
+        doc = fp.emit_intent(pcb, path)
+        emitted[os.path.basename(path)] = (
+            (doc.get('assembly') or {}).get('sides'),
+            assembly_census(pcb)['sides'])
+    disagree = {k: v for k, v in emitted.items() if v[0] != v[1]}
+    check("emit: every board's declared sides IS its observed sides",
+          not disagree, str(disagree))
+    check("emit: and the corpus contains both answers, or the arm is vacuous",
+          len({v[0] for v in emitted.values()}) >= 2,
+          str({v[0] for v in emitted.values()}))
+
+    # The CLI end of the arithmetic. `grow_board` is exercised directly by
+    # tests/test_capacity_options.py; this arm exists so the THREADING --
+    # flag -> capacity_options -> grow_board -> JSON_SUMMARY -- cannot be cut
+    # without a test noticing.
+    def capacity(stem, *extra, quiet=True):
+        # `-q` suppresses `format_text`, so the arm that checks the TEXT
+        # channel must not pass it. Found by that arm failing: a check that
+        # looked for the digest in output the flag had turned off would have
+        # been a false red, and looking only at the JSON would have been a
+        # false green for the very trap the bool type exists to avoid.
+        r = subprocess.run([sys.executable, '-X', 'utf8',
+                            os.path.join(ROOT, 'py_tools', 'check_capacity.py'),
+                            board(stem), '--only', 'grow_board',
+                            *(['-q'] if quiet else []), *extra],
+                           capture_output=True, text=True, cwd=ROOT,
+                           env=dict(os.environ, KRT_NO_BANNER='1'))
+        out = r.stdout + r.stderr
+        line = [ln for ln in out.splitlines() if 'JSON_SUMMARY' in ln]
+        return r, out, (json.loads(line[0].split('JSON_SUMMARY: ', 1)[1])
+                        if line else {})
+
+    r_none, _, d_none = capacity('ulx3s')
+    r_both, _, d_both = capacity('ulx3s', '--assembly-sides', 'both')
+    r_f, out_f, d_f = capacity('ulx3s', '--assembly-sides', 'F',
+                                quiet=False)
+    check("capacity: the flag reaches grow_board and changes the charge",
+          d_f.get('utilisation') != d_none.get('utilisation')
+          and d_f.get('charged_area_is_sum') is True
+          and d_f.get('fits_by_area') is False,
+          f"none={d_none} F={d_f}")
+    check("capacity: `both` is identical to undeclared, to the last digit",
+          d_both.get('utilisation') == d_none.get('utilisation')
+          and d_both.get('fits_by_area') == d_none.get('fits_by_area')
+          and d_both.get('charged_area_is_sum') is False,
+          f"none={d_none} both={d_both}")
+    check("capacity: JSON_SUMMARY names the declared sides",
+          d_f.get('assembly_sides') == 'F'
+          and d_none.get('assembly_sides') is None,
+          f"F={d_f.get('assembly_sides')} none={d_none.get('assembly_sides')}")
+    # The basis must reach the TEXT digest. `options._digest` skips string
+    # values before the forced-key list, so a string label would be invisible
+    # exactly where a human reads -- which is why the key is a bool.
+    check("capacity: the basis is visible in the text channel",
+          'charged_area_is_sum=yes' in out_f, out_f[-500:])
+    check("capacity: all three invocations exit 0",
+          r_none.returncode == r_both.returncode == r_f.returncode == 0,
+          f"{r_none.returncode} {r_both.returncode} {r_f.returncode}")
+
     # The loader refuses by REASON. `single` is the spelling an author reaches
     # for first, and "it does not say WHICH face" is the whole correction --
     # ulx3s is back-dominant, so "single implies front" would flag 163 parts.

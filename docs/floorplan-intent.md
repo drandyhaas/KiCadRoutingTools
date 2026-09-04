@@ -441,6 +441,47 @@ Enforcing is not free, and the price is recorded rather than described:
 from the search, so `crossings` and `hpwl` can get worse — on ulx3s they do,
 and that row is pinned `regress` with the containment errors going 4 → 0.
 
+### `assembly.sides`: which faces the fab will populate (#837)
+
+A board-level fab claim, not a per-block one. `blocks[].side` says where one
+subsystem belongs; this says how many reflow passes the board gets.
+
+```jsonc
+"assembly": { "sides": "F" }        // "F" | "B" | "both"
+```
+
+**The face is named, and `single` is refused.** Single-sided does not mean
+front-sided: `ulx3s` is back-dominant, 163 of its 226 pad-bearing parts, so a
+reader that took `single` to mean F.Cu would be wrong about most of a shipping
+board. The refusal says so rather than just listing the enum.
+
+Two things read it:
+
+* **`rule_assembly_side`** flags a part on a face the policy does not populate.
+  It **warns** by default, deliberately: nothing in the engine can move a part
+  between faces — the writer gained a real flip in
+  [#714](https://github.com/drandyhaas/KiCadRoutingTools/issues/714), but no
+  move in any search carries a side
+  ([#836](https://github.com/drandyhaas/KiCadRoutingTools/issues/836)) — so an
+  error would be a red mark no run could clear, which is the defect `zone_side`
+  already carries. An author who wants the hard gate writes
+  `"severity": {"assembly_side": "error"}` and means it.
+* **`options.grow_board`** charges the parts against one face instead of the
+  busier one. That is the arithmetic the key exists for: without it, a board's
+  back-side area is credited to every board with nothing charged against it.
+
+It grades the **body face**, never `sides_occupied`. A through-hole part on the
+front needs wave, selective or hand soldering — not a second reflow pass — and
+`sides_occupied` would call `splitflap_driver` two-sided on 22 drilled parts
+when its back face is empty.
+
+`--emit-intent` writes the **observed** policy, so an existing board emits its
+own faces and grades clean by construction. `single` appears only where a human
+typed it, which is the case where the violations are the point. The count is
+the pad-bearing population: `glasgow_revC` declared `F` reports **92**, not the
+94 blocks on its back, because two of those blocks carry no pads. The census in
+`check_assembly.py` prints the same numbers and declares its basis.
+
 ### A through-hole part is in a keep-out from either side
 
 Its leads pass through. `keepout` tests the courtyard **and** the drilled-pad
