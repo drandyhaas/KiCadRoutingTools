@@ -540,8 +540,11 @@ def the_zero_depth_band_is_an_escape():
     A pad ON the box edge has a band of zero depth and escapes trivially.
     `assign_faces` never asks: it consults the corridor only when the box
     half said `min(d) > tol`, and `band[1] - band[0]` IS `d[face]`, so the
-    arm is unreachable through that path -- measured, 0 of 70464 `clear`
-    calls over the corpus at four bases take it.
+    arm is unreachable through that path -- measured, 0 of 32960 `clear` calls
+    take it, over `run_utils.corpus_boards()`'s 22 TRACKED boards at four
+    bases. (The basis is named because `kicad_files/` accumulates generated
+    boards, so a directory glob answers a different and larger number on a
+    machine that has run the suite.)
 
     It is kept because it is the definition's base case and the guard that
     binds the moment the box half is removed, and it is tested HERE because
