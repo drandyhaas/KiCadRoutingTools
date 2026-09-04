@@ -375,7 +375,7 @@ sided layer `F.<x>` / `B.<x>`, not the list of which ones exist. Measured over
 the 22 tracked boards, the layer tokens appearing inside a `(footprint ...)`
 block are `F.Cu F.Mask F.Paste F.SilkS F.CrtYd F.Fab F.Adhes B.SilkS B.Fab B.Cu
 B.CrtYd B.Mask B.Paste *.Cu *.Mask Dwgs.User Cmts.User Eco1.User Eco2.User
-User.1`; this flips the twelve sided ones and returns the other eight as they
+User.1`; this flips the thirteen sided ones and returns the other seven as they
 are.
 
 Two things it deliberately does **not** do, because both would be guesses:
@@ -383,13 +383,13 @@ Two things it deliberately does **not** do, because both would be guesses:
 - `*.Cu` and `*.Mask` pass through. They are KiCad's ALL-copper / all-mask sets
   and are already their own mirror; narrowing `*.Cu` to `B.Cu` would silently
   drop 66 pads on `rp2350_fpga_eensy_prePlane` U8 alone.
-- Inner copper passes through unchanged, which is the identity answer and not
-  the right one. `In1.Cu`'s mirror image is `In<n+1-k>.Cu`, which depends on
-  the board's inner-layer count *and* on `remove_unused_layers` padstack
-  semantics, and no tracked board carries an explicit `In<n>.Cu` in a footprint
-  pad. Callers that must decide about one are expected to **refuse** rather
-  than take this function's answer —
-  `placement.writer` does exactly that.
+- Inner copper passes through unchanged, and that matches KiCad: probed
+  against pcbnew 10.0.0 on a six-layer board, `FOOTPRINT::Flip` leaves a pad on
+  `In1.Cu` and an `fp_line` on `In2.Cu` where they are. So the identity answer
+  is correct here, not merely conservative. `placement.writer` nonetheless
+  **refuses** a pad naming an explicit `In<n>.Cu`, for a different reason: no
+  tracked board carries one, so nothing here would notice if a future KiCad
+  began remapping them.
 
 ## Utility functions
 

@@ -94,11 +94,23 @@ FIXTURES = [
     ('orangecrab_ext_pll', 'J1'),   # property on Eco1.User
 ]
 
+# Each fixture is compared TWICE: once against pcbnew's bare flip, and once
+# against a flip COMPOSED with a rotation the caller chose. The composed pass
+# exists because its absence hid a real bug -- the text-angle rule was the
+# constant `180 - a`, which is the general composition only when
+# `new_rot == -old_rot`, i.e. only for the bare flip this gate used to be the
+# whole of. Every shipped consumer asks for something else: `perturb`'s
+# `layer_flip` HOLDS the pose, so its delta is 2R, and 9 of tigard's 33 flipped
+# parts shipped a reference designator rotated 180 degrees from where KiCad
+# puts it -- relative to their own pads, which had rotated correctly.
+COMPOSED_DELTAS = (None, 90.0, 180.0)
+PASSES = [(b, r, d) for (b, r) in FIXTURES for d in COMPOSED_DELTAS]
+
 # A run that compared nothing must fail. Floors are below today's counts so a
 # board changing is not a failure, and far above zero so a vacuous run is.
-MIN_FIXTURES = 12
-MIN_PADS = 400
-MIN_NON_PAD_NODES = 400
+MIN_FIXTURES = 36
+MIN_PADS = 1200
+MIN_NON_PAD_NODES = 1200
 # Surfaces at least one fixture must actually carry, so the set cannot silently
 # stop covering them.
 REQUIRED_SURFACES = ('fp_arc', 'fp_curve', 'model', 'fp_poly', 'fp_circle')
@@ -180,7 +192,13 @@ def canon(node):
     rest = node[1:]
     if head == 'at':
         vals = [_num(t) for t in rest[:2]]
-        vals += [_num(t, angle=True) for t in rest[2:3]]
+        # A MISSING angle is zero, and is normalised to it. Declared because it
+        # is a real normalisation and not a formatting nicety: this writer
+        # PRESERVES the angle token's presence (which is what buys the
+        # byte-identical round trip) while pcbnew drops a zero, so under a
+        # composed rotation the same pad is `(at x y 0)` here and `(at x y)`
+        # there. Same angle, different arity.
+        vals += [_num(rest[2], angle=True) if len(rest) > 2 else 0.0]
         vals += [canon(t) for t in rest[3:]]
         return (head,) + tuple(vals)
     kids = [canon(t) if not isinstance(t, str) else _num(t) for t in rest]
@@ -223,7 +241,11 @@ def _count_nodes(text):
 # every instance printed, and a cap, so it cannot quietly widen into a blanket
 # float tolerance that would hide a real disagreement.
 _MID_WAIVER_NM = 1
-MAX_WAIVED = 6
+# Two arcs waive, once per pass. Stated as the product rather than as the
+# number, so adding a pass does not silently push the run through a cap it
+# was sitting exactly on -- it was at 6 of 6 the moment the composed
+# passes landed, which is a boundary, not a margin.
+MAX_WAIVED = 2 * 3 + 3
 
 
 def _diff(a, b, path='', out=None, limit=40, waived=None):
@@ -273,7 +295,7 @@ def main(argv=None):
     surfaces = set()
     direction_checked = False
     try:
-        for board, ref in FIXTURES:
+        for board, ref, delta in PASSES:
             src = os.path.join(REPO, 'kicad_files', board + '.kicad_pcb')
             if not os.path.isfile(src):
                 problems.append(f"{board}: board not tracked -- fixture stale")
@@ -288,6 +310,12 @@ def main(argv=None):
             before_y = [p.GetFPRelativePosition().y for p in fp.Pads()]
             before_x = [p.GetFPRelativePosition().x for p in fp.Pads()]
             fp.Flip(fp.GetPosition(), tb)
+            if delta is not None:
+                # COMPOSED: a flip AND a rotation the caller chose, which
+                # is not pcbnew's bare flip and is the case every shipped
+                # consumer actually asks for.
+                fp.SetOrientationDegrees(
+                    round((fp.GetOrientationDegrees() + delta) % 360, 6))
             if before_y and not direction_checked:
                 # The enum is KiCad 10; on 9 the second arg is a bool. Prove
                 # the direction TAKEN mirrors Y, so a KiCad that changes the
@@ -312,7 +340,8 @@ def main(argv=None):
             write_placed_output(src, ours, [{
                 'reference': ref, 'new_x': round(fp0.x, 6),
                 'new_y': round(fp0.y, 6),
-                'new_rotation': round((-(fp0.rotation or 0.0)) % 360, 6),
+                'new_rotation': round(((-(fp0.rotation or 0.0))
+                                       + (delta or 0.0)) % 360, 6),
                 'new_side': side}])
 
             ta, tk = _block(ours, ref), _block(kout, ref)
@@ -333,7 +362,9 @@ def main(argv=None):
             d = _diff(canon(parse_sexpr(ta)), canon(parse_sexpr(tk)),
                       limit=args.show, waived=waived)
             if d:
-                problems.append(f"{board}:{ref} {len(d)} node difference(s):")
+                tag = 'pure flip' if delta is None else f'flip + {delta} deg'
+                problems.append(
+                    f"{board}:{ref} [{tag}] {len(d)} node difference(s):")
                 problems.extend("      " + x for x in d[:args.show])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

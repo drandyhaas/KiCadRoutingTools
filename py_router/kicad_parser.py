@@ -654,17 +654,23 @@ def flip_layer_token(name: str) -> str:
         B.Cu B.Mask B.Paste B.SilkS B.CrtYd B.Fab
         *.Cu *.Mask Dwgs.User Cmts.User Eco1.User Eco2.User User.1
 
-    This flips the twelve sided ones and returns the other eight unchanged --
+    This flips the THIRTEEN sided ones and returns the other SEVEN unchanged --
     including both wildcards, which pcbnew also leaves alone (`*.Cu` is KiCad's
     ALL-copper set and is already its own mirror; rewriting it to `B*.Cu` or
     `B.Cu` would silently narrow 66 pads on rp2350's U8 alone).
 
-    Inner copper is NOT handled here and must never be: `In1.Cu` has no
-    face, its mirror image would be `In<n+1-k>.Cu`, that depends on the board's
-    inner-layer count AND on `remove_unused_layers` padstack semantics, and no
-    tracked board carries an explicit `In<n>.Cu` in a footprint pad. Callers
-    that must decide about one are expected to REFUSE rather than take the
-    identity answer this returns.
+    Inner copper passes through unchanged, and that is what KiCad does too:
+    probed against pcbnew 10.0.0 on a six-layer board, `FOOTPRINT::Flip` leaves
+    a pad on `In1.Cu` and an `fp_line` on `In2.Cu` exactly where they are. An
+    earlier version of this docstring asserted the mirror image would be
+    `In<n+1-k>.Cu` -- that was reasoning, and the oracle this repo uses as
+    ground truth everywhere else contradicts it.
+
+    The identity answer is therefore CORRECT for KiCad 10, not merely
+    conservative. `placement.writer` still refuses a pad naming an explicit
+    `In<n>.Cu`, which is a separate and deliberate choice: no tracked board
+    carries one, so this repo has no regression test that would notice if a
+    future KiCad started remapping them.
     """
     if name.startswith('F.'):
         return 'B.' + name[2:]

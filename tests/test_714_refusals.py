@@ -169,6 +169,39 @@ def main():
         results.append(_expect_refusal('In<n>.Cu in a pad (layers)',
                                        'J7', ['In1.Cu'], lambda: flip(p, 'J7')))
 
+        # --- four refusals added after an adversarial review found each of
+        # them SILENTLY SKIPPING instead. Every one leaves a half-mirrored
+        # footprint, which is the failure class this feature exists to remove,
+        # and none has a witness on the tracked corpus -- which is why they
+        # were skips for as long as they were.
+        p = _inject(tg, os.path.join(tmp, 'atunlocked.kicad_pcb'), 'J7',
+                    sub=(r'\(at 0 -3\.98 0\)', '(at 0 -3.98 0 unlocked)'))
+        results.append(_expect_refusal(
+            'a KiCad 6/7 four-token `(at x y a unlocked)`',
+            'J7', ['(at'], lambda: flip(p, 'J7')))
+
+        p = _inject(tg, os.path.join(tmp, 'nofont.kicad_pcb'), 'J7',
+                    sub=(r'\(effects\s*\n\s*\(font\s*\n\s*\(size 1 1\)\s*\n\s*'
+                         r'\(thickness 0\.15\)\s*\n\s*\)\s*\n\s*\)',
+                         '(effects)'))
+        results.append(_expect_refusal(
+            'a text with no (effects (font ...)) to carry the mirror flag',
+            'J7', ['font'], lambda: flip(p, 'J7')))
+
+        p = _inject(tg, os.path.join(tmp, 'padstack.kicad_pcb'), 'J7',
+                    sub=(r'\(size 0\.6 1\.55\)',
+                         '(size 0.6 1.55)\n\t\t\t(padstack (layer "F.Cu" '
+                         '(size 0.6 1.55)))'))
+        results.append(_expect_refusal(
+            'a pad child outside the whitelist (KiCad 9/10 padstack)',
+            'J7', ['padstack'], lambda: flip(p, 'J7')))
+
+        p = _inject(tg, os.path.join(tmp, 'nolayer.kicad_pcb'), 'J7',
+                    sub=(r'\(layer "F\.Cu"\)\n', ''))
+        results.append(_expect_refusal(
+            'a footprint block with no top-level (layer ...)',
+            'J7', ['layer'], lambda: flip(p, 'J7')))
+
         # --- a coordinate literal outside the measured grammar. 148417 tokens
         # on the corpus, 0 outside `-?\d+(\.\d+)?`; a sign toggle is an exact
         # involution only over that shape, so anything else must refuse.

@@ -103,9 +103,16 @@ ROWS = [
      (VAC, PAR), 'KILLED'),
 
     # ------------------------------------------------------------- the texts
-    ('text-angle-negates-instead-of-180-minus', 'wr',
-     "            new = _flip_at_angle(node, ref, lambda a: 180.0 - a)\n",
-     "            new = _flip_at_angle(node, ref, lambda a: -a)\n",
+    # RE-ANCHORED: the text-angle rule gained its rotation term (see
+    # `the-text-angle-ignores-the-rotation-delta` below), which staled the old
+    # anchor. The mutation is restated rather than transliterated -- writing
+    # `new_rot - 180.0 - (a - old_rot)` would have differed by exactly 360 and
+    # been a NO-OP that survived for the wrong reason. This applies the PAD
+    # rule to a text instead: the same angle without the 180 reflection, which
+    # is what a reader who saw `_flip_pad` first would plausibly write.
+    ('text-uses-the-pad-rule-with-no-180-reflection', 'wr',
+     "                                 lambda a: new_rot + 180.0 - (a - old_rot))\n",
+     "                                 lambda a: new_rot - (a - old_rot))\n",
      (PAR,), 'KILLED'),
 
     # The B->F direction in one line. Dropping only the token would leave an
@@ -119,10 +126,56 @@ ROWS = [
     # `(justify mirror)` only to a text on a SIDED layer; 28 flip-eligible
     # texts on the corpus sit on a User layer, and none of the first thirteen
     # parity fixtures carried one.
+    # RE-ANCHORED: `_flip_justify` gained a `ref` argument so its own refusal
+    # can name the footprint. Same mutation.
     ('the-justify-toggle-is-unconditional', 'wr',
-     "            if sided:\n                new = _flip_justify(new)\n",
-     "            if True:\n                new = _flip_justify(new)\n",
+     "            if sided:\n                new = _flip_justify(new, ref)\n",
+     "            if True:\n                new = _flip_justify(new, ref)\n",
      (PAR,), 'KILLED'),
+
+    # ---------------------------- what an adversarial branch review found
+    # THE SHIPPING BUG. `180 - a` is the general composition ONLY when
+    # new_rot == -old_rot, i.e. only for pcbnew's bare flip -- which is the
+    # only thing the parity gate used to ask for. Every real consumer asks for
+    # something else: `perturb`'s layer_flip HOLDS the pose, so its delta is
+    # 2R, and 9 of tigard's 33 flipped parts shipped a reference designator
+    # rotated 180 degrees from where KiCad puts it, relative to their own pads.
+    # Killed only by the COMPOSED passes added to PAR for exactly this.
+    ('the-text-angle-ignores-the-rotation-delta', 'wr',
+     "                                 lambda a: new_rot + 180.0 - (a - old_rot))\n",
+     "                                 lambda a: 180.0 - a)\n",
+     (PAR,), 'KILLED'),
+
+    # `\\S` matches `)`, so on the compact `(pts (xy -1 1))` spelling the last
+    # group backtracks to `1)` and the match runs to the `pts` closer. Fails
+    # CLOSED, but it makes every KiCad 6/7-formatted fp_poly unflippable.
+    ('the-coordinate-group-swallows-a-closing-paren', 'wr',
+     "                     + r')(\\s+)([^\\s()]+)(\\s+)([^\\s()]+)\\)')\n",
+     "                     + r')(\\s+)(\\S+)(\\s+)(\\S+)\\)')\n",
+     (VAC,), 'KILLED'),
+
+    # The pad dispatch was a BLACKLIST, so the head that refuses at footprint
+    # level was emitted verbatim from inside a pad. KiCad 9/10's `(padstack)`
+    # is the live instance.
+    ('the-pad-dispatch-is-a-blacklist-again', 'wr',
+     "        if head not in _PAD_HANDLED:\n",
+     "        if False:\n",
+     (REF,), 'KILLED'),
+
+    # A block with no top-level `(layer ...)` had all its geometry mirrored and
+    # no layer written -- #714's own silent failure, in the degenerate case.
+    ('a-block-with-no-layer-is-flipped-anyway', 'wr',
+     "    if not re.search(r'\\(layer\\s+\"[^\"]+\"\\)', fp_text):\n",
+     "    if False:\n",
+     (REF,), 'KILLED'),
+
+    # An `(at ...)` the mirror cannot parse was SKIPPED, leaving one node
+    # unmirrored inside a footprint whose every other node moved. The
+    # reachable spelling is KiCad 6/7's `(at 0 -3.98 0 unlocked)`.
+    ('an-unparseable-at-is-skipped-not-refused', 'wr',
+     "        if not re.search(r'\\(at\\b', node):\n            return node",
+     "        if True:\n            return node",
+     (REF,), 'KILLED'),
 
     # ---------------------------------------------------------- the graphics
     # Killed by PAR ALONE. RT survives it -- reversing a sweep twice restores

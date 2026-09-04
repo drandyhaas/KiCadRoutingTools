@@ -217,19 +217,99 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    # The named anchors, checked last so their failure is not buried.
-    for board, ref, num, exp_before, exp_after in ANCHORS:
-        src = os.path.join(REPO, 'kicad_files', board + '.kicad_pcb')
-        fp = parse_kicad_pcb(src).footprints.get(ref)
-        got = next((p for p in (fp.pads or []) if p.pad_number == num), None)
-        if got is None:
-            problems.append(f"anchor {board}:{ref} pad {num} is gone -- "
-                            f"re-anchor rather than delete")
-        elif (round(got.local_x, 6), round(got.local_y, 6)) != exp_before:
-            problems.append(
-                f"anchor {board}:{ref} pad {num} is at "
-                f"({got.local_x}, {got.local_y}), recorded as {exp_before} -- "
-                f"the board moved under the anchor")
+    # The named anchors, checked last so their failure is not buried. BOTH
+    # halves are asserted: an earlier version destructured `exp_after` and
+    # never used it, so the docstring's claim that `x` is pinned as hard as
+    # `y` -- the thing that kills a wrong-axis mutant -- was not implemented
+    # here at all, and the anchors were a board-staleness check wearing a
+    # correctness check's description.
+    tmp2 = tempfile.mkdtemp(prefix='krt714anchor')
+    try:
+        for board, ref, num, exp_before, exp_after in ANCHORS:
+            src = os.path.join(REPO, 'kicad_files', board + '.kicad_pcb')
+            fp = parse_kicad_pcb(src).footprints.get(ref)
+            got = next((p for p in (fp.pads or []) if p.pad_number == num), None)
+            if got is None:
+                problems.append(f"anchor {board}:{ref} pad {num} is gone -- "
+                                f"re-anchor rather than delete")
+                continue
+            if (round(got.local_x, 6), round(got.local_y, 6)) != exp_before:
+                problems.append(
+                    f"anchor {board}:{ref} pad {num} is at "
+                    f"({got.local_x}, {got.local_y}), recorded as "
+                    f"{exp_before} -- the board moved under the anchor")
+                continue
+            want = 'F' if (fp.layer or 'F').startswith('B') else 'B'
+            dst = os.path.join(tmp2, f"{board}__{ref}__{num}.kicad_pcb")
+            write_placed_output(src, dst, [{
+                'reference': ref, 'new_x': round(fp.x, 6),
+                'new_y': round(fp.y, 6), 'new_rotation': fp.rotation,
+                'new_side': want}])
+            after = parse_kicad_pcb(dst).footprints.get(ref)
+            aft = next((p for p in (after.pads or [])
+                        if p.pad_number == num), None)
+            if aft is None:
+                problems.append(f"anchor {board}:{ref} pad {num} vanished "
+                                f"from the flipped output")
+            elif (round(aft.local_x, 6), round(aft.local_y, 6)) != exp_after:
+                problems.append(
+                    f"anchor {board}:{ref} pad {num} flipped to "
+                    f"({aft.local_x}, {aft.local_y}), expected {exp_after}")
+    finally:
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+    # A COMPACTLY serialised graphic must flip, not refuse. `(pts (xy a b))`
+    # written on one line put a `)` immediately after the last coordinate, and
+    # the mirror's `(\S+)\)` matched it -- `\S` includes `)` -- so the group
+    # backtracked to `1)`, the literal failed the coordinate grammar and the
+    # whole footprint refused. It failed CLOSED, but it made every KiCad 6/7
+    # formatted `fp_poly` / `fp_curve` unflippable, and no tracked board
+    # writes that spelling so nothing here could see it.
+    tmp3 = tempfile.mkdtemp(prefix='krt714compact')
+    try:
+        from kicad_parser import iter_footprint_blocks
+        src = os.path.join(REPO, 'kicad_files', 'tigard.kicad_pcb')
+        with open(src, encoding='utf-8', newline='') as fh:
+            text = fh.read()
+        span = next(((s, e) for s, e, _t, _r, k in iter_footprint_blocks(text)
+                     if k == 'J7'), None)
+        if span is None:
+            problems.append("the compact-serialisation arm lost its fixture J7")
+        else:
+            bs, be = span
+            block = text[bs:be].replace(
+                '(attr smd)',
+                '(attr smd)\n\t\t(fp_poly (pts (xy -1 -1) (xy 1 -1) (xy 1 1) '
+                '(xy -1 1)) (stroke (width 0.1) (type solid)) (fill yes) '
+                '(layer "F.SilkS"))', 1)
+            if 'fp_poly' not in block:
+                problems.append("the compact-serialisation arm lost its anchor "
+                                "`(attr smd)` in J7")
+            else:
+                cin = os.path.join(tmp3, 'compact.kicad_pcb')
+                with open(cin, 'w', encoding='utf-8', newline='') as fh:
+                    fh.write(text[:bs] + block + text[be:])
+                cout = os.path.join(tmp3, 'compact_flipped.kicad_pcb')
+                fpc = parse_kicad_pcb(cin).footprints['J7']
+                try:
+                    write_placed_output(cin, cout, [{
+                        'reference': 'J7', 'new_x': round(fpc.x, 6),
+                        'new_y': round(fpc.y, 6), 'new_rotation': fpc.rotation,
+                        'new_side': 'B'}])
+                except Exception as exc:               # noqa: BLE001
+                    problems.append(
+                        f"a compactly written `(pts (xy ...))` made the flip "
+                        f"raise {type(exc).__name__}: {exc}")
+                else:
+                    with open(cout, encoding='utf-8') as fh:
+                        got = fh.read()
+                    want = '(xy -1 1) (xy 1 1) (xy 1 -1) (xy -1 -1)'
+                    if want not in got.replace('\n', ' '):
+                        problems.append(
+                            "a compactly written `(pts (xy ...))` was not "
+                            "mirrored: expected the four points y-negated")
+    finally:
+        shutil.rmtree(tmp3, ignore_errors=True)
 
     if checked == 0:
         problems.append("no fixture reached the geometry checks")

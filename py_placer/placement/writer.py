@@ -293,9 +293,26 @@ class SideFlipUnsupported(Exception):
 _COORD_LITERAL = re.compile(r'^-?\d+(\.\d+)?$')
 
 # Top-level children of a `(footprint ...)` block, by what the flip does with
-# them. Measured: these 27 heads are every top-level child kind on the tracked
-# corpus. Anything else REFUSES -- a whitelist, because you cannot test for a
+# them. Anything else REFUSES -- a whitelist, because you cannot test for a
 # node kind you have not thought of.
+#
+# TWO DIFFERENT COUNTS, and an earlier version of this comment read them as one
+# measured claim: the tracked corpus has 27 distinct top-level child kinds, and
+# this set also happens to hold 27 names, but they are not the same 27. Fifteen
+# of these have a corpus witness; TWELVE DO NOT -- `autoplace_cost90`,
+# `autoplace_cost180`, `clearance`, `generator`, `generator_version`,
+# `jumper_pad_groups`, `net_tie_pad_groups`, `thermal_gap`, `thermal_width`,
+# `tstamp`, `version`, `zone_connect`.
+#
+# Which raises the obvious objection: `chamfer` and `rect_delta` are refused
+# for having no witness, so why are these passed through? Because the doctrine
+# is about GEOMETRY, not about familiarity. Every name here is a scalar, an
+# identifier or a flag that a reflection cannot act on -- a cost weight, a
+# uuid, a margin, a pad-number group, a version string. `chamfer` and
+# `rect_delta` describe SHAPE, and their behaviour under a mirror is a real
+# question with a real answer that this corpus cannot supply. Passing through a
+# number that has no orientation is not a guess; guessing how a corner name
+# reflects is.
 _FLIP_PASSTHROUGH = frozenset({
     'uuid', 'descr', 'tags', 'path', 'attr', 'embedded_fonts', 'sheetfile',
     'sheetname', 'units', 'locked', 'variant', 'solder_mask_margin',
@@ -336,6 +353,22 @@ _PAD_REFUSALS = {
     'rect_delta': ("trapezoid pad deltas under a mirror are unmeasured -- no "
                    "tracked board carries one"),
 }
+
+# Pad children this mirror knows what to do with. `at`, `layers` and `drill`
+# are TRANSFORMED; the rest are mirror-invariant -- sizes, margins, net and pin
+# metadata, thermal and teardrop settings, which a reflection does not touch.
+# Measured: these 22 heads are every pad child kind on the 22 tracked boards
+# (9491 pads), with `primitives` the only one refused. Anything outside the set
+# refuses, so a KiCad that adds a pad child -- `padstack` is the live example
+# in 9/10 -- stops the flip instead of being emitted unmirrored.
+_PAD_HANDLED = frozenset({
+    'at', 'size', 'layers', 'uuid', 'net', 'pintype', 'pinfunction',
+    'roundrect_rratio', 'drill', 'remove_unused_layers', 'solder_paste_margin',
+    'solder_mask_margin', 'teardrops', 'zone_connect', 'property', 'options',
+    'clearance', 'thermal_bridge_angle', 'solder_paste_margin_ratio',
+    'thermal_bridge_width', 'thermal_gap', 'thermal_width', 'die_length',
+    'zone_layer_connections', 'tstamp', 'locked', 'chamfer_ratio',
+})
 
 _SIDED_LAYER = re.compile(r'^[FB]\.')
 _INNER_LAYER = re.compile(r'^In\d+\.Cu$', re.IGNORECASE)
@@ -390,7 +423,14 @@ def _iter_sexpr_children(text: str, open_idx: int = 0):
 def _mirror_xy_pairs(node: str, ref: str, heads=('start', 'end', 'center',
                                                  'mid', 'xy')) -> str:
     """Negate the Y of every `(head x y)` in `node`. X is never touched."""
-    pat = re.compile(r'\((' + '|'.join(heads) + r')(\s+)(\S+)(\s+)(\S+)\)')
+    # `[^\s()]+`, NOT `\S+`: `\S` matches `)`, so on the compact
+    # `(pts (xy -1 1))` spelling the last group backtracks to `1)` and the
+    # match runs to the `pts` closer. It failed CLOSED -- the literal `'1)'`
+    # is outside the coordinate grammar, so `_negate_coord` refused -- but with
+    # a message blaming the board for a regex bug, and it made every
+    # compactly-serialised `fp_poly` / `fp_curve` unflippable.
+    pat = re.compile(r'\((' + '|'.join(heads)
+                     + r')(\s+)([^\s()]+)(\s+)([^\s()]+)\)')
 
     def fix(m):
         return (f"({m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}"
@@ -416,9 +456,22 @@ def _flip_at_angle(node: str, ref: str, new_angle_of) -> str:
     the angle is 0 and stays 0 whenever the footprint's own rotation is 0 or
     180. A pad that would gain a non-zero angle gains the token.
     """
-    m = re.search(r'\(at\s+(\S+)\s+(\S+)(?:\s+(\S+))?\)', node)
+    m = re.search(r'\(at\s+([^\s()]+)\s+([^\s()]+)(?:\s+([^\s()]+))?\)', node)
     if not m:
-        return node
+        if not re.search(r'\(at\b', node):
+            return node          # genuinely has no `(at ...)`; nothing to move
+        # There IS one and it did not parse: REFUSE, never return the node
+        # untouched. The rest of the footprint mirrors around it, so a silently
+        # skipped `(at ...)` leaves exactly the half-mirrored block this whole
+        # feature exists to prevent. The reachable spelling is KiCad 6/7's
+        # four-token `(at 0 -3.98 0 unlocked)` -- no tracked board writes it
+        # (they all use the modern `(unlocked yes)` node), which is why nothing
+        # caught this.
+        raise SideFlipUnsupported(
+            f"{ref}: a node has an `(at ...)` this mirror cannot parse -- "
+            f"expected two or three plain numbers. Refusing rather than "
+            f"leaving it unmirrored inside a footprint whose every other node "
+            f"moved: {node[:120]!r}")
     x, y, a = m.group(1), m.group(2), m.group(3)
     ny = _negate_coord(y, ref, 'at')
     na = new_angle_of(float(a) if a is not None else 0.0)
@@ -430,13 +483,20 @@ def _flip_at_angle(node: str, ref: str, new_angle_of) -> str:
     return node[:m.start()] + rep + node[m.end():]
 
 
-def _flip_justify(node: str) -> str:
+def _flip_justify(node: str, ref: str) -> str:
     """Toggle the `mirror` token of the first `(justify ...)` in `node`.
 
-    Three cases, and two of them add or delete a whole node. Measured, the
-    tracked corpus contains exactly two forms -- `(justify mirror)` x1391 and
-    `(justify left bottom)` x58 -- so alignment tokens are preserved and only
-    `mirror` moves:
+    Three cases, and two of them add or delete a whole node. Measured INSIDE
+    footprint blocks on the 22 tracked boards -- which is the only place this
+    function ever runs -- there is exactly ONE form, `(justify mirror)`, 1356
+    of them, and ZERO instances of any alignment token. (Whole-file counts are
+    1367 and 42, but the 42 `(justify left bottom)` are board-level `gr_text`
+    that this never sees.) So the alignment-preserving branch below has no
+    corpus witness at all; it is there because pcbnew emits alignment tokens on
+    a footprint text the moment a user sets one, and dropping them would be a
+    silent edit to somebody's silkscreen. Said plainly because an earlier
+    version of this docstring quoted 1391/58 -- numbers that match no board set
+    -- and justified the branch with a form that cannot occur here.
 
       absent            -> insert `(justify mirror)` as the last child of
                            `(effects ...)`, at the `(font ...)` indentation,
@@ -462,11 +522,27 @@ def _flip_justify(node: str) -> str:
             rep = m.group(1) + '(justify ' + ' '.join(toks + ['mirror']) + ')'
         return node[:m.start()] + rep + node[m.end():]
 
-    fm = re.search(r'(\n([ \t]*))\(font\b', node)
+    # INSERT. The separator is taken from however `(font ...)` is actually
+    # written, so the compact one-line spelling works too. An earlier version
+    # required `(font` to START a line, which meant that on a compactly
+    # serialised board (KiCad 6/7 output, and anything a third-party tool
+    # writes) the DELETE path fired and the INSERT path silently did not:
+    # B->F removed the flag, F->B never added it, and the two stopped being
+    # inverses. No tracked board writes a one-line `(effects ...)`, so no gate
+    # could see it.
+    fm = re.search(r'(\s*)\(font\b', node)
     if fm is None:
-        return node          # no effects/font block: nothing to hang it on
+        # No font block to hang it on. REFUSE rather than return the node
+        # untouched: silently declining to mirror one text inside a footprint
+        # whose every other node moved is the half-flip this feature exists to
+        # prevent, and `write_placed_output` returns True either way.
+        raise SideFlipUnsupported(
+            f"{ref}: a text node has no `(effects (font ...))` to carry "
+            f"`(justify mirror)`, so its mirrored state cannot be written: "
+            f"{node[:120]!r}")
+    sep = fm.group(1) if '\n' in fm.group(1) else ' '
     fend = find_matching_paren(node, fm.end() - len('(font'))
-    return node[:fend] + fm.group(1) + '(justify mirror)' + node[fend:]
+    return node[:fend] + sep + '(justify mirror)' + node[fend:]
 
 
 def _flip_pad(node: str, ref: str, old_rot: float, new_rot: float) -> str:
@@ -483,11 +559,29 @@ def _flip_pad(node: str, ref: str, old_rot: float, new_rot: float) -> str:
     entirely and never calls it -- one code path per mode, so the ordinary
     non-flip write cannot regress.
     """
+    # A WHITELIST, like the footprint-level dispatch, and for the same reason.
+    # This was a blacklist -- refuse the three named heads, pass everything
+    # else through -- which meant the module's own argument stopped applying
+    # one level down: the very head that refuses at footprint level was emitted
+    # verbatim from inside a pad. The realistic instance is KiCad 9/10's
+    # `(padstack ...)` (per-layer pad geometry with its own nested
+    # `(primitives ...)` and per-layer `(layer ...)` sub-nodes): not in the
+    # refusal table, so its primitives never reached the check and its layers
+    # were never toggled. No tracked board carries one, which by this file's
+    # own doctrine is the argument for refusing rather than for passing
+    # through.
     for head, s, e in _iter_sexpr_children(node, 0):
         if head in _PAD_REFUSALS:
             raise SideFlipUnsupported(
                 f"{ref}: a pad carries ({head} ...) -- {_PAD_REFUSALS[head]}. "
                 f"Refusing to guess at its mirror image.")
+        if head not in _PAD_HANDLED:
+            raise SideFlipUnsupported(
+                f"{ref}: a pad carries a ({head} ...) node, which this mirror "
+                f"has no rule for. The pad dispatch is a WHITELIST for the "
+                f"same reason the footprint one is: a node passed through "
+                f"untouched leaves a pad whose geometry contradicts the face "
+                f"it claims, and nothing downstream raises.")
 
     lm = re.search(r'\(layers\b', node)
     if lm:
@@ -574,8 +668,22 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
     which negates the orientation itself; a caller that wants pcbnew's result
     passes the negated angle, which is what the parity gate does.
     """
+    # The block MUST declare a side of its own, and this is checked rather
+    # than assumed: `_block_side` defaults to 'F' when there is no top-level
+    # `(layer ...)`, so a block without one would have all its geometry
+    # mirrored and no layer written -- #714's exact silent failure,
+    # reintroduced in the degenerate case. KiCad always writes the node, so
+    # this is unreachable from KiCad; it is checked because a whitelist that
+    # refuses far less likely things should not wave this one through.
+    if not re.search(r'\(layer\s+"[^"]+"\)', fp_text):
+        raise SideFlipUnsupported(
+            f"{ref}: the footprint block declares no top-level `(layer ...)`, "
+            f"so there is nothing to flip and no way to say which face the "
+            f"mirrored geometry ended up on.")
+
     pieces = []
     prev = 0
+    saw_layer = False
     for head, s, e in _iter_sexpr_children(fp_text, 0):
         node = fp_text[s:e]
         if head in _FLIP_NAMED_REFUSALS:
@@ -597,6 +705,7 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
         if head == 'at':
             continue                     # already written by the caller
         elif head == 'layer':
+            saw_layer = True
             new = _flip_layer_nodes(node)
         elif head == 'private_layers':
             new = re.sub(r'"([^"]+)"',
@@ -616,15 +725,36 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
             # thirteen parity fixtures carried one until orangecrab U3 and J1
             # were added for exactly this.
             sided = bool(re.search(r'\(layer\s+"[FB]\.', node))
-            new = _flip_at_angle(node, ref, lambda a: 180.0 - a)
+            # A TEXT's angle composes with the pose change exactly as a pad's
+            # does; `180 - a` alone is the special case `new_rot == -old_rot`,
+            # i.e. pcbnew's own bare Flip, and it is wrong by the rotation
+            # delta for every other request. That is not hypothetical: the
+            # `layer_flip` perturbation HOLDS the pose, so its delta is 2R, and
+            # 9 of tigard's 33 flipped parts shipped a reference designator
+            # rotated 180 degrees from where KiCad puts it -- relative to their
+            # own pads, which had rotated correctly. Silent, and invisible to
+            # the parity gate because that gate only ever asked for the pure
+            # flip. See the COMPOSED pass in
+            # `tests/gui_parity/test_714_mirror_pcbnew_parity.py`.
+            new = _flip_at_angle(node, ref,
+                                 lambda a: new_rot + 180.0 - (a - old_rot))
             new = _flip_layer_nodes(new)
             if sided:
-                new = _flip_justify(new)
+                new = _flip_justify(new, ref)
         else:
             new = _flip_graphic(node, head, ref)
 
         if new != node:
             pieces.append((s, e, new))
+
+    if not saw_layer:
+        # Belt and braces: the regex above found a `(layer ...)` somewhere in
+        # the block, the WALK must have found it as a top-level child. If the
+        # two disagree, the walk is wrong and the block would ship half
+        # mirrored.
+        raise SideFlipUnsupported(
+            f"{ref}: the block's `(layer ...)` is not a top-level child, so "
+            f"the mirrored geometry would carry no face declaration.")
 
     if not pieces:
         return fp_text
