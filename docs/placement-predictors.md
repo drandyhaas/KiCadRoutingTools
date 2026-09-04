@@ -232,7 +232,8 @@ kit-dev-coldfire 0 / 0 -> 1 / 7, glasgow 14 / 2 -> 16 / 4, rp2350 8 / 11 ->
 
 *After #850* (2026-09-03) **nothing on this page moved, and that is a
 measurement rather than an omission.** #850 changed which face a pad points
-at in both ledgers -- corpus-wide, face demand fell from 2034 nets to 1203 --
+at in both ledgers -- corpus-wide, face demand fell from 2034 nets to 1142
+at that tip (1215 at this one, since #862 gave some of it back) --
 and it moved neither column of either table above. Both were re-derived at
 that tip with the two commands named above: every deficit / worst pair is
 identical, the 72.2% share is identical, and so is 14 of the 80 uncharged
@@ -257,7 +258,11 @@ Re-derived at the tip with the same two commands:
   that board's parts crosses into deficit; the worst deficit is unchanged.
 * the halo share: **72.2% -> 71.8%** already charged, and **14 of 80 -> 16 of
   82** uncharged pairs the demand term reaches. Both denominators move because
-  a part with no face demand named no blockers, and four parts now do.
+  a part with no face demand named no blockers, and ulx3s **GPDI1** now
+  does -- that board's named-blocker count goes 1 to 3 (`GPDI1/D51` and
+  `GPDI1/SW1`, both uncharged) and one more pair is charged on orangecrab,
+  taking the corpus total 288 to 291 and the uncharged-pair part population
+  93 to 96.
 
 **The direction is worth stating rather than leaving to the reader**: the
 share fell, so this re-measurement WEAKENS the "already charged" argument by
@@ -273,8 +278,10 @@ field, and a bounding box cannot tell eight corner marks from an enclosing
 ring. **#862** fixed that -- see the *After #862* paragraph below -- and U1
 now reads 308 interior with demand on all four faces.
 
-**What that does to the argument, stated rather than absorbed.** The
-"already charged" share falls 93.6% -> 72.2%, and the pairs the halo misses
+**What that does to the argument, stated rather than absorbed.** (This
+paragraph and the two above it describe the #841 re-measurement; the #862 one
+is in the *After #862* paragraph further up.) The
+"already charged" share falls 93.6% -> 71.8%, and the pairs the halo misses
 that the demand term WOULD reach go from 0 of 26 to 14 of 93. So the first
 claim is weaker than it was: the term is no longer measurably redundant, it is
 mostly redundant. The conclusion does not turn over -- 72% is still most of

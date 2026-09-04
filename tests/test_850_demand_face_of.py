@@ -357,8 +357,16 @@ def the_golden(boards):
             check('golden: %s -- #862 only ADDED demand' % key,
                   all(got[f] >= post[f] for f in post),
                   '%r fell against the #850 row %r' % (got, post))
+            # MEASURED against the #850 column, not `want_ipads` against
+            # `ipads`: those are two literals in this file and the check
+            # reduced to `308 < 379`, which no code change can fail. A blind
+            # review caught it. `rows[0]` is the live ledger.
             check('golden: %s -- #862 only REMOVED interior pads' % key,
-                  want_ipads < ipads, '%d !< %d' % (want_ipads, ipads))
+                  rows[0]['interior_pads'] < ipads,
+                  '%r !< %d' % (rows[0]['interior_pads'], ipads))
+            check('golden: %s -- and the box count is the #850 number' % key,
+                  rows[0]['interior_pads_box'] == ipads,
+                  '%r != %d' % (rows[0]['interior_pads_box'], ipads))
         check('golden: %s interior_pads / interior_demand_nets' % key,
               (rows[0]['interior_pads'], rows[0]['interior_demand_nets'])
               == (want_ipads, want_ilost),

@@ -87,7 +87,7 @@ def _geom(pcb, path):
     return part_copper_geometry(pcb.footprints or {}, clr)
 
 
-def _face_demand(fp, lane, geom=None):
+def _face_demand(fp, lane, geom=None, clearance=None, track_width=None):
     """Largest per-face distinct-net count, by the ledger's own face rule.
 
     #841: the ledger measures each pad by its own COPPER EDGE against the
@@ -102,11 +102,20 @@ def _face_demand(fp, lane, geom=None):
     face rule, and this file, `part_escape` and `routability.face_lane_ledger`
     all call it. The paragraph above is kept because it is the finding.
 
+    #862: AND IT MUST BE HANDED THE SAME BASIS. `assign_faces` answers the box
+    rule alone when it is given no `clearance`/`track_width` pair, so calling
+    it without one puts this file back on a DIFFERENT rule from the two
+    ledgers -- the third-copy defect above, arriving through the argument list
+    instead of through a reimplementation. Measured on ulx3s at the board's
+    own basis, without the pair: U1 reads demand 0 here against the ledger's
+    18, and SD1 2 against 8.
+
     `geom=None` keeps the old pairing, for a caller with no `PCBData`.
     """
     g = None if geom is None else geom.get(fp.reference)
     asg = escape.assign_faces(fp, g, lane_mm=lane,
-                              fallback_rect=escape._part_rect(fp))
+                              fallback_rect=escape._part_rect(fp),
+                              clearance=clearance, track_width=track_width)
     per = {f: set() for f in escape.FACES}
     for pad, face in asg.faces:
         if not getattr(pad, 'net_id', 0):
@@ -169,24 +178,34 @@ def question_a():
           ' demand term would:' % len(uncharged))
     fired = 0
     seen = set()
+    # A COUNT IS NOT A SET. `fired` counts PAIR hits, and it was being
+    # printed against `len(seen)`, a count of distinct PARTS -- so a
+    # part appearing in several uncharged pairs was counted once per
+    # pair on one side of the sentence and once in total on the other.
+    # Measured, that read '16 of 96 parts' for 5 distinct parts.
+    fires = set()
     for name, a, b, gap, need in uncharged:
         pcb, path = _load(name)
         ncu = len(pcb.board_info.copper_layers or ['F.Cu', 'B.Cu'])
         lane = escape.lane_pitch(pcb, path)
+        tw, clr = escape.lane_pitch_parts(pcb, path)
         geom = _geom(pcb, path)
         hits = []
         for ref in (a, b):
             fp = pcb.footprints[ref]
             pin = len([p for p in fp.pads if p.net_id > 0])
-            want = _face_demand(fp, lane, geom) * lane / ncu
+            want = _face_demand(fp, lane, geom, clearance=clr,
+                                track_width=tw) * lane / ncu
             if want > _shape_halo(pin) + 1e-9:
                 hits.append(ref)
+                fires.add((name, ref))
             seen.add((name, ref))
         fired += len(hits)
         print('     %-28s %-6s/%-6s gap %.3f vs %.3f  demand term fires on: %s'
               % (name, a, b, gap, need, ', '.join(hits) or 'NEITHER'))
-    print('\n   the demand term fires on %d of the %d parts in those pairs.'
-          % (fired, len(seen)))
+    print('\n   the demand term fires on %d of the %d parts in those pairs'
+          '  (%d of the %d pair-hits).'
+          % (len(fires), len(seen), fired, len(uncharged)))
     return total, charged, len(uncharged), fired
 
 
@@ -207,6 +226,7 @@ def question_b():
         # disagree about the board they are both reading.
         nsig, _source, planes = escape.signal_layer_count(pcb)
         lane = escape.lane_pitch(pcb, path)
+        tw, clr = escape.lane_pitch_parts(pcb, path)
         geom = _geom(pcb, path)
         fires = parts = 0
         worst_ask = (0.0, '')
@@ -215,7 +235,8 @@ def question_b():
             if not pin:
                 continue
             parts += 1
-            want = _face_demand(fp, lane, geom) * lane / nsig
+            want = _face_demand(fp, lane, geom, clearance=clr,
+                                track_width=tw) * lane / nsig
             if want > _shape_halo(pin) + 1e-9:
                 fires += 1
                 if want > worst_ask[0]:

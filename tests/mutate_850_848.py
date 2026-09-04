@@ -22,7 +22,11 @@ gate to pass UNMUTATED first; drop `__pycache__` before and after every row and
 run children with `-B`; treat exit 77 from every witness as UNDECIDED rather
 than a kill; restore in a `finally`.
 
-RECORDED at 093f5f36 -- **17 rows, 17 killed, 0 survived, 0 undecided, 0
+RECORDED at f30f5bdb (the #862 rows land there) -- **26 rows, 26 killed, 0
+survived, 0 undecided, 0 broken, 0 disagreeing.** The 17-row #850/#848
+verdict it carried before was recorded at 093f5f36, a pre-rebase commit that
+is no longer reachable from this branch, so the basis could not be checked out
+and the number could not be reproduced at the tip it named. 0
 broken, 0 disagreeing with expectation.**
 
 Six rows that guarded a `_assignment_rect` experiment were REMOVED with it:
@@ -145,8 +149,9 @@ ROWS = [
      (T850,), 'KILLED'),
 
     ('interior-demand-does-not-subtract-the-faces', 'rou',
-     "    interior_demand -= set().union(*demand.values())"
-     " if demand else set()",
+     # RE-ANCHORED: the `if demand else set()` tail was dead (a four-key
+     # dict literal is always truthy) and was dropped. Same mutation.
+     "    interior_demand -= set().union(*demand.values())",
      "    interior_demand -= set()",
      (T850,), 'KILLED'),
 

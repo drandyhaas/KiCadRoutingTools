@@ -1329,7 +1329,10 @@ track 0.2: interior pads **2054 → 1953**, nine refs move and every one moves
 down. `ulx3s` U1 goes **379 → 308** — 71 balls recover, more than the 67-ball
 outer ring of its 20 × 20 lattice, because some second-row balls escape through
 sites where the outer row has no ball — and its four faces then read demand
-17/11/18/16 against supply 21/31/29/31 at the finest grid, so the board gains
+17/11/18/16 against supply 21/31/29/31 at the finest grid **as
+`check_channels` resolves that board (track 0.3 / clearance 0.25)** — demand
+is basis-invariant here but supply is not, and at 0.2/0.2 the same faces read
+43/43/40/43 — so the board gains
 real demand and is still not short. `qfn_interior_pads` U1 stays at **5**, the
 same five pads: they sit behind that QFN's unnetted south pin row and are
 genuinely enclosed.
@@ -1342,21 +1345,26 @@ genuinely enclosed.
 > can only add interior pads) and bounded above by `interior_pads_box`, so *an
 > interior pad that survives the box rule is a fanout fact, not a parameter
 > fact* — the same distinction `supply_routed_grid` / `supply_finest_grid`
-> draws for supply. There is no clamp: at clearance 0.05 a 0.2 mm gap between
-> QFN pins really does pass a 0.1 mm track, and `qfn_interior_pads` U1 reading
-> 0 there is the right answer for a board etched at that floor.
+> draws for supply. There is no clamp: `qfn_interior_pads` U1's pin rows are
+> 0.25 mm pads on a 0.5 mm pitch, so the gap between pins is 0.25 mm, and at
+> clearance 0.05 that leaves 0.25 − 2×0.05 = 0.15 mm — which really does pass
+> a 0.1 mm track. U1 reading 0 interior there is the right answer for a board
+> etched at that floor.
 
-**A pad that is not on any edge of that box is INTERIOR**, and counts toward
-no face's demand. It cannot leave sideways at any pitch — it needs a via — and
-charging a face for it blames the face for a fanout problem. On a BGA-529 that
-is 441 of 529 balls; the ledger assigns the 88 that form the perimeter.
+**A pad that escapes in no direction is INTERIOR**, and counts toward no
+face's demand. It cannot leave sideways — it needs a via — and charging a face
+for it blames the face for a fanout problem. On a BGA-529 whose balls are too
+close to pass a track between, that is 441 of 529; the ledger assigns the 88
+that form the perimeter. *(A pad not on any edge of the copper box is
+interior under the BOX HALF alone, which is what `interior_pads_box` reports
+— since #862 that is a bound on `interior_pads`, not a synonym for it.)*
 
-Three keys report it, on every row (they are part-level facts, repeated the
-way `escape_band_mm` is), and the tool prints them once per ref:
+Seven keys report it, on every row (they are part-level facts, repeated the
+way `escape_band_mm` is):
 
 | key | |
 |---|---|
-| `interior_pads` | netted pads on no face — **equal to `escape_ledger`'s `interior_pads` for the same ref at the same clearance AND the same track width** (#862 added the second term; measured, price one ledger at track 0.2 and let the other resolve orangecrab's own 0.3 and `U3` reads 227 against 223) |
+| `interior_pads` | netted pads on no face — **equal to `escape_ledger`'s `interior_pads` for the same ref at the same clearance, the same track width, and the same net population** (#862 added the track-width term; measured, price one ledger at track 0.2 and let the other resolve orangecrab's own 0.3 and `U3` reads 227 against 223). The population term is `ignore_net_ids`: this ledger has none, so a caller that drops plane rails from the escape side is comparing two different sets — on ulx3s U1 with its two plane nets ignored, 190 against 308 |
 | `interior_nets` | distinct nets among them |
 | `interior_demand_nets` | the subset that had **no** pad on any face, i.e. what the four faces actually lost |
 | `interior_pads_box` | the same count under the **box rule alone** — basis-free, and the number to read when you want the fanout fact without the parameter fact |
@@ -1383,11 +1391,21 @@ It is additive: the three in-repo readers of `ledgers`
 a key set, and the skill drivers use the tool through its exit code and its
 printed text, not its JSON.
 
+**#862 adds six more**, and it is a published-schema change for the same
+reason: `interior_pads_box`, `face_corridor_escapes`, `face_corridor_source`,
+`face_corridor_clearance_mm`, `face_corridor_track_mm`, and
+`face_pitch_mm`/`face_pitch_source` on the ESCAPE row, which #850 had put on
+the routability row only. The tool PRINTS the interior count, what the
+corridor freed, the basis and the box-rule count once per ref; the rest are
+JSON-only, which is why this table says "report" rather than "print".
+
 *Before #850* this ledger took `min` over the distance from each pad's
 **centre** to the whole-part extent edge, with no tolerance and no interior
 case, so every netted pad was demand on some face. Corpus-wide that was 2034
-face-demand nets against 1142, and 478 deficit lanes at the finest grid
-against 199; the boards where the two instruments most disagreed (ulx3s,
+face-demand nets against **1215**, and 478 deficit lanes at the finest grid
+against 199; (that first pair read 1142 at the #850 tip and #862 moved it,
+which is why it is regenerated rather than quoted — the deficit pair beside
+it did NOT move, so a reader can see which half this change touched); the boards where the two instruments most disagreed (ulx3s,
 haasoscope_pro_max, routed_output — 68 / 44 / 44 lanes short here against 0 on
 the escape ledger) now agree. Regenerate with
 `tests/measure_850_848_faces.py --table demand`, which prints the two

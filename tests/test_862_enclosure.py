@@ -16,8 +16,16 @@ under them was specified before it was measured. EVERY expected value here is
 derived in the comment above it, from the fixture's own numbers; none was read
 off an implementation.
 
-Deliberately unit-only and fixture-only: it runs no board and takes well under
-a second, so it stays a FAST test that `run_all.py --fast` collects.
+Sections 1-2 are unit-only. EVERYTHING FROM SECTION 3 ON PARSES REAL BOARDS
+-- six of them, with `part_copper_geometry` over every footprint, and section
+8 runs the whole `board_lane_context` + `face_lane_ledger` + `escape_ledger`
+pipeline on ulx3s. Measured wall time is ~20s, not the "well under a second"
+an earlier version of this line claimed. `run_all.py` classifies fast vs
+integration on the strings `import run_utils` / `from run_utils` /
+`subprocess`, none of which appear here, so this file rides in `--fast` on
+that heuristic rather than on a measurement -- said out loud because a 20s
+test in the fast set is a thing a reader should be able to find out from the
+file.
 
     python3 -X utf8 tests/test_862_enclosure.py
 """
@@ -36,7 +44,7 @@ RUN_ALL_TIMEOUT = 300
 
 FAILURES = []
 PASSED = []
-SECTIONS = 8
+SECTIONS = 9
 
 
 def check(name, cond, detail=''):
@@ -380,7 +388,7 @@ def the_corridor_is_only_asked_about_box_interior_pads():
 #:   qfn_interior_pads U1   5 -> 5, AND IT IS THE SAME FIVE PADS. The negative
 #:              control: pads 34-37 plus one sit behind the QFN's UNNETTED
 #:              south pin row and are genuinely enclosed. A previous attempt at
-#:              #862 (`_assignment_rect`, reverted in e1f233b4) measured
+#:              #862 (`_assignment_rect`, reverted in 39ca0b98) measured
 #:              against the NETTED pads only and took this to 1. Measured, a
 #:              netted-only obstacle set still takes it to 0 today.
 #:   tigard U3 / glasgow_revC U1 / rp2350 U2 / watchy U1   unchanged, at every
@@ -405,6 +413,21 @@ GOLDEN_862 = {
     ('glasgow_revC', 'U1'):       {b: (27, 27) for b in BASES},
     ('rp2350_fpga_eensy_prePlane', 'U2'): {b: (25, 25) for b in BASES},
     ('watchy', 'U1'):             {b: (0, 0) for b in BASES},
+    # THE TWO REFS THAT TELL THE UNION FROM A REPLACEMENT, and the reason
+    # they are here: a blind review pointed out that none of the six rows
+    # above distinguishes them -- ulx3s reads 308 and qfn reads 5 under BOTH
+    # rules, at every basis -- so the whole "union, not replacement"
+    # argument had no golden behind it. These two do. Each is a 0.325mm
+    # 5-pad part whose central 0.82mm GND pad sits 0.0699mm from the copper
+    # box on west and east, plainly on the boundary; the corridor alone
+    # calls it interior because an axis-aligned shadow through a 0.07mm band
+    # is closed by the flanking pads once inflated, and the box half is what
+    # keeps it escaping. Under a replacement each reads 1. (The central pad is
+    # 0.58 x 0.58 at 45 degrees; 0.82mm is its axis-aligned extent, which is
+    # the number this rule works in.)
+    ('orangecrab_ext_pll', 'U10'): {b: (0, 0) for b in BASES},
+    ('rp2350_fpga_eensy_prePlane', 'U4'): {b: (0, 0) for b in BASES},
+    # (5 copper pads of 13 pad entries -- the footprint is Texas_X2SON-4.)
 }
 
 
@@ -478,8 +501,72 @@ def the_two_sided_gate():
     check('ulx3s:U1 recovers 71 balls', box - un == 71,
           'recovered {}'.format(box - un))
 
+    # THE UNION IS NOT A REPLACEMENT, asserted by RUNNING the replacement
+    # rather than by an invariant that cannot fail. `assign_faces` can only
+    # add escapes -- it recomputes a face solely when the box half returned
+    # None -- so "no pad the box placed became interior" is true by
+    # construction and sees nothing. This arm patches the box half out and
+    # requires the answer to MOVE, on the two refs that discriminate.
+    from placement import legality as L2
+    moved = {}
+    for board, ref in (('orangecrab_ext_pll', 'U10'),
+                       ('rp2350_fpga_eensy_prePlane', 'U4')):
+        pcb, geoms = _CACHE[(board, 0.2)]
+        fp = pcb.footprints[ref]
+        geom = geoms[ref]
+        corr = E.PadCorridors(geom.copper, tuple(geom.pads.values()), 0.2, 0.2)
+        n = 0
+        for pad in fp.pads:
+            if not getattr(pad, 'net_id', 0):
+                continue
+            box = L2.pad_box(geom, pad)
+            if box is None:
+                continue
+            # The CORRIDOR ALONE, with no box-tolerance accept in front of
+            # it -- which is what "replace" means and what `face_of` cannot
+            # be made to do from outside, because its tolerance short-circuits
+            # before the corridor is ever consulted.
+            if not any(corr.clear(f, box) for f in E.FACES):
+                n += 1
+        moved['%s:%s' % (board, ref)] = n
+    check('a REPLACING rule gains interior pads where the union does not',
+          all(v == 1 for v in moved.values()), repr(moved))
+
 
 # ---------------------------------------------------------------- section 7
+def the_zero_depth_band_is_an_escape():
+    """`PadCorridors.clear`'s base case, which `assign_faces` cannot reach.
+
+    A pad ON the box edge has a band of zero depth and escapes trivially.
+    `assign_faces` never asks: it consults the corridor only when the box
+    half said `min(d) > tol`, and `band[1] - band[0]` IS `d[face]`, so the
+    arm is unreachable through that path -- measured, 0 of 70464 `clear`
+    calls over the corpus at four bases take it.
+
+    It is kept because it is the definition's base case and the guard that
+    binds the moment the box half is removed, and it is tested HERE because
+    nothing else calls `clear` directly -- `free_run` and `pad_band` each
+    have their own arms and the function that actually decides had none.
+    """
+    rect = (0.0, 0.0, 10.0, 10.0)
+    edge = (4.0, 0.0, 5.0, 1.0)          # flush against the box's north edge
+    blocked = [(0.0, 0.0, 10.0, 10.0)]   # a slab covering everything
+    c = E.PadCorridors(rect, tuple(blocked), 0.2, 0.2)
+    check('a pad on the box edge escapes that way even through a slab',
+          c.clear('north', edge))
+    check('...and is still blocked the other way',
+          not c.clear('south', edge))
+
+    # The candidate index must change no answer -- it is a pre-filter on
+    # `free_run`'s own clip, not a heuristic. Asserted on a case where the
+    # index actually excludes something.
+    far = [(100.0, 0.0, 101.0, 10.0)]
+    c2 = E.PadCorridors(rect, tuple(far), 0.2, 0.2)
+    want = E.free_run(4.0, 5.0, (5.0, 10.0), True, far, grow=0.2) >= 0.2
+    check('an obstacle outside the strip is excluded and changes nothing',
+          c2.clear('south', (4.0, 4.0, 5.0, 5.0)) == want)
+
+
 def the_band_test_is_open_not_closed():
     """The parameter the prose never named, and it decides everything.
 
@@ -609,6 +696,7 @@ def main():
                the_corridor_is_only_asked_about_box_interior_pads,
                the_two_sided_gate,
                the_band_test_is_open_not_closed,
+               the_zero_depth_band_is_an_escape,
                the_basis_is_published_by_both):
         fn()
     for f in FAILURES:

@@ -1232,7 +1232,10 @@ def face_lane_ledger(pcb_data, ref: str, *, clearance: float,
     # A net with one pad interior and another on a face is NOT lost demand --
     # it still has to leave through that face. Only the nets with no pad on
     # any face are.
-    interior_demand -= set().union(*demand.values()) if demand else set()
+    # `demand` is a four-key dict literal, so it is always truthy and the
+    # guard this line used to carry never bound. Dropped rather than left
+    # to read as a considered edge case.
+    interior_demand -= set().union(*demand.values())
 
     pitch_fine = _quantized_pitch(track_width, clearance,
                                   FINEST_LEGAL_GRID_MM)

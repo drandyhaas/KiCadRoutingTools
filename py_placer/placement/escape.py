@@ -39,6 +39,7 @@ numpy only; no networkx in the placement stack.
 """
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -251,6 +252,14 @@ class PartEscape:
     corridor_source: str = 'not_measured'
     corridor_clearance_mm: float = 0.0
     corridor_track_mm: float = 0.0
+    #: The TOLERANCE pitch `assign_faces` ran at, and where it came from --
+    #: NOT `pitch_mm`. They differ on a part whose pad lattice yields no
+    #: pitch: `pad_pitch` answers `inf` there and `assign_faces` substitutes
+    #: the lane. Publishing the raw one would report a basis the rule did not
+    #: use, and `float('inf')` is not JSON either -- measured, `esp_prog`'s
+    #: one-pad `Ref*` made `json.dumps(..., allow_nan=False)` raise.
+    face_pitch_mm: float = 0.0
+    face_pitch_source: str = 'unknown'
 
     @property
     def worst(self) -> Optional[FaceLedger]:
@@ -287,8 +296,11 @@ class PartEscape:
                 'face_corridor_track_mm': round(self.corridor_track_mm, 4),
                 # #850 published these on the routability row only, so until
                 # now the two instruments could not be compared on the basis
-                # they are asserted EQUAL at.
-                'face_pitch_mm': round(self.pitch_mm, 4),
+                # they are asserted EQUAL at. It is `face_pitch_mm`, the pitch
+                # the rule RAN at, not `pitch_mm`, the part's raw lattice
+                # pitch -- they differ wherever the lattice yields none.
+                'face_pitch_mm': round(self.face_pitch_mm, 4),
+                'face_pitch_source': self.face_pitch_source,
                 # Board-wide, so reported once rather than on all four faces.
                 'via_pitch_mm': round(f0.via_pitch_mm, 4) if f0 else 0.0,
                 'signal_layers': f0.signal_layers if f0 else 1,
@@ -717,10 +729,11 @@ def face_of(pad, rect, pitch, pad_box=None,
     does not apply, because a track leaving a pad turns before it has
     travelled that far. Drop it and orangecrab_ext_pll U10 and
     rp2350_fpga_eensy_prePlane U4 each GAIN an interior pad -- both a 0.325mm
-    5-pad part whose central 0.82mm GND pad sits 0.0699mm from the copper box
-    on west and east, plainly on the boundary, whose axis-aligned corridor is
-    nevertheless closed by its flanking pads once they are inflated by
-    clearance. (That divergence is basis-dependent and invisible at clearance
+    part with 5 copper pads, whose central GND pad (0.58 x 0.58 at 45 degrees,
+    so an 0.8202mm axis-aligned extent, which is what this test measures) sits
+    0.0699mm from the copper box on west and east, plainly on the boundary,
+    and whose axis-aligned corridor is nevertheless closed by its flanking
+    pads once they are inflated by clearance. (That divergence is basis-dependent and invisible at clearance
     0.09, where the two rules agree exactly; it appears at 0.20.)
 
     Because the union only ADDS escapes, the corridor is consulted only for
@@ -765,6 +778,25 @@ def face_of(pad, rect, pitch, pad_box=None,
     return None
 
 
+class KeyList(object):
+    """A read-only view of `seq` projected onto element `key`, for `bisect`.
+
+    `bisect` has no `key=` before Python 3.10 and this module supports
+    older interpreters; a projected view costs nothing and needs no copy.
+    """
+    __slots__ = ('seq', 'key')
+
+    def __init__(self, seq, key):
+        self.seq = seq
+        self.key = key
+
+    def __len__(self):
+        return len(self.seq)
+
+    def __getitem__(self, i):
+        return self.seq[i][self.key]
+
+
 class PadCorridors(object):
     """One part's own pad copper, as the field each of its pads must leave.
 
@@ -781,7 +813,7 @@ class PadCorridors(object):
     Built ONCE per part: `obstacles` is every copper pad rect the part has,
     including the UNNETTED ones. That is deliberate and it is the distinction
     a previous attempt at #862 got wrong (`_assignment_rect`, reverted in
-    e1f233b4): an unnetted pad may not DEMAND a lane, which is a fact about
+    39ca0b98): an unnetted pad may not DEMAND a lane, which is a fact about
     demand, and it still BLOCKS a track, which is a fact about escape. Two
     populations for two questions. Measured on `qfn_interior_pads` U1 -- the
     fixture that exists for this case -- pads 34-37 sit 1.075mm inside the
@@ -795,20 +827,54 @@ class PadCorridors(object):
     Its row-mates are beside it rather than in front of it and are skipped for
     the same reason.
     """
-    __slots__ = ('rect', 'obstacles', 'clearance', 'track_width')
+    __slots__ = ('rect', 'obstacles', 'clearance', 'track_width',
+                 '_by_x', '_by_y', '_wx', '_wy')
 
     def __init__(self, rect, obstacles, clearance, track_width):
         self.rect = rect
         self.obstacles = obstacles
         self.clearance = float(clearance)
         self.track_width = float(track_width)
+        # A CANDIDATE INDEX, and it is exact rather than a heuristic. Only
+        # obstacles whose ALONG span overlaps the pad's strip can contribute
+        # an interval at all -- `free_run` clips every one of them to
+        # `[lo, hi]` and drops the empties -- so pre-selecting them changes
+        # no answer and is asserted to change none.
+        #
+        # It is worth having because the naive form is O(pads^2 * 4) per
+        # part and lands hardest where it buys least: haasoscope's U3 is a
+        # BGA-529 with 441 interior balls and NOTHING to rescue, and it paid
+        # 441 * 4 * 529 ~ 0.9M inner iterations for that answer -- measured,
+        # `assign_faces` on it went 0.006s -> 0.700s, and `escape_ledger` on
+        # the board 12x, on a page where `options.escape_layer_gain` calls
+        # the ledger six times per invocation.
+        #
+        # Sorted by along-min, with the widest obstacle recorded so BOTH ends
+        # of the candidate window can be bisected: an obstacle overlaps
+        # `[lo2, hi2]` only if its along-min is in `[lo2 - widest, hi2]`.
+        # On a ball grid that is one column rather than the whole part.
+        self._by_x = sorted(obstacles, key=lambda r: r[0])
+        self._by_y = sorted(obstacles, key=lambda r: r[1])
+        self._wx = max((r[2] - r[0] for r in obstacles), default=0.0)
+        self._wy = max((r[3] - r[1] for r in obstacles), default=0.0)
+
+    def _candidates(self, lo, hi, horizontal):
+        """The obstacles that can possibly clip into `[lo, hi]`."""
+        idx, widest, key = ((self._by_x, self._wx, 0) if horizontal
+                            else (self._by_y, self._wy, 1))
+        lo2 = lo - self.clearance
+        hi2 = hi + self.clearance
+        a = bisect.bisect_left(KeyList(idx, key), lo2 - widest)
+        b = bisect.bisect_right(KeyList(idx, key), hi2)
+        return idx[a:b]
 
     def clear(self, face, pad_box):
         """Can a track of `track_width` leave `pad_box` straight out `face`?"""
         lo, hi, band, horizontal = pad_band(self.rect, face, pad_box)
         if band[1] - band[0] <= 0.0:
             return True          # already on that edge: nothing to cross
-        run = free_run(lo, hi, band, horizontal, self.obstacles,
+        run = free_run(lo, hi, band, horizontal,
+                       self._candidates(lo, hi, horizontal),
                        grow=self.clearance)
         # The epsilon is the caller's half of the trap `FREE_RUN_EPS`
         # documents: a nominally 0.4mm pad's span subtracts to
@@ -1515,7 +1581,9 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                       interior_pads_box=interior_box,
                       corridor_source=asg.corridor_source,
                       corridor_clearance_mm=asg.corridor_clearance_mm,
-                      corridor_track_mm=asg.corridor_track_mm)
+                      corridor_track_mm=asg.corridor_track_mm,
+                      face_pitch_mm=asg.pitch_mm,
+                      face_pitch_source=asg.pitch_source)
 
 
 def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,
