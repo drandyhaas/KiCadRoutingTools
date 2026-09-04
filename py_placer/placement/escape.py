@@ -241,6 +241,16 @@ class PartEscape:
     interior_pads: int        # need a via, not a lane -- a FANOUT signal
     interior_nets: Tuple[int, ...]
     plane_layers_found: Tuple[str, ...] = ()   # #700, disclosure only
+    #: #862. `interior_pads` under the BOX rule alone -- the fanout fact
+    #: without the parameter fact, since `interior_pads` now moves with the
+    #: clearance and the track width and this cannot.
+    interior_pads_box: int = 0
+    #: The basis the enclosure corridor ran at, published for the same reason
+    #: the escape band's is: two instruments that price it differently must
+    #: be able to be told apart from two boards that differ.
+    corridor_source: str = 'not_measured'
+    corridor_clearance_mm: float = 0.0
+    corridor_track_mm: float = 0.0
 
     @property
     def worst(self) -> Optional[FaceLedger]:
@@ -266,6 +276,19 @@ class PartEscape:
                 'faces': [f.to_dict() for f in self.faces],
                 'interior_pads': self.interior_pads,
                 'interior_nets': len(self.interior_nets),
+                # #862, and named identically to `face_lane_ledger`'s rows so
+                # the two instruments' JSON can be diffed key for key.
+                'interior_pads_box': self.interior_pads_box,
+                'face_corridor_escapes': (self.interior_pads_box
+                                          - self.interior_pads),
+                'face_corridor_source': self.corridor_source,
+                'face_corridor_clearance_mm': round(
+                    self.corridor_clearance_mm, 4),
+                'face_corridor_track_mm': round(self.corridor_track_mm, 4),
+                # #850 published these on the routability row only, so until
+                # now the two instruments could not be compared on the basis
+                # they are asserted EQUAL at.
+                'face_pitch_mm': round(self.pitch_mm, 4),
                 # Board-wide, so reported once rather than on all four faces.
                 'via_pitch_mm': round(f0.via_pitch_mm, 4) if f0 else 0.0,
                 'signal_layers': f0.signal_layers if f0 else 1,
@@ -1459,10 +1482,16 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
                        clearance=clr, track_width=tw)
     demand: Dict[str, List[int]] = {f: [] for f in FACES}
     interior: List[int] = []
-    for pad, face in asg.faces:
+    interior_box = 0
+    for i, (pad, face) in enumerate(asg.faces):
         nid = getattr(pad, 'net_id', 0)
         if not nid or nid in ignored:
             continue
+        # #862: the box-rule count over the SAME population this one uses --
+        # `ignore_net_ids` dropped, which is why it cannot be taken inside
+        # `assign_faces` where neither caller's filter is known.
+        if asg.box_faces and asg.box_faces[i] is None:
+            interior_box += 1
         if face is None:
             interior.append(nid)
         else:
@@ -1492,7 +1521,11 @@ def part_escape(pcb_data, ref, *, pitch_mm: Optional[float] = None,
     return PartEscape(ref=ref, pitch_mm=pitch, faces=tuple(faces),
                       interior_pads=len(interior),
                       interior_nets=tuple(sorted(set(interior))),
-                      plane_layers_found=tuple(plane_layers_found or ()))
+                      plane_layers_found=tuple(plane_layers_found or ()),
+                      interior_pads_box=interior_box,
+                      corridor_source=asg.corridor_source,
+                      corridor_clearance_mm=asg.corridor_clearance_mm,
+                      corridor_track_mm=asg.corridor_track_mm)
 
 
 def escape_ledger(pcb_data, *, refs: Optional[Sequence[str]] = None,

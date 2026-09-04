@@ -36,7 +36,7 @@ RUN_ALL_TIMEOUT = 300
 
 FAILURES = []
 PASSED = []
-SECTIONS = 7
+SECTIONS = 8
 
 
 def check(name, cond, detail=''):
@@ -525,13 +525,91 @@ def the_band_test_is_open_not_closed():
               for f in E.FACES))
 
 
+
+#: The six keys #862 publishes, on BOTH instruments, spelled identically so
+#: the two JSON outputs can be diffed key for key.
+PUBLISHED = ('interior_pads_box', 'face_corridor_escapes',
+             'face_corridor_source', 'face_corridor_clearance_mm',
+             'face_corridor_track_mm', 'face_pitch_mm')
+
+
+# ---------------------------------------------------------------- section 8
+def the_basis_is_published_by_both():
+    """A basis nobody can read is the defect #847 was about, one level down.
+
+    `interior_pads` changed KIND in this change, not just value: it was a
+    function of the part's geometry and is now a function of the clearance and
+    the track width too. A reader diffing two runs must be able to tell a
+    placement that moved from a basis that moved, and to recover the
+    basis-free number when they want the fanout fact alone.
+    """
+    from kicad_parser import parse_kicad_pcb
+    from placement import routability as R
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, 'kicad_files', 'ulx3s.kicad_pcb')
+    pcb = parse_kicad_pcb(path)
+    ctx = R.board_lane_context(pcb, 0.2, pcb_file=path)
+    rows = R.face_lane_ledger(pcb, 'U1', clearance=0.2, track_width=0.2,
+                              grid_step=0.05, pcb_file=path, context=ctx)
+    led = E.escape_ledger(pcb, refs=['U1'], pcb_file=path,
+                          track_width=0.2, clearance=0.2)
+    esc = led[0].to_dict()
+
+    for k in PUBLISHED:
+        check('the routability row publishes {}'.format(k), k in rows[0])
+        check('the escape row publishes {}'.format(k), k in esc)
+        check('...and the two agree on {}'.format(k),
+              rows[0].get(k) == esc.get(k),
+              '{!r} != {!r}'.format(rows[0].get(k), esc.get(k)))
+        check('...and it is never None on {}'.format(k),
+              rows[0].get(k) is not None and esc.get(k) is not None)
+
+    # The row repeats the part-level facts on all four faces, the way
+    # `escape_band_mm` does, so a machine holding ONE row has the basis.
+    check('every face row carries the basis',
+          all(r['face_corridor_track_mm'] == 0.2
+              and r['face_corridor_clearance_mm'] == 0.2 for r in rows))
+
+    # THE CONSERVATION LAW. A pad that leaves the interior bucket has to be
+    # accounted for somewhere; a count that fell with nothing naming where it
+    # went is how a ledger stops looking and reads as a fix.
+    check('interior + freed == the box-rule count (routability)',
+          (rows[0]['interior_pads'] + rows[0]['face_corridor_escapes']
+           == rows[0]['interior_pads_box']),
+          '{} + {} != {}'.format(rows[0]['interior_pads'],
+                                 rows[0]['face_corridor_escapes'],
+                                 rows[0]['interior_pads_box']))
+    check('interior + freed == the box-rule count (escape)',
+          esc['interior_pads'] + esc['face_corridor_escapes']
+          == esc['interior_pads_box'])
+    check('and ulx3s U1 is the 379 -> 308 witness',
+          (esc['interior_pads_box'], esc['interior_pads'],
+           esc['face_corridor_escapes']) == (379, 308, 71),
+          repr((esc['interior_pads_box'], esc['interior_pads'],
+                esc['face_corridor_escapes'])))
+
+    # `interior_pads_box` is the BASIS-FREE number, and that is checkable
+    # rather than asserted in prose: `CopperGeometry.copper` carries neither
+    # clearance nor track width, so the box count cannot move with them.
+    for clr, trk in ((0.09, 0.10), (0.25, 0.30)):
+        r2 = R.face_lane_ledger(pcb, 'U1', clearance=clr, track_width=trk,
+                                grid_step=0.05, pcb_file=path,
+                                context=R.board_lane_context(
+                                    pcb, clr, pcb_file=path))
+        check('interior_pads_box does not move with the basis {}/{}'
+              .format(clr, trk),
+              r2[0]['interior_pads_box'] == 379,
+              str(r2[0]['interior_pads_box']))
+
+
 def main():
     for fn in (the_free_run_kernel, the_pad_band_geometry,
                the_basis_is_a_pair_or_it_refuses,
                the_degradation_paths_are_declared,
                the_corridor_is_only_asked_about_box_interior_pads,
                the_two_sided_gate,
-               the_band_test_is_open_not_closed):
+               the_band_test_is_open_not_closed,
+               the_basis_is_published_by_both):
         fn()
     for f in FAILURES:
         print('FAIL: {}'.format(f))
