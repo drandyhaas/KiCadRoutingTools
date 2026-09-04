@@ -730,6 +730,15 @@ Options:
   --board-edge-clearance  Min clearance from stub/via copper to the Edge.Cuts
                       outline in mm (default 0 = use --clearance)
   --allow-via-in-pad  Underpad escape: let the escape via overlap its OWN pad
+                      (via-in-pad), so a via boxed in on the outward side can
+                      stagger inward instead of being dropped. It ALSO enables
+                      an inward search along the escape axis that steps by the
+                      inter-net stagger -- on a fine-pitch part its later rungs
+                      land past the pad edge on the chip side -- and four extra
+                      stagger configurations (#846). A via that overlaps its pad
+                      is clamped to the pad edge (#202) and needs IPC-4761 Type
+                      VII; JSON_SUMMARY reports via_in_pad / via_in_pad_clamped /
+                      via_in_pad_offcentre / max_stub_mm.
   --fab-tier          JLC fab capability floor: standard (default) or advanced
   --fab-overrides FILE  Fab-floor override file overlaying the selected --fab-tier
 ```

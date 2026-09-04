@@ -1261,8 +1261,12 @@ class QFNOptionsPanel(wx.ScrolledWindow):
             "Under-pad escape only: let the escape via overlap its OWN pad "
             "(via-in-pad), so a leg boxed in on the outward side (a neighbour "
             "pad/track a pitch away) staggers inward toward the chip instead of "
-            "being dropped (#161). The via still must clear other-net pads, vias "
-            "and tracks.")
+            "being dropped (#161). It also enables an INWARD search along the "
+            "escape axis that steps by the inter-net stagger, so on a fine-pitch "
+            "part its later rungs land past the pad edge on the chip side, and "
+            "four extra stagger configurations (#846). A via that does overlap "
+            "its pad is clamped to the pad edge (#202) and needs IPC-4761 Type "
+            "VII. The via still must clear other-net pads, vias and tracks.")
         main_sizer.Add(self.allow_via_in_pad, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         self.SetSizer(main_sizer)

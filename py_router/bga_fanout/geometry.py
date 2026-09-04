@@ -306,6 +306,44 @@ def calculate_jog_end(exit_pos: Tuple[float, float],
 
 # --- #620: the run's own output, testable against itself ---------------------
 
+def via_anchors_route(via_x: float, via_y: float, via_size: float,
+                      pad_pos: Tuple[float, float],
+                      track_width: float = 0.0) -> bool:
+    """Does a via at (via_x, via_y) physically REACH this route's track start?
+
+    #854. The question a via-merge must answer is not "is that via somewhere
+    inside my pad's rectangle" -- it is "does that via touch the copper this
+    route starts from". Every emission path in ``bga_fanout/tracks.py`` starts
+    the route's first segment at ``route.pad_pos``, and that track lives on an
+    INNER or bottom layer while the ball pad lives on the top one, so the pad
+    reaches its own track only THROUGH the via. A via that does not overlap the
+    track start therefore connects nothing, however deep inside the pad's
+    bounding box its centre happens to sit.
+
+    Keying on the pad box instead let a LARGE pad swallow a SMALLER overlapping
+    same-net pad's committed via: the large pad's route then shipped an
+    inner-layer track starting where no via reaches, and still counted as
+    escaped -- the very defect ``would_overlap_existing_via``'s #620 half was
+    fixed to prevent. Measured on ``kicad_files/kit-dev-coldfire-xilinx_5213``,
+    footprint VR201 (TO-263-5, net GND): the 10.8 x 9.4mm tab's box is
+    (5.41, 4.71), a 5.25 x 4.55 paste sub-pad's via sits at dx 2.775 / dy 2.425
+    -- inside the box on both axes -- and the adopted via is **3.6853mm** from
+    the tab route's track start, against a 0.225mm ring.
+
+    ``track_width`` defaults to 0, i.e. the via's own copper only. That is the
+    conservative reading and the right one for a caller that does not know the
+    width; the fanout passes its real (fab-clamped) width.
+
+    This is the SECOND time this rule has been a containment test standing in
+    for a reach test -- see ``PendingVias.verdict``'s note on the scalar radius
+    an adversarial review caught in PR #852, and #695 before it ("credits a pad
+    by via centre but a track by via radius"). It is spelled out so it is not
+    the third.
+    """
+    return (math.hypot(via_x - pad_pos[0], via_y - pad_pos[1])
+            <= (via_size or 0.0) / 2.0 + (track_width or 0.0) / 2.0)
+
+
 class PendingVias:
     """The via-in-pads ONE ``manage_vias`` call has already committed.
 
@@ -426,23 +464,35 @@ class PendingVias:
             self._max_size = s
 
     def verdict(self, x, y, size, drill, net_id, bulges=False, tol=1e-6,
-                anchor_box=None):
+                track_width=0.0):
         """How a candidate at (x, y) relates to what this call already placed.
 
-        ``anchor_box`` is the candidate BALL's own pad half-extents,
-        ``(size_x / 2 + t, size_y / 2 + t)`` -- a RECTANGLE, because a pad is
-        one. Default: the 1 um site tolerance in both axes.
+        ``track_width`` is the width of the track this candidate's route will
+        emit; a committed via is a twin when it REACHES that route's track
+        start at ``via_radius + track_width / 2`` -- see ``via_anchors_route``.
+        Default 0 = the via's own copper only.
 
-        A SCALAR RADIUS HERE WAS A BUG, and an expensive one, so it is spelled
-        out. The first version took ``max(size_x, size_y) / 2 + 0.01`` and
-        compared it against a straight-line distance, which on an OBLONG pad
-        reaches far outside the copper along the short axis: two same-net
-        0.30 x 1.50 fingers 0.50mm apart -- an ordinary fine-pitch QFP pair
-        whose pads are 0.20mm apart and NOT touching -- were merged into one
-        via, and the second route shipped with no via at all while still
-        counting as escaped. That is precisely the defect the sibling commit
-        fixes, re-created by the merge. An adversarial review found it, with
-        17 footprints on 11 in-repo boards matching the geometry.
+        THE PAD IS NOT THE TEST, and this took three attempts to get right, so
+        it is spelled out.
+
+        * A SCALAR RADIUS was the first bug: ``max(size_x, size_y) / 2 + 0.01``
+          against a straight-line distance reaches far outside the copper along
+          an OBLONG pad's short axis, and two same-net 0.30 x 1.50 fingers
+          0.50mm apart -- an ordinary fine-pitch QFP pair whose pads are 0.20mm
+          apart and NOT touching -- were merged into one via, the second route
+          shipping with no via at all while still counting as escaped. An
+          adversarial review of PR #852 found it, with 17 footprints on 11
+          in-repo boards matching the geometry.
+        * A PER-AXIS RECTANGLE (``anchor_box``) fixed that and was still the
+          wrong question (#854): it closes the equal-size case, because two
+          same-net pads of the same size can only be twins if they overlap by
+          more than half, but a LARGE pad's box still reaches a small pad whose
+          overlap is slight -- and swallows its via. Measured on VR201 of
+          ``kit-dev-coldfire-xilinx_5213``: a via **3.6853mm** from the route it
+          was supposed to anchor, against a 0.225mm ring.
+        * REACH is the question. A pad connects to its own inner-layer track
+          only through the via, so a via that does not touch the track start
+          connects nothing, wherever its centre sits.
 
         Returns ``(verdict, detail)``:
 
@@ -460,13 +510,14 @@ class PendingVias:
             today's, which appends a second identical dict that the writer
             emits as a second ``(via ...)`` at the same point.
 
-            KEYED ON THE PAD, NOT ON AN EXACT MATCH. An exact-match rule has a
+            KEYED ON REACH, NOT ON AN EXACT MATCH. An exact-match rule has a
             1 um cliff: an adversarial review found same-net sites 0.0010mm
             apart merging into one via while 0.0011mm apart DROPPED an escape
             outright, because no fab rung can space two holes 1.1 um apart. A
-            via inside the ball's own pad is a via that anchors it, which is
-            the question actually being asked -- and "inside the pad" is a
-            rectangle test, per ``anchor_box`` above.
+            via that ANCHORS this ball is a via it needs no second hole for,
+            which is the question actually being asked -- and every distance-0
+            case (an exposed pad modelled as an F.Cu + B.Cu pair) is inside any
+            reach, so the cliff stays closed.
         ``('conflict', (reason, x, y))``
             that via is closer than a floor allows. A DIFFERENT net at the same
             site lands here, not in ``'twin'``: two nets sharing one hole is a
@@ -474,22 +525,20 @@ class PendingVias:
         """
         d = drill or 0.0
         s = size or 0.0
-        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else
-                    (max(anchor_box[0], self._tol),
-                     max(anchor_box[1], self._tol)))
+        tw = track_width or 0.0
         # Broad phase: nothing outside this x-window can be within either floor
-        # of the candidate, whatever its y. `ahx` is in it because a twin can
-        # sit further out than either floor when the pad is large.
+        # of the candidate, whatever its y. The third term is the ANCHOR reach
+        # -- the widest committed via plus half a track -- because a twin is
+        # decided by whether that via touches this route's track start.
         window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,
                      s / 2.0 + self._max_size / 2.0 + self._clearance,
-                     ahx)
+                     self._max_size / 2.0 + tw / 2.0)
         lo = bisect.bisect_left(self._xs, x - window)
         hi = bisect.bisect_right(self._xs, x + window)
         best = None
         for (ox, oy, os_, od, onet, obulges) in self._rows[lo:hi]:
             dist = math.hypot(ox - x, oy - y)
-            if (onet == net_id
-                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):
+            if onet == net_id and via_anchors_route(ox, oy, os_, (x, y), tw):
                 return 'twin', (ox, oy, os_, od)
             if dist <= self._tol:
                 return 'conflict', ("two nets would share one hole", ox, oy)

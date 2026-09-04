@@ -254,6 +254,137 @@ def _dist_point_to_polygon(x: float, y: float, polygon: List[Tuple[float, float]
     return best
 
 
+def entombed_bare_pads(pcb_data, net_ids, *, reach: float = 0.05,
+                       min_net_pads: int = 2, min_package_pads: int = 8,
+                       inset: float = 0.65):
+    """Pads a package's own pad field encloses that own NO escape copper (#652).
+
+    This is the geometry behind "the fanout dropped this ball": a pad deep
+    inside a fine-pitch package, with nothing of its net attached to it, cannot
+    be reached by any later routing step -- and the step that reports the
+    failure says `no rippable blockers found`, which is true and useless.
+
+    Re-derived from the board on purpose. A fanout's ``unescaped_nets`` is
+    printed and then lost -- nothing persists it, and #472 already settled that
+    this machinery is board-state-driven so no sidecar file is load-bearing --
+    so a later ``route.py`` process can only see the geometry.
+
+    NOT keyed on ``auto_detect_bga_exclusion_zones``. That helper walks
+    ``find_components_by_type(pcb_data, 'BGA')`` only, and measured on this
+    repo's own boards it returns 3 zones for routed_output (IC1, U3, U1) and
+    none for its QFN-76 U2, and ZERO zones for tigard -- so a zone-keyed
+    diagnosis would stay silent on exactly the fine-pitch parts that drop
+    balls. Entombment is computed from the footprint's own pad bounding box
+    instead, which works for any package.
+
+    Returns ``[(pad, footprint_ref), ...]``.
+
+    NOTE ON WHAT THIS POPULATION LOOKS LIKE, measured before trusting it: on a
+    pre-plane board it is dominated by power and ground. orangecrab_ext_pll
+    gives 120 hits of which 118 are GND / P1.1V / P1.35V / P3.3V; ulx3s gives
+    305, 141 of them GND / +1V1 / +3V3. Those balls are not wrong -- they
+    really do own no copper -- but their FIX is a plane drop, not a re-run of
+    the fanout, and `pcb_data.zones` is empty at that point in the chain so the
+    pour exemption above cannot tell them apart. Callers that turn this into
+    advice must say so: `routing_diagnostics.fanout_dropped_ball_hint` names
+    the plane route for a net with `plane_like_pads` or more pads.
+
+    Arguments that are deliberately explicit rather than shared constants:
+
+    * ``reach`` -- how close copper must be to count as attached. This repo
+      asks that question at two different tolerances for two different
+      questions: 0.05mm for "is there copper AT this pad" (the #472 zone
+      exemption, route.py's direct-first ordering) and
+      ``max(size)/2 + 0.35`` for "is there copper NEAR it" (net_rescue's #666
+      rung). Collapsing them into one constant would be the bug, so the caller
+      states which it means.
+    * ``min_net_pads`` -- a single-pad net's ball is trivially bare, and
+      counting it disabled U6/U7's zones spuriously on ottercast (#472).
+    * ``inset`` -- how far past the pitch band a pad must sit to count as
+      entombed. Outer-ring bare balls are reachable through the band.
+
+    A pad served by a POUR is not bare: ``pcb_data.zones`` is consulted, which
+    the #472 closure this generalises never did -- it built its attachment set
+    from segments and vias only, so an interior ball connected solely by a
+    plane read as BARE, and the entombment filter selects exactly the region
+    where plane-served balls live.
+    """
+    import math
+    from check_connected import point_in_polygon
+
+    want = set()
+    for n in (net_ids or ()):
+        want.add(n[1] if isinstance(n, (tuple, list)) else n)
+    want = {n for n in want
+            if n and len(pcb_data.pads_by_net.get(n, [])) >= min_net_pads}
+    if not want:
+        return []
+
+    attached = {}
+    for seg in pcb_data.segments:
+        if seg.net_id in want:
+            attached.setdefault(seg.net_id, []).append((seg.start_x,
+                                                        seg.start_y))
+            attached[seg.net_id].append((seg.end_x, seg.end_y))
+    for via in pcb_data.vias:
+        if via.net_id in want:
+            attached.setdefault(via.net_id, []).append((via.x, via.y))
+    zones_by_net = {}
+    for z in (getattr(pcb_data, 'zones', None) or ()):
+        if z.net_id in want and z.polygon:
+            zones_by_net.setdefault(z.net_id, []).append(z.polygon)
+
+    out = []
+    for fp in pcb_data.footprints.values():
+        pads = [p for p in fp.pads if p.net_id is not None]
+        if len(pads) < min_package_pads:
+            continue
+        # Nothing below can report a pad of a net this footprint does not
+        # carry, and the pitch sweep is the expensive part -- so ask first.
+        # Without this the cost is O(failing nets x whole board): measured
+        # 3-5 ms per call on corpus boards, and it scales with FOOTPRINT
+        # count, not with the net being asked about.
+        if not any(p.net_id in want for p in pads):
+            continue
+        xs = [p.global_x for p in pads]
+        ys = [p.global_y for p in pads]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        # The band an outer ring occupies, as a pitch: the smallest non-zero
+        # centre-to-centre between pads of this footprint.
+        #
+        # Swept over ALL pads, in x order, with early exit -- not over the
+        # first 60 in FILE order, which an earlier draft did. That was
+        # measurably wrong: on glasgow_revC U1 (87 pads) the truncated prefix
+        # gives 0.5000 where the true minimum is 0.4031, a 24% overestimate
+        # that widens `band` and silences the hint on pads it should reach.
+        # And it was order-dependent, which a geometric predicate must not be.
+        pitch = 0.0
+        order = sorted(pads, key=lambda p: (p.global_x, p.global_y))
+        for i, a in enumerate(order):
+            for b in order[i + 1:]:
+                dx = b.global_x - a.global_x
+                if pitch and dx >= pitch:
+                    break          # x-sorted: no later pad can be closer
+                d = math.hypot(dx, a.global_y - b.global_y)
+                if d > 1e-6 and (pitch == 0.0 or d < pitch):
+                    pitch = d
+        band = pitch * 1.1 + inset
+        for pad in pads:
+            if pad.net_id not in want or (pad.drill or 0) > 0:
+                continue      # a barrel already reaches every layer
+            if min(pad.global_x - x0, x1 - pad.global_x,
+                   pad.global_y - y0, y1 - pad.global_y) <= band:
+                continue      # outer ring: reachable through the band
+            if any(abs(x - pad.global_x) < reach and abs(y - pad.global_y) < reach
+                   for (x, y) in attached.get(pad.net_id, ())):
+                continue      # this pass or an earlier one attached copper
+            if any(point_in_polygon(pad.global_x, pad.global_y, poly)
+                   for poly in zones_by_net.get(pad.net_id, ())):
+                continue      # served by a pour, not bare
+            out.append((pad, fp.reference))
+    return out
+
+
 def warn_targets_outside_board(pcb_data: PCBData,
                                net_ids: List[Tuple[str, int]],
                                edge_margin: float = 0.0,

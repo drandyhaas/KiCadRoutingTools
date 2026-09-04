@@ -1131,6 +1131,29 @@ def route_diff_pairs(
                         continue
                 if not polarity_skip:
                     print(f"  {RED}ROUTE FAILED - no rippable blockers found{RESET}")
+                    # #652: the FOURTH site that prints this line, and the one
+                    # a first pass over the code misses. It differs from the
+                    # other three in that the pair is not abandoned here --
+                    # #289 defers it to the single-ended follow-up, where the
+                    # hint would fire again -- but the misleading line is
+                    # printed HERE, and a reader acting on it retries the pair.
+                    try:
+                        from routing_diagnostics import (
+                            fanout_dropped_ball_hint, condense_hint as _ch652)
+                        from routing_state import (
+                            record_net_event as _rne652)
+                        for _nid, _nm in ((pair.p_net_id, pair.p_net_name),
+                                          (pair.n_net_id, pair.n_net_name)):
+                            _h652, _v652 = fanout_dropped_ball_hint(
+                                pcb_data, config, _nid, _nm,
+                                return_verdict=True)
+                            if _h652:
+                                _c652 = _ch652(_h652)
+                                if _c652:
+                                    print(f"  {_c652}")
+                                _rne652(state, _nid, "fanout_dropped", _v652)
+                    except Exception:
+                        pass
                 # #289: a 2-terminal pair that exhausted every coupled path
                 # (rip-up, fallback layer swap, hybrid escape) gets the same
                 # single-ended defer the electrically-short gate uses, instead

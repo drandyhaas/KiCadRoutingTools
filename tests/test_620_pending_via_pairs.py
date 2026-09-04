@@ -80,14 +80,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), 'py_router'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from kicad_parser import Pad, BoardInfo                          # noqa: E402
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+from kicad_parser import Pad, BoardInfo, parse_kicad_pcb        # noqa: E402
 from synth import make_pcb                                       # noqa: E402
 import fab_tiers                                                 # noqa: E402
 from fab_tiers import fab_floor_ladder, fab_floor_min            # noqa: E402
-from bga_fanout import manage_vias                               # noqa: E402
+from bga_fanout import manage_vias, ball_has_copper             # noqa: E402
 from bga_fanout.types import FanoutRoute                         # noqa: E402
 from bga_fanout.geometry import (PendingVias, thin_drill_to_clear,  # noqa: E402
-                                 clamp_via_to_pad)
+                                 clamp_via_to_pad, via_anchors_route)
 
 CU = ('F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu')
 H2H = fab_floor_min(len(CU))['hole_to_hole']          # 0.20, standard tier
@@ -269,35 +271,279 @@ class TestTwinsShareOneHole(_TmpCase):
         self.assertAlmostEqual(add[0]['y'], 10.0, places=6)
         self.assertEqual(add[0]['net_id'], 7)
 
-    def test_a_twin_FURTHER_OUT_than_either_floor_is_still_a_twin(self):
-        """The anchor term in the broad-phase window, which nothing else makes
-        binding.
+    def test_a_via_the_route_cannot_REACH_is_not_its_twin(self):
+        """#854. THIS ARM WAS REVERSED, deliberately, with a measurement.
 
-        `verdict`'s window is `max(drill term, ring term, anchor half-width)`.
-        On a BGA-sized pad the drill term (0.40mm at the standard floor)
-        exceeds the anchor half-width, so dropping it from the max changes
-        nothing and the mutation survives -- the battery caught exactly that.
-        A BIG pad inverts it: a 2.0mm pad has a 1.01mm half-width against a
-        0.40mm drill window, so a twin 0.9mm away is inside the pad and
-        OUTSIDE the window. Without the anchor term it is never even scanned,
-        so the second route gets its own via 0.9mm from the first -- two holes
-        in one pad.
+        It used to read `test_a_twin_FURTHER_OUT_than_either_floor_is_still_a
+        _twin` and assert that two routes 0.9mm apart inside one 2.0mm pad get
+        ONE via -- keyed on the candidate's pad rectangle. That is the defect
+        #854 reports: the surviving via has a 0.225mm radius, so it is 0.9mm
+        from the second route's track start and touches nothing. The pad does
+        not carry the connection -- the ball pad is on the top layer and the
+        route's track is on an inner one, so the pad reaches its own track only
+        THROUGH the via. One via there ships an inner-layer track connected to
+        nothing, while the route still counts as escaped.
 
-        MUTATION: drop `ahx` from the `window = max(...)` -- this arm dies."""
+        Measured on a tracked board before the change (kit-dev-coldfire-
+        xilinx_5213, VR201, a TO-263-5 whose pad 3 is a 10.8 x 9.4mm SMD tab
+        plus four 5.25 x 4.55mm paste sub-pads, all net GND): routing the
+        sub-pad first made the TAB adopt its via, 3.6853mm from the tab route's
+        track start against a 0.35mm reach, and the run printed
+        `#620: 1 coincident same-net site(s) share one via` for a pair 3.69mm
+        apart. Tab-first emitted two vias. After the change both orders emit
+        two and neither route is stranded.
+
+        Every case #620 needs still merges: those are at distance 0 (an exposed
+        pad modelled as an F.Cu + B.Cu pair -- interf_u BUS1 has 31 such sites
+        on one component), which is inside any reach.
+
+        MUTATION: widen the twin test back to a pad-box containment -- this
+        arm dies."""
         p = PendingVias(H2H, 0.1)
         p.add(10.0, 10.0, 0.45, 0.2, 7)
-        self.assertGreater(1.01, 0.2 / 2 + 0.2 / 2 + H2H,
-                           'the rig no longer makes the ANCHOR term the '
-                           'binding one, so it cannot detect its loss')
         self.assertEqual(p.verdict(10.9, 10.0, 0.45, 0.2, 7,
-                                   anchor_box=(1.01, 1.01))[0], 'twin',
-                         'a same-net via well inside this ball pad is no '
-                         'longer recognised as its anchor')
-        # ... and end to end, where it becomes a second hole in one pad.
+                                   track_width=0.1)[0], 'clear',
+                         'a via 0.9mm from this route track start, with a '
+                         '0.225mm ring, was called its anchor')
+        # ... and end to end, where the second route now gets the via it needs.
         add, blocked, _t = _two_balls(0.9, 2.0, same_net=True)
-        self.assertEqual((len(add), len(blocked)), (1, 0),
-                         'two routes 0.9mm apart inside one 2.0mm pad got '
-                         'two vias')
+        self.assertEqual((len(add), len(blocked)), (2, 0),
+                         'two routes 0.9mm apart in one 2.0mm pad shared a '
+                         'via that reaches neither')
+        for r in add:
+            self.assertTrue(
+                any(via_anchors_route(r['x'], r['y'], r['size'], pos, 0.1)
+                    for pos in ((10.0, 10.0), (10.9, 10.0))),
+                'an emitted via anchors no route')
+
+    def test_TIGHTENING_the_survivor_must_not_break_the_reach(self):
+        """The interaction #854 created, found by review before any board hit.
+
+        `verdict` decides 'twin' from the COMMITTED via's size, and the branch
+        then calls `tighten` to replace it with the tighter pad's clamp (#202,
+        so the shared via cannot bulge past the smaller pad). A smaller barrel
+        reaches less far -- so a merge can be justified by a via that, once
+        tightened, no longer touches the second route's track start. That is
+        the very stranding #854 is about, recreated by the fix for it. It could
+        not happen under the old pad-BOX rule, which does not depend on via
+        size at all, so the hazard is new with this change.
+
+        The numbers: a 0.60 via committed at (0, 0), a second route 0.30mm away
+        with a 0.30mm track. Reach is 0.30 + 0.15 = 0.45 >= 0.30, so it is a
+        twin. Tighten to that route's 0.25 clamp and reach becomes
+        0.125 + 0.15 = 0.275 < 0.30 -- it no longer reaches.
+
+        MUTATION: drop the post-tighten re-check in the twin branch."""
+        p = PendingVias(0.20, 0.25)
+        p.add(0.0, 0.0, 0.60, 0.30, 7)
+        self.assertEqual(
+            p.verdict(0.30, 0.0, 0.25, 0.15, 7, track_width=0.30)[0], 'twin',
+            'the rig no longer produces a twin here, so it cannot detect the '
+            'shrink breaking one')
+        self.assertFalse(
+            via_anchors_route(0.0, 0.0, min(0.60, 0.25), (0.30, 0.0), 0.30),
+            'the rig no longer SHRINKS out of reach, so it tests nothing')
+        big = _ball(0.0, 0.0, 7, 1.40, 'BIG')
+        small = _ball(0.30, 0.0, 7, 0.25, 'SML')
+        r_big = FanoutRoute(pad=big, pad_pos=(0.0, 0.0), stub_end=(0.0, 1.0),
+                            exit_pos=(0.0, 1.5), layer='B.Cu')
+        r_small = FanoutRoute(pad=small, pad_pos=(0.30, 0.0),
+                              stub_end=(0.30, -1.0), exit_pos=(0.30, -1.5),
+                              layer='B.Cu')
+        pcb = make_pcb(board_info=BoardInfo(layers={}, copper_layers=list(CU),
+                                            board_bounds=(-5.0, -5.0,
+                                                          5.0, 5.0)),
+                       vias=[], segments=[], pads_by_net={7: [big, small]},
+                       source_path='', zones=[])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            add, _rm, _blocked = manage_vias([r_big, r_small], pcb, 'F.Cu',
+                                             0.60, 0.30, 0.25,
+                                             track_width=0.30)
+        for r in (r_big, r_small):
+            self.assertTrue(
+                any(via_anchors_route(v['x'], v['y'], v['size'], r.pad_pos,
+                                      0.30) for v in add),
+                f'route at {r.pad_pos} has no via reaching its track start '
+                f'after the merge tightened the shared one: '
+                f'{[(v["x"], v["y"], v["size"]) for v in add]}')
+
+    def test_the_REACH_term_in_the_broad_phase_window(self):
+        """`verdict`'s window is `max(drill term, ring term, reach term)`, and
+        the reach term (widest committed via + half a track) is the one nothing
+        else makes binding.
+
+        A wide track inverts the usual order: with via 0.25 / clearance 0.05 /
+        h2h 0.2 the drill term is 0.35 and the ring term 0.30, while a 0.5mm
+        track puts reach at 0.375. A twin 0.36mm away is inside reach and
+        OUTSIDE the other two windows, so without the reach term it is never
+        scanned and the second route gets a second hole it does not need.
+
+        MUTATION: drop the reach term from `window = max(...)` -- this arm
+        dies."""
+        p = PendingVias(0.2, 0.05)
+        p.add(10.0, 10.0, 0.25, 0.15, 7)
+        drill_term = 0.15 / 2 + 0.15 / 2 + 0.2
+        ring_term = 0.25 / 2 + 0.25 / 2 + 0.05
+        reach_term = 0.25 / 2 + 0.5 / 2
+        self.assertGreater(reach_term, max(drill_term, ring_term),
+                           'the rig no longer makes the REACH term the '
+                           'binding one, so it cannot detect its loss')
+        self.assertEqual(p.verdict(10.36, 10.0, 0.25, 0.15, 7,
+                                   track_width=0.5)[0], 'twin',
+                         'a same-net via this route reaches was outside the '
+                         'broad-phase window, so it was never scanned')
+
+    def test_a_LARGE_pad_does_not_swallow_a_SMALLER_overlapping_one(self):
+        """#854's own case, and the third in this family.
+
+        A scalar radius merged DISTINCT oblong pads (fixed in PR #852). A
+        per-axis rectangle closed the equal-size case -- two same-net pads of
+        the same size can only be twins if they overlap by more than half --
+        and left this one: a BIG pad's box reaches a SMALL pad that only just
+        overlaps it, so the big pad adopts the small one's via and ships an
+        inner-layer track starting where no via reaches.
+
+        The maintainer's probe, reproduced: a 1.0 x 1.0mm pad at (10.0, 10.0)
+        and a 0.25 x 0.25mm pad at (10.4, 10.0), same net, both routed on B.Cu,
+        via 0.45 / drill 0.2 / clearance 0.1 on an empty board. Small-first
+        used to emit ONE via and strand the big route; big-first emitted two.
+        Order-dependence was the tell.
+
+        MUTATION: key the twin test on the candidate's pad box again -- this
+        arm dies."""
+        for label, first_big in (('small-first', False), ('big-first', True)):
+            big = _ball(10.0, 10.0, 7, 1.0, 'BIG')
+            small = _ball(10.4, 10.0, 7, 0.25, 'SML')
+            r_big = FanoutRoute(pad=big, pad_pos=(10.0, 10.0),
+                                stub_end=(10.0, 10.9), exit_pos=(10.0, 11.4),
+                                layer='B.Cu')
+            r_small = FanoutRoute(pad=small, pad_pos=(10.4, 10.0),
+                                  stub_end=(10.4, 9.1), exit_pos=(10.4, 8.6),
+                                  layer='B.Cu')
+            order = [r_big, r_small] if first_big else [r_small, r_big]
+            pcb = make_pcb(
+                board_info=BoardInfo(layers={}, copper_layers=list(CU),
+                                     board_bounds=(0.0, 0.0, 20.0, 20.0)),
+                vias=[], segments=[], pads_by_net={7: [big, small]},
+                source_path='', zones=[])
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                add, _rm, blocked = manage_vias(order, pcb, 'F.Cu', 0.45, 0.2,
+                                                0.1, track_width=0.1)
+            for r in order:
+                self.assertTrue(
+                    any(via_anchors_route(v['x'], v['y'], v['size'],
+                                          r.pad_pos, 0.1) for v in add),
+                    f'{label}: route at {r.pad_pos} ships an inner-layer '
+                    f'track with no via reaching its start, and still counts '
+                    f'as escaped -- vias at '
+                    f'{[(v["x"], v["y"], v["size"]) for v in add]}')
+            self.assertEqual(len(blocked), 0, f'{label}: a route was dropped')
+
+    def test_a_REAL_board_reaches_the_swallow(self):
+        """The issue says no board in kicad_files/ reaches this. It is wrong,
+        and the counter-example is worth keeping: a bound that drops its own
+        counterexample proves nothing.
+
+        kit-dev-coldfire-xilinx_5213 VR201 is a TO-263-5 whose pad 3 is a
+        10.8 x 9.4mm SMD tab PLUS four 5.25 x 4.55mm SMD paste sub-pads, all
+        net GND -- ordinary KiCad geometry, not a constructed case. The tab's
+        old anchor box was (5.41, 4.71) and the nearest sub-pad sits at
+        dx 2.775 / dy 2.425, inside it on both axes, so sub-pad-first made the
+        tab adopt a via 3.6853mm from its own track start.
+
+        Caveat kept honestly: VR201 has exactly 6 GND pads, so an UNFILTERED
+        run excludes it at `fanout_candidate_nets`' plane_min_pads (default 6);
+        a --nets filter admits it. The geometry is real either way, which is
+        what this arm tests.
+
+        MUTATION: key the twin test on the candidate's pad box again."""
+        board = os.path.join(ROOT, 'kicad_files',
+                             'kit-dev-coldfire-xilinx_5213.kicad_pcb')
+        if not os.path.exists(board):
+            self.skipTest('corpus board not present')
+        pcb = parse_kicad_pcb(board)
+        fp = pcb.footprints['VR201']
+        smd = [p for p in fp.pads
+               if not (p.drill or 0) and p.net_id
+               and any(l.endswith('.Cu') for l in (p.layers or []))]
+        tab = max(smd, key=lambda p: p.size_x * p.size_y)
+        sub = min((p for p in smd if p is not tab),
+                  key=lambda p: math.hypot(p.global_x - tab.global_x,
+                                           p.global_y - tab.global_y))
+        self.assertLessEqual(abs(sub.global_x - tab.global_x),
+                             tab.size_x / 2 + 0.01)
+        self.assertLessEqual(abs(sub.global_y - tab.global_y),
+                             tab.size_y / 2 + 0.01)
+        sep = math.hypot(sub.global_x - tab.global_x,
+                         sub.global_y - tab.global_y)
+        self.assertGreater(sep, 3.0,
+                           'the rig no longer has a FAR pair inside the box, '
+                           'so it cannot detect the swallow')
+        routes = []
+        for pad, dy in ((sub, 1.0), (tab, -1.0)):     # sub FIRST: the order
+            routes.append(FanoutRoute(                # that used to strand
+                pad=pad, pad_pos=(pad.global_x, pad.global_y),
+                stub_end=(pad.global_x, pad.global_y + dy),
+                exit_pos=(pad.global_x, pad.global_y + 2 * dy), layer='B.Cu'))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            add, _rm, blocked = manage_vias(routes, pcb, 'F.Cu', 0.45, 0.2,
+                                            0.1, track_width=0.25)
+        for r in routes:
+            self.assertTrue(
+                any(via_anchors_route(v['x'], v['y'], v['size'], r.pad_pos,
+                                      0.25) for v in add),
+                f'VR201 route at {r.pad_pos} is stranded: nearest via is '
+                f'{min(math.hypot(v["x"] - r.pad_pos[0], v["y"] - r.pad_pos[1]) for v in add):.4f}'
+                f'mm away, reach is {add[0]["size"] / 2 + 0.125:.4f}mm')
+
+    def test_the_DOWNSTREAM_ball_anchor_test_asks_reach_too(self):
+        """#854's second site, and the one that made the stranding silent.
+
+        `ball_has_copper` is what decides whether an unescaped extra ball gets
+        strapped to its net's fanout. Its VIA arm used to ask
+        `max(size_x, size_y) / 2 + 0.01` in BOTH axes -- the scalar-radius shape
+        PR #852's review had already removed from `PendingVias.verdict` -- and
+        the twin branch cites it by name as its justification: "the ball-anchor
+        test downstream looks for a via inside the pad, and this is that via".
+        So fixing `verdict` alone leaves a swallowed ball reading as ANCHORED
+        and never strapped: two graders agreeing in the wrong direction.
+
+        The numbers are the maintainer's own repro. A 1.0mm pad's old tolerance
+        is 0.51mm, so a via 0.4mm away -- with a 0.225mm ring, touching nothing
+        on the inner layer -- passed.
+
+        This arm exists because the mutation row for that revert SURVIVED while
+        the predicate was a closure: nothing could call it.
+
+        MUTATION: revert the via arm to the pad box -- this arm dies."""
+        pad = _ball(10.0, 10.0, 7, 1.0, 'BIG')
+        far = [{'net_id': 7, 'x': 10.4, 'y': 10.0, 'size': 0.45}]
+        self.assertFalse(
+            ball_has_copper(pad, far, [], 0.1),
+            'a via 0.4mm from this ball, ring 0.225mm, counts as its copper -- '
+            'the ball will never be strapped and ships unconnected')
+        near = [{'net_id': 7, 'x': 10.1, 'y': 10.0, 'size': 0.45}]
+        self.assertTrue(ball_has_copper(pad, near, [], 0.1),
+                        'a via that DOES reach the ball is not credited')
+        self.assertFalse(
+            ball_has_copper(pad, [dict(near[0], net_id=8)], [], 0.1),
+            'a FOREIGN-net via is credited as this ball\'s copper')
+        # The track arm keeps the pad-box tolerance on purpose: a track
+        # endpoint anywhere on the pad copper does connect it.
+        on_pad = [{'net_id': 7, 'layer': 'F.Cu', 'start': (10.4, 10.0),
+                   'end': (12.0, 10.0)}]
+        self.assertTrue(
+            ball_has_copper(pad, [], on_pad, 0.1),
+            'a track ENDPOINT on this ball pad is no longer credited -- the '
+            'via fix was applied to the wrong arm')
+        off_layer = [{'net_id': 7, 'layer': 'In1.Cu', 'start': (10.4, 10.0),
+                      'end': (12.0, 10.0)}]
+        self.assertFalse(
+            ball_has_copper(pad, [], off_layer, 0.1),
+            'copper crossing the pad on ANOTHER layer counts as a connection')
 
     def test_an_OBLONG_pad_does_not_swallow_its_NEIGHBOUR(self):
         """The regression an adversarial review found in the twin rule's first
@@ -864,13 +1110,19 @@ class TestPendingViasItself(unittest.TestCase):
         self.assertNotIn('np.', code)
 
 
-def _brute(rows, cand, h2h, clearance, tol=1e-6, site_tol=0.001):
-    """The window-free spec `PendingVias.verdict` must match."""
+def _brute(rows, cand, h2h, clearance, tol=1e-6, site_tol=0.001,
+           track_width=0.0):
+    """The window-free spec `PendingVias.verdict` must match.
+
+    The twin arm CALLS `via_anchors_route` rather than restating it: what this
+    spec exists to test is the broad-phase WINDOW, and a hand-copied reach
+    formula here would just be a second place for the two to drift apart.
+    """
     x, y, s, d, net, bulges = cand
     best = None
     for (ox, oy, os_, od, onet, obulges) in rows:
         dist = math.hypot(ox - x, oy - y)
-        if onet == net and dist <= site_tol:
+        if onet == net and via_anchors_route(ox, oy, os_, (x, y), track_width):
             return 'twin'
         if dist <= site_tol:
             return 'conflict'

@@ -51,6 +51,69 @@ LAST_CANCEL_SKIPPED: List[str] = []
 # copper lands), `clearance` (the floor the stub was graded at).
 LAST_ERASED_SETS: Dict = {}
 
+# #846: what the last under-pad escape's COMMIT LOOP decided, published for the
+# same reason as LAST_ERASED_SETS -- a sweep or a test grades against what the
+# engine did rather than re-deriving it. `via_in_pad` is the FAB question (the
+# barrel overlaps same-net pad copper, `fab_notes.via_overlaps_pad`), which is
+# what the IPC-4761 note counts and what #202's clamp is for; it is NOT the
+# 0.001mm centre coincidence this loop used to decide it by. Keys: `via_in_pad`,
+# `via_in_pad_offcentre` (the subset #846 was about, which used to ship
+# unclamped), `clamped`, `max_stub_mm`, `allow_via_in_pad`.
+LAST_UNDERPAD_REPORT: Dict = {}
+
+
+def axis_offset_ladder(pad_width, via_size, step, mode='near'):
+    """Signed offsets along the escape axis, under KICAD_QFN_ONPAD_REACH (#846).
+
+    `mode` orders them: 'in' sweeps inward (toward the chip) first, 'near'
+    alternates nearest first.
+
+    NOT an "on-pad ladder", though it was called `_onpad` and documented as one.
+    Only k = 0 is guaranteed on the pad. The increment is the INTER-NET stagger
+    -- the centre-to-centre a via needs from a DIFFERENT net's via at this pitch
+    -- and on a fine-pitch part that exceeds the pad: on routed_output's QFN-76
+    (pitch 0.40, via 0.45, clearance 0.1) step is 0.4275 against a pad whose
+    escape-axis extent is 0.875, so rung 1 lands 0.0100 mm inside the pad EDGE,
+    rung 2 is 0.8550 mm out and rung 8 reaches +-3.4199 mm.
+
+    Those rungs ARE load-bearing, measured by
+    `tests/sweep_846_onpad_ladder.py` -- committed, so this stays checkable
+    rather than remembered: confining the ladder regressed escapes on 1 of 5
+    boards ('pad': routed_output U2, 15 -> 10) and 3 of 5 ('barrel'), improved
+    none, and left drc_grazes identical arm-to-arm. So the default is 'full' --
+    the ladder is right and the NAME was wrong.
+
+    It is also where the long stubs come from, which is what #846 reports: on
+    routed_output U2 the longest EMITTED stub is 3.0125 mm against a 0.875 mm
+    pad. (An earlier draft of this docstring said 2.9924 mm -- that is the
+    ladder's requested OFFSET at k = 7, before `snap()` puts the via on the
+    routing grid, not the copper that shipped.)
+
+    KICAD_QFN_ONPAD_REACH picks the arm -- 'full' (default), 'pad' (the via
+    CENTRE stays on the pad), 'barrel' (the whole barrel does). An unrecognised
+    value is 'full', so a typo cannot silently shorten the ladder.
+
+    Module-level, and the engine's only source for these offsets, because a
+    test that restates the arithmetic cannot detect the arithmetic changing:
+    the first draft of tests/test_846_onpad_ladder_reach.py rebuilt the ladder
+    from the same formula and every knob row of tests/mutate_846.py SURVIVED.
+
+    Whether a via that lands here is IN a pad is not decided here -- the commit
+    loop asks `via_overlaps_pad`, the fab question.
+    """
+    seq = [0.0]
+    if mode == 'in':
+        seq += [-k * step for k in range(1, 9)] + [k * step for k in range(1, 9)]
+    else:                                   # 'near'
+        for k in range(1, 9):
+            seq += [k * step, -k * step]
+    reach = {'pad': pad_width / 2.0,
+             'barrel': pad_width / 2.0 - via_size / 2.0,
+             }.get(env_knobs.QFN_ONPAD_REACH)
+    if reach is not None:
+        seq = [d for d in seq if abs(d) <= reach + 1e-9]
+    return seq
+
 
 def _snap_tip_on_grid(corner, tip, net_id, grid_step, grazes):
     """Move a shortened fan tip back ONTO the routing grid (#446).
@@ -306,7 +369,8 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     from geometry_utils import segment_to_segment_distance
     from bga_fanout.reroute import _seg_hits_pad
     from bga_fanout.geometry import clamp_via_to_pad
-    from list_nets import fab_floor_ladder, fab_floor_min, warn_fab_escalation
+    from fab_notes import via_overlaps_pad
+    from list_nets import fab_floor_min, warn_fab_escalation
     from routing_config import GridRouteConfig
 
     # Fab floors for the via-in-pad clamp (#202): when a chosen via sits ON its
@@ -317,7 +381,7 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # escalation_rungs: empty under --escalation off, raised to the board's
     # own minimums under board (#857).
     floors = escalation_rungs(_copper)
-    clamp_n = floor_n = escalated_n = 0
+    clamp_n = floor_n = escalated_n = offcentre_n = vip_n = 0
 
     # Only the nets we're escaping right now are exempt from the obstacle map --
     # the chip's OTHER nets (a routed neighbour pair, a crossing track) must
@@ -679,30 +743,22 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     def snap(v):
         return round(v / grid_step) * grid_step if grid_step > 0 else v
 
-    def _onpad(mode):
-        # On-pad (via-in-pad) offsets along the escape axis, ordered by `mode`:
-        # 'in' sweeps inward (toward the chip) first; 'near' alternates nearest
-        # first. 0 == via centred on the pad.
-        seq = [0.0]
-        if mode == 'in':
-            seq += [-k * step for k in range(1, 9)] + [k * step for k in range(1, 9)]
-        else:                                   # 'near'
-            for k in range(1, 9):
-                seq += [k * step, -k * step]
-        return seq
-
     def candidate_offsets(pad_width, mode):
-        # Off-pad outward offsets always clear the pad body. With via-in-pad we
-        # ALSO offer on-pad offsets and mix the two: 'out' prefers off-pad
-        # outward then falls back to on-pad; 'near'/'in' prefer on-pad then fall
-        # back to off-pad outward.
+        # `outward` starts past the pad body and always clears it. With
+        # --allow-via-in-pad we ALSO offer the axis ladder, which starts ON the
+        # pad centre and steps by the inter-net stagger -- so it reaches on-pad
+        # positions AND off-pad ones on the inward side (#846). 'out' prefers
+        # the outward ladder and falls back to the axis one; 'near'/'in' prefer
+        # the axis ladder and fall back to outward.
         base = pad_width / 2 + via_size / 2 + clearance
         outward = [base + k * step for k in range(0, 9)]
         if not allow_via_in_pad:
             return outward
+        axis = axis_offset_ladder(pad_width, via_size, step,
+                                  'near' if mode == 'out' else mode)
         if mode == 'out':
-            return outward + _onpad('near')
-        return _onpad(mode) + outward
+            return outward + axis
+        return axis + outward
 
     def place_pin(pi, mode, placed):
         ex, ey = pi.escape_direction
@@ -854,8 +910,28 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 tracks.append({'start': (px, py), 'end': (vx, vy),
                                'width': track_width, 'layer': footprint.layer,
                                'net_id': pi.pad.net_id})
-                v_size, v_drill = via_size, via_drill   # off-pad via: not in a pad
-            else:
+            # Whether a STUB is needed and whether the via is IN THE PAD are
+            # two questions, and this loop used to answer both with one 0.001mm
+            # centre-coincidence test (#846). They come apart in two ways:
+            #
+            #  * `snap()` quantises the via COORDINATE to the routing grid
+            #    (0.05 by default) while pad centres are off-lattice on real
+            #    parts -- 76 of 77 pads on routed_output's QFN-76, 6 of 6 on
+            #    qfn_diffpair_escape -- so the genuinely centred rung lands
+            #    0.0125mm out, 12.5x POSITION_TOLERANCE. The via-in-pad branch
+            #    was unreachable by construction on those boards.
+            #  * an offset rung can put the barrel well inside the pad without
+            #    the centre being on it at all.
+            #
+            # Either way the via shipped at NOMINAL size with no #202 clamp,
+            # free to bulge past the pad -- while `print_via_in_pad_note` below
+            # counted the very same via as needing IPC-4761 Type VII, because
+            # it asks the fab question: does the BARREL overlap the copper. The
+            # commit loop now calls that same predicate, on the pad this leg is
+            # escaping (`via_in_pad_sites` scans every same-net pad and would
+            # classify against a NEIGHBOUR's, then clamp to this one's).
+            if via_overlaps_pad(pi.pad, vx, vy, via_size):
+                vip_n += 1
                 # via-in-pad: clamp to the pad edge so it never bulges past it (#202)
                 v_size, v_drill, status, rung = clamp_via_to_pad(via_size, via_drill, pi.pad, floors)
                 if status == 'clamped':
@@ -864,6 +940,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                     floor_n += 1
                 if rung > 0:
                     escalated_n += 1
+                if math.hypot(vx - px, vy - py) > POSITION_TOLERANCE:
+                    offcentre_n += 1
+            else:
+                v_size, v_drill = via_size, via_drill   # off-pad via: not in a pad
             vias.append({'x': vx, 'y': vy, 'size': v_size, 'drill': v_drill,
                          'layers': ['F.Cu', 'B.Cu'], 'net_id': pi.pad.net_id})
 
@@ -875,6 +955,26 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
         print(f"    dropped (no clear via offset): {dropped}")
     if clamp_n:
         print(f"    clamped {clamp_n} via-in-pad(s) to fit their pad edge (#202)")
+    # Cleared HERE and repopulated in the same breath, but the engine
+    # entry point clears it too: a caller that runs two components in one
+    # process must not read the first one's numbers for the second.
+    LAST_UNDERPAD_REPORT.clear()
+    LAST_UNDERPAD_REPORT.update({
+        'via_in_pad': vip_n,
+        'via_in_pad_offcentre': offcentre_n,
+        'clamped': clamp_n,
+        'max_stub_mm': round(max((math.hypot(t['end'][0] - t['start'][0],
+                                             t['end'][1] - t['start'][1])
+                                  for t in tracks), default=0.0), 4),
+        'allow_via_in_pad': bool(allow_via_in_pad),
+    })
+    if offcentre_n:
+        # Disclosed separately, not folded into the line above: these are the
+        # vias #846 was about -- overlapping their pad while OFF its centre,
+        # which the old test could not see. A reader has to be able to watch
+        # this number move.
+        print(f"    {offcentre_n} of them sit OFF the pad centre (#846); "
+              f"before, those shipped unclamped")
     # The FAB requirement this escape may have just created (#489 §8). Emitted
     # from the shared engine path so the GUI fanout tab reports it too.
     from fab_notes import print_via_in_pad_note
@@ -1471,7 +1571,13 @@ def main():
                         help='Underpad escape: let the escape via overlap its OWN pad '
                              '(via-in-pad), so a via boxed in on the outward side can '
                              'stagger inward toward the chip instead of being dropped. '
-                             'The via still must clear other-net pads, vias and tracks.')
+                             'It also enables an INWARD search along the escape axis '
+                             'that steps by the inter-net stagger, so on a fine-pitch '
+                             'part its later rungs land past the pad edge on the chip '
+                             'side, and four extra stagger configurations (#846). A via '
+                             'that does overlap its pad is clamped to the pad edge '
+                             '(#202) and needs IPC-4761 Type VII. The via still must '
+                             'clear other-net pads, vias and tracks.')
     # #489 section 9: fanout is where a teardrop matters most (a 0.1mm trace
     # meeting a 0.25mm via pad), and this step had no way to ask for one.
     parser.add_argument('--add-teardrops', action='store_true',
@@ -1721,6 +1827,18 @@ def main():
         # and check_drc grade the board at this floor.
         'min_clearance_used': eff_clearance,
     }
+    # #846: what --allow-via-in-pad actually did. Before this, the only
+    # machine-readable numbers a fanout run published were escape counts, so
+    # neither the flag's effect nor a stub-length claim could be checked
+    # without re-parsing the board. `via_in_pad` is the fab question, so it
+    # agrees with the IPC-4761 note printed above it.
+    summary['allow_via_in_pad'] = bool(getattr(args, 'allow_via_in_pad', False))
+    if LAST_UNDERPAD_REPORT:
+        summary['via_in_pad'] = LAST_UNDERPAD_REPORT.get('via_in_pad', 0)
+        summary['via_in_pad_clamped'] = LAST_UNDERPAD_REPORT.get('clamped', 0)
+        summary['via_in_pad_offcentre'] = LAST_UNDERPAD_REPORT.get(
+            'via_in_pad_offcentre', 0)
+        summary['max_stub_mm'] = LAST_UNDERPAD_REPORT.get('max_stub_mm', 0.0)
     try:                       # #653: env knobs into the machine-readable
         import env_knobs as _ek653   # summary, so a harness can detect a
         summary['env_knobs'] = _ek653.active_env_knobs()   # dirty baseline

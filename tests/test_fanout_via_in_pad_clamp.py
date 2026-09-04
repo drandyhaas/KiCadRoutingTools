@@ -105,19 +105,24 @@ def _via_in_pad_violations(pcb, fp, vias, configured_via, fab):
     Returns (n_in_pad, n_clamped_below_cfg, violations)."""
     floor_dia = fab['via_diameter']   # deepest reachable fab via (fab_floor_min)
     pads = [p for p in fp.pads if getattr(p, 'drill', 0) == 0 and p.net_id]
-    # Only TRUE via-in-pad vias (centred on the pad) are governed by the clamp; an
-    # off-pad staggered via with a connecting stub legitimately extends past a tiny
-    # pad. Match by the code's OWN via-in-pad test (hypot <= POSITION_TOLERANCE),
-    # not merely landing in the pad bbox -- a 0.45 via parked a hair off a 0.25 pad
-    # is an off-pad escape, not a clamp candidate.
-    from bga_fanout.constants import POSITION_TOLERANCE
+    # A via-in-pad is a via whose BARREL OVERLAPS same-net pad copper -- the fab
+    # question, and the one `fab_notes` has always asked.
+    #
+    # This scoping used to be `hypot <= POSITION_TOLERANCE` (0.001mm), copied
+    # from the engine, with a comment claiming "an off-pad staggered via with a
+    # connecting stub legitimately extends past a tiny pad". That was the very
+    # defect #846 reports, restated as a test: a 0.45 via staggered 0.30mm along
+    # a 0.80 x 0.25 lead is INSIDE that pad's copper and bulges 0.1mm past each
+    # long edge. Worse, it made this gate's QFN half vacuous -- measured
+    # n_in_pad = 0 on its own fixture, with no guard to say so (the BGA half has
+    # had one since it was written).
     viols, n_in_pad, n_clamped = [], 0, 0
+    from fab_notes import via_overlaps_pad
     for v in vias:
         pad = None
         for p in pads:
-            if (p.net_id == v['net_id'] and
-                    abs(p.global_x - v['x']) <= POSITION_TOLERANCE and
-                    abs(p.global_y - v['y']) <= POSITION_TOLERANCE):
+            if (p.net_id == v['net_id']
+                    and via_overlaps_pad(p, v['x'], v['y'], v['size'])):
                 if pad is None or min(p.size_x, p.size_y) < min(pad.size_x, pad.size_y):
                     pad = p
         if pad is None:
@@ -185,7 +190,15 @@ def test_methods(verbose):
                 clearance=0.15, grid_step=0.05, **kw))
             n, _nc, viols = _via_in_pad_violations(pcb, fp, vias, kw['via_size'], fab2)
             fails += [f"{label}: {x}" for x in viols]
-            if verbose and not viols:
+            # The guard the BGA half has and this half did not (#846). The
+            # under-pad case MUST place via-in-pads on this board: its pads are
+            # 0.25 wide and every escape lands on one. `stub` may legitimately
+            # place none, so only the under-pad arm is required to exercise
+            # something.
+            if n == 0 and 'underpad' in label:
+                fails.append(f"{label}: placed no via-in-pad "
+                             f"(test exercises nothing)")
+            elif verbose and not viols:
                 print(f"  {label}: {n} via-in-pad, none bulge past max(pad,floor)  OK")
     return fails
 

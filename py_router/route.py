@@ -267,6 +267,7 @@ def _empty_results_data() -> dict:
         'vias_to_remove': [],
         'blockers': [],
         'boxed_in': [],
+        'fanout_dropped': [],
         'pad_pairs_open': [],
     }
 
@@ -3836,6 +3837,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # here because the final failed sets are authoritative.
     blockers_report = []
     boxed_in_report = []
+    fanout_dropped_report = []
     try:
         _final_failed_ids = list(dict.fromkeys(
             failed_single_ids + [m['net_id'] for m in failed_multipoint]))
@@ -3877,10 +3879,26 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _bx = _ev.get('details') or _bx
             if _bx:
                 boxed_in_report.append(dict(_bx, net=_name))
+            # #652: and WHY nothing was rippable, when the answer is that this
+            # net has a ball the fanout never escaped. A third key rather than
+            # a note inside `boxed_in`, for the same reason `boxed_in` is not
+            # inside `blockers`: it answers a different question (the BOARD is
+            # wrong, not the search), and it is the only one of the three whose
+            # fix is upstream of this step. The hint PROSE does not survive --
+            # this loop keeps `details` and drops `hint` -- so a structured
+            # verdict is the only durable form.
+            _fd = None
+            for _ev in (state.net_history.get(_nid) or []):
+                if _ev.get('event') == 'fanout_dropped':
+                    _fd = _ev.get('details') or _fd
+            if _fd:
+                fanout_dropped_report.append(dict(_fd, net=_name))
         if blockers_report:
             summary['blockers'] = blockers_report
         if boxed_in_report:
             summary['boxed_in'] = boxed_in_report
+        if fanout_dropped_report:
+            summary['fanout_dropped'] = fanout_dropped_report
     except Exception:
         blockers_report = []
     # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected
@@ -4026,6 +4044,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # printed summary, so a key that only reaches stdout does not
             # reach the plugin (CLAUDE.md's Class-1 CLI/GUI gap).
             'boxed_in': boxed_in_report,
+            'fanout_dropped': fanout_dropped_report,
             # #409 follow-up: same data as JSON_SUMMARY['pad_pairs_open']
             # (may be empty).
             'pad_pairs_open': pad_pairs_open_report,
@@ -5774,7 +5793,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # why the caller asked -- and the gate report itself.
                 _keep6 = {k: results_data.get(k) or []
                           for k in ('blockers', 'pad_pairs_open',
-                                    'boxed_in')}
+                                    'boxed_in', 'fanout_dropped')}
                 results_data = _empty_results_data()
                 results_data.update(_keep6)
                 _action = ("DISCARDED this run's changes (nothing is applied "

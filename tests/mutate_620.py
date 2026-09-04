@@ -76,7 +76,7 @@ T756 = os.path.join(_TESTS, 'test_756_fanout_clearance_drill_floors.py')
 _WINDOW = ("        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n"
            "                     s / 2.0 + self._max_size / 2.0 + "
            "self._clearance,\n"
-           "                     ahx)")
+           "                     self._max_size / 2.0 + tw / 2.0)")
 
 # (name, target, old, new, tests, expect)
 ROWS = [
@@ -85,16 +85,16 @@ ROWS = [
      '                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, '
      'v_drill,\n'
      '                                               route.net_id, _bulges,\n'
-     '                                               anchor_box=_abox)',
+     '                                               track_width=track_width)',
      "                _v, _detail = 'clear', None",
      (T620,), 'KILLED'),
 
     ('verdict-always-clear', 'geo',
      '        d = drill or 0.0\n        s = size or 0.0\n'
-     '        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else',
+     '        tw = track_width or 0.0',
      "        return 'clear', None\n"
      '        d = drill or 0.0\n        s = size or 0.0\n'
-     '        ahx, ahy = ((self._tol, self._tol) if anchor_box is None else',
+     '        tw = track_width or 0.0',
      (T620,), 'KILLED'),
 
     ('pending-never-records-the-committed-via', 'bga',
@@ -146,26 +146,38 @@ ROWS = [
      (T620,), 'KILLED'),
 
     # --- THE BROAD PHASE. The rows an earlier test could not kill. ----------
+    # #854 note: these three replacements used to end in `ahx`, the name the
+    # anchor-box rule bound. This PR deleted it, which silently turned all
+    # three into CRASH mutants -- `NameError: ahx` -- and the runner counts an
+    # ERROR as a kill, so they would have reported KILLED forever while
+    # measuring nothing. The BROKEN-anchor guard cannot catch this: it
+    # validates the string being REPLACED, not the replacement. Found by a
+    # pre-push review, and the reason the runner below reports CRASH as its own
+    # verdict instead of folding a NameError into KILLED.
     ('broad-phase-window-drops-the-halving', 'geo',
      _WINDOW,
      '        window = max(d + self._h2h,\n'
      '                     s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
-     '                     ahx)',
+     '                     self._max_size / 2.0 + tw / 2.0)',
      (T620,), 'KILLED'),
 
     ('broad-phase-window-drops-the-ring-term', 'geo',
      _WINDOW,
      '        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n'
-     '                     ahx)',
+     '                     self._max_size / 2.0 + tw / 2.0)',
      (T620,), 'KILLED'),
 
     ('broad-phase-window-drops-the-drill-term', 'geo',
      _WINDOW,
      '        window = max(s / 2.0 + self._max_size / 2.0 + self._clearance,\n'
-     '                     ahx)',
+     '                     self._max_size / 2.0 + tw / 2.0)',
      (T620,), 'KILLED'),
 
-    ('broad-phase-window-drops-the-anchor-term', 'geo',
+    # #854 RE-POINTED this row rather than retiring it: the window's third
+    # term is no longer the candidate pad's half-width but the ANCHOR REACH
+    # (widest committed via + half a track), and it is still the term nothing
+    # else makes binding -- see test_the_REACH_term_in_the_broad_phase_window.
+    ('broad-phase-window-drops-the-reach-term', 'geo',
      _WINDOW,
      '        window = max(d / 2.0 + self._max_drill / 2.0 + self._h2h,\n'
      '                     s / 2.0 + self._max_size / 2.0 + self._clearance)',
@@ -178,36 +190,78 @@ ROWS = [
 
     # --- TWINS --------------------------------------------------------------
     ('twin-branch-refuses-instead', 'geo',
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):\n'
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):\n'
      "                return 'twin', (ox, oy, os_, od)",
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):\n'
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):\n'
      "                return 'conflict', ('same site', ox, oy)",
      (T620,), 'KILLED'),
 
     ('twin-branch-ignores-the-net', 'geo',
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
-     '            if (True\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):',
+     '            if True and via_anchors_route(ox, oy, os_, (x, y), tw):',
      (T620,), 'KILLED'),
 
     ('twin-keyed-on-the-exact-site-again', 'geo',
-     '            if (onet == net_id\n'
-     '                    and abs(ox - x) <= ahx and abs(oy - y) <= ahy):',
-     '            if (onet == net_id\n'
-     '                    and dist <= self._tol and abs(oy - y) <= ahy):',
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):',
+     '            if onet == net_id and dist <= self._tol:',
      (T620,), 'KILLED'),
 
+    # --- #854: a reach test is not a containment test -----------------------
+    # The row the issue asks for by name ("mutate_620.py should get a row that
+    # dies when the anchor test is widened back"). 0.5 is the BIG pad's own
+    # half-extent in the dissimilar-size arm, so this row IS that arm's defect.
+    ('twin-keyed-on-the-candidate-PAD-BOX-again', 'geo',
+     '            if onet == net_id and via_anchors_route(ox, oy, os_, '
+     '(x, y), tw):',
+     '            if (onet == net_id\n'
+     '                    and abs(ox - x) <= 0.5 and abs(oy - y) <= 0.5):',
+     (T620,), 'KILLED'),
+
+    # The SECOND copy of the same rule, which is what made the stranding
+    # invisible downstream: fixing `verdict` alone leaves `_has_copper`
+    # agreeing with the old answer, so nothing straps the swallowed ball.
+    ('ball-anchor-test-reverted-to-the-pad-box', 'bga',
+     "    if any(v['net_id'] == pad.net_id\n"
+     "           and via_anchors_route(v['x'], v['y'], v.get('size') or 0.0,\n"
+     "                                 (pad.global_x, pad.global_y), "
+     "track_width)\n"
+     '           for v in vias):',
+     "    tol = max(pad.size_x, pad.size_y) / 2 + 0.01\n"
+     "    if any(v['net_id'] == pad.net_id\n"
+     "           and abs(v['x'] - pad.global_x) < tol\n"
+     "           and abs(v['y'] - pad.global_y) < tol\n"
+     '           for v in vias):',
+     (T620,), 'KILLED'),
+
+    # #854: `tighten` shrinks the survivor, and a smaller barrel reaches less
+    # far, so the merge can be justified by a via that no longer reaches once
+    # tightened. Impossible under the old pad-BOX rule (a box does not depend
+    # on via size), so this row exists because the rule changed.
+    ('post-tighten-reach-recheck-deleted', 'bga',
+     '                    if not via_anchors_route(_tx, _ty, min(_ts, v_size),\n'
+     "                                             (pad_x, pad_y), track_width):\n"
+     "                        _v = 'clear'\n"
+     '                    else:',
+     '                    if False:\n'
+     "                        _v = 'clear'\n"
+     '                    else:',
+     (T620,), 'KILLED'),
+
+    # Both anchors sit one indent deeper since the post-tighten reach re-check
+    # put the branch body inside an `else:`. Re-pointed after that landed, not
+    # when written -- the file's own rule, and it caught these two.
     ('twin-appends-a-second-via-anyway', 'bga',
-     "                    _twin_shared += 1\n                    continue",
-     '                    _twin_shared += 1',
+     "                        _twin_shared += 1\n                        continue",
+     '                        _twin_shared += 1',
      (T620,), 'KILLED'),
 
     ('twin-keeps-the-FIRST-via-not-the-tighter', 'bga',
-     '                    if _pending.tighten(_tx, _ty, v_size, v_drill):',
-     '                    if False:',
+     '                        if _pending.tighten(_tx, _ty, v_size, v_drill):',
+     '                        if False:',
      (T620,), 'KILLED'),
 
     # --- THE LADDER ---------------------------------------------------------
@@ -354,6 +408,34 @@ ROWS = [
 ]
 
 
+def _head():
+    p = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True,
+                       text=True, cwd=_ROOT)
+    return (p.stdout or '').strip()
+
+
+def _warn_if_head_moved(before):
+    """A commit made WHILE this battery ran may have captured a mutant.
+
+    The dirty-tree refusal above checks at START. It cannot see a `git add -A`
+    that lands between a rewrite and the `finally` restore -- and that is not
+    hypothetical: `h2h-decline-not-disclosed`'s edit was committed into an
+    unrelated PR that way, silencing a disclosure print in underpad.py for two
+    commits. One writer per tree; this says so out loud when the rule is broken.
+    """
+    after = _head()
+    if before and after and before != after:
+        print('\n*** HEAD MOVED DURING THIS RUN (%s -> %s) ***'
+              % (before[:8], after[:8]))
+        print('    A commit made while files were mutated may have captured a')
+        print('    MUTANT. Check every target before trusting this run:')
+        for v in TARGETS.values():
+            print('      git diff %s -- %s' % (before[:8],
+                                               os.path.relpath(v, _ROOT)))
+        return True
+    return False
+
+
 def _dirty(path):
     p = subprocess.run(['git', 'status', '--porcelain', '--', path],
                        capture_output=True, text=True, cwd=_ROOT)
@@ -372,6 +454,7 @@ def run(only=None):
                   % os.path.basename(path))
             return 2
 
+    head_before = _head()
     orig = {k: io.open(v, encoding='utf-8', newline='').read()
             for k, v in TARGETS.items()}
     results = []
@@ -392,13 +475,20 @@ def run(only=None):
             for o, nw in edits:
                 mutated = mutated.replace(o, nw, 1)
             io.open(path, 'w', encoding='utf-8', newline='').write(mutated)
-            killed, failed = False, []
+            killed, failed, crashed = False, [], False
             for t in tests:
                 p = subprocess.run([sys.executable, '-X', 'utf8', t],
                                    capture_output=True, text=True,
                                    encoding='utf-8', errors='replace',
                                    timeout=1800, cwd=_ROOT)
                 out = (p.stderr or '') + (p.stdout or '')
+                # A mutant that makes the ENGINE crash proves nothing about
+                # the test's discrimination -- the runner would score the
+                # non-zero exit as a kill either way. Three rows here spent a
+                # commit in exactly that state (`NameError: ahx`), reporting
+                # KILLED while measuring nothing, so it is now its own verdict.
+                if 'NameError' in out or 'AttributeError' in out:
+                    crashed = True
                 if p.returncode:
                     killed = True
                 failed += ['%s::%s' % (os.path.basename(t)[5:8],
@@ -407,8 +497,10 @@ def run(only=None):
                            for l in out.splitlines()
                            if l.startswith(('FAIL:', 'ERROR:'))]
             io.open(path, 'w', encoding='utf-8', newline='').write(base)
-            results.append((name, 'KILLED' if killed else 'SURVIVED', expect,
-                            '%d' % len(failed), failed))
+            results.append((name,
+                            'CRASH' if crashed else
+                            ('KILLED' if killed else 'SURVIVED'),
+                            expect, '%d' % len(failed), failed))
     finally:
         for k, v in TARGETS.items():
             io.open(v, 'w', encoding='utf-8', newline='').write(orig[k])
@@ -425,13 +517,14 @@ def run(only=None):
             print('%s      %s' % (' ' * w, f))
     killed = sum(1 for r in results if r[1] == 'KILLED')
     survived = sum(1 for r in results if r[1] == 'SURVIVED')
-    broken = sum(1 for r in results if r[1] == 'BROKEN')
+    broken = sum(1 for r in results if r[1] in ('BROKEN', 'CRASH'))
     print('\n%d rows: %d killed, %d survived (%d of them expected), %d broken'
           % (len(results), killed, survived,
              sum(1 for r in results if r[1] == r[2] == 'SURVIVED'), broken))
     if wrong or broken:
         print('%d row(s) did not match their expectation' % (wrong + broken))
-    return 1 if (wrong or broken) else 0
+    moved = _warn_if_head_moved(head_before)
+    return 1 if (wrong or broken or moved) else 0
 
 
 def main():
