@@ -164,10 +164,18 @@ ROWS = [
 
     # A block with no top-level `(layer ...)` had all its geometry mirrored and
     # no layer written -- #714's own silent failure, in the degenerate case.
+    #
+    # EXPECTED TO SURVIVE, and the reason is a design fact worth recording:
+    # there are TWO guards. The early regex check is the one that gives a good
+    # message; the `saw_layer` backstop after the walk catches the same case
+    # if the walk and the regex ever disagree. Disabling either leaves the
+    # other, so no single row can kill this -- which is what "belt and braces"
+    # means, and is why the row is kept with its real expectation rather than
+    # deleted for looking like a failure.
     ('a-block-with-no-layer-is-flipped-anyway', 'wr',
      "    if not re.search(r'\\(layer\\s+\"[^\"]+\"\\)', fp_text):\n",
      "    if False:\n",
-     (REF,), 'KILLED'),
+     (REF,), 'SURVIVED'),
 
     # An `(at ...)` the mirror cannot parse was SKIPPED, leaving one node
     # unmirrored inside a footprint whose every other node moved. The
@@ -225,10 +233,18 @@ ROWS = [
      "        if False:\n",
      (REF,), 'SURVIVED'),
 
+    # EXPECTED TO SURVIVE since the pad dispatch became a WHITELIST. It used to
+    # kill, and the change that made it survive is the change that made the pad
+    # side safe: `primitives`, `chamfer` and `rect_delta` are not in
+    # `_PAD_HANDLED` either, so dropping the NAMED table leaves them refused by
+    # the generic arm. The named table now exists to give a better MESSAGE --
+    # which construct, and why nothing here can validate a rule for it -- not to
+    # be the only guard. `the-pad-dispatch-is-a-blacklist-again` above is the
+    # row that proves the whitelist is load-bearing.
     ('the-pad-construct-refusals-are-dropped', 'wr',
      "        if head in _PAD_REFUSALS:\n",
      "        if False:\n",
-     (REF,), 'KILLED'),
+     (REF,), 'SURVIVED'),
 
     # -------------------------------------------------- format and the ledger
     # Killed by RT ALONE: every value test passes, because the numbers are
