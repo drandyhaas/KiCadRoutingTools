@@ -53,7 +53,8 @@ def main():
     import routing_defaults as defaults
     from kicad_parser import parse_kicad_pcb
     from placement import legality
-    from placement.legality import grade_body_overlap, grade_pad_legality
+    from placement.legality import (assembly_census, grade_body_overlap,
+                                    grade_pad_legality)
 
     # GRADE AT THE BOARD'S OWN FLOOR, and say where that came from.
     #
@@ -333,6 +334,43 @@ def main():
               f"containment channel cannot judge them: "
               + ', '.join(_u[:8]) + (' ...' if len(_u) > 8 else ''))
 
+    # ASSEMBLY SIDES (#837). Report-only, and deliberately not a conjunct:
+    # which faces a board is populated on is a FACT about the board, not a
+    # defect, and the verdict predicate below is untouched. It is here because
+    # this is the tool named `check_assembly` and it could not say how many
+    # reflow passes the board it just graded would take.
+    #
+    # Printed unconditionally, including the all-on-one-face case: a section
+    # that appears only when there is something on the back would make
+    # "single-sided" and "not measured" look identical.
+    _cen = assembly_census(pcb)
+    _pb, _bl = _cen['pad_bearing'], _cen['blocks']
+    print(f"  ASSEMBLY SIDES: F {_pb['F']} / B {_pb['B']} pad-bearing part(s)"
+          f" of {_bl['F'] + _bl['B']} block(s); "
+          f"{_cen['reflow_passes']} reflow pass(es), "
+          f"{_cen['through_hole']} through-hole part(s)")
+    if _cen['zero_pad_back']:
+        # The distinction that makes esp_prog single-sided: three OLIMEX logo
+        # footprints sit on B.Cu carrying no pads at all. Counting blocks it
+        # is a two-sided board; counting copper it is not, and the fab builds
+        # the second one.
+        _z = _cen['zero_pad_back']
+        print(f"    {len(_z)} back-side block(s) carry NO pads and are "
+              f"excluded from the verdict: "
+              + ', '.join(_z[:8]) + (' ...' if len(_z) > 8 else ''))
+    if _cen['through_hole']:
+        print(f"    Through-hole parts are counted, never folded in: a "
+              f"drilled part on the front needs wave or hand soldering, not "
+              f"a second reflow pass. (`sides_occupied` answers the "
+              f"OBSTRUCTION question and would call this board two-sided.)")
+    # The basis in one clause here and in full in the JSON. It has to appear
+    # in BOTH: a per-side number quoted without its counting rule cannot be
+    # checked against any other one (#726 moved ulx3s from 234 blocks to 235),
+    # and a reader of the text channel never sees the JSON.
+    print(f"    observed policy: sides={_cen['sides']} -- counted per "
+          f"footprint BLOCK, verdict from the pad-bearing subset "
+          f"(parts_by_side_basis in --json has the rule in full)")
+
     # Courtyard gate currency (run-23): the census below is ABSOLUTE, but the
     # GATE is moved-vs-baseline. Measured on this repo's own corpus: 5 healthy
     # human boards ship unwaived courtyard interpenetrations past any sane
@@ -476,6 +514,18 @@ def main():
                 'like any other two parts. See duplicate_references for the '
                 'names the board itself uses.'),
             'duplicate_references': dup_refs,
+            # #837, report-only: additive keys, no exit code and no conjunct
+            # moves. `parts_by_side` is the pad-bearing census -- the one the
+            # `assembly_sides` verdict is taken from -- and
+            # `parts_by_side_blocks` is every block, so a reader can see which
+            # rule produced which number instead of guessing.
+            'parts_by_side': _cen['pad_bearing'],
+            'parts_by_side_blocks': _cen['blocks'],
+            'parts_by_side_basis': _cen['basis'],
+            'back_side_zero_pad_blocks': _cen['zero_pad_back'],
+            'through_hole_parts': _cen['through_hole'],
+            'assembly_sides': _cen['sides'],
+            'reflow_passes': _cen['reflow_passes'],
             # Just the entry count now: every block is one. The old formula
             # (len + sum(values) - len(values)) reconstructed the block total
             # from the dict of survivors, and after #726 it OVERCOUNTS -- on

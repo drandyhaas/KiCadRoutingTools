@@ -257,6 +257,71 @@ def sides_occupied(side: str, has_tht: bool) -> frozenset:
     return BOTH_SIDES if has_tht else frozenset((side,))
 
 
+#: The counting rule `assembly_census` reports under, named rather than
+#: assumed. Every published per-side number for this corpus is ambiguous
+#: without it: #726 stopped `PCBData.footprints` silently overwriting a
+#: duplicate reference, which moved ulx3s from 234 blocks to 235 and
+#: glasgow_revC from 266 to 272 -- so a census quoting a bare total cannot be
+#: checked against any earlier one. `check_assembly`'s `coincident_origins`
+#: channel already carries this disclosure for the same reason.
+ASSEMBLY_CENSUS_BASIS = (
+    'every footprint BLOCK (#726): blocks sharing one reference are keyed '
+    'with an ordinal suffix and counted separately. `pad_bearing` restricts '
+    'that to blocks carrying at least one pad, and it is the count the '
+    'populated-side verdict is taken from -- a zero-pad graphic on the back '
+    'does not make a board double-sided.')
+
+
+def assembly_census(pcb_data) -> Dict:
+    """Which faces this board is POPULATED on, under both counting rules.
+
+    This is deliberately not `sides_occupied`, and the distinction is the
+    whole point. `sides_occupied` answers "which faces does this part
+    physically obstruct", so a drilled pad puts its part on both -- under it
+    17 of the 22 tracked boards read double-sided, `splitflap_driver`
+    (65 parts, all on F.Cu, 24 of them through-hole) included. That is the
+    right answer to the obstruction question and the wrong answer to the
+    assembly one: a through-hole part on the front does not demand a second
+    reflow pass, it demands wave or hand soldering. So the verdict here is
+    taken from the BODY face (`footprint_side`) and the through-hole count is
+    reported beside it, never folded into it.
+
+    `sides` is the value an intent declares and `emit_intent` observes:
+    'F', 'B' or 'both'. It is read off the pad-bearing census, so `esp_prog` --
+    whose three back-side blocks are all zero-pad OLIMEX logos -- observes
+    'F', which is what the fab builds.
+    """
+    blocks = {'F': 0, 'B': 0}
+    pad_bearing = {'F': 0, 'B': 0}
+    zero_pad_back, through_hole = [], 0
+    for ref, fp in sorted((pcb_data.footprints or {}).items()):
+        side = footprint_side(fp)
+        blocks[side] = blocks.get(side, 0) + 1
+        if not (fp.pads or ()):
+            if side == 'B':
+                zero_pad_back.append(ref)
+            continue
+        pad_bearing[side] = pad_bearing.get(side, 0) + 1
+        if footprint_has_through_pads(fp):
+            through_hole += 1
+    populated = tuple(s for s in ('F', 'B') if pad_bearing[s])
+    return {
+        'basis': ASSEMBLY_CENSUS_BASIS,
+        'blocks': blocks,
+        'pad_bearing': pad_bearing,
+        'zero_pad_back': zero_pad_back,
+        'through_hole': through_hole,
+        'populated_sides': list(populated),
+        # 'both' when neither face is populated too: a board with no parts
+        # constrains nothing, and claiming it is single-sided would be an
+        # assertion nobody made.
+        'sides': populated[0] if len(populated) == 1 else 'both',
+        # Reflow passes, not solder operations. The through-hole count above
+        # is the rest of the assembly story and is reported separately.
+        'reflow_passes': len(populated),
+    }
+
+
 def container_refs(pcb_data, graded) -> set:
     """Refs whose courtyard covers at least `CONTAINER_RATIO` of the board.
 
