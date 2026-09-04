@@ -126,7 +126,7 @@ KEY_SETS = {
         'schema', 'kind', 'board', 'units', 'min_reader', 'envelope',
         'defaults', 'blocks', 'keepouts', 'edge_connectors', 'decaps',
         'must_lock', 'legality_budget', 'health', 'severity', 'context',
-        'overlap_waivers'},
+        'overlap_waivers', 'assembly'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
@@ -152,6 +152,10 @@ KEY_SETS = {
     '_CORRIDOR_KEYS': {'name', 'nets', 'width_mm'},
     '_BUDGET_KEYS': {'overlap_area', 'oob_count', 'oob_amount'},
     '_WAIVER_KEYS': {'pair', 'reason', 'context'},
+    # #837: the board-level assembly policy. `sides` is the claim; `why`
+    # records how it was reached, and `emit_intent` fills it with the
+    # observation rather than a reason nobody gave.
+    '_ASSEMBLY_KEYS': {'sides', 'why', 'context'},
 }
 
 
@@ -200,6 +204,7 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_WAIVER_KEYS': 'overlap_waivers[]',
         '_OVERHANG_KEYS': 'edge_connectors[].overhang_mm',
         '_EDGE_CONNECTOR_KEYS': 'edge_connectors[]',
+        '_ASSEMBLY_KEYS': 'assembly',
     }
     checked = 0
     for name, row in sorted(TABLE_ROWS.items()):
@@ -267,6 +272,8 @@ def test_an_intent_using_every_known_key_loads():
         'context': {'note': 'read-only'},
         'overlap_waivers': [{'pair': ['U1', 'U2'], 'reason': 'net tie',
                              'context': {'why': 'w'}}],
+        'assembly': {'sides': 'F', 'why': 'one reflow pass',
+                     'context': {'quoted': 'the fab'}},
     }
     # Every key of every set must appear above, or this proves less than it
     # claims -- the point is coverage of the vocabulary, not of a sample.
@@ -282,6 +289,7 @@ def test_an_intent_using_every_known_key_loads():
     seen |= set(raw['edge_connectors'][1]['along_edge_band'])
     seen |= set(raw['health']['bus_corridors'][0])
     seen |= set(raw['overlap_waivers'][0])
+    seen |= set(raw['assembly'])
     for k in raw['keepouts']:
         seen |= set(k)
     missing = sorted({k for keys in KEY_SETS.values() for k in keys} - seen)

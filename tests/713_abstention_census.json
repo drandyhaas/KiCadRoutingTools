@@ -1,5 +1,5 @@
 {
- "boards_clean_but_ungraded": 5,
+ "boards_clean_but_ungraded": 0,
  "boards_graded": 22,
  "boards_total": 22,
  "channels_seen": {
@@ -9,13 +9,7 @@
   "rules_skipped_not_asked_EXCLUDED": 22,
   "rules_skipped_withheld": 0
  },
- "names_clean_but_ungraded": [
-  "glasgow_revC.kicad_pcb",
-  "orangecrab_ext_pll.kicad_pcb",
-  "tigard.kicad_pcb",
-  "ulx3s.kicad_pcb",
-  "watchy.kicad_pcb"
- ],
+ "names_clean_but_ungraded": [],
  "rows": [
   {
    "board": "cap_chain.kicad_pcb",
@@ -29,7 +23,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -57,7 +51,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -85,7 +79,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 4,
+   "rules_run": 5,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -105,15 +99,15 @@
    "budget_abstained_keys": [
     "overlap_area"
    ],
-   "clean_but_ungraded": true,
+   "clean_but_ungraded": false,
    "edge_seating_abstained": 0,
    "emit_rc": 0,
    "errors": 0,
-   "grade_rc": 0,
+   "grade_rc": 4,
    "human_not_derivable": true,
-   "human_pass_line": true,
-   "pass": true,
-   "rules_run": 4,
+   "human_pass_line": false,
+   "pass": false,
+   "rules_run": 5,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -139,7 +133,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 4,
+   "rules_run": 5,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -165,7 +159,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 3,
+   "rules_run": 4,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -192,7 +186,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 3,
+   "rules_run": 4,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -219,7 +213,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 5,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -244,7 +238,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -272,7 +266,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -294,15 +288,15 @@
    "budget_abstained_keys": [
     "overlap_area"
    ],
-   "clean_but_ungraded": true,
+   "clean_but_ungraded": false,
    "edge_seating_abstained": 0,
    "emit_rc": 0,
    "errors": 0,
-   "grade_rc": 0,
+   "grade_rc": 4,
    "human_not_derivable": true,
-   "human_pass_line": true,
-   "pass": true,
-   "rules_run": 5,
+   "human_pass_line": false,
+   "pass": false,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -327,7 +321,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -355,7 +349,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -383,7 +377,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -411,7 +405,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 2,
+   "rules_run": 3,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -439,7 +433,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 4,
+   "rules_run": 5,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -467,7 +461,7 @@
    "human_not_derivable": true,
    "human_pass_line": false,
    "pass": false,
-   "rules_run": 5,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -492,7 +486,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 3,
+   "rules_run": 4,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -519,7 +513,7 @@
    "human_not_derivable": false,
    "human_pass_line": true,
    "pass": true,
-   "rules_run": 3,
+   "rules_run": 4,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -540,15 +534,15 @@
    "budget_abstained_keys": [
     "overlap_area"
    ],
-   "clean_but_ungraded": true,
+   "clean_but_ungraded": false,
    "edge_seating_abstained": 0,
    "emit_rc": 0,
    "errors": 0,
-   "grade_rc": 0,
+   "grade_rc": 4,
    "human_not_derivable": true,
-   "human_pass_line": true,
-   "pass": true,
-   "rules_run": 3,
+   "human_pass_line": false,
+   "pass": false,
+   "rules_run": 4,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -569,15 +563,15 @@
    "budget_abstained_keys": [
     "overlap_area"
    ],
-   "clean_but_ungraded": true,
+   "clean_but_ungraded": false,
    "edge_seating_abstained": 0,
    "emit_rc": 0,
    "errors": 0,
-   "grade_rc": 0,
+   "grade_rc": 4,
    "human_not_derivable": true,
-   "human_pass_line": true,
-   "pass": true,
-   "rules_run": 5,
+   "human_pass_line": false,
+   "pass": false,
+   "rules_run": 6,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",
@@ -596,15 +590,15 @@
    "budget_abstained_keys": [
     "overlap_area"
    ],
-   "clean_but_ungraded": true,
+   "clean_but_ungraded": false,
    "edge_seating_abstained": 0,
    "emit_rc": 0,
    "errors": 0,
-   "grade_rc": 0,
+   "grade_rc": 4,
    "human_not_derivable": true,
-   "human_pass_line": true,
-   "pass": true,
-   "rules_run": 3,
+   "human_pass_line": false,
+   "pass": false,
+   "rules_run": 4,
    "skipped_arm": [],
    "skipped_not_asked": [
     "decap_distance",

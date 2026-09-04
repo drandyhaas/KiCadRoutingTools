@@ -101,15 +101,35 @@ EDGE_BAND_SANITY_MM = 5.0
 #: and at 1 a brief-compiled intent would claim a reader-1 build acts on a
 #: claim it has never heard of. That is a false statement in the one field
 #: whose only job is to be true.
-READER_VERSION = 2
+#:
+#: 3 (#837): `assembly.sides` -- which faces the fab will populate. Declarable,
+#: and it changes two verdicts rather than one: `assembly_side` violations, and
+#: `options.grow_board`'s utilisation, which credits the back face's area to
+#: every board and had no way to be told the board is built on one side. The
+#: same reasoning as 2 applies -- the unknown-key refusal already protects an
+#: older build, and the bump is about `min_reader` being able to name the
+#: version that can act on the claim.
+READER_VERSION = 3
 
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
     'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
+    'assembly',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                'tolerance_mm', 'note', 'context'}
+#: #837. The board-level assembly policy: which faces the fab will populate.
+#: `blocks[].side` is a claim about ONE subsystem; this is a claim about the
+#: whole board, and it is the thing `options.grow_board` needed and could not
+#: be told -- it credits the back face's area to every board, so a placement
+#: can be reported as fitting on area the fab will never populate.
+_ASSEMBLY_KEYS = {'sides', 'why', 'context'}
+#: Named faces, not "single". `"sides": "single"` is under-specified, and the
+#: corpus says so: ulx3s is BACK-dominant (163 of its 226 pad-bearing parts),
+#: so a rule reading "single implies F.Cu" would flag most of a shipping
+#: board. 'both' is the observed default and grades nothing.
+_ASSEMBLY_SIDES = ('F', 'B', 'both')
 
 # The principle `_BLOCK_KEYS` already encodes, applied one level down (#710).
 # Before this the loader was strict at exactly two levels -- top-level and
@@ -267,6 +287,21 @@ class Intent:
     # printing 0 errors. Hand-written intents leave it empty, which is the
     # honest answer for a budget a human simply chose not to declare.
     budget_withheld: Dict[str, str] = field(default_factory=dict)
+    # #837: the board-level assembly policy, `{'sides': 'F'|'B'|'both', ...}`.
+    # Empty when the intent declares none, which disarms `assembly_side` with
+    # the honest "nobody asked" reason rather than grading a board against a
+    # policy nothing states.
+    assembly: Dict[str, object] = field(default_factory=dict)
+
+    def assembly_sides(self) -> str:
+        """The declared policy, or 'both' -- which constrains nothing.
+
+        'both' is the resolved default rather than None so every consumer
+        (the rule, `options.grow_board`) reads one vocabulary. A board nobody
+        declared is a board that may use both faces, which is exactly what the
+        arithmetic did before this key existed.
+        """
+        return str((self.assembly or {}).get('sides') or 'both')
 
     def edge_claims(self) -> Tuple[Dict[str, object], ...]:
         """The `edge_connectors` entries that actually CLAIM AN EDGE.
@@ -643,6 +678,29 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     defaults = _obj(raw.get('defaults'), 'defaults')
     _reject_unknown(defaults, _DEFAULTS_KEYS, 'defaults')
 
+    assembly = _obj(raw.get('assembly'), 'assembly')
+    _reject_unknown(assembly, _ASSEMBLY_KEYS, 'assembly')
+    if 'sides' in assembly:
+        # Refused BY REASON rather than as a bare bad enum: 'single' is the
+        # spelling an author reaches for first, and the reason it is not
+        # accepted -- that it does not say WHICH face -- is the whole content
+        # of the correction.
+        v = assembly['sides']
+        if v not in _ASSEMBLY_SIDES:
+            extra = (" -- name the face: a single-sided board can be built on "
+                     "either one, and the corpus has back-dominant boards"
+                     if isinstance(v, str) and v.lower() in
+                     ('single', 'one', 'single-sided', 'one-sided') else '')
+            raise IntentError(
+                f"assembly.sides must be one of {list(_ASSEMBLY_SIDES)}, got "
+                f"{v!r}{extra}")
+    elif assembly:
+        raise IntentError(
+            "assembly: declares no `sides`, so it constrains nothing. Give it "
+            f"one of {list(_ASSEMBLY_SIDES)} or drop the key -- an assembly "
+            "block that grades nothing is the failure `block_unresolved` "
+            "exists to prevent, one level down")
+
     decaps = _obj(raw.get('decaps'), 'decaps')
     _reject_unknown(decaps, _DECAP_KEYS, 'decaps')
     # #705's three keys get REAL checks, unlike `max_distance_mm`,
@@ -737,6 +795,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             str(k): str(v) for k, v in
             _obj(context.get('budget_withheld'),
                  'context.budget_withheld').items()},
+        assembly=dict(assembly),
     )
 
 
@@ -1320,6 +1379,20 @@ class _Ctx:
         self.edge_seating: List[Dict[str, object]] = []
         self._decap_pops: Dict[float, tuple] = {}
         self._supply_pins = None
+        self._assembly_census = None
+
+    def assembly_census(self) -> Dict[str, object]:
+        """#837's per-side census, memoised. The SAME function
+        `check_assembly` prints and `emit_intent` observes, so the three
+        cannot come to disagree about how many parts are on a face.
+
+        A dict walk over `fp.layer` / `fp.pads`, no geometry, so it does not
+        break `_Ctx`'s contract that rules never re-derive geometry.
+        """
+        if self._assembly_census is None:
+            from .legality import assembly_census as _ac
+            self._assembly_census = _ac(self.pcb)
+        return self._assembly_census
 
     def sev(self, rule: str) -> str:
         return self.intent.severity_of(rule)
@@ -2054,6 +2127,50 @@ def rule_zone_side(ctx) -> Iterator[Violation]:
                     message=(f"{ref} is on side {part.side} but block "
                              f"{z.name!r} declares side {z.side}"),
                     measured={'side': part.side}, expected={'side': z.side})
+
+
+def rule_assembly_side(ctx) -> Iterator[Violation]:
+    """#837. Parts on a face the declared assembly policy does not populate.
+
+    WARN by default, and that is the design rather than timidity. Nothing in
+    the engine can move a part between faces -- `_Part.side` is set once at
+    construction and no move carries it (#836) -- so an ERROR here would be a
+    red mark no run could clear, which is the defect `zone_side` already
+    carries (`docs/floorplan-intent.md`: "vacuous, not conservative"). A
+    second instance of it would be a step backwards. An author who wants the
+    hard gate sets `severity: {"assembly_side": "error"}` and means it.
+
+    `severity_of(..., default=WARN)` rather than `ctx.sev(...)`, which
+    hard-defaults to ERROR -- the same trap `rule_decap_ungraded` records.
+
+    Graded on the BODY face, never `part.sides`. A through-hole part on the
+    front does not demand a reflow pass on the back; it demands wave or hand
+    soldering, and `legality.sides_occupied` -- which answers the obstruction
+    question -- would flag 24 parts on splitflap_driver, a board with nothing
+    on its back at all.
+    """
+    want = ctx.intent.assembly_sides()
+    if want != 'F' and want != 'B':
+        # 'both' (declared or defaulted): every face is populated, so no part
+        # can be on an undeclared one. The rule RAN and found nothing, which
+        # is a different report from "nobody asked" -- `_wants` keeps that
+        # distinction, and the docstring above says why the choice went this
+        # way.
+        return
+    sev = ctx.intent.severity_of('assembly_side', default=WARN)
+    other = 'B' if want == 'F' else 'F'
+    # The census's own ref list, NOT `ctx.parts`. The two agree on every
+    # tracked board and are not the same set by construction: `QuenchState`
+    # admits a zero-pad footprint that draws a courtyard as a locked obstacle
+    # and the pad-bearing census excludes it. One such board and
+    # `check_assembly` would print a count `check_floorplan` contradicts --
+    # two populations for one number, which is the defect #837 is about.
+    for ref in ctx.assembly_census()['pad_bearing_refs'][other]:
+        yield Violation(
+            rule='assembly_side', severity=sev, ref=ref,
+            message=(f"{ref} is on side {other} but the board declares "
+                     f"assembly.sides {want}"),
+            measured={'side': other}, expected={'side': want})
 
 
 def rule_zone_exclusive(ctx) -> Iterator[Violation]:
@@ -2839,6 +2956,7 @@ RULES = (
     ('envelope', rule_envelope),
     ('zone_containment', rule_zone_containment),
     ('zone_side', rule_zone_side),
+    ('assembly_side', rule_assembly_side),
     ('zone_exclusive', rule_zone_exclusive),
     ('keepout', rule_keepout),
     ('edge_connector', rule_edge_connector),
@@ -2876,6 +2994,7 @@ _SKIP_REASON = {
     'envelope': 'the intent declares no envelope.rect',
     'zone_containment': 'no block declares a zone',
     'zone_side': 'no block declares a side',
+    'assembly_side': 'the intent declares no assembly.sides',
     'zone_exclusive': 'no block is marked exclusive',
     'keepout': 'the intent declares no keepouts',
     'edge_connector': 'the intent declares no edge_connectors',
@@ -2980,6 +3099,22 @@ def _wants(intent: Intent, rule: str) -> bool:
         return any(z.rect is not None for z in intent.blocks)
     if rule == 'zone_side':
         return any(z.side for z in intent.blocks)
+    if rule == 'assembly_side':
+        # ANY declared value arms it, 'both' included -- measured, and the
+        # measurement reversed the obvious choice. Skipping on 'both' looks
+        # like the honest "this cannot fire, so do not claim to have graded
+        # it", but the intent DECLARES the key, so a skip lands in the
+        # abstention channel as "declared and ungraded": glasgow_revC and
+        # orangecrab_ext_pll went `pass: true -> false` and `grade_rc 0 -> 4`
+        # on an emitted intent, which breaks grades-clean-by-construction on
+        # exactly the boards this key exists to describe.
+        #
+        # And running it is not vacuous. 'both' is a real policy -- the fab
+        # will populate both faces -- and "every part is on a declared face"
+        # is a true answer to a real question. It simply cannot fail, the way
+        # `zone_containment` cannot fail on a board whose parts are all inside
+        # their zones.
+        return (intent.assembly or {}).get('sides') in _ASSEMBLY_SIDES
     if rule == 'zone_exclusive':
         return any(z.exclusive and z.rect is not None for z in intent.blocks)
     if rule == 'keepout':
@@ -3827,6 +3962,23 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # `unaccounted` stays 0 to say the three arms are the whole scope.
     _census['seeder_pin_scope'] = (_census['tethers']
                                    + _census['beyond_radius'])
+
+    # #837. An OBSERVATION, so `why` records how it was reached rather than a
+    # reason nobody gave. An emitted intent describes a board; it does not make
+    # demands of it, which is the same rule `must_lock` is emitted empty for.
+    from placement.legality import assembly_census as _ac
+    _cen = _ac(pcb_data)
+    # `sides` is None when NO face carries a pad-bearing part. The key is
+    # omitted entirely then, so the grade reports "the intent declares no
+    # assembly.sides" -- a board with nothing on it has no policy to observe,
+    # and 'both' would read identically to a real two-sided board.
+    _assembly = {} if _cen['sides'] is None else {
+        'sides': _cen['sides'],
+        'why': (f"observed: {_cen['pad_bearing']['F']} pad-bearing part(s) on "
+                f"F and {_cen['pad_bearing']['B']} on B, "
+                f"{_cen['reflow_passes']} reflow pass(es). "
+                f"{_cen['basis']}"),
+    }
     return {
         'schema': SCHEMA_VERSION,
         'kind': KIND,
@@ -3835,6 +3987,16 @@ def emit_intent(pcb_data, pcb_file: str, *,
         'envelope': {'rect': [round(v, 4) for v in bounds],
                      'tolerance_mm': DEFAULT_ENVELOPE_TOLERANCE_MM},
         'defaults': {'zone_tolerance_mm': DEFAULT_ZONE_TOLERANCE_MM},
+        # #837. The OBSERVED policy, never an assumed one: a board with parts
+        # on both faces emits 'both', which arms nothing, so every existing
+        # board still grades clean by construction and the round-trip gates
+        # stay honest. `single` appears only where a human typed it -- which is
+        # the case where the violations are the point.
+        #
+        # Read off the PAD-BEARING census, so esp_prog -- whose three back-side
+        # blocks are zero-pad OLIMEX logos -- emits 'F', which is what the fab
+        # builds. `_assembly_observed` says which rule produced it.
+        'assembly': _assembly,
         'blocks': blocks,
         # A keep-out is a MECHANICAL fact -- an enclosure rib, a standoff, a
         # battery, a display window, an antenna clearance -- and none of those

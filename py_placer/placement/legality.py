@@ -286,39 +286,91 @@ def assembly_census(pcb_data) -> Dict:
     taken from the BODY face (`footprint_side`) and the through-hole count is
     reported beside it, never folded into it.
 
-    `sides` is the value an intent declares and `emit_intent` observes:
-    'F', 'B' or 'both'. It is read off the pad-bearing census, so `esp_prog` --
-    whose three back-side blocks are all zero-pad OLIMEX logos -- observes
-    'F', which is what the fab builds.
+    `sides` is the scalar the intent's `assembly.sides` carries and
+    `emit_intent` observes: 'F', 'B', 'both', or None when no face is
+    populated at all. (Not to be confused with `keepouts[].sides`, which is a
+    LIST of faces an entry binds to and has no 'both' member.) It is read off
+    the pad-bearing census, so `esp_prog` -- whose three back-side blocks are
+    all zero-pad OLIMEX logos -- observes 'F', which is what the fab builds.
+
+    The through-hole split asks `pad_is_plated_through`, never bare
+    `drill > 0`. An NPTH hole is an alignment post, a tooling hole or a screw
+    hole -- it is not a soldered pin, so a part whose only drilled features are
+    NPTH is a REFLOW part. `drill > 0` reported watchy as carrying 5
+    through-hole parts when it carries 1: SW1-SW4 are SMD switches with 0.75mm
+    `np_thru_hole` alignment posts, and the text channel then told the reader
+    they need wave or hand soldering. Same rule CLAUDE.md records for #328,
+    for the same reason: `footprint_has_through_pads` answers the OBSTRUCTION
+    question -- where an unplated hole blocks the far side exactly as a plated
+    one does -- and this is the assembly question.
     """
+    from kicad_parser import pad_is_plated_through
     blocks = {'F': 0, 'B': 0}
     pad_bearing = {'F': 0, 'B': 0}
-    zero_pad_back, through_hole = [], 0
+    pad_bearing_refs = {'F': [], 'B': []}
+    smd = {'F': 0, 'B': 0}
+    through_hole_by_side = {'F': 0, 'B': 0}
+    unsoldered = {'F': 0, 'B': 0}
+    # BOTH faces, not just the back. Without the front list the printed
+    # arithmetic does not close on 7 of the 22 tracked boards -- interf_u
+    # reports "24 pad-bearing of 25 blocks" and discloses nothing, because its
+    # missing block is a zero-pad graphic on the FRONT.
+    zero_pad = {'F': [], 'B': []}
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         side = footprint_side(fp)
         blocks[side] = blocks.get(side, 0) + 1
         if not (fp.pads or ()):
-            if side == 'B':
-                zero_pad_back.append(ref)
+            zero_pad[side].append(ref)
             continue
         pad_bearing[side] = pad_bearing.get(side, 0) + 1
-        if footprint_has_through_pads(fp):
-            through_hole += 1
+        pad_bearing_refs[side].append(ref)
+        if any(pad_is_plated_through(p) for p in fp.pads):
+            through_hole_by_side[side] += 1
+        elif any(getattr(p, 'pad_type', '') != 'np_thru_hole' for p in fp.pads):
+            smd[side] += 1
+        else:
+            # NPTH-ONLY: every pad is an unplated hole, so the part is
+            # soldered by no process at all -- a mounting hole, a tooling
+            # hole, an alignment post. A third bucket rather than a default,
+            # because folding it into either of the other two is a wrong
+            # answer with a witness: flat_hierarchy's 6 NPTH mounting holes
+            # counted as SMD would report 1 reflow pass for a board whose 58
+            # real parts are every one of them through-hole.
+            unsoldered[side] += 1
     populated = tuple(s for s in ('F', 'B') if pad_bearing[s])
     return {
         'basis': ASSEMBLY_CENSUS_BASIS,
         'blocks': blocks,
         'pad_bearing': pad_bearing,
-        'zero_pad_back': zero_pad_back,
-        'through_hole': through_hole,
-        'populated_sides': list(populated),
-        # 'both' when neither face is populated too: a board with no parts
-        # constrains nothing, and claiming it is single-sided would be an
-        # assertion nobody made.
-        'sides': populated[0] if len(populated) == 1 else 'both',
-        # Reflow passes, not solder operations. The through-hole count above
-        # is the rest of the assembly story and is reported separately.
-        'reflow_passes': len(populated),
+        # The REFS, not just the count, so a consumer that grades against this
+        # census grades the same population it reports. `rule_assembly_side`
+        # reads this rather than `ctx.parts`: the two agree on every tracked
+        # board and are NOT the same set by construction -- `quench` admits a
+        # zero-pad footprint that draws a courtyard as a locked obstacle
+        # (quench.py, `_Part` construction) and this census excludes it. One
+        # such board and check_assembly would print a count check_floorplan
+        # contradicts, which is the two-populations defect #837 is about.
+        'pad_bearing_refs': pad_bearing_refs,
+        'zero_pad': zero_pad,
+        'zero_pad_back': zero_pad['B'],
+        'smd': smd,
+        'unsoldered': unsoldered,
+        'through_hole_by_side': through_hole_by_side,
+        'through_hole': sum(through_hole_by_side.values()),
+        # None, not 'both', when NOTHING is populated: a board with no
+        # pad-bearing part has no face to grade, and `emit_intent` omits the
+        # key rather than emitting a claim about it. 'both' would be an
+        # assertion nobody made, and it would read identically to a real
+        # two-sided board.
+        'sides': (populated[0] if len(populated) == 1
+                  else ('both' if populated else None)),
+        # REFLOW passes, counted from the SMD population -- not from the
+        # populated faces, which is the same number on 21 of 22 tracked boards
+        # and wrong on the 22nd. `flat_hierarchy` is 64 parts, every one of
+        # them through-hole: it is populated on F and takes ZERO reflow
+        # passes. The through-hole counts above are the rest of the assembly
+        # story (wave, selective or hand), reported and never folded in.
+        'reflow_passes': sum(1 for s in ('F', 'B') if smd[s]),
     }
 
 

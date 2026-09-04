@@ -133,7 +133,7 @@ source, suspect, suspect_reason
 
 | object | keys |
 |---|---|
-| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `context` |
+| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `assembly`, `context` |
 | `envelope` | `rect`, `tolerance_mm` |
 | `defaults` | `zone_tolerance_mm` |
 | `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `note`, `context` |
@@ -143,15 +143,16 @@ source, suspect, suspect_reason
 | `edge_connectors[].center_on_edge` | `tolerance_mm` (required — see below) |
 | `edge_connectors[].along_edge_band` | `from`, `to` |
 | `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm`, `max_pin_distance_mm`, `pin_functions`, `same_side` |
+| `assembly` | `sides` (`"F"`, `"B"` or `"both"`), `why`, `context` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 18 rule names below |
+| `severity` | any of the 19 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `must_lock` | a list of reference globs (no nested keys) |
 
-`severity` keys are checked too. The settable names are the eleven rules —
-`envelope`, `zone_containment`, `zone_side`, `zone_exclusive`, `keepout`,
+`severity` keys are checked too. The settable names are the twelve rules —
+`envelope`, `zone_containment`, `zone_side`, `assembly_side`, `zone_exclusive`, `keepout`,
 `edge_connector`, `decap_distance`, `decap_ungraded`, `decap_pin_distance`,
 `must_lock`, `legality` — plus the five findings raised outside the rule
 loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
@@ -160,7 +161,7 @@ plus two more that `rule_decap_pin_distance` raises BESIDE its own name —
 `decap_pin_distance_inferred` and `decap_pin_uncovered` (#705). One
 measurement can support several claims, and an author must be able to set
 their severities apart: a pin inferred from a net name and a pin the pad
-declares are not the same evidence. `decap_ungraded`,
+declares are not the same evidence. `assembly_side` (#837), `decap_ungraded`,
 `decap_pin_distance_inferred` and `decap_pin_uncovered` default to
 **warn**; all but those and the last of the five default to **error**;
 `keepout_allow_unresolved` defaults to **warn** and is upgraded by writing
@@ -195,7 +196,7 @@ inside it are yours.
 intent file at once — far too blunt for "this build learned a new field".
 
 So field-level compatibility is a second number. `READER_VERSION` (currently
-`2`) is what this build can act on, and an intent sets `min_reader` when a
+`3`) is what this build can act on, and an intent sets `min_reader` when a
 claim must not be silently ignored:
 
 ```jsonc
@@ -231,6 +232,12 @@ was needed because `READER_VERSION` is the number an author copies into
 `min_reader`, and at `1` a document could have claimed a reader-1 build acts on
 a claim it has never heard of. That would be a false statement in the one field
 whose only job is to be true.
+
+**Reader 3 arrived with [#837](https://github.com/drandyhaas/KiCadRoutingTools/issues/837):**
+`assembly.sides`. Same reasoning as 2 for the bump itself, and it changes two
+verdicts rather than one — `assembly_side` violations, and
+`options.grow_board`'s utilisation, which credits the back face's area to every
+board and had no way to be told the board is built on one side.
 
 ### WHERE ALONG the edge: `center_on_edge` and `along_edge_band`
 
@@ -348,6 +355,7 @@ for it, and the reason is printed:
 | `envelope` | the declared envelope is not the board's outline | `board_bounds` |
 | `zone_containment` | a member's courtyard leaves its block's zone | `GradedPart.rect`. **Enforced, not only graded, since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)** — the quench refuses such a MOVE, through the same `zone_escape` this rule calls |
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
+| `assembly_side` | a part sits on a face the board's declared assembly policy does not populate. **warn** by default (#837): nothing in the engine can move a part between faces, so an error would be a red mark no run could clear | `legality.assembly_census`, body face — the pad-bearing population, so a zero-pad graphic on the back is not a part |
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way — and since [#797](https://github.com/drandyhaas/KiCadRoutingTools/issues/797) the seat search refuses such a pose too, with the verdict `zone_exclusive_blocks` |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
 | `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
@@ -398,6 +406,7 @@ reports the whole picture in `accept_basis`.
 | `must_lock` | yes | — | **by freezing** | it is a claim about the FILE; no pose satisfies or violates it |
 | `edge_connector` | yes | anchor tier | **by freezing** | two of its three sub-claims are bounds on being *off* the board, so a per-pose term would fight the containment gate rather than complement it |
 | `zone_side` | yes | — | no | **vacuous, not conservative**: the quench never flips a side, so the term is invariant under every move it can make. Reported once at load instead |
+| `assembly_side` | yes | — | no | same reason, one level up: since #714 the WRITER can mirror a footprint, but no move in any search carries a side (#836), so the term is invariant under every move. Reported once at load, and **warn** by default so it cannot become a permanent red mark |
 | `envelope` | yes | — | no | a claim about the intent FILE against the board, not about any pose |
 | `decap_ungraded`, `decap_pin_*` | yes | — | no | `decap_ungraded` is a claim about what the GRADE covers rather than about any pose, so there is nothing for a search to refuse. The pin rules are a THIRD currency — pad edge to pad edge on one net — and the objection below applies to them more strongly, not less |
 | `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |

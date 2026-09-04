@@ -32,7 +32,7 @@ ROOT = os.path.dirname(HERE)
 sys.path[:0] = [os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_placer')]
 sys.path.insert(0, HERE)
 
-RUN_ALL_TIMEOUT = 300
+RUN_ALL_TIMEOUT = 900
 
 FAILURES = []
 
@@ -49,41 +49,66 @@ def board(stem):
     return os.path.join(ROOT, 'kicad_files', f'{stem}.kicad_pcb')
 
 
-#: (stem, blocks F/B, pad-bearing F/B, zero-pad back, THT, sides, passes)
-#: Measured at HEAD. `esp_prog` and `watchy` are the boards where the
-#: pad-bearing rule CHANGES the verdict; `splitflap_driver` is where the
-#: through-hole rule would; `ulx3s` is back-dominant, so an arm that assumed
-#: "single-sided means front" would flag 163 of its parts.
+#: (stem, blocks F/B, pad-bearing F/B, zero-pad F/B, THT, NPTH-only, sides,
+#:  reflow passes). Measured at HEAD, hand-stated: re-deriving these from
+#: `assembly_census` would make this file agree with whatever the module
+#: currently says.
+#:
+#: Each row is here because it is the board where one rule CHANGES the answer:
+#:   esp_prog, watchy  -- pad-bearing vs blocks (the verdict flips F/both)
+#:   splitflap_driver  -- `sides_occupied` would call it two-sided (24 drilled)
+#:   watchy            -- `drill > 0` counted 5 through-hole parts; 4 of them
+#:                        are SMD switches with unplated alignment posts, so
+#:                        the plated rule says 1
+#:   flat_hierarchy    -- 0 SMD parts, so 0 reflow passes on a populated face,
+#:                        and 6 NPTH mounting holes in neither solder bucket
+#:   ulx3s             -- back-dominant: an arm assuming "single means front"
+#:                        would flag 163 parts on a shipping board
 EXPECT = [
-    ('esp_prog',           (18, 3),   (18, 0),   3, 3,  'F',    1),
-    ('watchy',             (85, 1),   (84, 0),   1, 5,  'F',    1),
-    ('splitflap_driver',   (65, 0),   (65, 0),   0, 24, 'F',    1),
-    ('ulx3s',              (67, 168), (63, 163), 5, 12, 'both', 2),
-    ('glasgow_revC',       (178, 94), (172, 92), 2, 18, 'both', 2),
+    ('esp_prog',           (18, 3),   (18, 0),   (0, 3), 3,  0, 'F',    1),
+    ('watchy',             (85, 1),   (84, 0),   (1, 1), 1,  0, 'F',    1),
+    ('splitflap_driver',   (65, 0),   (65, 0),   (0, 0), 22, 2, 'F',    1),
+    ('flat_hierarchy',     (64, 0),   (64, 0),   (0, 0), 58, 6, 'F',    0),
+    ('ulx3s',              (67, 168), (63, 163), (4, 5), 11, 0, 'both', 2),
+    ('glasgow_revC',       (178, 94), (172, 92), (6, 2), 17, 0, 'both', 2),
+    ('tigard',             (89, 3),   (87, 2),   (2, 1), 8,  4, 'both', 2),
     ('kit-dev-coldfire-xilinx_5213',
-                           (146, 14), (146, 14), 0, 41, 'both', 2),
+                           (146, 14), (146, 14), (0, 0), 41, 0, 'both', 2),
 ]
 
 
 def independent(pcb):
     """The same census by a different route, deliberately.
 
-    Reads `fp.layer` and `len(fp.pads)` directly instead of calling
-    `footprint_side` / `footprint_has_through_pads`. A test that calls the
-    helpers the subject calls proves only that one function was invoked once.
+    Reads `fp.layer`, `fp.pads` and `pad.pad_type` directly instead of calling
+    `footprint_side` / `pad_is_plated_through`. A test that calls the helpers
+    the subject calls proves only that one function was invoked once.
+
+    The through-hole predicate is spelled out here rather than imported, and
+    that is the point: the first version of this file copied
+    `footprint_has_through_pads`'s bare `drill > 0`, so the arm voted AGAINST
+    the fix for the defect it should have caught -- watchy's four SMD switches
+    with unplated alignment posts.
     """
     blk = {'F': 0, 'B': 0}
     pad = {'F': 0, 'B': 0}
-    zero_back, tht = 0, 0
-    for fp in pcb.footprints.values():
+    zero = {'F': [], 'B': []}
+    tht = npth = 0
+    for ref, fp in pcb.footprints.items():
         s = 'B' if (getattr(fp, 'layer', '') or '').startswith('B') else 'F'
         blk[s] += 1
         if not (fp.pads or ()):
-            zero_back += (s == 'B')
+            zero[s].append(ref)
             continue
         pad[s] += 1
-        tht += any((getattr(p, 'drill', 0) or 0) > 0 for p in fp.pads)
-    return blk, pad, zero_back, tht
+        if any((getattr(p, 'drill', 0) or 0) > 0
+               and getattr(p, 'pad_type', '') != 'np_thru_hole'
+               for p in fp.pads):
+            tht += 1
+        elif all(getattr(p, 'pad_type', '') == 'np_thru_hole'
+                 for p in fp.pads):
+            npth += 1
+    return blk, pad, zero, tht, npth
 
 
 def main():
@@ -93,14 +118,15 @@ def main():
 
     print("#837 assembly census")
     graded = 0
-    for stem, e_blk, e_pad, e_zero, e_tht, e_sides, e_passes in EXPECT:
+    for (stem, e_blk, e_pad, e_zero, e_tht, e_npth, e_sides,
+         e_passes) in EXPECT:
         path = board(stem)
         if not os.path.isfile(path):
             check(f"{stem}: fixture present", False, path)
             continue
         pcb = parse_kicad_pcb(path)
         c = assembly_census(pcb)
-        i_blk, i_pad, i_zero, i_tht = independent(pcb)
+        i_blk, i_pad, i_zero, i_tht, i_npth = independent(pcb)
         graded += 1
 
         check(f"{stem}: blocks {e_blk}",
@@ -110,17 +136,36 @@ def main():
               (c['pad_bearing']['F'], c['pad_bearing']['B']) == e_pad,
               f"got {(c['pad_bearing']['F'], c['pad_bearing']['B'])}")
         check(f"{stem}: an independent parse agrees",
-              (i_blk, i_pad, i_zero, i_tht)
-              == ({'F': c['blocks']['F'], 'B': c['blocks']['B']},
-                  {'F': c['pad_bearing']['F'], 'B': c['pad_bearing']['B']},
-                  len(c['zero_pad_back']), c['through_hole']),
-              f"independent {(i_blk, i_pad, i_zero, i_tht)} vs census "
-              f"{(c['blocks'], c['pad_bearing'], len(c['zero_pad_back']), c['through_hole'])}")
-        check(f"{stem}: {e_zero} zero-pad back block(s)",
-              len(c['zero_pad_back']) == e_zero,
-              f"got {len(c['zero_pad_back'])}: {c['zero_pad_back']}")
-        check(f"{stem}: {e_tht} through-hole part(s)",
-              c['through_hole'] == e_tht, f"got {c['through_hole']}")
+              (dict(i_blk), dict(i_pad), i_tht, i_npth)
+              == (dict(c['blocks']), dict(c['pad_bearing']),
+                  c['through_hole'], sum(c['unsoldered'].values()))
+              and {k: sorted(v) for k, v in i_zero.items()}
+              == {k: sorted(v) for k, v in c['zero_pad'].items()},
+              f"independent {(i_blk, i_pad, i_zero, i_tht, i_npth)} vs "
+              f"census {(c['blocks'], c['pad_bearing'], c['zero_pad'], c['through_hole'], c['unsoldered'])}")
+        check(f"{stem}: zero-pad F/B {e_zero}",
+              (len(c['zero_pad']['F']), len(c['zero_pad']['B'])) == e_zero,
+              f"got {(len(c['zero_pad']['F']), len(c['zero_pad']['B']))}: "
+              f"{c['zero_pad']}")
+        # Every block accounted for, so a reader can reconcile the printed
+        # census against the board. Listing only the BACK left 7 of 22 boards
+        # short -- interf_u's unexplained 25th block is a FRONT graphic.
+        check(f"{stem}: the arithmetic closes",
+              sum(c['pad_bearing'].values()) + len(c['zero_pad']['F'])
+              + len(c['zero_pad']['B']) == sum(c['blocks'].values()),
+              f"{c['pad_bearing']} + {c['zero_pad']} != {c['blocks']}")
+        check(f"{stem}: {e_tht} plated through-hole, {e_npth} NPTH-only",
+              c['through_hole'] == e_tht
+              and sum(c['unsoldered'].values()) == e_npth,
+              f"got tht={c['through_hole']} npth={c['unsoldered']}")
+        # The three solder buckets partition the pad-bearing population. A
+        # part counted in none of them (or in two) is a classification bug.
+        check(f"{stem}: the solder buckets partition the parts",
+              sum(c['smd'].values()) + c['through_hole']
+              + sum(c['unsoldered'].values())
+              == sum(c['pad_bearing'].values()),
+              f"smd={c['smd']} tht={c['through_hole_by_side']} "
+              f"npth={c['unsoldered']} vs {c['pad_bearing']}")
         check(f"{stem}: sides={e_sides}, {e_passes} reflow pass(es)",
               c['sides'] == e_sides and c['reflow_passes'] == e_passes,
               f"got sides={c['sides']} passes={c['reflow_passes']}")
@@ -151,32 +196,52 @@ def main():
           f"{occupied} -- if this is not both, the arm below proves nothing")
     check("splitflap_driver: the census says F anyway",
           assembly_census(pcb)['sides'] == 'F'
-          and assembly_census(pcb)['through_hole'] == 24,
+          and assembly_census(pcb)['through_hole'] == 22,
           str(assembly_census(pcb)))
 
-    # --- The CLI: additive only. The exit code must not have moved, the
-    # section must be printed even when nothing is on the back, and the basis
-    # must reach BOTH channels.
+    # --- Trap 3: `drill > 0` is not the assembly question either. watchy's
+    # SW1-SW4 are SMD switches with unplated 0.75mm alignment posts, so the
+    # bare-drill rule reports 5 hand-soldered parts on a board with 1 -- and
+    # then the text channel tells the reader they need wave soldering.
+    pcb = parse_kicad_pcb(board('watchy'))
+    naive = sum(1 for fp in pcb.footprints.values()
+                if footprint_has_through_pads(fp))
+    check("watchy: the drill rule and the plated rule DISAGREE",
+          naive == 5 and assembly_census(pcb)['through_hole'] == 1,
+          f"drill>0 says {naive}, plated says "
+          f"{assembly_census(pcb)['through_hole']}")
+
+    # --- The CLI: additive only. Run on TWO boards, because on a
+    # single-sided one every distinction this feature draws collapses --
+    # `blocks` == `pad_bearing`, no zero-pad blocks, sides='F' -- so a wiring
+    # bug (printing `blocks` where `pad_bearing` was meant, hard-coding a
+    # verdict) is invisible there. ulx3s separates all of them.
     import run_utils
     tool = os.path.join(ROOT, 'py_tools', 'check_assembly.py')
-    with tempfile.TemporaryDirectory() as td:
-        jp = os.path.join(td, 'a.json')
-        env = dict(os.environ, KRT_NO_BANNER='1')
-        r = subprocess.run([sys.executable, '-X', 'utf8', tool,
-                            board('splitflap_driver'), '--json', jp],
+    env = dict(os.environ, KRT_NO_BANNER='1')
+
+    def run_cli(stem, td):
+        jp = os.path.join(td, f'{stem}.json')
+        r = subprocess.run([sys.executable, '-X', 'utf8', tool, board(stem),
+                            '--json', jp],
                            capture_output=True, text=True, cwd=ROOT, env=env)
-        out = r.stdout + r.stderr
+        run_utils.evidence(jp, f'the {stem} assembly JSON')
+        return r, r.stdout + r.stderr, json.load(open(jp, encoding='utf-8'))
+
+    with tempfile.TemporaryDirectory() as td:
+        r, out, doc = run_cli('splitflap_driver', td)
         check("CLI: a clean single-sided board still exits 0",
               r.returncode == 0, f"exit {r.returncode}\n{out[-800:]}")
         check("CLI: the section prints on a board with nothing on the back",
               'ASSEMBLY SIDES: F 65 / B 0' in out, out[-800:])
         check("CLI: the text channel names the counting rule",
               'per footprint BLOCK' in out, out[-800:])
-        run_utils.evidence(jp, 'the assembly JSON')
-        doc = json.load(open(jp, encoding='utf-8'))
         for k in ('parts_by_side', 'parts_by_side_blocks',
                   'parts_by_side_basis', 'back_side_zero_pad_blocks',
-                  'through_hole_parts', 'assembly_sides', 'reflow_passes'):
+                  'zero_pad_blocks_by_side', 'through_hole_parts',
+                  'through_hole_by_side', 'smd_parts_by_side',
+                  'unsoldered_parts_by_side', 'assembly_sides',
+                  'reflow_passes'):
             check(f"CLI: --json carries {k}", k in doc, sorted(doc))
         check("CLI: the JSON basis names #726",
               '#726' in doc.get('parts_by_side_basis', ''),
@@ -186,6 +251,144 @@ def main():
               doc.get('buildable') is True
               and 'blocking' in doc and doc['blocking'] == 0,
               f"buildable={doc.get('buildable')} blocking={doc.get('blocking')}")
+
+        # ulx3s: every published number DIFFERS from every other, so each
+        # assertion below fails against a different wiring mistake.
+        r2, out2, d2 = run_cli('ulx3s', td)
+        check("CLI/ulx3s: exit code unmoved", r2.returncode == 0,
+              f"exit {r2.returncode}")
+        check("CLI/ulx3s: parts_by_side is the PAD-BEARING census",
+              d2.get('parts_by_side') == {'F': 63, 'B': 163},
+              d2.get('parts_by_side'))
+        check("CLI/ulx3s: parts_by_side_blocks is EVERY block",
+              d2.get('parts_by_side_blocks') == {'F': 67, 'B': 168},
+              d2.get('parts_by_side_blocks'))
+        check("CLI/ulx3s: and the two differ, or the pair proves nothing",
+              d2.get('parts_by_side') != d2.get('parts_by_side_blocks'),
+              str(d2.get('parts_by_side')))
+        check("CLI/ulx3s: assembly_sides=both", d2.get('assembly_sides') == 'both',
+              d2.get('assembly_sides'))
+        check("CLI/ulx3s: reflow_passes=2", d2.get('reflow_passes') == 2,
+              d2.get('reflow_passes'))
+        check("CLI/ulx3s: through_hole_parts=11 (plated only)",
+              d2.get('through_hole_parts') == 11, d2.get('through_hole_parts'))
+        # The NAMES, not the count: the text channel prints them and a reader
+        # uses them to find the blocks being excluded.
+        check("CLI/ulx3s: the zero-pad blocks are named on BOTH faces",
+              sorted(d2.get('zero_pad_blocks_by_side', {}).get('B', []))
+              == ['D&M', 'EMARD~2', 'OSHW', 'REF**', 'koncar']
+              and len(d2.get('zero_pad_blocks_by_side', {}).get('F', [])) == 4,
+              d2.get('zero_pad_blocks_by_side'))
+        check("CLI/ulx3s: the text prints the pad-bearing counts",
+              'ASSEMBLY SIDES: F 63 / B 163' in out2, out2[-1200:])
+        check("CLI/ulx3s: the text prints the reflow-pass count",
+              '2 reflow pass(es)' in out2, out2[-1200:])
+        check("CLI/ulx3s: the text prints the observed policy",
+              'observed policy: sides=both' in out2, out2[-1200:])
+        # The one-face contrast must NOT be printed on a board the census
+        # already calls two-sided: there is no disagreement to point at.
+        check("CLI/ulx3s: no vacuous sides_occupied contrast",
+              'would call this board two-sided' not in out2, out2[-1200:])
+        check("CLI/splitflap: the contrast IS printed where it differs",
+              'would call this board two-sided' in out, out[-1200:])
+
+    # --- The RULE. Armed by hand, because no emitted intent can arm it: the
+    # emitter declares the OBSERVED policy, so a board always satisfies its
+    # own. That is the design, and it is also why the rule needs a test that
+    # does not go through the emitter.
+    from placement import floorplan as fp
+    from placement.floorplan import IntentError
+
+    def graded_with(stem, sides):
+        path = board(stem)
+        pcb = parse_kicad_pcb(path)
+        doc = fp.emit_intent(pcb, path)
+        doc['assembly'] = {'sides': sides}
+        return fp.grade(fp.intent_from_dict(doc), pcb, path)
+
+    # The count is the census's off-face PAD-BEARING count, and it is NOT the
+    # 94 the issue asks for: 94 is glasgow's back-side BLOCK count, and two of
+    # those blocks carry no pads. Same board, two bases, and the census
+    # declares which one it used.
+    r = graded_with('glasgow_revC', 'F')
+    v = [x for x in r.violations if x.rule == 'assembly_side']
+    check("rule: glasgow declared F flags its 92 pad-bearing back parts",
+          len(v) == 92, f"got {len(v)}")
+    check("rule: and 92 is the pad-bearing count, not the 94 block count",
+          len(v) != 94, "94 would mean the rule counted zero-pad blocks")
+    check("rule: it WARNS by default, so it can never be an unclearable red "
+          "mark (nothing in the engine can move a part between faces)",
+          v and all(x.severity == 'warn' for x in v)
+          and not [e for e in r.errors if e.rule == 'assembly_side'],
+          str(sorted({x.severity for x in v})))
+    # Both directions on the same board: a rule that hard-coded 'F' as the
+    # populated face would pass the first arm and fail this one.
+    rb = graded_with('ulx3s', 'B')
+    rf = graded_with('ulx3s', 'F')
+    nb = len([x for x in rb.violations if x.rule == 'assembly_side'])
+    nf = len([x for x in rf.violations if x.rule == 'assembly_side'])
+    check("rule: ulx3s declared B flags its 63 front parts",
+          nb == 63, f"got {nb}")
+    check("rule: ulx3s declared F flags its 163 back parts",
+          nf == 163, f"got {nf}")
+    check("rule: a single-sided board declared its own face is clean",
+          not [x for x in graded_with('splitflap_driver', 'F').violations
+               if x.rule == 'assembly_side'], 'splitflap_driver')
+
+    # `both` RUNS and reports nothing. It must not SKIP: the intent declares
+    # the key, so a skip lands in the abstention channel as "declared and
+    # ungraded" -- measured, that took glasgow_revC and orangecrab_ext_pll
+    # from pass:true to pass:false on their own emitted intents.
+    rboth = graded_with('ulx3s', 'both')
+    check("rule: `both` RUNS rather than skipping",
+          'assembly_side' in rboth.rules_run
+          and 'assembly_side' not in (rboth.rules_skipped or {}),
+          f"run={('assembly_side' in rboth.rules_run)} "
+          f"skipped={(rboth.rules_skipped or {}).get('assembly_side')}")
+    check("rule: ...and reports nothing, because every face is declared",
+          not [x for x in rboth.violations if x.rule == 'assembly_side'])
+
+    # An emitted intent grades clean BY CONSTRUCTION on every tracked board.
+    # That is the property that lets this ship default-on.
+    import glob
+    dirty = []
+    for path in sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
+                                              '*.kicad_pcb'))):
+        pcb = parse_kicad_pcb(path)
+        try:
+            res = fp.grade(fp.intent_from_dict(fp.emit_intent(pcb, path)),
+                           pcb, path)
+        except Exception:                                      # noqa: BLE001
+            continue                        # outline/board problems: not ours
+        bad = [x for x in res.violations if x.rule == 'assembly_side']
+        if bad:
+            dirty.append((os.path.basename(path), len(bad)))
+    check("emit: the observed policy grades clean on every tracked board",
+          not dirty, str(dirty))
+
+    # The loader refuses by REASON. `single` is the spelling an author reaches
+    # for first, and "it does not say WHICH face" is the whole correction --
+    # ulx3s is back-dominant, so "single implies front" would flag 163 parts.
+    base = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm'}
+    for bad_doc, want in (
+            ({'sides': 'single'}, 'name the face'),
+            ({'sides': 'B.Cu'}, "must be one of"),
+            ({'why': 'no sides key'}, 'constrains nothing'),
+            ({'side': 'F'}, 'unknown key')):
+        try:
+            fp.intent_from_dict(dict(base, assembly=bad_doc))
+            check(f"loader: refuses {bad_doc}", False, 'it LOADED')
+        except IntentError as exc:
+            check(f"loader: refuses {bad_doc} and says why",
+                  want in str(exc), f"{want!r} not in {str(exc)[:160]!r}")
+    check("loader: accepts the three declared faces",
+          all(fp.intent_from_dict(
+              dict(base, assembly={'sides': s})).assembly_sides() == s
+              for s in ('F', 'B', 'both')))
+    check("loader: an intent with no assembly key defaults to both",
+          fp.intent_from_dict(base).assembly_sides() == 'both')
+    check("reader version names the field it learned",
+          fp.READER_VERSION == 3, fp.READER_VERSION)
 
     check("graded every fixture", graded == len(EXPECT), f"{graded}")
     print(f"\n{'FAIL' if FAILURES else 'PASS'}: #837 census over {graded} "

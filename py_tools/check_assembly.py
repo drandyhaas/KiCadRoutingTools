@@ -349,20 +349,56 @@ def main():
           f" of {_bl['F'] + _bl['B']} block(s); "
           f"{_cen['reflow_passes']} reflow pass(es), "
           f"{_cen['through_hole']} through-hole part(s)")
-    if _cen['zero_pad_back']:
+    # BOTH faces' zero-pad blocks, so the printed arithmetic CLOSES. Listing
+    # only the back left interf_u reporting "24 pad-bearing of 25 blocks" with
+    # nothing to explain the 25th (a zero-pad graphic on the FRONT), and
+    # glasgow 6 blocks short. A census a reader cannot reconcile is a census
+    # they have to trust.
+    for _side in ('F', 'B'):
+        _z = _cen['zero_pad'][_side]
+        if not _z:
+            continue
         # The distinction that makes esp_prog single-sided: three OLIMEX logo
         # footprints sit on B.Cu carrying no pads at all. Counting blocks it
         # is a two-sided board; counting copper it is not, and the fab builds
-        # the second one.
-        _z = _cen['zero_pad_back']
-        print(f"    {len(_z)} back-side block(s) carry NO pads and are "
+        # the second one. Named by FOOTPRINT where the reference is a bare
+        # uuid -- esp_prog's three are `#00000000-...`, which tells a reader
+        # nothing about what they are being asked to ignore.
+        _named = []
+        for _r in _z[:8]:
+            _f = pcb.footprints.get(_r)
+            _n = (getattr(_f, 'footprint_name', '') or '').split(':')[-1]
+            _named.append(f"{_r} ({_n})" if _n and _r.startswith('#') else _r)
+        print(f"    {len(_z)} {_side}-side block(s) carry NO pads and are "
               f"excluded from the verdict: "
-              + ', '.join(_z[:8]) + (' ...' if len(_z) > 8 else ''))
+              + ', '.join(_named) + (' ...' if len(_z) > 8 else ''))
     if _cen['through_hole']:
-        print(f"    Through-hole parts are counted, never folded in: a "
-              f"drilled part on the front needs wave or hand soldering, not "
-              f"a second reflow pass. (`sides_occupied` answers the "
-              f"OBSTRUCTION question and would call this board two-sided.)")
+        _t = _cen['through_hole_by_side']
+        # `pad_is_plated_through`, never bare `drill > 0`: an NPTH hole is an
+        # alignment post or a screw hole, not a soldered pin. Counting those
+        # told the reader watchy has 5 hand-soldered parts when it has 1 --
+        # SW1-SW4 are SMD switches with unplated alignment posts.
+        print(f"    Through-hole F {_t['F']} / B {_t['B']} (plated barrels "
+              f"only), counted and never folded in: a drilled part on the "
+              f"front needs wave, selective or hand soldering, not a second "
+              f"reflow pass.")
+        if _cen['sides'] != 'both':
+            # Only where the two answers actually DIFFER. On a board the
+            # census already calls two-sided this sentence implies a
+            # disagreement that does not exist.
+            print(f"      (`sides_occupied` answers the OBSTRUCTION question "
+                  f"instead, and would call this board two-sided.)")
+    if sum(_cen['unsoldered'].values()):
+        _u = _cen['unsoldered']
+        print(f"    Unsoldered F {_u['F']} / B {_u['B']}: every pad an "
+              f"unplated hole -- mounting, tooling or alignment. No process "
+              f"attaches these, so they are in neither count above.")
+    if not _cen['reflow_passes'] and (_cen['blocks']['F'] + _cen['blocks']['B']):
+        # flat_hierarchy: 58 through-hole parts and 6 NPTH mounting holes.
+        # Counting POPULATED faces would report one reflow pass for a board
+        # that gets none.
+        print(f"    No SMD parts at all, so 0 reflow passes -- this board is "
+              f"assembled entirely by through-hole process.")
     # The basis in one clause here and in full in the JSON. It has to appear
     # in BOTH: a per-side number quoted without its counting rule cannot be
     # checked against any other one (#726 moved ulx3s from 234 blocks to 235),
@@ -524,7 +560,14 @@ def main():
             'parts_by_side_basis': _cen['basis'],
             'back_side_zero_pad_blocks': _cen['zero_pad_back'],
             'through_hole_parts': _cen['through_hole'],
+            'through_hole_by_side': _cen['through_hole_by_side'],
+            'smd_parts_by_side': _cen['smd'],
+            'unsoldered_parts_by_side': _cen['unsoldered'],
+            'zero_pad_blocks_by_side': _cen['zero_pad'],
             'assembly_sides': _cen['sides'],
+            # Counted from the SMD population, not from the populated faces:
+            # flat_hierarchy is 64 parts, every one through-hole, and takes
+            # ZERO reflow passes on a face it is certainly populated on.
             'reflow_passes': _cen['reflow_passes'],
             # Just the entry count now: every block is one. The old formula
             # (len + sum(values) - len(values)) reconstructed the block total
