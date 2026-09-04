@@ -32,12 +32,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 
 from placement import escape as E                              # noqa: E402
 
-RUN_ALL_TIMEOUT = 120
-RUN_ALL_FAST_OK = True
+RUN_ALL_TIMEOUT = 300
 
 FAILURES = []
 PASSED = []
-SECTIONS = 2
+SECTIONS = 5
 
 
 def check(name, cond, detail=''):
@@ -193,8 +192,183 @@ def the_pad_band_geometry():
           near(hi - lo, 0.2))
 
 
+
+#: The modelled fixture. `qfn_interior_pads` exists in the corpus for exactly
+#: this question -- an HVQFN-32 whose pads 34-37 (INT1, INT2 and two GND
+#: guards) sit 1.075mm inside the part's south copper edge, boxed in by the
+#: QFN's UNNETTED south pin row. It is the board a previous attempt at #862
+#: broke, so it is the right fixture to build the gate on. Real geometry
+#: rather than stubs, because `part_copper_geometry` refuses to model a pad
+#: that carries no size and the whole point here is the MODELLED path.
+_FIXTURE = 'qfn_interior_pads'
+_FIXTURE_REF = 'U1'
+_CACHE = {}
+
+
+def _fixture(clearance=0.2):
+    key = round(clearance, 6)
+    if key not in _CACHE:
+        from kicad_parser import parse_kicad_pcb
+        from placement import legality as L
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pcb = parse_kicad_pcb(os.path.join(root, 'kicad_files',
+                                           _FIXTURE + '.kicad_pcb'))
+        geom = L.part_copper_geometry(pcb.footprints, clearance)[_FIXTURE_REF]
+        _CACHE[key] = (pcb.footprints[_FIXTURE_REF], geom)
+    return _CACHE[key]
+
+
+# ---------------------------------------------------------------- section 3
+def the_basis_is_a_pair_or_it_refuses():
+    """A half-named basis is a plausible wrong number, so it raises.
+
+    This lives in `assign_faces` rather than in each ledger because that is
+    the one function both lane ledgers share: a check placed in either caller
+    could be present in one instrument and missing from the other, which is
+    the shape of every defect #835, #841, #847, #849 and #850 closed.
+    """
+    fp, geom = _fixture()
+
+    def raises(**kw):
+        try:
+            E.assign_faces(fp, geom, lane_mm=0.4, **kw)
+        except ValueError as exc:
+            return str(exc)
+        return None
+
+    msg = raises(clearance=0.2)
+    check('a clearance without a track width refuses', msg is not None)
+    check('and the refusal says it is a pair', bool(msg) and 'PAIR' in msg,
+          str(msg))
+
+    check('a track width without a clearance refuses',
+          raises(track_width=0.2) is not None)
+
+    msg = raises(clearance=0.2, track_width=0.0)
+    check('a zero-width track refuses', msg is not None)
+    check('and the refusal cites what a zero threshold measures',
+          bool(msg) and 'qfn_interior_pads' in msg, str(msg))
+
+    check('a negative clearance refuses',
+          raises(clearance=-0.1, track_width=0.2) is not None)
+
+    # Naming NEITHER is the documented way to ask for the pre-#862 answer.
+    a = E.assign_faces(fp, geom, lane_mm=0.4)
+    check('naming neither is not an error',
+          a.corridor_source == 'not_measured', a.corridor_source)
+    check('and then the union answer IS the box answer',
+          list(a.box_faces) == [f for _p, f in a.faces])
+
+
+# ---------------------------------------------------------------- section 4
+def the_degradation_paths_are_declared():
+    """Every path that cannot run the corridor SAYS which one it was.
+
+    Four distinct strings rather than one `unknown`, because "nobody asked"
+    and "this part has no pad model" are different facts and a reader has to
+    be able to tell them apart.
+    """
+    fp, geom = _fixture()
+
+    a = E.assign_faces(fp, None, lane_mm=0.4, fallback_rect=(0.0, 0.0, 4.0,
+                                                             4.0),
+                       clearance=0.2, track_width=0.2)
+    check('an unmodelled part says so', a.corridor_source == 'unmodelled',
+          a.corridor_source)
+
+    a = E.assign_faces(fp, geom._replace(pads={}), lane_mm=0.4,
+                       clearance=0.2, track_width=0.2)
+    check('a part with no pad boxes says so',
+          a.corridor_source == 'no_pad_boxes', a.corridor_source)
+
+    a = E.assign_faces(fp, geom, lane_mm=0.4, clearance=0.2, track_width=0.2)
+    check('a modelled part reports the caller as the source',
+          a.corridor_source == 'caller', a.corridor_source)
+    check('and records the basis it ran at',
+          (a.corridor_clearance_mm, a.corridor_track_mm) == (0.2, 0.2))
+
+    # THE COVERAGE DECLARATION, asserted rather than assumed.
+    # `tests/test_escape_ledger.py`'s synthetic parts carry no pad sizes, so
+    # `part_copper_geometry` returns `modelled=False` with an EMPTY `pads`
+    # table and `legality.pad_box` answers None for every pad. Its
+    # `interior_pads == 9` oracle is preserved by the degradation path above
+    # -- and it witnesses NOTHING about the corridor. Pinned here so that the
+    # day those fixtures gain a pad model, a test says so instead of that
+    # oracle quietly changing meaning.
+    import importlib.util
+    from placement import legality as L
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    spec = importlib.util.spec_from_file_location(
+        '_tel', os.path.join(root, 'tests', 'test_escape_ledger.py'))
+    tel = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tel)
+    bare = tel._grid_part(n=5, pitch=0.5, interior=True)
+    g = L.part_copper_geometry({'U1': bare}, 0.25).get('U1')
+    check('the escape_ledger fixture is unmodelled',
+          g is not None and not g.modelled)
+    check('... with an empty pad table', g is not None and not g.pads)
+    check('... so every pad_box is None',
+          g is not None and all(L.pad_box(g, p) is None for p in bare.pads))
+    a = E.assign_faces(bare, g, lane_mm=0.45, clearance=0.25, track_width=0.2)
+    check('... the corridor never runs there',
+          a.corridor_source == 'no_pad_boxes', a.corridor_source)
+    check('... and its interior verdict is the box rule, unchanged',
+          list(a.box_faces) == [f for _p, f in a.faces])
+    check('... which is still 9 interior pads',
+          sum(1 for _p, f in a.faces if f is None) == 9,
+          str(sum(1 for _p, f in a.faces if f is None)))
+
+
+# ---------------------------------------------------------------- section 5
+def the_corridor_is_only_asked_about_box_interior_pads():
+    """Not an optimisation -- a proof, and it is asserted as one.
+
+    When `min(d) <= tol` the argmin direction is itself in the escaping set,
+    so filtering the tie block by the corridor cannot move the answer. The
+    union therefore only ADDS escapes, and asking the corridor about a pad the
+    box half already placed would be dead work that could only change an
+    answer by being wrong.
+    """
+    from placement import legality as L
+    fp, geom = _fixture()
+    seen = []
+    real = E.PadCorridors.clear
+
+    def spy(self, face, pad_box):
+        seen.append(pad_box)
+        return real(self, face, pad_box)
+
+    E.PadCorridors.clear = spy
+    try:
+        a = E.assign_faces(fp, geom, lane_mm=0.4,
+                           clearance=0.2, track_width=0.2)
+    finally:
+        E.PadCorridors.clear = real
+
+    asked = set(seen)
+    accepted = {L.pad_box(geom, p)
+                for p, f in zip(fp.pads, a.box_faces)
+                if f is not None and L.pad_box(geom, p) is not None}
+    check('the corridor ran at all', len(seen) > 0, str(len(seen)))
+    check('and was never asked about a pad the box half accepted',
+          not (asked & accepted),
+          '{} of {} accepted pads were asked'.format(
+              len(asked & accepted), len(accepted)))
+
+    # The union can only ADD escapes, never remove one. Provable, and this is
+    # the arm that fails the moment someone makes the corridor a REPLACEMENT
+    # for the box test rather than a second sufficient condition.
+    grew = [i for i, (_p, f) in enumerate(a.faces)
+            if f is None and a.box_faces[i] is not None]
+    check('no pad the box half placed became interior', not grew,
+          '{} pad(s) went the wrong way'.format(len(grew)))
+
+
 def main():
-    for fn in (the_free_run_kernel, the_pad_band_geometry):
+    for fn in (the_free_run_kernel, the_pad_band_geometry,
+               the_basis_is_a_pair_or_it_refuses,
+               the_degradation_paths_are_declared,
+               the_corridor_is_only_asked_about_box_interior_pads):
         fn()
     for f in FAILURES:
         print('FAIL: {}'.format(f))
