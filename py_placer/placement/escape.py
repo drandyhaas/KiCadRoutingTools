@@ -936,6 +936,112 @@ def span_eaten(lo, hi, band, horizontal, obstacles):
     return min(blocked, hi - lo), order
 
 
+#: The threshold epsilon. A pad's own copper span is the strip a track has to
+#: fit in, and that span is a SUBTRACTION of two parsed millimetre
+#: coordinates: ulx3s U1's 0.4mm balls give `139.08 - 138.68 ==
+#: 0.39999999999997726`, which is `< 0.4` and NOT `>= 0.4`. Measured, a bare
+#: `>=` puts the whole outer ring of that BGA back in the interior bucket at
+#: track 0.4 while answering correctly at track 0.2 -- a rule that works at
+#: one basis and silently fails at another, which is the exact failure mode
+#: this module keeps recording. Same 1e-9 `face_of`'s tie block already uses.
+FREE_RUN_EPS = 1e-9
+
+
+def free_run(lo, hi, band, horizontal, obstacles, grow=0.0):
+    """The largest CONTIGUOUS stretch of [lo, hi] that no obstacle covers.
+
+    `span_eaten`'s other question on the same interval arithmetic. That one
+    asks how much of a span is gone; this asks whether any ONE piece of it is
+    still wide enough for a track. A sum cannot answer that -- three 0.1mm
+    gaps and one 0.3mm gap eat the same total and only one of them passes a
+    0.3mm track. Measured over the tracked corpus at clearance 0.09, taking
+    the total instead of the largest run moves nine refs and breaks both of
+    #862's oracles (`qfn_interior_pads` U1 5 -> 2, `tigard` U3 18 -> 16,
+    `glasgow_revC` U1 27 -> 26) -- and it is a value NO-OP at clearance 0.20
+    and 0.25, so a test written at the census basis alone cannot see the
+    difference.
+
+    A SIBLING of `span_eaten` rather than a flag on it. Three differences, and
+    each is a reason not to share a loop:
+
+    * **The band overlap is STRICT** (`>` / `<`, not `>=` / `<=`).
+      `span_eaten`'s obstacles are OTHER parts, which may legitimately touch
+      the band edge; these are the escaping part's OWN pads, and the band
+      starts at the escaping pad's own edge. An inclusive test therefore
+      charges the pad against ITSELF -- its rect touches the band at exactly
+      one point and covers its own strip end to end, so nothing would ever
+      escape -- and against its own ROW-MATES, which are beside it, not in
+      front of it. Strictness removes both exactly, with no self-exclusion
+      bookkeeping.
+    * **`grow` inflates each obstacle on the ALONG axis** before clipping,
+      because a track may not touch foreign copper: the run that has to hold
+      `track_width` is the gap minus one clearance on each side. It is
+      deliberately NOT applied across the band -- the band's far edge is the
+      part's copper box, which is the union of these same rects, so there is
+      nothing beyond it to grow into.
+    * **It returns a length, not `(blocked, by_ref)`.** Nothing here needs to
+      name a blocker; the blocker is the part itself.
+
+    Coordinates are `span_eaten`'s: mm, board frame, `horizontal=True` when
+    the run is measured along x. Returns `hi - lo` when nothing intersects.
+    """
+    intervals = []
+    for rect in obstacles:
+        oxmin, oymin, oxmax, oymax = rect
+        across = (oymin, oymax) if horizontal else (oxmin, oxmax)
+        if across[1] <= band[0] or across[0] >= band[1]:
+            continue                              # not in this pad's way
+        along = (oxmin, oxmax) if horizontal else (oymin, oymax)
+        a, b = max(lo, along[0] - grow), min(hi, along[1] + grow)
+        if b > a:
+            intervals.append((a, b))
+
+    intervals.sort()
+    best = 0.0
+    cur = lo
+    for a, b in intervals:
+        if a > cur:
+            best = max(best, a - cur)
+        cur = max(cur, b)
+    return max(best, hi - cur)
+
+
+def pad_band(rect, face, pad_box):
+    """`(lo, hi, band, horizontal)` for ONE pad's straight way out of `rect`.
+
+    The inward twin of `face_band`. That one looks OUTSIDE the part, for a
+    neighbour's body in the escape band; this looks INSIDE it, from the pad's
+    own copper edge to the part's own copper edge, for the part's own copper
+    -- the other half of "can a track leave this pad", and the half a bounding
+    box cannot answer. #862: eight unnetted alignment marks 0.954mm outside a
+    BGA's ball field set that box for all 379 balls, and a box cannot tell
+    eight corner dots from an enclosing ring.
+
+    `lo, hi` is the pad's OWN span on the perpendicular axis, NOT a
+    pitch-wide window centred on it. Measured, the window form is unstable:
+    at clearance 0.09 it takes ulx3s U1 to 0 interior pads, because a window
+    wider than the pad lets a pad claim a corridor its own copper does not sit
+    in front of. It is also why `pad_pitch` appears nowhere in this
+    arithmetic -- it is a MIN-consecutive-gap over projected local
+    coordinates and reads 0.100 on `qfn_interior_pads`, so anything derived
+    from it is fragile by construction.
+
+    A band of zero depth means the pad is already on that edge of the box.
+    """
+    minx, miny, maxx, maxy = rect
+    px0, py0, px1, py1 = pad_box
+    horizontal = face in ('north', 'south')
+    lo, hi = (px0, px1) if horizontal else (py0, py1)
+    if face == 'north':
+        band = (miny, py0)
+    elif face == 'south':
+        band = (py1, maxy)
+    elif face == 'west':
+        band = (minx, px0)
+    else:
+        band = (px1, maxx)
+    return lo, hi, band, horizontal
+
 #: The escape band's two terms, named so a reader can tell which one decided.
 #: `4 x lane` is the model ("a track has room to turn past four lanes of
 #: depth"); the 1.0mm FLOOR is the term nobody has re-derived (#847) and it was
