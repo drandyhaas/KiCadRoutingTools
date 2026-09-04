@@ -336,16 +336,6 @@ def pad_pitch(fp) -> float:
     return min(_min_step(xs), _min_step(ys))
 
 
-def has_interior_pads(fp) -> bool:
-    xs = sorted({round(p.local_x, 3) for p in fp.pads})
-    ys = sorted({round(p.local_y, 3) for p in fp.pads})
-    if len(xs) < 3 or len(ys) < 3:
-        return False
-    minx, maxx, miny, maxy = xs[0], xs[-1], ys[0], ys[-1]
-    return any(minx < round(p.local_x, 3) < maxx
-               and miny < round(p.local_y, 3) < maxy for p in fp.pads)
-
-
 def fine_pitch_parts(pcb_data, min_pads: int = MIN_PADS) -> List[str]:
     """Refs worth a lane ledger, by PITCH and geometry -- not by pin count.
 
