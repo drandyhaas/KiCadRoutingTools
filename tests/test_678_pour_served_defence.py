@@ -350,6 +350,9 @@ def main():
        isinstance(psg.get('finalize'), dict) and psg['finalize'].get('checked') == 1)
     ok('GUI-shaped front discloses its source (model or exact), never a bare verdict',
        psg.get('finalize', {}).get('source') in ('model', 'exact'))
+    ok('GUI-shaped front gets the SHIP-time audit too (no file: model-sourced, no weld)',
+       isinstance(psg.get('ship'), dict) and psg['ship'].get('checked') == 1
+       and psg['ship'].get('source') == 'model' and psg['ship'].get('rewelded') == 0)
 
     shutil.rmtree(work, ignore_errors=True)
     failed = [n for n, c in CHECKS if not c]

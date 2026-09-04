@@ -4359,6 +4359,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # GUI's input_file is the live project's board, whose .kicad_pro the
     # fanout tab / plan executor wrote at their step boundary.
     _prom678 = {}
+    _ship_scope678 = []   # the finalize's zone nets, set on both fronts
     try:
         from protected_nets import read_pour_served_for_pcb_data as _rps678
         _prom678 = _rps678(pcb_data, input_file) or {}
@@ -4447,6 +4448,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # sees), and the oracle is the model-independent verifier --
             # on a healthy board it costs one refill and exits at round 0.
             _zpairs_all = list(_zpairs)
+            _ship_scope678 = sorted({n for n, _l in _zpairs_all})
             if _zpairs:
                 from check_connected import check_net_connectivity as _cnc9
                 _zbn9 = {}
@@ -5637,7 +5639,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # GUI's live board, disclosed as such), and when one is still detached
     # run a promise-SCOPED oracle weld pass over just those nets (CLI: the
     # weld needs a file), then audit again so the summary says what shipped.
-    if (_prom678 and _reaudit9 is not None and not skip_routing
+    if (_prom678 and _ship_scope678 and not skip_routing
             and (output_file or return_results)):
         try:
             from pour_promise import (audit_pour_promises as _apo678b,
@@ -5649,13 +5651,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             if _file678:
                 from kicad_parser import parse_kicad_pcb as _pk678b
                 _pd678b = _pk678b(_file678)
-            _scope678 = set(_reaudit9[0])
+            _scope678 = set(_ship_scope678)
             _aud678b = _apo678b(_pd678b, _prom678, board_file=_file678,
                                 project_from=input_file,
                                 zone_net_names=_scope678)
             print("  " + _fa678b(_aud678b, 'ship'))
             _rewelded678 = 0
-            if _aud678b['detached'] and _file678:
+            # The weld needs a file AND the oracle config the finalize
+            # built (CLI file mode); the GUI gets the audit and disclosure.
+            if _aud678b['detached'] and _file678 and _reaudit9 is not None:
                 from kicad_oracle import oracle_reconnect as _orc678
                 _nets678 = sorted({d['net'] for d in _aud678b['detached']})
                 print(f"  Pour-served balls (#678): "
