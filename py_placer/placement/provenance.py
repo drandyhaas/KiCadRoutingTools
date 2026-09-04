@@ -164,6 +164,25 @@ def commit_write(output_file: str) -> Optional[Dict]:
     return row
 
 
+def _side_changed(fp, placement) -> bool:
+    """Did this placement ask to put `fp` on the other face (#714)?
+
+    Reads the side through `legality.footprint_side` rather than re-deriving
+    the first-character test here: this repo already carries that rule in one
+    place and a second copy is a second thing to get wrong. Imported lazily,
+    as this module already does for `kicad_parser`; `legality` imports nothing
+    from here, so there is no cycle.
+    """
+    want = placement.get('new_side')
+    if want is None:
+        return False
+    try:
+        from placement.legality import footprint_side
+    except ImportError:                                          # noqa: BLE001
+        return True     # cannot tell -> report the change, never hide it
+    return footprint_side(fp) != want
+
+
 def record_write(input_file: str, output_file: str,
                  placements: Sequence[Dict],
                  pending: bool = False) -> Optional[Dict]:
@@ -212,6 +231,16 @@ def record_write(input_file: str, output_file: str,
                             - (p.get('new_rotation') or 0.0) + 180.0) % 360.0
                            - 180.0) > 1e-6):
                 moved.append(ref)
+            elif _side_changed(fp, p):
+                # #714. A flip with identical x/y/rot is a real change to the
+                # delivered board, and without this term it lands in
+                # `refs_written` but NOT in `refs_moved`, with a
+                # `poses_written` row byte-identical to the incumbent -- so
+                # the ledger records the flip nowhere and `fence_audit` grades
+                # a flipped board as untouched. That is a silent wrongness of
+                # exactly the class #714 exists to remove, and it would have
+                # been introduced by the fix for it.
+                moved.append(ref)
     except Exception:                            # noqa: BLE001
         moved = [p.get('reference') for p in placements]
 
@@ -236,6 +265,16 @@ def record_write(input_file: str, output_file: str,
                         else (getattr(_fp, 'rotation', 0.0) or 0.0)) % 360.0,
                   4)]
 
+    # #714. A SEPARATE key, deliberately not a fourth element of
+    # `poses_written`: that list's shape is [x, y, rot] in every ledger ever
+    # written, and only refs that actually carried a `new_side` appear here, so
+    # an old ledger stays readable and `SCHEMA` does not move (`read_ledger` is
+    # shape-agnostic and no consumer indexes past [2] -- `git grep
+    # poses_written` finds only its own definition).
+    _sides = {p_.get('reference'): p_.get('new_side')
+              for p_ in placements
+              if p_.get('reference') and p_.get('new_side') is not None}
+
     row = {'t': time.time(), 'schema': SCHEMA,
            'path': os.path.abspath(output_file),
            'parent_sha256': (sha256_file(input_file)
@@ -244,6 +283,7 @@ def record_write(input_file: str, output_file: str,
            'declared': True, 'caller': _caller(),
            'refs_written': sorted(p.get('reference') for p in placements),
            'poses_written': _written,
+           'sides_written': _sides,
            'refs_moved': sorted(r for r in moved if r)}
     if pending:
         row['_root'] = root

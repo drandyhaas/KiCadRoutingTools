@@ -35,12 +35,13 @@ Two things are deliberately NOT offered as mutations:
   than displacement -- you would be measuring legality recovery. A single-part
   flip stays available as a test fixture for the rotation term of the metric,
   never as an experiment arm.
-- **Layer flip (F.Cu <-> B.Cu).** `placement.writer.write_placed_output` rewrites
-  `(at ...)` and pad angles only: it writes no `(layer ...)` and mirrors no pads.
-  A "flip" through it produces a board whose pads contradict its side, which
-  corrupts `footprint_side` / `sides_occupied` and therefore every overlap number
-  downstream. If the wrong SIDE is wanted rather than the wrong HALF, that is a
-  writer capability first.
+(Until #714 there was a third: a **layer flip**, because
+`placement.writer.write_placed_output` rewrote `(at ...)` and pad angles only
+and a "flip" through it produced a board whose pads contradicted its side. That
+is now the `layer_flip` kind below -- the writer mirrors the geometry, and
+`tests/gui_parity/test_714_mirror_pcbnew_parity.py` holds it to pcbnew's own
+`FOOTPRINT.Flip` node for node. `wrong_side` is unchanged and still means the
+wrong HALF: a point reflection through the board centre.)
 """
 from __future__ import annotations
 
@@ -53,7 +54,26 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from kicad_parser import parse_kicad_pcb
 
-KINDS = ('translate', 'wrong_side', 'swap', 'scatter', 'pile')
+KINDS = ('translate', 'wrong_side', 'swap', 'scatter', 'pile', 'layer_flip')
+
+#: `layer_flip` is deliberately a NEW kind rather than a redefinition of
+#: `wrong_side`, which is a point reflection through the board centre and whose
+#: measured numbers are recorded in `docs/placement-predictors.md` and in two
+#: committed baselines (`tests/553_diagnosis_recall_baseline.json`,
+#: `tests/554_block_relocation_baseline.json`). Redefining it would invalidate
+#: every one of those inside a PR whose subject is a writer capability -- a
+#: measurement change wearing a code change's clothes.
+#:
+#: Adding one is safe because the study arm tuples are LITERAL, not derived from
+#: KINDS: `tests/stress/block_relocation_study.py` EVIDENCE_KINDS /
+#: INSTRUMENT_KINDS and `tests/stress/diagnosis_recall.py` ARMS / EVIDENCE_ARMS
+#: all enumerate arms by hand, so nothing selects this one until someone asks.
+#:
+#: It is NOT an evidence arm yet, and that is a statement about the GRADER, not
+#: about the kind: the recall study grades by displacement
+#: (`routability.block_displacements`), and a flip in place produces exactly
+#: zero of it, so a `layer_flip` arm would score "nothing moved" until the
+#: grader learns about sides.
 
 # A unit smaller than this is not a block, and one larger than this fraction of
 # the movable parts is the board rather than a block in it.
@@ -316,6 +336,19 @@ def rigid_offsets(state, members: Sequence[str], t: Tuple[float, float], *,
     return {r: (dx, dy) for r in members if r in state.parts}
 
 
+def _fp_side(pcb_data, ref) -> str:
+    """'F' or 'B' for `ref`, through the ONE side rule (#714).
+
+    `legality.footprint_side`, not a local first-character test: the writer
+    validates `new_side` against the same function, so the perturber cannot
+    disagree with it about which face a part is already on -- which would flip
+    nothing, or flip everything.
+    """
+    from placement.legality import footprint_side
+    fp = (pcb_data.footprints or {}).get(ref)
+    return footprint_side(fp) if fp is not None else 'F'
+
+
 def _placements(state, offsets: Dict[str, Tuple[float, float]]) -> List[Dict]:
     out = []
     for ref, (dx, dy) in sorted(offsets.items()):
@@ -485,7 +518,18 @@ def perturb(board: str, out_board: str, *, kind: str = 'translate',
             applied_req = feasible
             clipped = True
 
-    if kind == 'pile':
+    if kind == 'layer_flip':
+        # A flip IN PLACE: pose held exactly, side inverted. `dose_mm` has no
+        # meaning here -- there is no distance -- so the record says so rather
+        # than reporting a clipped dose that nobody applied.
+        placements = [{'reference': r, 'new_x': round(st.parts[r].x, 6),
+                       'new_y': round(st.parts[r].y, 6),
+                       'new_rotation': st.parts[r].rot,
+                       'new_side': ('F' if _fp_side(pcb, r) == 'B' else 'B')}
+                      for r in members if r in st.parts]
+        applied_req = 0.0
+        clipped = False
+    elif kind == 'pile':
         from placement.portfolio import free_refs
         members = sorted(r for r in free_refs(pcb, board, lock_globs)
                          if r in st.parts)
