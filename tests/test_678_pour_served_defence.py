@@ -334,6 +334,37 @@ def main():
           f"{sum(1 for v in pcb_r.vias if v.net_id == gid)}")
     ok('promised ball is connected on the shipped board (fill-aware)', res.get('connected'))
 
+    # ---- 3b. the WELD is opt-in, and the summary says which ---------------
+    # The audit is disclosure and always runs; turning its findings into
+    # copper is gated (env_knobs.POUR_PROMISE_WELD) until a corpus A/B says
+    # it pays. Observe the VALUE rather than trusting the wiring: the same
+    # run under the knob must report the other state, or the gate is not
+    # actually read.
+    ok("ship summary discloses the weld gate as OFF by default",
+       ps.get('ship', {}).get('weld') == 'off',
+       f"weld={ps.get('ship', {}).get('weld')!r}")
+    routed_on = os.path.join(work, 'routed_weld_on.kicad_pcb')
+    jout_on = os.path.join(work, 'routed_weld_on.json')
+    os.environ['KICAD_POUR_PROMISE_WELD'] = '1'   # the child inherits it
+    try:
+        r_on = check([PY, ROUTE, carved, routed_on, '--nets', 'GND',
+                      '--layers', 'F.Cu', 'B.Cu', '--track-width', '0.15',
+                      '--clearance', '0.1', '--via-size', '0.4',
+                      '--via-drill', '0.2', '--json-out', jout_on],
+                     accept=True, timeout=600)
+    finally:
+        os.environ.pop('KICAD_POUR_PROMISE_WELD', None)
+    evidence(jout_on, 'route --json-out (weld on)')
+    ps_on = (json.load(open(jout_on)).get('pour_served') or {})
+    print(f"    weld ON ship: {json.dumps(ps_on.get('ship'))}")
+    ok("the knob is READ: the same run reports weld ON when it is set",
+       ps_on.get('ship', {}).get('weld') == 'on',
+       f"weld={ps_on.get('ship', {}).get('weld')!r}")
+    ok("an intact promise ships the same either way (the gate costs nothing "
+       "when nothing is carved)",
+       ps_on.get('ship', {}).get('kept') == ps.get('ship', {}).get('kept')
+       and not ps_on.get('ship', {}).get('detached'))
+
     # ---- 4. GUI-shaped front: return_results, no file to refill -----------
     from route import batch_route
     buf = io.StringIO()

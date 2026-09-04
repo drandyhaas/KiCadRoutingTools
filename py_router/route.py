@@ -5116,6 +5116,20 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         pass
                     _add678 = [d for d in _aud678['detached']
                                if d.get('link')]
+                    # The AUDIT above is disclosure and always runs. Turning
+                    # its findings into custody links CHANGES COPPER, which
+                    # no A/B has yet shown pays -- and the chain it was tried
+                    # on cannot show it (see env_knobs.POUR_PROMISE_WELD for
+                    # the measured run-to-run spread). Opt-in until a corpus
+                    # A/B decides it.
+                    if _add678 and not env_knobs.POUR_PROMISE_WELD:
+                        print(f"  Pour-served balls (#678): {len(_add678)} "
+                              f"carved-off ball(s) on "
+                              f"{', '.join(sorted({d['net'] for d in _add678}))}"
+                              f" -- NOT welded (set KICAD_POUR_PROMISE_WELD=1 "
+                              f"to defend them)")
+                        summary['pour_served']['finalize']['weld'] = 'off'
+                        _add678 = []
                     if _add678:
                         _custody_links9.extend(d['link'] for d in _add678)
                         for _d678 in _add678:
@@ -5127,7 +5141,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                               f"{', '.join(sorted({d['net'] for d in _add678}))}"
                               f" -- joining the final reconciliation")
                     _nolink678 = len(_aud678['detached']) - len(_add678)
-                    if _nolink678:
+                    if _nolink678 and env_knobs.POUR_PROMISE_WELD:
                         print(f"  Pour-served balls (#678): {_nolink678} "
                               f"detached ball(s) with no sourced copper to "
                               f"weld to -- nothing to route")
@@ -5659,7 +5673,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             _rewelded678 = 0
             # The weld needs a file AND the oracle config the finalize
             # built (CLI file mode); the GUI gets the audit and disclosure.
-            if _aud678b['detached'] and _file678 and _reaudit9 is not None:
+            if (_aud678b['detached'] and _file678 and _reaudit9 is not None
+                    and env_knobs.POUR_PROMISE_WELD):
                 from kicad_oracle import oracle_reconnect as _orc678
                 _nets678 = sorted({d['net'] for d in _aud678b['detached']})
                 print(f"  Pour-served balls (#678): "
@@ -5679,8 +5694,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                 - len(_aud678c['detached']))
                 print("  " + _fa678b(_aud678c, 'ship, after weld'))
                 _aud678b = _aud678c
+            if _aud678b['detached'] and not env_knobs.POUR_PROMISE_WELD:
+                print(f"  Pour-served balls (#678): "
+                      f"{len(_aud678b['detached'])} still detached at ship "
+                      f"-- NOT welded (set KICAD_POUR_PROMISE_WELD=1 to "
+                      f"defend them)")
             _ship678 = _se678b(_aud678b)
             _ship678['rewelded'] = _rewelded678
+            _ship678['weld'] = ('on' if env_knobs.POUR_PROMISE_WELD else 'off')
             summary.setdefault('pour_served', {})['ship'] = _ship678
             try:   # GUI front reads results_data, not the summary
                 results_data['pour_served'] = summary['pour_served']
