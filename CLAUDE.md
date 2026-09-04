@@ -191,7 +191,15 @@ Validate routed boards against the *real* spec, with the right checker — most
   impedance nets stay rippable, but a later step touching them without
   `--impedance` recomputes the same widths from the stackup and applies them
   per-net (config `net_layer_widths`; route_diff reapplies call-level, one
-  spec only).
+  spec only). **Pour-served balls (#678)** persist the same way
+  (`pour_served_pads` key: `"REF.PAD"` -> net/layer/how): the BGA fanout's
+  pour-direct promises a ball will be served by fill contact instead of a
+  drop via, and the route step's in-run plane finalize audits every promise
+  against the exact fill AFTER routing (`pour_promise.py`), welds a
+  carved-off ball back through a custody link anchored at the ball, re-audits
+  the shipped board, and discloses the populations in
+  `JSON_SUMMARY.pour_served` -- the post-route half of #662's connectivity
+  contract. No flag, no GUI control.
 - **Per-layer clearance comes from the board's `.kicad_dru` (#498) and OUTRANKS
   `--clearance`.** KiCad stores layer-scoped clearance in custom rules
   (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
