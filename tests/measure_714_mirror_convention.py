@@ -287,10 +287,39 @@ def section_c(paths):
         print(f"   {board:<28} {ref:<6} {info}")
         print(f"        {why}")
 
-    # And the corpus-wide symmetric fraction, under BOTH predicates, so no
-    # threshold can be pinned to the wrong one.
+    # The corpus-wide symmetric fraction under THREE predicates, because the
+    # number depends on the predicate and the three answer different
+    # questions. Publishing one of them alone is how a safety margin gets
+    # quoted at twice its real size.
+    #
+    #   position          {(x, y)} closed under y -> -y
+    #                     "would a bare POSITION comparison notice the mirror?"
+    #                     -- the weakest, and the one the issue's 89.2% is.
+    #
+    #   tuple             {(num, type, shape, x, y, angle)} with the angle
+    #                     NEGATED on the mirrored side
+    #                     "would a full pad-tuple comparison notice an
+    #                     implementation that changes nothing but the layer
+    #                     token?" -- the angle term does most of the work here.
+    #
+    #   tuple_angle_held  the same tuple with the angle IDENTICAL on both sides
+    #                     "how often is the Y-MIRROR ITSELF unobservable?"
+    #                     -- i.e. against the mutant that negates angles and
+    #                     layers but forgets y, which is exactly the local-X /
+    #                     local-Y confusion the issue's own prose invites.
+    #
+    # That third one is the number an implementer needs and it is the worst of
+    # the three. Measured: 90.8% / 40.3% / 76.6%. Reading 40.3% as the margin
+    # against a forgotten y-mirror is off by nearly a factor of two.
+    def _hold_angle(k):
+        return (k[0], k[1], k[2], k[3], k[4], 0.0)
+
     stats = {}
-    for label, keyfn in (('position', _pad_key_pos), ('tuple', _pad_key_tuple)):
+    for label, keyfn, mirrorfn in (
+            ('position', _pad_key_pos, lambda k: _mirror(k, 'y')),
+            ('tuple', _pad_key_tuple, lambda k: _mirror(k, 'y')),
+            ('tuple_angle_held', lambda q: _hold_angle(_pad_key_tuple(q)),
+             lambda k: _mirror(_hold_angle(k), 'y'))):
         tot = sym = 0
         for p in paths:
             for _ref, fp in parse_kicad_pcb(p).footprints.items():
@@ -298,10 +327,10 @@ def section_c(paths):
                     continue
                 tot += 1
                 ks = sorted(keyfn(q) for q in fp.pads)
-                if ks == sorted(_mirror(k, 'y') for k in ks):
+                if ks == sorted(mirrorfn(k) for k in ks):
                     sym += 1
         stats[label] = (sym, tot, round(100.0 * sym / tot, 1) if tot else 0.0)
-        print(f"   y-symmetric under the {label:<8} predicate: "
+        print(f"   y-symmetric under the {label:<17} predicate: "
               f"{sym}/{tot} = {stats[label][2]}%")
     return {'fixtures': [(b, r, i if isinstance(i, dict) else str(i))
                          for b, r, i, _w in rows],
@@ -329,6 +358,18 @@ def section_d(paths):
 # ------------------------------------------- sections E/F (need pcbnew)
 
 def _fp_signature(pcbnew, fp):
+    """Every mirror-relevant field, keyed so two states can be compared.
+
+    ALL text-bearing nodes, not just Reference and Value. Sampling two of them
+    UNDERCOUNTS, and it undercounted here: a footprint carries ~5.7 text nodes
+    corpus-wide, 736 of them sit on the opposite face from their footprint's
+    own `(layer ...)`, and it is the excluded ones -- `Datasheet` and
+    `Description` on F.Fab -- that make LEFT_RIGHT non-involutive on tigard J1
+    and LOGO2. Measured: the two-field sample reported LEFT_RIGHT failing on
+    4 of 15 fixtures, the full sample reports 6 of 15. The conclusion held
+    (LEFT_RIGHT is lossy) but the published count was wrong, and wrong in the
+    direction that made the measurement look tidier than it was.
+    """
     sig = {'layer': pcbnew.LayerName(fp.GetLayer()),
            'orient': round(fp.GetOrientationDegrees() % 360, 4), 'pads': [],
            'texts': []}
@@ -338,12 +379,40 @@ def _fp_signature(pcbnew, fp):
                             round(p.GetOrientationDegrees() % 360, 4),
                             tuple(sorted(pcbnew.LayerName(l)
                                          for l in p.GetLayerSet().Seq()))))
-    for t in (fp.Reference(), fp.Value()):
+    # Keyed by UUID, never sorted. Sorting looked harmless and was not: a
+    # flip changes a text's y, angle, mirror flag and layer, so the sort order
+    # changes with it and a before/after zip then pairs unrelated texts --
+    # which reported `txt_lay=False` and `txt180=False` on six fixtures whose
+    # texts were in fact correct. pcbnew preserves uuids across a Flip, so the
+    # uuid is the one field that identifies the same node on both sides.
+    # `GetFields()`, not `Reference()` + `Value()`. A footprint's fields are
+    # Reference, Value, Datasheet and Description; the first two are the ones
+    # a human sees and the LAST TWO are the ones that make LEFT_RIGHT
+    # non-involutive on tigard J1 and LOGO2 (both sit on F.Fab and both fold
+    # 180 -> 0 / 270 -> 90 under a double LEFT_RIGHT flip). Sampling the
+    # visible two reported LEFT_RIGHT failing on 4 of 15 fixtures; sampling
+    # all four reports 6 of 15. `GraphicalItems()` carries `fp_text` and does
+    # NOT carry fields, so both sources are needed.
+    if hasattr(fp, 'GetFields'):
+        texts = list(fp.GetFields())
+    else:
+        texts = [fp.Reference(), fp.Value()]
+    for it in fp.GraphicalItems():
+        if hasattr(it, 'GetTextAngleDegrees'):
+            texts.append(it)
+    sig['texts'] = {}
+    for t in texts:
         r = t.GetFPRelativePosition()
-        sig['texts'].append((r.x, r.y, round(t.GetTextAngleDegrees() % 360, 4),
-                             bool(t.IsMirrored()),
-                             pcbnew.LayerName(t.GetLayer())))
+        sig['texts'][t.m_Uuid.AsString()] = (
+            r.x, r.y, round(t.GetTextAngleDegrees() % 360, 4),
+            bool(t.IsMirrored()), pcbnew.LayerName(t.GetLayer()))
     return sig
+
+
+def _paired(before, after):
+    """(before_row, after_row) for every text present on BOTH sides, by uuid."""
+    return [(before['texts'][k], after['texts'][k])
+            for k in before['texts'] if k in after['texts']]
 
 
 def _flip(pcbnew, fp, direction):
@@ -352,6 +421,7 @@ def _flip(pcbnew, fp, direction):
 
 def section_e(paths):
     import pcbnew
+    from kicad_parser import flip_layer_token
     tb = getattr(pcbnew, 'FLIP_DIRECTION_TOP_BOTTOM', False)
     by_board = {os.path.splitext(os.path.basename(p))[0]: p for p in paths}
     print("E. the pcbnew mirror convention "
@@ -372,16 +442,60 @@ def section_e(paths):
         # The three rules, stated as checks rather than as prose.
         pad_x_fixed = all(a[1] == c[1] for a, c in zip(before['pads'], after['pads']))
         pad_y_neg = all(a[2] == -c[2] for a, c in zip(before['pads'], after['pads']))
+        # ASSERTED, not merely captured. The first version of this script read
+        # pad angles and pad layer sets into the signature and then checked
+        # NEITHER, so "footprint and pad angles negate, 15/15" rested on a
+        # check that only ever looked at the footprint's own orientation.
+        pad_ang_neg = all(round((-a[3]) % 360, 4) == c[3]
+                          for a, c in zip(before['pads'], after['pads']))
+        pad_layers_flipped = all(
+            tuple(sorted(flip_layer_token(x) for x in a[4])) == c[4]
+            for a, c in zip(before['pads'], after['pads']))
+        _tx = _paired(before, after)
+        txt_layers_flipped = all(flip_layer_token(a[4]) == c[4] for a, c in _tx)
         layer_flipped = before['layer'][0] != after['layer'][0]
-        txt_180 = all(round((180 - a[2]) % 360, 4) == c[2]
-                      for a, c in zip(before['texts'], after['texts']))
-        mirror_tog = all(a[3] != c[3] for a, c in zip(before['texts'], after['texts']))
+        txt_180 = all(round((180 - a[2]) % 360, 4) == c[2] for a, c in _tx)
+        # The mirror FLAG toggles only for a text on a SIDED layer. Measured
+        # against pcbnew 10.0.0: a text on Cmts.User / Eco1.User / Dwgs.User
+        # has its y and its angle mirrored like any other and keeps its
+        # justify untouched -- there is no face for it to be seen from the
+        # wrong side of. 28 flip-eligible texts on the tracked corpus sit on a
+        # User layer. Reported separately so the qualifier cannot be lost:
+        # the unconditional form of this check is what shipped a writer that
+        # added `(justify mirror)` to all of them.
+        _sided = [(a, c) for a, c in _tx if a[4][:2] in ('F.', 'B.')]
+        _unsided = [(a, c) for a, c in _tx if a[4][:2] not in ('F.', 'B.')]
+        mirror_tog = all(a[3] != c[3] for a, c in _sided)
+        mirror_held = all(a[3] == c[3] for a, c in _unsided)
         orient_neg = round((-before['orient']) % 360, 4) == after['orient']
         print(f"   {board:<28} {ref:<6} pads={len(before['pads']):3d} "
               f"{before['layer']}->{after['layer']}  "
               f"x_fixed={pad_x_fixed} y_neg={pad_y_neg} layer={layer_flipped} "
-              f"txt180={txt_180} mirror_toggle={mirror_tog} orient_neg={orient_neg}")
+              f"pad_ang={pad_ang_neg} pad_lay={pad_layers_flipped} "
+              f"txt_lay={txt_layers_flipped} txt180={txt_180} "
+              f"mirror_tog={mirror_tog} mirror_held={mirror_held} "
+              f"orient_neg={orient_neg}")
+        # DISCRIMINATION, printed beside the verdict, because a check run on a
+        # fixture that cannot see it is not evidence. Measured: `orient_neg` is
+        # vacuous on 7 of 15 (rot 0 or 180, where -r == r) and `pad_y_neg` on 3
+        # -- tigard LOGO2 (no pads), ulx3s BAT1 (every pad at local x=0) and
+        # glasgow_revC R9 (every pad at local y=0), which is the set's ONLY
+        # 45-degree fixture, so the fixture carrying non-orthogonal rotation
+        # carries nothing at all about the y-mirror.
+        print(f"        [live: y={any(a[2] for a in before['pads'])} "
+              f"x={any(a[1] for a in before['pads'])} "
+              f"rot={round(before['orient'] % 180, 4) != 0.0} "
+              f"padang={any(a[3] % 180 for a in before['pads'])} "
+              f"unsided_texts={len(_unsided)}]")
         out[f"{board}:{ref}"] = dict(pad_x_fixed=pad_x_fixed, pad_y_neg=pad_y_neg,
+                                     pad_angles_negate=pad_ang_neg,
+                                     pad_layers_flipped=pad_layers_flipped,
+                                     text_layers_flipped=txt_layers_flipped,
+                                     mirror_held_on_unsided=mirror_held,
+                                     live_y=any(a[2] for a in before['pads']),
+                                     live_x=any(a[1] for a in before['pads']),
+                                     live_rot=round(before['orient'] % 180, 4) != 0.0,
+                                     unsided_texts=len(_unsided),
                                      layer_flipped=layer_flipped,
                                      text_180_minus_a=txt_180,
                                      mirror_toggles=mirror_tog,

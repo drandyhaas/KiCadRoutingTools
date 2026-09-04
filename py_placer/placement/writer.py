@@ -605,9 +605,21 @@ def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
         elif head == 'pad':
             new = _flip_pad(node, ref, old_rot, new_rot)
         elif head in _FLIP_TEXTS:
+            # The mirror FLAG is conditional on the text living on a sided
+            # layer, and only the flag is. Measured against pcbnew 10.0.0: a
+            # text on `Cmts.User` / `Eco1.User` / `Dwgs.User` has its y and its
+            # angle mirrored like any other, but pcbnew does NOT add
+            # `(justify mirror)` to it -- there is no face for it to be seen
+            # from the wrong side of. Toggling it anyway is a real divergence
+            # and it is invisible on an ordinary part: 28 flip-eligible texts
+            # on the tracked corpus sit on a User layer, and not one of the
+            # thirteen parity fixtures carried one until orangecrab U3 and J1
+            # were added for exactly this.
+            sided = bool(re.search(r'\(layer\s+"[FB]\.', node))
             new = _flip_at_angle(node, ref, lambda a: 180.0 - a)
             new = _flip_layer_nodes(new)
-            new = _flip_justify(new)
+            if sided:
+                new = _flip_justify(new)
         else:
             new = _flip_graphic(node, head, ref)
 

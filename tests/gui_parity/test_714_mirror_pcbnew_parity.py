@@ -85,13 +85,20 @@ FIXTURES = [
     ('rp2350_fpga_eensy_prePlane', 'SW1'),  # fp_arc on a 10.0 board
     ('rp2350_fpga_eensy_prePlane', 'D1'),   # non-orthogonal rotation, -45
     ('ulx3s', 'BAT1'),       # 19 fp_arc, B.Cu -- graphics tier
+    # Texts on a NON-sided layer. pcbnew mirrors their y and angle but leaves
+    # `(justify ...)` alone -- there is no face to be seen from the wrong side
+    # of. 28 flip-eligible texts on the tracked corpus sit on a User layer and
+    # NONE of the fixtures above carries one, so this divergence shipped
+    # invisibly until these two were added.
+    ('orangecrab_ext_pll', 'U3'),   # 2 fp_text on Cmts.User
+    ('orangecrab_ext_pll', 'J1'),   # property on Eco1.User
 ]
 
 # A run that compared nothing must fail. Floors are below today's counts so a
 # board changing is not a failure, and far above zero so a vacuous run is.
-MIN_FIXTURES = 10
-MIN_PADS = 200
-MIN_NON_PAD_NODES = 300
+MIN_FIXTURES = 12
+MIN_PADS = 400
+MIN_NON_PAD_NODES = 400
 # Surfaces at least one fixture must actually carry, so the set cannot silently
 # stop covering them.
 REQUIRED_SURFACES = ('fp_arc', 'fp_curve', 'model', 'fp_poly', 'fp_circle')
