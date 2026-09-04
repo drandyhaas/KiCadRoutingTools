@@ -390,7 +390,14 @@ def the_corridor_is_only_asked_about_box_interior_pads():
 #: function of clearance and track width where before it was a function of
 #: geometry alone. 0.09/0.10 is where `check_channels` runs the corpus,
 #: 0.20/0.20 is `test_850`'s census basis, 0.25/0.30 is the CLI's own default.
-BASES = ((0.09, 0.10), (0.20, 0.20), (0.25, 0.30))
+#: 0.40/0.40 is not a basis any caller uses, and it is here for a reason a
+#: mutation run supplied: WITHOUT it, dropping FREE_RUN_EPS survives this
+#: whole gate. The epsilon only bites where a free run lands exactly on the
+#: threshold, which on this corpus is clearance 0.05 and 0.40 and nowhere
+#: else -- so a gate pinned only at the bases in use cannot see the trap that
+#: motivated the constant. At 0.40/0.40 a bare comparison puts 33 of ulx3s
+#: U1'''s recovered balls back in the interior bucket (308 -> 341).
+BASES = ((0.09, 0.10), (0.20, 0.20), (0.25, 0.30), (0.40, 0.40))
 GOLDEN_862 = {
     ('ulx3s', 'U1'):              {b: (379, 308) for b in BASES},
     ('qfn_interior_pads', 'U1'):  {b: (5, 5) for b in BASES},
