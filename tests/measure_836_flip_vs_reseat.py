@@ -105,9 +105,16 @@ CONTROL = ('splitflap_driver', 'watchy', 'flat_hierarchy')
 CLEARANCE = 0.2
 EDGE_CLEARANCE = 0.5
 RESEAT_RADIUS_MM = 5.0
-RANK_RADIUS_MM = 3.0
+#: The move arm's reach. Pre-registered, and BOUNDED: `rank_poses` pays a full
+#: `total_cost()` per (offset, rotation), so 3.0mm at 0.5mm is 452 evaluations
+#: per candidate and minutes per part on a 235-part board. 1.5mm is 116, which
+#: is still a strict superset of `reseat.slot_pool`'s 32 positions x 4
+#: rotations for a single part. A run that cannot finish measures nothing, and
+#: the sensitivity of the answer to this number is reported rather than
+#: assumed: `--rank-radius` re-runs it on the EXCLUSIVE set alone.
+RANK_RADIUS_MM = 1.5
 RANK_STEP_MM = 0.5
-RANK_LIMIT = 8
+RANK_LIMIT = 6
 
 
 def _sha(path):
@@ -122,6 +129,11 @@ def engine_sha():
                               capture_output=True, text=True).stdout.strip()
     except Exception:                                          # noqa: BLE001
         return 'unknown'
+
+
+def io_read(path):
+    with open(path, encoding='utf-8') as fh:
+        return fh.read()
 
 
 def board_path(stem):
@@ -213,25 +225,26 @@ def table_a(stems):
         st = make_state(pcb, path)
         movable = [r for r, p in st.parts.items() if not p.locked]
         refused, reasons = [], {}
-        tmp = tempfile.mkdtemp(prefix='m836a')
-        try:
-            base = _identity_placements(st)
-            for ref in movable:
-                pl = [dict(d) for d in base]
-                for d in pl:
-                    if d['reference'] == ref:
-                        d['new_side'] = ('B' if st.parts[ref].side == 'F'
-                                         else 'F')
-                try:
-                    _write(path, os.path.join(tmp, 'p.kicad_pcb'), pl)
-                except SideFlipUnsupported as exc:
-                    refused.append(ref)
-                    reasons[ref] = str(exc)[:120]
-                except Exception as exc:                       # noqa: BLE001
-                    refused.append(ref)
-                    reasons[ref] = f"{type(exc).__name__}: {str(exc)[:100]}"
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        # The refusal census asks `_flip_footprint_block` directly rather than
+        # writing the whole board once per part. Same function, same raise --
+        # `write_placed_output` reaches it through a loop over blocks -- but a
+        # whole-board write costs ~1s on a 1.9MB board, which is 4 minutes per
+        # board to learn something the block transform answers in milliseconds.
+        from placement.writer import _flip_footprint_block
+        from kicad_parser import iter_footprint_blocks
+        content = io_read(path)
+        for _s, _e, fp_text, _raw, key in iter_footprint_blocks(content):
+            if key not in st.parts:
+                continue
+            rot = st.parts[key].rot
+            try:
+                _flip_footprint_block(fp_text, key, rot, rot)
+            except SideFlipUnsupported as exc:
+                refused.append(key)
+                reasons[key] = str(exc)[:120]
+            except Exception as exc:                           # noqa: BLE001
+                refused.append(key)
+                reasons[key] = f"{type(exc).__name__}: {str(exc)[:100]}"
         cl = _reseat_clusters(pcb, st)
         covered = {m for c in cl for m in c.members}
         rows[stem] = {
@@ -354,7 +367,9 @@ def table_b(stems, limit=None, quiet=True):
 
             helps_flip, helps_move, exclusive, refused = [], [], [], []
             area_relief = []
-            for ref in movable:
+            for _i, ref in enumerate(movable):
+                if _i and _i % 25 == 0:
+                    print(f"    {stem}: {_i}/{len(movable)}", flush=True)
                 pl = [dict(d) for d in base_pl]
                 for d in pl:
                     if d['reference'] == ref:
