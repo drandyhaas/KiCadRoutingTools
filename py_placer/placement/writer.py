@@ -11,7 +11,8 @@ import re
 import sys
 from typing import List, Dict
 
-from kicad_parser import find_matching_paren, iter_footprint_blocks
+from kicad_parser import (find_matching_paren, flip_layer_token,
+                          iter_footprint_blocks)
 from kicad_writer import move_copper_text_to_silkscreen
 
 
@@ -263,6 +264,367 @@ def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
         fix_pad, fp_text)
 
 
+class SideFlipUnsupported(Exception):
+    """A flip was asked for on a footprint carrying a construct we will not guess at.
+
+    #714. RAISES rather than passing the construct through untouched, and the
+    argument is the same one `OutlineOwnerMove` above already makes:
+    `write_placed_output` returns True unconditionally, so a construct the
+    transform quietly skipped is indistinguishable from success at every call
+    site -- and a half-mirrored footprint is the SILENT failure this whole
+    feature is written around. `legality.footprint_side` reads `fp.layer[0]`
+    and nothing cross-checks the pads, so the board would grade plausibly and
+    wrongly forever.
+
+    Refusing is cheap, measured over the 22 tracked boards (1349 footprint
+    blocks): the refusal set touches at most 7 of them -- `primitives` 6,
+    `zone` 1 -- while `chamfer`, `rect_delta`, `fp_text_box` and `group` have
+    NO witness at all. A construct the corpus does not contain is a construct
+    no gate here can validate, so any rule for it would be an unfalsifiable
+    guess.
+    """
+
+
+# A coordinate literal, as this corpus actually spells them: measured 148417
+# tokens across every `(at|start|end|mid|center|xy|offset ...)` on every tracked
+# board, with ZERO outside this shape -- no leading `+`, no exponent, no `-0`.
+# That is what makes the sign TOGGLE below an exact involution, and it is why a
+# literal outside the shape is a refusal rather than a `float()` round trip.
+_COORD_LITERAL = re.compile(r'^-?\d+(\.\d+)?$')
+
+# Top-level children of a `(footprint ...)` block, by what the flip does with
+# them. Measured: these 27 heads are every top-level child kind on the tracked
+# corpus. Anything else REFUSES -- a whitelist, because you cannot test for a
+# node kind you have not thought of.
+_FLIP_PASSTHROUGH = frozenset({
+    'uuid', 'descr', 'tags', 'path', 'attr', 'embedded_fonts', 'sheetfile',
+    'sheetname', 'units', 'locked', 'variant', 'solder_mask_margin',
+    'solder_paste_margin', 'duplicate_pad_numbers_are_jumpers',
+    'net_tie_pad_groups', 'jumper_pad_groups', 'tstamp', 'autoplace_cost90',
+    'autoplace_cost180', 'clearance', 'zone_connect', 'thermal_width',
+    'thermal_gap', 'generator', 'generator_version', 'version',
+    # The 3D model is left COMPLETELY alone: the viewer applies the flip at
+    # render time, so mirroring its offset double-applies it. Probed on
+    # tigard J1 and orangecrab J4 -- pcbnew leaves both byte-identical.
+    'model',
+})
+_FLIP_GRAPHICS = frozenset({'fp_line', 'fp_rect', 'fp_circle', 'fp_poly',
+                            'fp_curve', 'fp_arc'})
+_FLIP_TEXTS = frozenset({'property', 'fp_text'})
+# `(layer ...)` and `(at ...)` are the footprint's OWN; `pad` and
+# `private_layers` have their own handlers.
+_FLIP_HANDLED = (_FLIP_GRAPHICS | _FLIP_TEXTS
+                 | {'layer', 'at', 'pad', 'private_layers'})
+
+# Constructs we refuse BY NAME, so the message can say which and why, rather
+# than falling through the generic "unknown node kind" arm.
+_FLIP_NAMED_REFUSALS = {
+    'zone': ("a footprint-internal (zone ...) stores its (pts (xy ...)) in "
+             "ABSOLUTE board coordinates, so mirroring it needs a flip centre "
+             "that this call does not have -- the pose may change in the same "
+             "write. One witness on the tracked corpus"),
+    'fp_text_box': "no tracked board carries one, so no gate here can validate a rule for it",
+    'group': "no tracked board carries one, so no gate here can validate a rule for it",
+}
+# ...and inside a pad.
+_PAD_REFUSALS = {
+    'primitives': ("a custom pad's sub-geometry frame is unconfirmed against "
+                   "pcbnew; 6 witnesses on the tracked corpus, none of them "
+                   "enough to validate a rule"),
+    'chamfer': ("corner NAMES under a mirror are unmeasured -- no tracked "
+                "board carries a chamfered pad"),
+    'rect_delta': ("trapezoid pad deltas under a mirror are unmeasured -- no "
+                   "tracked board carries one"),
+}
+
+_SIDED_LAYER = re.compile(r'^[FB]\.')
+_INNER_LAYER = re.compile(r'^In\d+\.Cu$', re.IGNORECASE)
+
+
+def _negate_coord(tok: str, ref: str, where: str) -> str:
+    """Toggle a coordinate literal's sign, as TEXT.
+
+    Not `_fmt_mm(-float(tok))`: that rewrites `0.500` as `0.5`, and the
+    flip-and-flip-back byte-identity gate would then be pinning the formatter
+    instead of the transform. A sign toggle over the measured literal grammar
+    is an exact involution by construction.
+    """
+    if not _COORD_LITERAL.match(tok):
+        raise SideFlipUnsupported(
+            f"{ref}: the coordinate {tok!r} in {where} is outside the literal "
+            f"grammar -?\\d+(\\.\\d+)? that makes a sign toggle an exact "
+            f"involution (measured: 148417 tokens on the tracked corpus, 0 "
+            f"outside it). Refusing rather than round-tripping it through "
+            f"float and silently reformatting the board.")
+    if float(tok) == 0.0:
+        return tok                      # '0' and '-0.000' both stay put
+    return tok[1:] if tok.startswith('-') else '-' + tok
+
+
+def _iter_sexpr_children(text: str, open_idx: int = 0):
+    """(head, start, end) for each direct child of the node starting at open_idx.
+
+    Built on the shipped string-aware `find_matching_paren`, so a lone paren
+    inside a quoted property value (an MPN like "TCR2EF115,LM(CT", #113) cannot
+    run the walk out of one node into the next.
+    """
+    end_all = find_matching_paren(text, open_idx)
+    i = open_idx + 1
+    while i < end_all - 1:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < end_all and text[i] != '"':
+                i += 2 if text[i] == '\\' else 1
+            i += 1
+            continue
+        if c == '(':
+            end = find_matching_paren(text, i)
+            m = re.match(r'\(\s*([A-Za-z_][A-Za-z_0-9]*)', text[i:end])
+            yield (m.group(1) if m else '?'), i, end
+            i = end
+            continue
+        i += 1
+
+
+def _mirror_xy_pairs(node: str, ref: str, heads=('start', 'end', 'center',
+                                                 'mid', 'xy')) -> str:
+    """Negate the Y of every `(head x y)` in `node`. X is never touched."""
+    pat = re.compile(r'\((' + '|'.join(heads) + r')(\s+)(\S+)(\s+)(\S+)\)')
+
+    def fix(m):
+        return (f"({m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}"
+                f"{_negate_coord(m.group(5), ref, m.group(1))})")
+
+    return pat.sub(fix, node)
+
+
+def _flip_layer_nodes(node: str) -> str:
+    """Toggle every `(layer "X")` token inside `node`."""
+    def fix(m):
+        return f'(layer "{flip_layer_token(m.group(1))}")'
+    return re.sub(r'\(layer\s+"([^"]+)"\)', fix, node)
+
+
+def _flip_at_angle(node: str, ref: str, new_angle_of) -> str:
+    """Mirror the FIRST `(at x y [a])` in `node`: y negated, angle remapped.
+
+    The angle token's PRESENCE is preserved, which is what makes the round trip
+    exact. Measured: all 1110 `fp_text` and all 6565 `property` nodes on the
+    tracked corpus carry an explicit three-token `(at x y a)`, so a text never
+    gains or loses the token; 2884 pads carry the two-token form, and for those
+    the angle is 0 and stays 0 whenever the footprint's own rotation is 0 or
+    180. A pad that would gain a non-zero angle gains the token.
+    """
+    m = re.search(r'\(at\s+(\S+)\s+(\S+)(?:\s+(\S+))?\)', node)
+    if not m:
+        return node
+    x, y, a = m.group(1), m.group(2), m.group(3)
+    ny = _negate_coord(y, ref, 'at')
+    na = new_angle_of(float(a) if a is not None else 0.0)
+    na = round(na % 360, 6)
+    if a is not None or na != 0:
+        rep = f"(at {x} {ny} {na:.6g})"
+    else:
+        rep = f"(at {x} {ny})"
+    return node[:m.start()] + rep + node[m.end():]
+
+
+def _flip_justify(node: str) -> str:
+    """Toggle the `mirror` token of the first `(justify ...)` in `node`.
+
+    Three cases, and two of them add or delete a whole node. Measured, the
+    tracked corpus contains exactly two forms -- `(justify mirror)` x1391 and
+    `(justify left bottom)` x58 -- so alignment tokens are preserved and only
+    `mirror` moves:
+
+      absent            -> insert `(justify mirror)` as the last child of
+                           `(effects ...)`, at the `(font ...)` indentation,
+                           which is where KiCad writes it
+      `left bottom`     -> `left bottom mirror`
+      `mirror` alone    -> DELETE the node and its leading newline+indent
+                           (dropping only the token would leave `(justify)`)
+
+    The delete case is the one a token-replacement implementation gets wrong,
+    and it is the whole of the B->F direction.
+    """
+    m = re.search(r'(\s*)\(justify\s+([^()]*?)\)', node)
+    if m:
+        toks = m.group(2).split()
+        if 'mirror' in toks:
+            toks = [t for t in toks if t != 'mirror']
+            if not toks:
+                # the node's ENTIRE text, leading whitespace included, so
+                # insert and delete are exact inverses
+                return node[:m.start()] + node[m.end():]
+            rep = m.group(1) + '(justify ' + ' '.join(toks) + ')'
+        else:
+            rep = m.group(1) + '(justify ' + ' '.join(toks + ['mirror']) + ')'
+        return node[:m.start()] + rep + node[m.end():]
+
+    fm = re.search(r'(\n([ \t]*))\(font\b', node)
+    if fm is None:
+        return node          # no effects/font block: nothing to hang it on
+    fend = find_matching_paren(node, fm.end() - len('(font'))
+    return node[:fend] + fm.group(1) + '(justify mirror)' + node[fend:]
+
+
+def _flip_pad(node: str, ref: str, old_rot: float, new_rot: float) -> str:
+    """Mirror one `(pad ...)` node.
+
+    The pad ANGLE is the subtle one and is derived, not copied. KiCad stores a
+    pad's angle ABSOLUTE (`a = R + p`, p the pad-local angle); a flip sends
+    `p -> -p`, so
+
+        a' = R_new - (a - R_old)
+
+    `_rotate_pad_angles` computes `a + (R_new - R_old) = R_new + p`, which
+    agrees only when p is 0 or 180. This path therefore owns the pad `(at ...)`
+    entirely and never calls it -- one code path per mode, so the ordinary
+    non-flip write cannot regress.
+    """
+    for head, s, e in _iter_sexpr_children(node, 0):
+        if head in _PAD_REFUSALS:
+            raise SideFlipUnsupported(
+                f"{ref}: a pad carries ({head} ...) -- {_PAD_REFUSALS[head]}. "
+                f"Refusing to guess at its mirror image.")
+
+    lm = re.search(r'\(layers\b', node)
+    if lm:
+        lend = find_matching_paren(node, lm.start())
+        block = node[lm.start():lend]
+        toks = re.findall(r'"([^"]+)"', block)
+        for t in toks:
+            if '&' in t:
+                raise SideFlipUnsupported(
+                    f"{ref}: a pad names the layer set {t!r}. It is plausibly "
+                    f"its own mirror, and no tracked board carries one, so "
+                    f"nothing here can check that. Refusing rather than "
+                    f"guessing.")
+            if _INNER_LAYER.match(t):
+                raise SideFlipUnsupported(
+                    f"{ref}: a pad names the inner copper layer {t!r}. Its "
+                    f"mirror image depends on the board's inner-layer count "
+                    f"and on remove_unused_layers padstack semantics, and no "
+                    f"tracked board carries one in a footprint pad. Refusing.")
+        new_block = re.sub(r'"([^"]+)"',
+                           lambda m: '"' + flip_layer_token(m.group(1)) + '"',
+                           block)
+        node = node[:lm.start()] + new_block + node[lend:]
+
+    node = _flip_at_angle(node, ref, lambda a: new_rot - (a - old_rot))
+
+    # `(drill ... (offset x y))` -- the offset is the HOLE's displacement from
+    # the copper centre and mirrors with everything else. The only witness on
+    # the tracked corpus is rp2350 U8.
+    dm = re.search(r'\(drill\b', node)
+    if dm:
+        dend = find_matching_paren(node, dm.start())
+        node = (node[:dm.start()]
+                + _mirror_xy_pairs(node[dm.start():dend], ref, heads=('offset',))
+                + node[dend:])
+    return node
+
+
+def _flip_graphic(node: str, head: str, ref: str) -> str:
+    """Mirror one `fp_*` graphic node."""
+    node = _mirror_xy_pairs(node, ref)
+    node = _flip_layer_nodes(node)
+    if head == 'fp_arc':
+        # An arc's SWEEP is start->mid->end. Mirroring the three points
+        # reverses the sweep, so KiCad exchanges start and end to restore it.
+        # Measured on sonde_u U2 and rp2350 SW1. This is invisible to every
+        # geometric check -- the same curve passes through the same three
+        # points either way -- which is why the acceptance gate compares nodes.
+        sm = re.search(r'\(start\s+(\S+)\s+(\S+)\)', node)
+        em = re.search(r'\(end\s+(\S+)\s+(\S+)\)', node)
+        if sm and em:
+            s_body, e_body = f"{sm.group(1)} {sm.group(2)}", f"{em.group(1)} {em.group(2)}"
+            lo, hi = sorted((sm, em), key=lambda m: m.start())
+            lo_new = f"(start {e_body})" if lo is sm else f"(end {s_body})"
+            hi_new = f"(end {s_body})" if hi is em else f"(start {e_body})"
+            node = (node[:lo.start()] + lo_new + node[lo.end():hi.start()]
+                    + hi_new + node[hi.end():])
+    return node
+
+
+def _block_side(fp_text: str) -> str:
+    """'F' or 'B' from the block's own `(layer ...)`.
+
+    The same first-character rule `legality.footprint_side` applies to the
+    parsed object, read here off the text so the writer and the side model
+    cannot disagree about what a block says it is.
+    """
+    m = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
+    return 'B' if (m and m.group(1).startswith('B')) else 'F'
+
+
+def _flip_footprint_block(fp_text: str, ref: str, old_rot: float,
+                          new_rot: float) -> str:
+    """Mirror a whole footprint block to the other face (#714).
+
+    A paren-balanced walk over the block's top-level children with a per-kind
+    dispatch, NOT a set of global regexes: a blanket `y -> -y` over the block
+    would also hit `(size 1 1)`, `(thickness 0.15)` and `(stroke (width 0.12))`,
+    and a blanket layer toggle would hit nodes that must not move.
+
+    The block's own `(at ...)` is deliberately skipped -- `write_placed_output`
+    has already written it from `new_x/new_y/new_rotation`, and the caller owns
+    the final rotation. Note that means this differs from `pcbnew`'s `Flip`,
+    which negates the orientation itself; a caller that wants pcbnew's result
+    passes the negated angle, which is what the parity gate does.
+    """
+    pieces = []
+    prev = 0
+    for head, s, e in _iter_sexpr_children(fp_text, 0):
+        node = fp_text[s:e]
+        if head in _FLIP_NAMED_REFUSALS:
+            raise SideFlipUnsupported(
+                f"{ref}: the footprint carries a ({head} ...) node -- "
+                f"{_FLIP_NAMED_REFUSALS[head]}. Refusing to guess at its "
+                f"mirror image.")
+        if head in _FLIP_PASSTHROUGH:
+            continue
+        if head not in _FLIP_HANDLED:
+            raise SideFlipUnsupported(
+                f"{ref}: the footprint carries a ({head} ...) node, which this "
+                f"mirror has no rule for. The dispatch is a WHITELIST on "
+                f"purpose: a node passed through untouched leaves a footprint "
+                f"whose geometry contradicts the face it claims, and nothing "
+                f"downstream raises. Add a measured rule for ({head} ...) or "
+                f"leave the flip refused.")
+
+        if head == 'at':
+            continue                     # already written by the caller
+        elif head == 'layer':
+            new = _flip_layer_nodes(node)
+        elif head == 'private_layers':
+            new = re.sub(r'"([^"]+)"',
+                         lambda m: '"' + flip_layer_token(m.group(1)) + '"',
+                         node)
+        elif head == 'pad':
+            new = _flip_pad(node, ref, old_rot, new_rot)
+        elif head in _FLIP_TEXTS:
+            new = _flip_at_angle(node, ref, lambda a: 180.0 - a)
+            new = _flip_layer_nodes(new)
+            new = _flip_justify(new)
+        else:
+            new = _flip_graphic(node, head, ref)
+
+        if new != node:
+            pieces.append((s, e, new))
+
+    if not pieces:
+        return fp_text
+    out = []
+    for s, e, new in pieces:
+        out.append(fp_text[prev:s])
+        out.append(new)
+        prev = e
+    out.append(fp_text[prev:])
+    return ''.join(out)
+
+
 def write_placed_output(input_file: str, output_file: str,
                         placements: List[Dict],
                         via_moves: List = None,
@@ -340,6 +702,26 @@ def write_placed_output(input_file: str, output_file: str,
         new_rot = placement['new_rotation']
         old_rot = float(at_match.group(3)) if at_match.group(3) else 0.0
 
+        # #714. An OPTIONAL key: absent or None means the layer is left alone
+        # and this write is byte-identical to one built before the flip
+        # existed, which is what keeps the ~20 producers of these dicts
+        # (quench, seeder, portfolio, relocate, perturb, fanout_clearance,
+        # place_reconstruct, place_seed, converge, net_rescue) unchanged.
+        #
+        # Spelled 'F'/'B', matching `legality.footprint_side` exactly, and
+        # anything else RAISES at the boundary rather than 200 lines
+        # downstream -- 'B.Cu' is the mistake a caller actually makes.
+        new_side = placement.get('new_side')
+        if new_side is not None:
+            if new_side not in ('F', 'B'):
+                raise ValueError(
+                    f"{key}: new_side must be 'F' or 'B' (the spelling "
+                    f"`legality.footprint_side` uses), not {new_side!r}. A "
+                    f"layer NAME is not a side.")
+            side_change = new_side != _block_side(fp_text)
+        else:
+            side_change = False
+
         # #829 backstop. RAISES, and does not skip: this function returns True
         # unconditionally, so a skip would be indistinguishable from success --
         # and `route.py`'s #666 cap move gates its IN-MEMORY mirror on that
@@ -359,7 +741,16 @@ def write_placed_output(input_file: str, output_file: str,
         if (_OWNS_OUTLINE_RE.search(fp_text)
                 and (abs(new_x - float(at_match.group(1))) > _POSE_EPS
                      or abs(new_y - float(at_match.group(2))) > _POSE_EPS
-                     or abs((new_rot - old_rot + 180) % 360 - 180) > _POSE_EPS)
+                     or abs((new_rot - old_rot + 180) % 360 - 180) > _POSE_EPS
+                     # #714: a flip with identical x/y/rot is still a change,
+                     # and on an outline owner it MIRRORS the owned Edge.Cuts
+                     # geometry -- the board resize this guard exists to
+                     # refuse. Without this term the flip walks straight past
+                     # it. `perturb._all_at_current` never sets `new_side`, so
+                     # the dose-0 control board is unaffected, which is the
+                     # reason the rest of this predicate is written the way it
+                     # is.
+                     or side_change)
                 # `key`, not the raw reference: #726 keys a duplicated
                 # reference's second block `TP4~2`, and the owner map is keyed
                 # the same way (kicad_parser._footprint_blocks_by_key), so a
@@ -391,9 +782,18 @@ def write_placed_output(input_file: str, output_file: str,
 
         # KiCad stores pad angles as footprint rotation + pad-local rotation,
         # so a footprint rotation change must be added to every pad angle.
-        delta_rot = (new_rot - old_rot) % 360
-        if delta_rot != 0:
-            new_fp_text = _rotate_pad_angles(new_fp_text, delta_rot)
+        if side_change:
+            # The flip owns every pad angle itself: a mirror sends the
+            # pad-local angle p -> -p, so a' = new_rot - (a - old_rot), which
+            # `_rotate_pad_angles`' a + delta_rot equals only when p is 0 or
+            # 180. One code path per mode, so the ordinary write below cannot
+            # regress.
+            new_fp_text = _flip_footprint_block(new_fp_text, key,
+                                                old_rot, new_rot)
+        else:
+            delta_rot = (new_rot - old_rot) % 360
+            if delta_rot != 0:
+                new_fp_text = _rotate_pad_angles(new_fp_text, delta_rot)
 
         content = content[:start] + new_fp_text + content[end:]
         modified_count += 1

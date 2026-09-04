@@ -201,7 +201,25 @@ def _count_nodes(text):
     return collections.Counter(re.findall(r'\(\s*([A-Za-z_][A-Za-z_0-9]*)', text))
 
 
-def _diff(a, b, path='', out=None, limit=40):
+# pcbnew's own flip LOSES A NANOMETRE on an arc's mid point, and ours does not.
+# Measured: a plain `LoadBoard` + `SaveBoard` round trip preserves rp2350 SW1's
+# `(mid 1.40384 0)` exactly, but `fp.Flip(...)` + `SaveBoard` writes
+# `1.403839` -- pcbnew holds an arc as centre/radius/angles and re-derives mid
+# from the polar form when it mirrors. This transform never touches an arc's X
+# at all, so it emits the board's own value verbatim.
+#
+# So this is a divergence in OUR favour, and it is waived rather than matched:
+# adopting pcbnew's rounding would make the transform lossy and would break the
+# flip-and-flip-back byte identity `tests/test_714_flip_roundtrip.py` pins.
+#
+# The waiver is deliberately narrow and LOUD -- `mid` only, one nanometre only,
+# every instance printed, and a cap, so it cannot quietly widen into a blanket
+# float tolerance that would hide a real disagreement.
+_MID_WAIVER_NM = 1
+MAX_WAIVED = 6
+
+
+def _diff(a, b, path='', out=None, limit=40, waived=None):
     """First differing paths between two canonical trees."""
     out = [] if out is None else out
     if len(out) >= limit:
@@ -212,6 +230,12 @@ def _diff(a, b, path='', out=None, limit=40):
         return out
     if not isinstance(a, tuple):
         if a != b:
+            if (waived is not None and '/mid[' in path
+                    and isinstance(a, int) and isinstance(b, int)
+                    and abs(a - b) <= _MID_WAIVER_NM):
+                waived.append(f"{path}: {a} (ours, = the board's own value) "
+                              f"vs {b} (pcbnew, re-derived from centre/angles)")
+                return out
             out.append(f"{path}: {a!r} (ours) vs {b!r} (pcbnew)")
         return out
     if len(a) != len(b):
@@ -219,7 +243,7 @@ def _diff(a, b, path='', out=None, limit=40):
         return out
     for i, (x, y) in enumerate(zip(a, b)):
         head = a[0] if isinstance(a[0], str) else '?'
-        _diff(x, y, f"{path}/{head}[{i}]", out, limit)
+        _diff(x, y, f"{path}/{head}[{i}]", out, limit, waived)
         if len(out) >= limit:
             break
     return out
@@ -238,6 +262,7 @@ def main(argv=None):
     tmp = tempfile.mkdtemp(prefix='krt714par')
     problems = []
     n_fix = n_pads = n_nonpad = 0
+    waived = []
     surfaces = set()
     direction_checked = False
     try:
@@ -299,7 +324,7 @@ def main(argv=None):
                                 f"membership and #726 keying rest on these")
 
             d = _diff(canon(parse_sexpr(ta)), canon(parse_sexpr(tk)),
-                      limit=args.show)
+                      limit=args.show, waived=waived)
             if d:
                 problems.append(f"{board}:{ref} {len(d)} node difference(s):")
                 problems.extend("      " + x for x in d[:args.show])
@@ -321,6 +346,15 @@ def main(argv=None):
                         f"covering a surface it claims to")
     if not direction_checked:
         problems.append("the flip direction was never verified to mirror Y")
+    if waived:
+        print(f"waived {len(waived)} arc-mid nanometre difference(s) -- pcbnew "
+              f"re-derives an arc's mid from centre/angles when it flips and "
+              f"loses 1 nm; this transform emits the board's own value:")
+        for w in waived:
+            print("    " + w)
+    if len(waived) > MAX_WAIVED:
+        problems.append(f"{len(waived)} waived differences (cap {MAX_WAIVED}) "
+                        f"-- the waiver is widening into a blanket tolerance")
 
     if problems:
         print(f"FAIL: {len(problems)} problem(s)")

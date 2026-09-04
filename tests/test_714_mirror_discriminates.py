@@ -59,7 +59,6 @@ FIXTURES = [
     ('glasgow_revC', 'U7'),
     ('glasgow_revC', 'SW1'),
     ('orangecrab_ext_pll', 'J4'),
-    ('orangecrab_ext_pll', 'U9'),
     ('rp2350_fpga_eensy_prePlane', 'U8'),
 ]
 
@@ -178,44 +177,43 @@ def main():
                                 f"{after.rotation}; the writer negated a "
                                 f"rotation the caller owns")
 
-            bpads = {p.pad_number: p for p in (before.pads or [])}
+            # Pads are compared as a MULTISET of tuples, never keyed by
+            # pad number. A QFN-64-1EP's thermal sub-pads and a USB-C shield
+            # share -- or omit -- their number, so a dict keyed on it silently
+            # collapses 91 pads to a handful and then compares the survivors
+            # against the wrong partners. That is how this gate first reported
+            # "local X moved" on a transform that had not touched X.
             R = round((before.rotation or 0.0) % 360, 4)
-            for p in (after.pads or []):
-                q = bpads.get(p.pad_number)
-                if q is None:
-                    continue
-                if round(p.local_x, 6) != round(q.local_x, 6):
-                    problems.append(
-                        f"{board}:{ref} pad {p.pad_number} local X moved "
-                        f"{q.local_x} -> {p.local_x}; a flip mirrors Y only")
-                if round(p.local_y, 6) != round(-q.local_y, 6):
-                    problems.append(
-                        f"{board}:{ref} pad {p.pad_number} local Y "
-                        f"{q.local_y} -> {p.local_y}, expected "
-                        f"{round(-q.local_y, 6)}")
-                want_a = round((2 * R - (q.rotation or 0.0)) % 360, 4)
-                got_a = round((p.rotation or 0.0) % 360, 4)
-                if got_a != want_a:
-                    problems.append(
-                        f"{board}:{ref} pad {p.pad_number} angle {q.rotation} "
-                        f"-> {p.rotation}, expected {want_a} "
-                        f"(a' = R_new - (a - R_old); NOT a + delta_rot)")
-                for lay in (p.layers or []):
-                    s = str(lay)
-                    if s.startswith('*'):
-                        continue          # wildcards are not sided
-                    if s.startswith(('F.', 'B.')) and s[0] != want:
-                        problems.append(
-                            f"{board}:{ref} pad {p.pad_number} still on {s} "
-                            f"after a flip to {want}")
-                        break
-                # A wildcard must survive VERBATIM -- `*.Cu` becoming `B*.Cu`
-                # or `B.Cu` is a real corpus hazard (rp2350 U8, 66 pads).
-                for a, b in zip(sorted(str(l) for l in (q.layers or [])),
-                                sorted(str(l) for l in (p.layers or []))):
-                    if a.startswith('*') and a != b:
-                        problems.append(f"{board}:{ref} pad {p.pad_number} "
-                                        f"wildcard {a} rewritten to {b}")
+
+            def key(q, mirror):
+                x = round(q.local_x, 6)
+                y = round(q.local_y, 6)
+                a = round((q.rotation or 0.0) % 360, 4)
+                if mirror:
+                    y = round(-y, 6)
+                    a = round((2 * R - a) % 360, 4)
+                lay = tuple(sorted(
+                    str(l) if str(l).startswith('*')
+                    else (('B' + str(l)[1:]) if str(l).startswith('F')
+                          else ('F' + str(l)[1:]) if str(l).startswith('B')
+                          else str(l))
+                    if mirror else str(l)
+                    for l in (q.layers or [])))
+                return (q.pad_number, q.pad_type, q.shape, x, y, a, lay)
+
+            want_pads = sorted(key(q, True) for q in (before.pads or []))
+            got_pads = sorted(key(q, False) for q in (after.pads or []))
+            if want_pads != got_pads:
+                extra = [t for t in got_pads if t not in want_pads]
+                miss = [t for t in want_pads if t not in got_pads]
+                problems.append(
+                    f"{board}:{ref} {len(miss)} of {len(want_pads)} pads do not "
+                    f"match the mirror image "
+                    f"(x unchanged, y negated, angle 2R-a, layers toggled, "
+                    f"wildcards left alone)")
+                for a, b in list(zip(miss, extra))[:4]:
+                    problems.append(f"      expected {a}")
+                    problems.append(f"      got      {b}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

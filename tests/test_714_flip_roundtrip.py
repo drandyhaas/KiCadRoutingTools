@@ -53,14 +53,18 @@ sys.path.insert(0, TESTS)
 
 RUN_ALL_TIMEOUT = 600
 
-# `orangecrab_ext_pll J4` and `rp2350 J2` already carry `(justify mirror)`, so
-# the removal branch is exercised rather than only the insertion branch.
+# `orangecrab_ext_pll J4` and `ulx3s BAT1` are already on B.Cu and already
+# carry `(justify mirror)`, so the REMOVAL branch is exercised rather than
+# only the insertion branch. Deliberately NOT `rp2350 J2`, which carries the
+# corpus's one footprint-internal `(zone ...)` and is therefore a REFUSAL
+# witness (tests/test_714_refusals.py), not a flip fixture -- a fixture the
+# transform refuses cannot round-trip, and the two lists must not overlap.
 FIXTURES = [
     ('tigard', 'J7'),
     ('tigard', 'J1'),
     ('glasgow_revC', 'SW1'),
     ('orangecrab_ext_pll', 'J4'),
-    ('rp2350_fpga_eensy_prePlane', 'J2'),
+    ('ulx3s', 'BAT1'),
     ('rp2350_fpga_eensy_prePlane', 'SW1'),
 ]
 

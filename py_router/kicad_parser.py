@@ -637,6 +637,42 @@ class PCBData:
         return total
 
 
+def flip_layer_token(name: str) -> str:
+    """The other face's spelling of a layer token (#714).
+
+    A PREFIX RULE, deliberately not a table. Three name->id tables in this repo
+    already happen to enumerate the F/B pairs (`fix_kicad_drc_settings.
+    _TECH_LAYER_IDS`, and twice in this file's pcbnew paths); a fourth
+    enumeration is a fourth thing to keep in sync, and the enumeration is not
+    where the knowledge is. The knowledge is that KiCad spells a sided layer
+    `F.<x>` / `B.<x>` and an unsided one anything else.
+
+    Measured over the 22 tracked boards, the layer tokens that appear inside a
+    `(footprint ...)` block are exactly:
+
+        F.Cu F.Mask F.Paste F.SilkS F.CrtYd F.Fab F.Adhes
+        B.Cu B.Mask B.Paste B.SilkS B.CrtYd B.Fab
+        *.Cu *.Mask Dwgs.User Cmts.User Eco1.User Eco2.User User.1
+
+    This flips the twelve sided ones and returns the other eight unchanged --
+    including both wildcards, which pcbnew also leaves alone (`*.Cu` is KiCad's
+    ALL-copper set and is already its own mirror; rewriting it to `B*.Cu` or
+    `B.Cu` would silently narrow 66 pads on rp2350's U8 alone).
+
+    Inner copper is NOT handled here and must never be: `In1.Cu` has no
+    face, its mirror image would be `In<n+1-k>.Cu`, that depends on the board's
+    inner-layer count AND on `remove_unused_layers` padstack semantics, and no
+    tracked board carries an explicit `In<n>.Cu` in a footprint pad. Callers
+    that must decide about one are expected to REFUSE rather than take the
+    identity answer this returns.
+    """
+    if name.startswith('F.'):
+        return 'B.' + name[2:]
+    if name.startswith('B.'):
+        return 'F.' + name[2:]
+    return name
+
+
 def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
                     pad_local_x: float, pad_local_y: float) -> Tuple[float, float]:
     """
