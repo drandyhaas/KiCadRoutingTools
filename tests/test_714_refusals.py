@@ -138,9 +138,22 @@ def main():
         p = _inject(tg, os.path.join(tmp, 'textbox.kicad_pcb'), 'J7',
                     extra='(fp_text_box "x" (start 0 0) (end 1 1) '
                           '(layer "F.SilkS"))')
-        results.append(_expect_refusal('unknown node kind (fp_text_box)',
+        results.append(_expect_refusal('named refusal (fp_text_box)',
                                        'J7', ['fp_text_box'],
                                        lambda: flip(p, 'J7')))
+        # A head that is in NEITHER the named-refusal table nor the whitelist,
+        # which is the arm that actually guards a KiCad we have not seen. The
+        # `fp_text_box` case above does NOT reach it -- that head is in
+        # `_FLIP_NAMED_REFUSALS`, so the named branch fires first, and the
+        # mutation battery caught this: `an-unknown-node-passes-through`
+        # SURVIVED because the only fixture aimed at it was answered by a
+        # different guard.
+        p = _inject(tg, os.path.join(tmp, 'unknown.kicad_pcb'), 'J7',
+                    extra='(fp_holographic_sticker "x" (at 0 0) '
+                          '(layer "F.SilkS"))')
+        results.append(_expect_refusal(
+            'a head in neither the refusal table nor the whitelist',
+            'J7', ['fp_holographic_sticker'], lambda: flip(p, 'J7')))
         p = _inject(tg, os.path.join(tmp, 'chamfer.kicad_pcb'), 'J7',
                     sub=(r'\(roundrect_rratio [^)]*\)',
                          '(chamfer top_left bottom_left)'))

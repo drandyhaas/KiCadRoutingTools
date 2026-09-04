@@ -170,6 +170,69 @@ def main():
                 problems.append(
                     f"{board}:{ref} flip-and-flip-back is NOT byte-identical\n"
                     f"      control {h_ctrl}\n      round   {h_f2}")
+            # --- arm 5, on the FIRST fixture only: a coordinate that is not
+            # already in `_fmt_mm`'s minimal form.
+            #
+            # This exists because the mutation battery said it had to. The row
+            # `the-negation-goes-through-float` replaces the sign toggle with
+            # `_fmt_mm(-float(tok))` and SURVIVED every gate here -- and the
+            # reason is a fact about the corpus, not about the code: measured,
+            # all 148417 coordinate literals on the 22 tracked boards are
+            # ALREADY in minimal form and none carries more than six decimals,
+            # so on this input the float round trip happens to be an
+            # involution too.
+            #
+            # That makes the sign toggle's advantage real but undemonstrated:
+            # it is exact BY CONSTRUCTION over the declared grammar, whereas
+            # the float path is exact only because of a property of these
+            # particular files that another tool's board can break. So the
+            # discriminating input is synthesised rather than found.
+            if checked == 1:
+                nm = os.path.join(tmp, 'nonminimal.kicad_pcb')
+                # newline='' on BOTH sides: without it the read translates
+                # CRLF to LF and the rewrite emits LF, so the round trip
+                # compares two different line endings and fails for a reason
+                # that has nothing to do with the mirror. (It did.)
+                with open(ctrl, encoding='utf-8', newline='') as fh:
+                    text = fh.read()
+                # Scoped to THIS block. `(at -1.5 -2)` is an ordinary pad
+                # coordinate and occurs on other footprints too; a whole-file
+                # replace can land in a block the flip never touches, and the
+                # arm then round-trips trivially.
+                #
+                # The span is computed on THIS string, not via `_block_span`,
+                # which does its own newline-translating read: on Windows a
+                # `newline=''` read keeps CRLF and a default read collapses it,
+                # so the two disagree by one byte per line and the window comes
+                # out shifted. (It did, and the arm reported a lost anchor.)
+                from kicad_parser import iter_footprint_blocks
+                bs = be = None
+                for _s, _e, _t, _raw, _k in iter_footprint_blocks(text):
+                    if _k == ref:
+                        bs, be = _s, _e
+                        break
+                marker = '(at -1.5 -2)'
+                if bs is None or marker not in text[bs:be]:
+                    problems.append(
+                        f"the non-minimal-literal arm lost its anchor "
+                        f"{marker!r} inside {ref} -- re-anchor it rather than "
+                        f"dropping it, or the float path stops being "
+                        f"distinguishable")
+                else:
+                    block = text[bs:be].replace(marker, '(at -1.5 -2.500000)', 1)
+                    with open(nm, 'w', encoding='utf-8', newline='') as fh:
+                        fh.write(text[:bs] + block + text[be:])
+                    g1 = _flip(nm, os.path.join(tmp, 'nm_f1.kicad_pcb'),
+                               'J7', 'B')
+                    g2 = _flip(g1, os.path.join(tmp, 'nm_f2.kicad_pcb'),
+                               'J7', 'F')
+                    if _sha(g2) != _sha(nm):
+                        problems.append(
+                            "a coordinate written non-minimally "
+                            "(`-2.500000`) does not survive flip-and-flip-back "
+                            "-- the transform is reformatting numbers instead "
+                            "of toggling their sign, so it is an involution "
+                            "only for input that was already minimal")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

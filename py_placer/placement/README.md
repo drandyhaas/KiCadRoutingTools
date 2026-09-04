@@ -969,7 +969,7 @@ rather than scraping text.
 | state | why refusing beats trying | override |
 |---|---|---|
 | **unplaced** (parts stacked at one coordinate) | the quench REFINES a placement. On a pile every candidate pose is illegal, so the run prints "0 parts moved" plus a legality block that looks like a result, and a large `--max-displacement` yields a tiny scatter around the origin that looks like progress | `--allow-unplaced` |
-| **already routed** | the quench models no copper at all: legality is courtyard + outline, cost is pad-to-pad airwires, and `writer.write_placed_output` rewrites footprint positions only. Every track would be left behind, detached from its pad | `--allow-routed` |
+| **already routed** | the quench models no copper at all: legality is courtyard + outline, cost is pad-to-pad airwires, and `writer.write_placed_output` rewrites footprint poses and — since #714, on request — their board SIDE, but never copper. Every track would be left behind, detached from its pad | `--allow-routed` |
 
 `place_route_loop` gates BEFORE round 0, which routes the whole board -- refusing
 there saves minutes-to-hours of A* that would fail everything and then quench a

@@ -345,10 +345,19 @@ precedent), which is simpler and may capture most of the value:
     wins; mixed-size swaps are usually illegal anyway, so restrict by
     footprint compatibility)
   - *side flip* (optional; mirrored courtyard): treated as a first-class move
-    in recent PCB literature. **Not implemented as a move.** Board side *is*
-    now modelled by the clearance/halo terms (#456): a part occupies its own
-    side with its courtyard and the far side only with its drilled-pad box, so
-    cross-side parts no longer collide or repel — but nothing flips a part.
+    in recent PCB literature. **Still not implemented as a move** — and that
+    sentence wants reading carefully, because half of what used to block it is
+    gone. Board side *is* modelled by the clearance/halo terms (#456): a part
+    occupies its own side with its courtyard and the far side only with its
+    drilled-pad box, so cross-side parts no longer collide or repel. And since
+    **#714** the WRITER can emit a real flip: `write_placed_output` mirrors a
+    footprint to the other face on request, held to pcbnew's own
+    `FOOTPRINT.Flip` node for node, so `perturb` can stage a `layer_flip`
+    damage kind. What is missing is the SEARCH — `_Part.side` is assigned once
+    at construction and no move signature carries it, so nothing in the
+    optimizer *chooses* a face. That is #836, and it is gated on its own
+    pre-registered measurement, because `reseat.py` is already side-aware and
+    the open question is how many parts a flip helps that a re-seat does not.
   - *rigid-group moves*: an IC plus its decoupling caps moves as one
     super-component. **Translation is implemented** (`--group-by`, #459);
     rigid *rotation* of a block is not. Blocks come from KiCad `(group ...)`,
