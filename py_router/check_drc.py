@@ -2363,12 +2363,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             # only an art-MEETS-art pair is dropped, never the actionable
             # TRACK end paired with art (#337, #722).
             _dangles[(s.net_id, s.layer)].append(
-                (x, y, s.width, getattr(s, 'graphic', False)))
+                (x, y, s.width, getattr(s, 'graphic', False), id(s)))
     for (net_id, layer), ends in _dangles.items():
         for i in range(len(ends)):
-            xi, yi, wi, gi = ends[i]
+            xi, yi, wi, gi, oi = ends[i]
             for j in range(i + 1, len(ends)):
-                xj, yj, wj, gj = ends[j]
+                xj, yj, wj, gj, oj = ends[j]
+                if oi == oj:
+                    # #672: a lone segment shorter than its cap is not a
+                    # joint with itself (same rule as the repair pass's
+                    # _soft_joint_pairs -- the two must agree).
+                    continue
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
                 if gi and gj:

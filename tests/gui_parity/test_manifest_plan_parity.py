@@ -61,6 +61,12 @@ BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
     '--no-gnd-vias': 'no_gnd_vias', '--rip-blocker-nets': 'rip_blocker_nets',
     '--keep-input-copper': 'keep_input_copper',
+    # #860 follow-up: qfn_fanout's under-pad via-in-pad opt-in, which #846 made
+    # consequential and which reached the GUI through nothing -- unregistered in
+    # manifest_to_plan, so a recorded manifest replayed the step without it.
+    # manifest_set11 carries the flag, so this row is exercised rather than
+    # merely declared.
+    '--allow-via-in-pad': 'allow_via_in_pad',
 }
 # nargs='+' glob-list flags: every pattern must survive into the plan param
 # (as a list, or a single scalar for one pattern). #521 --protect-nets and the

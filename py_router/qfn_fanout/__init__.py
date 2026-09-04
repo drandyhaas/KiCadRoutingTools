@@ -933,7 +933,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
             if via_overlaps_pad(pi.pad, vx, vy, via_size):
                 vip_n += 1
                 # via-in-pad: clamp to the pad edge so it never bulges past it (#202)
-                v_size, v_drill, status, rung = clamp_via_to_pad(via_size, via_drill, pi.pad, floors)
+                # Pass the via's REAL position: this branch is reached for
+                # OFF-CENTRE vias since #846, and a centred clamp does not
+                # stop those bulging (#860 follow-up). Off-centre, the
+                # honest verdict is usually 'floor' -- the barrel cannot be
+                # both manufacturable and inside the pad at that offset.
+                v_size, v_drill, status, rung = clamp_via_to_pad(
+                    via_size, via_drill, pi.pad, floors, via_x=vx, via_y=vy)
                 if status == 'clamped':
                     clamp_n += 1
                 elif status == 'floor':
@@ -982,9 +988,17 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     if escalated_n:
         warn_fab_escalation(f"{escalated_n} via-in-pad(s) (sub-0.45mm pads)")
     if floor_n:
-        print(f"    WARNING: {floor_n} pad(s) smaller than the fab via floor "
-              f"({fab_floor_min(_copper)['via_diameter']:.2f}mm dia); via held at the "
-              f"floor and still bulges past the pad edge")
+        # Two causes reach here and the message names both (#860 follow-up):
+        # the pad really is smaller than anything manufacturable, OR the via
+        # sits far enough OFF the pad centre that its remaining reach inside
+        # the pad is -- `clamp_via_to_pad` measures min(sx-2|dx|, sy-2|dy|)
+        # when it is given the position. Either way the barrel is held at the
+        # floor and still crosses the pad edge, which is the honest statement;
+        # saying "clamped to fit their pad edge" for these would not be.
+        print(f"    WARNING: {floor_n} via-in-pad(s) cannot fit their pad at "
+              f"the fab via floor ({fab_floor_min(_copper)['via_diameter']:.2f}mm "
+              f"dia) -- pad smaller than the floor, or the via too far off its "
+              f"centre; via held at the floor and still bulges past the pad edge")
     return tracks, vias, dropped
 
 

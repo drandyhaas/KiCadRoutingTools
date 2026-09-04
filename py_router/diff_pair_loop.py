@@ -20,6 +20,7 @@ from diff_pair_routing import (route_diff_pair_with_obstacles, get_diff_pair_end
                                _route_direct_coupled_middle, _seg_to_seglist_min_edge)
 from blocking_analysis import analyze_frontier_blocking, print_blocking_analysis, filter_rippable_blockers, invalidate_obstacle_cache
 from rip_up_reroute import rip_up_net, restore_net
+from obstacle_cache import refresh_net_obstacles  # #806
 from polarity_swap import apply_polarity_swap, get_canonical_net_id
 from layer_swap_fallback import try_fallback_layer_swap, add_own_stubs_as_obstacles_for_diff_pair
 from diff_pair_multipoint import (
@@ -316,6 +317,10 @@ def route_diff_pairs(
                 diff_pair_by_net_id[pair.n_net_id] = (pair_name, pair)
                 invalidate_obstacle_cache(obstacle_cache, pair.p_net_id)
                 invalidate_obstacle_cache(obstacle_cache, pair.n_net_id)
+                # #806: the legs are on the board (committed per leg inside the
+                # multipoint router); the working map must see them too.
+                refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,
+                                      pcb_data, config, (pair.p_net_id, pair.n_net_id))
             else:
                 # No leg was coupled - every leg was electrically short and
                 # deferred (peeled set above). Not a failure: the single-ended
@@ -626,6 +631,12 @@ def route_diff_pairs(
             apply_polarity_swap(pcb_data, result, pad_swaps, pair_name, polarity_swapped_pairs)
 
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+            # #806: keep the persistent working map in step with the commit
+            # (the single-ended loop's contract), or every later search on
+            # that map -- a ripped victim's reroute, a terminal restore --
+            # runs blind to this pair's copper.
+            refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,
+                                  pcb_data, config, (pair.p_net_id, pair.n_net_id))
 
             if pair.p_net_id in remaining_net_ids:
                 remaining_net_ids.remove(pair.p_net_id)
@@ -923,6 +934,8 @@ def route_diff_pairs(
                             apply_polarity_swap(pcb_data, retry_result, pad_swaps, pair_name, polarity_swapped_pairs)
 
                             add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                            refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,  # #806
+                                                  pcb_data, config, (pair.p_net_id, pair.n_net_id))
                             if pair.p_net_id in remaining_net_ids:
                                 remaining_net_ids.remove(pair.p_net_id)
                             if pair.n_net_id in remaining_net_ids:
@@ -1012,7 +1025,9 @@ def route_diff_pairs(
                         all_swap_vias, all_segment_modifications,
                         None, None,
                         routed_net_paths, routed_results, diff_pair_by_net_id, layer_map,
-                        target_swaps, results=results, obstacle_cache=obstacle_cache)
+                        target_swaps, results=results, obstacle_cache=obstacle_cache,
+                        working_obstacles=state.working_obstacles,          # #806
+                        net_obstacles_cache=state.net_obstacles_cache)
 
                     if swap_success and swap_result:
                         # Calculate actual routed length from segments (includes connectors and via barrels)
@@ -1063,6 +1078,8 @@ def route_diff_pairs(
 
                         apply_polarity_swap(pcb_data, swap_result, pad_swaps, pair_name, polarity_swapped_pairs)
                         add_route_to_pcb_data(pcb_data, swap_result, debug_lines=config.debug_lines)
+                        refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,  # #806
+                                              pcb_data, config, (pair.p_net_id, pair.n_net_id))
                         if pair.p_net_id in remaining_net_ids:
                             remaining_net_ids.remove(pair.p_net_id)
                         if pair.n_net_id in remaining_net_ids:
@@ -1107,6 +1124,8 @@ def route_diff_pairs(
                         print(f"  HYBRID ESCAPE: direct coupled middle + point-to-point "
                               f"terminal legs")
                         add_route_to_pcb_data(pcb_data, hyb, debug_lines=config.debug_lines)
+                        refresh_net_obstacles(state.working_obstacles, state.net_obstacles_cache,  # #806
+                                              pcb_data, config, (pair.p_net_id, pair.n_net_id))
                         results.append(hyb)
                         successful += 1
                         total_iterations += hyb.get('iterations', 0)

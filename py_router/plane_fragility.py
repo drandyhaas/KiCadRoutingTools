@@ -374,21 +374,62 @@ def fragility_on_copper_change(config, pcb_data, segments, vias) -> None:
         config._fragility_field = None
 
 
+#: The geometry sources `compute_plane_fragility_cells_ex` can report, in
+#: fidelity order. Exactly one of them -- `zone_outlines` -- is the one the
+#: module docstring calls "near-useless" for a full-board pour, and the record
+#: says WHY it was reached, because the why decides whether the answer is a
+#: fact about the board (no pcbnew, the refill failed, the pour is empty) or
+#: about THIS MACHINE (the refill timed out).
+GEOMETRY_SOURCES = ('live_board', 'live_board_in_process', 'kicad_refill',
+                    'zone_outlines', 'none')
+
+
+def _geometry(source: str, islands: int = 0, refill_status=None,
+              why: str = '', machine_dependent: bool = False) -> dict:
+    """The record `register_plane_fragility` publishes (#831): which copper
+    the field was rasterized from, and why.
+
+    `machine_dependent` is True when a FASTER machine would have produced a
+    different `source` -- the exact-fill timeout is the one such cause on the
+    CLI path, and the GUI's UI-thread save timeout is its twin. Every other
+    fallback reason is a property of the board or the install and would
+    repeat on any machine. A downstream grader reading the JSON summary can
+    then tell "this board was priced on outlines because it HAS no fill" from
+    "because pcbnew did not finish in 300 s here", which the printed notice
+    alone could not carry past the log.
+    """
+    assert source in GEOMETRY_SOURCES, source
+    return {'source': source, 'islands': int(islands),
+            'refill_status': refill_status, 'why': why,
+            'machine_dependent': bool(machine_dependent)}
+
+
 def compute_plane_fragility_cells(pcb_data: PCBData,
                                   config: GridRouteConfig) -> np.ndarray:
     """(N, 4) [layer, gx, gy, cost] rows for every filled-zone cell within
     the fragility half-width of its zone's boundary. Empty when disabled or
     the board has no filled zones on routing layers."""
-    cells, _states = _compute_cells_and_states(pcb_data, config,
-                                               want_states=False)
-    return cells
+    return compute_plane_fragility_cells_ex(pcb_data, config)[0]
+
+
+def compute_plane_fragility_cells_ex(pcb_data: PCBData,
+                                     config: GridRouteConfig):
+    """(cells, geometry): the rows of `compute_plane_fragility_cells` plus the
+    `_geometry` record saying which copper they were rasterized from."""
+    cells, _states, geometry = _compute_cells_and_states(pcb_data, config,
+                                                         want_states=False)
+    return cells, geometry
 
 
 def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
                               want_states: bool):
     cost_mm = fragility_cost_mm()
-    if cost_mm <= 0 or not pcb_data.zones:
-        return np.empty((0, 4), dtype=np.int32), []
+    if cost_mm <= 0:
+        return (np.empty((0, 4), dtype=np.int32), [],
+                _geometry('none', why='KICAD_PLANE_FRAGILITY_COST=0'))
+    if not pcb_data.zones:
+        return (np.empty((0, 4), dtype=np.int32), [],
+                _geometry('none', why='the board has no zones'))
     try:
         width_mm = float(os.environ.get('KICAD_PLANE_FRAGILITY_WIDTH', '2.0') or 2.0)
     except ValueError:
@@ -405,6 +446,7 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     # the drawn zone outlines as the last resort. Each entry: (layer, poly).
     name_to_id = {n.name: n.net_id for n in pcb_data.nets.values()}
     polys = []
+    geometry = None
     provider = getattr(pcb_data, 'exact_fill_provider', None)
     if provider is not None:
         try:
@@ -412,8 +454,21 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
             polys = [(name_to_id.get(_net, -1), layer, poly)
                      for (_net, layer), pp in fills.items() for poly in pp]
             if polys:
+                # #831: the GUI provider (`kicad_parser._live_fill`) returns
+                # an IN-PROCESS fill -- live copper, clearances as of board
+                # load -- when its staged refill did not yield one, and said
+                # so only on the console. Read its own account of which fill
+                # this was; a provider that keeps no account is reported as
+                # the live board with no claim about how it was filled.
+                _ls = getattr(provider, 'last_status', None) or {}
+                geometry = _geometry(
+                    _ls.get('source', 'live_board'), len(polys),
+                    refill_status=_ls.get('refill_status'),
+                    why=_ls.get('why', ''),
+                    machine_dependent=_ls.get('machine_dependent', False))
                 print(f"Plane fragility: exact-fill geometry "
-                      f"({len(polys)} filled island(s) from the LIVE board)")
+                      f"({len(polys)} filled island(s) from the LIVE board"
+                      f"{'; ' + geometry['why'] if geometry['why'] else ''})")
         except Exception as e:
             print(f"Plane fragility: live-board fill unavailable ({e}); "
                   f"trying the source file")
@@ -423,6 +478,9 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
         try:
             from kicad_exact_fill import refill_islands_ex
             fills, _st = refill_islands_ex(src)
+            geometry = _geometry('zone_outlines', refill_status=_st.reason,
+                                 why=_st.why(),
+                                 machine_dependent=_st.is_timeout)
             if fills is None:
                 # None is refill_islands' DOCUMENTED "unavailable" return, not
                 # an error. Calling .items() on it raised an AttributeError
@@ -450,14 +508,33 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
             polys = [(name_to_id.get(_net, -1), layer, poly)
                      for (_net, layer), pp in fills.items() for poly in pp]
             if polys:
+                geometry = _geometry('kicad_refill', len(polys),
+                                     refill_status=_st.reason, why=_st.why())
                 print(f"Plane fragility: exact-fill geometry "
                       f"({len(polys)} filled island(s) from KiCad refill)")
         except Exception as e:
             print(f"Plane fragility: exact refill unavailable ({e}); "
                   f"using zone outlines")
             polys = []
+            geometry = _geometry('zone_outlines', refill_status='error',
+                                 why=f'{type(e).__name__}: {e}')
     if not polys:
         polys = [(z.net_id, z.layer, z.polygon) for z in pcb_data.zones]
+        if geometry is None or geometry['source'] != 'zone_outlines':
+            # No file to refill (a live GUI board whose provider gave nothing,
+            # or an in-memory PCBData): a fact about the input, not the clock.
+            geometry = _geometry(
+                'zone_outlines',
+                why=('no board file to refill'
+                     if not (src and os.path.isfile(src))
+                     else 'the exact fill produced no islands'))
+        if geometry['machine_dependent']:
+            # LOUD, and in the summary too (see register_plane_fragility):
+            # a faster machine would have priced this board on its real fill.
+            print(f"WARNING: plane fragility is priced on the drawn zone "
+                  f"OUTLINES because {geometry['why']} -- this depends on "
+                  f"machine speed, not on the board; a faster machine "
+                  f"routes against the exact fill here (#831).")
 
     if os.environ.get('KICAD_FRAGILITY_DEBUG') == '1':
         # The field is a raster of the exact fill, so a GUI/CLI cell-count
@@ -524,7 +601,7 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
                                      net_name=_zname))
 
     if not rows:
-        return np.empty((0, 4), dtype=np.int32), []
+        return np.empty((0, 4), dtype=np.int32), [], geometry
     out = np.vstack(rows)
     # overlapping zones on one layer: keep the max cost per cell
     order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
@@ -532,7 +609,7 @@ def _compute_cells_and_states(pcb_data: PCBData, config: GridRouteConfig,
     keep = np.ones(len(out), dtype=bool)
     same = (np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0) & (np.diff(out[:, 2]) == 0)
     keep[:-1][same] = False  # lexsort put max cost last within a cell group
-    return out[keep], states
+    return out[keep], states, geometry
 
 
 def register_plane_fragility(pcb_data: PCBData, config: GridRouteConfig,
@@ -540,10 +617,18 @@ def register_plane_fragility(pcb_data: PCBData, config: GridRouteConfig,
     """Compute and register the field under the reserved cache key (no-op
     when disabled or no zones). With KICAD_PLANE_FRAGILITY_DYNAMIC on (the
     default), also arm the #466 incremental field on `config` so the
-    commit/rip/restore hooks keep it current as in-run copper lands."""
+    commit/rip/restore hooks keep it current as in-run copper lands.
+
+    Always leaves `config._plane_fragility_geometry` set (#831) -- the
+    `_geometry` record of which copper the field came from -- so
+    `batch_route`'s JSON summary can disclose an outline fallback, and
+    above all a MACHINE-DEPENDENT one, to whatever grades the run. Set even
+    when the field is empty, so a summary never has to guess between "no
+    zones" and "nobody recorded it"."""
     dynamic = os.environ.get('KICAD_PLANE_FRAGILITY_DYNAMIC', '1') != '0'
-    cells, states = _compute_cells_and_states(pcb_data, config,
-                                              want_states=dynamic)
+    cells, states, geometry = _compute_cells_and_states(pcb_data, config,
+                                                        want_states=dynamic)
+    config._plane_fragility_geometry = geometry
     if not len(cells):
         return
     track_proximity_cache[PLANE_FRAGILITY_CACHE_KEY] = cells

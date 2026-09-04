@@ -74,7 +74,8 @@ def via_clears_pad_rects(x: float, y: float, v_half: float, clearance: float,
 
 
 def clamp_via_to_pad(via_size: float, via_drill: float, pad,
-                     floors) -> Tuple[float, float, str, int]:
+                     floors, via_x: float = None,
+                     via_y: float = None) -> Tuple[float, float, str, int]:
     """Issue #202: shrink a via-in-pad so it never bulges past the pad edge.
 
     A via dropped at a pad centre whose diameter exceeds the pad's smallest
@@ -85,7 +86,8 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
     pads).
 
     Clamp the via to the pad's min dimension (a circular via inscribes a
-    rect/oval pad at min(size_x, size_y); for a circle pad that is the diameter),
+    rect/oval pad at min(size_x, size_y), or at the reach left from an
+    off-centre ``via_x``/``via_y``; for a circle pad that is the diameter),
     but NEVER below the fab via floor -- a pad smaller than the smallest
     manufacturable via keeps that floor via (it still bulges) rather than ship an
     unmanufacturable one. The drill follows to hold the annular ring at the fab
@@ -100,11 +102,41 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
     clamped to the first rung whose via fits the pad; if the pad is smaller than
     even the deepest rung's via, it's held at that deepest floor (still bulges).
 
+    ``via_x`` / ``via_y`` are the via's REAL centre, for a caller that has
+    placed it. Given, the fit is measured per axis from that offset
+    (``min(sx - 2|dx|, sy - 2|dy|)``) instead of from the pad centre; omitted,
+    both reduce to ``min(sx, sy)`` and the answer is unchanged. Pass them
+    whenever the via may be OFF-CENTRE -- since #846 the QFN commit loop
+    clamps any via whose BARREL overlaps its pad, not only a centred one, and
+    a centred clamp does not stop those bulging.
+
     Returns (size, drill, status, rung): status 'fits' (unchanged), 'clamped'
-    (shrunk to fit), or 'floor' (pad < deepest fab floor). ``rung`` is the floor
-    index used (0 = nominal/standard; >0 = escalated to a more-costly tier).
+    (shrunk to fit), or 'floor' (the pad -- or the reach left at this offset --
+    is smaller than the deepest fab floor, so the via is held there and STILL
+    bulges). ``rung`` is the floor index used (0 = nominal/standard;
+    >0 = escalated to a more-costly tier).
     """
-    pad_min = min(pad.size_x, pad.size_y)
+    # #846 follow-up: the reach a via has INSIDE this pad, per axis. A circular
+    # via of diameter d centred at offset (dx, dy) from a rect pad (sx, sy) is
+    # contained iff d <= min(sx - 2|dx|, sy - 2|dy|); at dx = dy = 0 that is
+    # exactly min(sx, sy), so a caller that does not pass a position keeps
+    # today's answer and every predictive call site (via_for_pad and the
+    # keep-out sizers, which ask "what size WOULD a via here be") is unchanged.
+    #
+    # It matters because #846 made this branch reachable for OFF-CENTRE vias --
+    # a barrel that overlaps its pad without being centred on it. Clamping such
+    # a via to min(sx, sy) does NOT stop it bulging: on qfn_underpad_coupling a
+    # 0.25 via at dx 0.3375 in a 0.875 x 0.25 pad still reaches 0.025mm past the
+    # edge, and the run reported it as `clamped ... to fit their pad edge`. With
+    # the offset the target falls below the deepest fab rung, so the honest
+    # answer is 'floor' -- the status this function already has for "the pad is
+    # smaller than anything manufacturable; it still bulges".
+    if via_x is None or via_y is None:
+        pad_min = min(pad.size_x, pad.size_y)
+    else:
+        dx = abs(float(via_x) - pad.global_x)
+        dy = abs(float(via_y) - pad.global_y)
+        pad_min = min(pad.size_x - 2.0 * dx, pad.size_y - 2.0 * dy)
     if via_size <= pad_min + 1e-9:
         return via_size, via_drill, 'fits', 0
     if not floors:

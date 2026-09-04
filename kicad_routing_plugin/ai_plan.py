@@ -583,16 +583,41 @@ def apply_step_params(step, dialog):
             chk.SetValue(not bool(value))
             return True
         if name == 'escape_method':
-            # Fanout escape dropdown lives on the BGA options panel and shows
-            # DISPLAY strings ("Auto (channel, under-pad retry)"), while the
-            # plan/CLI value is the engine token ('auto'/'channel'/'underpad').
-            # Map value -> index via the panel's ESCAPE_METHODS tuple.
-            opts = getattr(getattr(dialog, 'fanout_tab', None), 'bga_options', None)
+            # THE TWO FANOUT PANELS MODEL THE ESCAPE DIFFERENTLY, so this cannot
+            # resolve to one control (#860 follow-up). BGA has a 4-way dropdown
+            # showing DISPLAY strings ("Auto (channel, under-pad retry)") while
+            # the plan/CLI value is the engine token, mapped via ESCAPE_METHODS.
+            # QFN has no dropdown at all: it has a BOOLEAN `underpad_escape`
+            # checkbox, and QFNOptionsPanel's config emits 'underpad' when it is
+            # set and 'stub' when it is not.
+            #
+            # This used to reach `bga_options` unconditionally and RETURN TRUE,
+            # so a QFN step set the BGA panel's dropdown, reported "set
+            # escape_method=underpad", and left the QFN panel untouched -- the
+            # under-pad escape stayed off, which in turn made `allow_via_in_pad`
+            # inert, since it is under-pad-only. A plan carrying
+            # `--escape-method underpad --allow-via-in-pad` therefore replayed a
+            # STUB fanout while claiming both params had been applied.
+            #
+            # Dispatch on `step['kind']`, the same key the fanout action block
+            # below uses and which manifest_to_plan sets from the tool name.
+            tab = getattr(dialog, 'fanout_tab', None)
+            v = str(value).strip().lower()
+            if (step.get('kind') or 'bga').lower() == 'qfn':
+                chk = getattr(getattr(tab, 'qfn_options', None),
+                              'underpad_escape', None)
+                if chk is None:
+                    return False
+                # Only 'underpad' turns the checkbox ON; 'stub' (and anything
+                # else this panel cannot express) turns it off, which is what
+                # the panel's own config->token mapping means in reverse.
+                chk.SetValue(v == 'underpad')
+                return True
+            opts = getattr(tab, 'bga_options', None)
             choice = getattr(opts, 'escape_method_choice', None)
             if choice is None:
                 return False
             methods = getattr(type(opts), 'ESCAPE_METHODS', ('auto', 'channel', 'underpad'))
-            v = str(value).lower()
             if v in methods:
                 choice.SetSelection(methods.index(v))
                 return True

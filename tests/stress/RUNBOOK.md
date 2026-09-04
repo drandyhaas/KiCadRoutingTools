@@ -910,6 +910,67 @@ boards" and "which commit broke connectivity".
    a recorded run as a baseline, grep its `transcript.jsonl` for `KICAD_`
    exports (the timing sidecar cannot tell you).
 
+## Exact-fill timing census (#831)
+
+`kicad_exact_fill.refill_islands_ex` runs pcbnew's ZONE_FILLER under
+`EXACT_FILL_TIMEOUT` (300 s); on expiry `plane_fragility` (and the GUI's
+`kicad_parser._live_fill`) fall back to the drawn zone OUTLINES, so which
+geometry the router priced depends on whether pcbnew finished on THIS machine.
+#831 asked whether a deterministic pre-flight predicate over
+`kicad_oracle._fill_cost_key` -- `('fill', zones, pads, footprints, bbox)` --
+could separate "will finish" from "will not". The answer had to be measured,
+and the tool that measures it is general:
+
+```bash
+python3 tests/stress/fill_timing_census.py --out fills.jsonl --timeout 1800 \
+    --workers 2 ~/Documents/kicad_stress_test/runs_set*/*/*planes*.kicad_pcb
+python3 tests/stress/fill_timing_census.py --report fills.jsonl   # table + separation
+```
+
+One JSONL row per board: the signature, extra features (segments, vias,
+copper layers, summed zone-outline area, file size), the fill's wall and
+child-CPU seconds, and the `RefillStatus` reason. The corpus is read in place
+(the refill stages every board into its own temp dir). `--report` prints the
+sorted table and, for each candidate predicate, the largest threshold that
+still refuses every over-budget board, the under-budget boards it would
+wrongly refuse, and the margin between the two populations.
+
+**The recorded census (`tests/831_fill_timing_census.json`, 2026-09-04, Apple
+M3 8-core, KiCad 10.0.0, timeout 1800 s, 2 workers).** Population: every
+route-step INPUT carrying zones in the recorded corpus runs -- 383 pour-step
+outputs, 398 last-step routed boards, 18 in-repo `kicad_files/` boards; 790
+distinct files, 100% `ok`, 0 parse failures (no `('path', ...)` signatures).
+
+| | fill wall s | child CPU s |
+|---|---|---|
+| median | 2.0 | -- |
+| p99 | 13.8 | 9.9 |
+| max (duodyne_z80_proc step4, 1 zone, 1289 pads, 18847 segs + 3280 vias) | 116.7 | 55.8 |
+| boards >= 150 s (half the budget) | **0** | 0 |
+| boards >= 300 s | **0** | 0 |
+
+Wall times were measured under contention (other sessions ran ~4 CPU-bound
+processes on the same 8 cores; the slowest board's wall is 2.1x its CPU), so
+they are an OVERestimate of an idle machine.
+
+**Verdict: does not separate, and nothing to separate.** No board reached the
+budget, so the "will not finish" class is empty on this machine and a
+threshold could only be an extrapolation. And the signature does not rank
+fill time: Spearman with fill seconds is 0.07 (zones), 0.18 (pads), 0.25
+(bbox area), 0.27 (zones x area) -- while the slowest board has **20
+signature twins** (every component within 2x of its own) that fill in a
+median **4.0 s** (max 14.1 s). What separates it from them is the copper the
+fill must clear -- 22127 segments+vias against the twins' median of 155 -- which
+`_fill_cost_key` does not carry; even the best feature measured (zone area x
+segments+vias) reaches only 0.43. A predicate over the signature therefore
+has no threshold with provenance, and none was implemented: the machine-
+dependent fallback is DISCLOSED instead (`JSON_SUMMARY.plane_fragility`,
+`docs/api-routing-config.md`). `tests/test_831_fill_preflight_census.py` pins
+these numbers as a change detector; re-record with the tool above (and
+`--report`) if the corpus or the fill engine changes, and re-ask the question
+if the census then shows a board near the budget or a signature component
+above ~0.5.
+
 ## Multi-set waves & release sign-off
 
 `ab_replay_grade.py` grades **one set**. A release decision (should this become a

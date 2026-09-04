@@ -97,6 +97,28 @@ the routing pipeline applies both so the model and the output file agree.
 > and the whole-net dead-end trim `sweep_dead_ends` (#84). The residual same-net
 > self-crossings are tracked in #162.
 
+> **#672 -- sub-cell slivers.** `sweep_dead_ends(..., sliver_eps=mm)` is the one
+> exception to its `protect_net_ids` exemption (nets with unfinished pads keep
+> every landing site, #473): a protected net still loses a dead-end piece
+> SHORTER than `sliver_eps` when `check_net_connectivity` grades the net no
+> worse without it. The cleanup pipeline passes one routing cell
+> (`config.grid_step`) -- but **only under `KICAD_SLIVER_TRIM=1`; the default
+> is 0.0, i.e. off**. The epsilon's rationale is sound (no A* span is shorter,
+> so such a piece can only be rip/restore/prune debris, and a stub shorter
+> than a cell offers no landing its root does not) and the motive is real
+> (a 0.02 mm sliver of a net retried across an iteration ladder shipped
+> 0.054 mm from a foreign track) -- but taking copper off a net the ladder is
+> still retrying MEASURED AS A LOST NET: on orangecrab's recorded route step,
+> paired from the same input board, `RAM_UDQS+` went from routed to
+> `failed_single` (run verdict 9 -> 10, 14 DRC either way), while the
+> self-pair half of this change alone reproduced the base copper EXACTLY
+> (6097 segments and 625 vias compared, all identical). It stays opt-in until
+> a corpus A/B says it pays. The same change
+> teaches every soft-joint detector (`_soft_joint_pairs`, `close_soft_joints`,
+> `check_drc`, `check_weird`) that the two ends of ONE segment are not a joint:
+> a lone sub-cap sliver used to pair with itself, which made
+> `_restore_soft_joint_bridges` put a just-removed dead neighbour back.
+
 ## `geometry_utils.py`
 
 Pure functions; no PCB context needed.

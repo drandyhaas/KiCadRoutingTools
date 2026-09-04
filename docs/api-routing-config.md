@@ -226,10 +226,38 @@ otherwise invisible in flag tables:
 
 | Field | Env knob | Default | What it prices |
 |-------|----------|---------|----------------|
-| Plane fragility | `KICAD_PLANE_FRAGILITY_COST` | **2.0 = ON** | Cells near pour boundaries/necks, so signals do not bisect a plane. The LARGEST default field (10x the stub tier). `0` reverts. |
+| Plane fragility | `KICAD_PLANE_FRAGILITY_COST` | **2.0 = ON** | Cells near pour boundaries/necks, so signals do not bisect a plane. The LARGEST default field (10x the stub tier). `0` reverts. Which copper it was rasterized from is disclosed in `JSON_SUMMARY.plane_fragility` (below). |
 | Congestion v1 | `KICAD_CONGESTION_COST` | 0 = off | All-layer copper-density field. |
 | Congestion v2 | `KICAD_CONGESTION2_COST` | 0 = off | Demand/capacity bins, owner-exempt (your own destination does not repel you). A source in the layer-map composition pass since d52f1c2 (#585 item 7): sums in sum mode, max-mode unchanged by commutativity. |
 | History congestion | `KICAD_HISTORY_COST` | 0 = off | PathFinder-style negotiated congestion (#590): per-CELL, CUMULATIVE conflict history for the rest of the call. See below. |
+
+##### Plane fragility: which copper it priced (#831)
+
+The field is rasterized from the EXACT KiCad fill when pcbnew finishes within
+`EXACT_FILL_TIMEOUT` (300 s), else from the drawn zone OUTLINES -- which, for a
+full-board pour, price only a board-edge band. The choice used to be a console
+line only. `batch_route` now emits it in `JSON_SUMMARY.plane_fragility`:
+
+```json
+"plane_fragility": {"source": "zone_outlines", "islands": 0,
+                    "refill_status": "timeout",
+                    "why": "the KiCad refill TIMED OUT after 300s (limit 300s)",
+                    "machine_dependent": true}
+```
+
+`source` is one of `live_board` (the GUI's staged refill of the live board),
+`live_board_in_process` (the GUI's in-process fallback: live copper, clearances
+as of board load), `kicad_refill`, `zone_outlines`, `none` (no zones, or the
+field is off). `refill_status` is the `RefillStatus` reason the fill returned.
+**`machine_dependent: true` is the value a grader must not miss**: the fallback
+was taken because the refill timed out on THIS machine (or, in the GUI, the UI
+thread did not pump the save), so a faster machine routes the same board
+against different geometry. Every other fallback reason -- no pcbnew, the refill
+failed, the pour is empty -- is a fact about the board or the install and would
+repeat anywhere. The console prints a `WARNING` naming machine speed in the
+same case. There is deliberately no size pre-flight predicate: the corpus
+measurement behind that decision is in `tests/stress/RUNBOOK.md` ("Exact-fill
+timing census (#831)").
 
 ##### History congestion (#590), the only field that measures TIME
 

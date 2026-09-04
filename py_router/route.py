@@ -3744,6 +3744,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         summary['design_rules'] = _dr
     except Exception as _dre:                                   # noqa: BLE001
         summary['design_rules'] = {'error': str(_dre)}
+    # #831: WHICH copper the plane-fragility field was rasterized from, and
+    # why. The one value a grader must not miss is `machine_dependent`: the
+    # field fell back to the drawn zone outlines because the exact fill
+    # TIMED OUT on this machine, so a faster machine routes this same board
+    # against different geometry. Absent only when register_plane_fragility
+    # never ran (a config that predates it).
+    _pfg = getattr(config, '_plane_fragility_geometry', None)
+    if _pfg is not None:
+        summary['plane_fragility'] = dict(_pfg)
     if impedance_width_clamped:
         # #610: layers whose impedance-solved width was clamped UP to the
         # width floor, {layer: [solved_mm, floor_mm]}. Those layers route at
@@ -4292,7 +4301,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if env_knobs.OBSTACLE_AUDIT:
         from obstacle_cache import run_obstacle_audit
         run_obstacle_audit(base_obstacles, state.working_obstacles,
-                           state.net_obstacles_cache)
+                           state.net_obstacles_cache,
+                           pcb_data=pcb_data, config=config)
 
     # #348 (glasgow /SCL): END-OF-RUN RECONCILIATION. Mid-run rip churn can
     # leave a victim net partially connected whose gap is trivially routable
