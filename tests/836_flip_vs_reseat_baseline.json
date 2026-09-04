@@ -1,73 +1,6 @@
 {
- "census": {
-  "flat_hierarchy": {
-   "eligible": 58,
-   "flip_refused": 0,
-   "movable": 58,
-   "parts": 64,
-   "refusal_reasons": {},
-   "reseat_clusters": 1,
-   "reseat_members": 1,
-   "reseat_native_coverage": 0.0172
-  },
-  "glasgow_revC": {
-   "eligible": 243,
-   "flip_refused": 0,
-   "movable": 243,
-   "parts": 264,
-   "refusal_reasons": {},
-   "reseat_clusters": 33,
-   "reseat_members": 84,
-   "reseat_native_coverage": 0.3457
-  },
-  "orangecrab_ext_pll": {
-   "eligible": 162,
-   "flip_refused": 2,
-   "movable": 164,
-   "parts": 164,
-   "refusal_reasons": {
-    "U10": "U10: a pad carries (primitives ...) -- a custom pad's sub-geometry frame is unconfirmed against pcbnew; 6 witnesses on t",
-    "U9": "U9: a pad carries (primitives ...) -- a custom pad's sub-geometry frame is unconfirmed against pcbnew; 6 witnesses on th"
-   },
-   "reseat_clusters": 16,
-   "reseat_members": 74,
-   "reseat_native_coverage": 0.4512
-  },
-  "splitflap_driver": {
-   "eligible": 65,
-   "flip_refused": 0,
-   "movable": 65,
-   "parts": 65,
-   "refusal_reasons": {},
-   "reseat_clusters": 10,
-   "reseat_members": 11,
-   "reseat_native_coverage": 0.1692
-  },
-  "ulx3s": {
-   "eligible": 226,
-   "flip_refused": 0,
-   "movable": 226,
-   "parts": 226,
-   "refusal_reasons": {},
-   "reseat_clusters": 14,
-   "reseat_members": 53,
-   "reseat_native_coverage": 0.2345
-  },
-  "watchy": {
-   "eligible": 84,
-   "flip_refused": 0,
-   "movable": 84,
-   "parts": 84,
-   "refusal_reasons": {},
-   "reseat_clusters": 6,
-   "reseat_members": 24,
-   "reseat_native_coverage": 0.2857
-  }
- },
  "clearance": 0.2,
  "engine_sha": "417ebfa07850a6462d6ea8d09ab3ab5aa169a086",
- "generated_utc": "2026-09-04T20:38:40Z",
- "limited": null,
  "preregistration": {
   "C4_ratio": 0.5,
   "E_build": 6,
@@ -88,6 +21,142 @@
    "oob_pad_count"
   ],
   "question": "how many parts does a flip help that no same-side move within reach helps"
+ },
+ "rank_radius_mm": 3.0,
+ "routed": {
+  "glasgow_revC": {
+   "better": [
+    [
+     "RN5",
+     "vias",
+     15,
+     14,
+     true
+    ]
+   ],
+   "control_moved": [
+    [
+     "R50",
+     "failed",
+     0,
+     1,
+     false
+    ],
+    [
+     "C40",
+     "failed",
+     0,
+     1,
+     false
+    ]
+   ],
+   "control_no_change": [
+    "C86",
+    "C89"
+   ],
+   "control_refs": [
+    "R50",
+    "C86",
+    "C89",
+    "C40"
+   ],
+   "immaterial": [
+    [
+     "R58",
+     "vias",
+     23,
+     24,
+     false
+    ]
+   ],
+   "no_change": [
+    "D23"
+   ],
+   "no_verdict": [],
+   "probed": 11,
+   "scope_skipped": [],
+   "worse": [
+    [
+     "D20",
+     "vias",
+     35,
+     38,
+     false
+    ],
+    [
+     "RN11",
+     "vias",
+     15,
+     17,
+     false
+    ],
+    [
+     "RN12",
+     "vias",
+     15,
+     16,
+     false
+    ],
+    [
+     "RN6",
+     "vias",
+     14,
+     15,
+     false
+    ]
+   ]
+  },
+  "orangecrab_ext_pll": {
+   "refused": "carries copper (742 segments, 136 vias): a flip strands it, so a routed comparison here measures copper damage rather than placement. Strip the copper first if this board is wanted."
+  },
+  "ulx3s": {
+   "better": [],
+   "control_moved": [
+    [
+     "R39",
+     "vias",
+     14,
+     13,
+     true
+    ],
+    [
+     "D1",
+     "vias",
+     35,
+     36,
+     false
+    ],
+    [
+     "D12",
+     "vias",
+     0,
+     3,
+     false
+    ],
+    [
+     "C29",
+     "vias",
+     43,
+     46,
+     false
+    ]
+   ],
+   "control_no_change": [],
+   "control_refs": [
+    "R39",
+    "D1",
+    "D12",
+    "C29"
+   ],
+   "immaterial": [],
+   "no_change": [
+    "H2"
+   ],
+   "no_verdict": [],
+   "probed": 5,
+   "scope_skipped": [],
+   "worse": []
+  }
  },
  "screen": {
   "flat_hierarchy": {
@@ -244,26 +313,28 @@
  "verdict": {
   "E": 8,
   "E_boards": 2,
+  "E_material": 0,
   "artefact_rate_worst_control": 0.0119,
-  "controls": [
-   "splitflap_driver",
-   "watchy",
-   "flat_hierarchy"
-  ],
   "not_measured": [
-   "the ROUTED verdict (converge.scoped_route) -- this run grades on the assembly gate, which on a shipping board is already near-clean, so it can only see a flip that fixes an EXISTING legality defect. The E_material threshold is therefore unevaluated, which is itself a reason the verdict is not BUILD.",
+   "orangecrab_ext_pll could not be routed: it ships 742 segments and 136 vias, and flipping a footprint strands its copper, so a routed A/B there measures copper damage rather than placement. It contributed 0 EXCLUSIVE parts to the screen either way.",
    "the B->F direction-reversal control (C4)",
-   "a multi-flip (stacked) arm -- one flip at a time against a fixed placement is conservative in the BUILD direction"
-  ],
-  "primaries": [
-   "ulx3s",
-   "glasgow_revC",
-   "orangecrab_ext_pll"
+   "a multi-flip (stacked) arm -- one flip at a time against a fixed placement is conservative in the BUILD direction",
+   "a DAMAGED board. Every board here is a shipping placement, already near-clean on the assembly gate, so the screen can only see a flip that fixes an EXISTING legality defect."
   ],
   "primaries_beating_the_artefact_rate": [
    "glasgow_revC"
   ],
-  "verdict": "INCONCLUSIVE",
-  "why": "CLOSE requires E <= 1 (measured 11); BUILD requires all three primaries to show at least one EXCLUSIVE part (measured 2 of 3, orangecrab_ext_pll is 0). Neither threshold is met, and the third bucket is a real answer rather than a hedge: a two-outcome pre-registration forces a decision the data does not support. The control comparison is the sharper half -- watchy has NO back-side pad copper at all, so every flip on it lands in an empty face, and its 1.19% EXCLUSIVE rate is the artefact rate. ulx3s scores 0.88% and orangecrab 0.00%, so 2 of the 3 primaries do NOT beat a board where the effect cannot be real. Only glasgow_revC (3.70%) does. One board of three is not a directional result, by this repo's own rule."
+  "routed_better": 1,
+  "routed_control_moved": 6,
+  "routed_control_no_change": 2,
+  "routed_neutral": 3,
+  "routed_worse": 4,
+  "verdict": "DO NOT BUILD",
+  "why": [
+   "The routed arbiter -- the only instrument here that charges the via a flip creates -- says the candidates do not pay: of the 8 EXCLUSIVE parts it could route, 1 improved, 4 got WORSE and 3 did not move. Every move was on the LAST rung (vias); E_material, the count improving any rung above it, is 0.",
+   "The arbiter discriminates, so \"no change\" is not what it always says: of the 8 control parts flipped and routed identically, 6 moved the ladder.",
+   "The screen agrees for a second reason. watchy has NO back-side pad copper, so every flip on it lands in an empty face and its 1.19% EXCLUSIVE rate is the artefact rate. ulx3s scores below it and orangecrab_ext_pll scores zero: 1 of 3 primaries beat a board where the effect cannot be real.",
+   "SAID PLAINLY: the pre-registered CLOSE arm required E <= 1 and E was 8, so the letter of the threshold is not met and this conclusion rests on the routed arm the design named as decisive rather than on the screen count. Both numbers are published here so a reader can disagree with the reading rather than with the data."
+  ]
  }
 }

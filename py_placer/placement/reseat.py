@@ -53,6 +53,17 @@ its pin, and the slot pool already guarantees that. The mechanism earns its
 keep on clusters whose members carry SIGNAL nets -- series terminations, filter
 networks, a part tethered to a zone -- and it is generic over
 `(member, anchor, radius)` so a future tether source needs no changes here.
+
+It also cannot FLIP -- side is a filter here, never a variable -- and #836
+measured what that costs rather than leaving it to be assumed. Two numbers
+worth carrying (`tests/836_flip_vs_reseat_baseline.json`): this module's own
+reach is **23% of ulx3s's movable parts and 35% of glasgow_revC's**, because
+`clusters_from_tethers` sources only decap tethers -- so a comparison against
+native reseat ALONE would have manufactured a win on the rest of each board,
+and the measurement's move arm had to be widened with `pose_score.rank_poses`
+to mean anything. And of the 8 parts that a flip helped where no same-side
+move within reach did, a real route made **4 worse and 1 better**, all on the
+via rung. The flip move is not being built; see `docs/placement-optimization.md`.
 """
 from __future__ import annotations
 
