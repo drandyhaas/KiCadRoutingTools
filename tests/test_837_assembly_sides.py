@@ -424,14 +424,60 @@ def main():
           d_f.get('assembly_sides') == 'F'
           and d_none.get('assembly_sides') is None,
           f"F={d_f.get('assembly_sides')} none={d_none.get('assembly_sides')}")
-    # The basis must reach the TEXT digest. `options._digest` skips string
-    # values before the forced-key list, so a string label would be invisible
-    # exactly where a human reads -- which is why the key is a bool.
-    check("capacity: the basis is visible in the text channel",
-          'charged_area_is_sum=yes' in out_f, out_f[-500:])
+    # The basis must reach the TEXT channel. Not via the digest: forcing
+    # `charged_area_is_sum` into `_DIGEST_ALWAYS` evicted `part_area_mm2` on
+    # 21 of 22 boards, because `_digest` returns `out[:max(limit,
+    # len(forced))]` and the forced list was already at the limit. So the
+    # human record is `check_capacity`'s own line plus the action string,
+    # both unconditional, and the bool stays the machine channel.
+    check("capacity: the text channel names the declared policy",
+          'assembly sides: F' in out_f, out_f[-600:])
+    check("capacity: ...and the action names the face that must carry it",
+          'F.Cu, which must carry every part' in out_f, out_f[-900:])
+    check("capacity: the digest did not lose part_area_mm2 to the new keys",
+          'part_area_mm2=' in capacity('glasgow_revC', quiet=False)[1],
+          capacity('glasgow_revC', quiet=False)[1][-400:])
     check("capacity: all three invocations exit 0",
           r_none.returncode == r_both.returncode == r_f.returncode == 0,
           f"{r_none.returncode} {r_both.returncode} {r_f.returncode}")
+    # The DISCLOSURE, in the channel a human reads. It lived inside
+    # `measured` once, where `format_text` never looks and `_digest` never
+    # renders it, so both sentences it carries were invisible outside --json.
+    _, out_none, _ = capacity('ulx3s', quiet=False)
+    check("capacity: the undeclared run says the back area is credited free",
+          'NOT MODELLED' in out_none
+          and 'credited free' in out_none, out_none[-700:])
+    check("capacity: and the declared run drops that half, keeping the other",
+          'NOT MODELLED' in out_f and 'credited free' not in out_f
+          and 'through-hole leads' in out_f, out_f[-700:])
+
+    # An intent that declares NOTHING is not an intent that declares `both`.
+    # They share an arithmetic and are different statements, and reading them
+    # alike made both machine channels assert a policy nobody made.
+    with tempfile.TemporaryDirectory() as td:
+        empty = os.path.join(td, 'empty_intent.json')
+        with open(empty, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'floorplan-intent',
+                       'units': 'mm'}, fh)
+        _, out_e, d_e = capacity('ulx3s', '--intent', empty, quiet=False)
+        check("capacity: an intent declaring nothing reports nothing",
+              d_e.get('assembly_sides') is None
+              and d_e.get('assembly_sides_source') == 'intent declares none',
+              f"{d_e.get('assembly_sides')} / "
+              f"{d_e.get('assembly_sides_source')}")
+        check("capacity: ...and keeps the credited-free disclosure",
+              'credited free' in out_e, out_e[-600:])
+        decl = os.path.join(td, 'both_intent.json')
+        with open(decl, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+                       'assembly': {'sides': 'both'}}, fh)
+        _, _, d_b = capacity('ulx3s', '--intent', decl)
+        check("capacity: a declared `both` is told apart from silence",
+              d_b.get('assembly_sides') == 'both'
+              and d_b.get('assembly_sides_source') == 'intent'
+              and d_b.get('utilisation') == d_e.get('utilisation'),
+              f"declared {d_b.get('assembly_sides_source')} vs silent "
+              f"{d_e.get('assembly_sides_source')}")
 
     # The loader refuses by REASON. `single` is the spelling an author reaches
     # for first, and "it does not say WHICH face" is the whole correction --

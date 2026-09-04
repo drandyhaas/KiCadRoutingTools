@@ -63,6 +63,7 @@ NOT_ASKED = {
     'the intent declares no decaps.max_pin_distance_mm',
     'the intent declares no must_lock patterns',
     'the intent declares no legality_budget',
+    'the intent declares no assembly.sides',
     'not requested',
 }
 

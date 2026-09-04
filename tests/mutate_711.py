@@ -98,8 +98,13 @@ ROWS = [
      "        if not f0 < f1:",
      "        if False:",
      (TSCH, T712, T711), KILLED),
+    # RE-ANCHORED for #837, which took READER_VERSION 2 -> 3. The mutation is
+    # restated rather than transliterated: it must move the version BELOW the
+    # one #712's fields need, and `3 -> 2` would now be a bump that is merely
+    # smaller rather than absent -- a row that could survive for the wrong
+    # reason. `3 -> 1` is the same claim the row has always made.
     ('reader-version-not-bumped', 'fp',
-     "READER_VERSION = 2",
+     "READER_VERSION = 3",
      "READER_VERSION = 1",
      (TSCH, T712), KILLED),
 

@@ -1,0 +1,269 @@
+{
+ "census": {
+  "flat_hierarchy": {
+   "eligible": 58,
+   "flip_refused": 0,
+   "movable": 58,
+   "parts": 64,
+   "refusal_reasons": {},
+   "reseat_clusters": 1,
+   "reseat_members": 1,
+   "reseat_native_coverage": 0.0172
+  },
+  "glasgow_revC": {
+   "eligible": 243,
+   "flip_refused": 0,
+   "movable": 243,
+   "parts": 264,
+   "refusal_reasons": {},
+   "reseat_clusters": 33,
+   "reseat_members": 84,
+   "reseat_native_coverage": 0.3457
+  },
+  "orangecrab_ext_pll": {
+   "eligible": 162,
+   "flip_refused": 2,
+   "movable": 164,
+   "parts": 164,
+   "refusal_reasons": {
+    "U10": "U10: a pad carries (primitives ...) -- a custom pad's sub-geometry frame is unconfirmed against pcbnew; 6 witnesses on t",
+    "U9": "U9: a pad carries (primitives ...) -- a custom pad's sub-geometry frame is unconfirmed against pcbnew; 6 witnesses on th"
+   },
+   "reseat_clusters": 16,
+   "reseat_members": 74,
+   "reseat_native_coverage": 0.4512
+  },
+  "splitflap_driver": {
+   "eligible": 65,
+   "flip_refused": 0,
+   "movable": 65,
+   "parts": 65,
+   "refusal_reasons": {},
+   "reseat_clusters": 10,
+   "reseat_members": 11,
+   "reseat_native_coverage": 0.1692
+  },
+  "ulx3s": {
+   "eligible": 226,
+   "flip_refused": 0,
+   "movable": 226,
+   "parts": 226,
+   "refusal_reasons": {},
+   "reseat_clusters": 14,
+   "reseat_members": 53,
+   "reseat_native_coverage": 0.2345
+  },
+  "watchy": {
+   "eligible": 84,
+   "flip_refused": 0,
+   "movable": 84,
+   "parts": 84,
+   "refusal_reasons": {},
+   "reseat_clusters": 6,
+   "reseat_members": 24,
+   "reseat_native_coverage": 0.2857
+  }
+ },
+ "clearance": 0.2,
+ "engine_sha": "417ebfa07850a6462d6ea8d09ab3ab5aa169a086",
+ "generated_utc": "2026-09-04T20:38:40Z",
+ "limited": null,
+ "preregistration": {
+  "C4_ratio": 0.5,
+  "E_build": 6,
+  "E_close": 1,
+  "E_material_build": 3,
+  "V1_floor": 0.85,
+  "boards": [
+   "ulx3s",
+   "glasgow_revC",
+   "orangecrab_ext_pll"
+  ],
+  "gate_keys": [
+   "blocking",
+   "containment_blocking",
+   "courtyard_blocking",
+   "pad_conflicts",
+   "hole_conflicts",
+   "oob_pad_count"
+  ],
+  "question": "how many parts does a flip help that no same-side move within reach helps"
+ },
+ "screen": {
+  "flat_hierarchy": {
+   "area_relief_parts": 58,
+   "blind_halo_relief_frac": 0.0,
+   "blind_halo_relief_parts": 0,
+   "blind_halo_relief_sum": 0.0,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 5927.41,
+    "containment_blocking": 0,
+    "courtyard_blocking": 0,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 0,
+   "exclusive_refs": [],
+   "flip_refused": 0,
+   "helps_flip": 0,
+   "helps_move": 0,
+   "movable": 58,
+   "sides_observed": "F"
+  },
+  "glasgow_revC": {
+   "area_relief_parts": 157,
+   "blind_halo_relief_frac": 0.8977,
+   "blind_halo_relief_parts": 237,
+   "blind_halo_relief_sum": 2566.924,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 3047.11,
+    "containment_blocking": 0,
+    "courtyard_blocking": 23,
+    "hole_conflicts": 0,
+    "oob_pad_count": 1,
+    "pad_conflicts": 1
+   },
+   "control_write_inert": true,
+   "exclusive": 7,
+   "exclusive_refs": [
+    "D20",
+    "D23",
+    "R58",
+    "RN11",
+    "RN12",
+    "RN5",
+    "RN6"
+   ],
+   "flip_refused": 0,
+   "helps_flip": 11,
+   "helps_move": 4,
+   "movable": 243,
+   "sides_observed": "both"
+  },
+  "orangecrab_ext_pll": {
+   "area_relief_parts": 80,
+   "blind_halo_relief_frac": 0.9329,
+   "blind_halo_relief_parts": 153,
+   "blind_halo_relief_sum": 2416.247,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 999.94,
+    "containment_blocking": 0,
+    "courtyard_blocking": 5,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 0,
+   "exclusive_refs": [],
+   "flip_refused": 2,
+   "helps_flip": 0,
+   "helps_move": 0,
+   "movable": 164,
+   "sides_observed": "both"
+  },
+  "splitflap_driver": {
+   "area_relief_parts": 65,
+   "blind_halo_relief_frac": 0.3538,
+   "blind_halo_relief_parts": 23,
+   "blind_halo_relief_sum": 138.131,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 2936.52,
+    "containment_blocking": 0,
+    "courtyard_blocking": 0,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 0,
+   "exclusive_refs": [],
+   "flip_refused": 0,
+   "helps_flip": 0,
+   "helps_move": 0,
+   "movable": 65,
+   "sides_observed": "F"
+  },
+  "ulx3s": {
+   "area_relief_parts": 63,
+   "blind_halo_relief_frac": 0.9159,
+   "blind_halo_relief_parts": 207,
+   "blind_halo_relief_sum": 1995.929,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 4175.64,
+    "containment_blocking": 0,
+    "courtyard_blocking": 18,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 1,
+   "exclusive_refs": [
+    "H2"
+   ],
+   "flip_refused": 0,
+   "helps_flip": 2,
+   "helps_move": 1,
+   "movable": 226,
+   "sides_observed": "both"
+  },
+  "watchy": {
+   "area_relief_parts": 84,
+   "blind_halo_relief_frac": 0.9167,
+   "blind_halo_relief_parts": 77,
+   "blind_halo_relief_sum": 1330.729,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 739.8,
+    "containment_blocking": 0,
+    "courtyard_blocking": 4,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 1,
+   "exclusive_refs": [
+    "J1"
+   ],
+   "flip_refused": 0,
+   "helps_flip": 2,
+   "helps_move": 1,
+   "movable": 84,
+   "sides_observed": "F"
+  }
+ },
+ "verdict": {
+  "E": 8,
+  "E_boards": 2,
+  "artefact_rate_worst_control": 0.0119,
+  "controls": [
+   "splitflap_driver",
+   "watchy",
+   "flat_hierarchy"
+  ],
+  "not_measured": [
+   "the ROUTED verdict (converge.scoped_route) -- this run grades on the assembly gate, which on a shipping board is already near-clean, so it can only see a flip that fixes an EXISTING legality defect. The E_material threshold is therefore unevaluated, which is itself a reason the verdict is not BUILD.",
+   "the B->F direction-reversal control (C4)",
+   "a multi-flip (stacked) arm -- one flip at a time against a fixed placement is conservative in the BUILD direction"
+  ],
+  "primaries": [
+   "ulx3s",
+   "glasgow_revC",
+   "orangecrab_ext_pll"
+  ],
+  "primaries_beating_the_artefact_rate": [
+   "glasgow_revC"
+  ],
+  "verdict": "INCONCLUSIVE",
+  "why": "CLOSE requires E <= 1 (measured 11); BUILD requires all three primaries to show at least one EXCLUSIVE part (measured 2 of 3, orangecrab_ext_pll is 0). Neither threshold is met, and the third bucket is a real answer rather than a hedge: a two-outcome pre-registration forces a decision the data does not support. The control comparison is the sharper half -- watchy has NO back-side pad copper at all, so every flip on it lands in an empty face, and its 1.19% EXCLUSIVE rate is the artefact rate. ulx3s scores 0.88% and orangecrab 0.00%, so 2 of the 3 primaries do NOT beat a board where the effect cannot be real. Only glasgow_revC (3.70%) does. One board of three is not a directional result, by this repo's own rule."
+ }
+}

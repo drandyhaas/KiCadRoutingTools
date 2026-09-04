@@ -3104,10 +3104,19 @@ def _wants(intent: Intent, rule: str) -> bool:
         # measurement reversed the obvious choice. Skipping on 'both' looks
         # like the honest "this cannot fire, so do not claim to have graded
         # it", but the intent DECLARES the key, so a skip lands in the
-        # abstention channel as "declared and ungraded": glasgow_revC and
-        # orangecrab_ext_pll went `pass: true -> false` and `grade_rc 0 -> 4`
-        # on an emitted intent, which breaks grades-clean-by-construction on
-        # exactly the boards this key exists to describe.
+        # abstention channel as "declared and ungraded". Measured with
+        # `_wants` hand-edited to skip: `713_abstention_census` reports
+        # `rules_skipped_arm 0 -> 7` and `boards_clean_but_ungraded 0 -> 2`
+        # (kit-dev-coldfire-xilinx_5213 and sonde_u) -- an emitted intent
+        # declaring a key its own grade then abstains on.
+        #
+        # (An earlier version of this comment claimed the skip took
+        # glasgow_revC and orangecrab_ext_pll from `pass: true` to `false`.
+        # That was read off a re-record of a baseline that had gone stale for
+        # unrelated reasons four days earlier; a review re-ran the census at
+        # the base commit with none of this code present and found those
+        # boards already failing. The decision stands, the mechanism above is
+        # the measured one.)
         #
         # And running it is not vacuous. 'both' is a real policy -- the fab
         # will populate both faces -- and "every part is on a declared face"

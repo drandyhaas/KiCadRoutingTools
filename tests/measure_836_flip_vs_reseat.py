@@ -444,6 +444,182 @@ def table_b(stems, limit=None, quiet=True):
     return rows
 
 
+#: The verdict ladder, most decisive first. Lifted from
+#: `tests/test_placement_probe.py` rather than restated: reading only `failed`
+#: is how a board shipping open copper reports zero, and two graders that
+#: disagree about what "worse" means is how a finding survives being wrong.
+LADDER = (
+    ('failed', lambda s: int(s.get('failed', 0) or 0)),
+    ('open', lambda s: len(s.get('open_single') or ())),
+    ('unconnected_pads', lambda s: int(s.get('pad_pairs_total', 0))
+     - int(s.get('pad_pairs_connected', 0))),
+    ('vias', lambda s: int(s.get('total_vias', 0) or 0)),
+)
+
+
+def _scope_nets(state, ref, pcb):
+    """The nets a flip of `ref` can plausibly move, fixed from the CONTROL.
+
+    `ref`'s own non-rail nets plus those of its halo neighbours. Computed once,
+    from the unflipped board, and passed byte-identically to both arms --
+    scoping by what MOVED would be circular, which is the rule
+    `test_placement_probe` states about itself.
+    """
+    part = state.parts.get(ref)
+    if part is None:
+        return []
+    refs = {ref}
+    if state._neighbors is not None and ref in state._neighbors:
+        refs |= set(state._neighbors[ref])
+    ids = set()
+    for r in refs:
+        p = state.parts.get(r)
+        if p is not None:
+            ids |= set(p.nets)
+    names = []
+    for nid in sorted(ids):
+        net = pcb.nets.get(nid)
+        nm = getattr(net, 'name', None)
+        if nm and nm.strip():
+            names.append(nm)
+    return names
+
+
+def _rung(sa, sb):
+    """(label, off, on, better) for the first rung that moved, else None."""
+    for label, fn in LADDER:
+        a, b = fn(sa), fn(sb)
+        if a != b:
+            # Materiality, the probe's own rule: a sub-5% move on the LAST
+            # rung with connectivity identical is not a result.
+            if label == LADDER[-1][0] and a and abs(b - a) / a < 0.05:
+                return (label, a, b, b < a, 'immaterial')
+            return (label, a, b, b < a, 'material')
+    return None
+
+
+def table_c(stems, screen, route_args=(), max_probes=None, control_sample=0,
+            seed=8361):
+    """The ROUTED arbiter, on the parts table B called EXCLUSIVE.
+
+    Table B grades on the assembly gate, which on a shipping board is already
+    near-clean -- so it can only see a flip that fixes an EXISTING legality
+    defect. This asks the only instrument that charges the via a flip creates:
+    a real route, scoped identically for both arms.
+    """
+    import contextlib
+    import io
+    from kicad_parser import parse_kicad_pcb
+    from converge import scoped_route
+    from pose_score import make_state
+
+    rows = {}
+    for stem in stems:
+        refs = list((screen.get(stem) or {}).get('exclusive_refs') or ())
+        if max_probes:
+            refs = refs[:max_probes]
+        path = board_path(stem)
+        pcb = parse_kicad_pcb(path)
+        # REFUSED, not silently skipped: a routed A/B needs a copper-FREE
+        # board. Flipping a footprint that already has traces on it leaves
+        # that copper where it was, attached to pads now on the other face --
+        # so the route would be measuring the damage the flip did to existing
+        # copper, not the placement. orangecrab_ext_pll ships 742 segments and
+        # 136 vias and is the board this rule exists for.
+        if pcb.segments or pcb.vias:
+            rows[stem] = {'refused': (
+                f"carries copper ({len(pcb.segments)} segments, "
+                f"{len(pcb.vias)} vias): a flip strands it, so a routed "
+                f"comparison here measures copper damage rather than "
+                f"placement. Strip the copper first if this board is wanted.")}
+            print(f"{stem}: REFUSED for the routed table -- "
+                  f"{rows[stem]['refused']}", flush=True)
+            continue
+        st = make_state(pcb, path)
+        # A CONTROL SAMPLE of parts table B did NOT call exclusive, flipped
+        # and routed exactly the same way. Without it, "every probe reported
+        # no change" is unreadable: it could mean a flip does not help, or it
+        # could mean this instrument never moves at all. A fixed seed, so the
+        # sample is the same on a re-run.
+        import random
+        rng = random.Random(seed)
+        pool = sorted(r for r, p in st.parts.items()
+                      if not p.locked and r not in set(refs))
+        controls = rng.sample(pool, min(control_sample, len(pool)))
+        out = {'probed': 0, 'better': [], 'worse': [], 'no_change': [],
+               'immaterial': [], 'no_verdict': [], 'scope_skipped': [],
+               'control_refs': controls, 'control_moved': [],
+               'control_no_change': []}
+        tmp = tempfile.mkdtemp(prefix='m836c')
+        buf = io.StringIO()
+        try:
+            base_pl = _identity_placements(st)
+            ctrl = os.path.join(tmp, 'ctrl.kicad_pcb')
+            with contextlib.redirect_stdout(buf):
+                _write(path, ctrl, base_pl)
+            live = len([n for n in pcb.nets.values()
+                        if getattr(n, 'name', '')])
+            for ref in refs + controls:
+                is_ctrl = ref in controls
+                nets = _scope_nets(st, ref, pcb)
+                # The probe's own cap: a scope past half the live nets is not
+                # a scoped route, it is a whole-board route with extra steps.
+                if not nets or (live and len(nets) > 0.5 * live):
+                    out['scope_skipped'].append(ref)
+                    continue
+                pl = [dict(d) for d in base_pl]
+                for d in pl:
+                    if d['reference'] == ref:
+                        d['new_side'] = 'B' if st.parts[ref].side == 'F' else 'F'
+                flip = os.path.join(tmp, f'flip_{ref}.kicad_pcb')
+                try:
+                    with contextlib.redirect_stdout(buf):
+                        _write(path, flip, pl)
+                except Exception:                              # noqa: BLE001
+                    out['scope_skipped'].append(ref)
+                    continue
+                # Fresh output path per route: `route.py` reads back a sibling
+                # `.kicad_pro` DRC floor it wrote, so reusing one silently
+                # changes the routing (CLAUDE.md).
+                a_res = scoped_route(ctrl, nets,
+                                     out=os.path.join(tmp, f'a_{ref}.kicad_pcb'),
+                                     extra_args=list(route_args))
+                b_res = scoped_route(flip, nets,
+                                     out=os.path.join(tmp, f'b_{ref}.kicad_pcb'),
+                                     extra_args=list(route_args))
+                sa, sb = a_res.get('summary') or {}, b_res.get('summary') or {}
+                out['probed'] += 1
+                if not sa or not sb:
+                    # A summary we cannot read is a NON-VERDICT, counted as
+                    # its own thing. Folding it into "did not help" is how a
+                    # broken router reads as evidence for closing an issue.
+                    out['no_verdict'].append(ref)
+                    continue
+                r = _rung(sa, sb)
+                if is_ctrl:
+                    (out['control_no_change'] if r is None
+                     else out['control_moved']).append(
+                         ref if r is None else [ref] + list(r[:4]))
+                elif r is None:
+                    out['no_change'].append(ref)
+                elif r[4] == 'immaterial':
+                    out['immaterial'].append([ref] + list(r[:4]))
+                elif r[3]:
+                    out['better'].append([ref] + list(r[:4]))
+                else:
+                    out['worse'].append([ref] + list(r[:4]))
+                print(f"    {stem}/{ref}{' [control]' if is_ctrl else ''}: "
+                      f"{r}", flush=True)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        rows[stem] = out
+        print(f"{stem}: routed {out['probed']} -- better {len(out['better'])} "
+              f"worse {len(out['worse'])} no_change {len(out['no_change'])} "
+              f"immaterial {len(out['immaterial'])} "
+              f"no_verdict {len(out['no_verdict'])}", flush=True)
+    return rows
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--table', default='AB')
@@ -452,11 +628,27 @@ def main(argv=None):
     ap.add_argument('--diff', nargs=2, default=None, metavar=('BEFORE', 'AFTER'))
     ap.add_argument('--limit', type=int, default=None,
                     help='candidates per board (a SMOKE bound, never a result)')
+    ap.add_argument('--screen', default=None,
+                    help='a prior run JSON to take table C candidates from')
+    ap.add_argument('--max-probes', type=int, default=None,
+                    help='cap the routed probes per board')
+    ap.add_argument('--control-sample', type=int, default=0,
+                    help='also route N NON-exclusive parts per board, so '
+                         '"no change everywhere" can be told apart from an '
+                         'instrument that never moves')
+    ap.add_argument('--rank-radius', type=float, default=RANK_RADIUS_MM,
+                    help='the MOVE arm reach in mm. Recorded in the output: '
+                         'EXCLUSIVE is defined against it, so a number '
+                         'published without it cannot be compared with '
+                         'another run')
     a = ap.parse_args(argv)
     if a.diff:
         return _diff(a.diff[0], a.diff[1])
+    globals()['RANK_RADIUS_MM'] = a.rank_radius
     stems = a.boards or list(PRIMARY)
     doc = {'preregistration': PREREGISTRATION, 'engine_sha': engine_sha(),
+           'rank_radius_mm': a.rank_radius, 'rank_step_mm': RANK_STEP_MM,
+           'reseat_radius_mm': RESEAT_RADIUS_MM,
            'clearance': CLEARANCE, 'generated_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ',
                                                                  time.gmtime())}
     if 'A' in a.table:
@@ -466,6 +658,17 @@ def main(argv=None):
         doc['screen'] = table_b(stems, limit=a.limit)
         doc['limited'] = a.limit
         print(json.dumps(doc['screen'], indent=1, sort_keys=True))
+    if 'C' in a.table:
+        screen = doc.get('screen')
+        if screen is None and a.screen:
+            screen = json.load(open(a.screen, encoding='utf-8'))['screen']
+        if screen is None:
+            print('table C needs a screen: run with B, or pass --screen '
+                  'the JSON of a run that did', file=sys.stderr)
+            return 2
+        doc['routed'] = table_c(stems, screen, max_probes=a.max_probes,
+                                control_sample=a.control_sample)
+        print(json.dumps(doc['routed'], indent=1, sort_keys=True))
     if a.out:
         with open(a.out, 'w', encoding='utf-8') as fh:
             json.dump(doc, fh, indent=1, sort_keys=True)

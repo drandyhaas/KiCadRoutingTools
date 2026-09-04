@@ -99,15 +99,22 @@ def main(argv=None):
     if sides is None and a.intent:
         try:
             from placement.floorplan import load_intent
-            declared = load_intent(a.intent).assembly_sides()
-            # `assembly_sides()` resolves an absent key to 'both', which is
-            # the same arithmetic as undeclared -- but the two are different
-            # STATEMENTS, so the source says which one was read.
-            sides, sides_src = declared, 'intent'
+            # The RAW key, not `assembly_sides()`, which resolves an absent
+            # key to 'both'. An intent that declares nothing and one that
+            # declares `both` produce the same arithmetic and are different
+            # STATEMENTS, and reading them alike made both machine channels
+            # assert a policy the intent never made -- including dropping the
+            # "back-side area is credited free" disclosure, which exists
+            # precisely for the case where nobody declared.
+            declared = (load_intent(a.intent).assembly or {}).get('sides')
+            if declared:
+                sides, sides_src = declared, 'intent'
+            else:
+                sides_src = 'intent declares none'
         except (OSError, ValueError) as e:
             print(f"cannot load intent {a.intent}: {e}", file=sys.stderr)
             return 2
-    if sides is None:
+    if sides is None and sides_src == 'cli':
         sides_src = 'not declared'
     if not a.quiet:
         print(f"  assembly sides: {sides or 'not declared'}  [{sides_src}]"
@@ -141,6 +148,11 @@ def main(argv=None):
         # a number a loop driver will compare against one taken on the other
         # basis.
         'assembly_sides': sides,
+        # WHERE the policy came from, not just what it was: "the intent
+        # declares none" and "the intent declares both" are different claims
+        # with the same arithmetic, and a loop driver comparing two runs has
+        # to be able to tell them apart.
+        'assembly_sides_source': sides_src,
         'charged_area_is_sum':
             (grow.get('measured') or {}).get('charged_area_is_sum'),
         'shortfall_mm2_at_least':

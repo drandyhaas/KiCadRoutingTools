@@ -357,6 +357,22 @@ if os.path.isfile(OC):
           and mf['busiest_side_area_mm2'] != mf['charged_area_mm2'],
           f"busiest {mf['busiest_side_area_mm2']} max {max(sides.values()):.2f} "
           f"charged {mf['charged_area_mm2']}")
+    # The PROPOSAL has to hold the parts it is proposed for. The audit above
+    # runs undeclared, where `charged == busiest`, so it cannot tell the two
+    # apart -- and a proposal solved from `busiest` under a one-face policy is
+    # short by the whole far side. Measured on ulx3s at 0.2/0.5: 79.7mm from
+    # `charged`, 65.7mm from `busiest`, a 2007mm2 (32%) shortfall that
+    # nothing else fails on.
+    _side = mf['proposed_square_side_mm']
+    _usable = (_side - 2 * 0.5) ** 2
+    check("the proposed square holds the CHARGED area, not the busiest side",
+          _usable >= mf['charged_area_mm2'] - 1e-6,
+          f"a {_side}mm square gives {_usable:.2f}mm2 usable for a charge of "
+          f"{mf['charged_area_mm2']}mm2")
+    check("...and that is a stricter test than the busiest side would give",
+          _usable > mf['busiest_side_area_mm2'],
+          f"{_usable:.2f} vs busiest {mf['busiest_side_area_mm2']} -- if these "
+          f"do not differ the arm above cannot see the mistake")
 
 # The proposed square must actually hold the parts. It was
 # sqrt(outline_area + need) where `need` is a USABLE-area shortfall, so the

@@ -295,28 +295,27 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             'extent_from_pad_bbox': from_pads,
             'parts_without_geometry': no_geometry,
             'largest_parts_mm2': biggest[:5],
-            # What this arithmetic does NOT model, named with its magnitude so
-            # the omission is a disclosure rather than a discovery.
-            #
-            # A through-hole part is charged to its footprint layer only; its
-            # leads occupy the far face and that area is not charged. Every
-            # other per-side instrument in the tree charges a drilled part to
-            # both faces -- and they do not agree with each other about HOW
-            # (`check_pockets.courtyard_cover` charges the whole courtyard,
-            # `floorplan.rule_keepout` charges the courtyard near and the
-            # through-pad rect far), so picking one is its own measurement
-            # rather than a ride-along on this one. Deliberately deferred:
-            # 17 of the 22 tracked boards carry through-hole parts, but under
-            # the busiest-side basis the fix moves `busiest` on 2 of them
-            # (rp2350 0.622 -> 0.674, ulx3s 0.902 -> 0.913) and flips no
-            # verdict.
-            'not_modelled': [
-                'through-hole leads on the far face (see the comment here)',
-            ] + ([] if assembly_sides else [
+        },
+        # AT OPTION LEVEL, which is where `format_text` reads it (`_digest`
+        # never sees it, and inside `measured` it printed nowhere). Every
+        # other option puts it here for the same reason.
+        #
+        # A through-hole part is charged to its footprint layer only; its
+        # leads occupy the far face and that area is not charged. Every other
+        # per-side instrument in the tree charges a drilled part to both faces
+        # -- and they do not agree with each other about HOW
+        # (`check_pockets.courtyard_cover` charges the whole courtyard,
+        # `floorplan.rule_keepout` charges the courtyard near and the
+        # through-pad rect far), so picking one is its own measurement rather
+        # than a ride-along on this one. Deliberately deferred: 17 of the 22
+        # tracked boards carry through-hole parts, but under the busiest-side
+        # basis the fix moves `busiest` on 2 of them and flips no verdict.
+        'not_modelled': '; '.join(
+            ['through-hole leads on the far face are not charged']
+            + ([] if assembly_sides else [
                 'whether the back side will be POPULATED -- no assembly.sides '
                 'was declared, so the busier face is charged and back-side '
-                'area is credited free (#837)']),
-        },
+                'area is credited free (#837)'])),
         'expected': {'utilisation': f'<= 1.0 to fit at all, and typically '
                                     f'<= {CROWDED_UTILISATION} to route'},
         'fits_by_area': fits,
@@ -849,10 +848,19 @@ def format_text(opts: Dict) -> str:
 #: adding it: the forced list is a curated headline and the headline has to be
 #: the number the verdict rests on. `busiest_side_area_mm2` is still emitted
 #: and still true; it is just no longer always the one `utilisation` divides.
-#: `charged_area_is_sum` rides along because it is what tells the two apart.
+#:
+#: `charged_area_is_sum` is deliberately NOT forced. Forcing it as well made
+#: the forced list one longer than `limit`, and `_digest` returns
+#: `out[:max(limit, len(forced))]` -- so on 21 of the 22 tracked boards there
+#: was no slot left for a single unforced key and `part_area_mm2` silently
+#: left the text channel, which is the eviction this list's own comments
+#: already record twice. It is a BOOL, so it renders in the unforced
+#: remainder whenever there is room, and the basis is stated in words by the
+#: action string and by `check_capacity`'s own `assembly sides:` line either
+#: way.
 _DIGEST_ALWAYS = ('deficit_lanes_now', 'deficit_lanes_at_more',
                   'deficit_lanes_at_fab_floor', 'utilisation',
-                  'charged_area_mm2', 'charged_area_is_sum',
+                  'charged_area_mm2',
                   'usable_area_mm2',
                   'parts', 'shortfall_mm2_at_least',
                   'proposed_square_side_mm', 'faces_in_deficit',

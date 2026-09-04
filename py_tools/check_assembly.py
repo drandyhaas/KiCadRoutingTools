@@ -393,7 +393,13 @@ def main():
         print(f"    Unsoldered F {_u['F']} / B {_u['B']}: every pad an "
               f"unplated hole -- mounting, tooling or alignment. No process "
               f"attaches these, so they are in neither count above.")
-    if not _cen['reflow_passes'] and (_cen['blocks']['F'] + _cen['blocks']['B']):
+    if not sum(_pb.values()):
+        # Guarded on PAD-BEARING parts, not on blocks: a board of nothing but
+        # graphics is assembled by no process at all, and the through-hole
+        # sentence below would have described it as assembled entirely by one.
+        print(f"    No pad-bearing parts at all, so there is no assembly "
+              f"policy to observe.")
+    elif not _cen['reflow_passes']:
         # flat_hierarchy: 58 through-hole parts and 6 NPTH mounting holes.
         # Counting POPULATED faces would report one reflow pass for a board
         # that gets none.
