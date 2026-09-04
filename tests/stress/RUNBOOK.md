@@ -800,6 +800,16 @@ boards" and "which commit broke connectivity".
   Graders that read the routed floor off a manifest accept either spelling
   (`ab_replay_grade.route_clearance`).
 
+  **After editing recorded manifests, re-upload the sets by hand** --
+  `cloud_replay_sets`' upload stage skips a set the corpus volume already
+  has (presence, not content), so a cloud arm launched after an in-place
+  rewrite replays the OLD manifests from the volume and measures nothing
+  new (the first `final2` arm did exactly that). Run
+  `python3 tests/stress/modal_sweep/upload_corpus.py --sets set1,...`
+  (extraction overwrites whole files) and confirm with
+  `modal volume get kicad-corpus /runs_setN/<board>/redo_commands.sh`
+  before launching.
+
   Likewise for the escalation ladder: `KICAD_FAB_TIER_DEFAULT` and
   `KICAD_ESCALATION_DEFAULT` set the default of the two flags a manifest
   omits. The shipped defaults are now `auto` / `fab` (the pre-#857 ladder,
