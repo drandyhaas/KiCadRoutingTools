@@ -397,9 +397,20 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
               + (f", {_oi_nv} via(s)" if _oi_nv else "") + ")")
 
     _prog("dead-end sweep")
-    _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids,
-                                                    protect_net_ids=protect_net_ids,
-                                                    keep_input_copper=keep_input_copper)
+    _de_segs, _de_vias, _de_strip = sweep_dead_ends(
+        results, pcb_data, scope_net_ids,
+        protect_net_ids=protect_net_ids,
+        keep_input_copper=keep_input_copper,
+        # #672: protected (unfinished) nets still shed sub-CELL dead-end
+        # slivers -- rip/restore/prune debris no landing needs. One routing
+        # cell is the epsilon: no A* span is shorter. Plane-flow namespace
+        # configs carry no grid_step, which disables the pass there.
+        # #672: OPT-IN (env_knobs.SLIVER_TRIM). One routing cell is the
+        # epsilon -- no A* span is shorter -- but trimming sub-cell debris
+        # off a net the ladder is still retrying measured as a LOST NET on
+        # orangecrab, so it is off by default. See the knob's note.
+        sliver_eps=(float(getattr(config, 'grid_step', 0.0) or 0.0)
+                    if env_knobs.SLIVER_TRIM else 0.0))
     counts['dead_ends_swept'] = _de_segs
     counts['dead_end_vias'] = _de_vias
     _trace('sweep')

@@ -285,6 +285,15 @@ def refresh() -> None:
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')
     g['OBSTACLE_AUDIT'] = _truthy('KICAD_OBSTACLE_AUDIT')
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
+    # #672 sub-cell sliver trim on PROTECTED (still-being-retried) nets.
+    # The self-pair half of #672 is a correctness fix and is always on;
+    # this half REMOVES COPPER, and measured on orangecrab's recorded
+    # route step (paired, same input board, chains otherwise identical)
+    # it cost a net: RAM_UDQS+ went from routed to failed_single, the
+    # run verdict 9 -> 10, while the self-pair fix alone reproduced the
+    # base copper EXACTLY (6097 segments and 625 vias compared, all
+    # identical). Opt-in until a corpus A/B says it pays.
+    g['SLIVER_TRIM'] = _opt_in('KICAD_SLIVER_TRIM')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
     # route.py's end-of-run oracle summary check (one staged
