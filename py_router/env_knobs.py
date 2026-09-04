@@ -263,6 +263,17 @@ def refresh() -> None:
     g['IMPROVEMENT_GATE'] = _s('KICAD_IMPROVEMENT_GATE', '1') != '0'
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'
     g['DUMP_BATCH_KWARGS_CONTINUE'] = _s('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'
+    # #530 replay compatibility: read --clearance the pre-#530 way (#439), as a
+    # CEILING that caps EVERY net class -- Default included -- at min(class,
+    # value). Since decision 2 an explicit --clearance IS the Default class
+    # for the run, so a late chain step saying 0.2 after an earlier step
+    # lowered the project's class to 0.1 now routes at 0.2 where 0.21.4
+    # routed at 0.1 (rp2040_dev: 3 nets that fit at 0.1 do not at 0.2). A
+    # corpus manifest recorded under the old reading therefore measures the
+    # semantics change, not the engine; this knob rides `cloud_replay_sets
+    # --env` so an A/B arm can replay those manifests like-for-like. Never
+    # set it for a real run -- pass --clearance-ceiling instead.
+    g['CLEARANCE_LEGACY_CEILING'] = _s('KICAD_CLEARANCE_LEGACY_CEILING') == '1'
     # #431: the placement-movie camera. 'off' (default) keeps every existing
     # movie bit-for-bit; one variable turns it on for the GUI recorder,
     # run_plan.py --movie and the stress renderer at once, which is the

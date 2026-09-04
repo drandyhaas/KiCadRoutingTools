@@ -57,6 +57,10 @@ def main():
 
     from kicad_parser import parse_kicad_pcb
     from bga_fanout import generate_bga_fanout
+    import fab_tiers
+    # #857: the under-pad via-in-pad clamp descends the ladder on sub-0.45 mm
+    # balls; that descent is the AUTO tier's now (standard is a hard floor).
+    fab_tiers.set_default_fab_tier('auto')
     from routing_defaults import HOLE_TO_HOLE_CLEARANCE
 
     pcb = parse_kicad_pcb(BOARD)

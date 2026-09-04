@@ -107,7 +107,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             extra_clearance: float = 0.0,
                             net_clearances: dict = None,
                             static_base: bool = False,
-                            progress_callback=None) -> GridObstacleMap:
+                            progress_callback=None,
+                            _rung_pass: bool = False) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -388,6 +389,31 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # #422: return the real map (never the stamp proxy) so downstream clone/
     # cache/rip-up all operate on the genuine GridObstacleMap with its normal
     # dynamic add/remove methods.
+    # #530 decision 4: one via-legality rung per distinct per-net via geometry.
+    # The base is rebuilt at that geometry (its blocked_vias are the cells a
+    # via of THAT size may not sit on) and the result copied into rung r of
+    # this map. Rung 0 stays this map's own blocked_vias / static bitmap; the
+    # search consults rung r when routing a net at that size.
+    if not _rung_pass:
+        try:
+            from obstacle_cache import via_rungs as _via_rungs, _small_via_pair
+            _rungs = _via_rungs(config, pcb_data)
+            _env_small = _small_via_pair(config, pcb_data)
+            for _r, (_d, _h) in enumerate(_rungs, 1):
+                if _env_small is not None and _r == 1:
+                    continue   # the #568 small rung keeps its base-less (static) discipline
+                from dataclasses import replace as _dc_replace
+                _sub = build_base_obstacle_map(
+                    pcb_data, _dc_replace(config, via_size=_d, via_drill=_h),
+                    nets_to_route, extra_clearance, net_clearances,
+                    static_base=False, _rung_pass=True)
+                _cells = _sub.blocked_via_cells_at_rung(0)
+                if _cells:
+                    _real_obstacles.add_blocked_vias_rung_batch(
+                        _r, np.asarray(_cells, dtype=np.int32))
+        except Exception as _re:                              # noqa: BLE001
+            print(f"  WARNING: per-net via rungs not stamped on the base map ({_re}); "
+                  f"nets with their own via size route at the run's via legality")
     return _real_obstacles
 
 
@@ -2257,6 +2283,43 @@ def _ledger_close(obstacles, pre, tag: str):
     _oc.ledger_raw_delta(obstacles, f"{tag} @ {site}", st[0] - pre[0], st[1] - pre[1])
 
 
+def _per_net_rungs(obstacles) -> range:
+    """#530: the PER-NET via-legality rungs the working map carries (empty on
+    a single-rung map or a 0.21.x binary). Rung 0 is the run's via; when the
+    #568 small map is armed it holds rung 1 (obstacle_cache.via_rungs keeps
+    that slot for it) and its own mirror stamps it, so per-net rungs start at
+    2 -- otherwise at 1. Raw copper adds mirror their full-size via cells into
+    every per-net rung, the same conservative over-block the small mirror
+    applies (never wrong; a rung-r search near raw copper is not told the
+    cells are legal)."""
+    try:
+        n = int(obstacles.rung_count())
+    except Exception:                                          # noqa: BLE001
+        return range(0)
+    return range(2 if _rung_small_armed() else 1, n)
+
+
+def _extra_rungs(obstacles) -> int:
+    """Number of per-net rungs (see _per_net_rungs)."""
+    return len(_per_net_rungs(obstacles))
+
+
+def _mirror_rungs_add(obstacles, cells) -> None:
+    rs = _per_net_rungs(obstacles)
+    if len(rs) and len(cells):
+        arr = np.asarray(cells, dtype=np.int32)
+        for r in rs:
+            obstacles.add_blocked_vias_rung_batch(r, arr)
+
+
+def _mirror_rungs_remove(obstacles, cells) -> None:
+    rs = _per_net_rungs(obstacles)
+    if len(rs) and len(cells):
+        arr = np.asarray(cells, dtype=np.int32)
+        for r in rs:
+            obstacles.remove_blocked_vias_rung_batch(r, arr)
+
+
 def _rung_small_armed():
     """#568 rust mode (KICAD_VIA_RUNG=2): the working map carries a second
     via-legality map at the small fab rung. Raw (non-cache) copper adds must
@@ -2343,15 +2406,17 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
         _h2h = _via_h2h_cells(via, config, coord)
         if _h2h is not None:
             obstacles.add_blocked_vias_batch(_h2h)
-    # #568 small-map mirror (see _rung_small_armed)
-    if _rung_small_armed() and vias:
+    # #568 small-map mirror (see _rung_small_armed); #530 per-net rungs too.
+    if vias and (_rung_small_armed() or _extra_rungs(obstacles)):
         _small = []
         for via in vias:
             _small.extend(_via_raw_block_cells(via, config, coord, num_layers,
                                                extra_clearance, diagonal_margin))
         if _small:
-            obstacles.add_blocked_vias_small_batch(
-                np.array(_small, dtype=np.int32))
+            if _rung_small_armed():
+                obstacles.add_blocked_vias_small_batch(
+                    np.array(_small, dtype=np.int32))
+            _mirror_rungs_add(obstacles, np.array(_small, dtype=np.int32))  # per-net rungs
     _ledger_close(obstacles, _pre, "add_vias_list")
 
 
@@ -2405,8 +2470,9 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
                                              via_block_mm, coord.grid_step)
             if len(_v):
                 _via_arrs.append(_v)
-            # #568 small-map mirror (see _rung_small_armed): same via capsule
-            if _rung_small_armed() and len(_v):
+            # #568 small-map mirror (see _rung_small_armed): same via capsule;
+            # #530 per-net rungs mirror it too.
+            if len(_v) and (_rung_small_armed() or _extra_rungs(obstacles)):
                 _small_arrs.append(_v)
     for _li, _arrs in sorted(_cells_by_layer.items()):
         _call = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
@@ -2420,7 +2486,9 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     if _small_arrs:
         _sall = (np.concatenate(_small_arrs) if len(_small_arrs) > 1
                  else _small_arrs[0])
-        obstacles.add_blocked_vias_small_batch(np.asarray(_sall, dtype=np.int32))
+        if _rung_small_armed():
+            obstacles.add_blocked_vias_small_batch(np.asarray(_sall, dtype=np.int32))
+        _mirror_rungs_add(obstacles, np.asarray(_sall, dtype=np.int32))  # per-net rungs
     _ledger_close(obstacles, _pre, "add_segments_list")
 
 
@@ -2487,6 +2555,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
+        _mirror_rungs_remove(obstacles, vias_array)   # #530 per-net rungs
     _ledger_close(obstacles, _pre, "remove_segments_list")
 
 
@@ -2580,6 +2649,7 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
+        _mirror_rungs_remove(obstacles, vias_array)   # #530 per-net rungs
     _ledger_close(obstacles, _pre, "remove_vias_list")
 
 
@@ -2645,6 +2715,7 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
         try:
             if _rung_small_armed():
                 obstacles.add_blocked_vias_small_batch(_pad_cells)
+            _mirror_rungs_add(obstacles, _pad_cells)   # #530 per-net rungs
         except (AttributeError, NameError):
             pass
 
@@ -3320,12 +3391,14 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     lc = getattr(pad, 'local_clearance', 0.0) or 0.0
 
     # #498 per-layer .kicad_dru rules: resolve the pair clearance PER LAYER (a
-    # layer rule REPLACES the net/class fallback; the pad's local keep-clear
-    # stays a hard floor on top -- KiCad gives local overrides precedence over
-    # custom rules). Layers sharing a resolved value share one rasterization,
-    # so a board without rules takes exactly the old single-margin path.
+    # layer rule REPLACES the net/class fallback). A pad OVERRIDE then
+    # REPLACES that, floored at rules.min_clearance -- KiCad returns before it
+    # looks at a class or a rule (design_rules.override_clearance, measured on
+    # KiCad 10). Layers sharing a resolved value share one rasterization, so a
+    # board without rules or overrides takes exactly the old single-margin path.
     def _layer_clr(layer_name):
-        return max(config.layer_clearance(layer_name, clearance), lc)
+        return config.pad_override_clearance(
+            config.layer_clearance(layer_name, clearance), pad)
 
     def _clr_groups(expanded):
         groups = {}
@@ -3460,9 +3533,9 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
     clearance = max((config.layer_clearance(l, clearance)
                      for l in expanded_layers if l.endswith('.Cu')),
                     default=clearance)
-    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
-    if lc > clearance:
-        clearance = lc
+    # A pad override REPLACES the resolved value (floored at the board
+    # minimum), it is not a floor on top of it -- KiCad semantics, measured.
+    clearance = config.pad_override_clearance(clearance, pad)
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)
     elif pad.shape == 'roundrect':

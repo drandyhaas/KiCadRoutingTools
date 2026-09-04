@@ -75,8 +75,11 @@ def main():
         cls = _run(tmp)
         if not near(cls["Default"]["clearance"], 0.09):
             fails.append(f"[clamp] Default.clearance = {cls['Default'].get('clearance')}, expected 0.09")
-        if not near(cls["Default"]["track_width"], 0.0889):
-            fails.append(f"[clamp] Default.track_width = {cls['Default'].get('track_width')}, expected 0.0889")
+        # #842: the Default class's track_width is a DRAW DEFAULT too and is
+        # PRESERVED (it used to be lowered to the routed 0.0889, which the
+        # next run then read back as "the board's own width").
+        if not near(cls["Default"]["track_width"], 0.2):
+            fails.append(f"[clamp] Default.track_width = {cls['Default'].get('track_width')}, expected 0.2 (draw default preserved, #842)")
         if not near(cls["Z100_inner"]["clearance"], 0.09):
             fails.append(f"[clamp] Z100_inner.clearance = {cls['Z100_inner'].get('clearance')}, expected 0.09 (should clamp)")
         # track_width is a DRAW DEFAULT, not a DRC floor: the non-Default clamp

@@ -332,10 +332,14 @@ def main():
     dlg.clearance_check.SetValue(True)
     dlg.clearance.SetValue(0.3)
     shared_raw = tab.get_shared_params()
+    # #530: the PLACEMENT ceiling key. The routing tabs' `clearance_ceiling`
+    # now needs the class-ceiling box as well; place_fanout_clearance.py's
+    # --clearance is still a ceiling by contract, and the fanout tab reads
+    # `placement_clearance_ceiling`, which follows Min Clearance alone.
     check("shared params export the RAW override, not min(Default, override)",
-          abs((shared_raw.get('clearance_ceiling') or 0) - 0.3) < 1e-9,
-          "clearance_ceiling=%r effective clearance=%r"
-          % (shared_raw.get('clearance_ceiling'), shared_raw.get('clearance')))
+          abs((shared_raw.get('placement_clearance_ceiling') or 0) - 0.3) < 1e-9,
+          "placement_clearance_ceiling=%r effective clearance=%r"
+          % (shared_raw.get('placement_clearance_ceiling'), shared_raw.get('clearance')))
     kw = _drive(dict(shared_raw))
     got = kw.get('netclass_ceiling', ABSENT)
     check("and the engine receives the raw override",
@@ -357,8 +361,8 @@ def main():
         shared2 = tab.get_shared_params()
         check("standalone: shared params report override %s"
               % ('CHECKED' if ticked else 'unchecked'),
-              bool(shared2.get('clamp_netclasses')) == ticked,
-              info="clamp_netclasses=%r" % (shared2.get('clamp_netclasses'),))
+              bool(shared2.get('placement_clamp_netclasses')) == ticked,
+              info="clamp_netclasses=%r" % (shared2.get('placement_clamp_netclasses'),))
         kw = _standalone_kw()
         got = kw.get('netclass_ceiling', ABSENT)
         want = 0.2 if ticked else None

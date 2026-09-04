@@ -313,7 +313,10 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
     # pad, size it to the pad edge so it can't bulge into a neighbouring net. Pass
     # the active fab-tier ladder so the clamp escalates standard->advanced (#237).
     _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
-    floors = fab_floor_ladder(_copper)
+    from list_nets import escalation_rungs
+    # escalation_rungs: empty under --escalation off, raised to the board's
+    # own minimums under board (#857).
+    floors = escalation_rungs(_copper)
     clamp_n = floor_n = escalated_n = 0
 
     # Only the nets we're escaping right now are exempt from the obstacle map --
@@ -1501,6 +1504,13 @@ def main():
             print(f"--board-edge-clearance not given; using the board "
                   f"min_copper_edge_clearance {_edge}mm.")
     set_default_fab_tier(*fab_tier_from_args(args))
+    # #530: --width IS this run's track-width request. The stale-minimum rule
+    # (set_policy_from_args) and the physical-floor pin (enforce_fab_floors)
+    # both look for `track_width`; without the alias neither saw it, so a
+    # stock 0.2 mm board minimum pinned 0.1 mm escape stubs up to 0.2.
+    if getattr(args, 'track_width', None) is None:
+        args.track_width = args.width
+    __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),

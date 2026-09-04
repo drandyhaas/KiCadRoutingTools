@@ -1676,6 +1676,16 @@ class FanoutTab(wx.Panel):
         via_size = shared.get('via_size', defaults.BGA_VIA_SIZE)
         via_drill = shared.get('via_drill', defaults.BGA_VIA_DRILL)
         layers = shared.get('layers', defaults.DEFAULT_LAYERS)
+        # #861: say where the width came from. A user who typed 3 mil and got
+        # 0.2 mm escapes had the Track Width override box unticked, so the
+        # tab used the board's Default net class (KiCad's stock 0.2 mm).
+        self.append_log(
+            f"Track width {track_width:.4f} mm "
+            + ("from the board's Default net class (Basic tab: tick the Track "
+               "Width box to use the typed value)"
+               if shared.get('track_width_from_class') else
+               "from the Basic tab's Track Width override (fab-floored)")
+            + f"; clearance {clearance:.4f} mm, via {via_size:.4f}/{via_drill:.4f} mm")
 
         if not layers:
             wx.MessageBox(
@@ -1775,8 +1785,13 @@ class FanoutTab(wx.Panel):
                 # places is how they came apart here in the first place --
                 # but it is inert today, and an earlier draft of this
                 # comment implied otherwise.
-                'clamp_netclasses': shared.get('clamp_netclasses', False),
-                'clearance_ceiling': shared.get('clearance_ceiling'),
+                # #530: the PLACEMENT ceiling -- place_fanout_clearance.py's
+                # --clearance is a ceiling by contract (#768), so this tab
+                # follows the Min Clearance override alone.
+                'clamp_netclasses': shared.get('placement_clamp_netclasses',
+                                               shared.get('clamp_netclasses', False)),
+                'clearance_ceiling': shared.get('placement_clearance_ceiling',
+                                                shared.get('clearance_ceiling')),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -1799,12 +1814,18 @@ class FanoutTab(wx.Panel):
         # Get shared parameters from Basic tab
         shared = self.get_shared_params() if self.get_shared_params else {}
         from fab_tiers import set_fab_tier_from_config
-        set_fab_tier_from_config(shared)
         # #381 D7: QFN width/clearance come from the QFN panel's own controls
         # (default 0.1/0.1 = qfn_fanout.py's CLI defaults), NOT the Basic-tab
         # 0.3/0.25 that BGA/route use. `config` is the QFN options config.
         track_width = config.get('track_width', defaults.QFN_TRACK_WIDTH)
         clearance = config.get('clearance', defaults.QFN_CLEARANCE)
+        # #530: the escalation policy's stale-minimum rule must see THIS run's
+        # width and clearance -- the QFN panel's, not the Basic tab's -- or a
+        # stock 0.2 mm board minimum pins 0.1 mm escape stubs up to 0.2
+        # (haasoscope: stubs the fanout on main draws at 0.1). Same request the
+        # CLI's qfn_fanout.py --width feeds set_policy_from_args.
+        set_fab_tier_from_config(dict(shared, track_width=track_width,
+                                      clearance=clearance))
 
         # Get extension from config (QFN-specific parameter)
         extension = config.get('extension', defaults.QFN_EXTENSION)
@@ -2157,7 +2178,8 @@ class FanoutTab(wx.Panel):
                 # Default False, not True: an absent key means the operator
                 # never ticked the override, and the safe reading of that is
                 # "honour the board", which is what an omitted CLI flag means.
-                netclass_ceiling=fanout_config.get('clearance_ceiling'),
+                netclass_ceiling=fanout_config.get('placement_clearance_ceiling',
+                                                   fanout_config.get('clearance_ceiling')),
                 grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
                 # #733: the plugin used to pass NOTHING here, so it silently took
                 # the signature default whatever the board or the operator said,
@@ -2368,8 +2390,11 @@ class FanoutTab(wx.Panel):
             # first cut of the ceiling gate came to be INERT on the standalone
             # and plan-executor path while looking correct on the inline one --
             # the same shape as the #693 finding the parity ledger records.
-            'clamp_netclasses': shared.get('clamp_netclasses', False),
-            'clearance_ceiling': shared.get('clearance_ceiling'),
+            # #530: placement ceiling semantics (see the BGA dict above).
+            'clamp_netclasses': shared.get('placement_clamp_netclasses',
+                                           shared.get('clamp_netclasses', False)),
+            'clearance_ceiling': shared.get('placement_clearance_ceiling',
+                                            shared.get('clearance_ceiling')),
             'fix_drc_settings': shared.get('fix_drc_settings', True),
         })
         from .gui_utils import redirect_prints_to_log, refill_all_zones

@@ -161,17 +161,58 @@ def main():
                     fails.append(f"created Default class missing '{required}' (KiCad won't honour a sparse class)")
         if "meta" not in proj["net_settings"]:
             fails.append("net_settings.meta missing (KiCad needs it to read classes)")
-        # Non-routing severities ignored.
-        for cat in ("solder_mask_bridge", "lib_footprint_mismatch", "courtyards_overlap",
-                    "annular_width"):
-            if sev.get(cat) != "ignore":
-                fails.append(f"severity[{cat}] = {sev.get(cat)}, expected ignore")
-        # Thermal-relief shortfall demoted error -> warning (still visible).
-        if sev.get("starved_thermal") != "warning":
-            fails.append(f"severity[starved_thermal] = {sev.get('starved_thermal')}, expected warning")
+        # #856: severities are UNTOUCHED without --relax-severities. The
+        # author's 'error' on solder_mask_bridge survives, the pre-existing
+        # 'ignore' on courtyards_overlap survives, nothing new appears.
+        if sev.get("solder_mask_bridge") != "error":
+            fails.append(f"severity[solder_mask_bridge] = {sev.get('solder_mask_bridge')}, "
+                         f"expected the author's 'error' to survive (#856)")
+        if sev.get("courtyards_overlap") != "ignore":
+            fails.append(f"severity[courtyards_overlap] = {sev.get('courtyards_overlap')}, "
+                         f"expected the author's 'ignore' to survive")
+        for cat in ("lib_footprint_mismatch", "annular_width", "starved_thermal"):
+            if cat in sev:
+                fails.append(f"severity[{cat}] = {sev.get(cat)} was written without "
+                             f"--relax-severities (#856)")
+        if "saved_severities" in proj.get("kicad_routing_tools", {}):
+            fails.append("saved_severities recorded although no severity changed")
+        # Default net class DRAW sizes are never lowered (#842 ratchet): the
+        # created class keeps the template's 0.2 track_width, not the 0.15
+        # routed width, and no via field is touched.
+        if default is not None:
+            if abs(default.get("track_width", -1) - 0.2) > 1e-9:
+                fails.append(f"net_class[Default].track_width = {default.get('track_width')}, "
+                             f"expected 0.2 (draw default preserved, #842)")
+            if abs(default.get("via_diameter", -1) - 0.6) > 1e-9:
+                fails.append(f"net_class[Default].via_diameter = {default.get('via_diameter')}, "
+                             f"expected 0.6 (draw default preserved, #842)")
         # The board file must be byte-for-byte unchanged (version preserved).
         if _md5(pcb) != md5_before:
             fails.append("the .kicad_pcb was modified (must only edit the .kicad_pro)")
+
+        # With --relax-severities the category plan applies, only-loosening, and
+        # the previous values are recorded so the change is reversible.
+        r3 = subprocess.run(
+            [sys.executable, SCRIPT, pcb, "--clearance", "0.15", "--relax-severities"],
+            capture_output=True, text=True, cwd=ROOT)
+        if r3.returncode != 0:
+            print("FAIL: --relax-severities run errored\n" + r3.stdout + r3.stderr)
+            return 1
+        proj3 = json.load(open(pro))
+        sev3 = proj3["board"]["design_settings"]["rule_severities"]
+        for cat in ("solder_mask_bridge", "lib_footprint_mismatch", "annular_width"):
+            if sev3.get(cat) != "ignore":
+                fails.append(f"[relax] severity[{cat}] = {sev3.get(cat)}, expected ignore")
+        if sev3.get("courtyards_overlap") != "ignore":
+            fails.append("[relax] courtyards_overlap was RAISED from the author's ignore")
+        if sev3.get("starved_thermal") != "warning":
+            fails.append(f"[relax] severity[starved_thermal] = {sev3.get('starved_thermal')}, expected warning")
+        saved = proj3.get("kicad_routing_tools", {}).get("saved_severities", {})
+        if saved.get("solder_mask_bridge") != "error":
+            fails.append(f"[relax] saved_severities[solder_mask_bridge] = {saved.get('solder_mask_bridge')}, "
+                         f"expected the previous 'error'")
+        if "courtyards_overlap" in saved:
+            fails.append("[relax] saved_severities records a category that did not change")
 
         # Idempotent: a second run reports nothing to change.
         r2 = subprocess.run([sys.executable, SCRIPT, pcb, "--clearance", "0.15",
@@ -187,7 +228,8 @@ def main():
         print("FAIL: " + "; ".join(fails))
         return 1
     print("PASS: constraints loosened to the routed floor (never tightened), Default "
-          "net class created, non-routing severities ignored, .kicad_pcb untouched, idempotent; "
+          "net class created with its draw sizes preserved (#842), severities untouched "
+          "unless --relax-severities (#856, previous values recorded), .kicad_pcb untouched, idempotent; "
           "in-run floor sync (#650) lowers hole/copper to the routed floor, only-loosens, "
           "is idempotent, and no-ops without a sibling project")
     return 0

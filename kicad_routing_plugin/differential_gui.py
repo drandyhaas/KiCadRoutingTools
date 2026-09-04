@@ -28,7 +28,7 @@ for _sib in ('py_placer', 'py_tools'):
 
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
-from .gui_utils import StdoutRedirector
+from .gui_utils import StdoutRedirector, board_minima_from_live
 
 
 def parse_diff_pairs_result(value):
@@ -939,8 +939,12 @@ class DifferentialTab(wx.Panel):
                         class_clearance_cache[cname] = params.get('clearance', _diff_clearance)
                     else:
                         class_clearance_cache[cname] = _diff_clearance
+                # #530 decision 2 (mirrors list_nets.net_clearance_map_by_id):
+                # a Default-only net takes the run's clearance and gets NO entry.
                 for net in self.pcb_data.nets.values():
                     cname = all_net_to_class.get(net.name, 'Default')
+                    if cname == 'Default':
+                        continue
                     net_clearances[net.net_id] = class_clearance_cache.get(
                         cname, _diff_clearance)
                 if config.get('clamp_netclasses', False):
@@ -1360,7 +1364,9 @@ class DifferentialTab(wx.Panel):
                     track_width=cfg.get('track_width'),
                     via_diameter=cfg.get('via_size'),
                     via_drill=cfg.get('via_drill'),
-                    fab_edge=fab_edge_floor())
+                    fab_edge=fab_edge_floor(),
+                    # #530: caps min_clearance at the smallest pad override
+                    minima=board_minima_from_live(board))
                 # #441: record the coupling gap at >= clearance, matching the gap
                 # the engine actually routed to (batch_route_diff_pairs floors gap
                 # up to clearance because KiCad grades P<->N coupling under the plain
@@ -1369,8 +1375,13 @@ class DifferentialTab(wx.Panel):
                 _dp_gap = cfg.get('diff_pair_gap')
                 if _dp_gap is not None and cfg.get('clearance'):
                     _dp_gap = max(_dp_gap, cfg.get('clearance'))
+                # #856: severities only on explicit request; {} = untouched.
+                # The diff-pair gap/width class values are draw defaults and are
+                # no longer written (the #842 ratchet); kwargs kept for the
+                # shared signature.
+                _sev = severity_plan() if cfg.get('relax_drc_severities') else {}
                 if apply_targets_to_board(
-                        board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
+                        board, targets, _sev,
                         diff_pair_gap=_dp_gap,
                         diff_pair_width=cfg.get('track_width'),
                         clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):

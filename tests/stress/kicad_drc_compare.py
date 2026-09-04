@@ -66,6 +66,17 @@ KICAD_COPPER_TYPES = {
     "copper_edge_clearance",
 }
 
+# check_drc's SIZE classes, the mirror of the kicad-side scope above: KiCad's
+# track_width / via_diameter / hole_size items are out of scope, so
+# check_drc's must be too or every one of them lands in checkdrc_only. Until
+# #530 this never bit -- check_drc graded sizes against the fab floor only,
+# which routed copper never crosses -- but it now grades each item against
+# the board's OWN declared minimum through the shared resolver (the same
+# value KiCad's track_width check enforces), so a board carrying copper
+# below its min_track_width is a check_drc size item AND a KiCad size item,
+# both outside this comparator's copper-clearance match.
+CD_SIZE_TYPES = {"track-width", "via-size", "via-drill-size"}
+
 # Min-copper-web class (#406): graded SEPARATELY from the copper-clearance
 # classes -- check_drc has no counterpart (the artifact lives in KiCad's own
 # float-borderline web measurement, which a from-scratch geometric check
@@ -226,6 +237,8 @@ def run_check_drc(board: str, clearance: float = None, netclasses: bool = False)
     violations = run_drc(board, quiet=True, print_summary=False, **kw)
     out = []
     for v in violations or []:
+        if v.get("type") in CD_SIZE_TYPES:
+            continue        # out of the copper-clearance scope on BOTH sides
         nets = frozenset(str(v.get(k)) for k in ("net1", "net2") if v.get(k))
         pos = None
         for k in ("loc1", "via_loc", "pad_loc", "seg_loc", "cross_point", "loc2"):

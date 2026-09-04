@@ -36,7 +36,8 @@ def get_dialog_settings(dialog):
             dialog.ripup_abandon_metric.GetSelection()),
         'ripup_blocker_select': dialog.ripup_blocker_select.GetString(
             dialog.ripup_blocker_select.GetSelection()),
-        'obey_design_rules': dialog.obey_drc_check.GetValue(),
+        # #857: the escalation policy (replaces the retired 'obey_design_rules').
+        'escalation': dialog.escalation.GetString(dialog.escalation.GetSelection()),
 
         # Layer selections
         'layers': [layer for layer, cb in dialog.layer_checks.items() if cb.GetValue()],
@@ -49,7 +50,7 @@ def get_dialog_settings(dialog):
         'move_text_check': dialog.move_text_check.GetValue(),
         'add_teardrops_check': dialog.add_teardrops_check.GetValue(),
         'fix_drc_settings': dialog.fix_drc_check.GetValue(),
-        'keep_thermal': dialog.keep_thermal_check.GetValue(),
+        'relax_drc_severities': dialog.relax_drc_severities_check.GetValue(),
         'power_nets': dialog.power_nets_ctrl.GetValue(),
         'power_widths': dialog.power_widths_ctrl.GetValue(),
         'no_bga_zones': dialog.no_bga_zones_ctrl.GetValue(),
@@ -92,6 +93,8 @@ def get_dialog_settings(dialog):
         # use the board's own value). Restored to also enable/disable the spinctrl.
         'track_width_override': dialog.track_width_check.GetValue(),
         'clearance_override': dialog.clearance_check.GetValue(),
+        # #530: the class-ceiling box (the CLI's --clearance-ceiling).
+        'clearance_ceiling_check': dialog.clearance_ceiling_check.GetValue(),
         'via_size_override': dialog.via_size_check.GetValue(),
         'via_drill_override': dialog.via_drill_check.GetValue(),
         'hole_to_hole_clearance_override': dialog.hole_to_hole_clearance_check.GetValue(),
@@ -318,8 +321,15 @@ def restore_dialog_settings(dialog, settings):
         dialog.ripup_abandon_metric.SetStringSelection(settings['ripup_abandon_metric'])
     if 'ripup_blocker_select' in settings:
         dialog.ripup_blocker_select.SetStringSelection(settings['ripup_blocker_select'])
-    if 'obey_design_rules' in settings:
-        dialog.obey_drc_check.SetValue(settings['obey_design_rules'])
+    # 'obey_design_rules' (legacy key, <= v0.21.5) is intentionally not
+    # restored: the checkbox never reached the engine and is replaced by the
+    # Escalation choice (#857).
+    if 'escalation' in settings:
+        try:
+            if dialog.escalation.FindString(str(settings['escalation'])) != wx.NOT_FOUND:
+                dialog.escalation.SetStringSelection(str(settings['escalation']))
+        except Exception:
+            pass
 
     # Restore layer selections
     if 'layers' in settings:
@@ -336,8 +346,11 @@ def restore_dialog_settings(dialog, settings):
         dialog.add_teardrops_check.SetValue(settings['add_teardrops_check'])
     if 'fix_drc_settings' in settings:
         dialog.fix_drc_check.SetValue(settings['fix_drc_settings'])
-    if 'keep_thermal' in settings:
-        dialog.keep_thermal_check.SetValue(settings['keep_thermal'])
+    # 'keep_thermal' (legacy key, <= v0.21.5) is intentionally not restored:
+    # the control it drove is gone (#856 -- routing steps no longer touch DRC
+    # severities), replaced by the opt-in below.
+    if 'relax_drc_severities' in settings:
+        dialog.relax_drc_severities_check.SetValue(settings['relax_drc_severities'])
     if 'power_nets' in settings:
         dialog.power_nets_ctrl.SetValue(settings['power_nets'])
     if 'power_widths' in settings:
@@ -421,6 +434,8 @@ def restore_dialog_settings(dialog, settings):
     if 'clearance_override' in settings:
         dialog.clearance_check.SetValue(settings['clearance_override'])
         dialog.clearance.Enable(settings['clearance_override'])
+    if 'clearance_ceiling_check' in settings:
+        dialog.clearance_ceiling_check.SetValue(bool(settings['clearance_ceiling_check']))
     if 'via_size_override' in settings:
         dialog.via_size_check.SetValue(settings['via_size_override'])
         dialog.via_size.Enable(settings['via_size_override'])

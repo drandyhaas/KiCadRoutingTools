@@ -984,7 +984,11 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         """It was the one step tab whose shared params did not carry it, so the
         gate above had nothing to read on either call path."""
         src = self._src(self.SWIG)
-        self.assertIn("'clamp_netclasses': self.clearance_check.GetValue(),",
+        # #530: the routing tabs' switch is the class-ceiling box (_ceiling_on);
+        # the PLACEMENT switch the fanout tab prices with is still the Min
+        # Clearance override alone (placement_clamp_netclasses).
+        self.assertIn("'clamp_netclasses': self._ceiling_on(),", src)
+        self.assertIn("'placement_clamp_netclasses': self.clearance_check.GetValue(),",
                       src)
         self.assertIn("'clearance_ceiling': (self.clearance.GetValue()", src,
                       'the ceiling must be the RAW spin value; '
@@ -1006,9 +1010,9 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         """
         src = self._src(self.GUI)
         for key in ("\n            'clamp_netclasses': "
-                    "shared.get('clamp_netclasses', False),",
+                    "shared.get('placement_clamp_netclasses',",
                     "\n            'clearance_ceiling': "
-                    "shared.get('clearance_ceiling'),"):
+                    "shared.get('placement_clearance_ceiling',"):
             self.assertIn(key, src,
                           'the STANDALONE cfg (run_cap_optimization, one '
                           'indent shallower than the inline one) must '
@@ -1024,7 +1028,7 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         there now."""
         src = self._src(self.GUI)
         self.assertIn("\n                'clearance_ceiling': "
-                      "shared.get('clearance_ceiling'),", src,
+                      "shared.get('placement_clearance_ceiling',", src,
                       'the INLINE cap config must carry the ceiling; '
                       'without it the checkbox path runs the OMITTED '
                       'branch whatever the operator ticked')

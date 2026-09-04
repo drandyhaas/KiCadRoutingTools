@@ -33,13 +33,19 @@ def run_route(out):
            "--nets", "/IO_Banks/IO_Buffer_B/*",
            "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
            "--clearance", CLEARANCE, "--via-size", "0.3",
-           "--via-drill", "0.2", "--track-width", "0.1"]
+           "--via-drill", "0.2", "--track-width", "0.1",
+           # #857: the escape drops to the advanced 0.25/0.15 via inside a
+           # boxed-in fine-pitch pad; that descent is the AUTO tier's now.
+           "--fab-tier", "auto"]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     return r.stdout + r.stderr
 
 
 def run_drc(out):
-    cmd = [sys.executable, "py_router/check_drc.py", out, "-c", CLEARANCE]
+    # Grade at the tier the board was routed with (#857: standard is hard, so
+    # the 0.25/0.15 escape via is only legal under auto).
+    cmd = [sys.executable, "py_router/check_drc.py", out, "-c", CLEARANCE,
+           "--fab-tier", "auto"]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     return r.stdout + r.stderr
 

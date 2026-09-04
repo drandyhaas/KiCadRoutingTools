@@ -65,6 +65,21 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #:
 #: MEASURED, from the run recorded in the pull request. Never predicted.
 #:
+#: RE-RECORDED 2026-09-03 (#530 decision 3). `truth.quality` moved on the three
+#: esp_prog rows and the cause is named: a pad clearance OVERRIDE now REPLACES
+#: the class value (KiCad 10, measured by tests/oracle/constraint_agreement.py)
+#: instead of max()-ing with it, and esp_prog carries 13 pads at a 0.0508 mm
+#: override -- so the router prices those pads as KiCad does and lays different
+#: copper past them. `truth.blocking` is 0 on all three, as before; it had read
+#: 49/25/34 for one commit because the writeback then stamped rules.min_clearance
+#: 0.2193 into the project and KiCad floors an override at min_clearance (the
+#: writeback now caps min_clearance at the smallest honoured override).
+#:
+#:   esp_prog:authored            vias 31 -> 33, copper 336.35 -> 345.52, segs 236 -> 373
+#:   esp_prog:perturb-scatter-d1  vias 38 -> 29, copper 377.83 -> 341.07, segs 286 -> 288
+#:   esp_prog:portfolio-1         vias 37 -> 32, copper 319.41 -> 347.03, segs 260 -> 270
+#:   splitflap_driver:authored    -- unchanged (no overrides on that board)
+#:
 #: RE-RECORDED 2026-08-30 (second time this day). `truth.quality` moved on TWO
 #: of the four rows, and the cause is named rather than assumed: #816's
 #: `GRID_TIE_EPS`, which resolves a keep-out boundary cell OPEN instead of
@@ -132,7 +147,9 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=8.2,
         truth={'headline': 0,
-               'quality': {'vias': 31, 'copper_mm': 336.35, 'segments': 236}},
+               # re-recorded 2026-09-03 with the #530 defaults --fab-tier auto /
+               # --escalation fab (the pre-#857 ladder): 33/345.52/373 -> 39/353.93/256
+               'quality': {'vias': 39, 'copper_mm': 353.93, 'segments': 256}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 127.48707486477095, 'overlap_area': 1.1400451712000104,
@@ -145,7 +162,8 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=11.2,
         truth={'headline': 0,
-               'quality': {'vias': 38, 'copper_mm': 377.83, 'segments': 286}},
+               # re-recorded 2026-09-03 (auto/fab defaults): 29/341.07/288 -> 32/327.31/282
+               'quality': {'vias': 32, 'copper_mm': 327.31, 'segments': 282}},
         predictors={
             'crossings': 50, 'hpwl': 252.34828000000005,
             'halo': 130.46454030971682, 'overlap_area': 1.1400451712000104,
@@ -194,7 +212,8 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=9.5,
         truth={'headline': 0,
-               'quality': {'vias': 37, 'copper_mm': 319.41, 'segments': 260}},
+               # re-recorded 2026-09-03 (auto/fab defaults): 32/347.03/270 -> 31/341.99/263
+               'quality': {'vias': 31, 'copper_mm': 341.99, 'segments': 263}},
         predictors={
             'crossings': 23, 'hpwl': 260.0687799999999,
             'halo': 101.01900525631262, 'overlap_area': 1.0,

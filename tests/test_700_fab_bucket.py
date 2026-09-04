@@ -141,12 +141,13 @@ def t_fine_via_rung_is_asked_not_restated():
     condition that has already moved once. Asking `fab_floor_ladder` means the
     field cannot drift from the ladder it describes.
     """
+    # #857: the escalating ladder is the AUTO tier's (standard is one hard rung).
     for n in (1, 2):
         assert ft.fab_floor_bucket(n).fine_via_rung is False, n
-        assert len(ft.fab_floor_ladder(n, 'standard')) == 2, n
+        assert len(ft.fab_floor_ladder(n, 'auto')) == 2, n
     for n in (3, 4, 6, 8):
         assert ft.fab_floor_bucket(n).fine_via_rung is True, n
-        assert len(ft.fab_floor_ladder(n, 'standard')) == 3, n
+        assert len(ft.fab_floor_ladder(n, 'auto')) == 3, n
 
     # Value agreement at those six counts is satisfied by a RESTATEMENT
     # (`n > 2` passes every line above), so also check the field tracks the

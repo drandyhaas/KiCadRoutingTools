@@ -620,8 +620,11 @@ diagnoses better than the score does — the score said `drc`, the router said
 A scoped retry is a fresh `route.py` call, and it resolves its floor from the fab
 tier unless told otherwise. Two things then happen quietly: the **per-net rescue
 re-routes a failed net AT the tier floor**, and the `standard`→`advanced` tier
-escalation is allowed, which is what puts sub-spec vias on a board that asked for
-big ones. Both report the net routed.
+escalation is allowed (the default `--fab-tier auto` / `--escalation fab`), which
+is what puts sub-spec vias on a board that asked for big ones. Both report the net
+routed, and both are counted in the run's `design_rules` summary; `--fab-tier
+standard` or `--escalation board` forbid them outright, `--strict-sizes` makes
+them a non-zero exit.
 
 So every route call in the loop — not only the first one — carries
 `--fab-overrides <the spec file>` when the spec is tighter than the tier.

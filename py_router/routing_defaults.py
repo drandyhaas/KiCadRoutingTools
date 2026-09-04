@@ -11,6 +11,18 @@ CLEARANCE = 0.25  # mm
 VIA_SIZE = 0.5  # mm
 VIA_DRILL = 0.3  # mm
 
+# Fab tier and escalation policy (#857/#530): THE one place these defaults
+# live -- fab_tiers.add_fab_tier_args (every routing CLI) and the GUI's
+# controls read them from here. Completion first (Andy, 2026-09-03): 'auto'
+# is the standard floor escalating to advanced when a fan-out, plane tap or
+# last-resort via cannot fit, 'fab' lets a descent go below the board's own
+# declared minimums to the tier floor -- the pre-#857 ladder, now disclosed
+# (the ledger, JSON_SUMMARY design_rules, the end-of-run line, --strict-sizes).
+# The hard tiers ('standard' / 'advanced') and the bounded policies
+# ('board' / 'off') are the opt-in for a run that must not narrow.
+FAB_TIER = 'auto'        # 'standard' | 'advanced' | 'auto'
+ESCALATION = 'fab'       # 'off' | 'board' | 'fab'
+
 # Grid parameters
 GRID_STEP = 0.1  # mm
 

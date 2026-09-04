@@ -388,6 +388,11 @@ class NetObstacleData:
     # EXCLUSIVELY for dynamic copper, so an unbalanced stamp doesn't just leak
     # cells, it makes small vias legal where they aren't (audit-enforced).
     blocked_vias_small: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.int32))
+    # #530 decision 4: via-block cells at every OTHER via geometry a routed net
+    # uses ({rung: (M, 2)}; rung r >= 1 per obstacle_cache.via_rungs). Stamped
+    # and removed in lockstep with blocked_vias, like blocked_vias_small (which
+    # is the env-armed #568 small rung and stays a separate channel).
+    blocked_vias_rungs: dict = field(default_factory=dict)
     # #815: SEGMENT keep-outs, as capsule SPANS instead of cells --
     # (K, 4) [gx, gy_lo, gy_hi, layer] and (K, 3) [gx, gy_lo, gy_hi].
     #
@@ -433,6 +438,53 @@ def rung_small_armed() -> bool:
     return env_knobs.VIA_RUNG_2 and not _RUNG_UNSAFE
 
 
+def _rung_api(obstacles_or_none=None) -> bool:
+    """True when the loaded grid_router carries the #530 rung API (0.22.0+)."""
+    try:
+        import grid_router as _gr
+        return hasattr(_gr.GridObstacleMap, 'add_blocked_vias_rung_batch')
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def via_rungs(config, pcb_data=None):
+    """#530 decision 4: the via geometries the obstacle map carries a
+    legality rung for, as an ordered list of (diameter, drill); rung r is
+    ``via_rungs(...)[r-1]`` (rung 0 is the run's via_size/via_drill). One
+    rung per DISTINCT per-net via geometry in ``config.net_via_sizes``,
+    largest first; the env-armed #568 small fab rung, when it exists, keeps
+    its historical slot as rung 1 ahead of them. Empty on a board where
+    every net uses the run's via, and on a 0.21.x binary."""
+    if not _rung_api():
+        return []
+    rungs = []
+    small = _small_via_pair(config, pcb_data) if pcb_data is not None else None
+    if small is not None:
+        rungs.append((round(small[0], 4), round(small[1], 4)))
+    sizes = getattr(config, 'net_via_sizes', None) or {}
+    run = (round(config.via_size, 4), round(config.via_drill, 4))
+    extra = sorted({(round(d, 4), round(h, 4)) for d, h in sizes.values()},
+                   key=lambda p: (-p[0], -p[1]))
+    for p in extra:
+        if p != run and p not in rungs:
+            rungs.append(p)
+    return rungs
+
+
+def rung_for_net(config, pcb_data, net_id: int) -> int:
+    """The via-legality rung a search for ``net_id`` must use: 0 at the run's
+    via, else the index of the net's own geometry in ``via_rungs``."""
+    sizes = getattr(config, 'net_via_sizes', None) or {}
+    v = sizes.get(net_id)
+    if not v:
+        return 0
+    key = (round(v[0], 4), round(v[1], 4))
+    for i, p in enumerate(via_rungs(config, pcb_data), 1):
+        if p == key:
+            return i
+    return 0
+
+
 def _small_via_pair(config, pcb_data):
     """#568: the fab-ladder (diameter, drill) the rung-1 legality map is
     stamped at -- the FIRST ladder entry smaller than the configured via,
@@ -453,10 +505,11 @@ def _small_via_pair(config, pcb_data):
         set_rung_unsafe(True)   # make the raw mirrors honor it too
         return None
     try:
-        from fab_tiers import fab_floor_ladder
+        from fab_tiers import escalation_rungs
         ncu = len([l for l in (pcb_data.board_info.copper_layers or [])
                    if l.endswith('.Cu')]) or 2
-        for f in fab_floor_ladder(ncu):
+        # None under --escalation off: no small-via rung exists to search at.
+        for f in escalation_rungs(ncu):
             pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
             if pair[0] < config.via_size - 1e-9:
                 return pair
@@ -694,6 +747,26 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             data.blocked_vias_small = (_unique_rows(np.concatenate(_small_cat))
                                        if _small_cat
                                        else np.empty((0, 2), dtype=np.int32))
+        # #530 decision 4: one more pass per distinct per-net via geometry, so
+        # a net searched at its own via sees this net's copper at the right
+        # reserve. The env-armed small rung above is rung 1 when present;
+        # via_rungs() orders them the same way rung_for_net numbers them.
+        _rungs = via_rungs(config, pcb_data)
+        for _r, (_d, _h) in enumerate(_rungs, 1):
+            if _sp is not None and _r == 1:
+                data.blocked_vias_rungs[1] = data.blocked_vias_small
+                continue
+            from dataclasses import replace as _dc_replace
+            _rd = precompute_net_obstacles(
+                pcb_data, net_id,
+                _dc_replace(config, via_size=_d, via_drill=_h),
+                extra_clearance, diagonal_margin, _small_pass=True)
+            _cells = [_rd.blocked_vias]
+            if len(_rd.blocked_via_spans):
+                _cells.append(expand_via_spans(_rd.blocked_via_spans))
+            _cat = [a for a in _cells if len(a)]
+            data.blocked_vias_rungs[_r] = (_unique_rows(np.concatenate(_cat)) if _cat
+                                           else np.empty((0, 2), dtype=np.int32))
     if not _small_pass:
         # A STABLE identity for every cache object, armed or not. id() cannot
         # serve: CPython recycles ids, and make_local_window mints a
@@ -823,8 +896,11 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # rule replaces the net/class fallback; the pad's local keep-clear stays a
     # hard floor on top. Layers sharing a resolved value share one
     # rasterization -- a board without rules takes the old single-margin path.
+    # A pad override REPLACES the resolved value, floored at the board
+    # minimum (KiCad semantics, measured) -- parity with _add_pad_obstacle.
     def _layer_clr(layer_name):
-        return max(config.layer_clearance(layer_name, clearance), lc)
+        return config.pad_override_clearance(
+            config.layer_clearance(layer_name, clearance), pad)
 
     def _clr_groups(expanded):
         groups = {}
@@ -836,10 +912,9 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
     def _via_clr(expanded):
         return max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
-                   default=max(clearance, lc))
+                   default=config.pad_override_clearance(clearance, pad))
 
-    if lc > clearance:
-        clearance = lc
+    clearance = config.pad_override_clearance(clearance, pad)
 
     # Custom comb/finger pads: rasterize the real copper polygon(s), leaving the
     # finger channels open, instead of the bounding box (issue #188). This is the
@@ -962,8 +1037,13 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
     if _vs is not None and len(_vs) > 0:
         obstacles.add_blocked_via_spans_batch(_vs)
     _small = getattr(cache_data, 'blocked_vias_small', None)
-    if _small is not None and len(_small) > 0:
+    _rungs = getattr(cache_data, 'blocked_vias_rungs', None) or {}
+    if _small is not None and len(_small) > 0 and 1 not in _rungs:
         obstacles.add_blocked_vias_small_batch(_small)
+    # #530: the per-net via rungs (rung 1 may BE the small map above).
+    for _r, _cells in sorted(_rungs.items()):
+        if _cells is not None and len(_cells) > 0:
+            obstacles.add_blocked_vias_rung_batch(_r, _cells)
     if _CELL_WATCH != []:
         ledger_cell_watch(obstacles, "cache-add " + _ledger_site(depth=2, frames=3))
 
@@ -992,8 +1072,13 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
     if _vs is not None and len(_vs) > 0:
         obstacles.remove_blocked_via_spans_batch(_vs)
     _small = getattr(cache_data, 'blocked_vias_small', None)
-    if _small is not None and len(_small) > 0:
+    _rungs = getattr(cache_data, 'blocked_vias_rungs', None) or {}
+    if _small is not None and len(_small) > 0 and 1 not in _rungs:
         obstacles.remove_blocked_vias_small_batch(_small)
+    # #530: exact mirror of the add above -- same arrays, same order.
+    for _r, _cells in sorted(_rungs.items()):
+        if _cells is not None and len(_cells) > 0:
+            obstacles.remove_blocked_vias_rung_batch(_r, _cells)
     if _CELL_WATCH != []:
         ledger_cell_watch(obstacles, "cache-remove " + _ledger_site(depth=2, frames=3))
 

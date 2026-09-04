@@ -323,6 +323,15 @@ def _emit_summary_min(gate_report: Optional[dict] = None,
         _min = summary_min(_m)
         if status is not None:
             _min['status'] = status
+        try:
+            from fab_tiers import escalation_summary, escalation_report_line
+            _es = escalation_summary()
+            _min['escalations'] = _es['count'] + _es['fab_tier_escalations']
+            _line = escalation_report_line()
+            if _line:
+                print(f"  {_line}")
+        except Exception:                                       # noqa: BLE001
+            pass
         if gate_report and gate_report.get('verdict') == 'reject':
             _min['improvement_gate'] = 'reverted'
         print("JSON_SUMMARY_MIN: " + json.dumps(_min, sort_keys=True))
@@ -422,6 +431,12 @@ def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
 
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
+                # #530: cap every auto-read net class at this clearance (the
+                # explicit --clearance-ceiling). None = honour the classes.
+                clearance_ceiling: Optional[float] = None,
+                # #530 decision 4: --via-size/--via-drill omitted -> each net's
+                # via is its own class / rule draw size (config.net_via_sizes).
+                via_from_class: bool = False,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
                 direction_order: str = None,
                 ordering_strategy: str = "inside_out",
@@ -779,11 +794,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             from list_nets import net_clearance_map_by_id
             net_clearances = net_clearance_map_by_id(
                 input_file, {nid: n.name for nid, n in pcb_data.nets.items()})
-            if net_clearances:
-                net_clearances = {nid: min(clr, clearance)
+            if net_clearances and clearance_ceiling is not None:
+                # #439 ceiling, now only when explicitly asked for (#530).
+                net_clearances = {nid: min(clr, clearance_ceiling)
                                   for nid, clr in net_clearances.items()}
                 print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
-                      f"capped at clearance {clearance}mm (#439).")
+                      f"capped at the ceiling {clearance_ceiling}mm (#439).")
+            elif net_clearances:
+                print(f"Auto-read netclass clearances for {len(net_clearances)} net(s), "
+                      f"honoured as declared (KiCad pairwise max).")
         except Exception as _e:
             print(f"Warning: could not auto-read netclass clearances ({_e}); "
                   f"routing at the uniform clearance.")
@@ -814,13 +833,56 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # min(nominal, fab_track, netclass width), never below the
             # advanced tier; dipping below standard prints the same fab
             # warning the via rungs use.
-            _adv_tw = _tier_floors(_ncl, tier='advanced') \
-                .get('track_width', _twfloor)
+            # The DEEPEST rung of the ACTIVE tier: advanced under --fab-tier
+            # auto, the tier's own floor when it is hard (#857).
+            from fab_tiers import fab_floor_min as _tier_min
+            _adv_tw = _tier_min(_ncl).get('track_width', _twfloor)
             net_track_widths = {}
-            for nid, w in net_track_width_map_by_id(
-                    input_file,
-                    {nid: n.name for nid, n in pcb_data.nets.items()}
-            ).items():
+            # #530: the per-net DRAW width is the resolver's `opt` -- the
+            # aggregate net class's track_width, overridden by any .kicad_dru
+            # (constraint track_width (opt ...)) that matches the net, clamped
+            # into the rule's min/max -- exactly what KiCad's own router draws
+            # under "use netclass values". Nets whose width equals the Default
+            # class's carry no entry (they route at config.track_width, as
+            # before); a rule with layer-scoped opts fills net_layer_widths.
+            _per_net, _per_layer, _per_net_via = {}, {}, {}
+            try:
+                from design_rules import DesignRules as _DR
+                _dr = _DR.from_project(
+                    pcb_data, input_file,
+                    fab_floor=fab_floors(_ncl),
+                    copper_layers=list(getattr(pcb_data.board_info, 'copper_layers', None)
+                                       or (layers or [])))
+                _dflt_w = _dr.classes.get('Default', {}).get('track_width')
+                _cu = [l for l in (getattr(pcb_data.board_info, 'copper_layers', None)
+                                   or (layers or [])) if str(l).endswith('.Cu')]
+                for nid in pcb_data.nets:
+                    if nid == 0:
+                        continue
+                    w_all = _dr.draw_size('track_width', nid)
+                    by_layer = {l: _dr.draw_size('track_width', nid, l) for l in _cu}
+                    by_layer = {l: w for l, w in by_layer.items() if w is not None}
+                    if by_layer and len(set(by_layer.values())) > 1:
+                        _per_layer[nid] = by_layer
+                    if w_all is not None and (_dflt_w is None or abs(w_all - _dflt_w) > 1e-9
+                                              or nid in _per_layer):
+                        _per_net[nid] = w_all
+                    # #530 decision 4: the net's own VIA draw size (class
+                    # via_diameter/via_drill, a rule's via_diameter/hole_size
+                    # opt, clamped into the rule's min/max), only when the
+                    # operator gave no --via-size/--via-drill.
+                    if via_from_class:
+                        _vd = _dr.draw_size('via_diameter', nid, default=None)
+                        _vh = _dr.draw_size('hole_size', nid, default=None)
+                        if _vd and _vh and _vh < _vd and (
+                                abs(_vd - via_size) > 1e-9 or abs(_vh - via_drill) > 1e-9):
+                            _per_net_via[nid] = (round(_vd, 4), round(_vh, 4))
+            except Exception as _dre:                          # noqa: BLE001
+                print(f"Warning: design-rule widths unavailable ({_dre}); "
+                      f"falling back to the net-class map.")
+                _per_net = dict(net_track_width_map_by_id(
+                    input_file, {nid: n.name for nid, n in pcb_data.nets.items()}))
+            for nid, w in _per_net.items():
                 w2 = max(w, _adv_tw)
                 if w2 < _twfloor - 1e-9:
                     _wfe435(f"netclass width net_{nid}")
@@ -1082,8 +1144,37 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if coplanar_net_ids and coplanar_layer_widths:
         config_kwargs['coplanar_net_ids'] = coplanar_net_ids
         config_kwargs['coplanar_layer_widths'] = coplanar_layer_widths
+    # #530: layer-scoped .kicad_dru width opts (e.g. a 50R class drawn 0.2 on
+    # outer and 0.11 on inner layers) ride the same per-net per-layer channel,
+    # only when the operator gave no --track-width and no --impedance (both
+    # outrank a draw default) and #521 did not already pin the net.
+    if track_width_from_class and impedance is None:
+        for _nid, _bl in (_per_layer or {}).items():
+            if _nid not in net_layer_widths_map:
+                net_layer_widths_map[_nid] = dict(_bl)
     if net_layer_widths_map:
         config_kwargs['net_layer_widths'] = net_layer_widths_map
+    # #530 decision 4: per-net via geometry -> config.net_via_sizes (the
+    # obstacle map grows one via-legality rung per distinct size; a 0.21.x
+    # router binary without rung support routes single-rung, announced).
+    if via_from_class and _per_net_via:
+        try:
+            import grid_router as _gr
+            _rung_ok = hasattr(_gr.GridObstacleMap, 'add_blocked_vias_rung_batch')
+        except Exception:                                      # noqa: BLE001
+            _rung_ok = False
+        if _rung_ok:
+            config_kwargs['net_via_sizes'] = dict(_per_net_via)
+            _sizes = sorted({v for v in _per_net_via.values()}, reverse=True)
+            print(f"Per-net via sizes for {len(_per_net_via)} net(s) from their "
+                  f"net class / rules: {', '.join(f'{d:g}/{h:g}' for d, h in _sizes)} "
+                  f"(run via {via_size:g}/{via_drill:g}); one via-legality rung "
+                  f"per size (#530).")
+        else:
+            print(f"NOTE: {len(_per_net_via)} net(s) declare their own via size, but the "
+                  f"loaded grid_router binary predates via rungs (needs 0.22.0+); "
+                  f"routing every net at {via_size:g}/{via_drill:g}. Run "
+                  f"build_router.py --from-source.")
     if collect_stats:
         config_kwargs['collect_stats'] = collect_stats
     # #581: an active (> 0) same-net pad via clearance keeps EVERY via this
@@ -3640,6 +3731,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # taps below the nominal). Grade/check_drc the board at this floor.
         'min_clearance_used': __import__('clearance_ledger').effective(clearance),
     }
+    # #857/#842/#530: the escalation policy, every feature delivered below its
+    # requested size, every fab-tier escalation, and the .kicad_dru rules this
+    # tool could not honour -- the block a harness reads instead of grepping.
+    try:
+        from fab_tiers import escalation_summary
+        _dr = escalation_summary()
+        _rules = getattr(config, 'rules', None)
+        if _rules is not None:
+            _dr['unsupported_rules'] = [n for n, _why in _rules.unsupported()]
+        summary['design_rules'] = _dr
+    except Exception as _dre:                                   # noqa: BLE001
+        summary['design_rules'] = {'error': str(_dre)}
     if impedance_width_clamped:
         # #610: layers whose impedance-solved width was clamped UP to the
         # width floor, {layer: [solved_mm, floor_mm]}. Those layers route at
@@ -5910,11 +6013,13 @@ For differential pair routing, use route_diff.py:
                              "Given: only matching nets get CPW widths; the rest stay "
                              "microstrip.")
     parser.add_argument("--clearance", type=float, default=None,
-                        help="Copper clearance CEILING in mm. When given, every net class "
-                             "(Default included) is capped at min(class, this). When OMITTED, "
-                             "each net routes at its own net-class clearance (base = the board's "
-                             f"Default class from the sibling .kicad_pro, else {defaults.CLEARANCE}). "
-                             "Use --net-clearances <json> for explicit per-net values.")
+                        help="Copper clearance of the DEFAULT net class for this run, in mm. "
+                             "Nets in other classes route at their own class clearance "
+                             "(pairwise max, as KiCad does). When OMITTED, the board's Default "
+                             f"class from the sibling .kicad_pro, else {defaults.CLEARANCE}. "
+                             "To cap EVERY class at one value (the old #439 behaviour) pass "
+                             "--clearance-ceiling. Use --net-clearances <json> for explicit "
+                             "per-net values.")
     parser.add_argument("--via-size", type=float, default=None,
                         help="Via outer diameter in mm. Default: the board's Default net-class "
                              f"via_diameter (sibling .kicad_pro), else {defaults.VIA_SIZE}.")
@@ -6191,6 +6296,9 @@ For differential pair routing, use route_diff.py:
     # uses this bit to floor impedance-solved widths at the fab tier instead of
     # the resolved default width. Captured before the fill below overwrites None.
     _tw_explicit = args.track_width is not None
+    # #530 decision 4: likewise for the via -- omitted, each net's via is its
+    # own class / rule draw size (per-net via rungs in the obstacle map).
+    _vs_explicit = args.via_size is not None or args.via_drill is not None
     # track_width / via_size / via_drill: when omitted, default to the board's OWN
     # Default net-class value (else the routing_defaults constant), so a bare route
     # uses the board's own geometry -- parity with the GUI's per-control override.
@@ -6208,20 +6316,36 @@ For differential pair routing, use route_diff.py:
     # (Default-class nets) is min(Default class, ceiling), and non-Default classes are
     # capped at the ceiling in the map below. Omitted -> no ceiling: every net routes
     # at its own class (base = the board's Default class).
-    _ceiling = args.clearance                       # None iff --clearance omitted
+    # #530 (decision 2): --clearance is the DEFAULT CLASS clearance for this run
+    # (KiCad semantics: other classes are honoured pairwise). The old cap-every-
+    # class behaviour (#439) is the explicit --clearance-ceiling.
+    if env_knobs.CLEARANCE_LEGACY_CEILING and args.clearance is not None \
+            and getattr(args, 'clearance_ceiling', None) is None:
+        args.clearance_ceiling = args.clearance   # replay knob: pre-#530 reading
+    _ceiling = getattr(args, 'clearance_ceiling', None)   # None iff omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     _dflt_clr = board_default_netclass_clearance(args.input_file)
-    if _ceiling is None:
+    if args.clearance is None:
         args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
         print(f"--clearance not given; honoring net classes with base = "
               f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
               f"clearance {args.clearance}mm.")
     else:
+        print(f"--clearance {args.clearance}: the Default net class routes at it this run; "
+              f"other classes are honoured (pass --clearance-ceiling to cap every class).")
+    if _ceiling is not None:
         # min(Default class, ceiling) so Default is capped like every other class.
-        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+        args.clearance = min(args.clearance, _ceiling)
+        print(f"--clearance-ceiling {_ceiling}: every net class is capped at it and the "
+              f"output project's classes are clamped down to it (#439).")
+        if env_knobs.CLEARANCE_LEGACY_CEILING and _dflt_clr is not None:
+            # the pre-#530 reading in full: the RUN clearance was
+            # min(Default class, ceiling) too, so a late chain step saying 0.2
+            # on a project an earlier step lowered to 0.09 routed at 0.09.
+            args.clearance = min(_dflt_clr, _ceiling)
     # Both floors go through the SHARED resolver (list_nets.resolve_cli_floor),
     # so a declared 0 -- KiCad's "not configured" -- reads as UNSET here exactly
     # as it does on the placement half of the loop. Read straight, these two
@@ -6235,6 +6359,9 @@ For differential pair routing, use route_diff.py:
         args.input_file, 'board_edge_clearance', args.board_edge_clearance,
         defaults.BOARD_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
+    # #857: the escalation policy + the board's own rules.min_* floors, set
+    # once per run like the tier (every descent site reads them).
+    __import__('fab_tiers').set_policy_from_args(args, args.input_file)
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),
@@ -6573,7 +6700,7 @@ For differential pair routing, use route_diff.py:
                                    for nid, clr in _net_clearances_map.items()}
         if _net_clearances_map:
             _classes = sorted({round(v, 4) for v in _net_clearances_map.values()})
-            _mode = (f"capped at --clearance {args._clearance_ceiling}"
+            _mode = (f"capped at --clearance-ceiling {args._clearance_ceiling}"
                      if args._clamp_netclasses
                      else "honored in full (--clearance omitted)")
             print(f"Netclass clearances for {len(_net_clearances_map)} net(s), {_mode} "
@@ -6596,6 +6723,7 @@ For differential pair routing, use route_diff.py:
                 layers=args.layers,
                 track_width=args.track_width,
                 track_width_from_class=not _tw_explicit,
+                via_from_class=not _vs_explicit,
                 impedance=args.impedance,
                 coplanar_gap=args.coplanar_gap,
                 coplanar_nets=args.coplanar_nets,
@@ -6769,4 +6897,12 @@ For differential pair routing, use route_diff.py:
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+    # #857: --strict-sizes turns any delivery below a requested size, or any
+    # fab-tier escalation, into a non-zero exit so a harness needs no grep.
+    if getattr(args, 'strict_sizes', False):
+        from fab_tiers import escalation_summary, escalation_report_line
+        _es = escalation_summary()
+        if _es['count'] or _es['fab_tier_escalations']:
+            print(f"  --strict-sizes: {escalation_report_line()}")
+            sys.exit(3)
 

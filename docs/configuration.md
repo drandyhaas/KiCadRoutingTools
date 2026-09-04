@@ -111,9 +111,10 @@ python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "/CLK" --force-rerou
 |--------|---------|-------------|
 | `--track-width` | 0.3 | Track width in mm (ignored if `--impedance` specified) |
 | `--impedance` | - | Target single-ended impedance in ohms (calculates width per layer from stackup) |
-| `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance **ceiling** in mm. **Given** → every net class (Default included) is capped at `min(class, --clearance)` and the output `.kicad_pro` clamps to the routed floor. **Omitted** → each net routes at its own net-class clearance and the classes are preserved (base = the board's own Default class from the sibling `.kicad_pro`) (#439). Use `--net-clearances <json>` for explicit per-net values |
-| `--via-size` | 0.5 | Via outer diameter in mm |
-| `--via-drill` | 0.3 | Via drill diameter in mm |
+| `--clearance` | board's Default net-class clearance (else 0.25) | Copper clearance of the **Default net class** for this run, in mm; nets in other classes route at their own class clearance (pairwise `max`, as KiCad's DRC does). **Omitted** → the board's own Default class from the sibling `.kicad_pro`. Since #530 this no longer caps the other classes; use `--net-clearances <json>` for explicit per-net values |
+| `--clearance-ceiling` | - | Cap **every** net class (Default included) at this clearance for the run and clamp the output `.kicad_pro`'s classes down to it — the "stock net classes are aspirational" workflow that `--clearance` used to switch on implicitly (#439). **This is the flag for a chained run**: on a project an earlier step already lowered, the run stays at that lower floor instead of routing wider, which is what the recorded corpus chains and the routing skills use. GUI: the **Class ceiling** checkbox next to Min Clearance |
+| `--via-size` | Default net-class via (else 0.5) | Via outer diameter in mm. **Given** → every net's vias are this size. **Omitted** → each net's vias are drawn at its **own** net class / `.kicad_dru` `via_diameter` (#530 decision 4): the router carries one via-legality map per distinct via geometry on the board (`grid_router` 0.22.0+; an older binary routes every net at the Default class size and says so) |
+| `--via-drill` | Default net-class drill (else 0.3) | Via drill diameter in mm; per-net exactly like `--via-size` |
 | `--grid-step` | 0.1 | Grid resolution in mm |
 
 **Impedance-controlled routing:** When `--impedance` is specified, track widths are automatically calculated per layer using IPC-2141 formulas based on the board stackup. Outer layers use microstrip formulas (typically wider tracks) and inner layers use stripline formulas (typically narrower tracks). Via clearance calculations account for the varying track widths per layer.
@@ -129,17 +130,52 @@ vias and clearances *down toward* when it needs to. It is shared by every CLI
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--fab-tier` | `standard` | `standard` (no extra fab cost) or `advanced` (tighter, "more costly") |
+| `--fab-tier` | `auto` | `auto` (the standard floor, escalating to advanced when a fine-pitch fan-out, plane tap or last-resort via cannot fit; warned and counted), `standard` (no extra fab cost, **hard**) or `advanced` (tighter, "more costly", **hard**) |
 | `--fab-overrides` | - | Path to a file overlaying the tier's floors (only the keys it lists) |
+| `--escalation` | `fab` | How far below a **requested** size a failing net may be retried: `fab` (down to the fab tier floor, below the board's own minimums; completion first, every narrowing disclosed), `board` (down to the board's own Board Setup minimums, i.e. what KiCad's DRC accepts; an unset key falls back to the fab tier floor), `off` (never; the net fails and is reported) |
+| `--strict-sizes` | off | Exit 3 when any feature was delivered below its requested size or a fab-tier escalation fired |
 
 The tier is a **floor ladder**:
 
 - **`standard`** — the cheap floor (per layer count: 2-layer track/clearance 0.127/0.127,
-  4+ layer 0.0889/0.10; via 0.45 / drill 0.20; via hole-to-hole 0.20). Routing prefers
-  it but **auto-escalates to the `advanced` floor — printing a one-line warning** — when a
-  fine-pitch fan-out genuinely cannot escape at the standard floor.
+  4+ layer 0.0889/0.10; via 0.45 / drill 0.20; via hole-to-hole 0.20). A **hard**
+  floor since #857: nothing on the board goes below it.
 - **`advanced`** — the JLC "more costly" floor (track/clearance 0.10/0.10 on 2-layer,
-  0.0762/0.09 on 4+; via 0.25 / drill 0.15). A **hard** floor: no escalation.
+  0.0762/0.09 on 4+; via 0.25 / drill 0.15). A **hard** floor.
+- **`auto`** — the default: `standard` first, **escalating to `advanced`** (one
+  warning line per context, and a count in the run summary) when a fine-pitch fan-out,
+  a plane tap or a last-resort via genuinely cannot fit at the standard floor. This
+  is what maximises completion; what #857 changed is the disclosure — the escalation
+  used to change what the board costs without saying so anywhere a harness could see
+  it (149 silent escalations on one board), and now every one is counted and named.
+  Pass `standard` or `advanced` for a hard floor that never escalates.
+
+**Escalation policy** (`--escalation`, the same choice on the GUI's Route tab) is
+orthogonal to the tier and bounds every place the engine narrows a track, shrinks a
+via or tightens a clearance to complete a net: the per-net rescue, the terminal
+escalation, the terminal graze neck, fine-pitch plane taps, via-in-pad clamps and
+last-resort vias. Under the default `fab`, a descent may go down to the fab tier
+floor, below the board's own declared minimums (the writeback then lowers the
+project's `rules.min_*` to match, as before); this is the completion-first setting.
+Under `board`, a descent stops at the board's own `rules.min_*` (Board Setup >
+Constraints), so the output is DRC-clean against the input project by construction;
+a minimum the board leaves unset (KiCad writes 0) falls back to the fab tier floor
+for that key. A board minimum bounds descents only
+when the run's own request respects it: a request already below the declared
+minimum (the stock 0.5 mm via on a project nobody edited, routed with
+`--via-size 0.3`) marks that minimum as stale for the run, is said so on the
+console, and descents for that key bound at the fab floor instead. An explicit
+request is never pinned up to a board minimum, only to the fab floor. Under
+`off` nothing is narrowed and a net that cannot complete at the requested
+geometry fails and is reported.
+
+**Disclosure.** Every descent is recorded and reported three ways: the
+`JSON_SUMMARY` block `design_rules` (policy, tier, the board floors read, every
+narrowing with net / kind / requested / delivered / site, the fab-tier escalation
+count, and the `.kicad_dru` rules the tool could not honour), an `escalations`
+count in `JSON_SUMMARY_MIN`, and one end-of-run line (`Design rules [--escalation
+fab, --fab-tier auto]: 7 feature(s) on 3 net(s) delivered below the requested
+size (...)`). `--strict-sizes` makes that line a non-zero exit.
 
 | Floor (per layer count) | standard | advanced |
 |---|---|---|
@@ -167,22 +203,32 @@ repo root. (`track_width` / `clearance` are layer-dependent in the tier tables, 
 override sets one fixed value for every board — override them only if you want that.)
 
 ```bash
-# Route to the cheap floor (default); dense fan-outs warn when they escalate
+# Route to the cheap floor (default, hard); descents stop at the board's own minimums
 python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*"
+
+# Let dense fan-outs escalate to the advanced via (warned + counted)
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier auto
 
 # Opt the whole board into the tighter, more-costly floor
 python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-tier advanced
+
+# Never narrow anything; fail the net instead, and make that a non-zero exit
+python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --escalation off --strict-sizes
 
 # Declare your own fab capability
 python py_router/route.py in.kicad_pcb out.kicad_pcb --nets "Net*" --fab-overrides my_fab.txt
 ```
 
-**Floor enforcement.** The CLI **errors** if `--track-width`, `--clearance`,
-`--via-size`, `--via-drill` or `--hole-to-hole-clearance` is set below the active tier's
-floor (raise the value, or declare a smaller capability with `--fab-overrides`). The GUI
-instead **pins** the corresponding Basic-tab spin control to the floor and warns. Grade
-verification (`check_drc.py`) defaults its size/clearance floors to the same tier, so
-legitimately-escalated fine geometry is not flagged.
+**Floor enforcement.** An explicit `--track-width`, `--clearance`, `--via-size`,
+`--via-drill` or `--hole-to-hole-clearance` is checked against the **physical** fab
+floor (the `--fab-overrides` file when given, else the advanced rung: 0.25/0.15 via,
+0.09–0.10 mm track/clearance) and **pinned** up to it with a warning when set below.
+The selected tier and the board's own minimums bound what the router may descend to
+on its own, never an explicit request: `--via-size 0.3` under the hard `standard` tier
+is routed at 0.3 as asked (no automatic descent below it), exactly as a request below a
+stock Board Setup minimum is. The GUI pins the corresponding Basic-tab spin control the
+same way. Grade verification (`check_drc.py`) grades sizes at the board's own minimums
+and rules (what KiCad grades) raised to the same physical floor.
 
 ### Post-Route DRC Settings
 
@@ -197,7 +243,8 @@ live board via the pcbnew API.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--no-fix-drc-settings` | off (fix is on) | Do **not** adjust the output's `.kicad_pro` DRC constraints afterwards; leave KiCad's stock floors |
-| `--keep-thermal` | off | Leave `starved_thermal` (thermal-relief) severity untouched instead of demoting it to a warning |
+| `--relax-drc-severities` | off | ALSO lower the project's DRC severities for the non-routing categories (courtyard shapes, solder-mask bridges, footprint/library issues incl. `annular_width` → ignore; `starved_thermal`, `courtyards_overlap` → warning). Off by default (#856): a routing step never changes what the project counts as a violation unless asked; the previous values are kept under `kicad_routing_tools.saved_severities` |
+| `--keep-thermal` | off | Deprecated no-op (with `--relax-drc-severities`, leaves `starved_thermal` untouched) |
 | `--enable-used-layers` | off | Add any layer the board uses but is missing from its `(layers)` table back into the `.kicad_pcb`, so KiCad stops flagging `item_on_disabled_layer`. Off by default because it edits the board, not just DRC settings |
 
 ### Power Net Options

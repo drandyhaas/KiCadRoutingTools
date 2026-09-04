@@ -1200,7 +1200,12 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
             rx2, ry2 = into_pad_frame_point(x2, y2, pad)
             d, _ = segment_to_rect_distance(rx1, ry1, rx2, ry2, pad.global_x, pad.global_y,
                                             pad.size_x / 2, pad.size_y / 2)
-            if d < max(_req(nid), getattr(pad, 'local_clearance', 0.0) or 0.0) + half:
+            # A pad override REPLACES the pair value, floored at the board
+            # minimum (KiCad, measured). No config in this scope: the
+            # module helper with the board's memoised rules.min_clearance.
+            from design_rules import override_clearance, board_min_clearance_cached
+            if d < override_clearance(_req(nid), board_min_clearance_cached(pcb_data),
+                                      pad) + half:
                 return False
     # Other-net copper pours (planes): a connector must not enter or graze them.
     zones = getattr(pcb_data, 'zones', None)
@@ -2629,8 +2634,7 @@ def neck_wide_segments_grazing_pads(results, pcb_data, config) -> int:
             for pad in pads_by_layer.get(seg.layer, []):
                 if pad.net_id == seg.net_id or pad.net_id == 0:
                     continue
-                clr = max(own, _own(pad.net_id),
-                          getattr(pad, 'local_clearance', 0.0) or 0.0)
+                clr = config.pad_override_clearance(max(own, _own(pad.net_id)), pad)
                 d = _pt_seg_dist(pad.global_x, pad.global_y,
                                  seg.start_x, seg.start_y, seg.end_x, seg.end_y)
                 # Bounding-circle pad half (conservative: never misses a violation).

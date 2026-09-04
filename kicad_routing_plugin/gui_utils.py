@@ -637,7 +637,35 @@ def board_minima_from_live(board):
                         holes.append(d)
                 except Exception:
                     continue
+        # #530: the smallest pad / footprint clearance OVERRIDE on a copper
+        # pad -- KiCad floors an override at rules.min_clearance, so the
+        # writeback must not raise min_clearance above one the run honoured.
+        # Best-effort across SWIG shapes (std::optional on KiCad 9/10).
+        ovr = []
+        for fp in board.GetFootprints():
+            fp_v = None
+            try:
+                v = fp.GetLocalClearance()
+                fp_v = v.value() if hasattr(v, 'has_value') and v.has_value() else (
+                    None if hasattr(v, 'has_value') else v)
+            except Exception:
+                fp_v = None
+            for pad in fp.Pads():
+                try:
+                    if not any(str(l).endswith('.Cu') for l in
+                               [board.GetLayerName(i) for i in pad.GetLayerSet().Seq()]):
+                        continue
+                    v = pad.GetLocalClearance()
+                    pv = v.value() if hasattr(v, 'has_value') and v.has_value() else (
+                        None if hasattr(v, 'has_value') else v)
+                    eff = pv if pv else fp_v
+                    if eff and eff > 0:
+                        ovr.append(pcbnew.ToMM(int(eff)))
+                except Exception:
+                    continue
         out = {}
+        if ovr:
+            out['min_pad_clearance_override'] = min(ovr)
         if widths:
             out['min_track_width'] = min(widths)
         if via_sizes:
@@ -806,6 +834,14 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                 _clr_floor = _dru_min
         except Exception:
             pass
+        # #530: never above the smallest pad override the run honoured (KiCad
+        # floors an override at min_clearance) -- parity with compute_targets.
+        try:
+            _ovr = board_minima_from_live(board).get('min_pad_clearance_override')
+            if _ovr and _clr_floor is not None and float(_clr_floor) > _ovr:
+                _clr_floor = _ovr
+        except Exception:
+            pass
         lower('m_MinClearance', _clr_floor)
         lower('m_TrackMinWidth', track_width, min_w)
         lower('m_ViasMinSize', via_size, min_via)
@@ -837,13 +873,12 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                         iu = board_min_iu if iu is None else min(iu, board_min_iu)
                     if get() > iu:
                         set_(iu)
+                # Clearance only: the class track/via/drill are DRAW defaults
+                # (KiCad loads them SetOpt, not SetMin). Lowering them to the
+                # board's smallest object was the #842 ratchet -- one 0.127
+                # neck made the Default class 0.127 and every later run
+                # routed at it. Parity with fix_kicad_drc_settings.
                 _nc_lower(_nc.GetClearance, _nc.SetClearance, clearance)
-                _nc_lower(_nc.GetTrackWidth, _nc.SetTrackWidth,
-                          track_width, min_w)
-                _nc_lower(_nc.GetViaDiameter, _nc.SetViaDiameter,
-                          via_size, min_via)
-                _nc_lower(_nc.GetViaDrill, _nc.SetViaDrill,
-                          via_drill, min_drill)
         except Exception:
             pass
         # #782: the NON-Default classes. Delegated, never re-implemented -- this

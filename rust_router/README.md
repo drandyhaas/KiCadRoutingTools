@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.21.4**
+**Current Version: 0.22.0**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -310,6 +310,28 @@ src/
 - **Costs**: ORTHO_COST=1000, DIAG_COST=1414 (sqrt(2) * 1000), DEFAULT_TURN_COST=1000
 
 ## Version History
+
+### 0.22.0 (2026-09-03)
+
+- **N via-legality rungs** (#530 decision 4, per-net via sizes). The single
+  #568 "small fab rung" map `blocked_vias_small` becomes
+  `blocked_vias_rungs: Vec<FxHashMap>`, one refcounted map per via geometry
+  a search may use (rung r at index r-1; rung 0 stays `blocked_vias`, the
+  configured via). New methods: `add_blocked_via_rung(rung, gx, gy)`,
+  `remove_blocked_via_rung`, `add_blocked_vias_rung_batch(rung, N x 2)`,
+  `remove_blocked_vias_rung_batch`, `rung_count()`, `rung_len(rung)`, and
+  `blocked_via_cells_at_rung(rung)` (sorted list of (gx, gy)) so Python can
+  build a base map at another via geometry and copy its via cells into a
+  rung of the working map. The `*_small*` methods remain as rung-1 aliases;
+  `is_via_blocked_rung(gx, gy, rung)` consults rung r's own map when it is
+  populated and falls back to rung 0 otherwise (conservative for a smaller
+  via; a LARGER via's rung must be populated by the caller). `get_stats()`'s
+  8th element is now the sum over every rung. `freeze_static` keeps a rung's
+  cells that lie outside the frozen full-size set (a larger via's overlay)
+  and clears the rest, as before.
+- Python-side consumer: `GridRouteConfig.net_via_sizes` /
+  `obstacle_cache.via_rungs`; a Python build against a 0.21.x binary detects
+  the missing `add_blocked_vias_rung_batch` and routes single-rung.
 
 ### 0.21.4 (2026-08-30)
 

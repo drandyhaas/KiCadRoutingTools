@@ -163,14 +163,17 @@ class TestTheClampItself(unittest.TestCase):
         self.assertEqual(o['Tight'].clearance_mm, 0.1)   # untouched
         self.assertEqual(len(ch), 2)
 
-    def test_diff_pair_draw_defaults_are_lowered_when_given(self):
+    def test_diff_pair_draw_defaults_are_NOT_lowered_even_when_given(self):
+        """#842: diff_pair_gap / diff_pair_width are draw defaults (KiCad loads
+        them SetOpt). The kwargs survive for signature compatibility and do
+        nothing; lowering them was the same ratchet as track_width."""
         b, _d, o = board_with(0.2, {'Wide': 0.4})
         o['Wide']._g = round(0.4 * MM)
         o['Wide']._w = round(0.4 * MM)
         clamp_nondefault_netclasses_on_board(
             b, {'min_clearance': 0.3}, diff_pair_gap=0.15, diff_pair_width=0.12)
-        self.assertEqual(o['Wide']._g, round(0.15 * MM))
-        self.assertEqual(o['Wide']._w, round(0.12 * MM))
+        self.assertEqual(o['Wide']._g, round(0.4 * MM))
+        self.assertEqual(o['Wide']._w, round(0.4 * MM))
 
     def test_track_and_via_geometry_is_NOT_lowered(self):
         """Parity with the CLI's _NONDEFAULT_CLAMP_FIELDS. Only `clearance` is
@@ -235,7 +238,11 @@ class TestOneSpelling(unittest.TestCase):
         someone has copied the clamp rather than called it."""
         hits = []
         for root, _dirs, files in os.walk(REPO):
-            if any(p in root for p in ('.git', 'node_modules', '.claude')):
+            # Test the path RELATIVE to the repo: an absolute path that
+            # contains '.claude' (a worktree under .claude/worktrees/) made
+            # this skip every file and report the body missing.
+            rel_root = os.path.relpath(root, REPO)
+            if any(p in rel_root for p in ('.git', 'node_modules', '.claude')):
                 continue
             for f in files:
                 if not f.endswith('.py'):

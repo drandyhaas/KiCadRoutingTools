@@ -289,10 +289,14 @@ _PARAM_CONTROL_ALIASES = {
     # carry it under the fallthrough name `fab_overrides`; the control is
     # fab_overrides_path. New conversions emit fab_overrides_path directly.
     'fab_overrides': 'fab_overrides_path',
+    # #856: the opt-in severity relaxation checkbox (Options tab).
+    'relax_drc_severities': 'relax_drc_severities_check',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                  # #530: --clearance-ceiling -> Min Clearance + the ceiling box
+                  'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
                   # #381 D5:
                   'impedance', 'length_match_groups', 'swappable_nets',
@@ -603,6 +607,22 @@ def apply_step_params(step, dialog):
                 return False
             chk.SetValue(str(value).strip().lower() not in ('off', '0', 'false', 'no'))
             return True
+        if name == 'clearance_ceiling':
+            # #530: --clearance-ceiling X == Min Clearance X with the class-
+            # ceiling box checked (both fronts cap every class at X).
+            spin = getattr(dialog, 'clearance', None)
+            chk = getattr(dialog, 'clearance_check', None)
+            ceil = getattr(dialog, 'clearance_ceiling_check', None)
+            if spin is None or chk is None or ceil is None:
+                return False
+            try:
+                spin.SetValue(float(value))
+                spin.Enable(True)
+                chk.SetValue(True)
+                ceil.SetValue(True)
+                return True
+            except (TypeError, ValueError):
+                return False
         if name == 'impedance':
             # #381 D5: route.py's --impedance drives a checkbox+value pair on the
             # Basic tab (impedance_check enables impedance-based width). A plain

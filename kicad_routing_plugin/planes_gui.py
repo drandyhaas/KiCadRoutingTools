@@ -32,7 +32,7 @@ for _sib in ('py_placer', 'py_tools'):
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
 from .fanout_gui import NetSelectionPanel
-from .gui_utils import StdoutRedirector
+from .gui_utils import StdoutRedirector, board_minima_from_live
 
 
 def _live_board_edge_clearance():
@@ -937,8 +937,12 @@ class PlanesTab(wx.Panel):
                     class_clearance_cache[cname] = params.get('clearance', _plane_clearance)
                 else:
                     class_clearance_cache[cname] = _plane_clearance
+            # #530 decision 2 (mirrors list_nets.net_clearance_map_by_id): a
+            # Default-only net takes the run's clearance and gets NO entry.
             for net in self.pcb_data.nets.values():
                 cname = all_net_to_class.get(net.name, 'Default')
+                if cname == 'Default':
+                    continue
                 _plane_net_clearances[net.net_id] = class_clearance_cache.get(
                     cname, _plane_clearance)
             if _plane_clamp:
@@ -1684,9 +1688,13 @@ class PlanesTab(wx.Panel):
                     track_width=cfg.get('track_width'),
                     via_diameter=cfg.get('via_size'),
                     via_drill=cfg.get('via_drill'),
-                    fab_edge=fab_edge_floor())
+                    fab_edge=fab_edge_floor(),
+                    # #530: caps min_clearance at the smallest pad override
+                    minima=board_minima_from_live(board))
+                # #856: severities only on explicit request; {} = untouched.
+                _sev = severity_plan() if cfg.get('relax_drc_severities') else {}
                 if apply_targets_to_board(
-                        board, targets, severity_plan(keep_thermal=cfg.get('keep_thermal', False)),
+                        board, targets, _sev,
                         clamp_nondefault_netclasses=cfg.get('clamp_netclasses', False)):
                     board.SetModified()
                     print("DRC settings: loosened Board Setup floors to the plane routing values")

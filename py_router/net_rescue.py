@@ -380,17 +380,38 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
         rungs.append(replace(config, grid_step=fine_grid,
                              max_iterations=max_iters))
 
+    from fab_tiers import may_narrow
     fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
+    # #530: the rescue's clearance may step down only to THIS net's own floors
+    # -- its class clearance for a non-Default net (KiCad grades it there and
+    # the writeback never lowers a non-Default class), plus .kicad_dru rules.
+    # core1106_cam: a MIPI_DIFF (0.15) net rescued at 0.10 landed 0.12 from a
+    # GND via -> 9 KiCad items graded at the class.
+    try:
+        fab_clear = max(fab_clear, config.rule_floors(net_id).get('clearance', 0.0))
+    except Exception:                                          # noqa: BLE001
+        pass
     nominal_w = config.get_net_track_width(net_id, config.layers[0])
     # Floor rule (2026-08-06): min(nominal, fab_track, netclass width) --
     # a class-declared width is designer intent and may sit below the
-    # standard fab floor (advanced-clamped at load; ecp5 /PF37- routes at
-    # its class 0.0762 where 0.0889 is sealed).
+    # standard fab floor (clamped at the tier floor at load; ecp5 /PF37-
+    # routes at its class 0.0762 where 0.0889 is sealed). fab_track is
+    # already raised to the board's own minimum under --escalation board.
     rescue_track = min(nominal_w, fab_track,
                        (config.netclass_width_floors or {}).get(
                            net_id, nominal_w))
+    # #530: never below the net's own .kicad_dru / Board Setup minimum.
+    _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
+    if _rf:
+        rescue_track = min(nominal_w, max(rescue_track, _rf))
     power_widths = dict(config.power_net_widths)
     power_widths.pop(net_id, None)  # this net necks down; other nets are obstacles
+    if not may_narrow():
+        # --escalation off: the finer grid is the only retry. Width, power
+        # width and clearance stay exactly what was asked (#842).
+        rescue_track = nominal_w
+        power_widths = dict(config.power_net_widths)
+        fab_clear = config.clearance
     floor_clearance = config.clearance
     for clearance in _clearance_ladder(config.clearance, fab_clear,
                                        defaults.RESCUE_CLEARANCE_STEPS):
@@ -408,9 +429,11 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     # advanced 0.25/0.15), mirroring the plane-tap escalation. Only rungs
     # strictly smaller than the run's via are added; the escalation warning
     # matches the tap path's.
-    from fab_tiers import fab_floor_ladder, warn_fab_escalation
+    from fab_tiers import escalation_rungs, warn_fab_escalation
     n_layers = len(pcb_data.board_info.copper_layers) or 2
-    _ladder = fab_floor_ladder(n_layers)
+    # escalation_rungs: empty under --escalation off, raised to the board's
+    # own minimums under board (#857) and to this net's rule minimums (#530).
+    _ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id))
     for floor in _ladder:
         v_dia, v_drill = floor['via_diameter'], floor['via_drill']
         if v_dia >= config.via_size - 1e-9:
@@ -1315,6 +1338,10 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             _w['scope'] = ('this rescue emitted no width-bearing segment; '
                            'delivered_mm falls back to the requested rung')
         summary['widths'][net_name] = _w
+        if _del_w < _req_w - 1e-9:
+            from fab_tiers import note_narrowing
+            note_narrowing(net_id, 'track_width', _req_w, _del_w, 'net rescue',
+                           net_name=net_name)
         _thin = (f", {YELLOW}width {_del_w:g} vs requested {_req_w:g}{RESET}"
                  if _del_w < _req_w - 1e-9 else "")
         print(f"    {GREEN}{'fully reconnected' if fully else 'improved'}{RESET} "
@@ -1346,16 +1373,24 @@ def _escalation_ladder(config, pcb_data, net_id):
     march) -- callers skip such nets silently.
     """
     from plane_pad_tap import fab_floor_clearance_track
-    from fab_tiers import fab_floor_ladder, warn_fab_escalation
+    from fab_tiers import escalation_rungs, warn_fab_escalation, may_narrow
 
+    if not may_narrow():
+        return []  # --escalation off: nothing may march (#842)
     _fab_clear, fab_track = fab_floor_clearance_track(pcb_data)
     w0 = config.get_net_track_width(net_id, config.layers[0])
     w_floor = min(w0, fab_track,
                   (config.netclass_width_floors or {}).get(net_id, w0))
+    # #530: never below the net's own .kicad_dru / Board Setup minimum.
+    _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
+    if _rf:
+        w_floor = min(w0, max(w_floor, _rf))
     width_travel = w0 - w_floor > 1e-9
 
     n_layers = len(pcb_data.board_info.copper_layers) or 2
-    ladder = fab_floor_ladder(n_layers)
+    # escalation_rungs: raised to the board's own minimums under board (#857)
+    # and to this net's rule minimums (#530).
+    ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id))
     via_rungs = [(f['via_diameter'], f['via_drill']) for f in ladder
                  if f['via_diameter'] < config.via_size - 1e-9]
     if not width_travel and not via_rungs:
@@ -1587,6 +1622,17 @@ def terminal_geometry_escalation(state, single_ended_nets, net_clearances=None,
 
         geom = (f"{accepted_cfg.track_width:.4g}x"
                 f"{accepted_cfg.via_size:.4g}/{accepted_cfg.via_drill:.4g}")
+        try:
+            from fab_tiers import note_narrowing
+            note_narrowing(net_id, 'track_width',
+                           config.get_net_track_width(net_id, config.layers[0]),
+                           accepted_cfg.track_width, 'terminal escalation',
+                           net_name=net_name)
+            note_narrowing(net_id, 'via_diameter', config.via_size,
+                           accepted_cfg.via_size, 'terminal escalation',
+                           net_name=net_name)
+        except Exception:                                       # noqa: BLE001
+            pass
         merged = {
             'net_name': net_name,
             'net_id': net_id,

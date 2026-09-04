@@ -58,9 +58,10 @@ _CONSTRAINT_FIELDS = ('min_clearance', 'min_track_width', 'min_via_diameter',
 # used to grade DRC so legitimately-escalated fine geometry isn't false-flagged.
 # The retired 'fine_via_*' keys are now just the advanced tier's via (fab_floor_min).
 from fab_tiers import (  # noqa: E402  (re-export)
-    fab_floors, fab_floor_min, fab_floor_ladder,
+    fab_floors, fab_floor_min, fab_floor_ladder, escalation_rungs,
     set_default_fab_tier, get_default_fab_tier,
     add_fab_tier_args, fab_tier_from_args, warn_fab_escalation,
+    note_narrowing, may_narrow,
 )
 
 

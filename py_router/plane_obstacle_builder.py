@@ -619,7 +619,8 @@ def _add_pad_via_obstacle(obstacles: GridObstacleMap, pad: Pad,
     # Honor a per-pad local clearance override (fiducial keep-clear rings etc.)
     # unless an explicit same-net override was supplied.
     if clearance_override is None:
-        clearance = max(clearance, getattr(pad, 'local_clearance', 0.0) or 0.0)
+        # A pad override REPLACES the resolved value (KiCad, measured).
+        clearance = config.pad_override_clearance(clearance, pad)
     margin = config.via_size / 2 + clearance + config.grid_step / 2
     if getattr(pad, 'polygons', None):
         _block_custom_pad_polys(obstacles, pad, coord, margin, via_mode=True)
@@ -1161,9 +1162,10 @@ def build_routing_obstacle_map(
                     # keep-clear rings carry a clearance far larger than the
                     # board global), else copper routes within the pad's
                     # required clearance (no-net fiducial DRC, upduino #146).
-                    pad_clr = max(config.layer_clearance(  # #498: on route_layer
-                                      route_layer, config.obstacle_clearance(net_id)),
-                                  getattr(pad, 'local_clearance', 0.0) or 0.0)
+                    pad_clr = config.pad_override_clearance(
+                        config.layer_clearance(  # #498: on route_layer
+                            route_layer, config.obstacle_clearance(net_id)),
+                        pad)
                     # Half-grid discretization cushion, matching this file's own
                     # VIA stamps and build_base_obstacles (#173) -- the segment
                     # capsule below deliberately carries NO cushion, same as the

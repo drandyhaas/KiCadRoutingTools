@@ -2551,8 +2551,8 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
                 continue  # the connector legitimately lands on its own-net pad
             pclr = _obs_clr(pad_net, seg.layer)
             for pad in pads:
-                # per-pad override (#326) wins where larger (keep-clear rings etc.)
-                pc = max(pclr, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                # per-pad override (#326) REPLACES the pair value (KiCad, measured)
+                pc = config.pad_override_clearance(pclr, pad)
                 # Coarse bounding-box reject before the exact rect-distance test.
                 pm = pc + seg.width / 2 + max(pad.size_x, pad.size_y) / 2
                 if (pad.global_x < sxmin - pm or pad.global_x > sxmax + pm or

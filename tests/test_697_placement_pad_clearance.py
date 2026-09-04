@@ -461,16 +461,22 @@ class TestRealBoards(unittest.TestCase):
             copy_board(ESP_PROG, staged)
             with open(os.path.splitext(staged)[0] + '.kicad_dru', 'w',
                       encoding='utf-8') as fh:
+                # 1.2 mm, not the 0.6 this test first used: esp_prog's only
+                # sub-0.6 pairs sit on 13 pads carrying a 0.0508 mm clearance
+                # OVERRIDE, and a pad override REPLACES a rule (KiCad 10,
+                # measured -- tests/oracle/constraint_agreement.py
+                # pad_override_beats_rule), so the rule must bind on a pair
+                # WITHOUT overrides to be seen binding at all.
                 fh.write('(version 1)\n(rule wide_front (layer "F.Cu") '
-                         '(constraint clearance (min 0.6mm)))\n')
+                         '(constraint clearance (min 1.2mm)))\n')
             from kicad_parser import parse_kicad_pcb
             pcb = parse_kicad_pcb(staged)
             model = PadClearanceModel.for_board(pcb, 0.15, staged)
             # MUTATION: drop the read_board_layer_clearances read -> empty.
-            self.assertEqual(model.layer_rules, {'F.Cu': 0.6})
+            self.assertEqual(model.layer_rules, {'F.Cu': 1.2})
             g = grade_pad_legality(pcb, 0.15, worst_n=0, pcb_file=staged)
             self.assertGreater(g['pad_conflicts'], 0,
-                               'a 0.6mm F.Cu rule must bind somewhere')
+                               'a 1.2mm F.Cu rule must bind somewhere')
             self.assertTrue(any(r[3] == 'layer rule' for r in g['required']),
                             g['required'])
 

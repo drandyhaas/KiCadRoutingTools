@@ -582,9 +582,11 @@ to TIGHTEN the grade — it is a FLOOR, `max(-c, classA, classB)`, not an
 override, so a value at or below the board's netclasses changes nothing.
 See Step 6.
 
-**`check_drc.py -c` is NOT `route.py --clearance`.** On route.py the flag is a
-**ceiling over every class** (`--clearance` caps each net at `min(its class,
---clearance)`). On `check_drc` it is only the **global fallback**, and a netclass
+**`check_drc.py -c` is NOT `route.py --clearance`.** On route.py the flag is the
+**Default net class's clearance for the run** (#530): nets in other classes route
+at their own class clearance, pairwise `max` as KiCad's DRC does, and the old
+cap-every-class reading (`min(its class, --clearance)`, clamping the project's
+classes down too) is the explicit `--clearance-ceiling`. On `check_drc` it is only the **global fallback**, and a netclass
 override still wins — the tool prints `Required clearance: 0.1600mm
 (local/netclass override; global 0.1500mm)` and grades at 0.16 no matter what
 `-c` says. Measured on one board: 7 violations at `-c 0.16`, the same 7 at
@@ -1189,7 +1191,7 @@ those, so do NOT exclude the pair nets there.
 
 python3 -X utf8 py_router/route_diff.py board_step1c.kicad_pcb board_diff.kicad_pcb \
     --nets <pair globs, e.g. '/usb/*'> \
-    --track-width 0.1 --diff-pair-gap 0.1 --clearance <floor> \
+    --track-width 0.1 --diff-pair-gap 0.1 --clearance-ceiling <floor> \
     [--impedance 90] \
     2>&1 | tee /tmp/step2a_diffpairs.txt
 
@@ -1207,7 +1209,7 @@ RF feed on an outer layer over the GND plane; recommend a `User.2` keepout +
 
 python3 -X utf8 py_router/route.py board_diff.kicad_pcb board_step2b.kicad_pcb \
     --nets RF --impedance 50 --layers F.Cu \
-    --clearance <floor> --no-bga-zones \
+    --clearance-ceiling <floor> --no-bga-zones \
     2>&1 | tee /tmp/step2b_impedance.txt
 
 ### Step 2: Route ALL Nets — plane nets included (#562)
@@ -1927,7 +1929,8 @@ Manufacturing constraints (set to match your fab's requirements):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--clearance 0.25` | 0.25 | Track-to-track clearance (mm) |
+| `--clearance-ceiling 0.1` | - | **Use this in a chain.** Every net class (Default included) is capped at the value for the run and the project's classes are clamped down to it — the floor the whole chain routes to; on a project an earlier step already lowered, the run stays at that lower value. (#530) |
+| `--clearance 0.25` | board's Default class, else 0.25 | The Default net class's clearance for this run, exactly; other classes keep their own (pairwise, as KiCad grades). Use it only when you mean that exact value — on a lowered project it routes WIDER than the earlier steps did. |
 | `--board-edge-clearance 0.5` | 0 | Min distance from board edge (mm) |
 | `--hole-to-hole-clearance 0.2` | 0.2 | Min drill-to-drill spacing (mm) |
 
@@ -2361,7 +2364,7 @@ B.Cu second):
 ```bash
 python3 -X utf8 py_router/route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
     --nets "*" \
-    --track-width 0.127 --clearance 0.1 \
+    --track-width 0.127 --clearance-ceiling 0.1 \
     --layer-costs 1.0 1.5 \
     --no-bga-zone --max-ripup 5 \
     2>&1 | tee /tmp/route_balanced.txt
@@ -2436,7 +2439,7 @@ hunt for.
    ```bash
    python3 -X utf8 py_router/route.py board_fanout.kicad_pcb board_signal.kicad_pcb \
        --nets "*" \
-       --track-width <fab floor, e.g. 0.127 or 0.0889> --clearance <floor, e.g. 0.1> \
+       --track-width <fab floor, e.g. 0.127 or 0.0889> --clearance-ceiling <floor, e.g. 0.1> \
        --via-size <floor via, e.g. 0.30> --via-drill <floor drill, e.g. 0.15> \
        --no-bga-zone --max-ripup 5 \
        2>&1 | tee /tmp/route_signal.txt

@@ -101,6 +101,7 @@ class _Occ:
         # One shared run of set bytes for the block_* slice blits (sliced to
         # length per span); ny is the longest span any column can need.
         self._ones = b'\x01' * self.ny
+        self._disk_memo = {}       # #864: see disk_cells
 
     def cell(self, x, y):
         return (int((x - self.x0) / self.res), int((y - self.y0) / self.res))
@@ -176,6 +177,25 @@ class _Occ:
         for a, b0, b1 in self._disk_spans(x, y, r):
             for b in range(b0, b1 + 1):
                 yield a, b
+
+    def disk_cells(self, x, y, r):
+        """``frozenset(_disk(x, y, r))``, MEMOISED per (x, y, r) (#864).
+
+        _carve_foreign re-derives the same foreign pad / via / track disks for
+        every anchor of every ball and for every rescue attempt (8 attempts on
+        one system76_launch net: 100M _disk yields, 397 of 433 s, most of it
+        the GC re-traversing the freshly built sets). Adjacent balls share
+        their neighbours, so the memo collapses that to one build per disk.
+        Built from _disk_spans, so membership is identical to _disk."""
+        key = (round(x, 6), round(y, 6), round(r, 6))
+        cells = self._disk_memo.get(key)
+        if cells is None:
+            cells = frozenset((a, b) for a, b0, b1 in self._disk_spans(x, y, r)
+                              for b in range(b0, b1 + 1))
+            if len(self._disk_memo) >= 200000:
+                self._disk_memo.clear()
+            self._disk_memo[key] = cells
+        return cells
 
     def block_layer(self, li, x, y, r):
         g = self.grid[li]
@@ -652,7 +672,11 @@ def generate_underpad_escape(footprint: Footprint,
               "package? use qfn_fanout.py)")
         return [], [], [p.net_name for p in signal_pads]
     if res is None:
-        res = min(grid.pitch_x, grid.pitch_y) / 32.0
+        # #864: floored at 0.01 mm. pitch/32 is 0.011 at a real 0.35 mm pitch,
+        # but a connector mis-detected as a 0.10 mm grid (system76_launch J7)
+        # got a 0.003 mm grid, on which a 7 mm mounting-pad keep-out is a
+        # 5-million-cell disk -- 264 such disks were 397 of a 433 s rescue.
+        res = max(min(grid.pitch_x, grid.pitch_y) / 32.0, 0.01)
     if res <= 0:
         # Backstop for a corrupt grid analysis (issue #283): a zero pitch would
         # divide-by-zero building the occupancy grid. Fail the escape cleanly.
@@ -752,7 +776,10 @@ def generate_underpad_escape(footprint: Footprint,
     # real (smaller) via -- letting neighbouring escapes route past it. Done
     # per-pad, so on a mixed-pad-size array only the small pads get smaller vias.
     _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
-    floors = fab_floor_ladder(_copper)
+    from list_nets import escalation_rungs
+    # escalation_rungs: empty under --escalation off, raised to the board's
+    # own minimums under board (#857).
+    floors = escalation_rungs(_copper)
     clamp_stats = {'clamped': 0, 'floor': 0, 'escalated': 0}
     # #618's policy answer: DISCLOSE. Sites this engine declines to put a
     # via-in-pad on because their hole is inside the hole-to-hole floor --
@@ -1028,18 +1055,27 @@ def generate_underpad_escape(footprint: Footprint,
         for (x, y, keep, li, nid) in carve_disks:
             if nid in net_ids or not near_pt(x, y, home_r + keep):
                 continue
-            add(set(occ._disk(x, y, keep)), li)
+            add(occ.disk_cells(x, y, keep) & home, li)
         for v in vias_to_add:
             keep = v['size'] / 2.0 + track_width / 2 + clearance + margin
             if v['net_id'] in net_ids or not near_pt(v['x'], v['y'], home_r + keep):
                 continue
-            add(set(occ._disk(v['x'], v['y'], keep)), None)
+            add(occ.disk_cells(v['x'], v['y'], keep) & home, None)
 
         def add_seg(x1, y1, x2, y2, keep, li):
+            # #864: the capsule around a foreign track, as disks sampled every
+            # keep/2 along it (was: every grid cell -- on the 0.025 rescue grid
+            # a 20 mm track was 800 full disks). A disk of radius
+            # sqrt(keep^2 + (step/2)^2) at that spacing covers the capsule of
+            # radius keep with no gap (the far point midway between samples is
+            # exactly that far), so the carve only ever over-blocks, by at most
+            # 3% of keep. Each disk is memoised and cut to `home` at once.
             dx, dy = x2 - x1, y2 - y1
             slen = math.hypot(dx, dy)
-            n = int(slen / res) + 1
-            reach = (home_r + keep + res) / max(slen, 1e-9)
+            step = max(res, keep / 2.0)
+            n = max(1, int(slen / step) + 1)
+            r_eff = math.sqrt(keep * keep + (slen / n / 2.0) ** 2)
+            reach = (home_r + keep + step) / max(slen, 1e-9)
             idxs = set()
             for ax, ay in anchors:
                 t = (((ax - x1) * dx + (ay - y1) * dy) / (slen * slen)
@@ -1050,7 +1086,7 @@ def generate_underpad_escape(footprint: Footprint,
             cells = set()
             for i in idxs:
                 t = i / n
-                cells |= set(occ._disk(x1 + dx * t, y1 + dy * t, keep))
+                cells |= occ.disk_cells(x1 + dx * t, y1 + dy * t, r_eff) & home
             add(cells, li)
 
         def seg_near(x1, y1, x2, y2, reach):
@@ -1374,7 +1410,7 @@ def generate_underpad_escape(footprint: Footprint,
         r = track_width / 2 + clearance + margin
         for i in range(n + 1):
             t = i / n
-            cells |= set(occ._disk(x1 + dx * t, y1 + dy * t, r))
+            cells |= occ.disk_cells(x1 + dx * t, y1 + dy * t, r)   # #864 memo; same disks
         return cells
 
     def home_of(p):
@@ -1383,13 +1419,13 @@ def generate_underpad_escape(footprint: Footprint,
         # trap a route). max(pad,via)_keep < pitch, so it never reaches a
         # neighbouring pad. Same real-coordinate disk the blocking stamped, so
         # the exemption covers it exactly.
-        cells = set(occ._disk(p.global_x, p.global_y, max(pad_keep, via_keep)))
+        cells = set(occ.disk_cells(p.global_x, p.global_y, max(pad_keep, via_keep)))
         # A dog-bone ball's OWN copper extends to its gap via + stub (#128);
         # foreign stamps inside this lens are re-blocked by _carve_foreign
         # (callers pass the site as a second carve anchor).
         s = db_site.get(id(p))
         if s is not None:
-            cells |= set(occ._disk(s[0], s[1], via_keep))
+            cells |= occ.disk_cells(s[0], s[1], via_keep)
             pts = db_path.get(id(p)) or [(p.global_x, p.global_y), s]
             for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                 cells |= _stub_cells_seg(ax, ay, bx, by)
@@ -2015,7 +2051,7 @@ def generate_underpad_escape(footprint: Footprint,
         ctx = _via_ctx(p.net_id, gx, gy,
                        extra=max(hx, hy) + lane_max * max(grid.pitch_x,
                                                           grid.pitch_y))
-        pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
+        pad_ex = occ.disk_cells(gx, gy, max(pad_keep, via_keep))   # #864 memo
 
         def _lane_pad_exempt(x1, y1, x2, y2):
             # The inter-row lane clears the flanking ball pads by only a few
@@ -2026,7 +2062,7 @@ def generate_underpad_escape(footprint: Footprint,
             cells = set()
             for p2 in footprint.pads:
                 if _pt_seg_d(p2.global_x, p2.global_y, x1, y1, x2, y2)                         < max(grid.pitch_x, grid.pitch_y) * 0.55:
-                    cells |= set(occ._disk(p2.global_x, p2.global_y, pad_keep))
+                    cells |= occ.disk_cells(p2.global_x, p2.global_y, pad_keep)
             return cells
 
         def _site_ok(vx, vy, avoid_soft):
@@ -2061,7 +2097,7 @@ def generate_underpad_escape(footprint: Footprint,
                             continue
                         if _stub_conflict(p, vx, vy, ctx):
                             continue
-                        ex_cells = pad_ex | set(occ._disk(vx, vy, via_keep))
+                        ex_cells = pad_ex | occ.disk_cells(vx, vy, via_keep)
                         if not occ.seg_clear(top_idx, (gx, gy), (vx, vy),
                                              exempt=ex_cells):
                             continue
@@ -2076,7 +2112,7 @@ def generate_underpad_escape(footprint: Footprint,
                             continue
                         if _seg_conflict(p.net_id, ex_, ey_, vx, vy, ctx):
                             continue
-                        via_ex = set(occ._disk(vx, vy, via_keep))
+                        via_ex = occ.disk_cells(vx, vy, via_keep)
                         if not occ.seg_clear(top_idx, (gx, gy), (ex_, ey_),
                                              exempt=pad_ex | via_ex):
                             continue

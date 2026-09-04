@@ -3291,9 +3291,10 @@ def wide_route_clear(route_points, width, pcb_data, net_id, config,
                 on_layer = ('*.Cu' in p.layers or layer in p.layers)
                 is_th = bool(p.drill and p.drill > 0)
                 if p.pad_type != 'np_thru_hole' and (on_layer or is_th):
-                    clr = max(config.layer_clearance(  # #498: meet on the leg's layer
-                                  layer, config.obstacle_clearance(pnid)),
-                              getattr(p, 'local_clearance', 0.0) or 0.0)
+                    clr = config.pad_override_clearance(
+                        config.layer_clearance(  # #498: meet on the leg's layer
+                            layer, config.obstacle_clearance(pnid)),
+                        p)
                     pext = max(p.size_x, p.size_y) / 2.0
                     req = half + pext + clr
                     if (bb[0] - req <= p.global_x <= bb[2] + req
@@ -3530,7 +3531,7 @@ def build_base_obstacles(
                 _pc = (config.stack_clearance(_pc)
                        if ('*.Cu' in (pad.layers or []) or not _pls)
                        else max(config.layer_clearance(l, _pc) for l in _pls))
-            pad_clr = max(_pc, getattr(pad, 'local_clearance', 0.0) or 0.0)
+            pad_clr = config.pad_override_clearance(_pc, pad)
             pad_expansion_mm = track_width / 2 + pad_clr + cushion
             half_w, half_h = pad_rect_halfspan(pad, pad_expansion_mm)
             min_gx, _ = coord.to_grid(pad.global_x - half_w, 0)

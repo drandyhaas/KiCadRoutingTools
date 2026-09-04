@@ -256,7 +256,26 @@ def route_diff_pairs(
             continue
 
         if len(terminals) > 2:
-            leg_results, merged, peeled = route_multipoint_diff_pair(state, pair, pair_name, terminals)
+            # #530: the multipoint router reads state.config /
+            # state.diff_pair_extra_clearance / state.diff_pair_base_obstacles,
+            # not the per-pair values resolved above, so a pair whose gap was
+            # raised to its class clearance (or set by its class, #435) was
+            # chained at the GLOBAL gap: ghoul's D+/D- (class 0.2, --diff-pair-gap
+            # 0.13) announced 0.2 and shipped 0.13 -> 222 KiCad clearance items.
+            # Hand it the pair's geometry for the duration of the call.
+            _swap = config is not state.config
+            if _swap:
+                _saved = (state.config, state.diff_pair_extra_clearance,
+                          state.diff_pair_base_obstacles)
+                state.config = config
+                state.diff_pair_extra_clearance = diff_pair_extra_clearance
+                state.diff_pair_base_obstacles = diff_pair_base_obstacles
+            try:
+                leg_results, merged, peeled = route_multipoint_diff_pair(state, pair, pair_name, terminals)
+            finally:
+                if _swap:
+                    (state.config, state.diff_pair_extra_clearance,
+                     state.diff_pair_base_obstacles) = _saved
             elapsed = time.time() - start_time
             total_time += elapsed
             if leg_results is None:

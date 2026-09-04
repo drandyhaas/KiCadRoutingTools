@@ -2049,14 +2049,21 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             return _layer_cl(layer, base)
         return base
 
+    # A pad / footprint clearance OVERRIDE replaces the class/rule value,
+    # floored at rules.min_clearance (KiCad 10, measured by
+    # tests/oracle/constraint_agreement.py) -- the same helper the router's
+    # obstacle stamps use, so the two cannot drift.
+    from design_rules import override_clearance as _override_clr, \
+        board_min_clearance_for as _bm_for
+    _board_min_clr = _bm_for(pcb_data, pcb_file)
+
     def _pad_pair_cl(pad, other_net: int, layer: str = None, other_pad=None) -> float:
         eff = _pair_cl(pad.net_id, other_net)
         if layer is not None:
             eff = _layer_cl(layer, eff)
         else:
             eff = _pads_cl(eff, pad, other_pad)
-        lc = getattr(pad, 'local_clearance', 0.0) or 0.0
-        return lc if lc > eff else eff
+        return _override_clr(eff, _board_min_clr, pad, other_pad)
 
     def _mark_required(v: dict, eff: float) -> dict:
         # Attribute above-global requirements (local override / netclass) in
@@ -2075,13 +2082,52 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # for 'standard' that's the advanced rung it escalates to (0.25 dia / 0.15
         # drill on 4+ layers), so legitimately-escalated fine vias aren't flagged;
         # for 'advanced'/overrides it's the hard floor (issue #237).
-        fab = fab_floor_min(copper_count)
+        # #857/#530: the PHYSICAL fab floor (the override file, else the
+        # advanced rung), not the selected tier's: the tier bounds what the
+        # router may descend to on its own, while an explicit --via-size 0.3
+        # is accepted as asked, so grading at the tier would flag every via
+        # the operator requested. The board's own minimums (below) are what
+        # KiCad grades; `--fab-tier advanced` and `--fab-overrides` still
+        # tighten this through physical_fab_floor.
+        from fab_tiers import physical_fab_floor
+        fab = physical_fab_floor(copper_count)
         eff_min_track = min_track_width if min_track_width is not None else fab['track_width']
         eff_min_via_dia = min_via_diameter if min_via_diameter is not None else fab['via_diameter']
         eff_min_via_drill = min_via_drill if min_via_drill is not None else fab['via_drill']
+        # #530: the board's OWN size minimums -- Board Setup rules.min_* and
+        # every .kicad_dru track_width / via_diameter / hole_size rule, resolved
+        # per net and layer in KiCad's order, raised to the fab floor -- are
+        # what KiCad grades. An explicit --min-* flag still overrides.
+        _size_rules = None
+        try:
+            from design_rules import DesignRules as _DR
+            _size_rules = _DR.from_project(pcb_data, pcb_file, fab_floor=fab,
+                                           copper_layers=copper_layers)
+            if not (_size_rules.board_min or _size_rules.rules):
+                _size_rules = None
+        except Exception as _dre:                              # noqa: BLE001
+            if not quiet:
+                print(f"  (design-rule size floors unavailable: {_dre})")
+            _size_rules = None
+
+        def _track_floor(seg):
+            if min_track_width is not None or _size_rules is None:
+                return eff_min_track
+            v = _size_rules.floor('track_width', seg.net_id, seg.layer)
+            return v if v is not None else eff_min_track
+
+        def _via_floors(via):
+            if _size_rules is None:
+                return eff_min_via_dia, eff_min_via_drill
+            d = (eff_min_via_dia if min_via_diameter is not None
+                 else (_size_rules.floor('via_diameter', via.net_id, type='via') or eff_min_via_dia))
+            h = (eff_min_via_drill if min_via_drill is not None
+                 else (_size_rules.floor('hole_size', via.net_id, type='via') or eff_min_via_drill))
+            return d, h
         if not quiet:
             print(f"Size floors ({copper_count}-layer fab): track >= {eff_min_track}mm, "
-                  f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm")
+                  f"via dia >= {eff_min_via_dia}mm, via drill >= {eff_min_via_drill}mm"
+                  + ("; per-net board/rule minimums applied (#530)" if _size_rules else ""))
 
     # Helper to check if a net_id matches the filter patterns
     def net_matches_filter(net_id: int) -> bool:
@@ -2553,8 +2599,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     if pair_key in pad_pad_checked:
                         continue
                     pad_pad_checked.add(pair_key)
-                    _lc2 = getattr(pad2, 'local_clearance', 0.0) or 0.0
-                    _eff = max(_pad_pair_cl(pad1, pad2_net, other_pad=pad2), _lc2)
+                    # both pads' overrides are folded in by _pad_pair_cl
+                    _eff = _pad_pair_cl(pad1, pad2_net, other_pad=pad2)
                     has_violation, overlap, closest_pt = check_pad_pad_overlap(
                         pad1, pad2, _eff, routing_layers, clearance_margin)
                     if has_violation:
@@ -3225,7 +3271,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         for seg in pcb_data.segments:
             if matching_net_ids is not None and seg.net_id not in matching_net_ids:
                 continue
-            too_thin, shortfall = check_track_width(seg, eff_min_track, size_margin)
+            _tf = _track_floor(seg)
+            too_thin, shortfall = check_track_width(seg, _tf, size_margin)
             if too_thin:
                 net_name = pcb_data.nets.get(seg.net_id, None)
                 net_str = net_name.name if net_name else f"net_{seg.net_id}"
@@ -3234,15 +3281,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'net1': net_str,
                     'layer': seg.layer,
                     'width': seg.width,
-                    'min_width': eff_min_track,
+                    'min_width': _tf,
                     'shortfall_mm': shortfall,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                 })
         for via in pcb_data.vias:
             if matching_net_ids is not None and via.net_id not in matching_net_ids:
                 continue
+            _vd, _vh = _via_floors(via)
             dia_bad, drill_bad, dia_short, drill_short = check_via_size(
-                via, eff_min_via_dia, eff_min_via_drill, size_margin)
+                via, _vd, _vh, size_margin)
             if dia_bad or drill_bad:
                 net_name = pcb_data.nets.get(via.net_id, None)
                 net_str = net_name.name if net_name else f"net_{via.net_id}"
@@ -3251,7 +3299,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'type': 'via-size',
                         'net1': net_str,
                         'size': via.size,
-                        'min_size': eff_min_via_dia,
+                        'min_size': _vd,
                         'shortfall_mm': dia_short,
                         'via_loc': (via.x, via.y),
                     })
@@ -3260,7 +3308,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         'type': 'via-drill-size',
                         'net1': net_str,
                         'drill': via.drill,
-                        'min_drill': eff_min_via_drill,
+                        'min_drill': _vh,
                         'shortfall_mm': drill_short,
                         'via_loc': (via.x, via.y),
                     })
