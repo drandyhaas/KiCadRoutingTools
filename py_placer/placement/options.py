@@ -146,7 +146,8 @@ _hosts_the_design = hosts_the_design
 
 
 def grow_board(pcb_data, pcb_file: str, *, clearance: float,
-               board_edge_clearance: float) -> Dict:
+               board_edge_clearance: float,
+               assembly_sides: Optional[str] = None) -> Dict:
     """Does the total part area fit inside the outline, and by how much not?
 
     This is the number the prohibition asks for and nobody computes. It is
@@ -159,6 +160,22 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
     Courtyard area is used where a footprint has one and the pad bounding box
     where it does not, and the count of each is reported: a pad bbox carries
     no courtyard margin, so a board made of them reads smaller than it builds.
+
+    `assembly_sides` (#837) is the board's declared assembly policy -- 'F',
+    'B', 'both', or None for "nobody declared". It decides WHICH SIDE'S AREA
+    the parts are charged against, and that is the whole of its effect:
+
+      * None or 'both' -> `max(per_side)`, bit-identical to every number this
+        function reported before the key existed. A part on B.Cu does not
+        compete for F.Cu area.
+      * 'F' or 'B'     -> `sum(per_side)`. Every part has to fit on the one
+        face the fab will populate, so the demand on it is the total.
+
+    The two agree exactly when the far face is empty, which is why declaring
+    the OBSERVED policy is inert: 15 of the 22 tracked boards have zero
+    back-side area. It moves the 7 that do not, and flips the verdict on the
+    two whose sum exceeds their usable area (orangecrab_ext_pll 0.92 -> 1.25,
+    ulx3s 0.90 -> 1.34).
     """
     from placement.parser import extract_courtyard_bboxes
     bi = pcb_data.board_info
@@ -177,7 +194,8 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
     total = 0.0
     from_courtyard = from_pads = no_geometry = 0
     biggest = []
-    from placement.legality import CONTAINER_RATIO, rotate_local_bounds
+    from placement.legality import (CONTAINER_RATIO, footprint_side,
+                                    rotate_local_bounds)
     from placement.utility import compute_footprint_bbox_local
     per_side = {'F.Cu': 0.0, 'B.Cu': 0.0}
     containers = []
@@ -218,7 +236,13 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
         # area rather than to the parts' bare footprints.
         a = (w + clearance) * (h + clearance)
         total += a
-        layer = getattr(fp, 'layer', None) or 'F.Cu'
+        # `footprint_side` rather than the raw `fp.layer` string, so this
+        # partition cannot grow a third key that `max()` would then silently
+        # rank against the other two. Inert on the corpus -- every tracked
+        # board's footprints are on F.Cu or B.Cu -- and the point is that it
+        # stays inert. Same helper the census, the rule and every other
+        # per-side instrument in the tree read.
+        layer = 'B.Cu' if footprint_side(fp) == 'B' else 'F.Cu'
         per_side[layer] = per_side.get(layer, 0.0) + a
         biggest.append((round(a, 2), ref))
     biggest.sort(reverse=True)
@@ -230,8 +254,14 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
     # 1.2531) does not. A part on B.Cu does not compete for F.Cu area.
     # (ulx3s flips the same way, 1.3373 -> 0.9018.)
     busiest = max(per_side.values()) if per_side else 0.0
-    util = (busiest / usable) if usable > 0 else float('inf')
-    fits = busiest <= usable
+    # #837. WHICH area the utilisation is computed from. `busiest` keeps its
+    # own meaning and its own key on both bases -- it is still the busiest
+    # side's area, and it stops being the number the verdict rests on rather
+    # than becoming a lie.
+    one_face = assembly_sides in ('F', 'B')
+    charged = sum(per_side.values()) if one_face else busiest
+    util = (charged / usable) if usable > 0 else float('inf')
+    fits = charged <= usable
     out = {
         'ran': True,
         'measured': {
@@ -243,6 +273,15 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             'part_area_by_side_mm2': {k: round(v, 2)
                                       for k, v in sorted(per_side.items())},
             'busiest_side_area_mm2': round(busiest, 2),
+            # #837: the area `utilisation` is ACTUALLY computed from, and a
+            # BOOL saying which rule produced it. The bool is not a stylistic
+            # choice -- `_digest` skips string values before it reaches the
+            # forced-key list (see its `else: continue`), so a string basis
+            # label can never appear in the text channel at all, and the text
+            # channel is the one a human reads.
+            'charged_area_mm2': round(charged, 2),
+            'charged_area_is_sum': one_face,
+            'assembly_sides_declared': assembly_sides,
             'usable_area_mm2': round(usable, 2),
             'outline_area_mm2': round((x1 - x0) * (y1 - y0), 2),
             'utilisation': round(util, 4),
@@ -256,13 +295,34 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
             'extent_from_pad_bbox': from_pads,
             'parts_without_geometry': no_geometry,
             'largest_parts_mm2': biggest[:5],
+            # What this arithmetic does NOT model, named with its magnitude so
+            # the omission is a disclosure rather than a discovery.
+            #
+            # A through-hole part is charged to its footprint layer only; its
+            # leads occupy the far face and that area is not charged. Every
+            # other per-side instrument in the tree charges a drilled part to
+            # both faces -- and they do not agree with each other about HOW
+            # (`check_pockets.courtyard_cover` charges the whole courtyard,
+            # `floorplan.rule_keepout` charges the courtyard near and the
+            # through-pad rect far), so picking one is its own measurement
+            # rather than a ride-along on this one. Deliberately deferred:
+            # 17 of the 22 tracked boards carry through-hole parts, but under
+            # the busiest-side basis the fix moves `busiest` on 2 of them
+            # (rp2350 0.622 -> 0.674, ulx3s 0.902 -> 0.913) and flips no
+            # verdict.
+            'not_modelled': [
+                'through-hole leads on the far face (see the comment here)',
+            ] + ([] if assembly_sides else [
+                'whether the back side will be POPULATED -- no assembly.sides '
+                'was declared, so the busier face is charged and back-side '
+                'area is credited free (#837)']),
         },
         'expected': {'utilisation': f'<= 1.0 to fit at all, and typically '
                                     f'<= {CROWDED_UTILISATION} to route'},
         'fits_by_area': fits,
     }
     if not fits:
-        need = busiest - usable
+        need = charged - usable
         # Square-ish growth is the cheapest way to state it; a real outline
         # change is a mechanical decision and this does not pretend otherwise.
         #
@@ -279,17 +339,19 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
         # rounding ships a proposal that is short. Measured across the corpus:
         # 8 of 22 boards were short by 0.9-3.1 mm2, and the test that checks
         # this passed only because splitflap's 55.1897 happens to round up.
-        exact = math.sqrt(max(0.0, busiest)) + 2.0 * board_edge_clearance
+        exact = math.sqrt(max(0.0, charged)) + 2.0 * board_edge_clearance
         side = math.ceil(exact * 10.0) / 10.0
         out['measured']['shortfall_mm2_at_least'] = round(need, 2)
         # The number, not just the prose. The proposal was reachable only by
         # parsing the action string, which is also what the test audited -- so
         # the audit read the same rounded text it was meant to check.
         out['measured']['proposed_square_side_mm'] = side
+        _basis = (f"on {assembly_sides}.Cu, which must carry every part"
+                  if one_face else "on the busiest side")
         out['action'] = (
             f"the parts need AT LEAST {need:.1f} mm2 more usable area than "
-            f"this outline has ({busiest:.1f} vs {usable:.1f} mm2 on the "
-            f"busiest side). A square "
+            f"this outline has ({charged:.1f} vs {usable:.1f} mm2 "
+            f"{_basis}). A square "
             f"board holding them would be about {side:.1f} x {side:.1f} mm "
             f"against today's {x1 - x0:.1f} x {y1 - y0:.1f}. The outline is a "
             f"mechanical decision: this reports it and changes nothing.")
@@ -717,6 +779,7 @@ OPTIONS = {
 def capacity_options(pcb_data, pcb_file: str, *, clearance: float,
                      board_edge_clearance: float,
                      track_width: Optional[float] = None,
+                     assembly_sides: Optional[str] = None,
                      only: Optional[Sequence[str]] = None) -> Dict:
     """Every option, each either measured or explaining why it was not."""
     out: Dict[str, Dict] = {}
@@ -726,6 +789,10 @@ def capacity_options(pcb_data, pcb_file: str, *, clearance: float,
         kw = {'clearance': clearance}
         if name == 'grow_board':
             kw['board_edge_clearance'] = board_edge_clearance
+            # #837, and only here. `smaller_footprint` also calls grow_board
+            # but reads `largest_parts_mm2` and `usable_area_mm2` only, and
+            # the policy touches neither.
+            kw['assembly_sides'] = assembly_sides
         if name in ('add_layers', 'move_blocker', 'relax_clearance'):
             kw['track_width'] = track_width
         try:
@@ -778,9 +845,15 @@ def format_text(opts: Dict) -> str:
 # NOT: the second is a non-empty list, so forcing it would spend a slot
 # rendering the useless `fab_buckets_modelled[2]` and evict a real number --
 # the same eviction the `containers_excluded` comment in `_digest` records.
+#: #837 swaps `busiest_side_area_mm2` for `charged_area_mm2` rather than
+#: adding it: the forced list is a curated headline and the headline has to be
+#: the number the verdict rests on. `busiest_side_area_mm2` is still emitted
+#: and still true; it is just no longer always the one `utilisation` divides.
+#: `charged_area_is_sum` rides along because it is what tells the two apart.
 _DIGEST_ALWAYS = ('deficit_lanes_now', 'deficit_lanes_at_more',
                   'deficit_lanes_at_fab_floor', 'utilisation',
-                  'busiest_side_area_mm2', 'usable_area_mm2',
+                  'charged_area_mm2', 'charged_area_is_sum',
+                  'usable_area_mm2',
                   'parts', 'shortfall_mm2_at_least',
                   'proposed_square_side_mm', 'faces_in_deficit',
                   'deficit_lanes', 'containers_excluded',

@@ -222,14 +222,39 @@ of differing. The routing half is `deficit_floor_lanes_*`: lanes still short
 after counting what the other signal layers could take. Both are bounds; a drop
 to zero does not mean the board routes.
 
+`grow_board` charges the parts against **one face**, and since
+[#837](https://github.com/drandyhaas/KiCadRoutingTools/issues/837) you can say
+which. Undeclared — the default, and what every number here meant before —
+charges the **busier** face, because a part on B.Cu does not compete for F.Cu
+area. That is right for a board built with two reflow passes and wrong for one
+built with a single pass, and nothing in the board says which kind it is. So:
+
+| declared | charged | when |
+|---|---|---|
+| nothing, or `both` | `max(F, B)` | a board populated on both faces |
+| `F` or `B` | `F + B` | one reflow pass: every part has to fit that face |
+
+Declare it with `--assembly-sides {F,B,both}`, or with `--intent` pointing at a
+floorplan intent carrying `assembly.sides` (only that key is read). The
+resolved value and its source are printed, and `charged_area_is_sum` says which
+rule produced `utilisation` in both the text digest and `JSON_SUMMARY` — a
+utilisation whose basis you cannot see is a number that cannot be compared with
+another one.
+
+The face has to be **named**: `single` is refused, because single-sided does not
+mean front-sided. `ulx3s` is back-dominant (163 of its 226 pad-bearing parts),
+so "single implies F.Cu" would be wrong about most of a shipping board.
+
 ```bash
 python3 -X utf8 py_tools/check_capacity.py board.kicad_pcb
 python3 -X utf8 py_tools/check_capacity.py board.kicad_pcb --json capacity.json
 python3 -X utf8 py_tools/check_capacity.py board.kicad_pcb --only grow_board add_layers
+python3 -X utf8 py_tools/check_capacity.py board.kicad_pcb --assembly-sides F
 ```
 
 Exit codes: 0 = measured (whatever the answer), 2 = usage/load error, 3 = no
-outline, so there is no capacity question to ask.
+outline, so there is no capacity question to ask. A board that does not fit is
+still exit 0 — see above.
 
 ## Connectivity Checker (`check_connected.py`)
 

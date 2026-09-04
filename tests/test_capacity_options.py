@@ -318,6 +318,46 @@ if os.path.isfile(OC):
           sum(sides.values()) > m['usable_area_mm2'],
           f"sum {sum(sides.values()):.1f} vs usable {m['usable_area_mm2']}")
 
+    # #837. The four checks above are the UNDECLARED path, and they keep their
+    # exact wording: the doctrine they pin is still the doctrine, it is now
+    # conditional rather than unconditional. These three arms pin the
+    # condition.
+    #
+    # `both` must be bit-identical to undeclared. A `both` that quietly sums
+    # is the likeliest bug in this feature, and it would fail a shipping
+    # two-sided board on a policy that says nothing.
+    gb = grow_board(ocb, OC, clearance=0.2, board_edge_clearance=0.5,
+                    assembly_sides='both')
+    check("declared `both` charges exactly what undeclared charges",
+          abs(gb['measured']['utilisation'] - m['utilisation']) < 1e-9
+          and gb['measured']['charged_area_is_sum'] is False
+          and gb['fits_by_area'] is True,
+          f"both {gb['measured']['utilisation']} vs undeclared "
+          f"{m['utilisation']}, is_sum "
+          f"{gb['measured']['charged_area_is_sum']}")
+    # Declared one-face: the parts all have to fit that face, so the sum is
+    # the demand -- and this is the arm that turns :317-319 from a hypothesis
+    # about the test's own arithmetic into a measurement of the code.
+    gf = grow_board(ocb, OC, clearance=0.2, board_edge_clearance=0.5,
+                    assembly_sides='F')
+    mf = gf['measured']
+    check("declared F charges the SUM of both sides",
+          mf['charged_area_is_sum'] is True
+          and abs(mf['charged_area_mm2'] - sum(sides.values())) < 0.02,
+          f"charged {mf['charged_area_mm2']} vs sum {sum(sides.values()):.2f}")
+    check("...so the same board now does NOT fit, and says which face",
+          gf['fits_by_area'] is False and 'F.Cu' in (gf.get('action') or ''),
+          f"fits {gf['fits_by_area']}, action {gf.get('action')!r}")
+    # `busiest_side_area_mm2` keeps its own meaning on both bases: it is still
+    # the busiest side's area, it has simply stopped being the number the
+    # verdict rests on. A key that changed meaning under a flag would be worse
+    # than a renamed one.
+    check("busiest_side_area_mm2 is still the busiest side, not the charge",
+          abs(mf['busiest_side_area_mm2'] - max(sides.values())) < 0.02
+          and mf['busiest_side_area_mm2'] != mf['charged_area_mm2'],
+          f"busiest {mf['busiest_side_area_mm2']} max {max(sides.values()):.2f} "
+          f"charged {mf['charged_area_mm2']}")
+
 # The proposed square must actually hold the parts. It was
 # sqrt(outline_area + need) where `need` is a USABLE-area shortfall, so the
 # proposal's own usable area was still short -- 55.1mm square for parts
