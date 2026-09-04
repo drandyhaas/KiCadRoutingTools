@@ -28,20 +28,7 @@ tags, grade = (open, drc, vias)):
          bus forced `down`, SDQ10/SDQ8 free; two candidates reach 79)
     K41  plain 91 5o 3d        search 84 3o -> 92 2o 0d (7-net bus free)
 
-Version 2 (beam + cache): ties go to the candidate with FEWER forced
-buses (a no-op 'free' tie was pinning a bus and hiding the path behind
-it); `--beam N` expands the incumbent plus the best tied/near bases
-(deduped by the realized asks dump); realized grades are CACHED by
-forced assignment (tmp/plan_search_cache_k{K}.json -- the chain is
-deterministic) so a relaunch replays its rounds in seconds.
-
-    K35  86 -> 79 (round 1) -> 68 clean (round 3: the 4-net data bus
-         forced RIGHT, a side certify REFUSED, + the 7- and 11-net
-         buses free; 63/1 open rescued to 68); plateau at 68 by round 6.
-    Evolution from that 68 board: improve_k 66 -> 64 clean, the new
-    K35 record (was 66; tmp/k35rec64_final).
-
-~2-4 min per candidate at K35 (3 in parallel), 12-16 candidates a round.
+~2-4 min per candidate at K35 (3 in parallel), 12 candidates a round.
 The plan's own cost ranked NONE of the winners first: at K35 the
 winning side cost 323 against the chosen 322, and 'free' has no cost
 at all. That is the finding: realized grades, not the plan's model,
@@ -232,7 +219,8 @@ for rnd in range(a.rounds + 1):
         break
     g, _nf, i = ranked[0]
     say(f'round {rnd} best: c{i} {results[i][1]} {g} (incumbent {incumbent})')
-    if incumbent is None or g < incumbent:
+    adopted = incumbent is None or g < incumbent
+    if adopted:
         incumbent, forced, best_label = g, results[i][2], f'{a.tag}_r{rnd}_c{i}'
         say(f'  ADOPT {best_label}: forced {forced}')
     # next round's bases: the incumbent plus the best few OTHER
@@ -243,7 +231,10 @@ for rnd in range(a.rounds + 1):
         f2, s2 = results[i2][2], results[i2][3]
         if len(bases) >= a.beam:
             break
-        if fkey(f2) == fkey(forced) or g2[0] > incumbent[0] or g2[1] > incumbent[1]:
+        # the beam is by RANK: in a high-open regime (K51 plain: 18
+        # open) every alternative has more opens or more drc than the
+        # incumbent and a dominance filter left nothing to expand
+        if fkey(f2) == fkey(forced):
             continue
         if s2 and s2 in sigs:
             continue                      # a no-op: same plan as a base
@@ -252,7 +243,7 @@ for rnd in range(a.rounds + 1):
             sigs.add(s2)
     say(f'  bases for round {rnd + 1}: ' + '; '.join(
         ', '.join(f'{k[:14]}={v}' for k, v in b.items()) or 'plain' for b in bases))
-    if incumbent is not None and g >= incumbent and len(bases) == 1:
+    if not adopted and len(bases) == 1:
         say('  no improvement and nothing to expand; stop')
         break
 say(f'FINAL {best_label}: {incumbent} forced {forced}')
