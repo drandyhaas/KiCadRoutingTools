@@ -2752,6 +2752,11 @@ def main():
         else:
             c.run()
         corridors.append(c)
+    if os.environ.get('BRAID_PACK', '0') in ('1', '2'):
+        pack_lanes(ctx, corridors, names, log,
+                   hw=float(os.environ.get('BRAID_PACK_HW', '0.3')),
+                   rounds=int(os.environ.get('BRAID_PACK_ROUNDS', '1')),
+                   attract=os.environ.get('BRAID_PACK') == '2')
     if os.environ.get('BRAID_NEGOTIATE', '0') == '1':
         negotiate_refusals(ctx, corridors, names, log,
                            rounds=int(os.environ.get('BRAID_NEG_ROUNDS', '3')),
@@ -2990,6 +2995,250 @@ def setup(board, names, dest, log, cluster=6.0):
     return ctx, groups
 
 
+def _chain_segs(segs, start):
+    """Order a lane's segments into a polyline from `start`: [(pt,
+    layer_of_next_seg), ...]. Returns (points, layers) with layers[i]
+    the layer of the segment points[i] -> points[i+1]."""
+    def k(x, y):
+        return (round(x, 3), round(y, 3))
+    left = list(segs)
+    pts, lays = [k(*start)], []
+    cur = k(*start)
+    while left:
+        nxt = None
+        for i, sg in enumerate(left):
+            a, b = k(sg.start_x, sg.start_y), k(sg.end_x, sg.end_y)
+            if a == cur:
+                nxt = (i, b)
+                break
+            if b == cur:
+                nxt = (i, a)
+                break
+        if nxt is None:
+            break
+        i, other = nxt
+        lays.append(left[i].layer)
+        pts.append(other)
+        cur = other
+        left.pop(i)
+    return pts, lays, left
+
+
+def relax_attract(init, obs, targets, pitch, rounds=150, window=1.5,
+                  gain=0.5):
+    """corridor.relax_path with a FOLLOW force: each point is pulled
+    toward the nearest point of `targets` (the packed neighbours'
+    polylines on this layer, an (N,4) array of segments) until it sits
+    `pitch` from it -- never closer (the obstacle push keeps the
+    clearance) and only where a neighbour is within `window`. Away
+    from every neighbour the string is simply taut."""
+    pts = ts.densify(list(init))
+    ends = (pts[0], pts[-1])
+    T = np.asarray(targets, dtype=float) if len(targets) else None
+    for it in range(rounds):
+        moved = 0.0
+        P = np.asarray(pts, dtype=float)
+        if T is not None:
+            ax, ay, bx, by = T[:, 0], T[:, 1], T[:, 2], T[:, 3]
+            dx, dy = bx - ax, by - ay
+            ll = np.maximum(dx * dx + dy * dy, 1e-12)
+            t = np.clip(((P[:, 0:1] - ax) * dx + (P[:, 1:2] - ay) * dy) / ll, 0.0, 1.0)
+            qx = ax + t * dx
+            qy = ay + t * dy
+            d2 = (P[:, 0:1] - qx) ** 2 + (P[:, 1:2] - qy) ** 2
+            j = np.argmin(d2, axis=1)
+            near = np.sqrt(d2[np.arange(len(P)), j])
+            nx = P[:, 0] - qx[np.arange(len(P)), j]
+            ny = P[:, 1] - qy[np.arange(len(P)), j]
+        for i in range(1, len(pts) - 1):
+            p = pts[i]
+            if ts.d2(p, ends[0]) < ts.FREEZE ** 2 or \
+                    ts.d2(p, ends[1]) < ts.FREEZE ** 2:
+                continue
+            q = (0.5 * p[0] + 0.25 * pts[i - 1][0] + 0.25 * pts[i + 1][0],
+                 0.5 * p[1] + 0.25 * pts[i - 1][1] + 0.25 * pts[i + 1][1])
+            if T is not None and pitch < near[i] < window:
+                h = near[i]
+                ux, uy = nx[i] / h, ny[i] / h
+                # the point pitch from the neighbour, on this side
+                q = (q[0] + gain * ((qx[i, j[i]] + ux * pitch) - q[0]),
+                     q[1] + gain * ((qy[i, j[i]] + uy * pitch) - q[1]))
+            for _k in range(6):
+                v = obs.point_violation(q)
+                if v is None:
+                    break
+                depth, (vx, vy) = v
+                q = (q[0] + vx * (depth + 0.01), q[1] + vy * (depth + 0.01))
+            moved += math.hypot(q[0] - p[0], q[1] - p[1])
+            pts[i] = q
+        if it % 25 == 24:
+            pts = ts.densify(ts.shortcut(pts, obs)) if T is None else ts.densify(pts)
+        if moved < 1e-4 * len(pts):
+            break
+    return ts.densify(pts)
+
+
+def pack_lanes(ctx, corridors, names, log, hw=0.3, rounds=1, attract=False,
+               pitch=None):
+    """PACK (BRAID_PACK=1): after every corridor is laid, each lane is
+    pulled tight -- run by run (a run = the lane's copper between two
+    layer changes), the run's own polyline relaxed as a taut string
+    against the static copper AND every other lane on that layer, then
+    re-routed by the real router inside a tube round the string, the
+    other layer closed. A taut string hugs whatever is on the inside of
+    its bends at exactly the clearance, so lanes round a corner pack
+    into a river the way a hand-routed bus does, and the free width of
+    the corridor is left in one piece instead of slivers between
+    wandering lanes. Shortest lanes first (the innermost at a bend),
+    a run kept only when the router lands it no longer than it was,
+    with no via. General: no face, axis or board name."""
+    import copy as _copy
+    lanes = {nm: (c.out_segs.get(nm) or [], c.out_vias.get(nm) or [])
+             for c in corridors for nm in c.members}
+    cfg = _copy.copy(ctx.cfg)
+    m = CLEAR + TRACK / 2
+    static = {}
+
+    def static_obs(nid, layer):
+        if (nid, layer) not in static:
+            static[(nid, layer)] = build_obstacles(ctx.pcb, nid, ctx.kids, layer)
+        return static[(nid, layer)]
+
+    def lane_len(segs):
+        return sum(math.hypot(x.end_x - x.start_x, x.end_y - x.start_y)
+                   for x in segs)
+
+    tot0 = sum(lane_len(v[0]) for v in lanes.values())
+    n_runs = n_packed = 0
+    pitch = pitch or (TRACK + CLEAR)
+    packed = set()
+
+    def wall_dist(nm):
+        # how close the lane already runs to STATIC copper: the lane
+        # nearest a wall packs first, everyone else packs against it
+        nid, _ = ctx.byname[nm]
+        best = 1e9
+        for x in lanes[nm][0]:
+            so = static_obs(nid, x.layer)
+            for q in ((x.start_x, x.start_y), (x.end_x, x.end_y)):
+                for i in so.near_discs(q):
+                    cx, cy, r, _n = so.discs[i]
+                    best = min(best, math.hypot(q[0] - cx, q[1] - cy) - r)
+        return best
+
+    for rnd in range(rounds):
+        if attract:
+            order = sorted((nm for nm in lanes if lanes[nm][0]), key=wall_dist)
+        else:
+            order = sorted((nm for nm in lanes if lanes[nm][0]),
+                           key=lambda nm: lane_len(lanes[nm][0]))
+        for nm in order:
+            nid, _ = ctx.byname[nm]
+            segs, vias = lanes[nm]
+            pts, lays, left = _chain_segs(segs, ctx.ends[nm][0])
+            if left or len(pts) < 2:
+                continue
+            # runs: maximal same-layer stretches
+            runs, i = [], 0
+            while i < len(lays):
+                j = i
+                while j + 1 < len(lays) and lays[j + 1] == lays[i]:
+                    j += 1
+                runs.append((i, j + 1, lays[i]))
+                i = j + 1
+            for (i0, i1, L) in runs:
+                n_runs += 1
+                poly = pts[i0:i1 + 1]
+                if len(poly) < 3 and math.hypot(poly[-1][0] - poly[0][0],
+                                                poly[-1][1] - poly[0][1]) < 1.0:
+                    continue
+                # obstacles on this layer: static + every other lane
+                o = ts.Obstacles()
+                so = static_obs(nid, L)
+                o.discs = list(so.discs)
+                o.caps = list(so.caps)
+                for om, (osegs, ovias) in lanes.items():
+                    if om == nm:
+                        continue
+                    for x in osegs:
+                        if x.layer == L:
+                            o.caps.append(((x.start_x, x.start_y),
+                                           (x.end_x, x.end_y),
+                                           x.width / 2 + m, om))
+                    for v in ovias:
+                        o.discs.append((v.x, v.y, v.size / 2 + m, om))
+                o.build()
+                if attract:
+                    T = [(x.start_x, x.start_y, x.end_x, x.end_y)
+                         for om in packed if om != nm
+                         for x in lanes[om][0] if x.layer == L]
+                    string = relax_attract(list(poly), o, T, pitch)
+                else:
+                    string = cr.relax_path(list(poly), o)
+                L0 = sum(math.hypot(b[0] - a[0], b[1] - a[1])
+                         for a, b in zip(poly, poly[1:]))
+                L1 = sum(math.hypot(b[0] - a[0], b[1] - a[1])
+                         for a, b in zip(string, string[1:]))
+                if not attract and L1 > L0 - 0.02:
+                    continue          # already taut
+                # the tube round the string, this layer only
+                sx = np.array([q[0] for q in string])
+                sy = np.array([q[1] for q in string])
+
+                def band(xs, ys, lname, sx=sx, sy=sy, L=L):
+                    if lname != L:
+                        return np.zeros((len(xs), len(ys)), dtype=bool)
+                    X, Y = np.meshgrid(xs, ys, indexing='ij')
+                    best = np.full(X.shape, np.inf)
+                    for a0, a1, b0, b1 in zip(sx[:-1], sy[:-1], sx[1:], sy[1:]):
+                        dx, dy = b0 - a0, b1 - a1
+                        ll = dx * dx + dy * dy
+                        if ll < 1e-12:
+                            d2 = (X - a0) ** 2 + (Y - a1) ** 2
+                        else:
+                            t = np.clip(((X - a0) * dx + (Y - a1) * dy) / ll, 0.0, 1.0)
+                            d2 = (X - a0 - t * dx) ** 2 + (Y - a1 - t * dy) ** 2
+                        best = np.minimum(best, d2)
+                    return best <= hw * hw
+                # the board without this run's copper
+                run_ids = set()
+                cur = poly[0]
+                for x in segs:
+                    if x.layer == L:
+                        run_ids.add(id(x))
+                # only the segments of THIS run (same layer, on the polyline)
+                onpoly = set()
+                keyset = {(round(q[0], 3), round(q[1], 3)) for q in poly}
+                for x in segs:
+                    if x.layer == L and (round(x.start_x, 3), round(x.start_y, 3)) in keyset \
+                            and (round(x.end_x, 3), round(x.end_y, 3)) in keyset:
+                        onpoly.add(id(x))
+                seg0 = ctx.pcb.segments
+                ctx.pcb.segments = [x for x in seg0 if id(x) not in onpoly]
+                res = cn.connect(ctx.pcb, nid, poly[0], L, poly[-1], L, cfg,
+                                 band=band, margin=1.0, window_pts=string)
+                if res is None or res[1]:
+                    ctx.pcb.segments = seg0
+                    continue
+                new_segs = res[0]
+                if lane_len(new_segs) > (L0 * 1.15 + 0.5 if attract else L0 - 0.01):
+                    ctx.pcb.segments = seg0
+                    continue
+                ctx.pcb.segments = ctx.pcb.segments + list(new_segs)
+                segs = [x for x in segs if id(x) not in onpoly] + list(new_segs)
+                lanes[nm] = (segs, vias)
+                n_packed += 1
+            packed.add(nm)
+    tot1 = sum(lane_len(v[0]) for v in lanes.values())
+    for c in corridors:
+        for nm in c.members:
+            if nm in lanes:
+                c.out_segs[nm] = lanes[nm][0]
+    ctx.base_segments = list(ctx.pcb.segments)
+    log(f'\nPACK: {n_packed} of {n_runs} runs re-laid taut; lane length '
+        f'{tot0:.1f} -> {tot1:.1f} mm')
+
+
 def negotiate_refusals(ctx, corridors, names, log, rounds=3, victims=4):
     """The FINAL stage (BRAID_NEGOTIATE=1): every lane still refused
     after its corridor's attempts and last call is classified by the
@@ -3099,6 +3348,54 @@ def write_out(a, ctx, corridors, names, log):
             f'{sum(pre_len.values()):.2f} -> '
             f'{sum(post_len.values()):.2f} mm')
         smoothed = True
+
+    if smoothed and refused and os.environ.get('BRAID_NEGOTIATE', '0') == '1' \
+            and os.environ.get('BRAID_NEG_POST', '1') == '1':
+        # POST-SMOOTHING NEGOTIATION (BRAID_NEG_POST=0 disables). The
+        # #536 smoothing collapses the lanes' 45-degree nudges into
+        # single elbows and frees space the negotiation stage never
+        # saw: two of K41's four remaining opens routed on the WRITTEN
+        # board with no rip at all. Same negotiator, over the smoothed
+        # copper, refused nets only; a recovered net's copper replaces
+        # its final segments and vias here.
+        import negotiate as ng
+        fo = ctx.fo_copper
+        state = {nm: (list(final_segs[nm]),
+                      [v for v in pcb.vias if v.net_id == byname[nm][0]])
+                 for nm in names}
+        rest = ([s for s in pcb.segments if s.net_id not in kids],
+                [v for v in pcb.vias if v.net_id not in kids])
+        ends_ = {nm: (ends[nm][0], ctx.tooth_layer[nm],
+                      ends[nm][1], ctx.dest_layer[nm]) for nm in names}
+        log(f'\nNEGOTIATE (post-smoothing): {len(refused)} refused {refused}')
+        N = ng.Negotiator(pcb, ctx.cfg, byname, ends_, fo, state, rest,
+                          log=log,
+                          window_pts={nm: [ends[nm][0], ends[nm][1]]
+                                      for nm in names},
+                          b_alts=ctx.dest_alts, chains=ctx.dest_chain)
+        still = set(N.run(list(refused),
+                          rounds=int(os.environ.get('BRAID_NEG_ROUNDS', '3')),
+                          max_victims=int(os.environ.get('BRAID_NEG_VICTIMS', '4'))))
+        changed = []
+        for nm in names:
+            if N.state[nm] is not state[nm]:
+                final_segs[nm] = list(N.state[nm][0])
+                out_vias[nm] = ng.lane_part(fo[nm], N.state[nm])[1]
+                changed.append(nm)
+        pcb.segments = list(rest[0]) + [x for nm in names for x in N.state[nm][0]]
+        pcb.vias = list(rest[1]) + [x for nm in names for x in N.state[nm][1]]
+        log(f'NEGOTIATE (post-smoothing): {len(refused) - len(still)} of '
+            f'{len(refused)} recovered ({len(changed)} nets re-laid); still open '
+            f'{sorted(still)}')
+        refused = sorted(still)
+        for c in corridors:
+            c.refused = [nm for nm in c.members if nm in still]
+        if a.out != os.devnull:
+            import json as _json
+            with open(a.out + '_refusals.json', 'w') as _f:
+                _json.dump({nm: dict(ctx.refusal_info.get(nm, {}),
+                                     stage='negotiated_post')
+                            for nm in refused}, _f, indent=1, sort_keys=True)
 
     # ---- write board
     txt = open(a.board, encoding='utf-8').read()
