@@ -58,9 +58,16 @@ WITHHELD_MARK = 'the emitter WITHHELD'
 #: HAND-MIRRORED, and it has already fallen out of step once: #837 added
 #: `assembly_side` to `RULES` and this set was not updated, so a board with no
 #: pad-bearing part had an honest skip classified as a real abstention.
-#: `test_713_abstention_drift.py` asserts the two sets are equal in BOTH
-#: directions in milliseconds, so the next one fails a gate rather than
-#: silently changing a census (#879).
+#: `test_713_abstention_drift.py` compares the two in BOTH directions in
+#: milliseconds, so the next one fails a gate rather than silently changing a
+#: census (#879).
+#:
+#: They are equal EXCEPT for `'not requested'`, which is deliberate and is why
+#: the gate names it rather than subtracting it quietly: it is not a
+#: `_SKIP_REASON` value at all but `floorplan.grade`'s `.get(name, 'not
+#: requested')` fallback, for a rule that was skipped with no reason recorded.
+#: (`_SKIP_REASON` also has 12 keys and 11 distinct values -- `decap_distance`
+#: and `decap_ungraded` share one -- so a count comparison would be wrong too.)
 NOT_ASKED = {
     'the intent declares no envelope.rect',
     'no block declares a zone',
@@ -87,7 +94,7 @@ def classify(reason):
 
 
 def tracked_boards(repo):
-    """The TRACKED board names, via git -- not os.listdir.
+    """The TRACKED board names ONLY, via git -- not os.listdir.
 
     Running the suite leaves 11 gitignored routing artifacts in kicad_files/
     (fanout_output*, interf_u_routed, sonde_u_routed*, ...), so a listdir
@@ -107,6 +114,19 @@ def run(argv, repo):
     return subprocess.run([sys.executable, '-X', 'utf8'] + argv,
                           capture_output=True, text=True, encoding='utf-8',
                           errors='replace', cwd=repo, timeout=900)
+
+
+def refusal_text(text, tmp):
+    """The tail of a refusal, with the per-run temp path taken out.
+
+    The raw tail embeds the `tempfile.mkdtemp` directory, which changes every
+    run -- so a board that starts refusing would make this census flap forever
+    on a random string, and the gate would report it as DRIFT every time. No
+    board refuses today (0 of 22), which is exactly why it is worth removing
+    now: the first one to refuse would otherwise turn the gate into noise at
+    the moment it finally had something to say.
+    """
+    return (text.strip()[-300:]).replace(tmp, '<tmp>')
 
 
 def summary_of(text):
@@ -141,7 +161,7 @@ def census(repo, quiet=False):
             e = run([check, board, '--emit-intent', intent, '-q'], repo)
             row['emit_rc'] = e.returncode
             if not os.path.isfile(intent):
-                row['emit_refused'] = (e.stdout + e.stderr).strip()[-300:]
+                row['emit_refused'] = refusal_text(e.stdout + e.stderr, tmp)
                 rows.append(row)
                 say(f"  {name:42s} emit rc={e.returncode} NO INTENT",
                     flush=True)
@@ -151,7 +171,7 @@ def census(repo, quiet=False):
             row['grade_rc'] = g.returncode
             s = summary_of(g.stdout)
             if s is None:
-                row['grade_refused'] = (g.stdout + g.stderr).strip()[-300:]
+                row['grade_refused'] = refusal_text(g.stdout + g.stderr, tmp)
                 rows.append(row)
                 say(f"  {name:42s} grade rc={g.returncode} NO SUMMARY",
                     flush=True)
@@ -222,10 +242,21 @@ def census(repo, quiet=False):
 
 
 def write(doc, path):
-    """The ONE place the serialization lives, so the gate cannot come to
-    disagree with the recorder about formatting."""
-    with open(path, 'w', encoding='utf-8') as f:
+    """The one place the census FILE is serialized, so the gate cannot come to
+    disagree with the recorder about formatting.
+
+    (`main` also prints a summary through `json.dumps` for the console; that is
+    a different document -- no `rows`, unsorted -- and deliberately not this.)
+
+    Written to a temp file and moved into place. The default `--out` IS the
+    committed baseline, so a plain `'w'` truncates it before serialising and a
+    Ctrl-C in that window leaves it destroyed. Cheap insurance on the one file
+    this whole gate exists to protect.
+    """
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(doc, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
 
 
 def main(argv=None):
@@ -243,7 +274,30 @@ def main(argv=None):
                    help='suppress the per-board progress lines')
     a = p.parse_args(argv)
 
+    # Fail on an unwritable --out BEFORE spending 42 s, not after. A
+    # `FileNotFoundError` traceback from `write()` at the end of a full census
+    # is the same information delivered at the worst possible moment.
+    out_dir = os.path.dirname(os.path.abspath(a.out))
+    if not os.path.isdir(out_dir):
+        p.error(f"--out directory does not exist: {out_dir}")
+    if os.path.isdir(a.out):
+        p.error(f"--out is a directory, not a file: {a.out}")
+
     doc = census(a.repo, quiet=a.quiet)
+
+    # REFUSE to write a census of nothing. `tracked_boards` asks git from
+    # `repo`, so a plausible-but-wrong root -- `tests/` instead of the repo,
+    # say -- returns no boards, and every count below is then a truthful zero
+    # about a set nobody censused. Writing that to the DEFAULT out path
+    # replaces the committed baseline with an empty document at exit 0, which
+    # is the #879 failure in its purest form: a file that reads as
+    # authoritative and measured nothing.
+    if not doc['boards_total']:
+        print(f"REFUSED to write a census of 0 boards. `git ls-files "
+              f"kicad_files/*.kicad_pcb` found nothing under {a.repo!r} -- "
+              f"is that the repo root?", file=sys.stderr)
+        return 2
+
     if not a.quiet:
         print('\nCENSUS: ' + json.dumps(
             {k: v for k, v in doc.items() if k != 'rows'}, indent=1))
