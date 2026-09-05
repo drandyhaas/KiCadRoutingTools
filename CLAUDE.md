@@ -201,10 +201,14 @@ Validate routed boards against the *real* spec, with the right checker — most
   contract. **The AUDIT is always on; the WELD is opt-in**
   (`KICAD_POUR_PROMISE_WELD=1`), which turns a carved-off ball into a custody
   link anchored at the ball plus a promise-scoped oracle pass. It is opt-in
-  because no corpus A/B has shown a weld that changes copper pays, and the
-  obvious board cannot show it: **two replays of IDENTICAL code over
-  orangecrab's recorded 15-command chain graded 1 vs 3 DRC and 8 vs 14
-  connectivity issues.** That is the chain's own run-to-run spread (the
+  because a weld that changes copper has not cleared the bar for a default.
+  **Corpus A/B, 2026-09-04** (sets 1-5 on Modal, 72 boards complete in both
+  arms at one commit): real DRC **21 vs 21**, unconnected nets **86 -> 85** --
+  one board better (orangecrab, which carries 180 recorded promises), **none
+  worse**, out of 16 eligible boards (BGA fanout + planes). Positive but under
+  the two-board bar. Note also that a SINGLE replay pair cannot judge this at
+  all: **two replays of IDENTICAL code over orangecrab's recorded 15-command
+  chain graded 1 vs 3 DRC and 8 vs 14 connectivity issues.** That is the chain's own run-to-run spread (the
   oracle/kicad-cli stage jitters reported anchors), so a single-run
   comparison on it measures the spread, not the change -- **grade a plane /
   oracle chain change by a corpus A/B, never by one replay pair.** Same rule

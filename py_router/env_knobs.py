@@ -292,7 +292,12 @@ def refresh() -> None:
     # it cost a net: RAM_UDQS+ went from routed to failed_single, the
     # run verdict 9 -> 10, while the self-pair fix alone reproduced the
     # base copper EXACTLY (6097 segments and 625 vias compared, all
-    # identical). Opt-in until a corpus A/B says it pays.
+    # identical).
+    # CORPUS A/B RAN (2026-09-04, sets 1-5 on Modal, 72 boards complete in
+    # both arms, same commit d0278273): real DRC 21 vs 21 -- unchanged --
+    # and unconnected nets 86 -> 87. ONE board moved and it moved the wrong
+    # way (core1106_cam 0 -> 1); no board improved. So it STAYS OFF: the
+    # trim has no measured upside and a measured, if small, cost.
     g['SLIVER_TRIM'] = _opt_in('KICAD_SLIVER_TRIM')
     # #678 pour-promise DEFENCE (the copper-changing half: the
     # pad-anchored custody weld links and the ship-time promise-scoped
@@ -307,9 +312,18 @@ def refresh() -> None:
     # stage (see the repair-wobble finding: kicad-cli jitters reported
     # anchor coordinates between identical invocations). A single-board,
     # single-run comparison on it measures that spread, not the change. So
-    # the standing rule applies unchanged -- a default change needs a
-    # corpus A/B -- and until one exists the weld is opt-in. Disclosure is
-    # fine to make environment-dependent; copper is not.
+    # the standing rule applies -- a default change needs a corpus A/B.
+    # THAT A/B HAS NOW RUN (2026-09-04, sets 1-5 on Modal, 72 boards
+    # complete in both arms, same commit d0278273): real DRC 21 vs 21 --
+    # unchanged -- and unconnected nets 86 -> 85, from ONE board improving
+    # (orangecrab 6 -> 5) with NO board regressing anywhere. The eligible
+    # denominator is 16 boards (a BGA fanout step AND a plane step, i.e.
+    # able to promise a ball and then carve it), so that is 1 of 16, and
+    # the one that moved is the board carrying 180 recorded promises.
+    # First real evidence the weld does what it claims, and no measured
+    # cost -- but one board is under the repo's own two-board bar for a
+    # default change, so it stays opt-in pending a wider corpus.
+    # Disclosure is fine to make environment-dependent; copper is not.
     g['POUR_PROMISE_WELD'] = _opt_in('KICAD_POUR_PROMISE_WELD')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')

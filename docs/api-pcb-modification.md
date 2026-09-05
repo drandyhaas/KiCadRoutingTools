@@ -112,8 +112,10 @@ the routing pipeline applies both so the model and the output file agree.
 > paired from the same input board, `RAM_UDQS+` went from routed to
 > `failed_single` (run verdict 9 -> 10, 14 DRC either way), while the
 > self-pair half of this change alone reproduced the base copper EXACTLY
-> (6097 segments and 625 vias compared, all identical). It stays opt-in until
-> a corpus A/B says it pays. The same change
+> (6097 segments and 625 vias compared, all identical). **The corpus A/B ran
+> (2026-09-04, sets 1-5, 72 boards paired at one commit) and it does not pay:
+> real DRC 21 vs 21 unchanged, unconnected nets 86 -> 87, one board worse
+> (`core1106_cam` 0 -> 1) and none better.** It stays off. The same change
 > teaches every soft-joint detector (`_soft_joint_pairs`, `close_soft_joints`,
 > `check_drc`, `check_weird`) that the two ends of ONE segment are not a joint:
 > a lone sub-cap sliver used to pair with itself, which made
