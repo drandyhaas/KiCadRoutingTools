@@ -885,6 +885,9 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # nodes then let the graze prune approve removals that gut the net, #195).
     _original_segments_keepalive = list(pcb_data.segments)
     original_segment_ids = set(id(s) for s in _original_segments_keepalive)
+    # #874: same snapshot for vias -- see the note in route.py.
+    _original_vias_keepalive = list(pcb_data.vias)
+    original_via_ids = set(id(v) for v in _original_vias_keepalive)
 
     # Build separate base obstacle map with extra clearance for diff pair centerline routing
     # Extra clearance = spacing from centerline to P/N track center
@@ -1322,7 +1325,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 })
 
     # Sync pcb_data with length-matched segments
-    sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config)
+    sync_pcb_data_segments(pcb_data, routed_results, original_segment_ids, state, config,
+                           original_via_ids=original_via_ids)
 
     # #521: coupled pair copper is an invariant later chain steps cannot
     # reproduce (P/N geometry, gap, polarity) -- mark routed members protected

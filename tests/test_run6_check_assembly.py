@@ -68,8 +68,6 @@ class TestCheckAssemblyCLI(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestRenderBodyChannel(unittest.TestCase):
@@ -139,3 +137,7 @@ class TestContainmentDisclosure(unittest.TestCase):
             self.assertGreater(doc['fab_unjudged'], 0)
             self.assertEqual(len(doc['fab_unjudged_refs']),
                              doc['fab_unjudged'])
+
+
+if __name__ == '__main__':
+    unittest.main()

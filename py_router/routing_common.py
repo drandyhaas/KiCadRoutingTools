@@ -751,13 +751,35 @@ def sync_pcb_data_segments(
     routed_results: Dict[int, Dict],
     original_segment_ids: Set[int],
     state=None,
-    config: GridRouteConfig = None
+    config: GridRouteConfig = None,
+    original_via_ids: Set[int] = None
 ) -> None:
     """
-    Sync routed segments back to pcb_data and update obstacle cache.
+    Sync routed copper back to pcb_data and update the obstacle cache.
 
-    Preserves original stubs (segments from input file) and replaces only
-    routed segments.
+    Preserves original copper (from the input file) and replaces only the
+    routed copper, for BOTH segments and vias (#874).
+
+    Vias matter here for the same reason segments do, and the asymmetry was a
+    real bug: the output is written from "input file text + the RESULTS", never
+    from ``pcb_data.vias``, so the two lists say different things about the same
+    board the moment a result's via list is rebuilt after it was committed --
+    which ``apply_meanders_to_diff_pair`` does on every meandered coupled pair,
+    replacing ``new_vias`` wholesale with fresh objects. That leaves
+
+      * a result via absent from ``pcb_data`` -- SHIPPED copper that no obstacle
+        map can see, so the Phase 3 taps routed immediately after this call
+        drive straight through a barrel that is on the board (measured on
+        ddr5_testbed: one VDDQ via at (139.300, 89.200), present in the written
+        output and missing from ``pcb_data`` at the sync point); and
+      * a superseded via still in ``pcb_data`` -- a phantom that BLOCKS the map
+        at a place no copper will be written.
+
+    Both are the under/over-block class #806 fixed for the diff-pair loop. The
+    removal keeps anything an input-file original OR referenced by any current
+    result, so it can only drop genuinely superseded barrels; measured over
+    ddr5_testbed and orangecrab that population is 0 except where a meander
+    rebuild actually happened.
 
     Args:
         pcb_data: Parsed PCB data (modified in place)
@@ -765,6 +787,10 @@ def sync_pcb_data_segments(
         original_segment_ids: Set of id() for original segments to preserve
         state: Optional RoutingState for cache updates
         config: Optional config for cache recomputation
+        original_via_ids: Set of id() for original vias to preserve. Omit it and
+            the via half is skipped entirely -- callers that hold no via
+            keep-alive cannot tell an input-file barrel from a superseded one,
+            and guessing would strip real copper off the map.
     """
     if not routed_results:
         return
@@ -793,10 +819,46 @@ def sync_pcb_data_segments(
             total_added += 1
     print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")
 
+    # Same reconciliation for VIAS (#874). Identity, not geometry: two distinct
+    # objects at one point are two real barrels, and the writer holds each once.
+    touched_net_ids = set(routed_net_ids_set)
+    if original_via_ids is not None:
+        result_via_ids = set()
+        for result in routed_results.values():
+            for via in result.get('new_vias', []):
+                result_via_ids.add(id(via))
+        via_count_before = len(pcb_data.vias)
+        pcb_data.vias = [v for v in pcb_data.vias
+                         if v.net_id not in routed_net_ids_set
+                         or id(v) in original_via_ids
+                         or id(v) in result_via_ids]
+        via_count_after_remove = len(pcb_data.vias)
+        present_vias = set(id(v) for v in pcb_data.vias)
+        vias_added = 0
+        for result in routed_results.values():
+            for via in result.get('new_vias', []):
+                if id(via) in present_vias:
+                    continue
+                present_vias.add(id(via))
+                pcb_data.vias.append(via)
+                # A pair result carries its partner's and its GND vias too, so
+                # the net a via lands on is not always a key of routed_results.
+                touched_net_ids.add(via.net_id)
+                vias_added += 1
+        if via_count_before != via_count_after_remove or vias_added:
+            print(f"Sync pcb_data vias: {via_count_before} -> "
+                  f"{via_count_after_remove} (kept originals) -> "
+                  f"{len(pcb_data.vias)} (after adding {vias_added})")
+
     # Sync working_obstacles with the updated pcb_data
     if state is not None and config is not None:
         if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-            for net_id in routed_net_ids_set:
+            # A net the cache never held keeps its copper in the BASE map, so
+            # computing a cache for it here and ADDING it would stamp that net
+            # twice (#874: the pair results carry GND barrels). Refresh only
+            # what is already cached, plus the routed nets as before.
+            for net_id in sorted(routed_net_ids_set
+                                 | (touched_net_ids & set(state.net_obstacles_cache))):
                 # Remove old cache from working
                 if net_id in state.net_obstacles_cache:
                     remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])

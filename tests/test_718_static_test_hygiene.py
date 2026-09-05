@@ -446,6 +446,116 @@ def test_no_module_scope_posix_only_import():
         'file(s) this gate could not parse, so it cleared them without '
         'looking:\n  ' + '\n  '.join(unparseable))
     print(f'  PASS: no module-scope POSIX-only import, over {scanned} file(s)')
+def _guard_end(tree):
+    """Line of the last top-level `if __name__ == '__main__':` block's end."""
+    end = None
+    for node in tree.body:
+        if (isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == '__name__'):
+            end = max(end or 0, node.end_lineno or node.lineno)
+    return end
+
+
+def _defines_tests(node):
+    """Does this top-level node define test(s), and under what name?"""
+    if isinstance(node, ast.ClassDef):
+        if any(isinstance(b, ast.FunctionDef) and b.name.startswith('test')
+               for b in node.body):
+            return f'class {node.name}'
+    elif (isinstance(node, ast.FunctionDef)
+          and node.name.startswith('test')):
+        return f'def {node.name}'
+    return None
+
+
+def test_no_test_is_defined_after_its_own_runner():
+    """A test defined BELOW `if __name__ == '__main__':` never runs.
+
+    The guard executes the runner and the runner exits, so anything defined
+    after it does not exist yet -- `unittest.main()` discovers what is bound
+    at the moment it is called, and a hand-rolled `for t in TESTS` cannot list
+    a function defined later. Either way the file reports OK and `run_all`
+    records a PASS, which is indistinguishable from having checked.
+
+    Measured when this gate was written (#876): FIVE files, 27 dead tests.
+    `test_run6_body_overlap.py` ran 9 of 20 and hid four stale corpus
+    assertions; `test_431_render_placement.py` had 8 unregistered functions,
+    one of which was red the moment it ran. This is the same failure as
+    `test_every_test_in_this_file_is_registered` below, one file wider -- that
+    one caught the pattern in THIS file, and nothing looked at the others.
+    """
+    bad = {}
+    for rel, src in _py_files(only_tests=True):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:                                # pragma: no cover
+            continue
+        end = _guard_end(tree)
+        if end is None:
+            continue
+        after = [name for node in tree.body
+                 if node.lineno > end
+                 for name in [_defines_tests(node)] if name]
+        if after:
+            bad[rel] = after
+    assert not bad, (
+        'test(s) defined after the runner that would have run them, so they '
+        'never run:\n  ' + '\n  '.join(
+            f'{rel}: {", ".join(names)}' for rel, names in sorted(bad.items()))
+        + '\n  Move `if __name__ == ...` to the END of the file.')
+    print(f'  PASS: no test defined after its own runner, over '
+          f'{sum(1 for _ in _py_files(only_tests=True))} test file(s)')
+
+
+def test_every_test_is_registered_in_its_files_own_list():
+    """A file with a module-level `TESTS = [...]` must list every test it
+    defines.
+
+    The registry idiom is hand-maintained, so a function added to the bottom
+    of such a file runs only if someone also adds it to the list -- and one
+    that never runs is indistinguishable from one that passes. Measured at
+    #876: `test_431_render_placement.py` defined 28 tests and registered 20.
+
+    Scoped to files that HAVE such a list: a unittest file has no registry and
+    is covered by the gate above instead.
+    """
+    bad = {}
+    for rel, src in _py_files(only_tests=True):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:                                # pragma: no cover
+            continue
+        listed = None
+        for node in tree.body:
+            if (isinstance(node, ast.Assign)
+                    and any(getattr(t, 'id', None) == 'TESTS'
+                            for t in node.targets)
+                    and isinstance(node.value, (ast.List, ast.Tuple))):
+                listed = {e.id for e in node.value.elts
+                          if isinstance(e, ast.Name)}
+        if listed is None:
+            continue
+        # `TESTS.append(...)` is an accepted way to register one late.
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'append'
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == 'TESTS'):
+                listed |= {a.id for a in node.args if isinstance(a, ast.Name)}
+        defined = {node.name for node in tree.body
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name.startswith('test')}
+        missing = sorted(defined - listed)
+        if missing:
+            bad[rel] = missing
+    assert not bad, (
+        'test(s) defined but absent from their file\'s own TESTS list, so '
+        'they never run:\n  ' + '\n  '.join(
+            f'{rel}: {", ".join(names)}' for rel, names in sorted(bad.items())))
+    print('  PASS: every registry-style test file lists all its tests')
 
 
 TESTS = [
@@ -453,6 +563,8 @@ TESTS = [
     test_no_test_spawns_a_script_that_moved,
     test_the_scanners_still_match_something,
     test_no_module_scope_posix_only_import,
+    test_no_test_is_defined_after_its_own_runner,
+    test_every_test_is_registered_in_its_files_own_list,
 ]
 
 

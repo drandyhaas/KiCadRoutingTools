@@ -383,35 +383,6 @@ def test_ignore_nets_reproduces_place_optimize_exactly():
         shutil.rmtree(d, ignore_errors=True)
 
 
-TESTS = [
-    test_moved_parts_finds_the_tracked_delta,
-    test_rects_come_from_the_optimizers_own_model,
-    test_metrics_are_the_quenchs_own_numbers,
-    test_far_side_of_a_through_hole_part_is_its_drilled_pad_box,
-    test_union_view_pads_and_floors,
-    test_clusters_are_deterministic_and_ordered,
-    test_zoom_group_resolves_exactly_like_route_py,
-    test_no_edge_cuts_board_reports_oob_unavailable,
-    test_toggles_measurably_change_the_image,
-    test_ghosts_and_arrows_need_a_before_board,
-    test_rendering_is_reproducible_in_this_environment,
-    test_per_side_panels_differ_on_a_two_sided_board,
-    test_the_caption_carries_the_verdict_not_just_a_title,
-    test_cli_writes_a_png_and_a_machine_readable_summary,
-    test_an_unplaced_board_still_renders_and_says_so,
-    test_ratsnest_nets_draws_only_the_named_nets,
-    test_ratsnest_nets_uses_the_shared_net_filter,
-    test_ratsnest_nets_cli_reports_an_empty_match,
-    test_single_panel_accepts_a_directory_target,
-    test_ignore_nets_reproduces_place_optimize_exactly,
-]
-
-
-if __name__ == '__main__':
-    for t in TESTS:
-        print(f"--- {t.__name__}")
-        t()
-    print("ALL PASS")
 
 
 # --- run-4 G additions: file JSON, instrument echo, checklist, -o siblings --
@@ -455,9 +426,24 @@ def test_json_out_writes_a_file_with_instrument_and_checklist():
         cl = doc['checklist']
         # run-6: 'b_overlap_pairs' was renamed to its honest channel name
         # (it carried pad CLEARANCE pairs) and the body channel was added.
+        #
+        # The set is EXACT on purpose -- a checklist key that appears or
+        # vanishes changes what a reader of this JSON is told. It grew by five
+        # while this test was unregistered and therefore dead (#876): the
+        # run-23 courtyard channel added four (one of them the
+        # always-present `census_error`, None when clean) and the
+        # cross-side stack census
+        # one. Re-stated rather than relaxed to a subset, because a subset
+        # check is what would have let the drift through in the first place.
         assert set(cl) == {'a_off_outline', 'b_pad_clearance_pairs',
                            'b_body_overlap_pairs',
-                           'c_hole_conflicts', 'c_locked_refs', 'd_moved'}
+                           'b_courtyard_advisory_pairs',
+                           'b_courtyard_blocking_pairs',
+                           'b_courtyard_census_error',
+                           'b_courtyard_overlap_mm2',
+                           'b_cross_side_stacks',
+                           'c_hole_conflicts', 'c_locked_refs', 'd_moved'}, (
+            f'checklist keys moved to {sorted(cl)}')
         assert cl['d_moved'] == {'moved': 22, 'expected': 22, 'match': True}
         assert doc['moved_refs'] and all(
             set(m) == {'reference', 'dist'} for m in doc['moved_refs'])
@@ -582,3 +568,43 @@ def test_legality_findings_cached_once_per_model():
                 'pad_conflict_pairs_refs', 'hole_conflict_pairs_refs',
                 'locked_refs'):
         assert key in a
+
+
+TESTS = [
+    test_moved_parts_finds_the_tracked_delta,
+    test_rects_come_from_the_optimizers_own_model,
+    test_metrics_are_the_quenchs_own_numbers,
+    test_far_side_of_a_through_hole_part_is_its_drilled_pad_box,
+    test_union_view_pads_and_floors,
+    test_clusters_are_deterministic_and_ordered,
+    test_zoom_group_resolves_exactly_like_route_py,
+    test_no_edge_cuts_board_reports_oob_unavailable,
+    test_toggles_measurably_change_the_image,
+    test_ghosts_and_arrows_need_a_before_board,
+    test_rendering_is_reproducible_in_this_environment,
+    test_per_side_panels_differ_on_a_two_sided_board,
+    test_the_caption_carries_the_verdict_not_just_a_title,
+    test_cli_writes_a_png_and_a_machine_readable_summary,
+    test_an_unplaced_board_still_renders_and_says_so,
+    test_ratsnest_nets_draws_only_the_named_nets,
+    test_ratsnest_nets_uses_the_shared_net_filter,
+    test_ratsnest_nets_cli_reports_an_empty_match,
+    test_single_panel_accepts_a_directory_target,
+    test_ignore_nets_reproduces_place_optimize_exactly,
+    # Defined AFTER the runner and never registered until now (#876):
+    test_per_side_png_target_writes_sibling_files,
+    test_json_out_writes_a_file_with_instrument_and_checklist,
+    test_expect_moved_mismatch_is_reported_not_fatal,
+    test_focus_without_summary_json_clusters_legality_findings,
+    test_net_pattern_report_counts_declared_against_matched,
+    test_a_net_list_that_missed_is_reported_in_the_json_and_on_stderr,
+    test_a_fully_matching_net_list_stays_quiet,
+    test_legality_findings_cached_once_per_model,
+]
+
+
+if __name__ == '__main__':
+    for t in TESTS:
+        print(f"--- {t.__name__}")
+        t()
+    print("ALL PASS")
