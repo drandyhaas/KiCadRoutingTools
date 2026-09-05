@@ -932,8 +932,6 @@ TESTS = [
     test_no_module_scope_posix_only_import,
     test_no_test_is_defined_after_its_own_runner,
     test_every_test_is_registered_in_its_files_own_list,
-
-
     test_every_committed_baseline_is_declared,
 ]
 

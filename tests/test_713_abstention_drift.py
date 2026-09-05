@@ -329,6 +329,28 @@ def arm_engine(census_mod):
           f"{len(pairs)} (rule, reason) pair(s) the engine can produce")
 
 
+def summary(code=None):
+    """The one exit. EVERY return in `main` goes through it.
+
+    They did not, and the drift-gate mutation battery caught it: with the
+    ENGINE arm failing AND the recorder then unable to run, the arm's finding
+    was collected into FAILURES and never printed -- `main` returned 1 from the
+    recorder branch first. Non-zero, so the row still went red, but naming a
+    different cause than the one actually found. A gate that discards its own
+    findings on the way out is this PR's subject one level up.
+
+    `code` forces an exit code (77 for a SKIP) when nothing has failed;
+    a real failure always wins over a skip, and always gets printed.
+    """
+    if code is not None and not FAILURES:
+        return code
+    print(f"\n{'FAIL' if FAILURES else 'PASS'}: #879 census drift, "
+          f"{len(FAILURES)} failure(s)")
+    for f in FAILURES:
+        print(f"  - {f}")
+    return 1 if FAILURES else 0
+
+
 def main():
     print("#879 abstention-census drift")
 
@@ -349,23 +371,23 @@ def main():
         # actually raises; everything else must reach the traceback.
         print(f"SKIP: git cannot name the tracked corpus here "
               f"({type(exc).__name__}), so there is no set to census: {exc}")
-        return 77
+        return summary(77)
     if not boards:
         print("SKIP: git named no tracked boards, so this would grade nothing")
-        return 77
+        return summary(77)
 
     if not os.path.isfile(BASELINE):
         # NOT a pass. Deleting the baseline must not delete the protection
         # behind exit 0.
         print(f"FAIL: no baseline at {BASELINE}. Re-record it deliberately:\n"
               f"  {REMEDY}")
-        return 1
+        return summary(1)
     try:
         with open(BASELINE, encoding='utf-8') as fh:
             expected = json.load(fh)
     except Exception as exc:                                   # noqa: BLE001
         print(f"FAIL: baseline unreadable: {exc}\n  {REMEDY}")
-        return 1
+        return summary(1)
 
     # Re-derive into a temp dir. The recorder's default `--out` IS the
     # committed file, so a gate that forgot this flag would overwrite the very
@@ -387,12 +409,12 @@ def main():
                   f"there is no census to compare. This is the only one of "
                   f"the three clocks that gives a reason, which is why it is "
                   f"set below run_all's {RUN_ALL_TIMEOUT} s budget.")
-            return 1
+            return summary(1)
         if r.returncode != 0 or not os.path.isfile(out):
             tail = (r.stdout + r.stderr).strip()[-800:]
             print(f"FAIL: the recorder did not produce a census "
                   f"(exit {r.returncode}):\n{tail}")
-            return 1
+            return summary(1)
         with open(out, encoding='utf-8') as fh:
             current = json.load(fh)
 
@@ -420,11 +442,7 @@ def main():
               f"row(s) match this run of "
               f"{os.path.basename(RECORDER)}")
 
-    print(f"\n{'FAIL' if FAILURES else 'PASS'}: #879 census drift, "
-          f"{len(FAILURES)} failure(s)")
-    for f in FAILURES:
-        print(f"  - {f}")
-    return 1 if FAILURES else 0
+    return summary()
 
 
 if __name__ == '__main__':
