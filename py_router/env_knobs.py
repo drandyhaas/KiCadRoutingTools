@@ -285,6 +285,46 @@ def refresh() -> None:
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')
     g['OBSTACLE_AUDIT'] = _truthy('KICAD_OBSTACLE_AUDIT')
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
+    # #672 sub-cell sliver trim on PROTECTED (still-being-retried) nets.
+    # The self-pair half of #672 is a correctness fix and is always on;
+    # this half REMOVES COPPER, and measured on orangecrab's recorded
+    # route step (paired, same input board, chains otherwise identical)
+    # it cost a net: RAM_UDQS+ went from routed to failed_single, the
+    # run verdict 9 -> 10, while the self-pair fix alone reproduced the
+    # base copper EXACTLY (6097 segments and 625 vias compared, all
+    # identical).
+    # CORPUS A/B RAN (2026-09-04, sets 1-5 on Modal, 72 boards complete in
+    # both arms, same commit d0278273): real DRC 21 vs 21 -- unchanged --
+    # and unconnected nets 86 -> 87. ONE board moved and it moved the wrong
+    # way (core1106_cam 0 -> 1); no board improved. So it STAYS OFF: the
+    # trim has no measured upside and a measured, if small, cost.
+    g['SLIVER_TRIM'] = _opt_in('KICAD_SLIVER_TRIM')
+    # #678 pour-promise DEFENCE (the copper-changing half: the
+    # pad-anchored custody weld links and the ship-time promise-scoped
+    # oracle weld). OPT-IN, for the reason KICAD_ORACLE_SUMMARY below
+    # records: the AUDIT is disclosure and is always on, but welding a
+    # carved-off ball back CHANGES COPPER, and no A/B has established that
+    # it pays. It is not for want of trying, and the reason is worth
+    # keeping: the orangecrab chain this was tried on CANNOT decide it.
+    # Two replays of IDENTICAL code (commit 2e15780d) over that recorded
+    # 15-command chain graded 1 vs 3 DRC and 8 vs 14 connectivity issues --
+    # that is the chain's own run-to-run spread, from the oracle/kicad-cli
+    # stage (see the repair-wobble finding: kicad-cli jitters reported
+    # anchor coordinates between identical invocations). A single-board,
+    # single-run comparison on it measures that spread, not the change. So
+    # the standing rule applies -- a default change needs a corpus A/B.
+    # THAT A/B HAS NOW RUN (2026-09-04, sets 1-5 on Modal, 72 boards
+    # complete in both arms, same commit d0278273): real DRC 21 vs 21 --
+    # unchanged -- and unconnected nets 86 -> 85, from ONE board improving
+    # (orangecrab 6 -> 5) with NO board regressing anywhere. The eligible
+    # denominator is 16 boards (a BGA fanout step AND a plane step, i.e.
+    # able to promise a ball and then carve it), so that is 1 of 16, and
+    # the one that moved is the board carrying 180 recorded promises.
+    # First real evidence the weld does what it claims, and no measured
+    # cost -- but one board is under the repo's own two-board bar for a
+    # default change, so it stays opt-in pending a wider corpus.
+    # Disclosure is fine to make environment-dependent; copper is not.
+    g['POUR_PROMISE_WELD'] = _opt_in('KICAD_POUR_PROMISE_WELD')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
     # route.py's end-of-run oracle summary check (one staged

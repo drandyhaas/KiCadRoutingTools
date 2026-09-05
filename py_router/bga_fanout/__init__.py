@@ -4666,6 +4666,20 @@ def main():
                     pro_path_for_board(out_path), args.same_net_pad_clearance)
         except Exception as _e:
             print(f"  (skipped same-net pad clearance record: {_e})")
+    # #678: the balls this fanout promised to serve by fill contact -- a later
+    # route step's plane finalize defends them (pour_promise.py). Merged into
+    # the project, so a chain of several fanouts accumulates every component's
+    # promises. NOT gated on --no-fix-drc-settings: that flag is about the DRC
+    # floor, and a promise is owed whether or not the floor was written.
+    if out_path and os.path.isfile(out_path):
+        try:
+            from protected_nets import (consume_pour_served_pads,
+                                        persist_pour_served_pads,
+                                        pro_path_for_board as _ppb678)
+            persist_pour_served_pads(_ppb678(out_path),
+                                     consume_pour_served_pads())
+        except Exception as _e:
+            print(f"  (skipped pour-served ball record: {_e})")
     summary = {
         'component': args.component,
         'requested': requested,

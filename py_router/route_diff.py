@@ -1216,6 +1216,16 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     total_time += rq_time
     total_iterations += rq_iterations
 
+    # #806: content audit of the working map at the point its in-run consumers
+    # (a ripped victim's reroute, a terminal restore) have just used it --
+    # BEFORE sync_pcb_data_segments recomputes every routed net's entry at the
+    # end and hides whatever the loops left stale. Env-gated, prints only.
+    if env_knobs.OBSTACLE_AUDIT:
+        from obstacle_cache import run_obstacle_content_audit
+        run_obstacle_content_audit(state.working_obstacles,
+                                   state.net_obstacles_cache, pcb_data, config,
+                                   label="route_diff pre-sync")
+
     # ----- Casualties-only final reconciliation (depth 1) -------------------
     # Nets ripped during diff-pair routing whose reroute never landed used to
     # ship at ZERO copper with no custody. Restore-first: verify actually
@@ -1716,7 +1726,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     if env_knobs.OBSTACLE_AUDIT:
         from obstacle_cache import run_obstacle_audit
         run_obstacle_audit(base_obstacles, state.working_obstacles,
-                           state.net_obstacles_cache, label="route_diff")
+                           state.net_obstacles_cache, label="route_diff",
+                           pcb_data=pcb_data, config=config)
 
     if return_results:
         return successful, failed, total_time, results_data

@@ -194,14 +194,17 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
             # or make the art real copper). So a graphic is carried as a
             # flag and only an art-MEETS-art pair is dropped.
                 continue  # its copper reaches a via / own pad = legitimate
-            dangles[s.layer].append((x, y, s.width, getattr(s, 'graphic', False)))
+            dangles[s.layer].append((x, y, s.width, getattr(s, 'graphic', False),
+                                     id(s)))
 
     soft_pts = set()
     for layer, ends in dangles.items():
         for i in range(len(ends)):
-            xi, yi, wi, gi = ends[i]
+            xi, yi, wi, gi, oi = ends[i]
             for j in range(i + 1, len(ends)):
-                xj, yj, wj, gj = ends[j]
+                xj, yj, wj, gj, oj = ends[j]
+                if oi == oj:
+                    continue  # #672: one segment's own two ends are not a joint
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
                 if gi and gj:
