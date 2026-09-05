@@ -28,14 +28,15 @@ diff -- and the diff goes out signed with your name.
 
 Two arms, and the cheap one is not a formality:
 
-  DRIFT   re-derives the whole census (~45 s) and compares it to the committed
+  DRIFT   re-derives the whole census (~40 s) and compares it to the committed
           file, per board and per key.
-  MIRROR  asserts `NOT_ASKED` still equals `floorplan._SKIP_REASON`'s values,
-          in milliseconds. That set is hand-maintained and has already fallen
-          out of step once (#837 added `assembly_side` and did not update it),
-          which silently reclassifies an honest skip as a real abstention. The
-          DRIFT arm sees only the symptom, and only once somebody re-records;
-          this one catches the cause.
+  ENGINE  asserts the census still ASKS `floorplan._is_not_asked` which skips
+          are the honest kind, rather than keeping its own copy of the reason
+          strings, in milliseconds. It kept one once, and it went stale (#837
+          added `assembly_side` and the copy was not updated), which silently
+          reclassifies an honest skip as a real abstention. The DRIFT arm sees
+          only the symptom, and only once somebody re-records; this one catches
+          the cause.
 
 WHY NOT `RUN_ALL_FAST_OK`. This shells out 44 times. `run_all`'s marker is
 documented for the case where "the shelling-out really is cheap" -- one
@@ -53,16 +54,30 @@ import tempfile
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS)
-sys.path[:0] = [os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_placer')]
+sys.path[:0] = [os.path.join(ROOT, 'py_router'),
+                os.path.join(ROOT, 'py_placer')]
 
-#: 42.6 s measured on the author's machine, dominated by `parse_kicad_pcb` on
-#: the four large boards. Declared with headroom so a slower box reports FAIL
-#: rather than TIME. The recorder's own per-subprocess timeout is also 900 s,
-#: and this one ALWAYS expires first: the outer clock starts when the recorder
-#: launches, the inner one when the hung board's `check_floorplan` does. So a
-#: hang surfaces here, which is why the timeout is caught and named rather than
-#: left to raise.
+#: 40 s measured on an idle machine, dominated by `parse_kicad_pcb` on the four
+#: large boards. Declared with headroom so a slower box reports FAIL rather
+#: than TIME.
 RUN_ALL_TIMEOUT = 900
+
+#: THREE clocks can expire on a hang, and only this one gives a reason, so it
+#: is set below the other two rather than equal to them:
+#:
+#:   run_all's budget          `max(RUN_ALL_TIMEOUT, 600)` = 900, started at
+#:                             process spawn -> prints `TIME (... NOT a failed
+#:                             assertion)`, which discloses nothing about why
+#:   this gate's subprocess     started ~1 s later, after import and the ENGINE
+#:                             arm -> `FAIL: the recorder did not finish ...`
+#:   the recorder's own        900 s per `check_floorplan` child, started later
+#:                             still
+#:
+#: Set equal, run_all always wins by that ~1 s head start and the named path is
+#: unreachable under the runner -- measured: forced equal, standalone printed
+#: the reason and `run_all` printed only `TIME`. The margin makes the reason
+#: reachable where a reader will actually meet it.
+RECORDER_TIMEOUT = RUN_ALL_TIMEOUT - 120
 
 BASELINE = os.path.join(TESTS, '713_abstention_census.json')
 RECORDER = os.path.join(TESTS, '713_abstention_census.py')
@@ -96,12 +111,21 @@ def _load_recorder():
 
 # --- the comparator ---------------------------------------------------------
 #
-# Verdict vocabulary and message shapes are `tests/test_placement_ab.py`'s
-# `compare_baseline` (its docstring explains each), reused rather than
-# reinvented. One is deliberately NOT carried over: INVERTED compares the
-# direction of an off/on pair, and this document has no arms -- there is
-# nothing to reverse. Saying so here is cheaper than leaving the next reader to
-# wonder which verdict went missing and why.
+# DRIFT, MISSING, MALFORMED and the message shapes are
+# `tests/test_placement_ab.py`'s `compare_baseline` (its docstring explains
+# each), reused rather than reinvented. The rest of that vocabulary does not
+# transfer, and the reader is owed which is which rather than left to wonder:
+#
+#   INVERTED  NOT carried over. It compares the direction of an off/on pair,
+#             and this document has no arms -- there is nothing to reverse.
+#   ORPHAN    NOT carried over. There, it means a baseline row that `ROWS` no
+#             longer declares; here the row set is the corpus itself, so that
+#             case is MISSING (in the baseline, not measured).
+#   NEW ROW / NEW KEY / MISSING KEY / DUPLICATE
+#             NEW here. This document is a per-board table with a fixed key
+#             set, which `placement_ab_baseline.json` is not, so appearing,
+#             gaining a field and being recorded twice are all reachable and
+#             all mean different things.
 
 def diff_value(label, exp_v, cur_v, problems):
     """One value -- or one level deeper when both sides are objects.
@@ -122,7 +146,17 @@ def diff_value(label, exp_v, cur_v, problems):
             else:
                 diff_value(f'{label}.{k}', exp_v[k], cur_v[k], problems)
         return
-    if exp_v != cur_v:
+    # TYPE too, not just value. `1 == True` and `22 == 22.0` in Python, so a
+    # baseline whose `pass` is `1` where the run produces `true`, or whose
+    # counts have become floats, compares equal and the gate says nothing. It
+    # is a shape change in a recorded measurement, and this document's ints and
+    # bools carry different meanings -- assert the shape, not just the value.
+    if type(exp_v) is not type(cur_v):
+        problems.append(f"DRIFT {label}: baseline {exp_v!r} "
+                        f"({type(exp_v).__name__}), measured {cur_v!r} "
+                        f"({type(cur_v).__name__}) -- same value, different "
+                        f"type")
+    elif exp_v != cur_v:
         problems.append(f"DRIFT {label}: baseline {exp_v!r}, "
                         f"measured {cur_v!r}")
 
@@ -199,6 +233,16 @@ def compare(current, expected):
     exp_rows, exp_problems = index_rows(exp_raw, 'baseline')
     problems += exp_problems
 
+    # `boards_total` is compared baseline-vs-measured above, but never against
+    # the rows it counts -- so a document whose header disagrees with its own
+    # body on BOTH sides is internally inconsistent and silent. Cheap to hold.
+    for doc, where, rows in ((expected, 'baseline', exp_raw),
+                             (current, 'measured', current.get('rows') or [])):
+        total = doc.get('boards_total')
+        if isinstance(total, int) and total != len(rows):
+            problems.append(f"MALFORMED {where}: boards_total says {total}, "
+                            f"rows holds {len(rows)}")
+
     for board in sorted(set(cur_rows) | set(exp_rows)):
         cur, exp = cur_rows.get(board), exp_rows.get(board)
         if exp is None:
@@ -223,50 +267,73 @@ def compare(current, expected):
     return problems
 
 
-def arm_mirror(census_mod):
-    """`NOT_ASKED` is a hand-copy of `floorplan._SKIP_REASON`'s values.
+def arm_engine(census_mod):
+    """`classify` must ASK the engine, not re-implement it.
 
-    Both directions. A reason the census does not know falls through
-    `classify()` to `'arm'` -- a real abstention -- so a stale mirror does not
-    error, it quietly changes the answer. And an entry here that `_SKIP_REASON`
-    no longer produces is a claim about a rule that no longer exists.
+    This arm replaces a set-equality check against `floorplan._SKIP_REASON`'s
+    VALUES, and the reason it replaces it is the point. The census used to keep
+    its own copy of those strings; the arm compared the two sets in both
+    directions and would have caught the copy going stale. But the engine
+    exports `_is_not_asked(rule, reason)` as, in its own words, "ONE home for
+    the distinction", keyed on the RULE precisely because a value match "meant
+    an `_ARM` reason that ever happened to equal some OTHER rule's skip reason
+    would read as 'nobody asked' -- a real abstention silently downgraded to a
+    pass". Two sets can be perfectly equal and that collision still happen, so
+    the mirror arm was green in exactly the case it most needed to be red.
+
+    Calling the engine deletes the mirror, and this arm holds it deleted: a
+    census that grows its own copy again reintroduces the drift AND the
+    collision. Milliseconds, no subprocess.
     """
+    from placement.floorplan import _is_not_asked, _WITHHELD_MARK
+    if census_mod.classify.__code__.co_argcount != 2:
+        fail("classify() no longer takes (rule, reason). Keyed on the reason "
+             "alone it cannot tell two rules that share a skip-reason string "
+             "apart -- and _SKIP_REASON has 12 keys to 11 distinct values")
+        return
+    for name in ('NOT_ASKED', 'WITHHELD_MARK', '_SKIP_REASON'):
+        if hasattr(census_mod, name):
+            fail(f"the census has grown its own `{name}` again. That copy is "
+                 f"what #879 is about: it went stale once already, and a "
+                 f"value-keyed match is the downgrade `_is_not_asked` exists "
+                 f"to prevent. Call the engine")
+            return
+    # And the call must actually REACH it: agree with the engine on every pair
+    # the engine can produce, and on the `not requested` fallback grade()
+    # raises outside the RULES loop for a rule with no recorded reason.
+    #
+    # That fallback is the one place the swap changed an ANSWER. The old
+    # hand-copy listed `not requested` as "nobody asked"; `_is_not_asked` says
+    # no, because it cannot match a rule that recorded no reason -- so it now
+    # counts as an abstention. The engine is right: an unexplained skip is
+    # exactly the case that must not read as a pass, and this is the direction
+    # its docstring calls safe. Unreachable today (`RULES` and `_SKIP_REASON`
+    # have the same 12 keys, so the fallback never fires), which is why the
+    # re-record is byte-identical -- but pinned here so the change is a
+    # decision on record rather than a silent consequence.
     from placement.floorplan import _SKIP_REASON
-    declared = set(_SKIP_REASON.values())
-    mirrored = set(census_mod.NOT_ASKED)
-    # `not requested` is raised outside the RULES loop, so it is legitimately
-    # in the mirror and not in _SKIP_REASON. Named, not silently subtracted.
-    extra_by_design = {'not requested'}
-
-    missing = sorted(declared - mirrored)
-    if missing:
-        fail(f"NOT_ASKED is missing {len(missing)} _SKIP_REASON value(s), so "
-             f"an honest skip is classified as a real abstention: "
-             f"{missing}")
-    stale = sorted(mirrored - declared - extra_by_design)
-    if stale:
-        fail(f"NOT_ASKED carries {len(stale)} reason(s) _SKIP_REASON no longer "
-             f"produces: {stale}")
-    # An exemption is a claim, so hold it in both directions too. Subtracting a
-    # set without asserting it is PRESENT means `not requested` can be deleted
-    # from the mirror and both arms above stay silent -- the exemption quietly
-    # covering its own absence.
-    absent = sorted(extra_by_design - mirrored)
-    if absent:
-        fail(f"NOT_ASKED no longer carries {absent}, which floorplan raises "
-             f"OUTSIDE the RULES loop (the `.get(name, ...)` fallback) and "
-             f"_SKIP_REASON therefore never declares. Dropped, that reason "
-             f"classifies as a real abstention.")
-    if not missing and not stale and not absent:
-        print(f"  ok   MIRROR: NOT_ASKED == _SKIP_REASON values "
-              f"({len(declared)} reasons, both directions)")
+    pairs = list(_SKIP_REASON.items()) + [('a_rule_with_no_reason',
+                                           'not requested')]
+    wrong = [(rule, reason, census_mod.classify(rule, reason))
+             for rule, reason in pairs
+             if (census_mod.classify(rule, reason) == 'not_asked')
+             is not bool(_is_not_asked(rule, reason))]
+    if wrong:
+        fail(f"classify disagrees with floorplan._is_not_asked on "
+             f"{len(wrong)} pair(s): {wrong[:5]}")
+        return
+    if census_mod._WITHHELD_MARK is not _WITHHELD_MARK:
+        fail("the census's WITHHELD mark is not the engine's object")
+        return
+    print(f"  ok   ENGINE: classify() calls _is_not_asked, agreeing on all "
+          f"{len(pairs)} (rule, reason) pair(s) the engine can produce")
 
 
 def main():
     print("#879 abstention-census drift")
 
     census_mod = _load_recorder()
-    arm_mirror(census_mod)
+    arm_engine(census_mod)
 
     # The corpus comes from `git ls-files`. Where git cannot answer, SKIP
     # loudly rather than grading a set we cannot identify -- the rule
@@ -274,7 +341,12 @@ def main():
     # follows.
     try:
         boards = census_mod.tracked_boards(ROOT)
-    except Exception as exc:                                   # noqa: BLE001
+    except (subprocess.CalledProcessError, OSError) as exc:
+        # NARROW on purpose. A bare `except Exception` here attributes any
+        # recorder-side bug -- an AttributeError, a bad import -- to "git is
+        # missing", and turns a broken gate into a clean SKIP that run_all
+        # scores as exit 0. These two are what an absent or unhappy git
+        # actually raises; everything else must reach the traceback.
         print(f"SKIP: git cannot name the tracked corpus here "
               f"({type(exc).__name__}), so there is no set to census: {exc}")
         return 77
@@ -305,15 +377,16 @@ def main():
                 [sys.executable, '-X', 'utf8', RECORDER, ROOT,
                  '--out', out, '-q'],
                 capture_output=True, text=True, encoding='utf-8',
-                errors='replace', cwd=ROOT, timeout=RUN_ALL_TIMEOUT)
+                errors='replace', cwd=ROOT, timeout=RECORDER_TIMEOUT)
         except subprocess.TimeoutExpired:
             # A traceback here reads as a broken test, not as a verdict --
             # CLAUDE.md's rule that a non-zero exit is not evidence, assert the
             # REASON. Say which clock ran out and how long it was given.
             print(f"FAIL: the recorder did not finish within "
-                  f"RUN_ALL_TIMEOUT={RUN_ALL_TIMEOUT} s (measured 42.6 s), so "
-                  f"there is no census to compare. A hung `check_floorplan` "
-                  f"surfaces here, not on the recorder's own equal timer.")
+                  f"RECORDER_TIMEOUT={RECORDER_TIMEOUT} s (measured 40 s), so "
+                  f"there is no census to compare. This is the only one of "
+                  f"the three clocks that gives a reason, which is why it is "
+                  f"set below run_all's {RUN_ALL_TIMEOUT} s budget.")
             return 1
         if r.returncode != 0 or not os.path.isfile(out):
             tail = (r.stdout + r.stderr).strip()[-800:]

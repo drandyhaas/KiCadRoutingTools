@@ -45,51 +45,47 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path[:0] = [os.path.join(ROOT, 'py_router'),
+                os.path.join(ROOT, 'py_placer')]
+
+from placement.floorplan import (_WITHHELD_MARK,                # noqa: E402
+                                 _is_not_asked)
+
 #: The committed baseline. Derived, never hardcoded: this file is committed and
 #: an absolute path from the machine that first ran it would make the census
 #: unrunnable anywhere else.
 DEFAULT_OUT = os.path.join(HERE, '713_abstention_census.json')
 
-WITHHELD_MARK = 'the emitter WITHHELD'
 
-#: Every `_SKIP_REASON` value, verbatim from floorplan.py. A skip whose reason
-#: is one of these (and carries no WITHHELD note) means nobody asked.
-#:
-#: HAND-MIRRORED, and it has already fallen out of step once: #837 added
-#: `assembly_side` to `RULES` and this set was not updated, so a board with no
-#: pad-bearing part had an honest skip classified as a real abstention.
-#: `test_713_abstention_drift.py` compares the two in BOTH directions in
-#: milliseconds, so the next one fails a gate rather than silently changing a
-#: census (#879).
-#:
-#: They are equal EXCEPT for `'not requested'`, which is deliberate and is why
-#: the gate names it rather than subtracting it quietly: it is not a
-#: `_SKIP_REASON` value at all but `floorplan.grade`'s `.get(name, 'not
-#: requested')` fallback, for a rule that was skipped with no reason recorded.
-#: (`_SKIP_REASON` also has 12 keys and 11 distinct values -- `decap_distance`
-#: and `decap_ungraded` share one -- so a count comparison would be wrong too.)
-NOT_ASKED = {
-    'the intent declares no envelope.rect',
-    'no block declares a zone',
-    'no block declares a side',
-    'no block is marked exclusive',
-    'the intent declares no keepouts',
-    'the intent declares no edge_connectors',
-    'the intent declares no decaps.max_distance_mm',
-    'the intent declares no decaps.max_pin_distance_mm',
-    'the intent declares no must_lock patterns',
-    'the intent declares no legality_budget',
-    'the intent declares no assembly.sides',
-    'not requested',
-}
+def classify(rule, reason):
+    """-> 'withheld' | 'not_asked' | 'arm'.
 
+    CALLS the engine rather than mirroring it. This used to hold its own copy
+    of every `_SKIP_REASON` value and match on the reason string, and both
+    halves of that were wrong (#879):
 
-def classify(reason):
-    """-> 'withheld' | 'not_asked' | 'arm'."""
-    if WITHHELD_MARK in reason:
-        return 'withheld'
-    if reason in NOT_ASKED:
+    * The copy went stale -- #837 added `assembly_side` to `RULES` and the set
+      was not updated, so a board with no pad-bearing part had an honest skip
+      counted as a real abstention.
+    * Matching on the VALUE is the failure `_is_not_asked`'s own docstring was
+      written against: "an `_ARM` reason that ever happened to equal some OTHER
+      rule's skip reason would read as 'nobody asked' -- a real abstention
+      silently downgraded to a pass, which is the dangerous direction."
+      Not theoretical here: `_SKIP_REASON` has 12 keys and 11 distinct values,
+      because `decap_distance` and `decap_ungraded` already share one. Keying
+      on the RULE, which this call site has in hand, makes the strings not have
+      to stay distinct.
+
+    Measured before the swap: over every `(rule, reason)` pair the engine can
+    produce, the old value-set match and `_is_not_asked` agree on all 12, and a
+    full re-record is byte-identical -- so this changes the census's ANSWER
+    nowhere and its exposure everywhere.
+    """
+    if _is_not_asked(rule, reason):
         return 'not_asked'
+    if _WITHHELD_MARK in reason:
+        return 'withheld'
     return 'arm'
 
 
@@ -202,7 +198,7 @@ def census(repo, quiet=False):
 
             buckets = {'withheld': [], 'not_asked': [], 'arm': []}
             for rule, reason in (doc.get('rules_skipped') or {}).items():
-                buckets[classify(reason)].append(rule)
+                buckets[classify(rule, reason)].append(rule)
 
             row['pass'] = s.get('pass')
             row['errors'] = s.get('errors')
@@ -335,7 +331,18 @@ def main(argv=None):
         except OSError:
             pass
 
-    doc = census(a.repo, quiet=a.quiet)
+    try:
+        doc = census(a.repo, quiet=a.quiet)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        # The same refusal, one rung earlier. `--repo <a directory outside any
+        # git tree>` makes `git ls-files` exit 128, and `check=True` turned
+        # that into a traceback at exit 1 -- which is a broken-tool exit, not
+        # the deliberate "I will not write a census of nothing" this refuses
+        # with. Same failure, so same answer and same exit code.
+        print(f"REFUSED: `git ls-files` could not name a corpus under "
+              f"{a.repo!r} ({type(exc).__name__}: {exc}). No census was "
+              f"taken, so nothing was written.", file=sys.stderr)
+        return 2
 
     # REFUSE to write a census of nothing. `tracked_boards` asks git from
     # `repo`, so a plausible-but-wrong root -- `tests/` instead of the repo,
