@@ -362,6 +362,90 @@ def test_the_scanners_still_match_something():
           f'{joins} literal join(s)')
 
 
+#: Modules the standard library ships on POSIX and NOT on Windows. Imported at
+#: module scope, any of these makes its file unimportable there -- and a file
+#: that cannot be imported takes down everything that imports it, at import
+#: time, before a single assertion runs.
+_POSIX_ONLY = ('resource', 'fcntl', 'termios', 'pwd', 'grp', 'posix',
+               'crypt', 'syslog', 'nis', 'spwd')
+
+
+def test_no_module_scope_posix_only_import():
+    """A POSIX-only module imported at top level is a Windows-wide outage.
+
+    #882: `tests/stress/fill_timing_census.py` imported `resource` at module
+    scope, so `tests/test_831_fill_preflight_census.py` -- a collected test
+    that only calls the pure `analyse()` and never touches CPU accounting --
+    died at IMPORT on every Windows machine. The suite carried a standing
+    failure there, which is the expensive part: a permanent red teaches the
+    reader to skim the failure list.
+
+    The repo already had the right shape in both available forms --
+    `py_router/memory_debug.py` guards with a `_HAS_RESOURCE` flag, and
+    `tests/stress/redo_stress_test.py` imports inside the one function that
+    needs it. This gate is what stops the third instance being written.
+
+    Scoped to the WHOLE repo, not just `tests/`, deliberately: the same import
+    in `py_router/` would break the router itself on Windows rather than one
+    test, so the cheaper place to catch it is everywhere.
+    """
+    roots = [TESTS_DIR] + [os.path.join(ROOT, d) for d in
+                           ('py_router', 'py_placer', 'py_tools',
+                            'kicad_routing_plugin')]
+    bad, scanned, unparseable = [], 0, []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in sorted(dirnames)
+                           if d not in ('__pycache__', '.pytest_cache')]
+            for fname in sorted(filenames):
+                if not fname.endswith('.py'):
+                    continue
+                path = os.path.join(dirpath, fname)
+                try:
+                    with open(path, encoding='utf-8', errors='replace') as fh:
+                        tree = ast.parse(fh.read())
+                except SyntaxError as exc:
+                    # REPORTED, not skipped. A file this gate cannot parse is
+                    # a file it cannot clear, and swallowing that is how the
+                    # gate would go quiet on exactly the file someone just
+                    # broke -- caught when a deliberate mutation of
+                    # fill_timing_census.py produced a SyntaxError and this
+                    # check printed PASS over one file FEWER. `_code_only`
+                    # above already states the rule: a gate that goes quiet on
+                    # a file it cannot parse is worse than one that is
+                    # slightly noisy.
+                    unparseable.append(
+                        f'{os.path.relpath(path, ROOT)}: {exc.__class__.__name__}'
+                        f' line {exc.lineno}')
+                    continue
+                except OSError:                            # pragma: no cover
+                    continue
+                scanned += 1
+                # TOP-LEVEL only. An import inside a function or a try/except
+                # is the correct shape and must not be flagged.
+                for node in tree.body:
+                    names = []
+                    if isinstance(node, ast.Import):
+                        names = [a.name.split('.')[0] for a in node.names]
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        names = [node.module.split('.')[0]]
+                    for name in names:
+                        if name in _POSIX_ONLY:
+                            bad.append(
+                                f'{os.path.relpath(path, ROOT)}'
+                                f':{node.lineno}: {name}')
+    assert not bad, (
+        'POSIX-only module(s) imported at module scope, so these files cannot '
+        'be imported on Windows:\n  ' + '\n  '.join(bad)
+        + '\n  Guard with try/except and a _HAS_X flag (see '
+          'py_router/memory_debug.py), or import inside the function that '
+          'needs it (see tests/stress/redo_stress_test.py).')
+    assert not unparseable, (
+        'file(s) this gate could not parse, so it cleared them without '
+        'looking:\n  ' + '\n  '.join(unparseable))
+    print(f'  PASS: no module-scope POSIX-only import, over {scanned} file(s)')
 def _guard_end(tree):
     """Line of the last top-level `if __name__ == '__main__':` block's end."""
     end = None
@@ -478,6 +562,7 @@ TESTS = [
     test_wk_dependent_tests_are_declared,
     test_no_test_spawns_a_script_that_moved,
     test_the_scanners_still_match_something,
+    test_no_module_scope_posix_only_import,
     test_no_test_is_defined_after_its_own_runner,
     test_every_test_is_registered_in_its_files_own_list,
 ]

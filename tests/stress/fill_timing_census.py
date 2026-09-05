@@ -41,9 +41,24 @@ import json
 import multiprocessing as mp
 import os
 import platform
-import resource
 import sys
 import time
+
+#: `resource` is POSIX-only. Imported at module scope it made this file
+#: unimportable on Windows, which took `tests/test_831_fill_preflight_census.py`
+#: -- a collected test that only calls the pure `analyse()` -- down with it at
+#: IMPORT time, so the suite carried a standing failure on every Windows
+#: machine (#882).
+#:
+#: Guarded rather than moved into `_child_cpu`, so the absence is a value this
+#: module can report rather than an exception at the call site. Same shape as
+#: `py_router/memory_debug.py`, which already does this for the same module.
+try:
+    import resource
+    _HAS_RESOURCE = True
+except ImportError:                                        # pragma: no cover
+    resource = None
+    _HAS_RESOURCE = False
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -101,6 +116,16 @@ def board_features(board_file):
 
 
 def _child_cpu():
+    """(cpu seconds, peak RSS) charged to reaped children, or (None, None).
+
+    None rather than 0.0 where `resource` is absent. A zero here would be
+    written into the recorded rows as `child_cpu_s: 0.0`, indistinguishable
+    from a fill that genuinely cost nothing -- and those rows are compared
+    against ones recorded on a POSIX machine. An absent measurement has to
+    look absent.
+    """
+    if not _HAS_RESOURCE:                                  # pragma: no cover
+        return None, None
     ru = resource.getrusage(resource.RUSAGE_CHILDREN)
     return ru.ru_utime + ru.ru_stime, ru.ru_maxrss
 
@@ -129,8 +154,18 @@ def measure_one(args):
         'wall_s': round(wall, 2),
         'fill_elapsed_s': (round(st.elapsed_s, 2)
                            if st.elapsed_s is not None else None),
-        'child_cpu_s': round(cpu1 - cpu0, 2),
-        'child_maxrss_mb': round(maxrss / (1024 * 1024), 1),
+        # None all the way through where the platform cannot measure it, and
+        # SAID so in the row rather than left for a reader to infer from a
+        # null. `analyse()` reads neither field -- it separates on
+        # `fill_elapsed_s` / `timeout_s` -- so a census recorded without them
+        # still answers the question this module exists for.
+        'child_cpu_s': (round(cpu1 - cpu0, 2)
+                        if cpu0 is not None and cpu1 is not None else None),
+        'child_maxrss_mb': (round(maxrss / (1024 * 1024), 1)
+                            if maxrss is not None else None),
+        'cpu_source': ('resource.RUSAGE_CHILDREN' if _HAS_RESOURCE else
+                       f'not measured: no `resource` module on '
+                       f'{platform.system()}'),
         'n_islands': (sum(len(v) for v in islands.values())
                       if islands else 0),
         'timeout_s': timeout,
@@ -295,7 +330,12 @@ def report(path, budget=PRODUCTION_TIMEOUT_S, top=25):
           f"zone_mm2 segs vias  board):")
     for r in timed[:top]:
         s = r['timeout_s'] if r['status'] == 'timeout' else r['fill_elapsed_s']
-        print(f"  {s:7.1f} {r['child_cpu_s']:7.1f} {r['status']:8s} "
+        # `{None:7.1f}` raises, and a row recorded on a platform without
+        # `resource` carries None here (#882). Printed as `-` so the column
+        # stays readable and an unmeasured cost cannot be read as a small one.
+        _cpu = r.get('child_cpu_s')
+        _cpu = f"{_cpu:7.1f}" if isinstance(_cpu, (int, float)) else f"{'-':>7}"
+        print(f"  {s:7.1f} {_cpu} {r['status']:8s} "
               f"{r['n_zones']:4d} {r['n_pads']:5d} {r['n_footprints']:4d} "
               f"{r['bbox_area_mm2']:9.0f} {r['zone_outline_area_mm2']:9.0f} "
               f"{r['n_segments']:6d} {r['n_vias']:5d}  "
