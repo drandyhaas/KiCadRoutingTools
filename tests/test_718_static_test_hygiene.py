@@ -558,6 +558,373 @@ def test_every_test_is_registered_in_its_files_own_list():
     print('  PASS: every registry-style test file lists all its tests')
 
 
+#: Every committed `.json`/`.jsonl` baseline under `tests/`, mapped to the test
+#: that READS it and fails when it is wrong -- or, in `_BASELINE_UNGATED`, to
+#: the reason it has none (#879).
+#:
+#: THE EXTENSIONS ARE THE SCOPE, and saying "every committed baseline" would
+#: overstate it. The first cut said `.json` and three committed `.jsonl`
+#: measurements were invisible; the honest reading of that is not "now it is
+#: complete" but "the scope is a list, and a list has an edge". A live one:
+#: `tests/stress/RUNBOOK.md` hand-transcribes `831_fill_timing_census.json`'s
+#: numbers into a markdown table, which is a recorded measurement under
+#: `tests/` that this never sees. Widening to `.md` would mean parsing prose
+#: for tables, so it stays out -- named here rather than left to be discovered
+#: the way 713 was.
+#:
+#: "Reads it and fails when it is wrong" is deliberately weaker than
+#: "re-derives every cell": four of these honestly do less, and say so.
+#:
+#: `test_553_recall_regen` re-derives 2 of 36 cells;
+#: `test_554_relocation_regen` re-derives the summary only;
+#: `test_803_calibration_claims` consumes its two files as the INPUT it holds
+#: `docs/placement-calibration.md` to; and
+#: `test_789_rule1_withdrawal` re-evaluates a rule over stored metrics. A map
+#: that claimed full re-derivation for all of them would be the kind of
+#: overstatement this file exists to catch.
+#:
+#: A baseline nothing re-derives is free to drift arbitrarily far from the tree
+#: while still reading as authoritative, and whoever eventually re-records it
+#: inherits every delta since the last recording as apparently their own. Not
+#: hypothetical: `713_abstention_census.json` drifted for four days, and the
+#: re-record was then published in a commit message AND a code comment as one
+#: change's effect. It was somebody else's.
+#:
+#: Declared rather than discovered, and held in BOTH directions like
+#: `_WK_DEPENDENT` above: a baseline missing from the map fails, and an entry
+#: naming a gate that does not exist -- or a gate that never mentions the file
+#: it claims to guard -- fails too. A registration nobody checks is how the
+#: #696 containment guard passed 28/28 while the thing it named had moved.
+_BASELINE_GATES = {
+    'tests/553_diagnosis_recall_baseline.json':
+        'tests/test_553_recall_regen.py',
+    'tests/554_block_relocation_baseline.json':
+        'tests/test_554_relocation_regen.py',
+    'tests/554_relocation_reach_baseline.json':
+        'tests/test_554_reach_regen.py',
+    'tests/713_abstention_census.json':
+        'tests/test_713_abstention_drift.py',
+    'tests/792_seeding_rows.jsonl':
+        'tests/test_792_seeding_claims.py',
+    'tests/799_feasibility_rows.jsonl':
+        'tests/test_799_feasibility_claims.py',
+    'tests/799_feasibility_summary.json':
+        'tests/test_799_feasibility_claims.py',
+    'tests/831_fill_timing_census.json':
+        'tests/test_831_fill_preflight_census.py',
+    'tests/placement_ab_baseline.json': 'tests/test_placement_ab.py',
+    'tests/placement_calibration_recovered.json':
+        'tests/test_803_calibration_claims.py',
+    'tests/placement_calibration_rows.json':
+        'tests/test_803_calibration_claims.py',
+    'tests/placement_rule1_withdrawal.json':
+        'tests/test_789_rule1_withdrawal.py',
+    'tests/data/714_identity_sha256.json':
+        'tests/test_714_identity_write_unchanged.py',
+}
+
+#: Committed baselines with NO gate, each with its reason. Being on this list
+#: is a DISCLOSURE, not an exemption -- see `_UNGATED_BASELINE_COUNT`.
+_BASELINE_UNGATED = {
+    'tests/797_seed_exclusive_baseline.json':
+        'no test names it; its own `reproduce` key carries a two-command '
+        'recipe, which is a recipe rather than a gate',
+    'tests/836_flip_vs_reseat_baseline.json':
+        'test_836_flip_census.py is a real gate on the two MECHANISMS the '
+        'answer rests on, but it re-derives them from the engine and never '
+        'opens this file, so the recorded verdict itself is unguarded',
+    'tests/measure_847_calibration.json':
+        'nothing references it; only measure_847_calibration.py is cited, in '
+        'docs/utilities.md and check_channels.py',
+    'tests/553_diagnosis_recall_rows.jsonl':
+        'ZERO references repo-wide -- 52 KB and 36 recorded rows that nothing '
+        'in the tree reads. test_553_recall_regen.py writes its OWN rows into '
+        'a temp workdir and never opens this one. The most exposed file in '
+        'the tree by this issue\'s own definition, and named here rather than '
+        'left to be discovered the way 713 was',
+    'tests/stress/corpus_noop_baseline.json':
+        'read by tests/stress/corpus_noop_sweep.py, which is not a test_*.py '
+        'and lives outside run_all.py the non-recursive glob',
+    'tests/stress/modal_sweep/board_value.json':
+        'a recorded measurement (`boards_scored: 148`) that is ALSO consumed '
+        'as sweep config, written by modal_sweep/curate_boards.py after a big '
+        'sweep. Nothing re-derives it',
+    'tests/stress/modal_sweep/retry_shape_2127.json':
+        'a per-board rescue-step census, cited as the frozen board list in '
+        'modal_sweep/PREREG_590_sets21_27.md. Nothing re-derives it',
+}
+
+#: A PINNED literal, never `len(_BASELINE_UNGATED)`. Deriving it from the map
+#: it guards would make this agree with whatever the map currently says, and
+#: the point is that another ungated baseline be a decision somebody takes
+#: rather than a line somebody adds.
+_UNGATED_BASELINE_COUNT = 7
+
+#: And the total the walk must CONSIDER. Without it the check goes vacuous in
+#: silence: widen an exclusion to `tests/` and every baseline disappears, while
+#: the map still holds its entries and the summary still prints PASS. Measured
+#: at `8816eab5`, which had no such literal: widening one exclusion to `tests/`
+#: printed a summary claiming ZERO baselines were considered and eleven were
+#: gated, and exited 0. Three numbers in one line, one of them contradicting
+#: the others, and nothing compared them. (Quoted as a shape rather than
+#: verbatim, because the print string has since been reworded and the counts
+#: have moved -- a "measured" line spliced from two versions is exactly what
+#: #879 is about.)
+_DECLARED_BASELINE_COUNT = 20
+
+#: Committed JSON/JSONL under `tests/` that is an INPUT, not a recorded
+#: measurement. Full-path regexes, each with its reason.
+#:
+#: Regexes rather than prefixes because a bare prefix widens silently:
+#: `tests/stress/manifest_set` also exempted a hypothetical
+#: `manifest_set_results_2026.json`, which would be a measurement. The pattern
+#: says what the shape actually is.
+_NOT_A_BASELINE = (
+    (r'tests/stress/manifest_set\d+(monster)?\.json$',
+     'stress-corpus manifests -- set1..set28 plus the three `monster` sets: '
+     'they name the boards to fetch and record nothing'),
+    (r'tests/stress/modal_sweep/arms\.[A-Za-z0-9_]+\.json$',
+     'sweep ARM configurations, an input to a study. Deliberately not the '
+     'whole modal_sweep/ directory: board_value.json and '
+     'retry_shape_2127.json in it are recorded measurements, and a directory '
+     'prefix quietly exempted both'),
+    (r'tests/fixtures/.*\.jsonl?$',
+     'fixture inputs a test feeds in, not measurements it took'),
+)
+
+
+def _names_in_live_code(src, needle):
+    """Does `needle` appear in a string this file actually EVALUATES?
+
+    `-> (answer, why_not)`, with `answer is None` when the file does not parse.
+
+    `_code_only` strips comments and the docstring in `body[0]`, which is the
+    right question for the path scanners above but not strong enough here: a
+    file whose ONLY mention is `__doc__ = "...I guard tests/x.json..."`, or a
+    second bare string statement after the real docstring, or an f-string used
+    as a statement, survived it -- and one such file, opening nothing and
+    asserting nothing, certified a baseline. So exclude every string used as a
+    STATEMENT (a bare string is never functional code, wherever it sits) and
+    every assignment to `__doc__`, and refuse a file that will not parse.
+
+    What this proves is that the registration is not PROSE. It does not prove
+    the gate is effective -- `note = 'x.json'` binds a name and nothing more,
+    and no static rule separates that from `ROWS = os.path.join(D, 'x.json')`.
+    That residual is why the map's own docstring claims "reads it and fails
+    when it is wrong" rather than anything stronger, and why the mutation
+    battery, not this check, is the evidence a gate can go red.
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None, 'it does not parse'
+    inert = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expr) and isinstance(node.value,
+                                                     (ast.Constant,
+                                                      ast.JoinedStr)):
+            inert.add(id(node.value))
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        if any(getattr(t, 'id', getattr(t, 'attr', None)) == '__doc__'
+               for t in targets) and node.value is not None:
+            inert.add(id(node.value))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in inert and needle in node.value):
+            return True, ''
+    return False, 'it names the file only in a docstring, a bare string or a '\
+                  '`__doc__` assignment, if at all'
+
+
+#: Directories the walk always skips, whatever git says about them.
+_ALWAYS_SKIP = ('__pycache__', '.pytest_cache')
+
+
+def _ignored_dirnames(dirpath):
+    """Directory names a `.gitignore` IN `dirpath` excludes from `dirpath`.
+
+    Only unambiguous entries -- a bare name, or `name/`. No globs, no `!`
+    negation, no embedded path. Anything this cannot parse is left IN the walk,
+    so an unhandled rule makes the check louder, never quieter.
+
+    This exists because `os.walk` sees gitignored OUTPUT directories, which
+    makes the result depend on which gates the machine has run.
+    `tests/gui_parity/.gitignore` holds `work/`, and both
+    `replay_plan_vs_run.py` and `test_gui_engine_parity.py` write `.json` into
+    it -- so on a tree where CLAUDE.md's own parity instructions have been
+    followed, this check went red about files git deliberately ignores. That is
+    the `_WK_DEPENDENT` defect class inverted, and "delete the scratch file" is
+    the wrong advice when the file is a gate's workdir.
+
+    STRICTLY LOCAL, and that is the correction to the first cut. It also read
+    the repo-root `.gitignore` and applied those 20 bare names -- `lib`,
+    `parts`, `var`, `build`, `dist`, `wk`, ... -- at EVERY level under tests/.
+    Measured: `git add -f tests/lib/probe_recorded_baseline.json` gave a
+    TRACKED file that `git check-ignore` says is not ignored, and this check
+    neither reported nor counted it, so `_DECLARED_BASELINE_COUNT` stayed
+    green too. Git's ignore rules never apply to tracked files; a name-matcher
+    has no way to know that, so it does not get to guess. A `.gitignore` next
+    to the directory it names is the only claim specific enough to act on.
+    """
+    out = set()
+    path = os.path.join(dirpath, '.gitignore')
+    if not os.path.isfile(path):
+        return out
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('!'):
+                continue
+            name = line.rstrip('/')
+            if name and not set(name) & set('/*?[]'):
+                out.add(name)
+    return out
+
+
+def test_every_committed_baseline_is_declared():
+    """A committed baseline is either re-derived by a test, or says why not.
+
+    Three failures, each meaning something different:
+
+      unlisted -- a new baseline arrived and nobody decided how it stays
+                  honest. (Or a scratch .json is sitting in tests/, which is
+                  also worth being told about.)
+      stale    -- the map names a gate that does not exist, or one that never
+                  mentions the file it claims to guard. Both are worse than no
+                  map: they certify nothing while looking like they do.
+      count    -- the number of UNGATED baselines moved and nobody re-stated
+                  it.
+    """
+    problems = []
+    for path, gate in sorted(_BASELINE_GATES.items()):
+        if not os.path.isfile(os.path.join(ROOT, path)):
+            problems.append(f'{path}: registered, but the file is gone')
+            continue
+        gate_full = os.path.join(ROOT, gate)
+        if not os.path.isfile(gate_full):
+            problems.append(f'{path}: its gate {gate} does not exist')
+            continue
+        # A gate must be a TEST, under tests/, named so `run_all`'s glob can
+        # find it. Without this, any file in the repo that happens to contain
+        # the basename qualifies -- and a docs page did.
+        if not (gate.startswith('tests/')
+                and os.path.basename(gate).startswith('test_')
+                and gate.endswith('.py')):
+            problems.append(
+                f'{path}: its gate {gate} is not a tests/**/test_*.py, so '
+                f'nothing runs it as a gate')
+            continue
+        # THIS file can never be the gate. It names every baseline -- that is
+        # what a registry is -- so the "does the gate mention it" check below
+        # is satisfied trivially by pointing an entry here, and the entry then
+        # certifies nothing. Found by mutating an entry to do exactly that and
+        # watching the row survive.
+        if os.path.abspath(gate_full) == os.path.abspath(__file__):
+            problems.append(
+                f'{path}: registered against this registry, which declares '
+                f'every baseline and re-derives none. Name the test that '
+                f're-computes it, or move it to _BASELINE_UNGATED')
+            continue
+        # The gate must NAME the file. A pairing nobody checks survives the
+        # gate being rewritten to guard something else entirely.
+        with open(gate_full, encoding='utf-8', errors='replace') as fh:
+            src = fh.read()
+        # The gate must name the file in CODE it evaluates. Measured, all
+        # three of these registered a gate that certifies nothing and a raw
+        # substring test accepted every one: `test_789_slate_harness.py` names
+        # `placement_rule1_withdrawal.json` in its module docstring, and
+        # `reseat.py` and `docs/placement-optimization.md` name
+        # `836_flip_vs_reseat_baseline.json` in a docstring and in prose.
+        # Comments are the other half of the same trap -- a comment quoting
+        # code has satisfied a source-grep test in this repo before.
+        live, why_not = _names_in_live_code(src, os.path.basename(path))
+        if not live:
+            problems.append(
+                f'{path}: {gate} cannot support the registration -- '
+                f'{why_not}. Prose is not a gate; name the file in code '
+                f'that reads it')
+
+    for path, reason in sorted(_BASELINE_UNGATED.items()):
+        if not os.path.isfile(os.path.join(ROOT, path)):
+            problems.append(f'{path}: listed as ungated, but the file is gone')
+        if not (reason or '').strip():
+            problems.append(f'{path}: listed as ungated with no reason given')
+
+    for pattern, why in _NOT_A_BASELINE:
+        if not (why or '').strip():
+            problems.append(f'{pattern}: excluded with no reason given. An '
+                            f'exclusion is a claim like any other')
+
+    declared = set(_BASELINE_GATES) | set(_BASELINE_UNGATED)
+    both = set(_BASELINE_GATES) & set(_BASELINE_UNGATED)
+    if both:
+        problems.append(f'listed as both gated and ungated: {sorted(both)}')
+
+    # .jsonl too, and case-insensitively. The first cut matched `.json` only,
+    # and three committed .jsonl measurements were invisible to it -- one of
+    # them, `553_diagnosis_recall_rows.jsonl`, with zero references repo-wide.
+    # A registry that cannot see the most exposed file in the tree is the #879
+    # bug wearing a green tick.
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
+        skip = set(_ALWAYS_SKIP) | _ignored_dirnames(dirpath)
+        dirnames[:] = [d for d in sorted(dirnames) if d not in skip]
+        for fname in sorted(filenames):
+            if not fname.lower().endswith(('.json', '.jsonl')):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fname),
+                                  ROOT).replace(os.sep, '/')
+            if any(re.fullmatch(pat, rel) for pat, _why in _NOT_A_BASELINE):
+                continue
+            seen.add(rel)
+            if rel not in declared:
+                problems.append(
+                    f'{rel}: a committed baseline nothing declares. Register '
+                    f'it against the test that re-derives it, or in '
+                    f'_BASELINE_UNGATED with the reason it has none. (A '
+                    f'scratch file? Delete it.)')
+
+    # The other direction, and the reason the count below can be trusted: a
+    # declared entry the walk never REACHES is a dead registration. `isfile`
+    # does not catch it -- widen an exclusion to cover a listed baseline and
+    # the entry stays green while guarding a file nothing looks at any more.
+    for rel in sorted(declared - seen):
+        problems.append(
+            f'{rel}: declared, but the walk never reaches it. Either it is '
+            f'outside tests/, or a _NOT_A_BASELINE pattern now swallows it -- '
+            f'so its registration guards nothing')
+
+    if len(_BASELINE_UNGATED) != _UNGATED_BASELINE_COUNT:
+        problems.append(
+            f'_UNGATED_BASELINE_COUNT says {_UNGATED_BASELINE_COUNT}, the map '
+            f'holds {len(_BASELINE_UNGATED)}. Re-state the literal '
+            f'deliberately -- an ungated baseline is a decision, not a line')
+    if len(seen) != _DECLARED_BASELINE_COUNT:
+        # Name the DIRECTION. The two cases have opposite remedies, and a
+        # message that assumes the shrinking one sends a reader hunting for an
+        # exclusion that does not exist.
+        if len(seen) < _DECLARED_BASELINE_COUNT:
+            why = ('a SHRINKING scope is how this check goes vacuous while '
+                   'still printing PASS -- find the exclusion or the pruned '
+                   'directory that swallowed one')
+        else:
+            why = ('the scope GREW -- a baseline arrived, so re-state the '
+                   'literal once you have registered it')
+        problems.append(
+            f'_DECLARED_BASELINE_COUNT says {_DECLARED_BASELINE_COUNT}, the '
+            f'walk considered {len(seen)}. {why}')
+
+    assert not problems, ('committed-baseline registry:\n  '
+                          + '\n  '.join(problems))
+    print(f'  PASS: {len(seen)} committed baseline(s) declared -- '
+          f'{len(_BASELINE_GATES)} read by a named gate, '
+          f'{len(_BASELINE_UNGATED)} ungated with a stated reason')
+
+
 TESTS = [
     test_wk_dependent_tests_are_declared,
     test_no_test_spawns_a_script_that_moved,
@@ -565,6 +932,7 @@ TESTS = [
     test_no_module_scope_posix_only_import,
     test_no_test_is_defined_after_its_own_runner,
     test_every_test_is_registered_in_its_files_own_list,
+    test_every_committed_baseline_is_declared,
 ]
 
 
