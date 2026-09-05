@@ -15,6 +15,12 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+#: run_utils is imported for the TRACKED corpus (see `_corpus`),
+#: which would otherwise mark this file integration and drop it
+#: from `--fast`. These checks spawn nothing.
+RUN_ALL_FAST_OK = True
 
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
@@ -30,12 +36,30 @@ def _grade(board, **kw):
                               pcb_file=board, **kw)
 
 
+
+#: The TRACKED corpus, not a glob of `kicad_files/`.
+#:
+#: The glob is not deterministic: other tests generate boards into that
+#: directory and they are gitignored, so `git status` stays clean while the
+#: count moves. Measured on one tree, one commit, minutes apart -- 22 boards
+#: before a suite run and 32 after, which took the `fab_unjudged` census below
+#: from 140 to 154 with nothing in the repo having changed. The four sweeps
+#: here were defined after this file's own runner (#876) and had never run, so
+#: nothing reported it.
+#:
+#: `run_utils.corpus_boards()` shells `git ls-files`, which is why
+#: `RUN_ALL_FAST_OK` is declared above: the run_utils import would otherwise
+#: classify this file as integration and `--fast` would stop running it.
+def _corpus():
+    import run_utils
+    return run_utils.corpus_boards()
+
+
 class TestCorpusCalibration(unittest.TestCase):
     def test_all_healthy_boards_grade_zero_blocking(self):
         """THE calibration gate: pad_intersection must be 0 on every corpus
         board, or the channel may not gate anywhere (run-6 invariant)."""
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
+        boards = _corpus()
         # The TRACKED corpus is 22 boards; generated fixture chains add more on a
         # developed tree. Guard against an empty or half-checked-out corpus, not
         # against the generated surplus (a fresh clone has exactly 22).
@@ -279,8 +303,7 @@ class TestContainment(unittest.TestCase):
         """0 boards may gate. The only corpus containments are orangecrab's
         FID2/J5 (frac 1.000) and FID1/J4 (0.867), both marker_class and both
         correct -- fiducials under a connector body."""
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
+        boards = _corpus()
         # 22, not 30. The floor is an anti-vacuity guard -- a sweep
         # over an empty glob passes every assertion below it -- and it
         # was written when kicad_files/ held 30+ boards. The corpus is
@@ -325,8 +348,7 @@ class TestContainment(unittest.TestCase):
         is a FALLBACK body for bodyless parts: measured, that adds 77 fab
         pairs, 65 above the threshold, and breaks the calibration gate below.
         """
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
+        boards = _corpus()
         # 22, not 30. The floor is an anti-vacuity guard -- a sweep
         # over an empty glob passes every assertion below it -- and it
         # was written when kicad_files/ held 30+ boards. The corpus is
@@ -354,8 +376,7 @@ class TestContainment(unittest.TestCase):
         conclusion has to be revisited.
         """
         from placement.parser import extract_fab_sides
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
+        boards = _corpus()
         # 22, not 30. The floor is an anti-vacuity guard -- a sweep
         # over an empty glob passes every assertion below it -- and it
         # was written when kicad_files/ held 30+ boards. The corpus is
@@ -391,8 +412,7 @@ class TestContainment(unittest.TestCase):
         poses on 12% of the corpus -- the run-4 lesson in a new costume.
         """
         from placement.legality import CONTAINMENT_FRAC
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
+        boards = _corpus()
         # 22, not 30. The floor is an anti-vacuity guard -- a sweep
         # over an empty glob passes every assertion below it -- and it
         # was written when kicad_files/ held 30+ boards. The corpus is
