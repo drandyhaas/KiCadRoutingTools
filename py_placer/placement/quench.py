@@ -70,13 +70,21 @@ EPS_IMPROVE = 1e-6
 #: re-typing it: a rule added here enters the A/B signal automatically, and a
 #: rule removed to flatter a row trips a test rather than passing quietly.
 #:
-#: The other six floorplan rules are deliberately absent, each for its own
+#: The other NINE floorplan rules are deliberately absent, each for its own
 #: reason -- `must_lock` and `edge_connector` are enforced by FREEZING the ref
 #: (no pose satisfies or violates them), `zone_side` is invariant under every
-#: move this engine can make, `envelope` is a claim about the intent file,
+#: move this engine can make and `assembly_side` (#837) is invariant for the
+#: same reason one level up, `envelope` is a claim about the intent file,
 #: `decap_distance` is graded in a currency this engine does not carry (pad
-#: centroid to an inflated pad bbox, not courtyard to courtyard), and
-#: `legality` is a whole-board budget rather than a per-pose predicate.
+#: centroid to an inflated pad bbox, not courtyard to courtyard),
+#: `decap_ungraded` and `decap_pin_distance` are claims about what the GRADE
+#: covers rather than about any pose, and `legality` is a whole-board budget
+#: rather than a per-pose predicate.
+#:
+#: The count said "six" and named six while nine were absent: `decap_ungraded`
+#: (#794) and `decap_pin_distance` (#705) arrived without being added here, and
+#: #837 made it three. Stated as a number AND an enumeration so the next
+#: addition is visibly missing from both.
 INTENT_ENFORCED_RULES = ('zone_containment', 'zone_exclusive', 'keepout')
 
 
