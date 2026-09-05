@@ -384,6 +384,9 @@ TESTS = [
     test_the_summary_carries_the_keys_a_caller_branches_on,
     test_the_full_json_carries_the_measured_numbers,
     test_emit_writes_no_board_and_touches_nothing,
+    # Defined but never registered, so never run (#876):
+    test_a_round_board_now_grades_normally,
+    test_grading_knobs_resolve_from_the_board_and_are_disclosed,
 ]
 
 

@@ -15,6 +15,12 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+#: run_utils is imported for the TRACKED corpus (see `_corpus`),
+#: which would otherwise mark this file integration and drop it
+#: from `--fast`. These checks spawn nothing.
+RUN_ALL_FAST_OK = True
 
 sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # placement split
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # placement split
@@ -30,12 +36,30 @@ def _grade(board, **kw):
                               pcb_file=board, **kw)
 
 
+
+#: The TRACKED corpus, not a glob of `kicad_files/`.
+#:
+#: The glob is not deterministic: other tests generate boards into that
+#: directory and they are gitignored, so `git status` stays clean while the
+#: count moves. Measured on one tree, one commit, minutes apart -- 22 boards
+#: before a suite run and 32 after, which took the `fab_unjudged` census below
+#: from 140 to 154 with nothing in the repo having changed. The four sweeps
+#: here were defined after this file's own runner (#876) and had never run, so
+#: nothing reported it.
+#:
+#: `run_utils.corpus_boards()` shells `git ls-files`, which is why
+#: `RUN_ALL_FAST_OK` is declared above: the run_utils import would otherwise
+#: classify this file as integration and `--fast` would stop running it.
+def _corpus():
+    import run_utils
+    return run_utils.corpus_boards()
+
+
 class TestCorpusCalibration(unittest.TestCase):
     def test_all_healthy_boards_grade_zero_blocking(self):
         """THE calibration gate: pad_intersection must be 0 on every corpus
         board, or the channel may not gate anywhere (run-6 invariant)."""
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
+        boards = _corpus()
         # The TRACKED corpus is 22 boards; generated fixture chains add more on a
         # developed tree. Guard against an empty or half-checked-out corpus, not
         # against the generated surplus (a fresh clone has exactly 22).
@@ -171,8 +195,6 @@ class TestIntentKey(unittest.TestCase):
             floorplan.load_intent(p)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestContainment(unittest.TestCase):
@@ -281,9 +303,13 @@ class TestContainment(unittest.TestCase):
         """0 boards may gate. The only corpus containments are orangecrab's
         FID2/J5 (frac 1.000) and FID1/J4 (0.867), both marker_class and both
         correct -- fiducials under a connector body."""
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        boards = _corpus()
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         gating = {os.path.basename(b): [(q.a, q.b, q.waiver)
                                         for q in _grade(b)['containment_blocking_pairs']]
                   for b in boards}
@@ -299,11 +325,19 @@ class TestContainment(unittest.TestCase):
         self.assertEqual(len(g['fab_unjudged_refs']), g['fab_unjudged'])
 
     def test_the_bodyless_hole_is_exactly_what_was_measured(self):
-        """144 of 1583 footprints draw no .Fab body, and that is the FINAL
-        answer, not a TODO.
+        """140 footprints draw no .Fab body, and that is the FINAL answer,
+        not a TODO.
 
-        Measured over all 33 boards: every one of those 144 draws ZERO .Fab
-        geometric primitives -- there is no footprint whose .Fab geometry the
+        It was 144 over 33 boards. The count is a census of whatever
+        `kicad_files/` holds, and as the next test says, the generated
+        fixtures that made up 11 of those 33 come and go -- the corpus is 22
+        tracked boards now. This test was defined after this file's own
+        runner (#876), so it never ran and the drift was never reported. The
+        INVARIANT below, which does not depend on corpus membership, is the
+        claim that actually licenses the conclusion.
+
+        Measured over the boards present: every one of those 140 draws ZERO
+        .Fab geometric primitives -- there is no footprint whose .Fab geometry the
         parser fails to read. So a tolerance or polygon-closure fix moves
         nothing (313 footprints DO have non-closing .Fab chains, tigard Q1
         among them, and all 313 are judged correctly because a bbox is a
@@ -314,11 +348,15 @@ class TestContainment(unittest.TestCase):
         is a FALLBACK body for bodyless parts: measured, that adds 77 fab
         pairs, 65 above the threshold, and breaks the calibration gate below.
         """
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        boards = _corpus()
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         total_unjudged = sum(_grade(b)['fab_unjudged'] for b in boards)
-        self.assertEqual(total_unjudged, 144,
+        self.assertEqual(total_unjudged, 140,
                          f'corpus fab_unjudged moved to {total_unjudged}; if '
                          f'that was deliberate, re-measure the 4-pair census '
                          f'below and this number together')
@@ -338,9 +376,13 @@ class TestContainment(unittest.TestCase):
         conclusion has to be revisited.
         """
         from placement.parser import extract_fab_sides
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        boards = _corpus()
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         readable, checked = [], 0
         for b in boards:
             sides = extract_fab_sides(b)
@@ -370,9 +412,13 @@ class TestContainment(unittest.TestCase):
         poses on 12% of the corpus -- the run-4 lesson in a new costume.
         """
         from placement.legality import CONTAINMENT_FRAC
-        boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
-                                               '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        boards = _corpus()
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         census = []
         for b in boards:
             for p in _grade(b)['pairs']:
@@ -383,3 +429,7 @@ class TestContainment(unittest.TestCase):
         offenders = [c for c in census
                      if c[3] >= CONTAINMENT_FRAC and not c[4]]
         self.assertEqual(offenders, [], offenders)
+
+
+if __name__ == '__main__':
+    unittest.main()
