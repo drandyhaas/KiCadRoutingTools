@@ -577,35 +577,6 @@ def test_negative_screen_is_rejected():
     raise AssertionError("--ratsnest-screen -1 must be rejected")
 
 
-TESTS = [
-    test_swap_cap_held_while_displacement_widens,
-    test_swap_cap_held_when_quench_finds_nothing,
-    test_swap_cap_flag_overrides_the_base,
-    test_rotate_and_swap_flags_reach_quench,
-    test_kwargs_match_the_real_quench_signature,
-    test_swap_cap_above_displacement_is_rejected,
-    test_reconciliation_recoveries_are_not_counted_as_failures,
-    test_effort_counters_are_summed_across_passes,
-    test_blockers_are_unioned_across_both_passes,
-    test_pad_pairs_keep_the_whole_board_denominator,
-    test_pad_pairs_survive_a_sub_run_without_the_keys,
-    test_empty_structured_blockers_do_not_regress_to_the_regex,
-    test_blockers_filtered_to_still_failed_when_sub_run_omits_the_key,
-    test_single_summary_run_is_unchanged,
-    test_a_net_the_reconciliation_broke_is_reported_and_weighed,
-    test_aborted_reconciliation_falls_back_to_the_first_summary,
-    test_reconciliation_without_a_summary_degrades_to_the_first,
-    test_merge_returns_none_without_a_summary,
-    test_route_py_is_invoked_by_absolute_path_in_utf8_mode,
-    test_nonzero_exit_raises_and_names_the_real_error,
-    test_missing_summary_raises_with_the_log_tail,
-    test_screen_skips_the_routing_run_on_a_regressed_candidate,
-    test_screen_off_by_default_routes_every_candidate,
-    test_screen_lets_an_improving_candidate_through,
-    test_screen_is_inert_when_quench_reports_nothing,
-    test_loop_passes_metrics_out_to_quench,
-    test_negative_screen_is_rejected,
-]
 
 
 
@@ -635,6 +606,40 @@ def test_target_nets_gives_the_loop_something_to_move_on_a_clean_board():
         extra_targets=['QSPI_SD0', 'QSPI_SD3'])
     assert m2['failed_nets'] == ['QSPI_SD0', 'QSPI_SD3'], m2['failed_nets']
     print("  PASS: --target-nets seeds the move set, leaves the failure count alone")
+
+
+TESTS = [
+    test_swap_cap_held_while_displacement_widens,
+    test_swap_cap_held_when_quench_finds_nothing,
+    test_swap_cap_flag_overrides_the_base,
+    test_rotate_and_swap_flags_reach_quench,
+    test_kwargs_match_the_real_quench_signature,
+    test_swap_cap_above_displacement_is_rejected,
+    test_reconciliation_recoveries_are_not_counted_as_failures,
+    test_effort_counters_are_summed_across_passes,
+    test_blockers_are_unioned_across_both_passes,
+    test_pad_pairs_keep_the_whole_board_denominator,
+    test_pad_pairs_survive_a_sub_run_without_the_keys,
+    test_empty_structured_blockers_do_not_regress_to_the_regex,
+    test_blockers_filtered_to_still_failed_when_sub_run_omits_the_key,
+    test_single_summary_run_is_unchanged,
+    test_a_net_the_reconciliation_broke_is_reported_and_weighed,
+    test_aborted_reconciliation_falls_back_to_the_first_summary,
+    test_reconciliation_without_a_summary_degrades_to_the_first,
+    test_merge_returns_none_without_a_summary,
+    test_route_py_is_invoked_by_absolute_path_in_utf8_mode,
+    test_nonzero_exit_raises_and_names_the_real_error,
+    test_missing_summary_raises_with_the_log_tail,
+    test_screen_skips_the_routing_run_on_a_regressed_candidate,
+    test_screen_off_by_default_routes_every_candidate,
+    test_screen_lets_an_improving_candidate_through,
+    test_screen_is_inert_when_quench_reports_nothing,
+    test_loop_passes_metrics_out_to_quench,
+    test_negative_screen_is_rejected,
+    # Defined below this list and never registered (#876):
+    test_target_nets_gives_the_loop_something_to_move_on_a_clean_board,
+]
+
 
 if __name__ == '__main__':
     for fn in TESTS:

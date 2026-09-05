@@ -152,8 +152,6 @@ class TestB3GradedAtAlways(unittest.TestCase):
             self.assertEqual(bs._graded_at(r.stdout), 0.15)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestRun5RemainingBanners(unittest.TestCase):
@@ -182,3 +180,7 @@ class TestRun5RemainingBanners(unittest.TestCase):
                 self.assertTrue(r.stdout.startswith('CMD: '),
                                 f'{tool}: {r.stdout[:120]!r}')
                 self.assertIn('EXIT=', r.stdout)
+
+
+if __name__ == '__main__':
+    unittest.main()

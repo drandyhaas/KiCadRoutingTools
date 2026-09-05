@@ -171,8 +171,6 @@ class TestIntentKey(unittest.TestCase):
             floorplan.load_intent(p)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestContainment(unittest.TestCase):
@@ -283,7 +281,12 @@ class TestContainment(unittest.TestCase):
         correct -- fiducials under a connector body."""
         boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
                                                '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         gating = {os.path.basename(b): [(q.a, q.b, q.waiver)
                                         for q in _grade(b)['containment_blocking_pairs']]
                   for b in boards}
@@ -299,11 +302,19 @@ class TestContainment(unittest.TestCase):
         self.assertEqual(len(g['fab_unjudged_refs']), g['fab_unjudged'])
 
     def test_the_bodyless_hole_is_exactly_what_was_measured(self):
-        """144 of 1583 footprints draw no .Fab body, and that is the FINAL
-        answer, not a TODO.
+        """140 footprints draw no .Fab body, and that is the FINAL answer,
+        not a TODO.
 
-        Measured over all 33 boards: every one of those 144 draws ZERO .Fab
-        geometric primitives -- there is no footprint whose .Fab geometry the
+        It was 144 over 33 boards. The count is a census of whatever
+        `kicad_files/` holds, and as the next test says, the generated
+        fixtures that made up 11 of those 33 come and go -- the corpus is 22
+        tracked boards now. This test was defined after this file's own
+        runner (#876), so it never ran and the drift was never reported. The
+        INVARIANT below, which does not depend on corpus membership, is the
+        claim that actually licenses the conclusion.
+
+        Measured over the boards present: every one of those 140 draws ZERO
+        .Fab geometric primitives -- there is no footprint whose .Fab geometry the
         parser fails to read. So a tolerance or polygon-closure fix moves
         nothing (313 footprints DO have non-closing .Fab chains, tigard Q1
         among them, and all 313 are judged correctly because a bbox is a
@@ -316,9 +327,14 @@ class TestContainment(unittest.TestCase):
         """
         boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
                                                '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         total_unjudged = sum(_grade(b)['fab_unjudged'] for b in boards)
-        self.assertEqual(total_unjudged, 144,
+        self.assertEqual(total_unjudged, 140,
                          f'corpus fab_unjudged moved to {total_unjudged}; if '
                          f'that was deliberate, re-measure the 4-pair census '
                          f'below and this number together')
@@ -340,7 +356,12 @@ class TestContainment(unittest.TestCase):
         from placement.parser import extract_fab_sides
         boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
                                                '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         readable, checked = [], 0
         for b in boards:
             sides = extract_fab_sides(b)
@@ -372,7 +393,12 @@ class TestContainment(unittest.TestCase):
         from placement.legality import CONTAINMENT_FRAC
         boards = sorted(glob.glob(os.path.join(ROOT, 'kicad_files',
                                                '*.kicad_pcb')))
-        self.assertGreaterEqual(len(boards), 30)
+        # 22, not 30. The floor is an anti-vacuity guard -- a sweep
+        # over an empty glob passes every assertion below it -- and it
+        # was written when kicad_files/ held 30+ boards. The corpus is
+        # 22 tracked now, and these four tests were defined after this
+        # file's own runner (#876) so nothing ever reported the drift.
+        self.assertGreaterEqual(len(boards), 22)
         census = []
         for b in boards:
             for p in _grade(b)['pairs']:
@@ -383,3 +409,7 @@ class TestContainment(unittest.TestCase):
         offenders = [c for c in census
                      if c[3] >= CONTAINMENT_FRAC and not c[4]]
         self.assertEqual(offenders, [], offenders)
+
+
+if __name__ == '__main__':
+    unittest.main()

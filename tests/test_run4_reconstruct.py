@@ -161,8 +161,6 @@ class TestF5FullCensus(unittest.TestCase):
             self.assertIn('all listed', r.stdout)
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 
 class TestF2EdgeBands(unittest.TestCase):
@@ -368,3 +366,7 @@ class TestRepairEdgeSeating(unittest.TestCase):
             pcb = parse_kicad_pcb(out)
             j1 = pcb.footprints['J1']
             self.assertLess(j1.x, 34.0, 'J1 must end at the west edge')
+
+
+if __name__ == '__main__':
+    unittest.main()
