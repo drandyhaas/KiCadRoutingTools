@@ -168,13 +168,25 @@ for how they fit together.
   `precompute_all_net_obstacles` build `NetObstacleData`;
   `add_net_obstacles_from_cache` / `remove_net_obstacles_from_cache` /
   `update_net_obstacles_after_routing` keep a working map in sync cell-for-cell
-  (ref-counted). `precompute_via_placement_obstacles` does the same for via
-  placement. `KICAD_OBSTACLE_LEDGER=1` audits add/remove balance via
-  `run_obstacle_audit` / `obstacle_ledger_report`.
+  (ref-counted); `refresh_net_obstacles(working, cache, pcb_data, config,
+  net_ids)` is the remove -> recompute -> add cycle every commit, rip and
+  restore must run for the nets it touched (#806: the diff-pair engine's
+  commit sites go through it). `precompute_via_placement_obstacles` does the
+  same for via placement. `KICAD_OBSTACLE_LEDGER=1` audits add/remove balance
+  via `run_obstacle_audit` / `obstacle_ledger_report`; with `pcb_data` and
+  `config` the audit also runs `run_obstacle_content_audit`, which recomputes
+  every cached net from the board and counts the cells the map should block
+  but does not -- the invariant ref-count balance cannot see.
 
 - **`fab_tiers`** — JLCPCB fab-capability floors as selectable cost tiers
   (issue #237). `fab_floor_ladder` / `fab_floors` / `fab_floor_for_param` give
-  the minimum manufacturable value per parameter for a tier;
+  the minimum manufacturable value per parameter for a tier; `fab_floor_bucket`
+  reports WHICH layer bucket a floor came from, so a consumer comparing two
+  layer counts can tell "the floor does not move" from "this table cannot see
+  the difference" (#700); `count_copper_layers_in_file` /
+  `count_copper_layers_in_data` count copper layers from a path or from a
+  parsed board; `min_via_center_distance` is the one #491 via-pitch rule
+  (copper AND drill);
   `enforce_fab_floors` / `check_param_floors` clamp or reject below-floor
   params; `add_fab_tier_args` + `fab_tier_from_args` /
   `set_fab_tier_from_config` thread the tier through the CLI and GUI;

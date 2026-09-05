@@ -46,7 +46,19 @@ def test_writeback_loosens_project():
         assert rules["min_track_width"] == 0.1, rules
         dflt = next(c for c in proj["net_settings"]["classes"]
                     if c.get("name") == "Default")
-        assert dflt["clearance"] == 0.1 and dflt["diff_pair_gap"] == 0.1, dflt
+        # #842 (came in with the main sync): a routing step writes ONLY
+        # `clearance` onto the class. track_width / via_* / diff_pair_* are
+        # DRAW DEFAULTS, and lowering them was the ratchet that walked a
+        # board's stock geometry down one terminal segment at a time. The
+        # gap/width kwargs above are still accepted for signature
+        # compatibility and deliberately ignored, so the stock 0.25 must
+        # survive -- asserted rather than dropped, so this stays a change
+        # detector for the ratchet in BOTH directions.
+        assert dflt["clearance"] == 0.1, dflt
+        assert dflt["diff_pair_gap"] == 0.25, (
+            "the #842 ratchet is back: a routing step lowered the Default "
+            "class's diff_pair_gap, which is a draw default, not a floor: "
+            f"{dflt}")
         print("PASS writeback_loosens_project")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

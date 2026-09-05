@@ -74,6 +74,26 @@ def _pad_holds(pad, x: float, y: float, margin: float = 0.0) -> bool:
     return point_to_pad_distance(x, y, pad) <= margin
 
 
+def via_overlaps_pad(pad, via_x: float, via_y: float, via_size: float,
+                     margin: float = 0.0) -> bool:
+    """Does a via's BARREL overlap this pad's copper? (#846)
+
+    The public form of ``_pad_holds``, with the barrel radius applied for the
+    caller. This is the question "is this via in that pad" actually means, and
+    it is asked in two places that used to disagree: here, for the IPC-4761 fab
+    note, and in ``qfn_fanout``'s commit loop, which decides whether to clamp
+    the via to its pad edge (#202). The commit loop used to ask a 0.001mm
+    CENTRE-coincidence question instead, so a via staggered onto its own pad
+    was reported by this module as needing Type VII while shipping unclamped.
+
+    ``via_size`` of 0 or None claims the 0.6 default's radius, as every other
+    consumer of a size-less via in this repo does. ``margin`` is a FLOOR on the
+    credit, not a replacement for it -- see ``via_in_pad_sites``.
+    """
+    vr = (via_size if via_size else 0.6) / 2.0
+    return _pad_holds(pad, via_x, via_y, max(vr - 1e-6, margin))
+
+
 def via_in_pad_sites(vias, pads_by_net: Dict[int, list],
                      margin: float = 0.0) -> List[Tuple[object, object]]:
     """[(via, pad)] for every via whose BARREL overlaps a SAME-NET pad.
@@ -111,11 +131,11 @@ def via_in_pad_sites(vias, pads_by_net: Dict[int, list],
             continue
         # A via with no declared size claims the 0.6 default's radius, as
         # every other consumer of a size-less via in this repo does.
-        vr = (_get(via, 'size', 0.6) or 0.6) / 2.0
+        vsz = _get(via, 'size', 0.6)
         for pad in pads_by_net.get(net_id, ()) or ():
             if _get(pad, 'drill', 0.0) or 0.0:
                 continue  # a plated TH pad's own barrel is not via-in-pad
-            if _pad_holds(pad, vx, vy, max(vr - 1e-6, margin)):
+            if via_overlaps_pad(pad, vx, vy, vsz, margin):
                 sites.append((via, pad))
                 break
     return sites

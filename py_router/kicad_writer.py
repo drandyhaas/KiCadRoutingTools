@@ -1425,14 +1425,18 @@ def remove_segments_from_content(content: str, segments: List,
     if not segments:
         return content, 0
 
-    # #369 A1: gate on the net-token format the file ACTUALLY uses, like
-    # the caller (output_writer) does -- a pre-2025 header board that a
-    # previous pass round-tripped already carries (net "name") refs, and
-    # the old is_kicad_10 (header-only) gate made every strip a silent
-    # no-op there: ripped copper shipped alongside its replacement
-    # (stacked same-net drills; the #163/#344 stale-guard family).
-    from kicad_parser import board_uses_name_nets
-    use_names = net_id_to_name is not None and board_uses_name_nets(content)
+    # Net tokens are resolved PER BLOCK, in whichever dialect that block
+    # uses -- never from a file-level gate. The #369 A1 gate (match by the
+    # format the file "uses") still assumed a HOMOGENEOUS file; a MIXED-
+    # dialect board -- which this repo's own chain produces (#748/#749:
+    # segments `(net 6)` beside name-ref pads) -- reads as name-style, so
+    # every numeric segment block silently evaded the strip. Measured on
+    # the #622 bench: a force-rerouted net's stale input diagonal shipped
+    # verbatim and CROSSED the net routed into its vacated corridor (a
+    # hard short at (128.6, 64.2), the route.py same-call-shorts class).
+    # Both a numeric and a name ref now canonicalize to the same key.
+    def _canon(nid):
+        return net_id_to_name.get(nid, nid) if net_id_to_name else nid
 
     def seg_key(p1, p2, layer, net_token):
         return (frozenset((p1, p2)), layer, net_token)
@@ -1445,9 +1449,8 @@ def remove_segments_from_content(content: str, segments: List,
     targets = Counter()
     by_key = {}
     for s in segments:
-        net_token = (net_id_to_name.get(s.net_id) if use_names else s.net_id)
         k = seg_key(pos_key(s.start_x, s.start_y),
-                    pos_key(s.end_x, s.end_y), s.layer, net_token)
+                    pos_key(s.end_x, s.end_y), s.layer, _canon(s.net_id))
         targets[k] += 1
         by_key.setdefault(k, []).append(s)
 
@@ -1493,17 +1496,17 @@ def remove_segments_from_content(content: str, segments: List,
         ms, me, ml = start_re.search(block), end_re.search(block), layer_re.search(block)
         keep = True
         if ms and me and ml:
-            if use_names:
-                mn = net_name_re.search(block)
+            mn = net_name_re.search(block)
+            if mn:
                 # The file stores the ESCAPED name (backslash doubled, quote
                 # backslashed); targets use the parser's unescaped name. Undo
                 # the escapes or every backslash-named net silently evades the
                 # strip and its stale copper ships (neo6502 /GPIO*\* nets,
                 # found by the FILE_LEDGER audit -- #312/#264 family).
-                net_token = _unescape_kicad_string(mn.group(1)) if mn else None
+                net_token = _unescape_kicad_string(mn.group(1))
             else:
-                mn = net_id_re.search(block)
-                net_token = int(mn.group(1)) if mn else None
+                mi = net_id_re.search(block)
+                net_token = _canon(int(mi.group(1))) if mi else None
             key = seg_key(pos_key(float(ms.group(1)), float(ms.group(2))),
                           pos_key(float(me.group(1)), float(me.group(2))),
                           ml.group(1), net_token)
@@ -1540,14 +1543,12 @@ def remove_vias_from_content(content: str, vias: List,
     if not vias:
         return content, 0
 
-    # #369 A1: gate on the net-token format the file ACTUALLY uses, like
-    # the caller (output_writer) does -- a pre-2025 header board that a
-    # previous pass round-tripped already carries (net "name") refs, and
-    # the old is_kicad_10 (header-only) gate made every strip a silent
-    # no-op there: ripped copper shipped alongside its replacement
-    # (stacked same-net drills; the #163/#344 stale-guard family).
-    from kicad_parser import board_uses_name_nets
-    use_names = net_id_to_name is not None and board_uses_name_nets(content)
+    # Net tokens resolved PER BLOCK in either dialect -- see the segment
+    # twin above for the mixed-dialect hole this closes (#748/#749 boards:
+    # numeric refs on copper beside name refs elsewhere read as name-style,
+    # so every numeric block evaded the strip).
+    def _canon(nid):
+        return net_id_to_name.get(nid, nid) if net_id_to_name else nid
 
     # Counted multiset like the segment strip (#318 follow-up): only remove as
     # many blocks per key as were actually strip-listed.
@@ -1555,8 +1556,7 @@ def remove_vias_from_content(content: str, vias: List,
     targets = Counter()
     _v_by_key = {}
     for v in vias:
-        net_token = (net_id_to_name.get(v.net_id) if use_names else v.net_id)
-        _vk = (pos_key(v.x, v.y), net_token)
+        _vk = (pos_key(v.x, v.y), _canon(v.net_id))
         targets[_vk] += 1
         _v_by_key.setdefault(_vk, []).append(v)
 
@@ -1599,17 +1599,17 @@ def remove_vias_from_content(content: str, vias: List,
         ma = at_re.search(block)
         keep = True
         if ma:
-            if use_names:
-                mn = net_name_re.search(block)
+            mn = net_name_re.search(block)
+            if mn:
                 # The file stores the ESCAPED name (backslash doubled, quote
                 # backslashed); targets use the parser's unescaped name. Undo
                 # the escapes or every backslash-named net silently evades the
                 # strip and its stale copper ships (neo6502 /GPIO*\* nets,
                 # found by the FILE_LEDGER audit -- #312/#264 family).
-                net_token = _unescape_kicad_string(mn.group(1)) if mn else None
+                net_token = _unescape_kicad_string(mn.group(1))
             else:
-                mn = net_id_re.search(block)
-                net_token = int(mn.group(1)) if mn else None
+                mi = net_id_re.search(block)
+                net_token = _canon(int(mi.group(1))) if mi else None
             _vk = (pos_key(float(ma.group(1)), float(ma.group(2))), net_token)
             if targets.get(_vk, 0) > 0:
                 targets[_vk] -= 1
@@ -1876,36 +1876,27 @@ def swap_pad_nets_in_content(content: str, pad1: Pad, pad2: Pad) -> str:
         #369 A8: returns ALL same-number pads, not just the first -- connector
         shields / split EP paddles legally repeat one pad number, and swapping
         only the first left the twins on the old net (half-applied swap =
-        short/open at the target). Footprint references are matched via
-        (property "Reference" ...) with an (fp_text reference ...) fallback,
-        like the parser -- KiCad 6/7 boards only carry the latter, and bailing
-        here AFTER the segment/via relabels already applied shipped mixed-net
-        copper."""
-        fp_start_pattern = r'\(footprint\s+"[^"]*"'
+        short/open at the target).
+
+        #726: the footprint is located by the PARSER's key rather than by its
+        Reference string, so the KiCad 6/7 `(fp_text reference ...)` form is
+        handled for free and a duplicated reference resolves to the one block
+        the pad actually belongs to. Bailing here AFTER the segment/via
+        relabels have applied ships mixed-net copper, so a silent miss is the
+        expensive failure."""
+        from kicad_parser import iter_footprint_blocks
         spans = []
 
-        for fp_match in re.finditer(fp_start_pattern, content):
-            fp_start = fp_match.start()
-            # Find the end of this footprint block
-            depth = 0
-            fp_end = fp_start
-            for i, char in enumerate(content[fp_start:], fp_start):
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-                    if depth == 0:
-                        fp_end = i + 1
-                        break
-
-            fp_text = content[fp_start:fp_end]
-
-            # Check if this footprint has the right Reference (KiCad 8+
-            # property, else the KiCad 6/7 fp_text form)
-            ref_pattern = rf'\(property\s+"Reference"\s+"{re.escape(component_ref)}"'
-            legacy_ref_pattern = rf'\(fp_text\s+reference\s+"{re.escape(component_ref)}"'
-            if not (re.search(ref_pattern, fp_text)
-                    or re.search(legacy_ref_pattern, fp_text)):
+        # Blocks are resolved by the PARSER's key (#726). `component_ref` comes
+        # off a `kicad_parser.Pad`, so on a board with two blocks named `TP4`
+        # it is `TP4~2` -- a name the old Reference-string match could never
+        # find, which made this a SILENT no-op after the segment/via relabels
+        # had already applied. Matching the string was equally wrong the other
+        # way: it took the first block carrying the name, which is a different
+        # physical part than the one the pad belongs to.
+        for fp_start, fp_end, fp_text, _raw_ref, key in iter_footprint_blocks(
+                content):
+            if key != component_ref:
                 continue
 
             # Find every pad with this number in this footprint

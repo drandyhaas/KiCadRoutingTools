@@ -42,6 +42,10 @@ from kicad_parser import Via, Net
 from routing_config import GridRouteConfig
 from synth import make_pad, make_via, make_pcb  # #382 E7: canonical builders
 import layer_swap_optimization as lso
+import fab_tiers
+# #857: the 0.5 mm-pitch shrink-to-fit (#299) descends below the standard via;
+# that descent is the AUTO tier's now (standard is a hard floor).
+fab_tiers.set_default_fab_tier('auto')
 
 P_NET, N_NET, FOREIGN_NET = 1, 2, 99
 

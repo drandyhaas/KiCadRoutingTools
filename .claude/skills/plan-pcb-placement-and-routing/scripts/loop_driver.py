@@ -1497,10 +1497,14 @@ asymmetric.
   placement-shaped   a starved escape face, a part its net cannot reach, OR an
                      arrangement too tangled to route as a whole. No router
                      setting adds a lane or removes a crossing.
-                     Evidence: check_channels shows a face carrying demand with
-                     zero supply; check_reachability says CAGED on the
-                     COPPER-FREE board; or crossings sit far above the board
-                     placement started from.
+                     Evidence: check_channels shows a face carrying demand
+                     with zero supply, or one that LOST a large share of its
+                     escape against --baseline (#847 -- a face can go 43 -> 28
+                     lanes against a demand of 12 and still be worth moving,
+                     which the zero-supply form alone never saw);
+                     check_reachability says CAGED on the COPPER-FREE board;
+                     or crossings sit far above the board placement started
+                     from.
 
   floorplan-shaped   a clause no arrangement at this placement satisfies.
                      Evidence: the constraint survives every parameter and

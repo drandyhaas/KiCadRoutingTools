@@ -31,7 +31,7 @@ import os
 import shutil
 import tempfile
 from types import SimpleNamespace
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 REFERENCE_GRID_STEP = 0.1
 
@@ -49,22 +49,101 @@ def parse_plane_specs(tokens: Sequence[str], copper_layers: Sequence[str]):
     return out
 
 
+class PlaneScoreStatus(NamedTuple):
+    """Why `plane_fragility_score_ex` produced a score, or did not (#713).
+
+    `reason` is `'ok'`, one of this module's own two causes (`no_bounds`,
+    `no_named_net`), or a `kicad_exact_fill.REFILL_REASONS` value forwarded
+    from the refill.
+
+    `uniform` is the property a candidate RANKING has to branch on, and it is
+    the reason this type exists rather than a bare reason string.
+    """
+    reason: str
+    detail: str = ''
+    elapsed_s: Optional[float] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.reason == 'ok'
+
+    @property
+    def is_timeout(self) -> bool:
+        return self.reason == 'timeout'
+
+    @property
+    def uniform(self) -> bool:
+        """Would every candidate of a portfolio hit this same cause?
+
+        `no_bounds` and `no_named_net` are facts about the board and the
+        `--plane-score` spec, and a portfolio's candidates differ only in
+        component POSES -- so if one candidate hits them, all of them do.
+        `no_kicad_python` is a fact about the machine, likewise uniform.
+
+        A `timeout` is NOT uniform: it can strike candidate 7 and spare
+        candidate 1 on the same run. That asymmetry is what makes dropping
+        the plane terms on a timeout a machine-speed decision rather than a
+        capability one, and it is #713 item 1. `refill_failed`, `error` and
+        `empty_fill` are per-candidate accidents and are non-uniform for the
+        same reason -- `empty_fill` most clearly, since what KiCad manages to
+        pour is exactly what moving the parts changes.
+        """
+        return self.reason in ('no_bounds', 'no_named_net', 'no_kicad_python')
+
+    def why(self) -> str:
+        base = {
+            'ok': 'the plane score was computed',
+            'no_bounds': 'the board declares no outline bounds',
+            'no_named_net': ('none of the --plane-score nets exists on this '
+                             'board'),
+            'empty_fill': ('the KiCad refill poured no copper for any '
+                           '--plane-score net'),
+        }.get(self.reason)
+        if base is None:
+            return _refill_why(self)
+        # `detail` is rendered for THIS module's own reasons too. The first
+        # draft dropped it here while forwarded refill reasons kept theirs, so
+        # `no_named_net` carefully built the list of nets it wanted and then
+        # threw it away -- the one fact the reader needs to fix the flag.
+        return f'{base} ({self.detail})' if self.detail else base
+
+
+def _refill_why(status: 'PlaneScoreStatus') -> str:
+    """Forward a refill reason to `RefillStatus.why()` rather than restating
+    it -- one wording, so the two layers cannot drift apart."""
+    from kicad_exact_fill import RefillStatus
+    return RefillStatus(status.reason, status.detail, status.elapsed_s).why()
+
+
 def plane_fragility_score(board: str, specs: Sequence[Tuple[str, str]],
                           grid_step: float = 0.1,
                           keep_staged: Optional[str] = None) -> Optional[Dict]:
+    """The score alone. See `plane_fragility_score_ex` for why there is none."""
+    return plane_fragility_score_ex(board, specs, grid_step=grid_step,
+                                    keep_staged=keep_staged)[0]
+
+
+def plane_fragility_score_ex(
+        board: str, specs: Sequence[Tuple[str, str]],
+        grid_step: float = 0.1,
+        keep_staged: Optional[str] = None
+) -> Tuple[Optional[Dict], PlaneScoreStatus]:
     """Score one board. `specs` is [(net_name, layer), ...].
 
-    Returns {'islands', 'neck_sum', 'cells', 'per_net'} or None when the
-    KiCad refill is unavailable (no pcbnew python on this machine).
+    Returns ({'islands', 'neck_sum', 'cells', 'per_net'}, status) -- the score
+    is None whenever `status.ok` is False, and the status says WHICH of the
+    several causes it was. Before #713 every one of them was a bare None, so a
+    caller could not tell a capability gap (the same answer on every candidate)
+    from a 300 s timeout (this machine, this run).
     """
     from kicad_parser import board_uses_name_nets, parse_kicad_pcb
     from kicad_writer import generate_zone_sexpr
-    from kicad_exact_fill import refill_islands
+    from kicad_exact_fill import refill_islands_ex
 
     pcb = parse_kicad_pcb(board)
     bounds = pcb.board_info.board_bounds
     if bounds is None:
-        return None
+        return None, PlaneScoreStatus('no_bounds')
     copper = list(pcb.board_info.copper_layers or ['F.Cu', 'B.Cu'])
     name_to_id = {n.name: nid for nid, n in pcb.nets.items()}
     with open(board, encoding='utf-8', errors='replace') as f:
@@ -84,7 +163,9 @@ def plane_fragility_score(board: str, specs: Sequence[Tuple[str, str]],
             # on UUID and the fill varies run to run (kicad_writer note)
             priority=i))
     if not blocks:
-        return None
+        return None, PlaneScoreStatus(
+            'no_named_net',
+            'wanted ' + ', '.join(f'{n}:{l}' for n, l in specs))
 
     tmp = tempfile.mkdtemp(prefix='plane_score_')
     try:
@@ -92,23 +173,47 @@ def plane_fragility_score(board: str, specs: Sequence[Tuple[str, str]],
         idx = content.rindex(')')
         with open(staged, 'w', encoding='utf-8') as f:
             f.write(content[:idx] + '\n'.join(blocks) + '\n' + content[idx:])
-        for ext in ('.kicad_pro', '.kicad_dru'):
+        from copy_board import SIBLING_EXTS   # ONE list (#711)
+        for ext in SIBLING_EXTS:
             sib = os.path.splitext(board)[0] + ext
             if os.path.isfile(sib):
                 shutil.copyfile(sib, os.path.splitext(staged)[0] + ext)
         if keep_staged:
             shutil.copyfile(staged, keep_staged)
 
-        fills = refill_islands(staged)
+        fills, _rst = refill_islands_ex(staged)
         if fills is None:
-            return None
-
+            # Forwarded verbatim, reason and all: the caller's branch between
+            # "strip the plane terms" and "refuse" turns on whether this was a
+            # capability fact or a clock, and re-deriving it here would be a
+            # second opinion that can drift from the first.
+            return None, PlaneScoreStatus(_rst.reason, _rst.detail,
+                                          _rst.elapsed_s)
         wanted = {(net, layer) for net, layer in specs}
         per_net = {}
         for (net, layer), polys in fills.items():
             if (net, layer) in wanted:
                 per_net[f'{net}:{layer}'] = len(polys)
         islands = sum(per_net.values())
+        if not per_net:
+            # The refill RAN and poured nothing FOR THE NETS WE ASKED ABOUT.
+            # Scoring it would report `islands: 0` -- the OPTIMUM of a term
+            # that sorts before hpwl -- while `neck_sum` was priced over
+            # whatever OTHER copper the board happens to carry. So the
+            # candidate that could not be scored would outrank every candidate
+            # that could.
+            #
+            # The guard used to be `if not fills` and sat above this loop,
+            # testing the WHOLE fill dict. That only catches a board with no
+            # poured copper at all; 29 boards in this repo carry pre-existing
+            # zones, so `fills` is non-empty regardless of whether the
+            # --plane-score nets poured anything. `per_net` is what actually
+            # feeds the rank, so `per_net` is what has to be guarded.
+            return None, PlaneScoreStatus(
+                'empty_fill',
+                'no copper poured for ' + ', '.join(f'{n}:{l}'
+                                                    for n, l in specs),
+                _rst.elapsed_s)
 
         # The #424 field over the poured board. The staged pcb_data gets the
         # ALREADY-COMPUTED fill as its provider so the field prices the exact
@@ -123,10 +228,11 @@ def plane_fragility_score(board: str, specs: Sequence[Tuple[str, str]],
         # cost units -> mm-equivalents (cell_cost inverse), summed
         neck_sum = float(cells[:, 3].sum()) * REFERENCE_GRID_STEP / 1000.0 \
             if len(cells) else 0.0
-        return {'islands': islands,
-                'neck_sum': round(neck_sum, 3),
-                'cells': int(len(cells)),
-                'per_net': per_net}
+        return ({'islands': islands,
+                 'neck_sum': round(neck_sum, 3),
+                 'cells': int(len(cells)),
+                 'per_net': per_net},
+                PlaneScoreStatus('ok', _rst.detail, _rst.elapsed_s))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

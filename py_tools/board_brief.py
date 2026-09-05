@@ -178,16 +178,33 @@ def _floors(pcb_file):
 # shape of the answer is the problem: on a pile these come back in the exact
 # schema a placed board yields, so a reader has no way to tell them apart.
 # Measured placed -> piled, same brief, no marking anywhere: ulx3s escape
-# 19 -> 109 deficit lanes and locks.high 10 -> 0; kit-dev-coldfire 0 -> 82
+# 0 -> 101 deficit lanes and locks.high 10 -> 0; kit-dev-coldfire 0 -> 82
 # lanes on a board with no escape problem at all; splitflap_driver
 # locks.high 16 -> 2; watchy 25 -> 69 lanes, locks.high 7 -> 1, tethers 6 -> 4.
+# (ulx3s re-measured after #835: it was 19 -> 109, and its PLACED 19 was
+# itself an artifact -- every one of those lanes was charged to a neighbour on
+# the other side of the board. The pile artifact is larger than before, not
+# smaller, because the placed number is now honest.)
+#
+# STALE ON THE PLACED SIDE, and dated rather than quietly re-typed. #841
+# changed what a neighbour contributes from the bbox of its pad CENTRES to its
+# pad COPPER, so every PLACED number above moved: ulx3s 0 -> 5,
+# kit-dev-coldfire 0 -> 8, watchy 25 -> 55 (regenerate with
+# `tests/measure_834_835_side_awareness.py --table B`). The PILED halves are
+# from a recorded run against a staged pile that no committed script rebuilds,
+# so they are not re-derived here. The direction is unaffected -- a pile still
+# collapses every supply to 0 -- and it is the direction the block is about.
 #
 # Mechanisms, one per group:
-#   escape   `_blocked_span` charges every co-located neighbour against the
-#            band, so supply -> 0 and deficit == demand for every part but
-#            the largest. `deficit_lanes` becomes a netlist count wearing an
-#            escape verdict's clothes, and `blockers` names parts to move
-#            that are not anywhere.
+#   escape   `_blocked_span` charges every co-located neighbour that shares a
+#            face, is not a container (#835), its PAD COPPER (#841), against
+#            the band -- so on a PILE supply -> 0 and deficit == demand for
+#            every part but the largest.
+#            `deficit_lanes` becomes a netlist count wearing an escape
+#            verdict's clothes, and `blockers` names parts to move that are
+#            not anywhere. The side and container filters cut the charge on a
+#            real placement; they cannot help on a pile, where every part is
+#            co-located with every other on its own face.
 #   locks    the geometric rules (off_board, near_board_edge,
 #            family_orbit_seat) cannot fire at a centre pile, so the
 #            `geometric and lexical -> high` promotion is unreachable and the
@@ -206,6 +223,13 @@ POSITION_DEPENDENT = (
     'measurements.escape.worst[].faces[].deficit',
     'measurements.escape.worst[].faces[].blocked_mm',
     'measurements.escape.worst[].faces[].blockers',
+    # #700's layer-aware pair. Both derive from `supply`, already listed, so
+    # they inherit its position dependence exactly -- and `worst_face_floor`
+    # is None on a board with no floor-level deficit, the same way
+    # `worst_face` is on a board with no deficit at all.
+    'measurements.escape.worst[].worst_face_floor',
+    'measurements.escape.worst[].worst_deficit_floor',
+    'measurements.escape.worst[].faces[].deficit_floor',
     'measurements.locks.high',
     'measurements.locks.lock_argv',
     'measurements.locks.tally.findings_high',
@@ -247,7 +271,11 @@ POSE_DERIVED_KEPT = (
      'the pile coordinate for any part `mechanical.pose_shared_with` lists'),
     ('measurements.escape.worst[].faces[].face / .demand / .span_mm',
      'which face a net leaves through follows rotation, so the table is '
-     'right about the CURRENT angle only. Per-part totals are invariant'),
+     'right about the CURRENT angle only. Per-part totals are invariant. '
+     '#700\'s via_slots / other_layer_lanes / supply_other_max / '
+     'supply_bound derive from span_mm alone, so they follow rotation the '
+     'same way and are kept for the same reason -- unlike deficit_floor, '
+     'which also reads `supply` and is therefore nulled with it'),
     ('measurements.escape.worst[] membership and order',
      'the ledger is sorted by a deficit that is now null and truncated to '
      'the first 10, so on a board with more than 10 fine-pitch parts this '
@@ -585,6 +613,10 @@ def fit_section(pcb, pcb_file, extents, step, clearance, edge, skipped):
 # tell which half of a brief for an unplaced board to believe -- and every
 # section here used to read alike.
 SOURCES_NOTE = {
+    'design_brief': 'placement.design_brief.load_brief + compile_brief '
+                    '[requires: a sibling <board>.design-brief.json, or '
+                    '--brief. This is the only DECLARED section: every other '
+                    'one is measured or inferred from the board]',
     'board': 'kicad_parser.parse_kicad_pcb + list_nets.board_floor_knobs + '
              'board_brief._shoelace '
              '[requires: an outline. Independent of part positions]',
@@ -627,7 +659,7 @@ SOURCES_NOTE = {
 
 def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
                 requirements=None, fit=(), fit_step=DEFAULT_FIT_STEP_MM,
-                render_doc=None):
+                render_doc=None, design_brief=None, design_brief_path=''):
     skipped = {}
     # Board-first: an unset knob resolves from this board's own Default
     # netclass / min_copper_edge_clearance, and the returned `knobs` records
@@ -670,11 +702,47 @@ def build_brief(pcb, pcb_file, *, clearance=None, board_edge_clearance=None,
             'panels': render_doc.get('panels'),
             'describe': render_doc.get('describe'),
         }
+    if design_brief is not None:
+        # #711. The DECLARED section, and the only one that is. Every other
+        # section here is measured or inferred, and `mechanical`'s own note
+        # has been telling the reader to "state real mechanical constraints
+        # with --requirements" -- a channel nothing reads. This is where that
+        # advice now lands, structured.
+        from placement import design_brief as _db
+        _frag, _rep = _db.compile_brief(
+            design_brief, board_refs=sorted(pcb.footprints or {}))
+        brief['design_brief'] = {
+            'path': design_brief_path,
+            'declared': _rep['declared'],
+            'unknown': _rep['unknown'],
+            'absent': _rep['absent'],
+            'not_graded': _rep['not_graded'],
+            'unmatched': _rep['unmatched'],
+            'product': _rep['product'],
+            'fixed': _rep['fixed'],
+            'counts': _rep['counts'],
+            'note': ('DECLARED, not measured. Read this beside `mechanical`, '
+                     'which is INFERENCE from part class: where the two '
+                     'disagree the declaration is the authority, and '
+                     '`unknown` names what the author could not say.'),
+        }
+    elif not requirements:
+        # A silent absence is the failure. `mechanical`'s rows are inference,
+        # and without either channel nothing on this board is declared at all.
+        brief['design_brief'] = {
+            'path': None,
+            'note': ('NONE DECLARED. No sibling design brief and no '
+                     '--requirements, so every mechanical fact in this '
+                     'document is INFERENCE -- `mechanical` from part class, '
+                     'and any connector edge from the current pose. '
+                     'See docs/design-brief.md.'),
+        }
     if requirements:
         # Verbatim. These are the constraints that live nowhere in the board
         # file -- enclosure fit, connector positions, thermal and EMI zoning,
         # datasheet layout intent -- and paraphrasing them here would be this
-        # tool inventing mechanical geometry.
+        # tool inventing mechanical geometry. Kept as the free-text escape
+        # hatch beside the structured `design_brief` section (#711).
         brief['requirements'] = requirements
     # The board already told us it is a pile; act on it. This runs AFTER
     # every section so there is one table of position-dependent paths rather
@@ -826,6 +894,21 @@ def format_text(b):
         else:
             L.append(f"  fit {w}x{h}mm: NOWHERE on this board at "
                      f"{row['step_mm']}mm")
+    db = b.get('design_brief') or {}
+    if db.get('path'):
+        c = db.get('counts') or {}
+        L.append(f"  design brief {os.path.basename(db['path'])}: "
+                 f"{c.get('interfaces', 0)} interface(s), "
+                 f"{c.get('keepouts', 0)} keep-out(s)")
+        # Unknowns first: an unknown is the thing an author must go resolve.
+        for k in (db.get('unknown') or ()):
+            L.append(f"  !! design brief UNKNOWN: {k}")
+        for k in (db.get('absent') or ()):
+            L.append(f"  !! design brief NOT DECLARED: {k}")
+        for k in (db.get('unmatched') or ()):
+            L.append(f"  !! design brief names {k}, which is not on this board")
+    elif db.get('note'):
+        L.append(f"  !! {db['note']}")
     if b.get('requirements'):
         L.append(f"  requirements (verbatim): {b['requirements']}")
     if b.get('skipped'):
@@ -859,6 +942,8 @@ def main(argv=None):
                         "(enclosure, connector edges, thermal, EMI). Carried "
                         "VERBATIM")
     p.add_argument("--requirements-file", default=None)
+    from placement.cli_gates import add_brief_arg
+    add_brief_arg(p)
     p.add_argument("--fit", action="append", metavar="WxH",
                    help="Also report where a part of this extent fits at all "
                         "(repeatable)")
@@ -891,6 +976,14 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
 
+    # #711. The DECLARED channel, beside the inferred `mechanical` section
+    # whose own note has been telling readers to state mechanical constraints
+    # somewhere nothing read them.
+    from placement.cli_gates import load_brief_or_exit
+    dbrief, dbrief_path, _rc = load_brief_or_exit(a, a.board)
+    if _rc:
+        return _rc
+
     render_doc = None
     if a.render_json:
         try:
@@ -904,7 +997,8 @@ def main(argv=None):
     brief = build_brief(pcb, a.board, clearance=a.clearance,
                         board_edge_clearance=a.board_edge_clearance,
                         requirements=req, fit=_parse_fit(a.fit),
-                        fit_step=a.fit_step, render_doc=render_doc)
+                        fit_step=a.fit_step, render_doc=render_doc,
+                        design_brief=dbrief, design_brief_path=dbrief_path)
     if not a.quiet:
         print(format_text(brief))
     if a.json:

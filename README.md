@@ -53,6 +53,7 @@ Fast, grid-based A\* routing with a native Rust core (~10× faster than pure Pyt
 
 **Placement, fanout & optimization**
 - [Placement optimization](docs/placement-optimization.md) for routability, before routing
+- [The design brief](docs/design-brief.md) — state what the board is FOR, in a sibling the toolchain reads: which connectors are user-facing, which edge each belongs on and where along it
 - [Floorplan intent, graded](docs/floorplan-intent.md) — declare where parts belong and check the board against it, so "the render looks fine" stops being a verdict
 - BGA / QFN fanout with decoupling-cap placement cleanup, Hungarian target-swap, and schematic sync
 
@@ -598,6 +599,7 @@ See [tests/README.md](tests/README.md) for detailed documentation of all test sc
 | [Guide Corridor](docs/configuration.md#guide-corridor-options-preferred-route) | User-layer guide paths, waypoints, best-effort following |
 | [Power/Ground Planes](docs/route-plane.md) | Copper zones with automatic via placement |
 | [Utilities](docs/utilities.md) | DRC checker, connectivity checker, fanout generators, layer switcher, DRC-settings fixer |
+| [Design Brief](docs/design-brief.md) | Declare what the board IS -- the facts a board file cannot contain -- and compile them into the intent (`<board>.design-brief.json`) |
 | [Floorplan Intent](docs/floorplan-intent.md) | Declare the floorplan, grade the board against it (`check_floorplan.py`) |
 | [Placement Predictors](docs/placement-predictors.md) | What actually predicts routed `blocking`, measured (#703) |
 | [Placement Calibration](docs/placement-calibration.md) | Why P-close's routability threshold was withdrawn, and the rows it was withdrawn on (#803) |
@@ -836,6 +838,7 @@ Every tool prints its full option list with `--help`, and **[docs/configuration.
 | `bga_fanout.py` / `qfn_fanout.py` | BGA / QFN escape fanout | [BGA](py_router/bga_fanout/README.md) · [QFN](py_router/qfn_fanout/README.md) · [Utilities](docs/utilities.md) |
 | `place_fanout_clearance.py` | Move decoupling caps off fanout vias | [Utilities](docs/utilities.md) |
 | `place_optimize.py` | Placement for routability | [Placement Optimization](docs/placement-optimization.md) |
+| `board_brief.py` | Assemble what a placement author needs to read, in one artifact | [Design Brief](docs/design-brief.md) |
 | `check_floorplan.py` | Grade a board against a declared floorplan intent | [Floorplan Intent](docs/floorplan-intent.md) |
 | `check_*.py` | DRC / connectivity / hygiene / pad checks | [Utilities](docs/utilities.md) |
 | `make_movie.py` | Movie of a routing run (`.mp4`/`.gif`) | [Rendering & animation](docs/route-animation.md) |

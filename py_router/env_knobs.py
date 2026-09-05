@@ -263,6 +263,17 @@ def refresh() -> None:
     g['IMPROVEMENT_GATE'] = _s('KICAD_IMPROVEMENT_GATE', '1') != '0'
     g['PLANE_PARTIAL_RESTORE'] = _s('KICAD_PLANE_PARTIAL_RESTORE') == '1'
     g['DUMP_BATCH_KWARGS_CONTINUE'] = _s('KICAD_DUMP_BATCH_KWARGS_CONTINUE') == '1'
+    # #530 replay compatibility: read --clearance the pre-#530 way (#439), as a
+    # CEILING that caps EVERY net class -- Default included -- at min(class,
+    # value). Since decision 2 an explicit --clearance IS the Default class
+    # for the run, so a late chain step saying 0.2 after an earlier step
+    # lowered the project's class to 0.1 now routes at 0.2 where 0.21.4
+    # routed at 0.1 (rp2040_dev: 3 nets that fit at 0.1 do not at 0.2). A
+    # corpus manifest recorded under the old reading therefore measures the
+    # semantics change, not the engine; this knob rides `cloud_replay_sets
+    # --env` so an A/B arm can replay those manifests like-for-like. Never
+    # set it for a real run -- pass --clearance-ceiling instead.
+    g['CLEARANCE_LEGACY_CEILING'] = _s('KICAD_CLEARANCE_LEGACY_CEILING') == '1'
     # #431: the placement-movie camera. 'off' (default) keeps every existing
     # movie bit-for-bit; one variable turns it on for the GUI recorder,
     # run_plan.py --movie and the stress renderer at once, which is the
@@ -274,6 +285,46 @@ def refresh() -> None:
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')
     g['OBSTACLE_AUDIT'] = _truthy('KICAD_OBSTACLE_AUDIT')
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
+    # #672 sub-cell sliver trim on PROTECTED (still-being-retried) nets.
+    # The self-pair half of #672 is a correctness fix and is always on;
+    # this half REMOVES COPPER, and measured on orangecrab's recorded
+    # route step (paired, same input board, chains otherwise identical)
+    # it cost a net: RAM_UDQS+ went from routed to failed_single, the
+    # run verdict 9 -> 10, while the self-pair fix alone reproduced the
+    # base copper EXACTLY (6097 segments and 625 vias compared, all
+    # identical).
+    # CORPUS A/B RAN (2026-09-04, sets 1-5 on Modal, 72 boards complete in
+    # both arms, same commit d0278273): real DRC 21 vs 21 -- unchanged --
+    # and unconnected nets 86 -> 87. ONE board moved and it moved the wrong
+    # way (core1106_cam 0 -> 1); no board improved. So it STAYS OFF: the
+    # trim has no measured upside and a measured, if small, cost.
+    g['SLIVER_TRIM'] = _opt_in('KICAD_SLIVER_TRIM')
+    # #678 pour-promise DEFENCE (the copper-changing half: the
+    # pad-anchored custody weld links and the ship-time promise-scoped
+    # oracle weld). OPT-IN, for the reason KICAD_ORACLE_SUMMARY below
+    # records: the AUDIT is disclosure and is always on, but welding a
+    # carved-off ball back CHANGES COPPER, and no A/B has established that
+    # it pays. It is not for want of trying, and the reason is worth
+    # keeping: the orangecrab chain this was tried on CANNOT decide it.
+    # Two replays of IDENTICAL code (commit 2e15780d) over that recorded
+    # 15-command chain graded 1 vs 3 DRC and 8 vs 14 connectivity issues --
+    # that is the chain's own run-to-run spread, from the oracle/kicad-cli
+    # stage (see the repair-wobble finding: kicad-cli jitters reported
+    # anchor coordinates between identical invocations). A single-board,
+    # single-run comparison on it measures that spread, not the change. So
+    # the standing rule applies -- a default change needs a corpus A/B.
+    # THAT A/B HAS NOW RUN (2026-09-04, sets 1-5 on Modal, 72 boards
+    # complete in both arms, same commit d0278273): real DRC 21 vs 21 --
+    # unchanged -- and unconnected nets 86 -> 85, from ONE board improving
+    # (orangecrab 6 -> 5) with NO board regressing anywhere. The eligible
+    # denominator is 16 boards (a BGA fanout step AND a plane step, i.e.
+    # able to promise a ball and then carve it), so that is 1 of 16, and
+    # the one that moved is the board carrying 180 recorded promises.
+    # First real evidence the weld does what it claims, and no measured
+    # cost -- but one board is under the repo's own two-board bar for a
+    # default change, so it stays opt-in pending a wider corpus.
+    # Disclosure is fine to make environment-dependent; copper is not.
+    g['POUR_PROMISE_WELD'] = _opt_in('KICAD_POUR_PROMISE_WELD')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
     # route.py's end-of-run oracle summary check (one staged
@@ -282,11 +333,16 @@ def refresh() -> None:
     # failure disclosure", but it also APPENDS to failed_multipoint, which
     # the reconcile gate reads, so oracle-open nets were retried and the
     # board's copper changed. That made routing depend on whether kicad-cli
-    # is INSTALLED: the cloud image ships no KiCad, so the retry never fired
-    # there and the same commit produced different copper locally vs in the
-    # container -- the lora_v3 failure mode (7 DRC without KiCad, 0 with),
-    # and it silently breaks A/B comparability. Disclosure is fine to make
-    # environment-dependent; copper is not. See issue #675.
+    # is INSTALLED: the cloud image of the day shipped no KiCad, so the retry
+    # never fired there and the same commit produced different copper locally
+    # vs in the container -- the lora_v3 failure mode (7 DRC without KiCad,
+    # 0 with), and it silently breaks A/B comparability. Disclosure is fine to
+    # make environment-dependent; copper is not. See issue #675.
+    #
+    # (The stress image HAS carried KiCad since 2026-08-23 -- `--with-kicad` is
+    # cloud_replay_sets' default. That does not retire the argument, it sharpens
+    # it: the image is now a per-wave CHOICE, so a `--no-kicad` arm and a default
+    # one at the same commit would differ in copper, not just in disclosure.)
     g['ORACLE_SUMMARY'] = _opt_in('KICAD_ORACLE_SUMMARY')
     # #648's third link-source branch (exact-fill -> kicad-cli -> raster).
     # OPT-IN on purpose: a silent fallback would make the oracle run off a
@@ -323,6 +379,10 @@ def refresh() -> None:
     g['GATE_DEBUG'] = _truthy('KICAD_GATE_DEBUG')
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')
     g['NO_SOFT_JOINT_BRIDGE'] = _truthy('KICAD_NO_SOFT_JOINT_BRIDGE')
+    # #811 collinear merge (default ON, KICAD_MERGE_COLLINEAR=0 ablates).
+    # The pass moves no copper, so this is an A/B isolation knob like
+    # KICAD_NO_SOFT_JOINT_BRIDGE, not a behaviour choice.
+    g['MERGE_COLLINEAR'] = _on_default('KICAD_MERGE_COLLINEAR')
     g['BOARD_LEDGER'] = _truthy('KICAD_BOARD_LEDGER')
     # "x,y" via position string ('' = off; consumers test truthiness + parse)
     g['RESCUE_DEBUG_VIA'] = _s('KICAD_RESCUE_DEBUG_VIA')
@@ -330,6 +390,29 @@ def refresh() -> None:
     g['NO_STATIC_BASE'] = _truthy('KICAD_NO_STATIC_BASE')
     g['ALLOW_STAGGERED_BGA'] = _truthy('KICAD_ALLOW_STAGGERED_BGA')
     g['QFN_UNDERPAD_NO_ALT_STAGGER'] = _truthy('QFN_UNDERPAD_NO_ALT_STAGGER')
+    # #846 how far --allow-via-in-pad's escape-axis ladder may reach:
+    # 'full' (default) | 'pad' | 'barrel'. An A/B isolation knob like
+    # KICAD_QFN_UNDERPAD_ERASED_GATE, not a behaviour choice -- the ladder was
+    # named `_onpad` and documented as on-pad offsets, but its increment is the
+    # INTER-NET stagger, which on a fine-pitch part exceeds the pad, so only
+    # k = 0 is guaranteed on it. The three arms answer "what if it meant what
+    # it said": 'pad' keeps offsets whose via CENTRE stays on the pad
+    # (|k*step| <= pad_width/2), 'barrel' keeps only those whose whole BARREL
+    # does (|k*step| <= pad_width/2 - via_size/2), which on every board
+    # measured collapses the ladder to [0.0]. The two are very different
+    # restrictions and are named separately for that reason. An unrecognised
+    # value is 'full', so a typo cannot silently shorten the ladder.
+    g['QFN_ONPAD_REACH'] = _s('KICAD_QFN_ONPAD_REACH', 'full').strip().lower()
+    # #619 which halves of the nets_to_route erasure the under-pad escape tests
+    # its pad->via stub against: 'all' (default) | 'via' | 'seg' | 'off'.
+    # An A/B isolation knob like KICAD_NO_SOFT_JOINT_BRIDGE, not a behaviour
+    # choice -- the halves are NOT additive (the via half changes which offsets
+    # are chosen, so it moves the SEGMENT residual too: on routed_output U2 it
+    # takes seg 25 -> 12 without testing a single segment), so attributing a
+    # half needs an arm that runs only that half. An unrecognised value is
+    # 'all', so a typo cannot silently disable the gate.
+    g['QFN_UNDERPAD_ERASED_GATE'] = _s('KICAD_QFN_UNDERPAD_ERASED_GATE',
+                                       'all').strip().lower()
     g['LEGACY_ORACLE'] = _truthy('KICAD_LEGACY_ORACLE')
     g['NO_EXACT_FILL'] = _truthy('KICAD_NO_EXACT_FILL')
     g['NO_FILL_NETCLASS'] = _truthy('KICAD_NO_FILL_NETCLASS')  # fill-model A/B

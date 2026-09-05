@@ -82,6 +82,13 @@ REGISTRY = {
     'persist_protected_nets': ['_write_drc_floors', 'update_live_drc_floors'],
     # #521 companion: per-net impedance declarations recorded the same way.
     'persist_impedance_specs': ['_write_drc_floors', 'update_live_drc_floors'],
+    # #678 companion: the balls a BGA fanout promised to serve by fill contact,
+    # recorded in the sibling .kicad_pro so a later route step's plane finalize
+    # can audit the promise. Same shape and same two GUI writeback sites as its
+    # two siblings above -- bga_fanout.main() persists on the CLI, the plan end
+    # (ai_plan._write_drc_floors) and each manual step
+    # (gui_utils.update_live_drc_floors) persist in the GUI.
+    'persist_pour_served_pads': ['_write_drc_floors', 'update_live_drc_floors'],
     # GND return vias near signal vias
     'add_gnd_vias_to_existing_board': ['add_gnd_vias_to_existing_board'],
     # run-6 fix 1.7: castellated-landing retract (route.py + both plane
@@ -220,6 +227,49 @@ def _plugin_symbols():
 _TERMINAL = (ast.Return, ast.Raise, ast.Continue, ast.Break)
 
 
+# Passes whose GUI twin is the SAME function called inside a bigger writeback
+# (ai_plan._write_drc_floors / gui_utils.update_live_drc_floors), NOT a
+# reimplementation. For these, check B is worthless on its own: it is satisfied
+# by the CONTAINER's name, which exists whether or not the container still
+# calls the pass. Measured 2026-09-05 -- deleting the
+# `persist_pour_served_pads(...)` line from BOTH GUI writebacks left this gate
+# reporting "0 failures", because `update_live_drc_floors` was still a defined
+# function. Check E below asks the question B cannot: is the call still THERE?
+#
+# Only same-symbol twins belong here. Entries like clean_plane_copper (GUI twin
+# is `_run_plane_copper_cleanup`, a different implementation) or repair_planes
+# (evidenced by a results_data KEY) would fail a containment test correctly-but-
+# wrongly, which is why this is an explicit set rather than a blanket rule.
+SAME_SYMBOL_TWINS = {
+    'persist_protected_nets',
+    'persist_impedance_specs',
+    'persist_pour_served_pads',
+}
+
+
+def _plugin_func_bodies():
+    """{function name: set of symbols called/named inside it} for every
+    function defined under kicad_routing_plugin/."""
+    bodies = {}
+    for f in sorted(glob.glob(str(PLUGIN / "*.py"))):
+        try:
+            tree = ast.parse(Path(f).read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            names = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    fn = sub.func
+                    n = getattr(fn, 'id', None) or getattr(fn, 'attr', None)
+                    if n:
+                        names.add(n)
+            bodies.setdefault(node.name, set()).update(names)
+    return bodies
+
+
 def _unreachable_calls():
     """Calls that can NEVER execute because a return/raise/continue/break
     precedes them in the same block.
@@ -323,6 +373,32 @@ def main():
                 f"skips a CLI post-pass.")
         else:
             warnings.append(f"unreachable call to '{sym}' at {fname}:{lineno}")
+
+    # E. A SAME-SYMBOL twin must still be CALLED inside its registered GUI
+    # writeback. B is a presence test on the container's name and cannot see
+    # the call being deleted out of it; this can.
+    func_bodies = _plugin_func_bodies()
+    for sym in sorted(SAME_SYMBOL_TWINS):
+        if sym not in REGISTRY:
+            failures.append(
+                f"SAME_SYMBOL_TWINS names '{sym}', which is not in REGISTRY -- "
+                f"the two lists have drifted apart.")
+            continue
+        if not used.get(sym):
+            continue                      # B already warns about a stale entry
+        hosts = [g for g in REGISTRY[sym] if g in func_bodies]
+        if not hosts:
+            failures.append(
+                f"registered GUI counterpart(s) {REGISTRY[sym]} for '{sym}' name "
+                f"no function DEFINED under kicad_routing_plugin/, so check E "
+                f"cannot verify the call. Register the containing function.")
+            continue
+        if not any(sym in func_bodies[h] for h in hosts):
+            failures.append(
+                f"CLI post-pass '{sym}' (in {used[sym]}) is NOT CALLED by any of "
+                f"its registered GUI writebacks {hosts}: the GUI silently skips "
+                f"it while the container's name keeps check B green (Class-2 "
+                f"drift).")
 
     print(f"CLI post-pass coverage: {len(REGISTRY)} registered, "
           f"{len(used)} in active CLI use, {len(acknowledged)} CLI-only "

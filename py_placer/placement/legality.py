@@ -45,6 +45,12 @@ EPS = 1e-6
 CONTAINER_RATIO = 0.5
 
 BOTH_SIDES = frozenset(('F', 'B'))
+# #834: interned so `PartPads.pad_sides` allocates none of these per part --
+# `pair_shortfall` intersects them in `quench.candidate_valid`'s inner loop,
+# and a board contributes a few hundred parts.
+FRONT_ONLY = frozenset(('F',))
+BACK_ONLY = frozenset(('B',))
+NO_SIDES = frozenset()
 
 
 # --- rect primitives ---------------------------------------------------------
@@ -77,6 +83,50 @@ def rect_gap(a, b):
 def rect_overlap_shortfall(a, b, clearance):
     """Clearance shortfall between two rects (0 when they are clear)."""
     return max(0.0, clearance - rect_gap(a, b))
+
+
+def pad_half_extents(pad):
+    """(half_x, half_y) of a pad's axis-aligned bbox, honouring `rect_rotation`.
+
+    `pad.size_x/size_y` are already resolved to board space for an orthogonal
+    pad; `rect_rotation` is the residual tilt for one on a non-orthogonal angle
+    (in (-90, 90]), and ignoring it UNDER-sizes the pad. THREE copies lived in
+    `fanout_clearance` alone -- `_Cap`'s pad list, its via pass, and its rect
+    builder -- so it lives here now, beside the gap function its callers pair
+    it with.
+
+    Two near neighbours are deliberately NOT folded in, and naming them is the
+    point of this paragraph: `reachability._point_rect_dist` rotates the query
+    POINT into the pad frame instead, which is an exact rotated-rect distance
+    rather than a bbox; and `py_router/check_drc._pad_half_extents` computes
+    the same numbers but lives across the package boundary and also handles
+    custom-pad polygons. A first draft of this docstring listed `reachability`
+    as one of the three and did not mention `check_drc` at all -- which is
+    exactly the map a later reader hunting duplicates would have trusted.
+
+    The bbox OVER-states a tilted pad, so a gap computed from it UNDER-states
+    the true clearance: the safe direction for a proximity rule, and the same
+    convention `reachability` already records -- modelling one pad two ways puts
+    the naming and the number in different geometries.
+    """
+    tilt = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
+    c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
+    hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+    return hx * c + hy * s, hx * s + hy * c
+
+
+def pad_rect(pad, margin: float = 0.0):
+    """A pad's axis-aligned copper rect in BOARD coordinates, plus `margin`.
+
+    `global_x/global_y` is always the copper centre even when the drill is
+    offset from it, so this is the right anchor for a clearance question and the
+    wrong one for a drill question.
+    """
+    hx, hy = pad_half_extents(pad)
+    hx += margin
+    hy += margin
+    return (pad.global_x - hx, pad.global_y - hy,
+            pad.global_x + hx, pad.global_y + hy)
 
 
 def rect_overlap_area(a, b):
@@ -205,6 +255,143 @@ def footprint_has_through_pads(fp) -> bool:
 def sides_occupied(side: str, has_tht: bool) -> frozenset:
     """The board sides a part physically obstructs."""
     return BOTH_SIDES if has_tht else frozenset((side,))
+
+
+#: The counting rule `assembly_census` reports under, named rather than
+#: assumed. Every published per-side number for this corpus is ambiguous
+#: without it: #726 stopped `PCBData.footprints` silently overwriting a
+#: duplicate reference, which moved ulx3s from 234 blocks to 235 and
+#: glasgow_revC from 266 to 272 -- so a census quoting a bare total cannot be
+#: checked against any earlier one. `check_assembly`'s `coincident_origins`
+#: channel already carries this disclosure for the same reason.
+ASSEMBLY_CENSUS_BASIS = (
+    'every footprint BLOCK (#726): blocks sharing one reference are keyed '
+    'with an ordinal suffix and counted separately. `pad_bearing` restricts '
+    'that to blocks carrying at least one pad, and it is the count the '
+    'populated-side verdict is taken from -- a zero-pad graphic on the back '
+    'does not make a board double-sided.')
+
+
+def assembly_census(pcb_data) -> Dict:
+    """Which faces this board is POPULATED on, under both counting rules.
+
+    This is deliberately not `sides_occupied`, and the distinction is the
+    whole point. `sides_occupied` answers "which faces does this part
+    physically obstruct", so a drilled pad puts its part on both -- under it
+    17 of the 22 tracked boards read double-sided, `splitflap_driver`
+    (65 parts, all on F.Cu, 24 of them through-hole) included. That is the
+    right answer to the obstruction question and the wrong answer to the
+    assembly one: a through-hole part on the front does not demand a second
+    reflow pass, it demands wave or hand soldering. So the verdict here is
+    taken from the BODY face (`footprint_side`) and the through-hole count is
+    reported beside it, never folded into it.
+
+    `sides` is the scalar the intent's `assembly.sides` carries and
+    `emit_intent` observes: 'F', 'B', 'both', or None when no face is
+    populated at all. (Not to be confused with `keepouts[].sides`, which is a
+    LIST of faces an entry binds to and has no 'both' member.) It is read off
+    the pad-bearing census, so `esp_prog` -- whose three back-side blocks are
+    all zero-pad OLIMEX logos -- observes 'F', which is what the fab builds.
+
+    The through-hole split asks `pad_is_plated_through`, never bare
+    `drill > 0`. An NPTH hole is an alignment post, a tooling hole or a screw
+    hole -- it is not a soldered pin, so a part whose only drilled features are
+    NPTH is a REFLOW part. `drill > 0` reported watchy as carrying 5
+    through-hole parts when it carries 1: SW1-SW4 are SMD switches with 0.75mm
+    `np_thru_hole` alignment posts, and the text channel then told the reader
+    they need wave or hand soldering. Same rule CLAUDE.md records for #328,
+    for the same reason: `footprint_has_through_pads` answers the OBSTRUCTION
+    question -- where an unplated hole blocks the far side exactly as a plated
+    one does -- and this is the assembly question.
+    """
+    from kicad_parser import pad_is_plated_through
+    blocks = {'F': 0, 'B': 0}
+    pad_bearing = {'F': 0, 'B': 0}
+    pad_bearing_refs = {'F': [], 'B': []}
+    smd = {'F': 0, 'B': 0}
+    through_hole_by_side = {'F': 0, 'B': 0}
+    unsoldered = {'F': 0, 'B': 0}
+    # BOTH faces, not just the back. Without the front list the printed
+    # arithmetic does not close on 7 of the 22 tracked boards -- interf_u
+    # reports "24 pad-bearing of 25 blocks" and discloses nothing, because its
+    # missing block is a zero-pad graphic on the FRONT.
+    zero_pad = {'F': [], 'B': []}
+    for ref, fp in sorted((pcb_data.footprints or {}).items()):
+        side = footprint_side(fp)
+        blocks[side] = blocks.get(side, 0) + 1
+        if not (fp.pads or ()):
+            zero_pad[side].append(ref)
+            continue
+        pad_bearing[side] = pad_bearing.get(side, 0) + 1
+        pad_bearing_refs[side].append(ref)
+        if any(pad_is_plated_through(p) for p in fp.pads):
+            through_hole_by_side[side] += 1
+        elif any(getattr(p, 'pad_type', '') != 'np_thru_hole' for p in fp.pads):
+            smd[side] += 1
+        else:
+            # NPTH-ONLY: every pad is an unplated hole, so the part is
+            # soldered by no process at all -- a mounting hole, a tooling
+            # hole, an alignment post. A third bucket rather than a default,
+            # because folding it into either of the other two is a wrong
+            # answer with a witness: flat_hierarchy's 6 NPTH mounting holes
+            # counted as SMD would report 1 reflow pass for a board whose 58
+            # real parts are every one of them through-hole.
+            unsoldered[side] += 1
+    populated = tuple(s for s in ('F', 'B') if pad_bearing[s])
+    return {
+        'basis': ASSEMBLY_CENSUS_BASIS,
+        'blocks': blocks,
+        'pad_bearing': pad_bearing,
+        # The REFS, not just the count, so a consumer that grades against this
+        # census grades the same population it reports. `rule_assembly_side`
+        # reads this rather than `ctx.parts`: the two agree on every tracked
+        # board and are NOT the same set by construction -- `quench` admits a
+        # zero-pad footprint that draws a courtyard as a locked obstacle
+        # (quench.py, `_Part` construction) and this census excludes it. One
+        # such board and check_assembly would print a count check_floorplan
+        # contradicts, which is the two-populations defect #837 is about.
+        'pad_bearing_refs': pad_bearing_refs,
+        'zero_pad': zero_pad,
+        'zero_pad_back': zero_pad['B'],
+        'smd': smd,
+        'unsoldered': unsoldered,
+        'through_hole_by_side': through_hole_by_side,
+        'through_hole': sum(through_hole_by_side.values()),
+        # None, not 'both', when NOTHING is populated: a board with no
+        # pad-bearing part has no face to grade, and `emit_intent` omits the
+        # key rather than emitting a claim about it. 'both' would be an
+        # assertion nobody made, and it would read identically to a real
+        # two-sided board.
+        'sides': (populated[0] if len(populated) == 1
+                  else ('both' if populated else None)),
+        # REFLOW passes, counted from the SMD population -- not from the
+        # populated faces, which is the same number on 21 of 22 tracked boards
+        # and wrong on the 22nd. `flat_hierarchy` is 64 parts, every one of
+        # them through-hole: it is populated on F and takes ZERO reflow
+        # passes. The through-hole counts above are the rest of the assembly
+        # story (wave, selective or hand), reported and never folded in.
+        'reflow_passes': sum(1 for s in ('F', 'B') if smd[s]),
+    }
+
+
+def container_refs(pcb_data, graded) -> set:
+    """Refs whose courtyard covers at least `CONTAINER_RATIO` of the board.
+
+    A frame, not a body -- see the constant. Extracted from
+    `grade_body_overlap` (#835) so the escape ledger decides who is a
+    container the same way the courtyard channel does; two copies of this
+    arithmetic is how the two channels would come to disagree about rp2350's
+    U8, which is the part the constant was calibrated on.
+
+    `graded` is a `graded_parts_from_file(...)` sequence. Empty when the board
+    declares no bounds, which is the conservative answer: nothing is exempt.
+    """
+    bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
+    if not bb:
+        return set()
+    barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
+    return {g.ref for g in graded
+            if rect_area(g.rect) >= CONTAINER_RATIO * barea}
 
 
 def rect_on(side_wanted: str, own_side: str, courtyard_rect, tht_rect):
@@ -863,15 +1050,52 @@ def body_overlap_pairs(parts: Sequence[GradedPart]) -> List[BodyOverlapPair]:
     return out
 
 
-def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
-                           ) -> List[GradedPart]:
-    """`GradedPart` records at the FILE's own poses.
+class LocalBounds(NamedTuple):
+    """One part's UNROTATED local geometry, before any pose is applied.
+
+    The half of `graded_parts_from_file` that does not depend on where the part
+    currently sits: which box the courtyard is, whether it is the pad-bbox
+    fallback or the zero-pad fiction, and the drilled-pad box. Split out because
+    a consumer asking "could this part fit HERE, at any rotation" needs the
+    local box at a rotation the file does not carry, and re-deriving that chain
+    is exactly the second implementation #456 exists to prevent.
+
+    `local` / `tht_local` are in the footprint's own frame; rotate them with
+    `rotate_local_bounds` and offset by the pose to get board coordinates.
+    """
+    ref: str
+    side: str
+    local: Tuple[float, float, float, float]
+    tht_local: Optional[Tuple[float, float, float, float]]
+    has_tht: bool
+    # True when `local` is the +/-0.5mm FICTION for a footprint with no
+    # courtyard AND no pads. See `GradedPart.synthetic`: not geometry anyone
+    # drew, so it must never gate.
+    synthetic: bool
+    # False when the courtyard was missing and `local` is the PAD bbox, which
+    # carries no courtyard margin. NOT a safe direction, contrary to an earlier
+    # comment here: a smaller part is more permissive only WITHIN a fixed
+    # anchor mode, and shrinking can flip `zone_is_anchor` True->False, whose
+    # non-anchor branch has a strictly smaller admissible origin box. Measured:
+    # zone [0,0,5,2] tol 0, keep-out [0,0.9,2,1.1] -- a 6x3 courtyard is
+    # `seated` and its 4x1 pad bbox is REFUSED. So a consumer refusing on this
+    # geometry may differ in EITHER direction, which is why it is recorded
+    # per part rather than assumed away.
+    from_courtyard: bool
+
+
+def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
+                      ) -> Dict[str, LocalBounds]:
+    """THE local-bounds chain, once: `{ref: LocalBounds}`.
 
     Same geometry rules as the quench state (#456: one definition of legal):
     courtyard for the part's own side via the text parser, pad-bbox fallback
     when the footprint draws none, drilled-pad box on the far side. Needs the
     board FILE for courtyards (the text parser reads it); falls back to
     `pcb_data.source_path`, then to pad bboxes everywhere.
+
+    A ref is ABSENT when even the pad fallback raised -- the same parts
+    `graded_parts_from_file` skips, so both consumers see one universe.
     """
     from placement.parser import courtyard_for_side, extract_courtyard_sides
     from placement.quench import _through_pad_bounds_local
@@ -884,13 +1108,15 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
             sides = extract_courtyard_sides(path)
         except Exception:
             sides = {}
-    out: List[GradedPart] = []
+    out: Dict[str, LocalBounds] = {}
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         own = footprint_side(fp)
         local = None
         synthetic = False
+        from_courtyard = False
         if sides.get(ref):
             local = courtyard_for_side(sides[ref], own)
+            from_courtyard = local is not None
         if local is None:
             try:
                 local = compute_footprint_bbox_local(fp)
@@ -900,19 +1126,39 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
                 local = None
         if local is None:
             continue
-        rot = fp.rotation or 0.0
-        lx0, ly0, lx1, ly1 = rotate_local_bounds(*local, rot)
-        rect = (fp.x + lx0, fp.y + ly0, fp.x + lx1, fp.y + ly1)
-        tht = None
+        tht_local = None
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
-            tlb = _through_pad_bounds_local(fp)
-            if tlb is not None:
-                tx0, ty0, tx1, ty1 = rotate_local_bounds(*tlb, rot)
-                tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
-        out.append(GradedPart(ref=ref, side=own, rect=rect,
-                              tht_rect=tht, has_tht=has_tht,
-                              synthetic=synthetic))
+            tht_local = _through_pad_bounds_local(fp)
+        out[ref] = LocalBounds(ref=ref, side=own, local=tuple(local),
+                               tht_local=(tuple(tht_local)
+                                          if tht_local is not None else None),
+                               has_tht=has_tht, synthetic=synthetic,
+                               from_courtyard=from_courtyard)
+    return out
+
+
+def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
+                           ) -> List[GradedPart]:
+    """`GradedPart` records at the FILE's own poses.
+
+    The pose half of `part_local_bounds`: rotate each part's local box by its
+    own rotation and offset it. The chain itself lives there, so a consumer
+    that needs the box at ANOTHER rotation does not grow a second copy of it.
+    """
+    out: List[GradedPart] = []
+    for ref, lb in part_local_bounds(pcb_data, pcb_file).items():
+        fp = pcb_data.footprints[ref]
+        rot = fp.rotation or 0.0
+        lx0, ly0, lx1, ly1 = rotate_local_bounds(*lb.local, rot)
+        rect = (fp.x + lx0, fp.y + ly0, fp.x + lx1, fp.y + ly1)
+        tht = None
+        if lb.has_tht and lb.tht_local is not None:
+            tx0, ty0, tx1, ty1 = rotate_local_bounds(*lb.tht_local, rot)
+            tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
+        out.append(GradedPart(ref=ref, side=lb.side, rect=rect,
+                              tht_rect=tht, has_tht=lb.has_tht,
+                              synthetic=lb.synthetic))
     return out
 
 
@@ -949,13 +1195,9 @@ def grade_body_overlap(pcb_data, clearance: float,
     # Refs whose courtyard rect is the zero-pad +/-0.5mm fiction: their pairs
     # may inform but must never gate (run-23's phantom G***<->J5).
     _synthetic_refs = {g.ref for g in _graded if g.synthetic}
-    _containers: set = set()
+    # `bb` stays bound here: the edge-waiver and off-board arms below read it.
     bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
-    if bb:
-        _barea = max(1e-9, (bb[2] - bb[0]) * (bb[3] - bb[1]))
-        for g in _graded:
-            if rect_area(g.rect) >= CONTAINER_RATIO * _barea:
-                _containers.add(g.ref)
+    _containers = container_refs(pcb_data, _graded)
 
     def _waiver_for(a: str, b: str) -> str:
         if a in _containers or b in _containers:
@@ -1410,7 +1652,9 @@ class PadClearanceModel:
 
         base = max(global clearance, netclass(a), netclass(b))
         eff  = <.kicad_dru layer rules over the SHARED copper layers>   # REPLACES
-        eff  = max(eff, lc_a, lc_b)                                     # override wins
+        eff  = max(lc_a, lc_b, rules.min_clearance) if either pad has an
+               override, else eff                                       # override REPLACES
+                                                                        # (KiCad 10, measured)
 
     #768: when the caller passes a `ceiling` -- a `--clearance` it will then
     CLAMP the output project's classes down to -- the netclass term alone is
@@ -1443,7 +1687,7 @@ class PadClearanceModel:
 
     __slots__ = ('base', 'net_floor', 'layer_rules', 'board_copper',
                  'active', 'notes', 'ceiling', '_pair_cache',
-                 'track_rules', 'net_classes')
+                 'track_rules', 'net_classes', 'board_min_clearance')
 
     def __init__(self, base: float, net_floor=None, layer_rules=None,
                  board_copper=(), has_overrides: bool = False,
@@ -1469,6 +1713,8 @@ class PadClearanceModel:
         # DOES ask reads `track_rules` directly -- see `track_pair`.
         self.track_rules = list(track_rules or [])
         self.net_classes = dict(net_classes or {})
+        # rules.min_clearance: the floor under a pad override (set by for_board).
+        self.board_min_clearance = 0.0
         self.active = bool(self.net_floor or self.layer_rules or has_overrides)
         self.notes = []
         self._pair_cache = {}
@@ -1613,6 +1859,13 @@ class PadClearanceModel:
                     track_rules=track_rules, net_classes=net_classes,
                     has_overrides=has_overrides, ceiling=ceiling)
         model.notes = notes
+        if has_overrides and path:
+            try:
+                from design_rules import board_min_clearance_for
+                model.board_min_clearance = board_min_clearance_for(pcb_data, path)
+            except Exception as exc:                            # noqa: BLE001
+                notes.append('rules.min_clearance unread (%s: %s)'
+                             % (type(exc).__name__, exc))
         return model
 
     # -- per-pad --------------------------------------------------------------
@@ -1681,10 +1934,16 @@ class PadClearanceModel:
                 # REPLACE: a rule may raise OR lower, and either way it is the
                 # rule that decided the value.
                 eff, src = cached, 'layer rule'
-        if fa.lc > eff:
-            eff, src = fa.lc, 'pad override'
-        if fb.lc > eff:
-            eff, src = fb.lc, 'pad override'
+        # A pad / footprint clearance OVERRIDE REPLACES the class / rule value,
+        # floored at rules.min_clearance -- KiCad returns before it looks at
+        # either (drc_engine.cpp; measured on KiCad 10.0.0 by
+        # tests/oracle/constraint_agreement.py). It may therefore LOWER the
+        # pair below the class: 2932 pads on 48 corpus boards declare exactly
+        # that (fine-pitch BGA/QFN). Same helper as check_drc and the router.
+        lc = max(fa.lc, fb.lc)
+        if lc > 0.0:
+            bm = getattr(self, 'board_min_clearance', 0.0) or 0.0
+            eff, src = (lc if lc >= bm else bm), 'pad override'
         if eff <= self.base + 1e-9:
             # check_drc's `_mark_required` threshold exactly, not legality's
             # 1e-6 EPS: a requirement between the two would be disclosed by one
@@ -1801,7 +2060,8 @@ class PartPads:
     __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
                  'holes_local', 'holes_extent', 'n_pads', '_pad_cache',
                  '_hole_cache', '_keepout_cache', '_ext_cache', 'pad_floors',
-                 'max_floor', 'clearance', 'hole_reach', 'holes_req')
+                 'max_floor', 'clearance', 'hole_reach', 'holes_req',
+                 'pad_sides', '_ext_side_cache')
 
     def __init__(self, fp, clearance: float, model=None,
                  copper_holes: bool = True, npth_floor: float = None):
@@ -1943,14 +2203,30 @@ class PartPads:
                 continue
             copper = [l for l in p.layers if str(l).endswith('.Cu')]
             through = (p.drill or 0) > 0
-            pside = None if through else (
-                'B' if any(str(l).startswith('B') for l in copper) else 'F')
-            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-            c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
-            hx, hy = p.size_x / 2.0, p.size_y / 2.0
+            # #834: a pad on BOTH faces reads as through, not as back-only.
+            # An SMD pad listed on `*.Cu` (or explicitly on F.Cu and B.Cu) is
+            # not drilled, so the old expression fell to its `'B'` arm and
+            # declared the F copper away. That was harmless while the
+            # over-cap branch ignored sides entirely; once `pair_shortfall`
+            # SKIPS a pair whose pad sides are disjoint, it becomes a false
+            # ACCEPT -- which this module's contract forbids outright (see the
+            # class docstring: it may falsely reject, never falsely accept).
+            # Measured a no-op on the corpus: zero such pads on any of the 22
+            # tracked boards, so this is hardening, not a behaviour change.
+            # `*.Cu` is KiCad's ALL-copper wildcard, so it is both faces on its
+            # own -- and it read as FRONT, because it does not start with 'B'.
+            _star = any(str(l).startswith('*') for l in copper)
+            _b = any(str(l).startswith('B') for l in copper)
+            _f = any(not str(l).startswith(('B', '*')) for l in copper)
+            pside = (None if (through or _star or (_b and _f))
+                     else ('B' if _b else 'F'))
+            # THE one formula (see its docstring): PartPads was a fourth
+            # copy of it, and `part_copper_geometry` keys a pad's own rect
+            # on the same call, so a lookup cannot disagree with the box it
+            # is looking up.
+            phx, phy = pad_half_extents(p)
             self.pads_local.append((p.global_x - fp.x, p.global_y - fp.y,
-                                    hx * c + hy * s, hx * s + hy * c,
-                                    p.net_id, pside))
+                                    phx, phy, p.net_id, pside))
             if model is not None:
                 floor = model.pad_floor(p)
                 self.pad_floors.append(floor)
@@ -1980,10 +2256,28 @@ class PartPads:
             over = (_kr + self.clearance) - _er
             if over > self.hole_reach:
                 self.hole_reach = over
+        # #834: the board sides this part's COPPER PADS occupy -- a through
+        # pad (`pside is None`) occupies both. Deliberately NOT
+        # `sides_occupied(self.side, self.has_tht)`, which answers the BODY
+        # question and is always a superset: glasgow_revC's J5 has pads on F
+        # only but two NPTH holes, so its body occupies both faces, and
+        # pricing pad clearance at the body's answer would make this fix inert
+        # on the one over-cap part in the corpus that carries holes.
+        _sides = set()
+        for _t in self.pads_local:
+            if _t[5] is None:
+                _sides = BOTH_SIDES
+                break
+            _sides.add(_t[5])
+        self.pad_sides = (BOTH_SIDES if _sides is BOTH_SIDES else
+                          FRONT_ONLY if _sides == {'F'} else
+                          BACK_ONLY if _sides == {'B'} else
+                          BOTH_SIDES if _sides else NO_SIDES)
         self._pad_cache: Dict[float, list] = {}
         self._hole_cache: Dict[float, list] = {}
         self._keepout_cache: Dict[float, list] = {}
         self._ext_cache: Dict[float, Tuple[float, float, float, float]] = {}
+        self._ext_side_cache: Dict[Tuple[float, str], tuple] = {}
 
     def _delta_key(self, rot: float) -> float:
         return round(((rot or 0.0) - self.seed_rot) % 360, 3)
@@ -2090,25 +2384,316 @@ class PartPads:
             return None
         return (x + e[0], y + e[1], x + e[2], y + e[3])
 
+    def extent_local_side(self, rot: float, side: str):
+        """`extent_local`, restricted to the pads that occupy `side` (#834).
+
+        The over-cap branch of `pair_shortfall` grades a pair on the gap
+        between EXTENT boxes, and a whole-part extent spans both faces -- so a
+        BGA on F was charged for a part on B whenever the pad-pair product
+        crossed `PAIR_TEST_CAP`, and only then. This is the same box, built
+        over the pads that `_sides_interact` would have admitted.
+
+        Holes go into BOTH sides' boxes: a drill removes copper on every
+        layer, so it is not a side's to exclude. That also makes this box
+        equal to `extent_local` for a part whose pads all occupy one side --
+        which is why no same-side pair can move (measured: every one of the 35
+        same-side over-cap pairs on the tracked corpus, at four rotations, is
+        bit-identical).
+
+        `holes_extent` is rotated INLINE here for the same reason
+        `extent_local` does it: `hole_circles()` serves `holes_local`, the
+        keep-OUT radii, and substituting them would inflate every extent on
+        every board.
+        """
+        key = (self._delta_key(rot), side)
+        ext = self._ext_side_cache.get(key)
+        if ext is None:
+            xs0, ys0, xs1, ys1 = [], [], [], []
+            for ox, oy, HX, HY, _n, _s in self._rotated(rot):
+                if not _sides_interact(_s, side):
+                    continue
+                xs0.append(ox - HX); ys0.append(oy - HY)
+                xs1.append(ox + HX); ys1.append(oy + HY)
+            rad = math.radians(-key[0])
+            hc, hs = math.cos(rad), math.sin(rad)
+            for ox, oy, r in self.holes_extent:
+                cx, cy = ox * hc - oy * hs, ox * hs + oy * hc
+                xs0.append(cx - r); ys0.append(cy - r)
+                xs1.append(cx + r); ys1.append(cy + r)
+            ext = () if not xs0 else (min(xs0), min(ys0), max(xs1), max(ys1))
+            self._ext_side_cache[key] = ext
+        return ext or None
+
+    def extent_side(self, x: float, y: float, rot: float, side: str):
+        e = self.extent_local_side(rot, side)
+        if e is None:
+            return None
+        return (x + e[0], y + e[1], x + e[2], y + e[3])
+
 
 def build_part_pads(footprints: Dict[str, object],
                     clearance: float, model=None,
                     copper_holes: bool = True,
-                    npth_floor: float = None) -> Dict[str, 'PartPads']:
+                    npth_floor: float = None,
+                    tolerant: bool = False) -> Dict[str, 'PartPads']:
     """PartPads for every footprint that has any pad (copper or NPTH).
 
     `model` is an optional `PadClearanceModel` (#697); without it the parts
     carry no per-pad clearance floors and every consumer behaves exactly as
     before.
+
+    `tolerant` (#841) SKIPS a footprint whose pad model cannot be built rather
+    than losing the whole map to it. Default False, so the six existing call
+    sites are bit-identical: a gate that silently drops a part it could not
+    model is worse than one that raises. It exists for the lane ledgers, whose
+    callers include hand-built test fixtures that carry no `reference` -- there
+    a missing part degrades to the pad-centre box it always had, and
+    `CopperGeometry.modelled` says which parts those are.
     """
     out = {}
     for ref, fp in footprints.items():
         if not getattr(fp, 'pads', None):
             continue
-        pp = PartPads(fp, clearance, model, copper_holes, npth_floor)
+        try:
+            pp = PartPads(fp, clearance, model, copper_holes, npth_floor)
+        except Exception:                                    # noqa: BLE001
+            if not tolerant:
+                raise
+            continue
         if pp.n_pads or pp.holes_local:
             out[ref] = pp
     return out
+
+
+class CopperGeometry(NamedTuple):
+    """One part's copper, as both lane ledgers charge it (#841)."""
+    ref: str
+    #: `PartPads.extent`: pad copper UNION the NPTH hole extents. This is the
+    #: part's obstruction box -- what it contributes as a NEIGHBOUR, and the
+    #: box its own faces are measured on, so two parts facing each other
+    #: cannot disagree about where the channel between them is.
+    rect: Tuple[float, float, float, float]
+    #: The union of the PAD rects alone, never wider than `rect`. Face
+    #: ASSIGNMENT is measured against this one, because every edge of it is
+    #: attained by some pad -- which is what keeps an edge pad at distance
+    #: exactly 0. `rect` does not have that property: measured, on 12 of the
+    #: 388 edges of the corpus's fine-pitch parts the extreme edge is set by
+    #: an NPTH hole and no pad reaches it -- watchy SW1-SW4 (8 edges, 0.400mm)
+    #: and rp2350 J2 (4, up to 1.372mm). Regenerate with
+    #: `tests/test_841_obstruction_rect.py`, which prints the count.
+    #:
+    #: It read 14 for one commit, with ulx3s U1 (2 edges, 0.1905mm) named as a
+    #: third hole part. U1 has no holes: those two edges were `copper` losing
+    #: four stacked pad rects to a lookup keyed on the centre alone, and the
+    #: number was corrected in the docstring before the bug behind it was
+    #: found. A number that disagrees with another number is not always the
+    #: one to change.
+    copper: Tuple[float, float, float, float]
+    #: `{(cx, cy, half_x, half_y): (x0, y0, x1, y1)}` -- each copper pad's own
+    #: rect at this pose, keyed by its centre AND its half-extents (rounded to
+    #: 1e-4 mm) so a caller holding a `Pad` can find it. NOT indexed by
+    #: position: `PartPads` drops pads that carry no copper, so its order does
+    #: not align with `fp.pads`.
+    #:
+    #: The size is in the key because the centre alone is not unique. Pads
+    #: STACKED at one point are ordinary -- a cross-shaped alignment mark, a
+    #: thermal pad drawn as several rects -- and keying on the centre gave the
+    #: last one to whichever pad asked: measured, glasgow_revC U1's 0.6mm
+    #: GND pad 57 was handed a co-located 6.22mm box, and rp2350 U6's pad 61
+    #: a 3.4mm one.
+    #:
+    #: Measured over the tracked corpus, 383 of 9491 pads have no rect and
+    #: every one of them is copper-less; no NETTED pad misses, and none is now
+    #: handed another pad's box.
+    pads: Dict[Tuple[float, float], Tuple[float, float, float, float]]
+    #: False when the pad model could not be built and `rect`/`copper` are the
+    #: pad-CENTRE bbox instead -- today's answer, kept for the caller that has
+    #: no `PartPads` behind its footprints.
+    modelled: bool
+    #: `{'F': rect, 'B': rect}` -- `rect` restricted to the pads that occupy
+    #: each board side (#848), from `PartPads.extent_side`. A side the part's
+    #: pad model does not reach is ABSENT; `{}` when `modelled` is False.
+    #: Read it through `rect_on_sides`, never directly.
+    #:
+    #: What it is for: the side FILTER in both lane ledgers is already
+    #: per-side (`own & other` over `sides_occupied`, #835), but the rectangle
+    #: each charged was the whole part -- so an F.Cu part escaping past a B.Cu
+    #: connector with a few through pins was charged the connector's entire
+    #: back-side pad field, copper those tracks never have to share.
+    #:
+    #: HOLES ARE IN BOTH BOXES (see `extent_local_side`): a drill removes
+    #: copper on every layer, so it is not a side's to exclude. That is also
+    #: why this is very nearly inert -- measured over the tracked corpus at
+    #: clearance 0.2, 20 (ref, side) boxes differ from `rect` at all, 3 are
+    #: ever charged against a face in deficit, and no board's reported deficit
+    #: moves. It is correct and it is cheap; it is here to be right before a
+    #: board exercises it, not because a board does today.
+    rect_sides: Dict[str, Tuple[float, float, float, float]]
+
+
+def part_copper_geometry(footprints: Dict[str, object], clearance: float, *,
+                         parts: Optional[Dict[str, 'PartPads']] = None
+                         ) -> Dict[str, CopperGeometry]:
+    """{ref: CopperGeometry} at each footprint's own pose -- THE lane-ledger
+    obstruction geometry (#841).
+
+    One definition, because two lane ledgers asking "what stops a track
+    leaving this face" answered it with two different rectangles: `escape`
+    charged the bbox of pad CENTRES (a 0.9mm passive terminal contributing a
+    zero-width body), `routability.face_lane_ledger` charged the COURTYARD (an
+    assembly keep-out a track may legally run under). Neither is copper.
+
+    `clearance` is NOT decoration. `holes_extent` carries
+    `max(0, NPTH_TO_TRACK_CLEARANCE - clearance)` (see `extent_local`), so
+    below 0.20mm the hole box grows: measured over the 22 tracked boards, 19
+    parts on 6 boards differ between clearance 0.05 and 0.20, by up to
+    0.150mm, and nothing differs between 0.20 and 0.40. Pass the clearance you
+    priced the LANE at -- `check_channels` runs the corpus at 0.09, squarely
+    inside that regime, so two ledgers on different clearances would disagree
+    exactly where the starved-face gate lives.
+
+    A pad-LESS footprint is absent from the result (as it is from
+    `build_part_pads`). That is deliberate and it closes #841's own hazard:
+    the +/-0.5mm `synthetic` fiction `part_local_bounds` invents for a
+    footprint with neither courtyard nor pads can no longer reach a lane
+    SUPPLY, which `options.move_blocker` turns into an instruction to move a
+    part. Measured over the whole tracked corpus, the refs this drops from
+    `face_lane_ledger`'s neighbour list are EXACTLY that board's `synthetic`
+    set -- set equality, on every board that has one: ulx3s 9, glasgow_revC 8,
+    orangecrab 3, tigard 3, esp_prog 3, watchy 2, and interf_u_unrouted /
+    interf_u_unrouted_placed 1 each. Those last two carry no fine-pitch part,
+    so no default run reaches them; they are named because "and none
+    elsewhere" is what was written here first, and it was wrong.
+    """
+    if parts is None:
+        parts = build_part_pads(footprints, clearance, tolerant=True)
+    else:
+        # `parts` decides the NPTH hole growth, not `clearance` -- the boxes
+        # are already built. A caller handing in a map built at a different
+        # clearance would get hole extents up to 0.2mm off the value it just
+        # asked for, silently, and the docstring above spends a paragraph
+        # promising the opposite. `PartPads` records the clearance it was
+        # built at, so the disagreement is checkable rather than trusted.
+        for _pp in parts.values():
+            if abs(float(_pp.clearance) - float(clearance)) > 1e-9:
+                raise ValueError(
+                    'part_copper_geometry: parts were built at clearance '
+                    '{} but {} was requested; the NPTH hole extents would be '
+                    'the former and every caller would read the latter'
+                    .format(_pp.clearance, clearance))
+            break
+    out: Dict[str, CopperGeometry] = {}
+    for ref, fp in footprints.items():
+        if not getattr(fp, 'pads', None):
+            continue
+        pp = parts.get(ref)
+        ext = None if pp is None else pp.extent(fp.x, fp.y, fp.rotation or 0.0)
+        if pp is None or ext is None:
+            xs = [p.global_x for p in fp.pads]
+            ys = [p.global_y for p in fp.pads]
+            centre = (min(xs), min(ys), max(xs), max(ys))
+            out[ref] = CopperGeometry(ref=ref, rect=centre, copper=centre,
+                                      pads={}, modelled=False, rect_sides={})
+            continue
+        boxes = [(r[0], r[1], r[2], r[3])
+                 for r in pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)]
+        # The UNION comes from the full list, never from the lookup dict.
+        # Keying it by centre alone collapsed pads STACKED at one point -- a
+        # cross-shaped alignment pad, a thermal pad drawn as several rects --
+        # so `copper` silently lost them: measured, ulx3s U1 dropped 4 of its
+        # 389 rects and came out 0.1905mm short on two sides, and glasgow U1's
+        # 0.6mm pad 57 was handed a co-located 6.22mm box. A dict cannot be
+        # the union AND the lookup; it is now only the lookup.
+        if boxes:
+            copper = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes))
+        else:
+            copper = ext                      # holes only: no pad copper at all
+        # ...and the lookup key carries the pad's SIZE as well as its centre,
+        # so two pads at one point are distinguishable and a hit is the pad's
+        # own box. BOTH sides of that key come from `pad_half_extents(pad)` --
+        # here and in `pad_box` -- rather than one from the pad and one from
+        # the finished rect: measured, re-deriving the half-extent as
+        # `(x1 - x0) / 2` puts esp_prog U2 pad 2 (1.5019mm wide) at 0.7509
+        # against the pad's own 0.751, and it stops being findable.
+        #
+        # `pads_local` is built by walking `fp.pads` and keeping the pads that
+        # carry copper, so `pad_rects` is index-aligned with that same filter;
+        # the zip below is that correspondence, and the length check is what
+        # refuses to guess if it ever stops holding.
+        copper_pads = [q for q in fp.pads if _pad_carries_copper(q)]
+        rects = {}
+        if len(copper_pads) == len(boxes):
+            for q, box in zip(copper_pads, boxes):
+                qhx, qhy = pad_half_extents(q)
+                rects[(round(q.global_x, 4), round(q.global_y, 4),
+                       round(qhx, 4), round(qhy, 4))] = box
+        # #848: the same box per board SIDE. Built here rather than at the
+        # ledgers because BOTH of them charge `rect` today -- `escape.
+        # _blocked_span` and `routability.face_lane_ledger` -- and a per-side
+        # rect in one of them re-opens the disagreement #841 closed.
+        # `extent_side` is memoized per (delta-rot, side) inside `PartPads`, so
+        # this is two cached lookups per part.
+        rot = fp.rotation or 0.0
+        sides_ext = {}
+        for _side in ('F', 'B'):
+            _e = pp.extent_side(fp.x, fp.y, rot, _side)
+            if _e is not None:
+                sides_ext[_side] = _e
+        out[ref] = CopperGeometry(ref=ref, rect=ext, copper=copper,
+                                  pads=rects, modelled=True,
+                                  rect_sides=sides_ext)
+    return out
+
+
+def rect_on_sides(geom: CopperGeometry, sides=None
+                  ) -> Tuple[float, float, float, float]:
+    """`geom`'s obstruction box over the board sides in `sides` (#848).
+
+    The copper analogue of `rect_on` above, which makes exactly this
+    distinction for COURTYARDS: a part's own side gets its whole body, the
+    opposite side gets only what reaches through. Both lane ledgers already
+    decide WHETHER to charge a neighbour with `own & other` over
+    `sides_occupied`; this is what they charge once they have.
+
+    `sides=None` means "every side" and returns `geom.rect` -- today's answer,
+    and the answer for a caller with no side map. So does an empty union and
+    one naming only sides this part's PAD model does not reach: `g.sides` is
+    courtyard-derived while `rect_sides` is pad-derived, and the two can
+    legitimately disagree. A caller must never silently LOSE an obstruction,
+    which is the same rule `_blocked_span` states for its three `.get` maps.
+
+    Union, not intersection: a through-hole part occupying {F, B} and charged
+    against a part occupying both contributes what it has on either.
+    """
+    if not sides or not geom.rect_sides:
+        return geom.rect
+    boxes = [geom.rect_sides[s] for s in sides if s in geom.rect_sides]
+    if not boxes:
+        return geom.rect
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def pad_box(geom: CopperGeometry, pad) -> Optional[Tuple[float, float,
+                                                         float, float]]:
+    """`pad`'s own copper rect within `geom`, or None when it has none.
+
+    The one lookup, so a caller does not re-derive a pad's half-extents from
+    `size_x`/`size_y`/`rect_rotation` and end up with a box that disagrees with
+    the `copper` union built from `PartPads`. None means the pad carries no
+    copper (a paste aperture, an NPTH mounting hole) -- measured, no NETTED pad
+    on the tracked corpus answers None.
+    """
+    if not geom.pads:
+        # An unmodelled part (`modelled=False`) has no pad boxes at all, and
+        # asking one for its half-extents is how this reached out and touched
+        # a `size_x` the caller's footprints do not carry -- the hand-built
+        # fixtures in `tests/test_escape_ledger.py` are exactly that caller.
+        return None
+    hx, hy = pad_half_extents(pad)
+    return geom.pads.get((round(pad.global_x, 4), round(pad.global_y, 4),
+                          round(hx, 4), round(hy, 4)))
 
 
 def _sides_interact(a, b) -> bool:
@@ -2224,6 +2809,40 @@ class LegalityContext:
             return ZERO_SHORTFALL
         rects_a = pa.pad_rects(xa, ya, ra)
         rects_b = pb.pad_rects(xb, yb, rb)
+        # #834: two parts whose pads share no copper face cannot interact
+        # through the PAD channel at all, so answer it here rather than in
+        # either branch below.
+        #
+        # This is EXACT, not conservative, which is what licenses it without
+        # an EPS. `_sides_interact(a, b)` is `a is None or b is None or
+        # a == b`, and a member of `pad_sides` is never None, so: if some pad
+        # pair passes that filter then either one side is None (and that pad
+        # contributes BOTH sides) or the two are equal -- either way the sets
+        # intersect; and if a side s is in both sets then each part has a pad
+        # with pside in {None, s}, which `_sides_interact` admits. Disjoint
+        # therefore holds if and only if the per-pad sweep below would find
+        # zero interacting pairs, so this returns exactly what it returns.
+        #
+        # Placed AFTER the broad-phase early-out and after the rect lists so
+        # only pairs that were about to run the O(n*m) loop pay for the
+        # intersection -- measured on ulx3s, ~0.14us against 310us for one
+        # 778-pad-pair sweep it replaces.
+        #
+        # The HOLE channel is still measured: `reach` above includes
+        # `hole_reach`, so a cross-side pair that interacts ONLY through a
+        # drill survives the broad phase and lands here, and an NPTH hole
+        # pierces both faces (see `footprint_has_through_pads`). Returning a
+        # blanket ZERO_SHORTFALL here would delete #761's channel for exactly
+        # those pairs. The singleton is returned only when neither part has a
+        # hole, where `_hole_shortfall` is 0.0 by construction -- and that is
+        # worth doing, because `pads_ok` short-circuits on its IDENTITY.
+        if not (pa.pad_sides & pb.pad_sides):
+            if not pa.holes_local and not pb.holes_local:
+                return ZERO_SHORTFALL
+            return PairShortfall(0.0, False,
+                                 _hole_shortfall(pa, xa, ya, ra, rects_b,
+                                                 pb, xb, yb, rb, rects_a),
+                                 False)
         if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
             # Extent-level verdict for the PAD channel only: charge the extent
             # shortfall as pad shortfall so the baseline comparison still
@@ -2241,7 +2860,38 @@ class LegalityContext:
             # fire for exactly the dense connectors that carry mounting holes,
             # and that is corpus-reachable, not theoretical: J5 is the one part
             # on the 22 tracked boards whose product exceeds the cap.
-            g = rect_gap(ea, eb)
+            #
+            # ...which was wrong, and is corrected here (#834): 38 pairs on
+            # NINE of those boards exceed the cap, and J5 is not even the only
+            # over-cap part on glasgow (U1 x U30 is 83 x 121). The hole
+            # argument above still holds -- J5 remains the only over-cap part
+            # that CARRIES holes, which is what that paragraph is really
+            # about. Re-derive both with
+            # `tests/measure_834_835_side_awareness.py --table A`.
+            #
+            # The gap is taken PER SHARED SIDE, because the extent boxes above
+            # span both faces and a pair reaching this branch may share only
+            # one. Charging the whole-extent gap here priced a part on B
+            # against a BGA on F -- the same pair the per-pad sweep below
+            # discards on `_sides_interact` -- so the verdict turned on the
+            # pad-pair PRODUCT, a performance switch, rather than on physics.
+            # `min` because the pair interacts on whichever shared face brings
+            # them closest; `default` because a bare `min()` over an empty
+            # generator raises inside `quench.candidate_valid`'s inner loop,
+            # and "the disjoint case already returned above" is exactly the
+            # kind of unreachability that ships as a crash.
+            #
+            # `pad_overlap` and `stack` follow the same g. `stack` becoming
+            # side-aware is the correction, not a side effect: the per-pad
+            # sweep below sets it only AFTER `_sides_interact`, and
+            # `render_placement` already prints front-to-back overlaps as
+            # "opposite faces, NOT a conflict" while this branch refused them.
+            g = min((rect_gap(pa.extent_side(xa, ya, ra, s),
+                              pb.extent_side(xb, yb, rb, s))
+                     for s in ('F', 'B')
+                     if pa.extent_side(xa, ya, ra, s) is not None
+                     and pb.extent_side(xb, yb, rb, s) is not None),
+                    default=rect_gap(ea, eb))
             return PairShortfall(max(0.0, pad_reach - g), g < 0.0,
                                  _hole_shortfall(pa, xa, ya, ra, rects_b,
                                                  pb, xb, yb, rb, rects_a),

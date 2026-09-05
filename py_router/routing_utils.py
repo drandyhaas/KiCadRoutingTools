@@ -404,38 +404,92 @@ def pad_blocked_cells_array(
 _SEG_CAPSULE_CACHE: "OrderedDict[Tuple[float, float, float, float, float, float], np.ndarray]" = OrderedDict()
 _SEG_CAPSULE_ROWS = 0
 
+# Span twin of the capsule memo (#: 5.2x denser, so it holds a working set the
+# cell form evicted). The two SHARE the raster budget: spans take the bulk
+# because every stamping consumer uses them, and the cell form keeps a small
+# slice for the few consumers that iterate cells.
+_SEG_SPAN_CACHE: "OrderedDict[Tuple[float, float, float, float, float, float], np.ndarray]" = OrderedDict()
+_SEG_SPAN_ROWS = 0
+
+
+def _seg_span_row_budget() -> int:
+    # 12 bytes per (gx, lo, hi) int32 row.
+    #
+    # #815: 65% of the shared raster budget, up from 40%. A call-site census on
+    # glasgow_revC put 7,433,001 of 7,585,865 capsule calls (98.0%) in the span
+    # form once the plane builder's two loops migrated, so the cell memo below
+    # no longer needs a large slice -- and the span memo was the one starved,
+    # sitting at 100% of its old budget all run.
+    #
+    # The three raster memos SUM TO 100% of KICAD_RASTER_CACHE_MB and must keep
+    # doing so -- spans 65% + cells 5% + polygons 30% (obstacle_map.
+    # _poly_raster_byte_budget). The polygon share pays for the increase: #818
+    # measured it 58x oversubscribed at 40%, where DOUBLING it bought 1.0 point
+    # of hit rate, so budget moved out of it costs almost nothing and budget
+    # moved into the span memo -- the one starved at exactly 100% all run --
+    # buys the working set outright.
+    return int(env_knobs.RASTER_CACHE_MB * 0.65 * 1e6 / 12)
+
 
 def _seg_capsule_row_budget() -> int:
-    # 8 bytes per (N,2) int32 row; the capsule cache gets half the shared
-    # KICAD_RASTER_CACHE_MB budget (the polygon cache takes most of the
-    # rest). LRU-evicted, never wholesale-cleared: profiling showed the old
-    # 64MB clear-all cap cycling ~40x on orangecrab (69% hit rate where the
-    # keyspace supports ~99%).
-    return int(env_knobs.RASTER_CACHE_MB * 0.5 * 1e6 / 8)
+    # 8 bytes per (N,2) int32 row. 5% of the shared budget (#815), down from
+    # 10% and originally 50%: every stamping consumer now takes spans, and what
+    # is left here is the ~2% of traffic that genuinely ITERATES cells --
+    # _add_segment_obstacle_with_exclusion (tests each cell against an
+    # exclusion set) and blocking_analysis. Those have a small keyspace, so the
+    # slice they need is small; the memory belongs to the span memo, which is
+    # where the working set actually lives.
+    #
+    # LRU-evicted, never wholesale-cleared: profiling showed the old 64MB
+    # clear-all cap cycling ~40x on orangecrab (69% hit rate where the keyspace
+    # supports ~99%).
+    return int(env_knobs.RASTER_CACHE_MB * 0.05 * 1e6 / 8)
 
 
-def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
-                                margin: float, grid_step: float) -> "np.ndarray":
-    """(N, 2) int32 cells whose centre is within ``margin`` mm of the TRUE float
-    segment (x1,y1)-(x2,y2) -- a capsule (fat line with rounded ends).
+_SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
+_CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
 
-    Replaces the walk_line(rounded endpoints) + square_offsets box stamp, which
-    rounded the endpoints to the grid and used a Chebyshev box: an off-grid track
-    (terminal connection to an off-grid pad, ~31% of segments) had its keep-out
-    shifted up to a half cell off its real centreline, and a diagonal track's box
-    staircase under-covered the perpendicular direction between steps. A foreign
-    track cleared the rounded stamp but grazed the real track (issue #70/B). Here
-    distances are measured from the real segment, so off-grid + diagonal are exact.
 
-    The result is memoized (exact float key) and READ-ONLY -- callers must not
-    mutate it.
+# Tie epsilon for every grid keep-out boundary (mm). A cell centre whose
+# distance to the blocking geometry is within this of the threshold is treated
+# as OPEN. Shared by the capsule (here), the polygon rasterizer's consumers and
+# the drill discs (obstacle_map), so the three cannot drift apart.
+#
+# Why this exists: cell centres are computed in ABSOLUTE board coordinates
+# (`gx * grid_step`), and grid_step has no exact binary form, so the same
+# geometry rounds differently at different board positions. Where a cell sits
+# EXACTLY on the boundary the strict `<` is then decided by the last bit --
+# and the repo's own defaults put it there (track 0.3/2 + clearance 0.25 = 0.4
+# = exactly 4 x a 0.1 grid; ~20% of realistic track/clearance/grid combinations
+# do). Measured before this epsilon: the IDENTICAL capsule shape produced up to
+# 25 different cell sets depending only on where it sat on the board, 115 to
+# 138 cells for one shape. That is not a correctness bug -- a cell at exactly
+# `margin` is at exactly the clearance, which DRC passes either way -- but it
+# is arbitrary, and it is why the memo cannot key on shape (identical shapes
+# genuinely disagreed).
+#
+# 1e-6 mm = 1 nm = KiCad's own internal resolution, chosen with headroom
+# measured on both sides:
+#   * float noise to swamp, over a 600 mm board:      0.000034 nm  (29,000x smaller)
+#   * nearest GENUINE non-tie cell to the boundary:    1,498 nm    (1,498x larger)
+# so it deterministically resolves every tie and can never open a cell that is
+# really inside. Opening (rather than blocking) the tie is the safe direction:
+# the resulting gap is exactly the clearance, which passes DRC, and KiCad
+# stores nm integers so a sub-nm violation is not even representable.
+GRID_TIE_EPS = 1e-6
+
+
+def _capsule_mask(x1: float, y1: float, x2: float, y2: float,
+                  margin: float, grid_step: float):
+    """(xs, ys, mask) for the capsule around (x1,y1)-(x2,y2).
+
+    THE predicate, in one place: both segment_blocked_cells_array and
+    segment_blocked_spans derive from this, so the cell form and the span form
+    can never disagree about membership.
+
+    Boundary cells are resolved OPEN via `GRID_TIE_EPS` (see above), which
+    makes membership independent of where the capsule sits on the board.
     """
-    global _SEG_CAPSULE_ROWS
-    key = (x1, y1, x2, y2, margin, grid_step)
-    cached = _SEG_CAPSULE_CACHE.get(key)
-    if cached is not None:
-        _SEG_CAPSULE_CACHE.move_to_end(key)
-        return cached
     inv = 1.0 / grid_step
     glo_x = int(math.floor((min(x1, x2) - margin) * inv))
     ghi_x = int(math.ceil((max(x1, x2) + margin) * inv))
@@ -455,7 +509,92 @@ def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
         np.clip(t, 0.0, 1.0, out=t)
     ddx = cx - (x1 + t * dx)
     ddy = cy - (y1 + t * dy)
-    mask = (ddx * ddx + ddy * ddy) < margin * margin
+    # Shrink by the tie epsilon rather than comparing `< margin` exactly, so a
+    # cell sitting on the boundary is OPEN at every board position instead of
+    # being decided by float rounding.
+    m_eff = margin - GRID_TIE_EPS
+    mask = (ddx * ddx + ddy * ddy) < m_eff * m_eff
+    return xs, ys, gxg, gyg, mask
+
+
+def segment_blocked_spans(x1: float, y1: float, x2: float, y2: float,
+                          margin: float, grid_step: float) -> "np.ndarray":
+    """(M, 3) int32 SPANS (gx, gy_lo, gy_hi -- both inclusive) covering exactly
+    the cells segment_blocked_cells_array returns.
+
+    Same membership, ~5.2x less memory. A capsule is CONVEX, so each column's
+    cells are one contiguous run: storing (col, lo, hi) costs 12 bytes per
+    column against 8 bytes x ~8.3 cells (measured over 400 representative
+    capsules). That is what lets the memo hold a working set the cell form
+    could not -- on glasgow the cell cache sat pinned at its 16M-row ceiling
+    with 2,270,477 of its 2,317,497 misses being EVICTIONS, i.e. keys that
+    would have hit in a cache that fit.
+
+    Consumers stamp these through GridObstacleMap.add_blocked_cell_spans_batch
+    / add_blocked_via_spans_batch, which expand in Rust. Expanding in Python
+    instead measures 7.44 us against a 0.17 us cache hit (~65 s per route), so
+    the span form only pays when the CONSUMER takes spans.
+
+    Read-only and shared, exactly like the cell form.
+    """
+    global _SEG_SPAN_ROWS
+    key = (x1, y1, x2, y2, margin, grid_step)
+    cached = _SEG_SPAN_CACHE.get(key)
+    if cached is not None:
+        _SEG_SPAN_CACHE.move_to_end(key)
+        return cached
+    xs, ys, _gxg, _gyg, mask = _capsule_mask(x1, y1, x2, y2, margin, grid_step)
+    any_col = mask.any(axis=1)
+    sel = np.flatnonzero(any_col)
+    if sel.size:
+        lo = mask.argmax(axis=1)[sel]
+        hi = mask.shape[1] - 1 - mask[:, ::-1].argmax(axis=1)[sel]
+        out = np.empty((sel.size, 3), dtype=np.int32)
+        out[:, 0] = xs[sel]
+        out[:, 1] = ys[lo]
+        out[:, 2] = ys[hi]
+        # Convexity says each column is contiguous; verify rather than trust,
+        # because a non-contiguous column would silently BLOCK EXTRA cells.
+        if int((out[:, 2] - out[:, 1] + 1).sum()) != int(mask.sum()):
+            raise AssertionError("capsule column not contiguous")
+    else:
+        out = np.empty((0, 3), dtype=np.int32)
+    out.setflags(write=False)
+    _SEG_SPAN_CACHE[key] = out
+    _SEG_SPAN_ROWS += len(out)
+    budget = _seg_span_row_budget()
+    while _SEG_SPAN_ROWS > budget and _SEG_SPAN_CACHE:
+        _, old_arr = _SEG_SPAN_CACHE.popitem(last=False)
+        _SEG_SPAN_ROWS -= len(old_arr)
+    return out
+
+
+def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
+                                margin: float, grid_step: float) -> "np.ndarray":
+    """(N, 2) int32 cells whose centre is within ``margin`` mm of the TRUE float
+    segment (x1,y1)-(x2,y2) -- a capsule (fat line with rounded ends).
+
+    Prefer ``segment_blocked_spans`` for anything that stamps into a
+    GridObstacleMap; this cell form remains for consumers that iterate cells.
+
+    Replaces the walk_line(rounded endpoints) + square_offsets box stamp, which
+    rounded the endpoints to the grid and used a Chebyshev box: an off-grid track
+    (terminal connection to an off-grid pad, ~31% of segments) had its keep-out
+    shifted up to a half cell off its real centreline, and a diagonal track's box
+    staircase under-covered the perpendicular direction between steps. A foreign
+    track cleared the rounded stamp but grazed the real track (issue #70/B). Here
+    distances are measured from the real segment, so off-grid + diagonal are exact.
+
+    The result is memoized (exact float key) and READ-ONLY -- callers must not
+    mutate it.
+    """
+    global _SEG_CAPSULE_ROWS
+    key = (x1, y1, x2, y2, margin, grid_step)
+    cached = _SEG_CAPSULE_CACHE.get(key)
+    if cached is not None:
+        _SEG_CAPSULE_CACHE.move_to_end(key)
+        return cached
+    _xs, _ys, gxg, gyg, mask = _capsule_mask(x1, y1, x2, y2, margin, grid_step)
     out = np.empty((int(mask.sum()), 2), dtype=np.int32)
     out[:, 0] = gxg[mask]
     out[:, 1] = gyg[mask]
@@ -467,13 +606,6 @@ def segment_blocked_cells_array(x1: float, y1: float, x2: float, y2: float,
         _, old_arr = _SEG_CAPSULE_CACHE.popitem(last=False)
         _SEG_CAPSULE_ROWS -= len(old_arr)
     return out
-
-
-# Offset-pattern caches for batched rasterization. The patterns are tiny
-# (a few hundred cells) and reused for every segment/via on the board.
-_SQUARE_OFFSETS_CACHE: Dict[int, "np.ndarray"] = {}
-_CIRCLE_OFFSETS_CACHE: Dict[Tuple[int, float], "np.ndarray"] = {}
-
 
 def circle_offsets(block_range: int, effective_sq: float) -> "np.ndarray":
     """(K, 2) int32 offsets with ex^2 + ey^2 <= effective_sq, matching the

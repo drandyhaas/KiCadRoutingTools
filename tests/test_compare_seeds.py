@@ -95,7 +95,19 @@ def test_end_to_end_ranked_table_from_relative_paths():
             assert os.path.isfile(row['board']), f"seed board missing: {row}"
             if row.get('probe'):
                 assert row['probe']['probe_kind'] == 'full'
-                assert isinstance(row['probe']['failures'], int), row['probe']
+                # Every probe row now carries a `status`, and the row SHAPE no
+                # longer depends on the outcome (#713 item 2). Before that, a
+                # no-verdict row dropped four keys the success row has --
+                # `probe_kind` among them -- so this block was a latent
+                # KeyError on any such row rather than the assertion it looks
+                # like. Assert the pairing instead of assuming success.
+                assert row['probe']['status'] in (
+                    'ok', 'crashed', 'no_summary', 'screened'), row['probe']
+                if row['probe']['status'] == 'ok':
+                    assert isinstance(row['probe']['failures'], int), \
+                        row['probe']
+                else:
+                    assert row['probe']['failures'] is None, row['probe']
         line = next(l for l in r.stdout.splitlines()
                     if l.startswith('JSON_SUMMARY:'))
         s = json.loads(line.split(':', 1)[1])

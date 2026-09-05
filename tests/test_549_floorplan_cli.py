@@ -73,7 +73,19 @@ def _emit_once():
     return _EMITTED
 
 
-def test_emit_then_grade_is_clean_and_exits_zero():
+def test_emit_then_grade_is_clean_and_is_honest_about_what_it_graded():
+    """BOARD is ulx3s, and its emitted intent WITHHOLDS `overlap_area`: the
+    board carries 18 unwaived courtyard interpenetrations and an auto-budget
+    would bless them. So this round trip produces zero errors AND an ungraded
+    declared channel.
+
+    Before #713 item 5 that combination printed `PASS: 5 rule(s) ran, no
+    violations` twenty-six lines above `1 declared value(s) NOT DERIVABLE --
+    not graded, not passed`, reported `pass: true`, and exited 0. This test
+    asserted exactly that, so it was pinning the defect. It now asserts the
+    two halves it always meant: the rules find nothing wrong, and the run says
+    plainly that it did not grade everything.
+    """
     code, out, err = _run(BOARD, '--emit-intent', _EMITTED)
     assert code == 0, (code, err)
     doc = json.load(open(_EMITTED, encoding='utf-8'))
@@ -81,10 +93,19 @@ def test_emit_then_grade_is_clean_and_exits_zero():
     assert 'not editable by this toolchain' in out, out
 
     code, out, err = _run(BOARD, '--intent', _EMITTED)
-    assert code == 0, (code, err)
     s = _summary(out)
-    assert s['pass'] is True and s['errors'] == 0
-    print(f"  PASS: emit -> grade exits 0, {s['rules_run']} rules ran")
+    assert s['errors'] == 0 and s['violations'] == 0, s
+    assert s['complete'] is False and s['not_graded'] == {
+        'budget_abstained': 1}, s
+    assert s['pass'] is False, "an ungraded declared channel is not a pass"
+    assert code == VIOLATIONS_EXIT, (code, err)
+    assert 'INCOMPLETE' in out and 'PASS:' not in out, out
+    # --exit-zero suppresses the CODE without lying about the VERDICT, the
+    # same contract it already has for violations.
+    code, out, _ = _run(BOARD, '--intent', _EMITTED, '--exit-zero')
+    assert code == 0 and _summary(out)['pass'] is False
+    print(f"  PASS: emit -> grade is clean but INCOMPLETE, "
+          f"{s['rules_run']} rules ran, exit {VIOLATIONS_EXIT}")
 
 
 def test_violations_exit_4_and_exit_zero_overrides():
@@ -102,8 +123,21 @@ def test_violations_exit_4_and_exit_zero_overrides():
     code, out, _ = _run(BOARD, '--intent', p, '-q', '--exit-zero')
     assert code == 0, code
     assert _summary(out)['pass'] is False, "the verdict changed with --exit-zero"
+
+    # A board can be BOTH wrong and incompletely graded, and the second fact
+    # must not be swallowed by the first. ulx3s is exactly that case here: a
+    # must_lock violation AND a withheld overlap_area. The first draft of
+    # #713 item 5 returned on `errors` before it reached the completeness
+    # block, and printed the INCOMPLETE line only on the no-violation branch,
+    # so this board reported the errors and said nothing about what it never
+    # measured.
+    code, out, err = _run(BOARD, '--intent', p)
+    s2 = _summary(out)
+    assert s2['errors'] >= 1 and s2['complete'] is False, s2
+    assert 'ALSO NOT FULLY GRADED' in out, out[-600:]
+    assert 'NOT FULLY GRADED' in err, err
     print("  PASS: 4 on violations; --exit-zero returns 0 without lying "
-          "about `pass`")
+          "about `pass`; a wrong board still discloses what went ungraded")
 
 
 def test_argparse_failures_all_exit_2():
@@ -176,7 +210,10 @@ def test_json_output_is_byte_identical_across_hash_seeds():
         code, stdout, err = _run(BOARD, '--intent', _emit_once(), '-q',
                                  '--json', p, env={'PYTHONHASHSEED': seed,
                                                    'KRT_NO_BANNER': '1'})
-        assert code == 0, (seed, err)
+        # 4, not 0: ulx3s's emitted intent withholds `overlap_area`, so this
+        # round trip is clean but INCOMPLETE (#713 item 5). The determinism
+        # claim is about the BYTES and is unaffected either way.
+        assert code == VIOLATIONS_EXIT, (seed, err)
         outs.append((open(p, 'rb').read(), stdout))
     assert outs[0][0] == outs[1][0], "--json differs across PYTHONHASHSEED"
     assert outs[0][1] == outs[1][1], "JSON_SUMMARY differs across PYTHONHASHSEED"
@@ -195,7 +232,12 @@ def test_the_summary_reports_what_did_not_run():
     s = _summary(out)
     assert s['pass'] is True and s['violations'] == 0
     assert s['rules_run'] == 0, s['rules_run']
-    assert s['rules_skipped'] == 9, s['rules_skipped']
+    # A hand-stated literal, deliberately: deriving it from `len(RULES)`
+    # would make this arm agree with whatever the module currently says
+    # and stop being a change detector. 9 before #794 added
+    # `decap_ungraded` and #705 added `decap_pin_distance`; 11 before #837
+    # added `assembly_side`.
+    assert s['rules_skipped'] == 12, s['rules_skipped']
     print(f"  PASS: an empty intent passes with rules_run=0, "
           f"rules_skipped={s['rules_skipped']} -- visibly vacuous")
 
@@ -273,11 +315,22 @@ def test_a_placement_run_leaves_the_board_outline_untouched():
     """The invariant the whole outline rule rests on, asserted rather than
     assumed.
 
-    It is true today by construction -- no writer in the routing chain emits an
-    Edge.Cuts primitive, and `strip_zero_length_edge_cuts` removes only
-    degenerate segments that bound nothing. But "true by construction" is
-    exactly the kind of property that stops being true silently, so it gets a
-    test rather than a comment.
+    This used to justify itself with "true by construction -- no writer in the
+    routing chain emits an Edge.Cuts primitive". That reasoning was WRONG, and
+    #829 is what it missed: the outline moves through a MOVER, not a writer.
+    A footprint's `(at x y rot)` transforms any Edge.Cuts shape inside it
+    (`kicad_parser._footprint_edge_points`), and the movable set was gated on
+    pads alone -- so moving a pad-bearing footprint that owned outline geometry
+    resized the board while every writer behaved exactly as described.
+
+    watchy cannot see that: it draws its outline board-level, and 0 of the 27
+    tracked boards carry footprint-embedded Edge.Cuts at all. So this test is
+    live but blind to that path, and `tests/test_829_edge_cuts_owner.py` covers
+    it on a synthetic fixture that can actually fail.
+
+    What this one still pins is real and worth keeping: a full `place_optimize`
+    run on a board with two interior cutouts leaves bounds, rings and cutouts
+    identical.
 
     watchy is the right board for it: 2 real interior cutouts, and 81 of its 82
     parts seeded in courtyard violation, so the optimizer has every reason to
@@ -321,7 +374,7 @@ def test_a_placement_run_leaves_the_board_outline_untouched():
 
 
 TESTS = [
-    test_emit_then_grade_is_clean_and_exits_zero,
+    test_emit_then_grade_is_clean_and_is_honest_about_what_it_graded,
     test_a_placement_run_leaves_the_board_outline_untouched,
     test_violations_exit_4_and_exit_zero_overrides,
     test_argparse_failures_all_exit_2,
@@ -331,6 +384,9 @@ TESTS = [
     test_the_summary_carries_the_keys_a_caller_branches_on,
     test_the_full_json_carries_the_measured_numbers,
     test_emit_writes_no_board_and_touches_nothing,
+    # Defined but never registered, so never run (#876):
+    test_a_round_board_now_grades_normally,
+    test_grading_knobs_resolve_from_the_board_and_are_disclosed,
 ]
 
 

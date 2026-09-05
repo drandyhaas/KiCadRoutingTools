@@ -61,8 +61,21 @@ DECAP_MIN_IC_PADS = 4          # what chip_boundary already calls "not a passive
 # the board.
 _AUTO_NET = re.compile(r'^(net-\(|unconnected-\(|net\d)', re.I)
 # Power and ground reach everywhere by design, so they say nothing about blocks.
-_POWER_NET = re.compile(r'^(a?gnd|dgnd|pgnd|vcc|vdd|vss|vee|vbus|vin|vout|vref|'
-                        r'pwr|\+|-|\d)', re.I)
+# The pattern MOVED to `net_queries.is_power_net_name` (#705): the pin rule's
+# rail-net fallback asks the same question, and a second copy of a predicate
+# this tree already spells nine ways is exactly what it keeps paying for.
+# Imported in the function body, matching this module's own idiom for a
+# `py_router` sibling (see `decap_tethers`) -- a module-level import would need
+# `py_router` on `sys.path` before `placement` is imported, which several test
+# files do not arrange.
+#
+# It does EXTEND that requirement to `_from_netprefix`, which had no py_router
+# dependency before: with only `py_placer` on the path it now raises
+# ModuleNotFoundError where it used to work. Every in-tree caller is safe --
+# `kicad_parser` also lives in `py_router`, so holding a real `PCBData` already
+# implies it, and `swig_gui` inserts `py_router` first -- but the constraint is
+# now wider than the sentence above, and saying so is cheaper than a reader
+# rediscovering it.
 _PREFIX = re.compile(r'^([A-Za-z][A-Za-z0-9]+)[_\-]')
 NETPREFIX_MIN_REFS = 3
 # Max distance from the cluster centroid to any member. A prefix scattered wider
@@ -136,12 +149,13 @@ def _from_sheet(pcb_data, movable) -> Dict[str, List[str]]:
 
 
 def _from_netprefix(pcb_data, movable) -> Dict[str, List[str]]:
+    from net_queries import is_power_net_name
     buckets: Dict[str, Set[str]] = {}
     for net_id, net in (pcb_data.nets or {}).items():
         if net_id <= 0:
             continue
         leaf = (net.name or '').split('/')[-1]
-        if not leaf or _AUTO_NET.match(leaf) or _POWER_NET.match(leaf):
+        if not leaf or _AUTO_NET.match(leaf) or is_power_net_name(leaf):
             continue
         m = _PREFIX.match(leaf)
         if not m:
@@ -203,34 +217,97 @@ def _pads_are_collinear(fp, eps: float = 1e-6) -> bool:
     return len(xs) <= 1 or len(ys) <= 1
 
 
-def decap_tethers(pcb_data, movable=None,
-                  radius: float = DECAP_RADIUS_MM
-                  ) -> Dict[str, List[Tuple[str, float]]]:
-    """{IC ref: [(cap ref, bbox distance mm)]} -- the decoupling tethers.
+def _copper_pads(fp) -> int:
+    """How many of a footprint's pads carry copper.
 
-    Nearest IC by bounding-box distance, but ONLY when the cap shares a net with
-    it. Proximity alone is not enough -- on ulx3s 13 of 70 caps sit near an IC
-    they have no electrical relationship with, and dragging those along would be
-    a wrong group.
+    `chip_boundary.build_chip_list` gates on RAW pad count, and a KiCad 0201
+    footprint carries two solder-paste apertures beside its two copper pads --
+    so a two-terminal passive reaches four and is called a chip. The
+    collinearity guard does not save it: at a non-orthogonal angle its two
+    copper pads share neither an x nor a y, so the row test says "not a row".
+    Measured, exactly two parts corpus-wide reach the chip list this way, both
+    on rp2350: `C28` (Capacitor_SMD:C_0201_0603Metric at -45 degrees) and `R9`
+    (the resistor of the same body at the same angle). `orangecrab_ext_pll C1`
+    is the same four-pad shape and escapes only because it sits at 90 degrees,
+    where the x coordinates collapse and the row test catches it -- so the old
+    behaviour was rotation-dependent, which is not a property anyone chose.
 
-    Public, and returning the DISTANCE, because two consumers need the same
-    tether and must not each decide what "near its IC" means: `_from_decap`
-    wants the membership, and the floorplan grader's `decap_distance` rule
-    (#549) wants the number. Grading the quench's own decap rule against a
-    second implementation of it would measure the reimplementation, not the
-    board.
-
-    `movable` restricts which caps are considered (None = every footprint), as
-    in `derive_groups`. Iteration is over a SORTED ref list: `movable` reaches
-    us as a set, and cap order within an IC's list would otherwise vary with
-    PYTHONHASHSEED (#457).
+    Found by review, and it was not theoretical: the pin rule graded C28 as an
+    IC needing decoupling and reported `C28 pin 1 (/RP2354A/1V1) is 6.11mm from
+    C30`, i.e. a capacitor flagged for being far from another capacitor.
     """
+    if fp is None or not fp.pads:
+        return 0
+    return sum(1 for p in fp.pads
+               if any(str(l).endswith('.Cu') for l in (p.layers or ())))
+
+
+def _chip_list(pcb_data):
+    """The ChipBoundary objects this module calls ICs. ONE answer, one place."""
     from chip_boundary import build_chip_list
+    return [c for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
+            if not _pads_are_collinear(pcb_data.footprints.get(c.reference))
+            and _copper_pads(pcb_data.footprints.get(c.reference))
+            >= DECAP_MIN_IC_PADS]
+
+
+def chip_refs(pcb_data) -> Set[str]:
+    """The refs this module calls an IC: >= 4 COPPER pads, and not a row.
+
+    Public since #792, because the seeder was answering the same question with
+    `owner[0] == 'U'` -- a second answer to the problem `_pads_are_collinear`
+    was written for, and the one without the measurement behind it. One
+    question, one answer, and this is the one that carries its scar.
+    """
+    return {c.reference for c in _chip_list(pcb_data)}
+
+
+def is_decoupling_cap(fp, ref: str) -> bool:
+    """The syntactic half of "is this a decap": a `C*` bridging exactly two nets.
+
+    TWO DISTINCT NETS, not two net-bearing PADS, and case-INSENSITIVE. Both
+    differences were spelled three ways across this tree before #792 (here, in
+    `seeder.decap_scope`, and in `emit_intent`'s census) and all three produce
+    identical sets on every tracked board -- so the choice is argued, not
+    measured:
+
+    * a 2-pad part with both pads on ONE net is a zero-ohm link, not a decap
+      (pad-count says yes, distinct-nets says no);
+    * a 3-pad cap with a tied thermal pad IS a decap (pad-count says no).
+
+    Both differences favour distinct-nets. `ref[:1]` rather than `ref[0]` also
+    survives an empty reference instead of raising.
+    """
+    if fp is None or ref[:1].upper() != 'C':
+        return False
+    return len({p.net_id for p in fp.pads if p.net_id > 0}) == 2
+
+
+def _elect_tethers(pcb_data, movable=None):
+    """[(cap, ic|None, distance|None)] in sorted cap order -- the ONE election.
+
+    **The radius never reaches here, and that is the entire point.** It used to
+    live at the end of `decap_tethers` as a prune on the winner, which meant
+    that asking the same question at two radii ran the election twice and made
+    "the wider answer contains the narrower one" a per-board coincidence that a
+    test had to re-verify. `decap_census`'s own comment asserted the opposite --
+    that the unbounded pass "can pick a DIFFERENT chip, so this is a second
+    measurement rather than a superset" -- and that was never true of this code:
+    `radius` appeared only after the argmin, and `chips` and `ic_nets` are built
+    before any cap is considered. Measured over the tracked corpus, 0 of 357
+    tethers re-elect. With one election it is a property of the code shape
+    instead of a fact about a corpus.
+
+    `ic is None` means NO chip carries this cap's rail -- a bulk or filter cap
+    upstream of an LC network, not a decoupler. Ten of ulx3s's caps are that,
+    and they are why "in the seeder's scope" and "graded against an IC" are two
+    different questions rather than two spellings of one (#792).
+    """
     from net_queries import is_ground_net_name
-    chips = [c for c in build_chip_list(pcb_data, min_pads=DECAP_MIN_IC_PADS)
-             if not _pads_are_collinear(pcb_data.footprints.get(c.reference))]
-    if not chips:
-        return {}
+    # THE SAME chip list `chip_refs` publishes, so the seeder's owner
+    # test and the grader's tether election cannot answer "what is an
+    # IC" differently -- which is the whole of #792.
+    chips = _chip_list(pcb_data)
     if movable is None:
         movable = set(pcb_data.footprints)
     ic_nets = {}
@@ -239,14 +316,12 @@ def decap_tethers(pcb_data, movable=None,
         if fp is not None:
             ic_nets[c.reference] = {p.net_id for p in fp.pads if p.net_id > 0}
 
-    out: Dict[str, List[Tuple[str, float]]] = {}
+    out: List[Tuple[str, Optional[str], Optional[float]]] = []
     for ref in sorted(movable):
         fp = pcb_data.footprints.get(ref)
-        if fp is None or not ref[:1].upper() == 'C':
+        if not is_decoupling_cap(fp, ref):
             continue
         nets = {p.net_id for p in fp.pads if p.net_id > 0}
-        if len(nets) != 2:            # a decoupling cap bridges exactly two nets
-            continue
         # Match on the POWER net, not on ground. A decoupling cap bridges a rail
         # and GND, and GND is shared with nearly every part on the board -- so
         # matching on "shares a net" lets the nearest 4-pad part win on ground
@@ -270,12 +345,84 @@ def decap_tethers(pcb_data, movable=None,
             d = math.hypot(max(x0 - cx, cx - x1, 0.0), max(y0 - cy, cy - y1, 0.0))
             if best_d is None or d < best_d:
                 best, best_d = c.reference, d
-        if best is None or best_d > radius:
-            continue
-        if not (nets & ic_nets.get(best, set())):
-            continue              # near, but not electrically its cap
-        out.setdefault(best, []).append((ref, best_d))
+        # A second `nets & ic_nets[best]` recheck used to stand here, commented
+        # "near, but not electrically its cap". It was UNREACHABLE: `power` is a
+        # subset of `nets`, and `best` is only ever assigned inside the branch
+        # that already required `power & ic_nets[c]` to be non-empty. Deleted
+        # rather than kept, because a guard that cannot execute is worse than an
+        # absent one -- it reads like protection, and its comment described an
+        # ordering (proximity first, net-sharing second) that is the opposite of
+        # what the loop above does.
+        out.append((ref, best, best_d))
     return out
+
+
+def decap_tethers(pcb_data, movable=None,
+                  radius: float = DECAP_RADIUS_MM
+                  ) -> Dict[str, List[Tuple[str, float]]]:
+    """{IC ref: [(cap ref, bbox distance mm)]} -- the decoupling tethers.
+
+    Nearest IC by bounding-box distance, but ONLY when the cap shares a net with
+    it. Proximity alone is not enough -- on ulx3s 13 of 70 caps sit near an IC
+    they have no electrical relationship with, and dragging those along would be
+    a wrong group.
+
+    Public, and returning the DISTANCE, because two consumers need the same
+    tether and must not each decide what "near its IC" means: `_from_decap`
+    wants the membership, and the floorplan grader's `decap_distance` rule
+    (#549) wants the number. Grading the quench's own decap rule against a
+    second implementation of it would measure the reimplementation, not the
+    board.
+
+    `movable` restricts which caps are considered (None = every footprint), as
+    in `derive_groups`. Iteration is over a SORTED ref list: `movable` reaches
+    us as a set, and cap order within an IC's list would otherwise vary with
+    PYTHONHASHSEED (#457).
+
+    Since #794 this is a thin filter over `_elect_tethers`. **Signature and
+    result are unchanged, deliberately**: THREE callers depend on both --
+    `_from_decap`, `reseat.clusters_from_tethers` and `board_brief` -- and
+    `_from_decap` is what `--group-by decap` resolves through on BOTH the CLI
+    and the GUI, so a change here is a change to grouping on two front ends.
+    (`rule_decap_distance` and `decap_census` used to be a fourth and fifth;
+    they now reach the election through `decap_populations`. An earlier draft
+    of this line said six, which was the count before that refactor.)
+    """
+    out: Dict[str, List[Tuple[str, float]]] = {}
+    for cap, ic, d in _elect_tethers(pcb_data, movable):
+        if ic is not None and d <= radius:
+            out.setdefault(ic, []).append((cap, d))
+    return out
+
+
+def decap_populations(pcb_data, movable=None,
+                      radius: float = DECAP_RADIUS_MM):
+    """(near, beyond, orphans) -- the in-scope caps, PARTITIONED, from one pass.
+
+    * `near`    {ic: [(cap, d)]} -- byte-identical to `decap_tethers(radius)`;
+                the population `rule_decap_distance` grades.
+    * `beyond`  [(cap, ic, d)] cap-sorted -- elected, then pruned by the radius.
+                Invisible to the grader before #794; `rule_decap_ungraded`
+                reports them.
+    * `orphans` [cap] -- in scope, but NO chip carries their rail. There is no
+                IC for them to be far from, so the grader is right to ignore
+                them; the SEEDER is not, which is #792.
+
+    The three sets partition the in-scope population, and `decap_census` emits
+    an `unaccounted` key whose only correct value is 0 so that stays a measured
+    fact rather than a claim.
+    """
+    near: Dict[str, List[Tuple[str, float]]] = {}
+    beyond: List[Tuple[str, str, float]] = []
+    orphans: List[str] = []
+    for cap, ic, d in _elect_tethers(pcb_data, movable):
+        if ic is None:
+            orphans.append(cap)
+        elif d <= radius:
+            near.setdefault(ic, []).append((cap, d))
+        else:
+            beyond.append((cap, ic, d))
+    return near, beyond, orphans
 
 
 def _from_decap(pcb_data, movable) -> Dict[str, List[str]]:

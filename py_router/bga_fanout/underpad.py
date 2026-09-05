@@ -101,6 +101,7 @@ class _Occ:
         # One shared run of set bytes for the block_* slice blits (sliced to
         # length per span); ny is the longest span any column can need.
         self._ones = b'\x01' * self.ny
+        self._disk_memo = {}       # #864: see disk_cells
 
     def cell(self, x, y):
         return (int((x - self.x0) / self.res), int((y - self.y0) / self.res))
@@ -177,6 +178,25 @@ class _Occ:
             for b in range(b0, b1 + 1):
                 yield a, b
 
+    def disk_cells(self, x, y, r):
+        """``frozenset(_disk(x, y, r))``, MEMOISED per (x, y, r) (#864).
+
+        _carve_foreign re-derives the same foreign pad / via / track disks for
+        every anchor of every ball and for every rescue attempt (8 attempts on
+        one system76_launch net: 100M _disk yields, 397 of 433 s, most of it
+        the GC re-traversing the freshly built sets). Adjacent balls share
+        their neighbours, so the memo collapses that to one build per disk.
+        Built from _disk_spans, so membership is identical to _disk."""
+        key = (round(x, 6), round(y, 6), round(r, 6))
+        cells = self._disk_memo.get(key)
+        if cells is None:
+            cells = frozenset((a, b) for a, b0, b1 in self._disk_spans(x, y, r)
+                              for b in range(b0, b1 + 1))
+            if len(self._disk_memo) >= 200000:
+                self._disk_memo.clear()
+            self._disk_memo[key] = cells
+        return cells
+
     def block_layer(self, li, x, y, r):
         g = self.grid[li]
         ny = self.ny
@@ -194,37 +214,138 @@ class _Occ:
             for li in range(self.nl):
                 self.grid[li][s + b0:s + b1 + 1] = run
 
+    def _capsule_spans(self, p, q, r):
+        """Column spans of the CAPSULE: every cell within `r` of segment p-q,
+        in one pass instead of sampling ~25 disks along it and merging.
+
+        A capsule is CONVEX, so its intersection with a lattice column is
+        exactly one interval -- which is what makes the direct form possible.
+        The interval is the union of three convex pieces' slices (the two end
+        disks and the body rectangle); for a convex set that union is itself
+        the interval [min lo, max hi], so no merging is needed.
+
+        NOT bit-identical to the sampled union it replaces, and deliberately
+        so. Sampling at `res` spacing yields a scalloped shape slightly INSIDE
+        the true capsule: the sagitta between two sample disks of radius r at
+        spacing d is d^2/(8r), which at res=0.025 and r=0.15 is 0.0005 mm --
+        2% of ONE cell. This version blocks the true capsule, so it can admit
+        a boundary cell the scallop missed. That direction is the safe one
+        (a marginally LARGER keep-out never lets copper closer to an
+        obstacle).
+
+        Measured against the sampled union over 60 random segments (32,797
+        cells): the capsule ADDS 43 cells (0.131%) and MISSES none -- and it
+        matches the true point-to-segment predicate exactly, so the sampled
+        union was the approximation, not this. On a real ulx3s U1 underpad
+        fanout the whole visible effect was ONE net's 45-degree jog moving one
+        grid cell (0.025 mm) along its run: 199 escapes, identical failure
+        counts, identical via set, total copper delta exactly 0.
+        """
+        res = self.res
+        inv = 1.0 / res
+        fx0 = (p[0] - self.x0) * inv
+        fy0 = (p[1] - self.y0) * inv
+        fx1 = (q[0] - self.x0) * inv
+        fy1 = (q[1] - self.y0) * inv
+        R = r * inv
+        thr = R * R
+        lo_x = fx0 if fx0 < fx1 else fx1
+        hi_x = fx0 if fx0 > fx1 else fx1
+        a0 = int(lo_x - R) - 1
+        a1 = int(hi_x + R) + 1
+        if a0 < 0:
+            a0 = 0
+        if a1 > self.nx - 1:
+            a1 = self.nx - 1
+        blo_lim = 0
+        bhi_lim = self.ny - 1
+
+        dx = fx1 - fx0
+        dy = fy1 - fy0
+        seg_len2 = dx * dx + dy * dy
+        # Body rectangle corners: P +- R*n and Q +- R*n, n the unit normal.
+        if seg_len2 > 0.0:
+            inv_len = 1.0 / (seg_len2 ** 0.5)
+            nx_ = -dy * inv_len * R
+            ny_ = dx * inv_len * R
+            rect = ((fx0 + nx_, fy0 + ny_), (fx1 + nx_, fy1 + ny_),
+                    (fx1 - nx_, fy1 - ny_), (fx0 - nx_, fy0 - ny_))
+        else:
+            rect = None
+
+        spans = []
+        for a in range(a0, a1 + 1):
+            lo = 1e30
+            hi = -1e30
+            # the two end disks
+            d = thr - (a - fx0) * (a - fx0)
+            if d >= 0.0:
+                h = d ** 0.5
+                if fy0 - h < lo:
+                    lo = fy0 - h
+                if fy0 + h > hi:
+                    hi = fy0 + h
+            d = thr - (a - fx1) * (a - fx1)
+            if d >= 0.0:
+                h = d ** 0.5
+                if fy1 - h < lo:
+                    lo = fy1 - h
+                if fy1 + h > hi:
+                    hi = fy1 + h
+            # the body rectangle, sliced by the vertical line x = a
+            if rect is not None:
+                for i in range(4):
+                    xA, yA = rect[i]
+                    xB, yB = rect[(i + 1) & 3]
+                    if (xA <= a <= xB) or (xB <= a <= xA):
+                        if xA != xB:
+                            t = (a - xA) / (xB - xA)
+                            y = yA + (yB - yA) * t
+                        else:
+                            y = yA if yA < yB else yB
+                            if y < lo:
+                                lo = y
+                            y = yA if yA > yB else yB
+                        if y < lo:
+                            lo = y
+                        if y > hi:
+                            hi = y
+            if hi < lo:
+                continue
+            b0 = int(lo)
+            if lo < 0 and lo != b0:
+                b0 -= 1          # int() truncates toward zero
+            b1 = int(hi)
+            if hi < 0 and hi != b1:
+                b1 -= 1
+            # Lattice cells are the INTEGER points inside [lo, hi].
+            if b0 < lo:
+                b0 += 1
+            if b0 < blo_lim:
+                b0 = blo_lim
+            if b1 > bhi_lim:
+                b1 = bhi_lim
+            if b0 > b1:
+                continue
+            spans.append((a, b0, b1))
+        return spans
+
     def block_segment(self, li, p, q, r):
-        (x0, y0), (x1, y1) = p, q
-        n = int(max(abs(x1 - x0), abs(y1 - y0)) / self.res) + 1
-        # Union of the sample disks, merged into per-column intervals and
-        # blitted once -- the same membership as stamping each sample disk
-        # (integer-adjacent intervals merge losslessly), ~10x less work.
-        cols = {}
-        dx, dy = x1 - x0, y1 - y0
-        for i in range(n + 1):
-            t = i / n
-            for a, b0, b1 in self._disk_spans(x0 + dx * t, y0 + dy * t, r):
-                iv = cols.get(a)
-                if iv is None:
-                    cols[a] = [(b0, b1)]
-                else:
-                    iv.append((b0, b1))
+        """Block the capsule around segment p-q.
+
+        Was: sample ~25 disks along the segment, collect per-column intervals,
+        sort and merge them, blit. Now: _capsule_spans computes the one
+        interval each column can have directly, so there is nothing to merge.
+        Measured 288.6 -> 12.6 us/segment; the sampled union also MISSED
+        0.131% of the cells genuinely within r (the scallops between sample
+        disks), so this is both faster and closer to the real predicate.
+        """
         g = self.grid[li]
         ny = self.ny
         ones = self._ones
-        for a, ivs in cols.items():
-            ivs.sort()
+        for a, b0, b1 in self._capsule_spans(p, q, r):
             s = a * ny
-            cb0, cb1 = ivs[0]
-            for b0, b1 in ivs[1:]:
-                if b0 <= cb1 + 1:
-                    if b1 > cb1:
-                        cb1 = b1
-                else:
-                    g[s + cb0:s + cb1 + 1] = ones[:cb1 - cb0 + 1]
-                    cb0, cb1 = b0, b1
-            g[s + cb0:s + cb1 + 1] = ones[:cb1 - cb0 + 1]
+            g[s + b0:s + b1 + 1] = ones[:b1 - b0 + 1]
 
     def block_poly(self, polys, r, li=None):
         """Keep-out for a custom pad's REAL polygon copper: block every cell
@@ -551,7 +672,11 @@ def generate_underpad_escape(footprint: Footprint,
               "package? use qfn_fanout.py)")
         return [], [], [p.net_name for p in signal_pads]
     if res is None:
-        res = min(grid.pitch_x, grid.pitch_y) / 32.0
+        # #864: floored at 0.01 mm. pitch/32 is 0.011 at a real 0.35 mm pitch,
+        # but a connector mis-detected as a 0.10 mm grid (system76_launch J7)
+        # got a 0.003 mm grid, on which a 7 mm mounting-pad keep-out is a
+        # 5-million-cell disk -- 264 such disks were 397 of a 433 s rescue.
+        res = max(min(grid.pitch_x, grid.pitch_y) / 32.0, 0.01)
     if res <= 0:
         # Backstop for a corrupt grid analysis (issue #283): a zero pitch would
         # divide-by-zero building the occupancy grid. Fail the escape cleanly.
@@ -651,8 +776,18 @@ def generate_underpad_escape(footprint: Footprint,
     # real (smaller) via -- letting neighbouring escapes route past it. Done
     # per-pad, so on a mixed-pad-size array only the small pads get smaller vias.
     _copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
-    floors = fab_floor_ladder(_copper)
+    from list_nets import escalation_rungs
+    # escalation_rungs: empty under --escalation off, raised to the board's
+    # own minimums under board (#857).
+    floors = escalation_rungs(_copper)
     clamp_stats = {'clamped': 0, 'floor': 0, 'escalated': 0}
+    # #618's policy answer: DISCLOSE. Sites this engine declines to put a
+    # via-in-pad on because their hole is inside the hole-to-hole floor --
+    # 'sites' for the single-ended centre fallback, 'coupled' for a diff pair.
+    # Refuse-to-build was measured and rejected: on ulx3s U1, honouring a
+    # declared 0.9mm floor costs 15 of 199 escapes, so refusing the RUN would
+    # throw away 184 good ones to prevent 62 bad holes.
+    h2h_stats = {'sites': 0, 'coupled_pairs': set()}
 
     # DRILL FLOOR, board-first and raise-only. `_via_site_conflict` below spaced
     # every drill it places at the flat routing_defaults.HOLE_TO_HOLE_CLEARANCE
@@ -920,18 +1055,27 @@ def generate_underpad_escape(footprint: Footprint,
         for (x, y, keep, li, nid) in carve_disks:
             if nid in net_ids or not near_pt(x, y, home_r + keep):
                 continue
-            add(set(occ._disk(x, y, keep)), li)
+            add(occ.disk_cells(x, y, keep) & home, li)
         for v in vias_to_add:
             keep = v['size'] / 2.0 + track_width / 2 + clearance + margin
             if v['net_id'] in net_ids or not near_pt(v['x'], v['y'], home_r + keep):
                 continue
-            add(set(occ._disk(v['x'], v['y'], keep)), None)
+            add(occ.disk_cells(v['x'], v['y'], keep) & home, None)
 
         def add_seg(x1, y1, x2, y2, keep, li):
+            # #864: the capsule around a foreign track, as disks sampled every
+            # keep/2 along it (was: every grid cell -- on the 0.025 rescue grid
+            # a 20 mm track was 800 full disks). A disk of radius
+            # sqrt(keep^2 + (step/2)^2) at that spacing covers the capsule of
+            # radius keep with no gap (the far point midway between samples is
+            # exactly that far), so the carve only ever over-blocks, by at most
+            # 3% of keep. Each disk is memoised and cut to `home` at once.
             dx, dy = x2 - x1, y2 - y1
             slen = math.hypot(dx, dy)
-            n = int(slen / res) + 1
-            reach = (home_r + keep + res) / max(slen, 1e-9)
+            step = max(res, keep / 2.0)
+            n = max(1, int(slen / step) + 1)
+            r_eff = math.sqrt(keep * keep + (slen / n / 2.0) ** 2)
+            reach = (home_r + keep + step) / max(slen, 1e-9)
             idxs = set()
             for ax, ay in anchors:
                 t = (((ax - x1) * dx + (ay - y1) * dy) / (slen * slen)
@@ -942,7 +1086,7 @@ def generate_underpad_escape(footprint: Footprint,
             cells = set()
             for i in idxs:
                 t = i / n
-                cells |= set(occ._disk(x1 + dx * t, y1 + dy * t, keep))
+                cells |= occ.disk_cells(x1 + dx * t, y1 + dy * t, r_eff) & home
             add(cells, li)
 
         def seg_near(x1, y1, x2, y2, reach):
@@ -1266,7 +1410,7 @@ def generate_underpad_escape(footprint: Footprint,
         r = track_width / 2 + clearance + margin
         for i in range(n + 1):
             t = i / n
-            cells |= set(occ._disk(x1 + dx * t, y1 + dy * t, r))
+            cells |= occ.disk_cells(x1 + dx * t, y1 + dy * t, r)   # #864 memo; same disks
         return cells
 
     def home_of(p):
@@ -1275,13 +1419,13 @@ def generate_underpad_escape(footprint: Footprint,
         # trap a route). max(pad,via)_keep < pitch, so it never reaches a
         # neighbouring pad. Same real-coordinate disk the blocking stamped, so
         # the exemption covers it exactly.
-        cells = set(occ._disk(p.global_x, p.global_y, max(pad_keep, via_keep)))
+        cells = set(occ.disk_cells(p.global_x, p.global_y, max(pad_keep, via_keep)))
         # A dog-bone ball's OWN copper extends to its gap via + stub (#128);
         # foreign stamps inside this lens are re-blocked by _carve_foreign
         # (callers pass the site as a second carve anchor).
         s = db_site.get(id(p))
         if s is not None:
-            cells |= set(occ._disk(s[0], s[1], via_keep))
+            cells |= occ.disk_cells(s[0], s[1], via_keep)
             pts = db_path.get(id(p)) or [(p.global_x, p.global_y), s]
             for (ax, ay), (bx, by) in zip(pts, pts[1:]):
                 cells |= _stub_cells_seg(ax, ay, bx, by)
@@ -1465,6 +1609,82 @@ def generate_underpad_escape(footprint: Footprint,
             half = via_size / 2.0
         return via_site_ok(vx, vy, half)
 
+    def _via_site_geom(pad):
+        """(x, y, size, drill) for the escape via this ball would get.
+
+        Pure: uses `clamp_via_to_pad` directly rather than `via_for_pad`, whose
+        `clamp_stats` side effect would count vias that are only being
+        CONSIDERED.
+        """
+        vx, vy = _via_spot(pad, True)
+        if (vx, vy) == (pad.global_x, pad.global_y):
+            cs, cd, _st, _r = clamp_via_to_pad(via_size, via_drill, pad, floors)
+        else:
+            cs, cd = via_size, via_drill
+        return vx, vy, cs, cd
+
+    def _coupled_via_sites_ok(pp, nn):
+        """#618: gate the COUPLED escape's two via-in-pads the way every other
+        via site in this engine is gated.
+
+        `_drop_escape_via` emits a via-in-pad at each ball centre, and its two
+        callers gated that on `_via_gate_ok` alone -- the locked-SMD copper
+        check -- and only when the board HAS locked SMD pads. So on an ordinary
+        board the coupled pair's vias went in with no `_via_site_conflict` at
+        all: not against the board's drills, not against this run's committed
+        vias, and not against each other. Every other via site in this file
+        goes through `_via_site_conflict` (`_site_ok`, and the centre-site
+        fallback #567 closed at the plane-drop path); this one did not, which
+        is the structurally live remainder of #618 -- the issue's other three
+        clauses were closed by #567 and #756.
+
+        `skip_resv=True` for the same reason #567 gives at its own call site:
+        these sites ARE the mutual centre reservation, so including `resv`
+        would make each ball veto itself.
+
+        THE PAIR IS ALSO TESTED AGAINST ITSELF, which `_via_site_conflict`
+        cannot do: neither via is in `vias_to_add` when the decision is made,
+        so `_via_ctx` cannot see the sibling. DRILL ONLY, on the reasoning
+        `PendingVias` sets out for the channel engine: both balls are SMD and
+        carry no hole, so both holes are ones this pass creates, and a drill
+        pair inside the floor is an unbuildable board rather than a DRC
+        opinion. The RING between the pair is left alone because a via clamped
+        into its pad asks the fab for the etch pitch the footprint already
+        demands, and because there is no lever -- a via-in-pad site IS the ball
+        centre, so refusing buys a lost escape and nothing else. It is NOT
+        because the copper is already there: a ball pad is one layer and the
+        via spans all of them.
+
+        Drill hole-to-hole is net-independent (#282), which is what makes it
+        the right test for a P/N pair.
+        """
+        if locked_smd_pads and not all(_via_gate_ok(q) for q in (pp, nn)):
+            return False           # a through via would hit locked copper
+
+        # COUNT PAIRS, NOT CALLS. This gate runs inside `strict x direction x
+        # candidate` loops from two templates and is not memoised, so a bare
+        # `+= 1` reported "8 coupled pair(s) declined" on a board with ONE
+        # coupled pair (16 calls for it). An adversarial review measured that.
+        # The `sites` counter is fine -- its caller memoises per ball centre.
+        _pair_key = tuple(sorted((id(pp), id(nn))))
+
+        sites = [_via_site_geom(q) for q in (pp, nn)]
+        for pad, (vx, vy, cs, cd) in zip((pp, nn), sites):
+            ctx = _via_ctx(pad.net_id, vx, vy)
+            why = _via_site_conflict(vx, vy, pad.net_id, ctx, vr=cs / 2.0,
+                                     vdr=(cd or 0.0) / 2.0, skip_resv=True)
+            if why is not None:
+                if why.startswith('drill hole'):
+                    h2h_stats['coupled_pairs'].add(_pair_key)
+                return False
+        (ax, ay, _as, ad), (bx, by, _bs, bd) = sites
+        if math.hypot(ax - bx, ay - by) < ((ad or 0.0) / 2.0
+                                           + (bd or 0.0) / 2.0
+                                           + _h2h - 1e-6):
+            h2h_stats['coupled_pairs'].add(_pair_key)
+            return False           # the pair's own two holes, #620's shape
+        return True
+
     def _drop_escape_via(pad):
         """Emit this ball's escape via -- at its dog-bone site (plus the
         pad->via stub, whose corridor was stamped at reservation) when
@@ -1547,9 +1767,11 @@ def generate_underpad_escape(footprint: Footprint,
             if De <= Lc + 0.01:
                 continue
             for L, use_via in candidates:
-                if use_via and locked_smd_pads and not all(
-                        _via_gate_ok(q) for q in (pp, nn)):
-                    continue  # a through via would hit locked copper
+                # #618: locked copper, or a via site conflicting with the
+                # board, with this run's own committed copper, or with the
+                # pair's own sibling hole.
+                if use_via and not _coupled_via_sites_ok(pp, nn):
+                    continue
                 segs = []
                 ok = True
                 for pad, side in ((pp, 1.0), (nn, -1.0)):
@@ -1641,9 +1863,11 @@ def generate_underpad_escape(footprint: Footprint,
                 return (mx + along * ex + off * px, my + along * ey + off * py)
 
             for L, use_via in candidates:
-                if use_via and locked_smd_pads and not all(
-                        _via_gate_ok(q) for q in (pp, nn)):
-                    continue  # a through via would hit locked copper
+                # #618: locked copper, or a via site conflicting with the
+                # board, with this run's own committed copper, or with the
+                # pair's own sibling hole.
+                if use_via and not _coupled_via_sites_ok(pp, nn):
+                    continue
                 for tside in (1.0, -1.0):         # which gap the trail bulges through
                     lside = -tside
                     lead_segs = [(_via_spot(lead, use_via), pt(De - run, lside * half_sp)),
@@ -1827,7 +2051,7 @@ def generate_underpad_escape(footprint: Footprint,
         ctx = _via_ctx(p.net_id, gx, gy,
                        extra=max(hx, hy) + lane_max * max(grid.pitch_x,
                                                           grid.pitch_y))
-        pad_ex = set(occ._disk(gx, gy, max(pad_keep, via_keep)))
+        pad_ex = occ.disk_cells(gx, gy, max(pad_keep, via_keep))   # #864 memo
 
         def _lane_pad_exempt(x1, y1, x2, y2):
             # The inter-row lane clears the flanking ball pads by only a few
@@ -1838,7 +2062,7 @@ def generate_underpad_escape(footprint: Footprint,
             cells = set()
             for p2 in footprint.pads:
                 if _pt_seg_d(p2.global_x, p2.global_y, x1, y1, x2, y2)                         < max(grid.pitch_x, grid.pitch_y) * 0.55:
-                    cells |= set(occ._disk(p2.global_x, p2.global_y, pad_keep))
+                    cells |= occ.disk_cells(p2.global_x, p2.global_y, pad_keep)
             return cells
 
         def _site_ok(vx, vy, avoid_soft):
@@ -1873,7 +2097,7 @@ def generate_underpad_escape(footprint: Footprint,
                             continue
                         if _stub_conflict(p, vx, vy, ctx):
                             continue
-                        ex_cells = pad_ex | set(occ._disk(vx, vy, via_keep))
+                        ex_cells = pad_ex | occ.disk_cells(vx, vy, via_keep)
                         if not occ.seg_clear(top_idx, (gx, gy), (vx, vy),
                                              exempt=ex_cells):
                             continue
@@ -1888,7 +2112,7 @@ def generate_underpad_escape(footprint: Footprint,
                             continue
                         if _seg_conflict(p.net_id, ex_, ey_, vx, vy, ctx):
                             continue
-                        via_ex = set(occ._disk(vx, vy, via_keep))
+                        via_ex = occ.disk_cells(vx, vy, via_keep)
                         if not occ.seg_clear(top_idx, (gx, gy), (ex_, ey_),
                                              exempt=pad_ex | via_ex):
                             continue
@@ -2083,9 +2307,17 @@ def generate_underpad_escape(footprint: Footprint,
                 key = ('c', round(x, 6), round(y, 6))
                 ok = _m.get(key)
                 if ok is None:
-                    ok = _via_site_conflict(x, y, _nid, _c, vr=_cs / 2.0,
-                                            vdr=(_cd or 0.0) / 2.0,
-                                            skip_resv=True) is None
+                    _why = _via_site_conflict(x, y, _nid, _c, vr=_cs / 2.0,
+                                              vdr=(_cd or 0.0) / 2.0,
+                                              skip_resv=True)
+                    ok = _why is None
+                    # #618 asks for a policy on via-in-pad sites the
+                    # hole-to-hole floor refuses -- skip, warn, or fail. This
+                    # is the WARN answer. Counted on the cache MISS so each
+                    # distinct site counts once. It changes no decision; it
+                    # makes one visible that the operator could not see.
+                    if _why is not None and _why.startswith('drill hole'):
+                        h2h_stats['sites'] += 1
                     _m[key] = ok
                 return ok
             key = (round(x, 6), round(y, 6))
@@ -2177,16 +2409,23 @@ def generate_underpad_escape(footprint: Footprint,
                     _pour_models[(nid, lay)] = models
 
         def _pour_covers(p):
+            """The ball's own copper layer when the (existing or declared)
+            pour's MAIN fill component reaches it there, else None."""
             lay = next((l for l in (p.layers or []) if l.endswith('.Cu')), None)
             if lay is None:
-                return False
+                return None
             for m in _pour_models.get((p.net_id, lay), ()):
                 comp = m.query_component(p.global_x, p.global_y,
                                          size=min(p.size_x, p.size_y))
                 if comp and comp == m.largest_component():
-                    return True
-            return False
+                    return lay
+            return None
 
+        # #678: every ball served by fill contact is a PROMISE a later route
+        # step must keep (its island can be carved off the sourced region
+        # by routing). Recorded per ball, keyed "REF.PAD", published in the
+        # drop report and noted for the .kicad_pro writeback.
+        _promised: Dict[str, Dict[str, str]] = {}
         _rep_nets: Dict[str, Dict[str, int]] = {}
         n_gap = n_ctr = n_exist = n_fail = n_pour = 0
         n_trk = [0]
@@ -2204,13 +2443,16 @@ def generate_underpad_escape(footprint: Footprint,
                 n_exist += 1
                 r['existing'] += 1
                 continue
-            if _pour_covers(p):
+            _pour_lay = _pour_covers(p)
+            if _pour_lay is not None:
                 # Served by the surface pour on its own layer -- no via needed.
                 # (The pad-centre tap reservation stays: if a later step's
                 # copper carves the pour away from this pad, the plane repair
                 # can still tap here.)
                 n_pour += 1
                 r['pour'] += 1
+                _promised[f"{p.component_ref}.{p.pad_number}"] = {
+                    'net': p.net_name, 'layer': _pour_lay, 'how': 'pour'}
                 continue
             # POUR-TRACK near-miss (#652): the pour's MAIN component stops
             # just short of this ball (fill eroded around a neighbouring
@@ -2262,6 +2504,9 @@ def generate_underpad_escape(footprint: Footprint,
                             [(gx, gy), (_tx, _ty)])
                         n_ptrk[0] += 1
                         r['pour_track'] = r.get('pour_track', 0) + 1
+                        _promised[f"{p.component_ref}.{p.pad_number}"] = {
+                            'net': p.net_name, 'layer': _lay,
+                            'how': 'pour_track'}
                         continue
             # TRACK-CONNECT (env-gated, KICAD_FANOUT_TRACK_CONNECT=1 arms): a through-barrel here
             # perforates EVERY foreign pour whose fill covers this (x,y) --
@@ -2374,7 +2619,19 @@ def generate_underpad_escape(footprint: Footprint,
                 {'nets': _rep_nets, 'gap_vias': n_gap, 'pad_vias': n_ctr,
                  'skipped_existing': n_exist, 'skipped_pour': n_pour,
                  'track_connects': n_trk[0],
-                 'pour_tracks': n_ptrk[0], 'failed': n_fail})
+                 'pour_tracks': n_ptrk[0], 'failed': n_fail,
+                 # #678: WHICH balls were promised, not just how many.
+                 'pour_served_pads': dict(_promised)})
+        if _promised:
+            # Engine-side note (both fronts inherit it); the step boundary
+            # that knows the output project persists it -- the CLI main next
+            # to its DRC-floor writeback, the GUI in update_live_drc_floors /
+            # the plan executor, exactly like protected nets (#521).
+            try:
+                from protected_nets import note_pour_served_pads
+                note_pour_served_pads(_promised)
+            except Exception:
+                pass
         if verbose and drop_pads:
             per = ", ".join(f"{n} {c['gap']}+{c['in_pad']}"
                             for n, c in sorted(_rep_nets.items()))
@@ -2414,6 +2671,18 @@ def generate_underpad_escape(footprint: Footprint,
             print(f"  Under-pad: WARNING {clamp_stats['floor']} pad(s) smaller than "
                   f"the fab via floor ({fab_floor_min(_copper)['via_diameter']:.2f}mm "
                   f"dia); via held at the floor and still bulges past the pad edge")
+        # #618: the hole-to-hole floor's cost, disclosed. Refusing these sites
+        # is not new (the floor has been enforced since #756); being able to
+        # SEE that the floor is what refused them is. Balls that lose their
+        # via-in-pad here fall to the checked off-centre search, and only fail
+        # to the main router if that finds nothing either.
+        _n_coupled_declined = len(h2h_stats['coupled_pairs'])
+        if h2h_stats['sites'] or _n_coupled_declined:
+            print(f"  Under-pad: {h2h_stats['sites']} via-in-pad centre site(s)"
+                  f" and {_n_coupled_declined} coupled pair(s) declined by the"
+                  f" {_h2h:g}mm hole-to-hole floor ({_h2h_src}); the levers are"
+                  f" a smaller --via-drill, a fab tier whose floor this pitch"
+                  f" can meet, or the board's own min_hole_to_hole")
     # The FAB requirement under-pad escape creates (#489 §8): via-in-pad needs
     # IPC-4761 Type VII. Emitted from the shared engine so both fronts report it.
     from fab_notes import print_via_in_pad_note

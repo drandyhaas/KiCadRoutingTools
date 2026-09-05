@@ -71,7 +71,8 @@ The top-level container returned by both entry points.
 |-------|------|---------|
 | `board_info` | `BoardInfo` | Layers, bounds, outline, stackup, keepouts |
 | `nets` | `Dict[int, Net]` | Nets keyed by net ID (ID 0 = unconnected) |
-| `footprints` | `Dict[str, Footprint]` | Footprints keyed by reference (`'U9'`, `'R1'`) |
+| `footprints` | `Dict[str, Footprint]` | Every footprint BLOCK, keyed by reference (`'U9'`, `'R1'`). Duplicated references get a file-order ordinal (`TP4`, `TP4~2`); a reference-less block is keyed `#<uuid>` (#726) |
+| `duplicate_references` | `Dict[str, int]` | `{reference as the FILE spells it: how many blocks claim it}`, for the ones claimed more than once. Advisory -- a duplicate is legal in KiCad |
 | `segments` | `List[Segment]` | All track segments |
 | `vias` | `List[Via]` | All vias |
 | `pads_by_net` | `Dict[int, List[Pad]]` | Pads grouped by net ID (fast lookup) |
@@ -172,7 +173,7 @@ default for vias you ADD.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `reference` | str | Reference designator — also the key in `pcb.footprints` |
+| `reference` | str | The key in `pcb.footprints`, which is the reference designator for all but a duplicated one (`TP4~2`) or a reference-less block (`#<uuid>`). `Pad.component_ref` carries the same value |
 | `footprint_name` | str | Library ID (`'interf_u:PGA120'`) |
 | `x`, `y` | float | Footprint origin |
 | `rotation` | float | Rotation in degrees |
@@ -181,6 +182,8 @@ default for vias you ADD.
 | `value` | str | Component value (`'100nF'`, `'MCF5213'`) |
 | `clearance` | float | Footprint-level `(clearance …)` override in mm (0 = none). Already **resolved into** each pad's `local_clearance` at parse time — read that field for clearance decisions; this records the raw footprint value (issue #326). |
 | `net_tie_groups` | List[List[str]] | Pad-number groups the footprint deliberately shorts (`(net_tie_pad_groups "1, 2")` — Kelvin shunts, net-ties). KiCad's clearance exemption between the grouped pads is **local**: a tied net's copper may contact the partner pad only where the contact lies on its own pad. Query per-net via `pcb.net_tie_exempt_pad_ids(net_id)`. |
+| `owns_edge_cuts` | bool | The footprint draws Edge.Cuts geometry of its own (`fp_line`/`fp_rect`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_curve` on that layer, issue #829). Its `(at x y rot)` therefore transforms part of the board outline. |
+| `owns_board_outline` | bool | ...and that geometry is **the board's own boundary** rather than a relief the part carries, so moving the footprint would resize the board (issue #829). A footprint is *carried* (this stays `False`, and it remains movable) only when its Edge.Cuts segments **close on themselves** — a window, slot or milled relief — **and** that shape lies inside the outline the board draws without it. An open path cannot be a cut-out, so it is always the boundary. crkbd draws 184 per-LED windows as carried geometry, and #628 measured that freezing such a part costs it every legal pose it has. **Movers gate on this field, never on `owns_edge_cuts`.** Computed by `kicad_parser.footprint_outline_owners` (text) and `footprint_outline_owners_from_pcbnew` (live board), which share the one decision function `classify_outline_owners`. |
 
 ### `Zone`
 
@@ -353,6 +356,41 @@ Converts footprint-local pad coordinates to absolute board coordinates.
 KiCad's rotation convention means the angle is **negated** inside the
 standard rotation matrix — use this helper rather than rolling your own.
 
+There is **no mirror term**, and that is correct rather than an omission: KiCad
+stores a B-side footprint's children *pre-mirrored*, so a plain rotate and
+translate resolves them. A consumer that adds a mirror of its own for B-side
+parts double-applies it.
+
+## Board side: `flip_layer_token`
+
+```python
+flip_layer_token(name: str) -> str
+```
+
+The other face's spelling of a layer token (#714): `F.SilkS` → `B.SilkS`,
+`B.Cu` → `F.Cu`, and **anything else unchanged**.
+
+A prefix rule, deliberately not a table — the knowledge is that KiCad spells a
+sided layer `F.<x>` / `B.<x>`, not the list of which ones exist. Measured over
+the 22 tracked boards, the layer tokens appearing inside a `(footprint ...)`
+block are `F.Cu F.Mask F.Paste F.SilkS F.CrtYd F.Fab F.Adhes B.SilkS B.Fab B.Cu
+B.CrtYd B.Mask B.Paste *.Cu *.Mask Dwgs.User Cmts.User Eco1.User Eco2.User
+User.1`; this flips the thirteen sided ones and returns the other seven as they
+are.
+
+Two things it deliberately does **not** do, because both would be guesses:
+
+- `*.Cu` and `*.Mask` pass through. They are KiCad's ALL-copper / all-mask sets
+  and are already their own mirror; narrowing `*.Cu` to `B.Cu` would silently
+  drop 66 pads on `rp2350_fpga_eensy_prePlane` U8 alone.
+- Inner copper passes through unchanged, and that matches KiCad: probed
+  against pcbnew 10.0.0 on a six-layer board, `FOOTPRINT::Flip` leaves a pad on
+  `In1.Cu` and an `fp_line` on `In2.Cu` where they are. So the identity answer
+  is correct here, not merely conservative. `placement.writer` nonetheless
+  **refuses** a pad naming an explicit `In<n>.Cu`, for a different reason: no
+  tracked board carries one, so nothing here would notice if a future KiCad
+  began remapping them.
+
 ## Utility functions
 
 ```python
@@ -387,7 +425,10 @@ large file:
 | `extract_layers(content)` | `BoardInfo` (layers, bounds, stackup, outline, cutouts) |
 | `extract_stackup(content)` | `List[StackupLayer]` |
 | `extract_nets(content, kicad_version=0)` | `(Dict[int, Net], Dict[str, int])` — nets and name→id |
-| `extract_footprints_and_pads(content, nets, name_to_id=None)` | `(Dict[str, Footprint], Dict[int, List[Pad]])` |
+| `extract_footprints_and_pads(content, nets, name_to_id=None, duplicates=None)` | `(Dict[str, Footprint], Dict[int, List[Pad]])` — `duplicates`, if given, is FILLED with the duplicate-reference counts |
+| `iter_footprint_blocks(content)` | yields `(start, end, fp_text, raw_reference, key)` per block in FILE ORDER — the one place that decides what a block is CALLED |
+| `disambiguate_references(raw_refs)` | ordered raw references -> ordered unique keys, by file-order ordinal |
+| `footprint_raw_reference(fp_text)` | the name a block claims, before disambiguation |
 | `extract_segments(content, name_to_id=None)` | `List[Segment]` |
 | `extract_vias(content, name_to_id=None)` | `List[Via]` |
 | `extract_zones(content, name_to_id=None)` | `List[Zone]` |
@@ -398,6 +439,23 @@ large file:
 
 ## Gotchas
 
+- **A reference is not unique, and the dict key is not always the reference**
+  (#726). Five of the 22 boards this repo tracks carry two or more footprint
+  blocks claiming one reference — on `watchy` they are real test points, on
+  `glasgow_revC` there are seven `REF**`. Every block is an entry; the first
+  keeps the bare name and later ones get a file-order ordinal (`TP4~2`), and a
+  reference-LESS block is keyed `#<uuid>`. `pcb.duplicate_references` reports
+  the board's own spelling. Consequences worth knowing:
+  - `len(pcb.footprints)` is the BLOCK count, so it can exceed the number of
+    distinct designators on the schematic.
+  - `Pad.component_ref` carries the same key, so comparing two pads'
+    `component_ref` is a genuine same-part test.
+  - **A writer must locate blocks with `iter_footprint_blocks`, never by
+    matching the Reference string.** One placement used to rewrite every block
+    carrying the name; measured, that teleported a fiducial 23.44 mm onto its
+    twin, and a write whose contract is that nothing moves relocated 3 blocks.
+  - A `--lock`-style glob still behaves: `~` is not an fnmatch metacharacter,
+    so `TP4*` covers both twins and `TP4` names the first.
 - **`global_x/y` vs `local_x/y`**: global is after footprint rotation, local
   is before. Use globals for anything board-related.
 - **Net ID 0** is "no net". Skip it when iterating nets to route, but

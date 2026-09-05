@@ -99,6 +99,7 @@ this part* and *everything near it is locked*.
 | verdict | what it means | what to do |
 | --- | --- | --- |
 | `keepout_blocks` | a **declared keep-out** refuses it — measured, by recounting the poses with that keep-out lifted (#701) | move the keep-out, or add the part to its `allow` list if it owns it |
+| `zone_exclusive_blocks` | a **declared exclusive zone** refuses it, and the part is not a member of the block that reserved it — measured by recounting with that zone lifted (#797) | add the part to the block that owns the zone, move the zone, or drop its `exclusive` flag. There is no `allow` list — membership is it |
 | `no_movable_neighbour` | nothing seated is near it | eviction cannot help — the pocket does not exist; re-check the outline or the intent |
 | `immovable_given_frozen` | everything near it is frozen (it names each neighbour **and the decision that froze it**) | unlock one of them, or accept it |
 | `blocker_available` | a useful blocker exists, the rung is disarmed | raise `--evict-depth` |
@@ -217,9 +218,20 @@ The instruments this skill decides with, all report-only until you accept:
 python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # on the COPPER-FREE board
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb [--baseline before.kicad_pcb]
 python3 -X utf8 py_tools/check_channels.py board.kicad_pcb [--baseline before.kicad_pcb --gate]
+python3 -X utf8 py_tools/check_pockets.py board.kicad_pcb [--nets <the route step's set>]
 python3 -X utf8 check_rigid_consistency.py before.kicad_pcb after.kicad_pcb
 python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent fp.json [--health]
 ```
+
+`check_pockets` is the only one of these that is AGGREGATE rather than
+per-part or per-net, and it answers the two questions the others structurally
+cannot: **where is the board empty**, ranked by contiguous area, and **does the
+part mass sit where the demand sits** (per quadrant, with the centroid weighted
+by courtyard area — the count-weighted form is printed as a control and
+disagrees on most boards). Pass it the net set the route step will carry. It
+also prints a ready-made `place_seed --reseat-region` command for its largest
+cold region; read the `aim:` line before running it, because a re-seat lands
+each part at its own net centroid and does not move anything INTO the region.
 
 Shared doctrine lives with the routing skill and applies here unchanged --
 read it when the step below points at it:
@@ -552,6 +564,22 @@ Each lap:
    courtyard kisses (corpus: 235), so the loop's advisory fix-list is the pairs
    NEW relative to the input, never a shipped design's own geometry.
 
+   **`check_channels --gate` now catches a face that LOST most of its escape,
+   not only one that reached zero (#847).** The old predicates were both
+   zero-crossings, and a zero-crossing on a falling quantity is masked exactly
+   when the baseline falls too — so a face going supply 43 → 28 against a
+   demand of 12 lost 35% of its escape and nothing reported it. `--min-supply-
+   drop` (default 0.20) is that threshold; the printed line names the share and
+   both supplies, and `--json` keeps `lost_escape_share` as its own key so you
+   can tell WHICH predicate fired. Read it as a move target the same way as a
+   starved face: the `eaten_by` refs on that row are what to move.
+
+   `--escape-band MM` exposes how deep off a face neighbours are charged
+   (default `max(1.0, 4 × lane pitch)`, printed with its source). **Do not
+   deepen it to make the gate more sensitive** — measured, deepening it raises
+   the false-positive rate, and at 2.0 mm a legitimate restore reports a 0.435
+   loss of escape. It is a screening depth, not a safety margin.
+
 2. **Fix iteration** — one ladder invocation targeting the NAMED findings: blocking
    body pairs and pad/hole conflicts go to `place_reconstruct` (full stages if
    structure moved, `--stages legalize` for local residue — the repair census
@@ -681,6 +709,16 @@ order:
    that plainly, tell the user to place the parts in KiCad, and offer to
    show them the current state.
 
+   Before concluding this, check whether the board carries a **declared
+   design brief** — a `<board>.design-brief.json` sibling, discovered
+   automatically, holding the facts the board file cannot contain (which
+   connectors are user-facing, which edge each belongs on and where along
+   it, what the enclosure forbids). `check_floorplan --emit-intent` compiles
+   it into the intent, so branch 2 applies after all. If there is none, ASK
+   for one — three fields and one row per connector is a useful brief, and
+   `"unknown"` is a legal answer that is reported rather than guessed. See
+   `docs/design-brief.md` and the driver's `P-brief` stage.
+
 **Then copy the `.kicad_pro` and `.kicad_dru` onto its output yourself.** A
 seeder writes a `.kicad_pcb` and, like `place_optimize.py`, usually nothing else
 — and it is the FIRST thing that touches the board, so a missing sibling there
@@ -713,6 +751,22 @@ make the board physically not fit, which no routing metric will ever tell you.
 footprint names and reference prefixes; it cannot read a requirements document,
 and its lexical rules "miss house libraries entirely". It is the **second** pass.
 The spec is the first.
+
+**Where the spec goes so a tool can read it.** A `<board>.design-brief.json`
+sibling is the declared channel (#711). `check_floorplan.py` auto-discovers it
+and `--emit-intent` COMPILES it into `edge_connectors` and `keepouts` — the
+constructs the grade and the seat search already act on — so the placement
+CLIs receive it through the `--intent` they already take, not through a flag
+of their own. It travels with the board's other siblings down a chain. Read
+what a board already declares with
+
+```bash
+python3 -X utf8 py_tools/board_brief.py board.kicad_pcb --json wk/brief0.json
+```
+
+whose `design_brief` section is the only DECLARED one in that document; every
+other section, `mechanical` included, is inference. `docs/design-brief.md` is
+the reference.
 
 **1. List what the spec fixes, and cite the requirement next to each ref.**
 Read the board's requirements/spec before touching placement. Anything with a
@@ -1002,7 +1056,7 @@ exactly the failed and blocker nets the router reported:
 
 ```bash
 python3 -X utf8 py_placer/place_route_loop.py board.kicad_pcb board_repaired.kicad_pcb \
-    --route-args '--nets "*" "!GND" "!VCC" --clearance <floor> --max-ripup 10' \
+    --route-args '--nets "*" "!GND" "!VCC" --clearance-ceiling <floor> --max-ripup 10' \
     --max-displacement 3 --max-target-pins 40 --ratsnest-screen 20 \
     --lock <refs from 0b> --ignore-nets GND VCC
 ```
@@ -1066,7 +1120,13 @@ yours to run on the candidate you pick. Among survivors:
    FAILED, not that it was skipped** — read the `[probe]` log lines and fix
    before adopting; empty-routed is never a license to adopt on static rank
    (measured: caller-relative paths broke every probe rc=1 and the slate
-   silently degraded to static). And **the shared window compares like with
+   silently degraded to static). Since #713 the tool says so itself: a
+   contender whose probe produced no verdict is reported as
+   `[probe] WARNING ... produced NO VERDICT (<status>)` on stderr, with the
+   status naming the cause (`crashed`, `no_summary`, `screened`) instead of an
+   undifferentiated `failures: null`. There is also no probe timeout any more —
+   `--route-timeout` is gone, because a verdict a clock erased was DROPPED from
+   the ranking rather than ranked worse. And **the shared window compares like with
    like WITHIN the slate; it is not whole-board routability** — it routes
    only the affected nets (run 7: 13–16 of 45). Pruning on it is fine;
    before ADOPTING on it, pass `--full-probe`: it routes the WHOLE board on
@@ -1304,9 +1364,26 @@ nets only chooses WHICH nets strand there, never how many (run 5 spent multiple
 ordering experiments proving this on a face whose ledger would have said it in
 seconds).
 
-Read **`blockers` first** — it names the neighbouring parts whose bodies ate the
-lanes, which is the move to make. `U9 west: supply 6 < demand 14 … 15.35mm of
-that face is taken by SD1` is an instruction; "west face is short" is not.
+Read **`blockers` first** — it names the neighbouring parts whose copper ate
+the lanes, which is the move to make. `U6 north: supply 0 < demand 13 … 7.70mm
+of that face is taken by U1, L1, U7, C6` is an instruction; "north face is
+short" is not.
+
+A blocker is only actionable if it is real, and it twice was not. Until #835 a
+neighbour was charged on XY overlap alone: the example this page used to give
+was the defect itself — the part and the neighbour it named sat on OPPOSITE
+copper faces, never shared copper, and each was charged the other's whole body
+across the board. Two neighbours are skipped now: one that shares no face with
+the part (a drilled part occupies both), and a module outline the part sits
+*inside* rather than beside. On a back-heavy board that can be every deficit
+it reported.
+
+And until #841 what a charged neighbour CONTRIBUTED was the bounding box of
+its pad **centres**, so a two-terminal passive obstructed a strip of zero
+width. It is now its pad **copper** — not its courtyard either, which is an
+assembly keep-out drawn beyond the copper and which a track may legally run
+under. Expect the numbers on this page's example to be larger than a run from
+before that change.
 Interior pads are reported separately and are a **fanout** question, not a lane
 one — they need a via, not a channel.
 
@@ -1315,6 +1392,26 @@ finest legal grid (run 5's v2 bulk ran at 0.05 mm and a lane count at that
 pitch understated supply a 0.025 mm pass could reach), and remember the ledger
 does not model **supply taps** — a via field feeding the part eats lanes exactly
 like signals do, so subtract those by hand before trusting a marginal pass.
+
+**Then read `deficit_floor` (#700), and read it as a floor.** Beside the
+own-layer `deficit` the ledger reports what the other signal layers could take,
+bounded by the via slots along the face. `deficit_floor > 0` means the face is
+short *even using every other layer* — a strictly stronger verdict than
+`deficit > 0`, and the one worth acting on. **`deficit_floor == 0` proves
+nothing**: it is a lower bound, not a clean bill, and nothing gates on it.
+
+Two fields to check before believing it:
+
+- **`signal_layers_source`.** A board being placed has no pours yet, so the
+  ledger falls back to counting every copper layer, which is optimistic.
+  Declare `plane_layers` under `health` in the intent for the real number.
+- **`supply_bound`.** It is almost always `via_slots`, and that is the finding
+  rather than a defect: the via row along the face fills before the layer count
+  binds, so **more layers will not help that face**. The action is via geometry,
+  underpad fanout, or freeing span — not a stackup change.
+  `check_capacity.py --only add_layers` says the same thing at board scale, and
+  says "structurally blind" when the fab table cannot tell two layer counts
+  apart at all.
 
 
 

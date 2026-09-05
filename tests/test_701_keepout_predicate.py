@@ -428,11 +428,17 @@ def test_the_grader_builds_a_state_that_carries_no_keepouts():
     # `_intent_spec` -> `_intent_active`), and a guard that named only the
     # #701 one would pass a grader that inherited the new half. Assert every
     # field the gate reads, not the field that existed when this was written.
+    # #797 added a THIRD (`exclusive_zones` -> `exclusive_for`), and the same
+    # argument applies: a grader that inherited it would be grading the seat
+    # predicate against itself, and every agreement test in this file would
+    # become a tautology.
     leaked = [(i, len(s.keepouts_for), len(s.keepouts),
-               len(s.intent_zones), len(s._intent_spec), s._intent_active)
+               len(s.intent_zones), len(s._intent_spec), s._intent_active,
+               len(s.exclusive_zones), len(s.exclusive_for))
               for i, s in enumerate(built)
               if s.keepouts_for or s.keepouts or s.intent_zones
-              or s._intent_spec or s._intent_active]
+              or s._intent_spec or s._intent_active
+              or s.exclusive_zones or s.exclusive_for]
     assert not leaked, (
         f"grade's own state(s) carry the SEAT gate: {leaked}. The grader "
         f"would then be grading the seat predicate against itself")
@@ -486,6 +492,13 @@ def test_every_no_pose_verdict_has_a_row_in_EVERY_table():
 #: attach, which is the whole point of listing them.
 _SEAT_FUNCS = ('_try_place', 'pose_ok', 'count_legal_poses', 'edge_seat_ok')
 
+#: The declared-claim channels a seat state must carry. `keepouts` is #701's;
+#: `exclusive_zones` is #797's. Both are required of every external caller by
+#: the same argument -- a rule enforced on some seat paths and absent on others
+#: is invisible to any behavioural test that does not happen to take the
+#: missed path.
+_SEAT_STATE_KWARGS = ('keepouts', 'exclusive_zones')
+
 
 def test_every_seat_predicate_caller_outside_the_seeder_attaches_keepouts():
     """`pose_ok` is the chokepoint, but only for code that goes through the
@@ -529,30 +542,44 @@ def test_every_seat_predicate_caller_outside_the_seeder_attaches_keepouts():
                     # four-character edit that survived both batteries. A
                     # keyword whose value is a literal None/()/[] is the same
                     # defect written three ways.
-                    ok = False
-                    for call in ast.walk(node):
-                        if not isinstance(call, ast.Call):
-                            continue
-                        for kw in call.keywords:
-                            if kw.arg != 'keepouts':
+                    #
+                    # EVERY declared-claim channel, not just keep-outs (#797).
+                    # A caller that attaches `keepouts` and forgets
+                    # `exclusive_zones` enforces one rule and silently drops
+                    # the other, which is the same "enforced on one path" hole
+                    # this gate exists for, one rule over.
+                    missing = []
+                    for want in _SEAT_STATE_KWARGS:
+                        ok = False
+                        for call in ast.walk(node):
+                            if not isinstance(call, ast.Call):
                                 continue
-                            v = kw.value
-                            if isinstance(v, ast.Constant) and v.value is None:
-                                continue
-                            if isinstance(v, (ast.Tuple, ast.List)) \
-                                    and not v.elts:
-                                continue
-                            ok = True
-                    if not ok:
-                        offenders.append(f"{rel}:{node.lineno} {node.name}")
+                            for kw in call.keywords:
+                                if kw.arg != want:
+                                    continue
+                                v = kw.value
+                                if isinstance(v, ast.Constant) \
+                                        and v.value is None:
+                                    continue
+                                if isinstance(v, (ast.Tuple, ast.List)) \
+                                        and not v.elts:
+                                    continue
+                                ok = True
+                        if not ok:
+                            missing.append(want)
+                    if missing:
+                        offenders.append(
+                            f"{rel}:{node.lineno} {node.name} (missing "
+                            f"{', '.join(missing)})")
     assert checked, ("the scan found NO seat-predicate caller outside "
                      "seeder.py -- the gate is vacuous, fix the scan")
     assert not offenders, (
-        "seat-predicate caller(s) whose state carries no keep-outs (absent, "
-        f"or a literal None/empty), so the rule is unenforced there: "
-        f"{offenders}")
+        "seat-predicate caller(s) whose state omits a declared-claim channel "
+        f"(absent, or a literal None/empty), so that rule is unenforced "
+        f"there: {offenders}")
     print(f"  PASS: {len(checked)} external seat-predicate caller(s), all "
-          f"attaching a NON-EMPTY keepouts value -- {', '.join(checked)}")
+          f"attaching a NON-EMPTY value for every one of "
+          f"{list(_SEAT_STATE_KWARGS)} -- {', '.join(checked)}")
 
 
 TESTS = [

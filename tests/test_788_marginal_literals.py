@@ -68,6 +68,16 @@ ROWS = (
     # and only oob_pad_count refuses. Without a row of this shape the
     # complementarity claim beside the gate has no evidence here, and the
     # first version of this file asserted it with a tautology.
+    # STALE SINCE #826, and only the first of the two. The portfolio's jitter
+    # now snaps its offset to the board's lattice, so a rebuilt study tree
+    # produces a different sonde_u:portfolio-3 candidate (sonde_u is imperial,
+    # 0.3175). The literal below still describes the slate these numbers were
+    # measured on; it is no longer reproducible from HEAD without rebuilding
+    # wk/703/study, which test_703_predictor_regen's header prices at ~8.8h.
+    # Arm A is arithmetic over these tuples and cannot move; Arm B skips
+    # loudly when the tree is absent, which it is on a clean checkout.
+    # watchy:portfolio-2 is NOT affected -- watchy declares no lattice (best
+    # occupancy 0.238 < floor 0.67), so its jitter stays continuous.
     ('sonde_u', 'portfolio-3', 0, 1, 0, 0, 0),
     ('watchy', 'portfolio-2', 0, 1, 0, 0, 3),
 )

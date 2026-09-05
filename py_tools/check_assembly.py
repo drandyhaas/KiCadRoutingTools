@@ -53,7 +53,8 @@ def main():
     import routing_defaults as defaults
     from kicad_parser import parse_kicad_pcb
     from placement import legality
-    from placement.legality import grade_body_overlap, grade_pad_legality
+    from placement.legality import (assembly_census, grade_body_overlap,
+                                    grade_pad_legality)
 
     # GRADE AT THE BOARD'S OWN FLOOR, and say where that came from.
     #
@@ -183,11 +184,14 @@ def main():
             continue
         _buckets.setdefault((round(_fp.x, 3), round(_fp.y, 3)),
                             []).append(_ref)
-    # NOTE this iterates DISTINCT REFERENCES. `pcb.footprints` is a dict keyed
-    # by reference, so two footprint blocks sharing one reference are ONE entry
-    # here and cannot form a coincident pair -- the check that exists to catch
-    # two parts at one point is structurally blind to two parts with one name.
-    # `duplicate_references` below is that case, reported separately.
+    # Every footprint BLOCK is an entry here since #726: two blocks sharing a
+    # reference are keyed `TP4` and `TP4~2`, so two parts at one point form a
+    # coincident pair even when they answer to one name. Before that they
+    # collapsed to a single entry and this check -- the one that exists to
+    # catch exactly that -- was structurally blind to it: run 20's board read
+    # `coincident_origins 0` with TWO coincident pairs on it.
+    # `duplicate_references` below still reports the naming, which is a
+    # schematic question rather than a geometric one.
     stack_groups = [{'point': [pt[0], pt[1]], 'refs': refs}
                     for pt, refs in sorted(_buckets.items())
                     if sum(1 for r in refs if not _marker(r)) >= 2]
@@ -237,10 +241,12 @@ def main():
         print(f"  DUPLICATE REFERENCES (advisory): {_n} footprint block(s) "
               f"share {len(dup_refs)} reference(s) -- "
               + ', '.join(f'{r} x{c}' for r, c in sorted(dup_refs.items())))
-        print(f"    Only the LAST block of each is parsed, so this audit sees "
-              f"{len(pcb.footprints)} parts and `coincident_origins` cannot "
-              f"compare the dropped ones. Legal, but rename them if they are "
-              f"meant to be distinct parts.")
+        print(f"    Every block is audited ({len(pcb.footprints)} parts): the "
+              f"later ones are keyed with an ordinal suffix, so "
+              f"`coincident_origins` above compares them. Legal in KiCad, but "
+              f"rename them if they are meant to be distinct parts -- two "
+              f"parts answering to one name cannot be told apart on a BOM, on "
+              f"a pick-and-place file, or by `--lock`.")
     print(f"  blocking {g['blocking']}  advisory {g['advisory']}"
           f"  waived {g['waived']}  contained {g['contained']}"
           f"  courtyard_blocking {g['courtyard_blocking']}"
@@ -327,6 +333,85 @@ def main():
               f"{len(pcb.footprints)} part(s) draw no .Fab outline, so the "
               f"containment channel cannot judge them: "
               + ', '.join(_u[:8]) + (' ...' if len(_u) > 8 else ''))
+
+    # ASSEMBLY SIDES (#837). Report-only, and deliberately not a conjunct:
+    # which faces a board is populated on is a FACT about the board, not a
+    # defect, and the verdict predicate below is untouched. It is here because
+    # this is the tool named `check_assembly` and it could not say how many
+    # reflow passes the board it just graded would take.
+    #
+    # Printed unconditionally, including the all-on-one-face case: a section
+    # that appears only when there is something on the back would make
+    # "single-sided" and "not measured" look identical.
+    _cen = assembly_census(pcb)
+    _pb, _bl = _cen['pad_bearing'], _cen['blocks']
+    print(f"  ASSEMBLY SIDES: F {_pb['F']} / B {_pb['B']} pad-bearing part(s)"
+          f" of {_bl['F'] + _bl['B']} block(s); "
+          f"{_cen['reflow_passes']} reflow pass(es), "
+          f"{_cen['through_hole']} through-hole part(s)")
+    # BOTH faces' zero-pad blocks, so the printed arithmetic CLOSES. Listing
+    # only the back left interf_u reporting "24 pad-bearing of 25 blocks" with
+    # nothing to explain the 25th (a zero-pad graphic on the FRONT), and
+    # glasgow 6 blocks short. A census a reader cannot reconcile is a census
+    # they have to trust.
+    for _side in ('F', 'B'):
+        _z = _cen['zero_pad'][_side]
+        if not _z:
+            continue
+        # The distinction that makes esp_prog single-sided: three OLIMEX logo
+        # footprints sit on B.Cu carrying no pads at all. Counting blocks it
+        # is a two-sided board; counting copper it is not, and the fab builds
+        # the second one. Named by FOOTPRINT where the reference is a bare
+        # uuid -- esp_prog's three are `#00000000-...`, which tells a reader
+        # nothing about what they are being asked to ignore.
+        _named = []
+        for _r in _z[:8]:
+            _f = pcb.footprints.get(_r)
+            _n = (getattr(_f, 'footprint_name', '') or '').split(':')[-1]
+            _named.append(f"{_r} ({_n})" if _n and _r.startswith('#') else _r)
+        print(f"    {len(_z)} {_side}-side block(s) carry NO pads and are "
+              f"excluded from the verdict: "
+              + ', '.join(_named) + (' ...' if len(_z) > 8 else ''))
+    if _cen['through_hole']:
+        _t = _cen['through_hole_by_side']
+        # `pad_is_plated_through`, never bare `drill > 0`: an NPTH hole is an
+        # alignment post or a screw hole, not a soldered pin. Counting those
+        # told the reader watchy has 5 hand-soldered parts when it has 1 --
+        # SW1-SW4 are SMD switches with unplated alignment posts.
+        print(f"    Through-hole F {_t['F']} / B {_t['B']} (plated barrels "
+              f"only), counted and never folded in: a drilled part on the "
+              f"front needs wave, selective or hand soldering, not a second "
+              f"reflow pass.")
+        if _cen['sides'] != 'both':
+            # Only where the two answers actually DIFFER. On a board the
+            # census already calls two-sided this sentence implies a
+            # disagreement that does not exist.
+            print(f"      (`sides_occupied` answers the OBSTRUCTION question "
+                  f"instead, and would call this board two-sided.)")
+    if sum(_cen['unsoldered'].values()):
+        _u = _cen['unsoldered']
+        print(f"    Unsoldered F {_u['F']} / B {_u['B']}: every pad an "
+              f"unplated hole -- mounting, tooling or alignment. No process "
+              f"attaches these, so they are in neither count above.")
+    if not sum(_pb.values()):
+        # Guarded on PAD-BEARING parts, not on blocks: a board of nothing but
+        # graphics is assembled by no process at all, and the through-hole
+        # sentence below would have described it as assembled entirely by one.
+        print(f"    No pad-bearing parts at all, so there is no assembly "
+              f"policy to observe.")
+    elif not _cen['reflow_passes']:
+        # flat_hierarchy: 58 through-hole parts and 6 NPTH mounting holes.
+        # Counting POPULATED faces would report one reflow pass for a board
+        # that gets none.
+        print(f"    No SMD parts at all, so 0 reflow passes -- this board is "
+              f"assembled entirely by through-hole process.")
+    # The basis in one clause here and in full in the JSON. It has to appear
+    # in BOTH: a per-side number quoted without its counting rule cannot be
+    # checked against any other one (#726 moved ulx3s from 234 blocks to 235),
+    # and a reader of the text channel never sees the JSON.
+    print(f"    observed policy: sides={_cen['sides']} -- counted per "
+          f"footprint BLOCK, verdict from the pad-bearing subset "
+          f"(parts_by_side_basis in --json has the rule in full)")
 
     # Courtyard gate currency (run-23): the census below is ABSOLUTE, but the
     # GATE is moved-vs-baseline. Measured on this repo's own corpus: 5 healthy
@@ -466,12 +551,35 @@ def main():
             'coincident_origin_groups': stack_groups,
             'coincident_origins': len(stack_groups),
             'coincident_origins_basis': (
-                'distinct references only -- footprints are keyed by '
-                'reference, so blocks sharing one reference are a single '
-                'entry here and cannot form a pair. See duplicate_references.'),
+                'every footprint BLOCK (#726): blocks sharing one reference '
+                'are keyed with an ordinal suffix, so they form a pair here '
+                'like any other two parts. See duplicate_references for the '
+                'names the board itself uses.'),
             'duplicate_references': dup_refs,
-            'footprint_blocks': len(pcb.footprints) + sum(dup_refs.values())
-                                - len(dup_refs),
+            # #837, report-only: additive keys, no exit code and no conjunct
+            # moves. `parts_by_side` is the pad-bearing census -- the one the
+            # `assembly_sides` verdict is taken from -- and
+            # `parts_by_side_blocks` is every block, so a reader can see which
+            # rule produced which number instead of guessing.
+            'parts_by_side': _cen['pad_bearing'],
+            'parts_by_side_blocks': _cen['blocks'],
+            'parts_by_side_basis': _cen['basis'],
+            'back_side_zero_pad_blocks': _cen['zero_pad_back'],
+            'through_hole_parts': _cen['through_hole'],
+            'through_hole_by_side': _cen['through_hole_by_side'],
+            'smd_parts_by_side': _cen['smd'],
+            'unsoldered_parts_by_side': _cen['unsoldered'],
+            'zero_pad_blocks_by_side': _cen['zero_pad'],
+            'assembly_sides': _cen['sides'],
+            # Counted from the SMD population, not from the populated faces:
+            # flat_hierarchy is 64 parts, every one through-hole, and takes
+            # ZERO reflow passes on a face it is certainly populated on.
+            'reflow_passes': _cen['reflow_passes'],
+            # Just the entry count now: every block is one. The old formula
+            # (len + sum(values) - len(values)) reconstructed the block total
+            # from the dict of survivors, and after #726 it OVERCOUNTS -- on
+            # watchy it would report 86 + 4 - 2 = 88 blocks for a board with 86.
+            'footprint_blocks': len(pcb.footprints),
         }
         if new_advisory is not None:
             doc['baseline'] = args.baseline

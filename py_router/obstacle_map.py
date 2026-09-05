@@ -17,7 +17,7 @@ from kicad_parser import PCBData, Segment, Via, Pad, pad_drill_circles, pad_dril
 from routing_config import GridRouteConfig, GridCoord
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, pad_blocked_cells_array, \
-    circle_offsets, segment_blocked_cells_array
+    circle_offsets, segment_blocked_cells_array, segment_blocked_spans, GRID_TIE_EPS
 from net_queries import expand_pad_layers
 
 # Import Rust router
@@ -66,6 +66,12 @@ class _StaticStampProxy:
     def add_blocked_vias_batch(self, vias):
         self._real.add_static_blocked_vias_batch(vias)
 
+    def add_blocked_cell_spans_batch(self, spans):
+        self._real.add_static_blocked_cell_spans_batch(spans)
+
+    def add_blocked_via_spans_batch(self, spans):
+        self._real.add_static_blocked_via_spans_batch(spans)
+
     def __getattr__(self, name):
         return getattr(self._real, name)
 
@@ -101,7 +107,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                             extra_clearance: float = 0.0,
                             net_clearances: dict = None,
                             static_base: bool = False,
-                            progress_callback=None) -> GridObstacleMap:
+                            progress_callback=None,
+                            _rung_pass: bool = False) -> GridObstacleMap:
     """Build base obstacle map with static obstacles (BGA zones, pads, pre-existing tracks/vias).
 
     Excludes all nets that will be routed (nets_to_route) - their stubs will be added
@@ -223,7 +230,14 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                 # rule for that layer replaces the net/class value.
                 seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id))
                 via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
-                vias_arr = segment_blocked_cells_array(
+                # SPANS, like the main loop below: both producers feed
+                # _seg_via_batch and it is concatenated as one array, so a
+                # cell (N,2) here beside a span (N,3) there is a hard
+                # ValueError at the flush. Only reachable on a board with
+                # copper on a layer OUTSIDE config.layers (a 6/8-layer board
+                # routed with a subset), which is why the signal/plane boards
+                # never tripped it and test_dru_layer_clearance_e2e did.
+                vias_arr = segment_blocked_spans(
                     seg.start_x, seg.start_y, seg.end_x, seg.end_y,
                     via_block_mm, coord.grid_step)
                 _seg_via_batch.append(vias_arr)
@@ -247,12 +261,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         # (memoized, read-only) cell arrays and stamp once per build below --
         # concatenation preserves the exact row multiset and order, and the
         # batch inserts process rows identically whether split or joined.
-        cells_arr = segment_blocked_cells_array(
+        cells_arr = segment_blocked_spans(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y,
             expansion_mm, coord.grid_step)
         if len(cells_arr):
             _seg_cell_batch.setdefault(layer_idx, []).append(cells_arr)
-        vias_arr = segment_blocked_cells_array(
+        vias_arr = segment_blocked_spans(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y,
             via_block_mm, coord.grid_step)
         if len(vias_arr):
@@ -261,15 +275,21 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Flush the accumulated segment stamps: one Rust call per layer for the
     # track keep-outs, one for the via keep-outs.
     for _li, _arrs in sorted(_seg_cell_batch.items()):
-        _cells = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
-        _rows = np.empty((len(_cells), 3), dtype=np.int32)
-        _rows[:, :2] = _cells
-        _rows[:, 2] = _li
-        obstacles.add_blocked_cells_batch(np.ascontiguousarray(_rows))
+        _sp = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
+        _rows = np.empty((len(_sp), 4), dtype=np.int32)
+        _rows[:, :3] = _sp
+        _rows[:, 3] = _li
+        obstacles.add_blocked_cell_spans_batch(np.ascontiguousarray(_rows))
     if _seg_via_batch:
+        # Every producer must emit the SAME form (spans, 3 columns). Assert it
+        # rather than let np.concatenate raise a dimension error three frames
+        # away from the producer that disagreed.
+        assert all(a.shape[1] == 3 for a in _seg_via_batch), (
+            "_seg_via_batch mixes cell and span rows: "
+            + repr(sorted({a.shape[1] for a in _seg_via_batch})))
         _vall = (np.concatenate(_seg_via_batch)
                  if len(_seg_via_batch) > 1 else _seg_via_batch[0])
-        obstacles.add_blocked_vias_batch(
+        obstacles.add_blocked_via_spans_batch(
             np.ascontiguousarray(_vall.astype(np.int32)))
 
     # Add vias as obstacles (excluding nets we'll route)
@@ -306,6 +326,8 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Add pads as obstacles (excluding nets we'll route - their pads added per-net)
     # Priced per obstacle: max(routing-side clearance, the pad net's own class clearance)
     _n_pad_nets = len(pcb_data.pads_by_net)
+    _pad_cell_sink: Dict[int, list] = {}
+    _pad_via_sink: list = []
     for _pn_i, (net_id, pads) in enumerate(pcb_data.pads_by_net.items()):
         if (_pn_i & 63) == 0:
             _report("pads", _pn_i, _n_pad_nets)
@@ -320,7 +342,14 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
                     _tie_recorded.append(('pad', id(pad), _rec.merged_cells()))
                 continue
             _add_pad_obstacle(obstacles, pad, coord, layer_map, config, extra_clearance,
-                              clearance_override=_obstacle_clearance(net_id))
+                              clearance_override=_obstacle_clearance(net_id),
+                              cell_sink=_pad_cell_sink, via_sink=_pad_via_sink)
+    # One Rust call per layer for every pad's track keep-out, one for the via
+    # keep-outs -- the segment loop above has done this since 2026-08-14; the
+    # pad loop was calling the batch API once PER PAD (measured on glasgow:
+    # 1,593 batch entries for 1,136 pads, per base build, 629 builds/route).
+    _flush_cell_sink(obstacles, _pad_cell_sink)
+    _flush_via_sink(obstacles, _pad_via_sink)
 
     # Intersect each tied net's corridor with the recorded tie-copper stamps:
     # the per-net lift arrays are EXACT subsets of what the base build added
@@ -360,6 +389,31 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # #422: return the real map (never the stamp proxy) so downstream clone/
     # cache/rip-up all operate on the genuine GridObstacleMap with its normal
     # dynamic add/remove methods.
+    # #530 decision 4: one via-legality rung per distinct per-net via geometry.
+    # The base is rebuilt at that geometry (its blocked_vias are the cells a
+    # via of THAT size may not sit on) and the result copied into rung r of
+    # this map. Rung 0 stays this map's own blocked_vias / static bitmap; the
+    # search consults rung r when routing a net at that size.
+    if not _rung_pass:
+        try:
+            from obstacle_cache import via_rungs as _via_rungs, _small_via_pair
+            _rungs = _via_rungs(config, pcb_data)
+            _env_small = _small_via_pair(config, pcb_data)
+            for _r, (_d, _h) in enumerate(_rungs, 1):
+                if _env_small is not None and _r == 1:
+                    continue   # the #568 small rung keeps its base-less (static) discipline
+                from dataclasses import replace as _dc_replace
+                _sub = build_base_obstacle_map(
+                    pcb_data, _dc_replace(config, via_size=_d, via_drill=_h),
+                    nets_to_route, extra_clearance, net_clearances,
+                    static_base=False, _rung_pass=True)
+                _cells = _sub.blocked_via_cells_at_rung(0)
+                if _cells:
+                    _real_obstacles.add_blocked_vias_rung_batch(
+                        _r, np.asarray(_cells, dtype=np.int32))
+        except Exception as _re:                              # noqa: BLE001
+            print(f"  WARNING: per-net via rungs not stamped on the base map ({_re}); "
+                  f"nets with their own via size route at the run's via legality")
     return _real_obstacles
 
 
@@ -506,21 +560,68 @@ def _banded_edge_distance_rows(px_axis, py_axis, x1, y1, x2, y2, threshold):
 # margin + clip (absolute-frame math, so translation canonicalization is
 # NOT bit-safe -- the #493 class); a hit returns the identical arrays by
 # construction, shared READ-ONLY (all consumers build masks / index; none
-# mutate -- audited). Bounded by total cached cells (a board-ring keepout
-# at a fine grid is millions of cells); wholesale clear on overflow.
+# mutate -- audited). LRU-evicted on a byte budget (a board-ring keepout
+# at a fine grid is millions of cells).
+#
+# #818: the cache stores the BOX (gx_lo, gy_lo, nx, ny) plus the two
+# per-cell arrays, NOT the per-cell gx/gy meshgrid. The meshgrid is a pure
+# function of the box -- 8 of the old 17 bytes/cell were recomputable, and
+# a glasgow route measured 15,318 misses of which 15,299 (99.9%) were
+# evictions against only 11,122 distinct keys, i.e. 37.7% more
+# rasterization than the keyspace requires. Consumers want the coordinates
+# of the MASKED cells only, which `_box_masked_cells` derives by divmod --
+# so the meshgrid is never materialized on the hot paths at all.
 _POLY_RASTER_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 _POLY_RASTER_BYTES = 0
-_POLY_CELL_BYTES = 17   # gx int32 + gy int32 + inside bool + edist float64
+_POLY_CELL_BYTES = 9    # inside bool + edist float64 (gx/gy derived from the box)
+_POLY_EMPTY_BOX = (0, 0, 0, 0, None, None)
 
 
 def _poly_raster_byte_budget() -> int:
-    # 40% of the shared KICAD_RASTER_CACHE_MB budget (capsule cache takes
-    # half); LRU-evicted, never wholesale-cleared.
-    return int(env_knobs.RASTER_CACHE_MB * 0.4 * 1e6)
+    # 30% of the shared KICAD_RASTER_CACHE_MB budget (#815 rebalance: the three
+    # raster memos sum to 100% -- capsule spans 65%, capsule cells 5%, here
+    # 30%). Cut from 40% because this cache cannot use the memory: #818
+    # measured it 58x oversubscribed, and DOUBLING it moved the hit rate 59.6%
+    # -> 60.6% for +100 MB of RSS. The span memo it was given to was pinned at
+    # exactly 100% of its budget for an entire route.
+    # LRU-evicted, never wholesale-cleared.
+    return int(env_knobs.RASTER_CACHE_MB * 0.30 * 1e6)
 
 
-def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds=None):
+def _box_masked_cells(gx_lo: int, gy_lo: int, nx: int, mask):
+    """Grid coordinates of the True cells of a box raster's `mask`.
+
+    #818: the box raster is stored WITHOUT its gx/gy meshgrid, because the
+    meshgrid is `gx_lo + idx % nx`, `gy_lo + idx // nx` under the flattened
+    (ny, nx) layout `_rasterize_polygon_box` produces (gx fastest). Deriving
+    only the masked cells is both exact and cheaper than materializing the
+    full grid and then indexing it with the mask.
+    """
+    idx = np.flatnonzero(mask)
+    gy_off, gx_off = np.divmod(idx, nx)
+    return (gx_off.astype(np.int32) + np.int32(gx_lo),
+            gy_off.astype(np.int32) + np.int32(gy_lo))
+
+
+def _box_full_cells(gx_lo: int, gy_lo: int, nx: int, ny: int):
+    """The full (gx_flat, gy_flat) meshgrid of a box raster (compat path)."""
+    gx_grid, gy_grid = np.meshgrid(
+        np.arange(gx_lo, gx_lo + nx, dtype=np.int32),
+        np.arange(gy_lo, gy_lo + ny, dtype=np.int32))
+    return gx_grid.ravel(), gy_grid.ravel()
+
+
+def _rasterize_polygon_box(poly_points, coord: GridCoord, margin: float, clip_bounds=None):
     """Rasterize a closed polygon over its grid bounding box (expanded by `margin` mm).
+
+    Returns ``(gx_lo, gy_lo, nx, ny, inside, edge_dist)`` -- the grid-space
+    bounding box of the raster plus two flattened per-cell arrays in (ny, nx)
+    row-major order with **gx fastest**, so cell ``i`` is
+    ``(gx_lo + i % nx, gy_lo + i // nx)``. Use :func:`_box_masked_cells` to
+    recover the coordinates of a masked subset.
+
+    ``inside``   : bool, cell centre inside the polygon (even-odd ray cast)
+    ``edge_dist``: float, mm distance from the cell centre to the nearest edge
 
     ``clip_bounds`` (min_x, min_y, max_x, max_y) restricts the rasterized region
     to the obstacle map's actual extent. Without it, a large polygon -- e.g. a
@@ -531,18 +632,14 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
     changes. A full-board build passes the board bounds, so nothing is clipped.
 
     Shared geometry kernel for the polygon obstacle passes (board cutouts, KiCad
-    keep-out rule areas, and user-drawn keepout zones). Returns four parallel
-    numpy arrays for the candidate cells:
-        gx_flat, gy_flat : int32 grid coordinates
-        inside           : bool, cell centre inside the polygon (even-odd ray cast)
-        edge_dist        : float, mm distance from the cell centre to the nearest edge
-    Returns ``(None, None, None, None)`` if the polygon is degenerate (< 3 points)
-    or the bounding box is empty. Callers threshold ``edge_dist`` by their own
-    clearance to decide which cells to block.
+    keep-out rule areas, and user-drawn keepout zones). Returns
+    ``_POLY_EMPTY_BOX`` (``inside is None``) if the polygon is degenerate
+    (< 3 points) or the bounding box is empty. Callers threshold ``edge_dist``
+    by their own clearance to decide which cells to block.
     """
     global _POLY_RASTER_BYTES
     if len(poly_points) < 3:
-        return None, None, None, None
+        return _POLY_EMPTY_BOX
     poly = np.array(poly_points, dtype=np.float64)
     _mkey = (poly.tobytes(), coord.grid_step, margin,
              tuple(clip_bounds) if clip_bounds is not None else None)
@@ -561,19 +658,15 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
         cmin_x = max(cmin_x, clip_bounds[0]); cmin_y = max(cmin_y, clip_bounds[1])
         cmax_x = min(cmax_x, clip_bounds[2]); cmax_y = min(cmax_y, clip_bounds[3])
         if cmin_x > cmax_x or cmin_y > cmax_y:
-            _POLY_RASTER_CACHE[_mkey] = (None, None, None, None)
-            return None, None, None, None  # polygon doesn't overlap the map
+            _POLY_RASTER_CACHE[_mkey] = _POLY_EMPTY_BOX
+            return _POLY_EMPTY_BOX  # polygon doesn't overlap the map
     gx_lo, gy_lo = coord.to_grid(cmin_x, cmin_y)
     gx_hi, gy_hi = coord.to_grid(cmax_x, cmax_y)
     gx_range = np.arange(gx_lo, gx_hi + 1, dtype=np.int32)
     gy_range = np.arange(gy_lo, gy_hi + 1, dtype=np.int32)
     if gx_range.size == 0 or gy_range.size == 0:
-        _POLY_RASTER_CACHE[_mkey] = (None, None, None, None)
-        return None, None, None, None
-
-    gx_grid, gy_grid = np.meshgrid(gx_range, gy_range)
-    gx_flat = gx_grid.ravel()
-    gy_flat = gy_grid.ravel()
+        _POLY_RASTER_CACHE[_mkey] = _POLY_EMPTY_BOX
+        return _POLY_EMPTY_BOX
 
     # #546: row-scanline inside test + threshold-banded edge distance instead
     # of the dense (cells x edges) kernels. edge_dist is exact wherever the
@@ -586,17 +679,36 @@ def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds
     edge_dist = _banded_edge_distance_rows(
         px_axis, py_axis, x1, y1, x2, y2, margin + coord.grid_step).ravel()
 
-    result = (gx_flat, gy_flat, inside, edge_dist)
-    for _a in result:
-        _a.setflags(write=False)
+    result = (int(gx_lo), int(gy_lo), int(gx_range.size), int(gy_range.size),
+              inside, edge_dist)
+    inside.setflags(write=False)
+    edge_dist.setflags(write=False)
     _POLY_RASTER_CACHE[_mkey] = result
-    _POLY_RASTER_BYTES += len(gx_flat) * _POLY_CELL_BYTES
+    _POLY_RASTER_BYTES += inside.size * _POLY_CELL_BYTES
     budget = _poly_raster_byte_budget()
     while _POLY_RASTER_BYTES > budget and _POLY_RASTER_CACHE:
         _, old_res = _POLY_RASTER_CACHE.popitem(last=False)
-        if old_res[0] is not None:
-            _POLY_RASTER_BYTES -= len(old_res[0]) * _POLY_CELL_BYTES
+        if old_res[4] is not None:
+            _POLY_RASTER_BYTES -= old_res[4].size * _POLY_CELL_BYTES
     return result
+
+
+def _rasterize_polygon(poly_points, coord: GridCoord, margin: float, clip_bounds=None):
+    """Compat wrapper: :func:`_rasterize_polygon_box` with the gx/gy meshgrid
+    materialized, as ``(gx_flat, gy_flat, inside, edge_dist)`` (or four ``None``
+    for a degenerate/empty raster).
+
+    #818: prefer the box form on hot paths -- this rebuilds 8 bytes/cell of
+    coordinates the box already implies, and every in-tree consumer only needs
+    the coordinates of its MASKED cells (see :func:`_box_masked_cells`).
+    """
+    gx_lo, gy_lo, nx, ny, inside, edge_dist = _rasterize_polygon_box(
+        poly_points, coord, margin, clip_bounds=clip_bounds)
+    if inside is None:
+        return None, None, None, None
+    gx_flat, gy_flat = _box_full_cells(gx_lo, gy_lo, nx, ny)
+    return gx_flat, gy_flat, inside, edge_dist
+
 
 
 def _block_cells_on_layers(obstacles: GridObstacleMap, gx_flat, gy_flat, mask, layer_idxs,
@@ -617,12 +729,28 @@ def _block_cells_on_layers(obstacles: GridObstacleMap, gx_flat, gy_flat, mask, l
         add(np.hstack([cells, layer_col]))
 
 
+def _block_cells_sel(obstacles: GridObstacleMap, gx_sel, gy_sel, layer_idxs,
+                     static: bool = False):
+    """:func:`_block_cells_on_layers` for cells already reduced by their mask
+    (#818: the box raster derives only the masked coordinates)."""
+    if gx_sel.size == 0:
+        return
+    cells = np.column_stack([gx_sel, gy_sel])
+    add = (obstacles.add_static_blocked_cells_batch if static
+           else obstacles.add_blocked_cells_batch)
+    for li in layer_idxs:
+        layer_col = np.full((cells.shape[0], 1), li, dtype=np.int32)
+        add(np.hstack([cells, layer_col]))
+
+
 def _polygon_grid_cells(points_mm, coord: GridCoord):
     """Return the set of (gx, gy) grid cells whose centre is inside the polygon."""
-    gx_flat, gy_flat, inside, _ = _rasterize_polygon(points_mm, coord, margin=0.0)
-    if gx_flat is None:
+    gx_lo, gy_lo, nx, ny, inside, _ = _rasterize_polygon_box(
+        points_mm, coord, margin=0.0)
+    if inside is None:
         return set()
-    return set(zip(gx_flat[inside].tolist(), gy_flat[inside].tolist()))
+    gx_sel, gy_sel = _box_masked_cells(gx_lo, gy_lo, nx, inside)
+    return set(zip(gx_sel.tolist(), gy_sel.tolist()))
 
 
 def add_user_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -796,12 +924,18 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # Bounding box gets a clearance margin so we also catch cells just outside
         # the polygon whose track/via copper would still intrude past the boundary.
         margin = max(track_clear, via_clear) + coord.grid_step
-        gx_flat, gy_flat, inside, edge_dist = _rasterize_polygon(poly, coord, margin, clip_bounds=clip)
-        if gx_flat is None:
+        o_gx_lo, o_gy_lo, o_nx, o_ny, inside, edge_dist = _rasterize_polygon_box(
+            poly, coord, margin, clip_bounds=clip)
+        if inside is None:
             continue
 
-        track_mask = inside | (edge_dist < track_clear)
-        via_mask = inside | (edge_dist < via_clear)
+        # Boundary cells resolve OPEN (GRID_TIE_EPS): a cell centre sitting
+        # EXACTLY at the clearance is decided by float rounding otherwise, and
+        # since edge_dist is measured in absolute board coordinates the answer
+        # varied with the polygon's POSITION (measured: 8 different cell sets
+        # for one rectangle at clearance 0.2 on a 0.1 grid).
+        track_mask = inside | (edge_dist < track_clear - GRID_TIE_EPS)
+        via_mask = inside | (edge_dist < via_clear - GRID_TIE_EPS)
 
         # Holes: the keep-out is the outer polygon MINUS its holes (a ring).
         # Cells deep inside a hole (>= the relevant clearance from the hole
@@ -819,33 +953,33 @@ def add_rule_area_keepout_obstacles(obstacles: GridObstacleMap, pcb_data: PCBDat
         # distance would (threshold strictly exceeds both clearances).
         holes = ko.get('holes') or []
         if holes:
-            o_gx_lo = int(gx_flat[0]); o_gy_lo = int(gy_flat[0])
-            o_nx = int(gx_flat.max()) - o_gx_lo + 1
-            o_ny = int(gy_flat.max()) - o_gy_lo + 1
-            assert o_nx * o_ny == gx_flat.size  # meshgrid layout, gx fastest
             for hole in holes:
                 if len(hole) < 3:
                     continue
                 h_margin = max(track_clear, via_clear)
-                hgx, hgy, h_inside, h_edge = _rasterize_polygon(
+                h_gx_lo, h_gy_lo, h_nx, h_ny, h_inside, h_edge = _rasterize_polygon_box(
                     hole, coord, h_margin, clip_bounds=clip)
-                if hgx is None:
+                if h_inside is None:
                     continue
-                sel = (h_inside & (hgx >= o_gx_lo) & (hgx < o_gx_lo + o_nx)
+                hgx, hgy = _box_masked_cells(h_gx_lo, h_gy_lo, h_nx, h_inside)
+                sel = ((hgx >= o_gx_lo) & (hgx < o_gx_lo + o_nx)
                        & (hgy >= o_gy_lo) & (hgy < o_gy_lo + o_ny))
                 if not sel.any():
                     continue
                 idx = ((hgy[sel].astype(np.int64) - o_gy_lo) * o_nx
                        + (hgx[sel].astype(np.int64) - o_gx_lo))
-                h_sel_edge = h_edge[sel]
-                track_mask[idx[h_sel_edge >= track_clear]] = False
-                via_mask[idx[h_sel_edge >= via_clear]] = False
+                h_sel_edge = h_edge[h_inside][sel]
+                # Complement of the blocking test above -- shift by the same
+                # epsilon or a ring cell could be both blocked and unblocked.
+                track_mask[idx[h_sel_edge >= track_clear - GRID_TIE_EPS]] = False
+                via_mask[idx[h_sel_edge >= via_clear - GRID_TIE_EPS]] = False
 
-        if block_tracks:
-            _block_cells_on_layers(obstacles, gx_flat, gy_flat, track_mask, layer_idxs)
+        if block_tracks and track_mask.any():
+            t_gx, t_gy = _box_masked_cells(o_gx_lo, o_gy_lo, o_nx, track_mask)
+            _block_cells_sel(obstacles, t_gx, t_gy, layer_idxs)
         if block_vias and via_mask.any():
-            obstacles.add_blocked_vias_batch(
-                np.column_stack([gx_flat[via_mask], gy_flat[via_mask]]))
+            v_gx, v_gy = _box_masked_cells(o_gx_lo, o_gy_lo, o_nx, via_mask)
+            obstacles.add_blocked_vias_batch(np.column_stack([v_gx, v_gy]))
 
 
 def add_board_edge_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
@@ -1082,8 +1216,8 @@ def _add_cutout_obstacles(obstacles: GridObstacleMap, cutout: List[Tuple[float, 
     """
     margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
     for gx_flat, gy_flat, inside, edge_dist in _rasterize_polygon_banded(cutout, coord, margin):
-        ring_track = (~inside) & (edge_dist < track_edge_clearance)
-        ring_via = (~inside) & (edge_dist < via_edge_clearance)
+        ring_track = (~inside) & (edge_dist < track_edge_clearance - GRID_TIE_EPS)
+        ring_via = (~inside) & (edge_dist < via_edge_clearance - GRID_TIE_EPS)
         # #422: cutouts are permanent board geometry -> static keep-out bitmap.
         _block_cells_on_layers(obstacles, gx_flat, gy_flat,
                                inside | ring_track, range(num_layers), static=True)
@@ -1110,8 +1244,8 @@ def _add_edge_contour_obstacles(obstacles: GridObstacleMap, contour: List[Tuple[
     margin = max(track_edge_clearance, via_edge_clearance) + coord.grid_step
     for gx_flat, gy_flat, _inside, edge_dist in _rasterize_polygon_banded(
             contour, coord, margin):
-        band_track = edge_dist < track_edge_clearance
-        band_via = edge_dist < via_edge_clearance
+        band_track = edge_dist < track_edge_clearance - GRID_TIE_EPS
+        band_via = edge_dist < via_edge_clearance - GRID_TIE_EPS
         # #422: board geometry is permanent -> static keep-out bitmap.
         _block_cells_on_layers(obstacles, gx_flat, gy_flat, band_track,
                                range(num_layers), static=True)
@@ -1354,7 +1488,12 @@ def block_via_cells_near_drills(obstacles: GridObstacleMap,
     for hx, hy, drill_dia in drill_holes:
         # Required center-to-center distance = drill/2 + via_drill/2 + clearance.
         required_dist = drill_dia / 2.0 + via_drill / 2.0 + hole_to_hole_clearance
-        req_sq = required_dist * required_dist
+        # Boundary cells resolve OPEN (GRID_TIE_EPS): required_dist is often an
+        # exact multiple of grid_step (drill 0.4 + via 0.2 + clearance 0.3 = 0.6
+        # = 6 x a 0.1 grid), which put cell centres exactly on the disc edge and
+        # made the blocked set depend on the hole's board position (measured: 8
+        # different sets for one hole).
+        req_sq = (required_dist - GRID_TIE_EPS) ** 2
         gx, gy = coord.to_grid(hx, hy)
         expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
         # #546: vectorized disc (was a Python double loop per drill). Same
@@ -1406,7 +1545,7 @@ def block_track_cells_near_drills(obstacles: GridObstacleMap, drill_holes,
     for hx, hy, drill_dia in drill_holes:
         # A track centerline must stay this far from the real drill centre.
         required_dist = drill_dia / 2.0 + track_width / 2.0 + clearance
-        req_sq = required_dist * required_dist
+        req_sq = (required_dist - GRID_TIE_EPS) ** 2   # tie -> OPEN, see above
         gx, gy = coord.to_grid(hx, hy)
         expand = coord.to_grid_dist_safe(required_dist) + 1  # ceil + 1-cell bbox margin
         # #546: vectorized disc (was a Python double loop per drill). Same
@@ -1477,10 +1616,15 @@ def override_pad_hole_track_cells(pcb_data: PCBData, track_width: float,
             exempt_r_sq = None
             if has_copper:
                 exempt_r = max(pad.size_x, pad.size_y) / 2.0
-                exempt_r_sq = exempt_r * exempt_r
+                # Note the SIGN: this radius exempts cells from being blocked,
+                # so resolving its boundary tie OPEN means growing it, not
+                # shrinking it like every other epsilon here. Both edges of this
+                # predicate therefore move the same way -- toward fewer blocked
+                # cells -- which is what "tie -> OPEN" means for the outcome.
+                exempt_r_sq = (exempt_r + GRID_TIE_EPS) ** 2
             for hx, hy, drill_dia in pad_drill_circles(pad):
                 required = drill_dia / 2.0 + track_width / 2.0 + lc + extra_clearance
-                req_sq = required * required
+                req_sq = (required - GRID_TIE_EPS) ** 2   # tie -> OPEN, see above
                 gx, gy = coord.to_grid(hx, hy)
                 expand = coord.to_grid_dist_safe(required) + 1
                 for ex in range(-expand, expand + 1):
@@ -2061,7 +2205,12 @@ def _via_h2h_cells(via, config: GridRouteConfig, coord: GridCoord):
     dxg, dyg = np.meshgrid(off, off, indexing="ij")
     cx = (gx + dxg) * config.grid_step
     cy = (gy + dyg) * config.grid_step
-    dm = ((cx - via.x) ** 2 + (cy - via.y) ** 2) < req * req
+    # tie -> OPEN (GRID_TIE_EPS), like the three other implementations of this
+    # same keep-out: block_via_cells_near_drills and obstacle_cache's two. All
+    # four must agree cell-for-cell or the incremental via maps desync from a
+    # fresh rebuild (that is exactly how test_shared_via_maps failed when only
+    # one of them had the epsilon).
+    dm = ((cx - via.x) ** 2 + (cy - via.y) ** 2) < (req - GRID_TIE_EPS) ** 2
     if not dm.any():
         return None
     return np.column_stack([(gx + dxg)[dm], (gy + dyg)[dm]]).astype(np.int32)
@@ -2132,6 +2281,43 @@ def _ledger_close(obstacles, pre, tag: str):
     st = obstacles.get_stats()
     site = _oc._ledger_site(depth=3, frames=2)
     _oc.ledger_raw_delta(obstacles, f"{tag} @ {site}", st[0] - pre[0], st[1] - pre[1])
+
+
+def _per_net_rungs(obstacles) -> range:
+    """#530: the PER-NET via-legality rungs the working map carries (empty on
+    a single-rung map or a 0.21.x binary). Rung 0 is the run's via; when the
+    #568 small map is armed it holds rung 1 (obstacle_cache.via_rungs keeps
+    that slot for it) and its own mirror stamps it, so per-net rungs start at
+    2 -- otherwise at 1. Raw copper adds mirror their full-size via cells into
+    every per-net rung, the same conservative over-block the small mirror
+    applies (never wrong; a rung-r search near raw copper is not told the
+    cells are legal)."""
+    try:
+        n = int(obstacles.rung_count())
+    except Exception:                                          # noqa: BLE001
+        return range(0)
+    return range(2 if _rung_small_armed() else 1, n)
+
+
+def _extra_rungs(obstacles) -> int:
+    """Number of per-net rungs (see _per_net_rungs)."""
+    return len(_per_net_rungs(obstacles))
+
+
+def _mirror_rungs_add(obstacles, cells) -> None:
+    rs = _per_net_rungs(obstacles)
+    if len(rs) and len(cells):
+        arr = np.asarray(cells, dtype=np.int32)
+        for r in rs:
+            obstacles.add_blocked_vias_rung_batch(r, arr)
+
+
+def _mirror_rungs_remove(obstacles, cells) -> None:
+    rs = _per_net_rungs(obstacles)
+    if len(rs) and len(cells):
+        arr = np.asarray(cells, dtype=np.int32)
+        for r in rs:
+            obstacles.remove_blocked_vias_rung_batch(r, arr)
 
 
 def _rung_small_armed():
@@ -2220,15 +2406,17 @@ def add_vias_list_as_obstacles(obstacles: GridObstacleMap, vias: list,
         _h2h = _via_h2h_cells(via, config, coord)
         if _h2h is not None:
             obstacles.add_blocked_vias_batch(_h2h)
-    # #568 small-map mirror (see _rung_small_armed)
-    if _rung_small_armed() and vias:
+    # #568 small-map mirror (see _rung_small_armed); #530 per-net rungs too.
+    if vias and (_rung_small_armed() or _extra_rungs(obstacles)):
         _small = []
         for via in vias:
             _small.extend(_via_raw_block_cells(via, config, coord, num_layers,
                                                extra_clearance, diagonal_margin))
         if _small:
-            obstacles.add_blocked_vias_small_batch(
-                np.array(_small, dtype=np.int32))
+            if _rung_small_armed():
+                obstacles.add_blocked_vias_small_batch(
+                    np.array(_small, dtype=np.int32))
+            _mirror_rungs_add(obstacles, np.array(_small, dtype=np.int32))  # per-net rungs
     _ledger_close(obstacles, _pre, "add_vias_list")
 
 
@@ -2282,8 +2470,9 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
                                              via_block_mm, coord.grid_step)
             if len(_v):
                 _via_arrs.append(_v)
-            # #568 small-map mirror (see _rung_small_armed): same via capsule
-            if _rung_small_armed() and len(_v):
+            # #568 small-map mirror (see _rung_small_armed): same via capsule;
+            # #530 per-net rungs mirror it too.
+            if len(_v) and (_rung_small_armed() or _extra_rungs(obstacles)):
                 _small_arrs.append(_v)
     for _li, _arrs in sorted(_cells_by_layer.items()):
         _call = np.concatenate(_arrs) if len(_arrs) > 1 else _arrs[0]
@@ -2297,7 +2486,9 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
     if _small_arrs:
         _sall = (np.concatenate(_small_arrs) if len(_small_arrs) > 1
                  else _small_arrs[0])
-        obstacles.add_blocked_vias_small_batch(np.asarray(_sall, dtype=np.int32))
+        if _rung_small_armed():
+            obstacles.add_blocked_vias_small_batch(np.asarray(_sall, dtype=np.int32))
+        _mirror_rungs_add(obstacles, np.asarray(_sall, dtype=np.int32))  # per-net rungs
     _ledger_close(obstacles, _pre, "add_segments_list")
 
 
@@ -2364,6 +2555,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
+        _mirror_rungs_remove(obstacles, vias_array)   # #530 per-net rungs
     _ledger_close(obstacles, _pre, "remove_segments_list")
 
 
@@ -2457,6 +2649,7 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         obstacles.remove_blocked_vias_batch(vias_array)
         if _rung_small_armed():  # #568: mirror of the add-side small stamp
             obstacles.remove_blocked_vias_small_batch(vias_array)
+        _mirror_rungs_remove(obstacles, vias_array)   # #530 per-net rungs
     _ledger_close(obstacles, _pre, "remove_vias_list")
 
 
@@ -2522,6 +2715,7 @@ def add_same_net_via_clearance(obstacles: GridObstacleMap, pcb_data: PCBData,
         try:
             if _rung_small_armed():
                 obstacles.add_blocked_vias_small_batch(_pad_cells)
+            _mirror_rungs_add(obstacles, _pad_cells)   # #530 per-net rungs
         except (AttributeError, NameError):
             pass
 
@@ -2675,25 +2869,59 @@ def get_same_net_through_hole_positions(pcb_data: PCBData, net_id: int,
 
 
 def _batch_cells_one_layer(obstacles, cells_xy: "np.ndarray", layer_idx: int,
-                           blocked_cells=None):
-    """Block an (N, 2) array of cells on one layer via the batch API."""
+                           blocked_cells=None, sink=None):
+    """Block an (N, 2) array of cells on one layer via the batch API.
+
+    ``sink`` (a {layer_idx: [arrays]} dict) DEFERS the Rust call: the caller
+    accumulates every pad's cells and stamps once per layer at the end. Same
+    row multiset per layer, so the refcounts land identically whether the rows
+    arrive split or joined -- the argument the 2026-08-14 FFI batching pass
+    already made for the segment and via loops. Pads were the loop it missed.
+    """
     if len(cells_xy) == 0:
         return
-    rows = np.empty((len(cells_xy), 3), dtype=np.int32)
-    rows[:, :2] = cells_xy
-    rows[:, 2] = layer_idx
-    obstacles.add_blocked_cells_batch(np.ascontiguousarray(rows))
+    if sink is not None:
+        sink.setdefault(layer_idx, []).append(cells_xy)
+    else:
+        rows = np.empty((len(cells_xy), 3), dtype=np.int32)
+        rows[:, :2] = cells_xy
+        rows[:, 2] = layer_idx
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(rows))
     if blocked_cells is not None:
         blocked_cells[layer_idx].update(map(tuple, cells_xy.tolist()))
 
 
-def _batch_vias(obstacles, vias_xy: "np.ndarray", blocked_vias=None):
-    """Block an (N, 2) array of via positions via the batch API."""
+def _flush_cell_sink(obstacles, sink):
+    """Stamp everything a ``sink`` accumulated: one Rust call per layer."""
+    for layer_idx, arrs in sorted(sink.items()):
+        cells = np.concatenate(arrs) if len(arrs) > 1 else arrs[0]
+        rows = np.empty((len(cells), 3), dtype=np.int32)
+        rows[:, :2] = cells
+        rows[:, 2] = layer_idx
+        obstacles.add_blocked_cells_batch(np.ascontiguousarray(rows))
+    sink.clear()
+
+
+def _batch_vias(obstacles, vias_xy: "np.ndarray", blocked_vias=None, sink=None):
+    """Block an (N, 2) array of via positions via the batch API.
+
+    ``sink`` (a list) defers the Rust call -- see _batch_cells_one_layer."""
     if len(vias_xy) == 0:
         return
-    obstacles.add_blocked_vias_batch(np.ascontiguousarray(vias_xy.astype(np.int32)))
+    if sink is not None:
+        sink.append(vias_xy)
+    else:
+        obstacles.add_blocked_vias_batch(np.ascontiguousarray(vias_xy.astype(np.int32)))
     if blocked_vias is not None:
         blocked_vias.update(map(tuple, vias_xy.tolist()))
+
+
+def _flush_via_sink(obstacles, sink):
+    """Stamp everything a via ``sink`` accumulated: one Rust call."""
+    if sink:
+        allv = np.concatenate(sink) if len(sink) > 1 else sink[0]
+        obstacles.add_blocked_vias_batch(np.ascontiguousarray(allv.astype(np.int32)))
+        del sink[:]
 
 
 
@@ -3129,7 +3357,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                       blocked_cells: List[Set[Tuple[int, int]]] = None,
                       blocked_vias: Set[Tuple[int, int]] = None,
                       clearance_override: float = None,
-                      skip_cell=None):
+                      skip_cell=None,
+                      cell_sink=None, via_sink=None):
     """Add a pad as obstacle to the map.
 
     Uses rectangular-with-rounded-corners pattern matching other pad blocking functions.
@@ -3162,12 +3391,14 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
     lc = getattr(pad, 'local_clearance', 0.0) or 0.0
 
     # #498 per-layer .kicad_dru rules: resolve the pair clearance PER LAYER (a
-    # layer rule REPLACES the net/class fallback; the pad's local keep-clear
-    # stays a hard floor on top -- KiCad gives local overrides precedence over
-    # custom rules). Layers sharing a resolved value share one rasterization,
-    # so a board without rules takes exactly the old single-margin path.
+    # layer rule REPLACES the net/class fallback). A pad OVERRIDE then
+    # REPLACES that, floored at rules.min_clearance -- KiCad returns before it
+    # looks at a class or a rule (design_rules.override_clearance, measured on
+    # KiCad 10). Layers sharing a resolved value share one rasterization, so a
+    # board without rules or overrides takes exactly the old single-margin path.
     def _layer_clr(layer_name):
-        return max(config.layer_clearance(layer_name, clearance), lc)
+        return config.pad_override_clearance(
+            config.layer_clearance(layer_name, clearance), pad)
 
     def _clr_groups(expanded):
         groups = {}
@@ -3197,27 +3428,28 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
         via_margin = config.via_size / 2 + _via_clr(expanded_layers) + extra_clearance
 
         def _emit(poly, m, via_pass, layer_idxs=None):
-            gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, m)
-            if gxf is None:
+            gx_lo, gy_lo, nx, ny, inside, edist = _rasterize_polygon_box(poly, coord, m)
+            if inside is None:
                 return
-            mask = inside | (edist <= m)
-            if skip_cell is not None and mask.any():
-                idx = np.flatnonzero(mask)
-                keep = np.fromiter((not skip_cell(int(gxf[i]), int(gyf[i])) for i in idx),
-                                   dtype=bool, count=idx.size)
-                mask = np.zeros_like(mask)
-                mask[idx[keep]] = True
+            mask = inside | (edist <= m - GRID_TIE_EPS)
             if not mask.any():
                 return
+            gxs, gys = _box_masked_cells(gx_lo, gy_lo, nx, mask)
+            if skip_cell is not None:
+                keep = np.fromiter(
+                    (not skip_cell(int(gxs[i]), int(gys[i])) for i in range(gxs.size)),
+                    dtype=bool, count=gxs.size)
+                gxs = gxs[keep]; gys = gys[keep]
+                if gxs.size == 0:
+                    return
             if via_pass:
-                cells = np.column_stack([gxf[mask], gyf[mask]])
-                _batch_vias(obstacles, cells, blocked_vias)
+                _batch_vias(obstacles, np.column_stack([gxs, gys]), blocked_vias)
             else:
-                _block_cells_on_layers(obstacles, gxf, gyf, mask, layer_idxs)
+                _block_cells_sel(obstacles, gxs, gys, layer_idxs)
                 if blocked_cells is not None:
                     for li in layer_idxs:
                         if li < len(blocked_cells):
-                            blocked_cells[li].update(zip(gxf[mask].tolist(), gyf[mask].tolist()))
+                            blocked_cells[li].update(zip(gxs.tolist(), gys.tolist()))
 
         for poly in pad_polys:
             for g_clr, g_idxs in clr_groups.items():
@@ -3261,7 +3493,8 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
                                dtype=bool, count=len(cells))
             cells = cells[keep]
         for layer_idx in g_idxs:
-            _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells)
+            _batch_cells_one_layer(obstacles, cells, layer_idx, blocked_cells,
+                                   sink=cell_sink)
 
     # Via blocking near pads - block vias if pad is on any copper layer
     if any(layer.endswith('.Cu') for layer in expanded_layers):
@@ -3273,7 +3506,7 @@ def _add_pad_obstacle(obstacles: GridObstacleMap, pad, coord: GridCoord,
             keep = np.fromiter((not skip_cell(int(cx), int(cy)) for cx, cy in via_cells),
                                dtype=bool, count=len(via_cells))
             via_cells = via_cells[keep]
-        _batch_vias(obstacles, via_cells, blocked_vias)
+        _batch_vias(obstacles, via_cells, blocked_vias, sink=via_sink)
 
 
 def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
@@ -3300,9 +3533,9 @@ def _pad_via_keepout_cells(pad, coord: GridCoord, config: GridRouteConfig,
     clearance = max((config.layer_clearance(l, clearance)
                      for l in expanded_layers if l.endswith('.Cu')),
                     default=clearance)
-    lc = getattr(pad, 'local_clearance', 0.0) or 0.0
-    if lc > clearance:
-        clearance = lc
+    # A pad override REPLACES the resolved value (floored at the board
+    # minimum), it is not a floor on top of it -- KiCad semantics, measured.
+    clearance = config.pad_override_clearance(clearance, pad)
     if pad.shape in ('circle', 'oval'):
         corner_radius = min(half_width, half_height)
     elif pad.shape == 'roundrect':

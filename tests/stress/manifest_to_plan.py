@@ -110,6 +110,12 @@ FLAG_PARAMS = {
     '--stitch-max-freq': 'stitch_max_freq',
     '--exit-margin': 'exit_margin',
     '--extension': 'extension',
+    # #860 follow-up: bga_fanout/qfn_fanout's escape selector. It was in
+    # NO table here and survived only on the unknown-flag fallthrough,
+    # which happens to spell it 'escape_method' -- the name ai_plan's
+    # _PARAM_SPECIAL wants, so it worked BY LUCK and unasserted, exactly
+    # like --fab-tier above. Registered so the parity gate binds it.
+    '--escape-method': 'escape_method',
     # #581: same-net pad via clearance -- valid on planes, route, route_diff,
     # bga/qfn fanout and repair steps; the GUI control lives on the Basic tab.
     '--same-net-pad-clearance': 'same_net_pad_clearance',
@@ -128,6 +134,12 @@ FLAG_PARAMS = {
     # string); both controls are already in reset_params_to_defaults.
     '--fab-tier': 'fab_tier',
     '--fab-overrides': 'fab_overrides_path',
+    # #857: the escalation policy (the GUI Choice of the same name).
+    '--escalation': 'escalation',
+    # #530: the explicit class ceiling (Min Clearance + the ceiling box).
+    '--clearance-ceiling': 'clearance_ceiling',
+    # #856: opt-in severity relaxation (the GUI checkbox of the same name).
+    '--relax-drc-severities': 'relax_drc_severities',
 }
 LIST_FLAGS = {
     '--layers': 'layers',
@@ -191,6 +203,13 @@ BOOL_FLAGS = {
     # #515 / PR #533: rip+re-route the selected nets from scratch. Same-named
     # basic-tab checkbox; applied by the plan executor's generic loop.
     '--force-reroute': 'force_reroute',
+    # #860 follow-up: qfn_fanout's under-pad via-in-pad opt-in. #846 made
+    # this flag consequential (a via that OVERLAPS its pad is now
+    # classified and clamped as one), and it reached the GUI through
+    # nothing: unregistered here, so a recorded manifest replayed the
+    # step WITHOUT it. The param name matches the QFNOptionsPanel
+    # checkbox, so the executor's generic loop places it once it arrives.
+    '--allow-via-in-pad': 'allow_via_in_pad',
 }
 
 # Flags whose values are file paths / bookkeeping -- consumed, never params.
@@ -207,7 +226,14 @@ BOOL_FLAGS = {
 # control matches, which the executor then drops silently; consuming it here
 # says so on purpose instead.
 IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report',
-                '--net-clearances', '--deadline'}
+                '--net-clearances', '--deadline',
+                # #856: deprecated no-op (routing steps no longer touch DRC
+                # severities; the control it drove is gone).
+                '--keep-thermal',
+                # #857: a HARNESS exit-code flag (non-zero when anything was
+                # delivered below its requested size); changes no copper, and
+                # the GUI's results panel is its equivalent.
+                '--strict-sizes'}
 
 # Per-tool flag renames: bga_fanout calls the trace width --width (routed to the
 # Basic-tab track_width, which BGA fanout reads). qfn_fanout also uses --width

@@ -105,10 +105,21 @@ def test_the_census_is_written_either_way():
             c = doc['context']['decap_census']
             for k in ('source', 'metric', 'search_radius_mm', 'tethers',
                       'ics', 'beyond_radius', 'beyond_radius_refs',
-                      'worst_beyond_mm', 'seeder_scope',
-                      'seeder_scope_ungraded'):
+                      'worst_beyond_mm', 'no_rail_chip',
+                      'no_rail_chip_refs', 'population', 'unaccounted',
+                      'seeder_pin_scope'):
                 assert k in c, (name, kw, k)
             assert c['source'] == 'auto-tethers'
+            # The retired keys must be GONE, not merely unread: a reader
+            # who kept using `seeder_scope_ungraded` would be reading a
+            # number that conflated three causes and was explained by a
+            # fourth that does not exist (#792).
+            for dead in ('seeder_scope', 'seeder_scope_ungraded'):
+                assert dead not in c, (name, kw, dead)
+            # The partition is the whole scope, on every board, always.
+            assert c['unaccounted'] == 0, (name, c)
+            assert (c['tethers'] + c['beyond_radius']
+                    + c['no_rail_chip'] == c['population']), (name, c)
     print("  PASS: context.decap_census present with and without the flag")
 
 
@@ -450,13 +461,31 @@ def test_the_printed_heading_is_not_a_legality_claim():
 
 def test_the_emitted_limit_changes_what_place_seed_seeds():
     """Declaring this key is NOT a grading-only change: `place_seed` reads it
-    and pulls every 2-net-bearing-pad C* out of radial zone packing into its
-    per-supply-pin stage. The two populations differ because the two "is this
-    a decap" predicates differ.
+    and pulls caps out of radial zone packing into its per-supply-pin stage.
 
-    Pinned with the numbers so a silent reconciliation of the predicates --
-    which would be a placement change landing unannounced -- fails LOUDLY and
-    with the figure, forcing it to be argued."""
+    THIS TEST'S PREDECESSOR PINNED 70 / 53 / 17 AND SAID A SILENT
+    RECONCILIATION MUST FAIL LOUDLY. It did, and this is the argument it
+    forced.
+
+    The old numbers were right and the old EXPLANATION was wrong. The doc and
+    the census both blamed the gap on the two "is this a decap" predicates
+    disagreeing. Measured over every tracked board, the three spellings of that
+    predicate name identical sets (`tests/test_792_decap_predicate.py`), so the
+    residue attributable to them is ZERO. ulx3s's 17 is:
+
+        7   beyond the 5mm tether search radius -- a real GRADING hole (#794),
+            reported by `decap_ungraded` since this change;
+        10  whose rail NO chip carries at all -- C3 C4 C22 on /power/P1V1,
+            C7 C8 C24 on /power/P3V3, C11 C12 C23 on /power/P2V5, C14 on
+            /power/SHUT. Every one of those rails is owned only by two-pad
+            passives (the caps, L1-L3, RA*/RP*): they are bulk and filter caps
+            upstream of an LC network, not decouplers. The GRADER is right to
+            ignore all ten. The SEEDER was not, and #792 narrows its scope to
+            the caps that elect a tether at any distance.
+
+    So the pin is now the PARTITION and the ten refs BY NAME, because the whole
+    argument rests on which ten they are rather than on how many.
+    """
     if not os.path.exists(_board('ulx3s')):
         print("  SKIP: ulx3s not present")
         return
@@ -464,15 +493,84 @@ def test_the_emitted_limit_changes_what_place_seed_seeds():
     scope = {r for r, f in pcb.footprints.items()
              if r[:1].upper() == 'C'
              and len([p for p in f.pads if p.net_id > 0]) == 2}
-    tethered = {c for caps in groups_mod.decap_tethers(pcb).values()
-                for c, _d in caps}
+    near, beyond, orphans = groups_mod.decap_populations(pcb)
+    tethered = {c for caps in near.values() for c, _d in caps}
     assert len(scope) == 70, len(scope)
     assert len(tethered) == 53, len(tethered)
     assert len(scope - tethered) == 17, len(scope - tethered)
+    assert len(beyond) == 7, len(beyond)
+    assert len(orphans) == 10, len(orphans)
+    assert sorted(orphans) == ['C11', 'C12', 'C14', 'C22', 'C23', 'C24',
+                               'C3', 'C4', 'C7', 'C8'], sorted(orphans)
     c = _emit('ulx3s', derive_decaps=True)[0]['context']['decap_census']
-    assert c['seeder_scope'] == 70 and c['seeder_scope_ungraded'] == 17, c
-    print("  PASS: ulx3s -- 70 caps enter the seeder's decap stage, 53 are "
-          "graded, 17 are neither; the census reports the same numbers")
+    assert c['population'] == 70, c
+    assert c['tethers'] == 53 and c['beyond_radius'] == 7, c
+    assert c['no_rail_chip'] == 10, c
+    assert c['no_rail_chip_refs'] == sorted(orphans), c
+    assert c['unaccounted'] == 0, c
+    assert c['seeder_pin_scope'] == 60, c
+    print("  PASS: ulx3s -- 70 in scope = 53 graded + 7 beyond the radius + "
+          "10 with no rail-carrying chip; 0 from the predicates, and the "
+          "seeder's pin stage takes the 60 that elect a tether")
+
+
+def test_the_worst_beyond_is_the_FARTHEST_cap_not_the_last_one():
+    """A pre-existing defect this work found by reading, not by a red test.
+
+    `worst_beyond_mm` was `beyond[-1][1]` off a list sorted by cap REFERENCE,
+    so it reported the alphabetically last beyond-cap rather than the farthest.
+    Measured, it understated on 7 of the 14 boards that have any beyond-cap:
+
+        kit-dev-coldfire   10.80 reported,  22.89 true
+        interf_u_unrouted   8.39 reported,  19.82 true
+        flat_hierarchy      6.44 reported,  18.42 true
+        glasgow_revC        6.23 reported,  10.34 true
+        sonde_u            12.15 reported,  15.58 true
+        watchy              9.18 reported,  11.16 true
+        interf_u_placed     5.04 reported,   8.48 true
+
+    The number is quoted in `--declare-decaps` stdout, in the withholding
+    reason, and in docs/floorplan-intent.md's censoring table, so all three
+    understated the very thing the census exists to disclose. It survived
+    because `splitflap_driver` -- the board every other census arm is written
+    against -- has exactly ONE cap beyond the radius, where last and farthest
+    are the same cap.
+
+    Checked on EVERY board rather than on a fixture, because the fixture is
+    what hid it.
+    """
+    n = checked = 0
+    for path in run_utils.corpus_boards():
+        try:
+            pcb = parse_kicad_pcb(path)
+        except Exception:                                   # noqa: BLE001
+            continue
+        c = fp.decap_census(pcb)
+        n += 1
+        if not c['beyond_radius']:
+            continue
+        _near, beyond, _orph = groups_mod.decap_populations(pcb)
+        assert c['worst_beyond_mm'] == round(max(d for _c, _i, d in beyond), 4), (
+            os.path.basename(path), c['worst_beyond_mm'])
+        # The two orderings are DIFFERENT things and must stay so.
+        assert c['beyond_radius_refs'] == sorted(c['beyond_radius_refs'])
+        checked += 1
+    assert n >= 15, n
+    # ANTI-VACUITY: a board set with no beyond-caps proves nothing here, and a
+    # set where every board has ONE is what hid the defect for a release.
+    assert checked >= 10, checked
+    multi = 0
+    for path in run_utils.corpus_boards():
+        try:
+            pcb = parse_kicad_pcb(path)
+        except Exception:                                   # noqa: BLE001
+            continue
+        if fp.decap_census(pcb)['beyond_radius'] >= 2:
+            multi += 1
+    assert multi >= 5, (multi, "the arm needs boards with SEVERAL beyond-caps; "
+                               "with one each, last and farthest coincide")
+    print(f"  PASS: worst_beyond_mm is the max on {checked} board(s), "
+          f"{multi} of them with 2+ beyond-caps where the two orderings differ")
 
 
 # --------------------------------------------------------------------------
@@ -529,12 +627,16 @@ def test_the_cli_reports_a_withholding_on_stdout():
              '--emit-intent', out, '--declare-decaps'], accept=True)
         assert 'WITHHELD' in r.stdout, r.stdout[-400:]
         run_utils.evidence(out, 'the emitted intent')
+        # A withheld key is an ungraded DECLARED channel, so since #713 item 5
+        # the grade REFUSES (exit 4) instead of exiting 0. That is the point of
+        # this test's own subject -- it asserts the CLI says NOT DERIVABLE --
+        # so assert the refusal AND its reason rather than a bare success.
         r2 = run_utils.check(
             [sys.executable, '-X', 'utf8',
              os.path.join('py_tools', 'check_floorplan.py'), _board(name),
-             '--intent', out], accept=True)
-        assert 'NOT DERIVABLE' in r2.stdout, r2.stdout[-400:]
+             '--intent', out], refuse='NOT DERIVABLE', code=4)
         assert 'decap_distance' in r2.stdout, r2.stdout[-400:]
+        assert 'NOT FULLY GRADED' in (r2.stdout + r2.stderr), r2.stdout[-400:]
     print(f"  PASS: {name} -- the CLI says WITHHELD on emit and NOT DERIVABLE "
           f"on grade")
 
@@ -559,6 +661,7 @@ TESTS = [
     test_an_unmapped_withheld_key_still_abstains_and_blames_no_rule,
     test_the_printed_heading_is_not_a_legality_claim,
     test_the_emitted_limit_changes_what_place_seed_seeds,
+    test_the_worst_beyond_is_the_FARTHEST_cap_not_the_last_one,
     test_the_cli_emits_and_warns_about_the_coupling,
     test_the_cli_refuses_a_shaved_limit_with_the_right_REASON,
     test_the_cli_reports_a_withholding_on_stdout,

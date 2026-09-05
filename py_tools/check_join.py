@@ -260,7 +260,8 @@ def main(argv=None):
                          cand_vias)
             if args.keep_staged:
                 shutil.copy(staged, args.keep_staged)
-                for ext in ('.kicad_pro', '.kicad_dru'):
+                from copy_board import SIBLING_EXTS   # ONE list (#711)
+                for ext in SIBLING_EXTS:
                     sib = os.path.splitext(staged)[0] + ext
                     if os.path.isfile(sib):
                         shutil.copy(sib, os.path.splitext(

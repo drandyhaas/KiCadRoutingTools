@@ -260,13 +260,26 @@ class TestRealBoards(unittest.TestCase):
     """The reported failure, on the board that reproduces it."""
 
     def _nudge_fiducial(self, board, mm):
-        """Rigidly move the override-carrying footprint toward USB1."""
+        """Rigidly move the override-carrying footprint toward USB1.
+
+        The candidate is chosen as the one NEAREST USB1, not `[0]`. esp_prog
+        carries two `Ref*` fiducial blocks, and until #726 the parser kept only
+        the second -- the one 0.61 mm from USB1, which is what makes a 0.40 mm
+        nudge cross its 1.016 mm keep-clear. With both blocks present, `[0]`
+        picks the OTHER one, 24.05 mm away, where no nudge this small can
+        violate anything: the arm then fails on its own honest guard
+        ("check_drc sees no violation -- fixture drifted") while the engine is
+        fine. Selecting on the property the test actually depends on says what
+        the fixture is for, and cannot be re-broken by a dict order.
+        """
         from kicad_parser import parse_kicad_pcb
         pcb = parse_kicad_pcb(board)
-        fid = [fp for fp in pcb.footprints.values()
-               if any((getattr(q, 'local_clearance', 0.0) or 0.0) > 0.5
-                      for q in fp.pads)][0]
         tgt = pcb.footprints['USB1']
+        cands = [fp for fp in pcb.footprints.values()
+                 if any((getattr(q, 'local_clearance', 0.0) or 0.0) > 0.5
+                        for q in fp.pads)]
+        assert cands, 'no pad-override footprint on this board'
+        fid = min(cands, key=lambda f: math.hypot(f.x - tgt.x, f.y - tgt.y))
         vx, vy = tgt.x - fid.x, tgt.y - fid.y
         n = math.hypot(vx, vy)
         dx, dy = vx / n * mm, vy / n * mm
@@ -448,16 +461,22 @@ class TestRealBoards(unittest.TestCase):
             copy_board(ESP_PROG, staged)
             with open(os.path.splitext(staged)[0] + '.kicad_dru', 'w',
                       encoding='utf-8') as fh:
+                # 1.2 mm, not the 0.6 this test first used: esp_prog's only
+                # sub-0.6 pairs sit on 13 pads carrying a 0.0508 mm clearance
+                # OVERRIDE, and a pad override REPLACES a rule (KiCad 10,
+                # measured -- tests/oracle/constraint_agreement.py
+                # pad_override_beats_rule), so the rule must bind on a pair
+                # WITHOUT overrides to be seen binding at all.
                 fh.write('(version 1)\n(rule wide_front (layer "F.Cu") '
-                         '(constraint clearance (min 0.6mm)))\n')
+                         '(constraint clearance (min 1.2mm)))\n')
             from kicad_parser import parse_kicad_pcb
             pcb = parse_kicad_pcb(staged)
             model = PadClearanceModel.for_board(pcb, 0.15, staged)
             # MUTATION: drop the read_board_layer_clearances read -> empty.
-            self.assertEqual(model.layer_rules, {'F.Cu': 0.6})
+            self.assertEqual(model.layer_rules, {'F.Cu': 1.2})
             g = grade_pad_legality(pcb, 0.15, worst_n=0, pcb_file=staged)
             self.assertGreater(g['pad_conflicts'], 0,
-                               'a 0.6mm F.Cu rule must bind somewhere')
+                               'a 1.2mm F.Cu rule must bind somewhere')
             self.assertTrue(any(r[3] == 'layer rule' for r in g['required']),
                             g['required'])
 

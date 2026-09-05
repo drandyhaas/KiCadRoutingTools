@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.20.0**
+**Current Version: 0.22.0**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -311,6 +311,94 @@ src/
 
 ## Version History
 
+### 0.22.0 (2026-09-03)
+
+- **N via-legality rungs** (#530 decision 4, per-net via sizes). The single
+  #568 "small fab rung" map `blocked_vias_small` becomes
+  `blocked_vias_rungs: Vec<FxHashMap>`, one refcounted map per via geometry
+  a search may use (rung r at index r-1; rung 0 stays `blocked_vias`, the
+  configured via). New methods: `add_blocked_via_rung(rung, gx, gy)`,
+  `remove_blocked_via_rung`, `add_blocked_vias_rung_batch(rung, N x 2)`,
+  `remove_blocked_vias_rung_batch`, `rung_count()`, `rung_len(rung)`, and
+  `blocked_via_cells_at_rung(rung)` (sorted list of (gx, gy)) so Python can
+  build a base map at another via geometry and copy its via cells into a
+  rung of the working map. The `*_small*` methods remain as rung-1 aliases;
+  `is_via_blocked_rung(gx, gy, rung)` consults rung r's own map when it is
+  populated and falls back to rung 0 otherwise (conservative for a smaller
+  via; a LARGER via's rung must be populated by the caller). `get_stats()`'s
+  8th element is now the sum over every rung. `freeze_static` keeps a rung's
+  cells that lie outside the frozen full-size set (a larger via's overlay)
+  and clears the rest, as before.
+- Python-side consumer: `GridRouteConfig.net_via_sizes` /
+  `obstacle_cache.via_rungs`; a Python build against a 0.21.x binary detects
+  the missing `add_blocked_vias_rung_batch` and routes single-rung.
+
+### 0.21.4 (2026-08-30)
+
+- **The 0.21.4 crate binaries are published in the v0.21.5 release**
+  (2026-09-01) -- v0.21.4 itself shipped before this crate work landed and
+  carries 0.21.1-built assets, so `build_router.py` on a 0.21.2..0.21.4 crate
+  had to build from source until v0.21.5 (the 0.20.1/0.20.2 pattern).
+- The UNSTAMP twins of 0.21.3's span adds: `remove_blocked_cell_spans_batch`
+  (N x 4) and `remove_blocked_via_spans_batch` (N x 3), same inclusive-bounds
+  row layout, expanded in Rust.
+
+  0.21.3 could only ADD spans, which is why only `build_base_obstacle_map`
+  (build-once, never unstamped) could use them. The per-net obstacle cache --
+  the consumer carrying most of the traffic -- stamps a net's capsules on entry
+  and removes the identical arrays on exit, so it needed a remove that expands
+  to exactly the same cell multiset. Without symmetry cells stay blocked after
+  their net is ripped and the router silently loses routable space, breaking
+  the invariant `working_obstacles == base_obstacles + sum(net_obstacles_cache)`
+  that `run_obstacle_audit`, `tests/test_obstacle_addremove_parity.py` and
+  `tests/test_obstacle_map_balance.py` defend. See #815.
+
+### 0.21.3 (2026-08-30)
+
+- Capsule keep-outs can be stamped as SPANS instead of cells:
+  `add_blocked_cell_spans_batch` / `add_blocked_via_spans_batch` (+ the
+  `add_static_*` twins for the base build's stamp proxy). Each row is
+  `(gx, y_lo, y_hi[, layer])` with both y bounds INCLUSIVE, expanded in Rust.
+
+  A capsule is convex, so its rasterization is one contiguous run per column --
+  measured **8.3 cells per column** over 400 representative capsules. A span
+  costs 12 bytes per column against 8 bytes per cell, i.e. **5.2x denser** for
+  the identical cell multiset (each span lists each of its cells exactly once,
+  so refcounts land the same). Verified against the cell path on 720 capsules:
+  zero cell-state mismatches, identical `get_stats()`.
+
+  This exists so the Python-side capsule memo can cache spans rather than
+  materialised cells. It thrashes badly in the cell form -- on glasgow_revC,
+  2,270,477 of 2,317,497 misses were EVICTIONS with the cache pinned at its
+  16M-row ceiling. Expanding spans back to cells in Python costs 7.44 us
+  against a 0.17 us cache hit (~65 s/route), which is why the expansion has to
+  be here and the consumer has to take spans. See #815.
+
+### 0.21.2 (2026-08-30)
+
+- #800: `GridObstacleMap.add_allowed_rect(min_gx, min_gy, max_gx, max_gy)` --
+  add a whole inclusive rectangle of allowed cells in ONE Python->Rust
+  crossing. The terminal-exemption block in `route_net_with_obstacles` was
+  calling `add_allowed_cell` once per cell -- the issue measured 509,109,266
+  crossings per route on rp2350.
+
+  Measured: **~50 ns/cell -> ~3 ns/cell (15-17x)**, against the ~2.5x an
+  `N x 3` cell batch would have given. One rp2350 route emits **655,531,651**
+  exemption cells in 1,487,872 blocks, counted directly. Output is
+  byte-identical. No whole-route percentage is quoted: it divides by a route
+  time that swings with board, machine and run.
+
+  A rect rather than the `N x 3` cell batch the issue sketched, for two reasons
+  in the code: `allowed_cells` is ONE set keyed by `pack_xy` with **no layer
+  dimension**, so an `N x 3` array carries a column the map cannot store; and
+  all five callers are already rectangles around a terminal, so a rect costs 4
+  ints where a cell batch would have Python build a 441-row array first --
+  paying much of the per-cell cost the batch exists to remove.
+
+  An inverted range (min > max) inserts nothing, which is what lets callers
+  hand over their `bounds` clipping verbatim: a terminal whose block lies
+  wholly outside `bounds` must add no cells, exactly as Python's `range()` did.
+  `add_allowed_cell` is unchanged and still exported.
 
 ### 0.21.1 (2026-08-16)
 

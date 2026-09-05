@@ -92,14 +92,32 @@ the alternatives only kick in to rescue an otherwise-dropped leg.
 On a genuinely boxed-in pair (the outer leg has a neighbour pad one pitch away
 *and* the neighbour's diagonal escape sweeping through the only outward room) the
 via has nowhere to go outward, so the plain escape **drops** it. With
-`--allow-via-in-pad` the escape via may sit on its **own** pad (via-in-pad). Its
-candidate offsets then become a **mix**: on-pad positions (centre, then inward
-toward the chip) *and* off-pad positions (outward past the pad), so each leg
-independently takes whichever escapes — a boxed-in leg staggers *inward*, away
-from the neighbour, instead of being dropped, while a leg with outward room still
-goes out. The via still must clear every other-net pad, via and track — it only
-gains permission to overlap its own pad. Name and behaviour match the
-"Allow via-in-pad" option elsewhere in the tools. Example:
+`--allow-via-in-pad` the escape via may sit on its **own** pad (via-in-pad), and
+the search gains an extra ladder of **signed offsets along the escape axis**,
+tried *before* the outward one, plus four extra stagger configurations. So each
+leg independently takes whichever escapes — a boxed-in leg staggers *inward*,
+away from the neighbour, instead of being dropped, while a leg with outward room
+still goes out. The via still must clear every other-net pad, via and track — it
+only gains permission to overlap its own pad.
+
+**That inward ladder is not confined to the pad (#846).** Its increment is the
+*inter-net* stagger — the centre-to-centre a via needs from a **different** net's
+via at this pitch — which on a fine-pitch part is larger than the pad. On
+`routed_output`'s QFN-76 (pitch 0.40, via 0.45, clearance 0.1) the step is
+0.4275 mm against a pad whose escape-axis extent is 0.875 mm, so rung 1 is
+already half a pad-length off centre and rung 8 reaches ±3.42 mm. Measured, the
+flag's rungs are load-bearing: with it on, this ladder won 66 of 84 accepted
+offsets on `routed_output` U2 and every one on `tigard`, `qfn_underpad_coupling`
+and `qfn_diffpair_escape`, and it owns the longest emitted stub there (2.9924 mm).
+So the offsets stay and the name was the wrong half. Set
+`KICAD_QFN_ONPAD_REACH` to confine them (see below).
+
+A via that **does** overlap its pad is clamped to the pad edge so it cannot bulge
+past it (#202), and needs IPC-4761 Type VII (filled + capped + plated) — the run
+prints a FAB NOTE naming the pads. `JSON_SUMMARY` carries `allow_via_in_pad`,
+`via_in_pad`, `via_in_pad_clamped`, `via_in_pad_offcentre` and `max_stub_mm`.
+Name and behaviour match the "Allow via-in-pad" option elsewhere in the tools.
+Example:
 
 ```bash
 python3 py_router/qfn_fanout.py board.kicad_pcb --component U1 --nets 'DP1*' \

@@ -32,6 +32,13 @@ for _sib in ('py_placer', 'py_tools'):
 import routing_defaults as defaults
 from kicad_parser import mm_to_iu
 from .fanout_gui import NetSelectionPanel
+# board_minima_from_live is NOT imported here (IPC): it is main's SWIG twin
+# of fix_kicad_drc_settings.scan_board_minima, and exists only to avoid
+# re-parsing the board inside a wx TIMER dispatch, where the allocation
+# burst tripped a gen0 collection over a stale pcbnew pointer. This front
+# writes floors through the CLI's own fix_project_for_output, which scans
+# the minima itself when the caller passes none -- so #530's pad-override
+# cap arrives here without the twin, and there is no SWIG board to hold.
 from .gui_utils import StdoutRedirector
 
 
@@ -943,8 +950,12 @@ class PlanesTab(wx.Panel):
                     class_clearance_cache[cname] = params.get('clearance', _plane_clearance)
                 else:
                     class_clearance_cache[cname] = _plane_clearance
+            # #530 decision 2 (mirrors list_nets.net_clearance_map_by_id): a
+            # Default-only net takes the run's clearance and gets NO entry.
             for net in self.pcb_data.nets.values():
                 cname = all_net_to_class.get(net.name, 'Default')
+                if cname == 'Default':
+                    continue
                 _plane_net_clearances[net.net_id] = class_clearance_cache.get(
                     cname, _plane_clearance)
             if _plane_clamp:

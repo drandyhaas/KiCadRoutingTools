@@ -37,8 +37,16 @@ def save_board_via_ui_thread(path, board, timeout_s=None):
     ``kicad_parser.build_pcb_data_from_board``), so the guard cannot live only
     here. See that module for the py-spy evidence and the reasoning.
     """
-    from ui_thread import save_board_on_ui_thread, SAVE_BOARD_UI_TIMEOUT_S
-    return save_board_on_ui_thread(
+    return save_board_via_ui_thread_ex(path, board, timeout_s)[0]
+
+
+def save_board_via_ui_thread_ex(path, board, timeout_s=None):
+    """Plugin-side alias for :func:`ui_thread.save_board_on_ui_thread_ex`
+    (#828): ``(ok, SaveStatus)``, so a caller can tell the 120 s expiry
+    (this machine, this moment -- retryable) from a ``SaveBoard`` exception
+    (this board -- it will throw again) instead of one bare ``False``."""
+    from ui_thread import save_board_on_ui_thread_ex, SAVE_BOARD_UI_TIMEOUT_S
+    return save_board_on_ui_thread_ex(
         path, board,
         SAVE_BOARD_UI_TIMEOUT_S if timeout_s is None else timeout_s)
 

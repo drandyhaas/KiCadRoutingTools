@@ -742,11 +742,31 @@ class TestTheOneRealBoardArmWhereTheRegistrarRUNS(unittest.TestCase):
                  via_clear_fallback=False)
 
     # Measured at 42e09a1a AND at the merge base 988634d0 -- identical, which
-    # is the whole claim of this change.
+    # was the whole claim of that change.
+    #
+    # TWO of these moved at #708, and the reason is worth reading before
+    # re-pinning them again. This arm sets `max_displacement=0.0`: the caller
+    # is saying no cap may move. The old `_candidate_positions` snapped the
+    # ABSOLUTE candidate, so even at a zero displacement budget the single
+    # candidate it produced was `snap(seed, grid_step)` -- not the cap's own
+    # pose. Measured on one real cap: seed (131.4450, 138.4300) -> candidate
+    # (131.4000, 138.4000), a 0.054mm move under a 0.0mm cap.
+    #
+    # So the pass used to emit 18 PLACEMENTS on a board it was forbidden to
+    # move anything on, and exactly one of those 18 illegitimate nudges
+    # happened to clear a violation. Snapping the OFFSET makes the only
+    # candidate at `max_displacement=0.0` the cap's own pose, so:
+    #
+    #   N_PLACEMENTS  18 -> 0    the contract is now kept
+    #   N_UNRESOLVED  10 -> 11   the one resolution that rested on breaking it
+    #
+    # Everything else is unchanged -- 9 barrels relocated, 17 connectors, the
+    # same three caps credited -- which is what says this is the cap being
+    # honoured rather than the via nudger regressing.
     N_MOVES = 9
     N_CONNECTORS = 17
-    N_UNRESOLVED = 10
-    N_PLACEMENTS = 18
+    N_UNRESOLVED = 11
+    N_PLACEMENTS = 0
     VIA_FREED = ['C19', 'C44', 'C45']
 
     def _run(self):

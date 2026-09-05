@@ -25,6 +25,11 @@ from typing import Dict, List, Set, Optional, Tuple
 from enum import Enum
 
 from kicad_parser import parse_kicad_pcb, PCBData, Footprint, Pad
+# Re-exported, not re-implemented (#705). These used to be a local tuple and a
+# closure inside `get_power_net_recommendations`; they are the repo's only
+# pin-level power predicate and every other caller was locked out of them.
+from net_queries import (  # noqa: F401  (POWER_PIN_KEYWORDS is a public re-export)
+    POWER_PIN_KEYWORDS, is_power_pin)
 
 
 class ComponentRole(Enum):
@@ -391,19 +396,16 @@ def get_power_net_recommendations(pcb_data: PCBData,
 
     # Also add direct power connections (power_in pins on sinks, power_out on sources)
     # These may not appear in traced paths if there's no pass-through component
-    # Also detect mislabeled power pins by their function name
-    power_pin_keywords = ('VCC', 'VDD', 'VSS', 'GND', 'VCCA', 'VSSA', 'VDDA',
-                          'VDDPLL', 'VCCPLL', 'GNDPLL', 'VRH', 'VRL', 'AVDD', 'AVSS')
-
-    def is_power_pin(pinfunction: str, pintype: str) -> bool:
-        """Check if a pin is a power pin by function name or pintype."""
-        if pintype in ('power_in', 'power_out'):
-            return True
-        if pinfunction:
-            fn_upper = pinfunction.upper()
-            # Check for exact matches or prefix matches
-            return any(fn_upper == kw or fn_upper.startswith(kw) for kw in power_pin_keywords)
-        return False
+    # Also detect mislabeled power pins by their function name.
+    #
+    # The table and the predicate MOVED to `net_queries` (#705) and are imported
+    # at module scope. They lived here as a closure and a local tuple, which
+    # made them unreachable to every other caller -- so the placement side had
+    # no pin-level power predicate at all, and issue #705's channel 2 would have
+    # had to copy them. This module's public behaviour is unchanged: the only
+    # semantic difference is that a compound pintype is token-split rather than
+    # compared whole, and the tracked corpus carries no compound spelling except
+    # `X+no_connect`, on which the two forms agree.
 
     for ref, comp in components.items():
         if comp.role == ComponentRole.CURRENT_SINK:

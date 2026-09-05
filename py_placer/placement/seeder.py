@@ -108,6 +108,24 @@ def pose_ok(state, ref: str, x: float, y: float, rot: float,
     # loop, two policies, both named.
     if not state.keepout_clear(ref, (r, tht)):
         return False
+    # #797, the FOURTH conjunct. `rule_zone_exclusive` graded a reserved
+    # rectangle that the seat search walked STRANGERS into: `place_seed` could
+    # seat an unrelated part in the middle of a region the intent reserved and
+    # then exit 4 against the intent it was built from. That is the round trip
+    # the keep-out conjunct above closed, one rule over.
+    #
+    # ABSOLUTE, for the reason the paragraph above gives, and BEFORE
+    # `candidate_valid` for the reason the keep-out one is: a handful of float
+    # compares against a usually-empty dict, where `candidate_valid` ends in
+    # the neighbour loop.
+    #
+    # BOTH rects are handed over and the answer is nonetheless COURTYARD ONLY.
+    # `intent_term_values` takes `rects[0]` for a zone_exclusive term because
+    # `rule_zone_exclusive` reads `part.rect` and never `tht_rect`; passing
+    # `(r,)` here would put a SECOND copy of that decision in this file, and
+    # the two would drift the first time one of them was revisited.
+    if not state.exclusive_clear(ref, (r, tht)):
+        return False
     return state.candidate_valid(ref, x, y, rot, exclude=exclude)
 
 
@@ -146,10 +164,12 @@ def zone_gate(part, constraint, tol: float):
     """
     if constraint is None:
         return (lambda x, y, rot: True), False
-    from placement.floorplan import zone_fits_courtyard
-    anchor = not any(
-        zone_fits_courtyard(constraint, part.rect(0.0, 0.0, r), tol)
-        for r in (part.rot % 360, (part.rot + 90) % 360))
+    from placement import floorplan as _fp
+    # The anchor decision moved to `floorplan.zone_is_anchor` (#799) so the
+    # load-time contradiction check asks the SAME question rather than a
+    # re-derivation of it. Resolved through the module object, not a
+    # `from ... import`, so a test that patches the decision is observed here.
+    anchor = _fp.zone_is_anchor(constraint, part, tol)
 
     if anchor:
         def _in(x, y, rot):
@@ -191,16 +211,17 @@ def _feasible_centre_box(part, constraint, tol, anchor):
         # Anchor zones constrain the ANCHOR POINT, so the centre box is the
         # zone itself; no courtyard term enters.
         return x0 - tol, y0 - tol, x1 + tol, y1 + tol
-    max_b0x = max_b0y = -float('inf')
-    min_b2x = min_b2y = float('inf')
-    for rot in (part.rot, part.rot + 90.0, part.rot + 180.0, part.rot + 270.0):
-        b = part.rect(0.0, 0.0, rot % 360)
-        max_b0x = max(max_b0x, b[0])
-        max_b0y = max(max_b0y, b[1])
-        min_b2x = min(min_b2x, b[2])
-        min_b2y = min(min_b2y, b[3])
-    return (x0 - tol - max_b0x, y0 - tol - max_b0y,
-            x1 + tol - min_b2x, y1 + tol - min_b2y)
+    # The per-rotation algebra is `floorplan.zone_origin_box` since #799, which
+    # needs it one rotation at a time; the union is this function's own shape.
+    # BIT-IDENTICAL to the max/min form it replaces: subtraction is monotone in
+    # its second operand, so `min_r(x0 - tol - b0_r)` is `x0 - tol - max_r(b0_r)`
+    # evaluated with the same operands in the same order.
+    from placement import floorplan as _fp
+    boxes = [_fp.zone_origin_box(constraint, part.rect(0.0, 0.0, rot % 360), tol)
+             for rot in (part.rot, part.rot + 90.0,
+                         part.rot + 180.0, part.rot + 270.0)]
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
 def zone_census_offsets(part, constraint, tol, tx, ty, grid_step=0.1,
@@ -419,7 +440,8 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
                       max_disp: Optional[float] = None,
                       rotations: Optional[Sequence[float]] = None,
                       constraint=None, tol: float = 0.5,
-                      without_keepouts: Sequence[str] = ()) -> int:
+                      without_keepouts: Sequence[str] = (),
+                      without_exclusive: Sequence[str] = ()) -> int:
     """How many legal poses `ref` has near (tx, ty), counting at most `cap`.
 
     This is issue #629's measurement. Three consecutive sweeps in run 19
@@ -452,6 +474,12 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
     static "does the zone intersect a keep-out" test computed some other way.
     A verdict derived from a different question is the reported-field trap
     one level up.
+
+    `without_exclusive` is the same lever for declared EXCLUSIVE zones (#797),
+    naming BLOCKS rather than keep-outs. Same argument: "this reserved zone is
+    what refuses the part" has to be a NUMBER from the seat predicate, not a
+    static "does the part's feasible region intersect the rect" test computed
+    some other way.
     """
     from pose_score import _offsets
     part = state.parts[ref]
@@ -481,6 +509,26 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
             state.keepouts_for[ref] = kept
         else:
             del state.keepouts_for[ref]
+    # #797: the same lift for exclusive zones, as a SECOND independent
+    # save/restore rather than a shared one -- the two channels are lifted by
+    # different callers for different questions, and one `saved` sentinel
+    # covering both would restore a channel that was never swapped.
+    #
+    # No `_inc_intent.clear()` here, unlike the keep-out lift above, and the
+    # difference is not an oversight: that cache holds the incumbent vector for
+    # `intent_spec_for`, whose ARITY changes when a keep-out is lifted.
+    # `exclusive_for` feeds no cached incumbent at all -- `exclusive_clear` is
+    # absolute and reads the candidate rects only -- so clearing it here would
+    # be harmless but would falsely signal that the two channels are coupled.
+    lift_z = set(without_exclusive or ())
+    saved_z = None
+    if lift_z and state.exclusive_for.get(ref):
+        saved_z = state.exclusive_for[ref]
+        kept_z = tuple(t for t in saved_z if t.name not in lift_z)
+        if kept_z:
+            state.exclusive_for[ref] = kept_z
+        else:
+            del state.exclusive_for[ref]
     try:
         n = 0
         for dx, dy in offsets:
@@ -501,6 +549,33 @@ def count_legal_poses(state, ref: str, tx: float, ty: float,
         if saved is not None:
             state.keepouts_for[ref] = saved
             state._inc_intent.clear()
+        if saved_z is not None:
+            state.exclusive_for[ref] = saved_z
+
+
+#: The declared-intent rules the SEAT SEARCH enforces, as `quench.py` states
+#: its own `INTENT_ENFORCED_RULES` for the per-move gate (#797).
+#:
+#: This exists because `docs/floorplan-intent.md` carries a "Which rules the
+#: SEARCH can see" table whose seat-search column was RE-TYPED prose, and it
+#: sat reading "no" against `zone_exclusive` for as long as it took someone to
+#: notice -- which is this issue. A tuple the tests can read makes that column
+#: derivable from the engine instead of remembered about it.
+#:
+#: Each rule reaches the search by a DIFFERENT mechanism, and the differences
+#: are the reason the other six are absent rather than an oversight:
+#:   zone_containment  the per-call `constraint` of `zone_gate`, anchor-aware
+#:                     and per-part -- never a state-wide gate, because a
+#:                     monotone one would make a repair refuse its own target
+#:                     (pose_score.make_state, and test_698 arm H)
+#:   zone_exclusive    `QuenchState.exclusive_clear`, ABSOLUTE, over the
+#:                     zone_exclusive slice of the same `build_zone_spec` the
+#:                     quench gate reads
+#:   keepout           `QuenchState.keepout_clear`, ABSOLUTE, over
+#:                     `floorplan.keepout_hit`
+#: The remaining rules are graded and not gated, each for a stated reason --
+#: see that document's table, whose "if not, why not" column is the record.
+SEAT_ENFORCED_RULES = ('zone_containment', 'zone_exclusive', 'keepout')
 
 
 #: The verdicts a part with no legal pose can be given (#699). Two of them
@@ -523,6 +598,13 @@ NO_POSE_VERDICTS = (
     # own size refuses it, not a neighbour" -- false, and the reader's next
     # move is different: move the keep-out, or add the part to its `allow`.
     'keepout_blocks',
+    # #797, the same story one rule over. Before it, a part a declared
+    # EXCLUSIVE zone refuses reported `no_movable_neighbour` (or, once
+    # neighbours were censused, `no_single_lift_frees` -- "lifting any ONE of
+    # them frees no pose", about a board where no neighbour was ever the
+    # problem). The reader's next move is different again: there is no `allow`
+    # list for an exclusive zone, because MEMBERSHIP is the allow list.
+    'zone_exclusive_blocks',
 )
 
 
@@ -546,7 +628,13 @@ def _empty_census() -> Dict:
             # empty on every part, per this function's whole rationale --
             # a consumer must never need a defaulting `.get` to tell "no
             # keep-out is in the way" from "keep-outs were not considered".
-            'keepouts_freeing': {}}
+            'keepouts_freeing': {},
+            # #797: the same pair for declared EXCLUSIVE zones. Named after
+            # the RULE rather than `zones_*`, which would collide with the
+            # other zone in this file -- the part's OWN zone, which is the
+            # per-call `constraint` and is not a census channel at all.
+            'zone_exclusive_joint': 0,
+            'zone_exclusive_freeing': {}}
 
 
 def _verdict_for(cands: Sequence[str], census: Dict) -> str:
@@ -558,6 +646,21 @@ def _verdict_for(cands: Sequence[str], census: Dict) -> str:
         # and it sits below `blocker_available` for free -- this function is
         # only reached when no trade was chosen.
         v = 'keepout_blocks'
+    elif (census.get('zone_exclusive_freeing')
+          or census.get('zone_exclusive_joint')):
+        # #797, and BELOW `keepout_blocks` on purpose rather than by accident.
+        # When both explain the refusal, name the one the reader CANNOT
+        # change: a keep-out is usually a mechanical fact (a boss, a shell, an
+        # enclosure wall), while an exclusive zone is a policy its author can
+        # relax with one key. Telling someone to drop `exclusive` while a
+        # heatsink boss also covers the pocket sends them to do work that will
+        # not seat the part.
+        #
+        # Above `no_movable_neighbour` / `immovable_given_frozen` /
+        # `no_single_lift_frees` for #701's reason: all three describe
+        # NEIGHBOURS, and on a board where a declared claim is what refuses,
+        # their prose is not merely unhelpful but false.
+        v = 'zone_exclusive_blocks'
     elif not cands:
         v = ('immovable_given_frozen' if census.get('frozen')
              else 'no_movable_neighbour')
@@ -611,6 +714,28 @@ def _no_pose_note(ref: str, verdict: str, census: Dict,
         return (f"{ref}: no legal pose, and {what}, and not this rung's to "
                 f"lift. Move a keep-out, or add {ref} to an `allow` list if "
                 f"it is the part that owns one")
+    if verdict == 'zone_exclusive_blocks':
+        freeing = census.get('zone_exclusive_freeing') or {}
+        if freeing:
+            who = ', '.join(f"{n!r} (frees {c})"
+                            for n, c in sorted(freeing.items()))
+            what = (f"the EXCLUSIVE ZONE(S) of block(s) {who} are what refuse "
+                    f"it -- {ref} is not a member of them, and no neighbour "
+                    f"is involved")
+        else:
+            # The JOINT case, as `keepout_blocks` has: naming one here would
+            # be false of every individual one, which is why the sentence does
+            # not.
+            what = (f"the declared exclusive zones are JOINTLY what refuse it "
+                    f"-- no single one frees a pose, lifting all of them frees "
+                    f"{census.get('zone_exclusive_joint', 0)}, and no "
+                    f"neighbour is involved")
+        # The reader's next move is NOT a keep-out's. There is no `allow` list
+        # for an exclusive zone -- membership IS the allow list -- so all three
+        # options are edits to the intent file and all three are named.
+        return (f"{ref}: no legal pose, and {what}. Add {ref} to the block "
+                f"that owns the zone, move the zone, or drop its `exclusive` "
+                f"flag")
     if verdict == 'no_movable_neighbour':
         return (f"{ref}: no legal pose, and NOTHING seated is near enough to "
                 f"be in the way -- the outline, the zone or its own size "
@@ -1092,6 +1217,23 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
         if reasons is not None:
             reasons.extend(f"keep-out {n!r}" for n in _blockers)
         return False
+    # A FOURTH conjunct, since #797, and here for the same reason the keep-out
+    # one is: this predicate deliberately bypasses `pose_ok`, so a rule added
+    # there is absent here unless it is added here too. An edge connector's
+    # body may leave the OUTLINE; it may not enter a region some other block
+    # reserved, and neither the band nor the pad test can see that.
+    #
+    # THE TRADE THIS MAKES, stated as #701 stated its own: a stranger edge
+    # connector whose entire declared band lies inside a reserved zone will
+    # slide along the edge, exhaust, and fall through to the ordinary stages
+    # -- trading a `zone_exclusive` error for an `edge_connector` one. That is
+    # a worse-looking grade about a better board, and it is reported BY NAME
+    # through `reasons` rather than as a silent missing pose.
+    _zblockers = state.exclusive_blockers(part.ref, (r, tht))
+    if _zblockers:
+        if reasons is not None:
+            reasons.extend(f"exclusive zone of block {n!r}" for n in _zblockers)
+        return False
     gate = state.edge_gate
     for px, py, _sz in part.pad_globals(x, y, part.rot):
         # A zero-size rect at the pad centre: "is this point on the board",
@@ -1124,6 +1266,191 @@ def _edge_frac_bounds(part, bounds, edge: str) -> Tuple[float, float]:
     return (-a) / span, 1.0 - (b / span)
 
 
+#: "Is this part over the boundary at all", in mm. MIRRORS `legality.EPS`
+#: (1e-6), which is this repo's zero for a distance like this; spelled here
+#: because `seeder` does not import `legality`, and reaching for a name this
+#: module does not have is how the first version of `_already_on_its_edge`
+#: came to answer False for every part on every board.
+_ON_EDGE_EPS_MM = 1e-6
+
+
+def _declared_frac(entry: Dict) -> Optional[float]:
+    """The along-edge fraction the INTENT declares, or None (#706 + #712).
+
+    `center_on_edge` is the midpoint. `along_edge_band`'s MIDPOINT, not an
+    end: the caller's +/-0.05, +/-0.1 ... ladder searches outward, so starting
+    at the middle reaches both ends of any band the ladder could have reached
+    from either end, and it does so symmetrically.
+
+    None whenever nothing is declared, which is what makes every consumer of
+    this bit-identical to the code that predates it.
+    """
+    if entry.get('center_on_edge') is not None:
+        return 0.5
+    band = entry.get('along_edge_band')
+    if band is not None:
+        return (float(band['from']) + float(band['to'])) / 2.0
+    return None
+
+
+def _declared_frac_window(entry: Dict, span: float):
+    """(lo, hi) fractions a declared claim allows, or None.
+
+    `center_on_edge`'s tolerance is in MILLIMETRES and the window is in
+    fractions, so it needs the span; a caller with no span passes 0 and gets
+    None rather than a window computed from a number that is not there.
+    """
+    band = entry.get('along_edge_band')
+    if band is not None:
+        return float(band['from']), float(band['to'])
+    centre = entry.get('center_on_edge')
+    if centre is not None and span > 1e-9:
+        t = float(centre['tolerance_mm']) / span
+        return max(0.0, 0.5 - t), min(1.0, 0.5 + t)
+    return None
+
+
+def _declared_edge_span(state, bounds, edge: str):
+    """(lo, hi, basis) for the edge a DECLARED fraction is a fraction OF.
+
+    The grade resolves this with `floorplan.edge_span`, which prefers the
+    outline RING because the bounding box is wrong on a notched board -- on
+    `interf_u_unrouted_placed` the bbox south side spans 115.57mm where the
+    board's real south edge spans 81.28mm. If the seat search kept using the
+    bbox the two would target centres 5.715mm apart on that board, and the
+    seeder would deterministically place what the grade then flags. So both
+    sides call the SAME function; a grader with its own idea of the geometry
+    grades the reimplementation.
+
+    Falls back to the bounding box when the outline cannot be resolved, which
+    is what the ladder used before any of this and is correct wherever the
+    grade abstains (there is then no declared verdict to disagree with).
+    """
+    from placement import floorplan as _fp   # NOT inside a try: an
+    # ImportError here would make every board answer `bbox` on every edge,
+    # silently, which is the "guard that never fires" shape
+    # `_already_on_its_edge` below was written to stop repeating.
+    x0, y0, x1, y1 = bounds
+    bbox = ((x0, x1) if edge in ('north', 'south') else (y0, y1))
+    outline = {'simple_rectangle': True, 'cutouts': 0, 'edge_segments': 0}
+    gate = state.edge_gate
+    if getattr(gate, 'rings', None):
+        # Rings exist, so `edge_span` takes its ring branch and never reads
+        # these flags. When there are none it takes the bbox branch, which is
+        # correct here for the same reason it is correct there: the parser
+        # publishes no ring for a plain rectangle, and the bbox IS the
+        # outline. The seeder can therefore answer `bbox` only where the
+        # GRADE would abstain -- never the reverse, since a ring run can
+        # never exceed its own bbox side.
+        outline = {'simple_rectangle': False, 'cutouts': 0,
+                   'edge_segments': 0}
+    lo, hi, basis = _fp.edge_span(gate, bounds, edge, outline)
+    if lo is None:
+        return bbox[0], bbox[1], 'bbox'
+    return lo, hi, basis
+
+
+def _axis_of(edge: str) -> int:
+    return 0 if edge in ('north', 'south') else 1
+
+
+def _centre_offset_mm(part, edge: str) -> float:
+    """(rect centre - origin) along `edge`, in MILLIMETRES.
+
+    Turns with the part, so it must be read at the rotation in use.
+    """
+    lx0, ly0, lx1, ly1 = part.rect(0.0, 0.0, part.rot)
+    a, b = ((lx0, lx1) if _axis_of(edge) == 0 else (ly0, ly1))
+    return (a + b) / 2.0
+
+
+def declared_to_ladder_frac(part, bounds, edge, e_lo, e_hi, declared):
+    """A DECLARED fraction -> the fraction the seat ladder works in.
+
+    TWO conversions, and both are needed or the seat lands somewhere the
+    grade did not ask for:
+
+      * the declaration is about the part's courtyard CENTRE (what
+        `rule_edge_connector` measures) and `_edge_pose` positions its
+        ORIGIN -- 2.54mm apart on splitflap_driver's J17;
+      * the declaration is a fraction of the EDGE's span, which on a notched
+        board is not the bounding box -- 81.28mm against 115.57mm on
+        `interf_u_unrouted_placed` -- while `_edge_pose` interpolates the
+        bounding box.
+
+    Everything meets in millimetres along the edge axis, which is the only
+    currency both sides can state without ambiguity.
+    """
+    ax = _axis_of(edge)
+    bb_lo, bb_hi = ((bounds[0], bounds[2]) if ax == 0
+                    else (bounds[1], bounds[3]))
+    centre_pos = e_lo + declared * (e_hi - e_lo)
+    origin_pos = centre_pos - _centre_offset_mm(part, edge)
+    return (origin_pos - bb_lo) / max(1e-9, bb_hi - bb_lo)
+
+
+def ladder_to_declared_frac(part, bounds, edge, e_lo, e_hi, frac):
+    """The inverse, so a refusal can report the legal window in the SAME
+    currency as the declaration it is refusing. Two numbers in one sentence
+    that mean different things is how the first version of this message read.
+    """
+    ax = _axis_of(edge)
+    bb_lo, bb_hi = ((bounds[0], bounds[2]) if ax == 0
+                    else (bounds[1], bounds[3]))
+    origin_pos = bb_lo + frac * (bb_hi - bb_lo)
+    centre_pos = origin_pos + _centre_offset_mm(part, edge)
+    return (centre_pos - e_lo) / max(1e-9, e_hi - e_lo)
+
+
+def _already_on_its_edge(state, part) -> bool:
+    """Is this part already crossing the boundary it was declared on?
+
+    Then its ORIENTATION is right and its refusal is a band, keep-out or
+    neighbour problem -- turning it is the wrong answer.
+
+    MEASURED, and the measurement is J17 on splitflap_driver rather than the
+    three parts an earlier version of this docstring named. With a declared
+    `along_edge_band` of 0.10-0.20, J17 at its home pose (overhanging its
+    north edge by 0.40mm) is refused at rot 0 WITH this guard and rotates to
+    90 without it -- so the guard is what keeps it upright, and
+    `tests/test_706_seat_edge_target.py` pins exactly that counterfactual.
+
+    THE CLAIM HERE HAS BEEN WRONG TWICE, and both are worth recording.
+
+    First it said a bare gate would turn ulx3s J1/J2 and sonde_u J1 -- three
+    full board-width connectors overhanging 11.99, 11.99 and 26.55mm. The
+    overhangs are real, the consequence was not: those three returned at the
+    `f_lo > f_hi` refusal before this guard was consulted, and I had read a
+    True from calling this function DIRECTLY as if it had been reached
+    through `_seat_edge`.
+
+    Then the correction itself went stale in the commit that wrote it. Moving
+    the rotation-dependent geometry into `_geometry` moved that refusal too,
+    so it no longer returns from `_seat_edge` -- the guard IS reached for all
+    three now (measured: `guard_calls=[(J1, True), (J2, True), (J1, True)]`),
+    and it is what keeps them upright after all. The conclusion held while
+    the mechanism was wrong in both directions, which is exactly why the test
+    beside this asserts the REASON and not just the outcome.
+
+    A real consequence of that move, stated because it is a contract change:
+    both hard refusals now fall THROUGH to the rotation loop instead of
+    returning. A declared part too wide for its edge at one rotation, and not
+    already overhanging, can now be turned. That is what #706's rotation half
+    is for, and it is corpus-inert -- measured, all six too-wide (part, edge)
+    pairs across splitflap/ulx3s/sonde_u/esp_prog/interf_u are already on
+    their edge, so none rotates.
+
+    NO `try/except` here, and that is the point. The first version wrapped the
+    measurement in a bare `except Exception: return False`, and `seeder` has
+    no module-level `legality` binding -- so `legality.EPS` raised NameError,
+    the except swallowed it, and the guard answered "not on its edge" for
+    EVERY part on EVERY board. It read exactly like a guard and never fired
+    once. A measurement that cannot be taken must raise, not return the
+    permissive answer.
+    """
+    return state.edge_gate.rect_outside_amount(part.rect()) > _ON_EDGE_EPS_MM
+
+
 def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                notes: List[str], target=None, exclude=None) -> bool:
     """Seat a DECLARED edge part on its edge band, minimal-move (run-4 B-6).
@@ -1143,25 +1470,108 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     overhang = (lo + float(hi)) / 2.0 if hi is not None else max(lo, 0.5)
     x0, y0, x1, y1 = state.board
 
-    # Along-edge start: the declared zone center when one exists (the R2
-    # spec-coordinate pattern -- a DERIVED home outranks minimal-move), else
-    # the part's current projection (minimal move).
-    ax, ay = target if target is not None else (part.x, part.y)
-    if edge in ('north', 'south'):
-        cur = (ax - x0) / max(1e-9, (x1 - x0))
-    else:
-        cur = (ay - y0) / max(1e-9, (y1 - y0))
+    # Along-edge start, in precedence order (#706):
+    #   the intent's DECLARED position  >  the zone centre  >  minimal move.
+    # Before #712 there was nothing to declare, so `df = 0.0` meant "keep the
+    # along-edge coordinate you came in with" -- and on a repaired board that
+    # coordinate is the damaged pose's own, carried verbatim into the output.
+    declared = _declared_frac(entry)
+    # A declared fraction is about the part's COURTYARD CENTRE, which is what
+    # the grade measures; the ladder below positions its ORIGIN. The
+    # conversion lives in `_geometry` rather than here because it TURNS WITH
+    # THE PART -- computing it once, at the incoming rotation, is what made
+    # the rotation branch validate one rectangle and apply another.
+    # The EDGE's span, not the bounding box's. `_declared_frac_window` turns
+    # `center_on_edge.tolerance_mm` into a fraction OF THE SPAN IT IS HANDED,
+    # and `_geometry` then reads that fraction as a fraction of the edge --
+    # so handing it the bbox silently shrinks the declared tolerance by the
+    # ratio of the two. Measured on `interf_u_unrouted_placed`'s south edge
+    # (bbox 115.570mm, real edge 81.280mm) with `tolerance_mm: 1.0`: the
+    # window came out +/-0.7033mm, 30% tighter than declared, which makes the
+    # "does not intersect the legal one" refusal fire on windows that DO
+    # intersect and drops the connector to the later stages -- and those park
+    # a connector in the board interior. Stage 1 was fixed and this was not;
+    # both now measure the same quantity.
+    _e_lo0, _e_hi0, _ = _declared_edge_span(state, state.board, edge)
+    win = _declared_frac_window(entry, _e_hi0 - _e_lo0)
 
-    # Clamp by the part's OWN half-extent, not a bare [0.05, 0.95]. A part
-    # wider than its edge has no legal fraction at all; say so rather than
-    # sliding it off the end and reporting a seat.
-    f_lo, f_hi = _edge_frac_bounds(part, state.board, edge)
-    if f_lo > f_hi:
-        notes.append(f"{ref}: is wider than the {edge} edge "
-                     f"({f_lo:.2f} > {f_hi:.2f} of its span), so no along-edge "
-                     f"position keeps it on the board")
-        return False
-    cur = min(f_hi, max(f_lo, cur))
+    def _geometry(rot, complain):
+        """(cur, f_lo, f_hi, step) at rotation `rot`, or None.
+
+        EVERY quantity here depends on the rotation, which is why it is a
+        function of one rather than four values computed once. `part.rect`
+        turns with the part, so its half-extent (`_edge_frac_bounds`), the
+        offset from its origin to its courtyard centre (`_centre_offset_mm`,
+        via `declared_to_ladder_frac`)
+        and therefore the window intersection are all different at 90 degrees.
+
+        `complain` is True only for the part's OWN rotation: a refusal note is
+        about the pose the caller asked for, and the rotation loop would
+        otherwise append the same sentence up to four times.
+        """
+        e_lo, e_hi, _ = _declared_edge_span(state, state.board, edge)
+
+        def to_ladder(f):
+            return declared_to_ladder_frac(part, state.board, edge,
+                                           e_lo, e_hi, f)
+
+        def to_declared(f):
+            return ladder_to_declared_frac(part, state.board, edge,
+                                           e_lo, e_hi, f)
+
+        # Clamp by the part's OWN half-extent, not a bare [0.05, 0.95]. A part
+        # wider than its edge has no legal fraction at all; say so rather than
+        # sliding it off the end and reporting a seat.
+        f_lo, f_hi = _edge_frac_bounds(part, state.board, edge)
+        if f_lo > f_hi:
+            if complain:
+                notes.append(f"{ref}: at rotation {rot:g}deg it is wider "
+                             f"than the {edge} edge ({f_lo:.2f} > {f_hi:.2f} "
+                             f"of its span), so no along-edge position keeps "
+                             f"it on the board")
+            return None
+        # A DECLARED window narrows the legal one. Without this the +/-0.4
+        # ladder could find a seat OUTSIDE the declared band, which
+        # `rule_edge_connector` would then flag -- the search accepting a pose
+        # the grade refuses is the round-trip break `edge_seat_ok` and
+        # `keepout_hit` both exist to prevent.
+        if win is not None:
+            w_lo, w_hi = to_ladder(win[0]), to_ladder(win[1])
+            n_lo, n_hi = max(f_lo, w_lo), min(f_hi, w_hi)
+            if n_lo > n_hi:
+                if complain:
+                    notes.append(
+                        f"{ref}: the declared along-edge window "
+                        f"[{win[0]:.3f}, {win[1]:.3f}] does not intersect the "
+                        f"legal one [{to_declared(f_lo):.3f}, "
+                        f"{to_declared(f_hi):.3f}] "
+                        f"for this part on the {edge} edge -- "
+                        f"widen the declaration, or the part is too wide for "
+                        f"the position it is declared at")
+                return None
+            f_lo, f_hi = n_lo, n_hi
+        if declared is not None:
+            cur = to_ladder(declared)
+        else:
+            ax, ay = target if target is not None else (part.x, part.y)
+            if edge in ('north', 'south'):
+                cur = (ax - x0) / max(1e-9, (x1 - x0))
+            else:
+                cur = (ay - y0) / max(1e-9, (y1 - y0))
+        cur = min(f_hi, max(f_lo, cur))
+        # The ladder's steps are fractions of the WHOLE edge, which is the
+        # right scale when it is sliding a part along a free edge and much too
+        # coarse when it is searching inside a declared window. Measured: with
+        # a declared band of 0.85-0.95 on splitflap_driver's 198.12mm north
+        # edge, the +/-0.05 rungs are 9.9mm apart and clamp to the window's
+        # two ends, so the ladder tries THREE distinct positions in the band
+        # and misses the one legal seat between them -- the feature reported
+        # "no seat" on every band of that board. Scaling the rungs to the
+        # window searches it at the same relative resolution the ladder gives
+        # a whole edge. 0.8 is the ladder's own full sweep (+/-0.4), so an
+        # undeclared seat has scale exactly 1.0 and is unchanged.
+        step = ((f_hi - f_lo) / 0.8) if win is not None else 1.0
+        return cur, f_lo, f_hi, step
 
     # The declared band. `hi` None means "no stated maximum" -- allow twice the
     # midpoint target, which is what `overhang` was derived from, rather than
@@ -1171,7 +1581,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     ctx = state.legality_ctx
     ex = set(exclude or ())
 
-    def conflict_free(px, py):
+    def conflict_free(px, py, rot):
         if ctx is None:
             return True
         for other in ctx.parts:
@@ -1182,7 +1592,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
             # and hung off the end.
             if other == ref or other in ex or other not in state.parts:
                 continue
-            sf = ctx.pair_shortfall(ref, other, pose_a=(px, py, part.rot))
+            sf = ctx.pair_shortfall(ref, other, pose_a=(px, py, rot))
             if sf.pad > 1e-6 or sf.hole > 1e-6:
                 return False
         return True
@@ -1198,15 +1608,90 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         return edge_seat_ok(state, part, px, py, edge, lo, hi_eff,
                             reasons=refused)
 
-    for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
-               0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
-        frac = min(f_hi, max(f_lo, cur + df))
-        x, y = _edge_pose(part, state.board, edge, frac, overhang)
-        x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
-        if not converged or not on_board(x, y):
-            continue
-        if conflict_free(x, y):
-            state.apply_move(ref, round(x, 3), round(y, 3), part.rot)
+    def try_rot(rot):
+        """The seat ladder at one rotation. (x, y) or None.
+
+        `part.rot` is SET for the duration, and that is the whole point rather
+        than a shortcut. `_edge_pose`, `_edge_correct` and `edge_seat_ok` all
+        read `part.rot` internally -- the first version of this threaded the
+        trial rotation into `conflict_free` alone, so the overhang band, the
+        convergence walk and the pads-on-board check were all measured on the
+        rectangle the part had BEFORE the turn, and then the turn was applied.
+        Measured on the fixture this file's own rotation test uses: the seat
+        checked 0.50mm of overhang at rot 0 and delivered 1.92mm at rot 90 --
+        0.92mm past the declared maximum, `edge_seat_ok` False at the pose
+        actually written, and an along-edge fraction outside the declared band
+        as well. Exactly the "search accepts what the grade refuses" break the
+        window intersection exists to prevent.
+        """
+        saved = part.rot
+        part.rot = rot
+        try:
+            geom = _geometry(rot, complain=(rot == saved))
+            if geom is None:
+                return None
+            cur, f_lo, f_hi, step = geom
+            for df in (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
+                       0.2, -0.2, 0.3, -0.3, 0.4, -0.4):
+                frac = min(f_hi, max(f_lo, cur + df * step))
+                x, y = _edge_pose(part, state.board, edge, frac, overhang)
+                x, y, converged = _edge_correct(state, ref, edge, x, y,
+                                                overhang)
+                if not converged or not on_board(x, y):
+                    continue
+                if conflict_free(x, y, rot):
+                    return x, y
+            return None
+        finally:
+            part.rot = saved
+
+    seat = try_rot(part.rot)
+    if seat is not None:
+        state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), part.rot)
+        return True
+
+    # #706, the rotation half. THREE gates, and the third is a deliberate
+    # addition to what the issue asked for:
+    #
+    #  1. the ladder above already ran at the part's own rotation and found
+    #     nothing, so this can only fire where the function returns False
+    #     today -- the issue's own guard against turning a part whose
+    #     orientation was deliberate;
+    #  2. `_already_on_its_edge` -- see its docstring for the three corpus
+    #     parts a bare gate would have turned sideways;
+    #  3. the intent must actually DECLARE a position for this part.
+    #
+    # (3) is not in the issue, and it was added because the probe caught the
+    # loop firing without it: driven over a lattice of incoming poses for an
+    # UNDECLARED splitflap_driver J17, the seat at start fraction 0.3 came
+    # back rotated 0 -> 90 degrees. Nothing in this tree knows which way a
+    # mating face must point -- `edge_seat_ok` tests the overhang band, the
+    # pads being on the board and the keep-outs, and `part_class` has no
+    # orientation concept at all -- so turning a connector is only defensible
+    # where a human declared where it belongs, and that declaration is the
+    # evidence that its current orientation is not itself the requirement.
+    # Without (3) this PR's contract, inert unless something is declared,
+    # would be false.
+    #
+    # Stay on the part's OWN 90-degree lattice (`rot + 90k`, not a fixed
+    # list): a part seeded at 45 degrees must rotate to 135/225/315, not be
+    # snapped onto the axes.
+    if declared is not None and not _already_on_its_edge(state, part):
+        # Captured BEFORE the loop: `state.apply_move` mutates `part.rot`, so
+        # reading it afterwards reports the new angle as the old one and the
+        # note says "at its own rotation 90deg; seated at 90deg".
+        was_rot = part.rot
+        for rot in ((was_rot + 90) % 360, (was_rot + 180) % 360,
+                    (was_rot + 270) % 360):
+            seat = try_rot(rot)
+            if seat is None:
+                continue
+            state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), rot)
+            notes.append(
+                f"{ref}: no seat existed on the declared {edge} edge at its "
+                f"own rotation {was_rot:g}deg; seated at {rot:g}deg. CHECK "
+                f"THIS -- a rotation changes the PART, not only where it is, "
+                f"and nothing here knows which way the mating face must point")
             return True
     if refused:
         # Sorted+deduped: the ladder tries up to 13 fractions and would
@@ -1263,6 +1748,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      anchors_first: bool = False,
                      anchor_rounds: int = 1,
                      evict_depth: int = 0,
+                     decap_owner_chips: bool = False,
                      immovable_extra: Sequence[str] = ()) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
@@ -1300,19 +1786,29 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     import pose_score
     from placement import floorplan
 
+    # Hoisted above `make_state` (#797): the exclusive zones the seat predicate
+    # gates on are built from these blocks, and `resolve_blocks` needs no
+    # state. `notes` is filled from `block_problems` below, unchanged.
+    blocks, block_problems = floorplan.resolve_blocks(
+        intent, pcb_data, group_sources)
+
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
         # #701: the declared keep-outs reach the SEAT PREDICATE here, and
         # every `_try_place` / `count_legal_poses` / `_evict_trade` site in
         # this module inherits them through `pose_ok`.
-        keepouts=intent.keepouts if intent else ())
+        keepouts=intent.keepouts if intent else (),
+        # #797: and the declared EXCLUSIVE zones, the same way. Stage 3 is the
+        # STRANGER path -- it passes no `constraint` at all, so before this
+        # nothing asked whether the region it was aiming at belonged to
+        # somebody else.
+        exclusive_zones=(floorplan.zone_entries(intent, blocks)
+                         if intent else ()))
     bounds = state.board
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
 
-    blocks, block_problems = floorplan.resolve_blocks(
-        intent, pcb_data, group_sources)
     for v in block_problems:
         notes.append(v.message)
     zones_by_name = {z.name: z for z in intent.blocks if z.rect is not None}
@@ -1393,11 +1889,53 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # part at 0.25 hangs off the end. This stage runs no legality
             # gate at all (by design), so nothing downstream would catch it.
             f_lo, f_hi = _edge_frac_bounds(part, bounds, edge)
-            frac = (k + 1) / (len(specs) + 1)
+            # #706/#712. A DECLARED position outranks the even distribution.
+            # Stage 1 is the from-scratch path and it never calls `_seat_edge`,
+            # so without this a declared `center_on_edge` would be seated at
+            # (k+1)/(n+1) -- on splitflap_driver's six north connectors that is
+            # 1/7 .. 6/7 and NONE of them is 0.5 -- and `place_seed` would then
+            # exit 4 grading its own output against the intent it was built
+            # from. Inert when nothing is declared: `_declared_frac` is None.
+            _dec = _declared_frac(c)
+            # THE SAME TWO CONVERSIONS `_seat_edge` MAKES, and stage 1 needs
+            # both for the same reasons. Without them this path seats a
+            # declared claim wrong and `place_seed` exits 4 grading its own
+            # output -- the very failure the comment above is about.
+            #
+            #  * the declared fraction is about the courtyard CENTRE and this
+            #    ladder positions the ORIGIN. Measured on splitflap_driver
+            #    J17 with `center_on_edge {tolerance_mm: 1.0}`: origin at
+            #    frac 0.5 puts the rect centre at 0.51282, i.e. +2.54mm, a
+            #    violation of any tolerance under 2.54mm;
+            #  * the fraction is of the EDGE's span, and on a notched board
+            #    that is not the bounding box -- the reason `edge_span`
+            #    exists at all.
+            _e_lo, _e_hi, _ = _declared_edge_span(state, bounds, edge)
+            frac = ((declared_to_ladder_frac(part, bounds, edge,
+                                             _e_lo, _e_hi, _dec))
+                    if _dec is not None else (k + 1) / (len(specs) + 1))
             if f_lo > f_hi:
                 notes.append(f"edge connector {ref}: wider than the {edge} "
                              f"edge, so stage 1 leaves it to the later stages")
                 continue
+            _win = _declared_frac_window(c, _e_hi - _e_lo)
+            if _win is not None:
+                _w_lo = declared_to_ladder_frac(part, bounds, edge,
+                                                _e_lo, _e_hi, _win[0])
+                _w_hi = declared_to_ladder_frac(part, bounds, edge,
+                                                _e_lo, _e_hi, _win[1])
+                _n_lo, _n_hi = max(f_lo, _w_lo), min(f_hi, _w_hi)
+                if _n_lo > _n_hi:
+                    notes.append(
+                        f"edge connector {ref}: the declared along-edge window "
+                        f"[{_win[0]:.3f}, {_win[1]:.3f}] does not intersect "
+                        f"the legal one ["
+                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_lo):.3f}, "
+                        f"{ladder_to_declared_frac(part, bounds, edge, _e_lo, _e_hi, f_hi):.3f}] "
+                        f"on the {edge} edge, so stage 1 leaves it to the "
+                        f"later stages")
+                    continue
+                f_lo, f_hi = _n_lo, _n_hi
             frac = min(f_hi, max(f_lo, frac))
             # #701: SLIDE along the edge when a declared keep-out refuses the
             # even-distribution position, using the same ladder `_seat_edge`
@@ -1408,13 +1946,46 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # error for an `edge_connector` one, while 26 clear south-edge
             # seats existed. The ladder is skipped entirely when nothing is
             # declared, so a board with no keep-out is unchanged.
-            _slide = ((0.0,) if not state.keepouts_for.get(ref) else
+            #
+            # #797 arms it for a declared EXCLUSIVE ZONE too. `edge_seat_ok`
+            # got the exclusive conjunct, but this ladder was still keyed on
+            # keep-outs alone -- so identical geometry cost the connector its
+            # declared edge when declared one way and not the other. Measured
+            # on a 20x14 fixture with a rect over the WEST HALF of the south
+            # band: as a keep-out J1 slid to (14.0, 12.5), still on the south
+            # edge; as an exclusive zone it got one fraction, was refused, and
+            # fell through to the ordinary stages, which parked it at
+            # (7.489, 8.34) -- the board interior. Same rect, same free strip
+            # to the east, two different answers. (Both numbers are arm E2's
+            # own output; an earlier draft of this comment said 13.0, which
+            # was never measured anywhere.)
+            #
+            # #706: armed for a DECLARED position too, not only a keep-out.
+            # Two connectors declared at overlapping positions must slide off
+            # each other rather than one being dropped to the later stages,
+            # which park a connector in the board INTERIOR. Still skipped
+            # entirely when nothing is declared and no keep-out exists, so a
+            # board that declares nothing is unchanged.
+            #
+            # The three arming conditions are a UNION: #701's keep-out,
+            # #706's declared position and #797's exclusive zone each need
+            # the ladder, and any one of them alone leaves the other two
+            # parking a connector in the interior.
+            _slide = ((0.0,) if not (state.keepouts_for.get(ref)
+                                     or _dec is not None
+                                     or state.exclusive_for.get(ref)) else
                       (0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15,
                        0.2, -0.2, 0.3, -0.3, 0.4, -0.4))
+            # SCALED to the declared window, exactly as `_seat_edge`'s ladder
+            # is. Unscaled, a `center_on_edge {tolerance_mm: 1.0}` window on
+            # splitflap's 198.12mm north edge is 0.0101 wide and every
+            # +/-0.05 rung clamps to an end -- three distinct positions, the
+            # defect `_seat_edge`'s `step` comment documents, in this path.
+            _sstep = ((f_hi - f_lo) / 0.8) if _win is not None else 1.0
             _base_frac = frac
             _why: List[str] = []
             for _df in _slide:
-                frac = min(f_hi, max(f_lo, _base_frac + _df))
+                frac = min(f_hi, max(f_lo, _base_frac + _df * _sstep))
                 _x, _y = _edge_pose(part, bounds, edge, frac, overhang)
                 _x, _y, _conv = _edge_correct(state, ref, edge, _x, _y,
                                               overhang)
@@ -1525,8 +2096,36 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     decap_scope: Set[str] = set()
     if decap_spec.get('max_distance_mm') is not None:
         exempt = tuple(decap_spec.get('exempt') or ())
-        decap_scope = {r for r in state.parts
-                       if r[0] == 'C' and state.parts[r].pin_count == 2
+        # NARROWED by #792 to the caps that ELECT A TETHER at any distance --
+        # `near | beyond`, i.e. the scope minus the caps whose rail no chip
+        # carries.
+        #
+        # It used to be a syntactic test (`r[0] == 'C'` and two net-bearing
+        # pads) -- a third spelling of the grouper's predicate and, more to the
+        # point, an answer to the WRONG QUESTION. This stage seats a cap AT A
+        # CHIP'S PIN. A cap whose rail no >=4-pad non-collinear part touches
+        # has no such pin, ever, on any board, at any run time -- so evicting
+        # it from zone packing below is a promise the stage is structurally
+        # incapable of keeping. It then fell through to the generic centroid
+        # stage, whose fanout cap nulls out a rail net, and landed near the
+        # board middle.
+        #
+        # Measured, ulx3s: ten caps -- C3 C4 C22 on /power/P1V1, C7 C8 C24 on
+        # /power/P3V3, C11 C12 C23 on /power/P2V5, C14 on /power/SHUT. Those
+        # rails are owned only by two-pad passives (the caps, L1-L3, RA*/RP*),
+        # so they are bulk and filter caps upstream of an LC network, not
+        # decouplers. cap_chain 2 of 2, flat_hierarchy 3, watchy 2.
+        #
+        # The three syntactic spellings name the SAME parts on every tracked
+        # board (`tests/test_792_decap_predicate.py`), so unifying them would
+        # have preserved this bug rather than fixed it. The defect was never
+        # the spelling; it was one predicate asked two different questions.
+        from placement import groups as _groups
+        near, beyond, _orphans = _groups.decap_populations(pcb_data)
+        tethered = ({c for caps in near.values() for c, _d in caps}
+                    | {c for c, _ic, _d in beyond})
+        decap_scope = {r for r in tethered
+                       if r in state.parts
                        and not any(fnmatch.fnmatch(r, pat) for pat in exempt)}
 
     # ---- 2. zoned blocks: radial pack from the zone center -----------------
@@ -1592,8 +2191,39 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 rail_of[ref] = rail
         rails = set(rail_of.values())
         pins: List[Tuple[int, str, float, float, int]] = []
+        # WHAT IS AN IC gets one answer, and it is the grouper's (#792).
+        # `owner[0] != 'U'` and `groups._pads_are_collinear` are two answers to
+        # the SAME documented problem -- "a castellated row carries the rail
+        # too and must not eat a claim" -- and only the grouper's carries the
+        # measurement behind it ("Measured on one board it captured three, and
+        # the grader then reported 'C12 is 3.30mm from CN2, the IC it
+        # decouples'"). A ref prefix also refuses a real IC for its NAME:
+        # measured, caps whose rail gains a pin source under the grouper's
+        # answer -- watchy +8, kit-dev +5, lvds +4, orangecrab +3, ulx3s +2,
+        # glasgow +1, tigard +1, and zero losses IN THAT METRIC. The new
+        # sources are IC*, J*, VR*, SD* and a crystal: exactly the parts
+        # `decap_tethers` already tethers caps to, so this makes the seeder
+        # AGREE with the grader.
+        #
+        # "Zero losses" is true of pin SOURCES and false of the outcome,
+        # and the first draft of this comment said the former while
+        # meaning the latter. Measured on the rows this PR commits, the
+        # widened arm STRANDS four parts across three boards that the
+        # control seats (orangecrab U4, rp2350 L1, tigard H1 and H3) and
+        # worsens `pin_gap_sum` on glasgow (346.63 -> 404.80) and rp2350
+        # (86.99 -> 91.30). Coverage is not seating. That is why the flag
+        # is OFF, and `test_792_seeding_claims.py` asserts the stranding
+        # so it cannot be flipped on without confronting it.
+        #
+        # Behind a flag until the A/B rows run, following `evict_depth`'s
+        # precedent: it changes where parts go, and this file's own rule is
+        # that such a change is opt-in until three boards say otherwise.
+        from placement import groups as _g
+        # Built ONCE: `chip_refs` walks every footprint's pads, and this loop
+        # runs per placed part.
+        chips = _g.chip_refs(pcb_data) if decap_owner_chips else None
         for owner in sorted(placed):
-            if owner[0] != 'U':
+            if (owner not in chips) if chips is not None else (owner[0:1] != 'U'):
                 continue
             o = state.parts[owner]
             for gx, gy, pn in o.pad_globals():
@@ -1673,9 +2303,79 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             for cluster, ref in zip(clusters, list(caps_r)):
                 cx2 = round(sum(k[2] for k in cluster) / len(cluster), 3)
                 cy2 = round(sum(k[3] for k in cluster) / len(cluster), 3)
-                _seat(ref, cx2, cy2, cluster[0][1], rail)
+                if not _seat(ref, cx2, cy2, cluster[0][1], rail):
+                    # SILENTLY lost before #792. `caps_r` is snapshotted above
+                    # while `_seat` mutates `avail`, so the zip consumes the
+                    # cluster whether or not the seat succeeded: the cap stayed
+                    # in `avail`, the pins went unserved, and NOTHING said so --
+                    # while the comment below claimed the fall-through "reports
+                    # honestly". It does now.
+                    net = getattr(pcb_data.nets.get(rail), 'name', rail)
+                    notes.append(
+                        f"{ref}: no legal pose at {cluster[0][1]}'s {net} pin "
+                        f"cluster ({cx2}, {cy2}) -- falls through to the "
+                        f"zone/centroid stages")
+            # ...and the caps NO CLUSTER WANTED. `zip` truncates to the
+            # shorter list, so a cap past the cluster count is never reached
+            # by the loop above and was dropped without a word -- a SECOND
+            # silent path, distinct from the `_seat` failure, and the one the
+            # comment below has always described as reporting honestly.
+            # Measured on a three-caps-two-pins fixture: the third cap is
+            # seated by the generic stage and nothing said the pin stage had
+            # passed it over.
+            for ref in caps_r[len(clusters):]:
+                if ref in avail:
+                    net = getattr(pcb_data.nets.get(rail), 'name', rail)
+                    # WORDED so it does not contain "falls through". The first
+                    # draft ended with the same phrase the `_seat`-failure note
+                    # uses, and the arm that matched on that substring then
+                    # accepted EITHER note as coverage -- which silently
+                    # un-tested the 2.6 put-back: a battery row that had been
+                    # KILLED started SURVIVING, and the headline #792 fix
+                    # became deletable with every arm still green. Two paths,
+                    # two texts, so an arm can name exactly one.
+                    notes.append(
+                        f"{ref}: no {net} pin cluster left for it "
+                        f"({len(clusters)} cluster(s), {len(caps_r)} cap(s)) "
+                        f"-- left to the zone/centroid stages")
             # pins beyond the cap supply, and caps no pin wanted, fall
             # through to the generic stage, which reports honestly
+
+        # ---- 2.6 put back what the pin stage DECLINED (#792) ---------------
+        # Narrowing the scope is the predictive half and it is a theorem; this
+        # is the run-time safety net, and it is much the bigger of the two.
+        # Measured with `seed_from_intent`: splitflap_driver has 12 tethered
+        # caps and this stage claims ZERO; watchy 26 tethered, ZERO; kit-dev 53
+        # in scope, 12 claimed. The residue the stage declines at run time --
+        # the owner not yet placed, the cap supply exhausted, `_seat` refusing
+        # -- dwarfs the orphan population.
+        #
+        # NOT "re-run stage 2": that path appends a failure to `unseated`
+        # (see above), and UNSEATED is worse than the board centre. This is
+        # `_try_place` inside the declared zone, falling through to stage 3 on
+        # refusal, which makes the whole put-back MONOTONE -- no cap can end up
+        # worse placed than it is today, and none can become newly unseated.
+        # That is what lets it ship on without an A/B row.
+        for ref in _order(sorted(unplaced & decap_scope)):
+            z = zone_of_cap.get(ref)
+            if z is None or not getattr(z, 'rect', None):
+                continue
+            zx0, zy0, zx1, zy1 = z.rect
+            clr = _try_place(state, ref, round((zx0 + zx1) / 2.0, 3),
+                             round((zy0 + zy1) / 2.0, 3), unplaced - {ref},
+                             constraint=z.rect,
+                             tol=intent.zone_tolerance(z))
+            if clr is None:
+                notes.append(f"{ref}: the pin stage declined it and its zone "
+                             f"{z.name!r} has no legal pose either -- falls "
+                             f"through to the centroid stage")
+                continue
+            placed.add(ref)
+            unplaced.discard(ref)
+            if ref in avail:
+                avail.remove(ref)
+            notes.append(f"{ref}: zone-packed into {z.name!r} after the pin "
+                         f"stage declined it")
 
     # ---- 3. the rest: connectivity centroid --------------------------------
     # --anchors-first (run-4 C): the default queue is pin-count descending,
@@ -1831,6 +2531,42 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         state, ref, tx, ty, base_excl,
                         without_keepouts=tuple(k['name'] for k in _bound),
                         **zkw)
+            # #797: which declared EXCLUSIVE zone is refusing this part,
+            # measured the same way. A SIBLING of the keep-out sweep above and
+            # never nested inside it: a stranger can be refused by a reserved
+            # zone on a board that declares no keep-out anywhere, and nesting
+            # would make this channel depend on that one being non-empty.
+            #
+            # Same cost model, and the same reasons it is affordable: only for
+            # a part with no pose at all, only over the zones that BIND it, and
+            # every census is already capped at CENSUS_CAP.
+            zx_freeing: Dict[str, int] = {}
+            zx_joint = 0
+            if not baseline:
+                _zb = state.exclusive_for.get(ref, ())
+                for _t in _zb:
+                    _n = count_legal_poses(state, ref, tx, ty, base_excl,
+                                           without_exclusive=(_t.name,),
+                                           **zkw)
+                    if _n > baseline:
+                        zx_freeing[_t.name] = _n
+                # JOINTLY blocked, exactly as the keep-out side: two zones
+                # that each cross the part's whole feasible region free
+                # NOTHING alone, so the per-zone sweep reports {} and the
+                # verdict would fall back to a sentence about neighbours.
+                #
+                # KNOWN GAP, disclosed rather than silently accepted: this
+                # joint sweep is per-RULE. A part refused by a keep-out AND an
+                # exclusive zone over the same pocket frees nothing under
+                # either one, so both channels report {} and the verdict falls
+                # back to `no_movable_neighbour`. Closing it needs a
+                # cross-rule joint census and a fourth verdict tier, which is
+                # disproportionate for a case needing both declarations over
+                # one pocket. Filed rather than fixed here.
+                if not zx_freeing and len(_zb) > 1:
+                    zx_joint = count_legal_poses(
+                        state, ref, tx, ty, base_excl,
+                        without_exclusive=tuple(t.name for t in _zb), **zkw)
             cinfo: Dict = {}
             cands = _evict_candidates(state, ref, tx, ty, placed, immovable,
                                       constraint=constraint, tol=tol,
@@ -1849,7 +2585,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                            'truncated': cinfo.get('truncated', 0),
                            'baseline': baseline,
                            'keepouts_freeing': keepouts_freeing,
-                           'keepouts_joint': keepouts_joint})
+                           'keepouts_joint': keepouts_joint,
+                           'zone_exclusive_freeing': zx_freeing,
+                           'zone_exclusive_joint': zx_joint})
             no_pose_census[ref] = census
             useful = sorted((n, b) for b, n in freed.items() if n > baseline)
             if not evict_depth:
@@ -2035,17 +2773,19 @@ def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
     KiCad itself) reads it from. The grade's must_lock rule demands the lock
     IN THE FILE, so writing the intent's locks here is what makes the emitted
     seed grade clean rather than merely hoped-correct."""
-    from kicad_parser import find_matching_paren
+    from kicad_parser import iter_footprint_blocks
     with open(board_file, 'r', encoding='utf-8') as f:
         content = f.read()
     want = set(refs)
     count = 0
-    starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
-    for start in reversed(starts):
-        end = find_matching_paren(content, start)
-        fp_text = content[start:end]
-        m = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
-        if not m or m.group(1) not in want:
+    # Named by the parser's own resolver (#726), so locking `TP4` stamps the
+    # one block the parser calls `TP4`. It used to match the reference STRING,
+    # so on watchy it locked both test points from one name -- and the refs
+    # handed in here come from `pcb.footprints` keys, which now address the
+    # twins separately. Reverse order keeps the spans valid as text is inserted.
+    for start, end, fp_text, _raw_ref, key in reversed(
+            list(iter_footprint_blocks(content))):
+        if key not in want:
             continue
         if re.search(r'\(locked\s+yes\)', fp_text[:fp_text.find('(pad')
                                                   if '(pad' in fp_text else len(fp_text)]):
@@ -2119,6 +2859,10 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # (the unrepairable filter, and reseat's refusal list) pick it up for free.
     _extra_locked = {r for pat in (lock_globs or [])
                      for r in fnmatch.filter(sorted(pcb_data.footprints), pat)}
+    # Hoisted above `make_state` (#797), as in `seed_from_intent`; the
+    # `ref_zone` join below reads the same `blocks`.
+    blocks, _probs = floorplan.resolve_blocks(intent, pcb_data, group_sources) \
+        if intent else ({}, [])
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
@@ -2126,7 +2870,17 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         # #701: the declared keep-outs reach the SEAT PREDICATE (see
         # `seed_from_intent`). `intent` is optional on this path, so the
         # inert default is what a caller without one gets.
-        keepouts=intent.keepouts if intent else ())
+        keepouts=intent.keepouts if intent else (),
+        # #797: and the exclusive zones. Arming the REPAIR path is what lets
+        # `--repair` fix a zone_exclusive breach at all -- without it the
+        # repair's own `_try_place` is free to re-seat the stranger straight
+        # back into the zone it was moved out of. Safe here because
+        # `_try_place` is a nearest-first RING search, not a bounded nudge: it
+        # finds the nearest fully clear pose directly and never needs a
+        # partly-still-inside stepping stone, which is exactly the property
+        # the quench lacks and why the quench's gate has to be monotone.
+        exclusive_zones=(floorplan.zone_entries(intent, blocks)
+                         if intent else ()))
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock
@@ -2139,8 +2893,6 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             edge_band[_c['ref']] = float(
                 (_c.get('overhang_mm') or {}).get('max') or 0.0)
 
-    blocks, _probs = floorplan.resolve_blocks(intent, pcb_data, group_sources) \
-        if intent else ({}, [])
     ref_zone: Dict[str, object] = {}
     if intent:
         for z in intent.blocks:
@@ -3106,6 +3858,16 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         # `seed_from_intent`). `intent` is optional on this path, so the
         # inert default is what a caller without one gets.
         keepouts=intent.keepouts if intent else ())
+    # NO `exclusive_zones=` here, and that is measured rather than assumed.
+    # A draft of #797 passed one, with a paragraph explaining why it was safe.
+    # A blind review showed this state is never consulted by a seat predicate
+    # at all -- `reseat_scope` seats through `seed_from_intent`, which builds
+    # its own -- so the channel was inert, and setting it to `()` changed
+    # nothing across all three of this area's batteries. It also cost a second
+    # `resolve_blocks` per call, whose `block_unresolved` problems were then
+    # discarded unread. Dead code carrying a comment that asserts it matters is
+    # worse than no code: anyone adding a seat call here must think about the
+    # channel, and an inert kwarg would tell them it was already handled.
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock
@@ -3133,7 +3895,19 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             # NAME THE SOURCE. This said "(locked yes) in the file"
             # unconditionally, which is false for a ref locked by --lock -- and
             # sends the reader hunting the board for a stamp that is not there.
-            if ref in _extra_locked:
+            if ref in getattr(state, 'outline_locked', ()):
+                # #829, and it belongs FIRST: an outline owner is locked by
+                # QuenchState, not by a stamp or a flag, so both arms below
+                # would name a source that is not there. That is the same
+                # defect this block's own comment records having fixed for
+                # --lock, recurring for a new lock source -- so the rule is
+                # not "special-case --lock", it is "every source names
+                # itself".
+                refused[ref] = ("draws the board outline -- moving it would "
+                                "resize the board, which is not this tool's "
+                                "to change (#829). Edit part and outline "
+                                "together in KiCad if it must move")
+            elif ref in _extra_locked:
                 refused[ref] = ("locked by --lock on this invocation -- not "
                                 "this tool's to move")
             else:

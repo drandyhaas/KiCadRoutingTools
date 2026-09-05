@@ -16,6 +16,7 @@ name the thing that was wrong.
 
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -125,7 +126,7 @@ KEY_SETS = {
         'schema', 'kind', 'board', 'units', 'min_reader', 'envelope',
         'defaults', 'blocks', 'keepouts', 'edge_connectors', 'decaps',
         'must_lock', 'legality_budget', 'health', 'severity', 'context',
-        'overlap_waivers'},
+        'overlap_waivers', 'assembly'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
@@ -135,15 +136,26 @@ KEY_SETS = {
     '_EDGE_CONNECTOR_KEYS': {
         'ref', 'edge', 'overhang_mm', 'max_setback_mm', 'class', 'source',
         'note', 'suspect', 'suspect_reason', 'overhang_capped',
-        'observed_overhang_mm', 'context'},
+        'observed_overhang_mm', 'context',
+        # #712: WHERE ALONG the edge. Mutually exclusive, absent by default,
+        # and never written by `emit_intent`.
+        'center_on_edge', 'along_edge_band'},
     '_OVERHANG_KEYS': {'min', 'max'},
-    '_DECAP_KEYS': {'max_distance_mm', 'exempt', 'search_radius_mm'},
+    '_CENTER_ON_EDGE_KEYS': {'tolerance_mm'},
+    '_ALONG_EDGE_BAND_KEYS': {'from', 'to'},
+    '_DECAP_KEYS': {'max_distance_mm', 'exempt', 'search_radius_mm',
+                    'max_pin_distance_mm', 'pin_functions', 'same_side'},
     '_HEALTH_KEYS': {'bus_corridors', 'classes', 'zoned_blocks',
                      'affinity_exempt_nets', 'affinity_exempt_net_ids',
-                     'ignore_net_ids', 'max_fanout', 'block_displacement_mm'},
+                     'ignore_net_ids', 'max_fanout', 'block_displacement_mm',
+                     'plane_layers'},
     '_CORRIDOR_KEYS': {'name', 'nets', 'width_mm'},
     '_BUDGET_KEYS': {'overlap_area', 'oob_count', 'oob_amount'},
     '_WAIVER_KEYS': {'pair', 'reason', 'context'},
+    # #837: the board-level assembly policy. `sides` is the claim; `why`
+    # records how it was reached, and `emit_intent` fills it with the
+    # observation rather than a reason nobody gave.
+    '_ASSEMBLY_KEYS': {'sides', 'why', 'context'},
 }
 
 
@@ -166,8 +178,46 @@ def test_the_key_sets_are_exactly_what_is_documented():
     undocumented = sorted({k for keys in KEY_SETS.values() for k in keys
                            if f'`{k}`' not in text})
     assert not undocumented, undocumented
+
+    # ...and the ACCEPTED-KEYS TABLE, not merely a mention somewhere in the
+    # file. `plane_layers` (#700) went into _HEALTH_KEYS, into this test and
+    # into a new prose section, while the table a reader actually consults
+    # still listed eight keys where the set had nine -- because "is the name
+    # backticked anywhere in this document" cannot tell a table row from a
+    # paragraph, and nothing else kept the two in sync.
+    rows = {}
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.split('|')]
+        if len(cells) < 4 or not cells[1].startswith('`'):
+            continue
+        rows[cells[1].strip('`')] = set(re.findall(r'`([a-z_]+)`', cells[2]))
+    # Named explicitly rather than derived from the constant's name: a
+    # derivation matched `_EDGE_CONNECTOR_KEYS` against an unrelated
+    # `edge_connector` row and failed on twelve keys that are documented
+    # perfectly well one row further down. A short honest map beats a clever
+    # rule that is wrong in a way the failure message hides.
+    TABLE_ROWS = {
+        '_HEALTH_KEYS': 'health',
+        '_CORRIDOR_KEYS': 'health.bus_corridors[]',
+        '_DECAP_KEYS': 'decaps',
+        '_BUDGET_KEYS': 'legality_budget',
+        '_WAIVER_KEYS': 'overlap_waivers[]',
+        '_OVERHANG_KEYS': 'edge_connectors[].overhang_mm',
+        '_EDGE_CONNECTOR_KEYS': 'edge_connectors[]',
+        '_ASSEMBLY_KEYS': 'assembly',
+    }
+    checked = 0
+    for name, row in sorted(TABLE_ROWS.items()):
+        listed = rows.get(row)
+        assert listed is not None, f'no `{row}` row in the accepted-keys table'
+        missing = sorted(KEY_SETS[name] - listed)
+        assert not missing, (
+            f'{name} and its `{row}` table row have drifted; the row is '
+            f'missing {missing}')
+        checked += 1
     print(f"  PASS: {len(KEY_SETS)} key sets pinned exactly; "
-          f"{sum(len(v) for v in KEY_SETS.values())} names all documented")
+          f"{sum(len(v) for v in KEY_SETS.values())} names all documented, "
+          f"{checked} of them against their table row")
 
 
 def test_an_intent_using_every_known_key_loads():
@@ -197,9 +247,17 @@ def test_an_intent_using_every_known_key_loads():
             'overhang_mm': {'min': 0.0, 'max': 1.5}, 'max_setback_mm': 2.0,
             'class': 'edge_receptacle', 'source': 'auto-class', 'note': 'n',
             'suspect': True, 'suspect_reason': 'r', 'overhang_capped': True,
-            'observed_overhang_mm': 9.0, 'context': {'why': 'w'}}],
+            'observed_overhang_mm': 9.0, 'context': {'why': 'w'},
+            'center_on_edge': {'tolerance_mm': 1.0}},
+            # #712's two fields are MUTUALLY EXCLUSIVE, so covering the
+            # vocabulary needs a second entry -- one entry carrying both is
+            # refused at load, deliberately. Without this the "every known key
+            # is accepted" claim would silently degrade to "every key but one".
+            {'ref': 'J2', 'edge': 'west',
+             'along_edge_band': {'from': 0.10, 'to': 0.35}}],
         'decaps': {'max_distance_mm': 2.5, 'exempt': ['C99'],
-                   'search_radius_mm': 6.0},
+                   'search_radius_mm': 6.0, 'max_pin_distance_mm': 1.5,
+                   'pin_functions': ['VCC', 'VDD'], 'same_side': False},
         'must_lock': ['MH*'],
         'legality_budget': {'overlap_area': 1.0, 'oob_count': 2,
                             'oob_amount': 3.0},
@@ -208,20 +266,30 @@ def test_an_intent_using_every_known_key_loads():
                    'classes': {'critical': ['/D*']}, 'zoned_blocks': ['power'],
                    'affinity_exempt_nets': ['/GND'],
                    'affinity_exempt_net_ids': [3], 'ignore_net_ids': [1, 2],
-                   'max_fanout': 30, 'block_displacement_mm': 4.0},
+                   'max_fanout': 30, 'block_displacement_mm': 4.0,
+                   'plane_layers': ['In1.Cu', 'In2.Cu']},
         'severity': {name: WARN for name in sorted(_SEVERITY_KEYS)},
         'context': {'note': 'read-only'},
         'overlap_waivers': [{'pair': ['U1', 'U2'], 'reason': 'net tie',
                              'context': {'why': 'w'}}],
+        'assembly': {'sides': 'F', 'why': 'one reflow pass',
+                     'context': {'quoted': 'the fab'}},
     }
     # Every key of every set must appear above, or this proves less than it
     # claims -- the point is coverage of the vocabulary, not of a sample.
     seen = set(raw) | set(raw['envelope']) | set(raw['defaults'])
     seen |= set(raw['blocks'][0]) | set(raw['decaps']) | set(raw['health'])
-    seen |= set(raw['legality_budget']) | set(raw['edge_connectors'][0])
+    seen |= set(raw['legality_budget'])
+    # UNION over every entry, not entry [0]: the two #712 fields cannot share
+    # one entry, so reading only the first would under-report the vocabulary.
+    for c in raw['edge_connectors']:
+        seen |= set(c)
     seen |= set(raw['edge_connectors'][0]['overhang_mm'])
+    seen |= set(raw['edge_connectors'][0]['center_on_edge'])
+    seen |= set(raw['edge_connectors'][1]['along_edge_band'])
     seen |= set(raw['health']['bus_corridors'][0])
     seen |= set(raw['overlap_waivers'][0])
+    seen |= set(raw['assembly'])
     for k in raw['keepouts']:
         seen |= set(k)
     missing = sorted({k for keys in KEY_SETS.values() for k in keys} - seen)
@@ -230,6 +298,9 @@ def test_an_intent_using_every_known_key_loads():
     i = intent_from_dict(raw)
     assert i.blocks[0].tolerance_mm == 0.7 and i.blocks[0].exclusive
     assert i.decaps['search_radius_mm'] == 6.0
+    assert i.decaps['max_pin_distance_mm'] == 1.5
+    assert i.decaps['pin_functions'] == ['VCC', 'VDD']
+    assert i.decaps['same_side'] is False
     assert i.health['max_fanout'] == 30
     assert i.legality_budget['oob_amount'] == 3.0
     assert i.keepouts[0]['allow'] == ('MH1',)
@@ -454,11 +525,16 @@ def test_an_entry_carries_its_own_context_slot():
 def test_severity_keys_are_checked_against_the_rule_names():
     """#710: `severity` validated its VALUES and never its keys.
 
-    The vocabulary is 13 names, not the 9 in `RULES`: four findings are
+    The vocabulary is 18 names, not the 11 in `RULES`: five findings are
     raised outside the rules loop (`validate_intent` raises two,
-    `resolve_blocks` one, and `resolve_intent_gate` raises
-    `intent_zone_in_keepout` since #702) and an intent has always been allowed
-    to set their severity. Validating against `RULES` alone would refuse
+    `resolve_blocks` one, `resolve_intent_gate` raises `intent_zone_in_keepout`
+    since #702, and BOTH `grade` and `resolve_intent_gate` raise
+    `keepout_allow_unresolved` since #793), and TWO more are raised by a rule
+    that is itself in `RULES`: `rule_decap_pin_distance` yields
+    `decap_pin_distance_inferred` and `decap_pin_uncovered` beside its own
+    name (#705), because one measurement can support several claims whose
+    severities an author must be able to set apart. An intent has always been
+    allowed to set these. Validating against `RULES` alone would refuse
     `{"block_unresolved": "warn"}`, which is legal today -- so the test
     asserts every name in the real vocabulary still loads, not just that a
     typo is refused.
@@ -476,7 +552,10 @@ def test_severity_keys_are_checked_against_the_rule_names():
     expected = {n for n, _ in RULES} | {'intent_zone_outside_envelope',
                                         'intent_zone_overlap',
                                         'block_unresolved',
-                                        'intent_zone_in_keepout'}
+                                        'intent_zone_in_keepout',
+                                        'keepout_allow_unresolved',
+                                        'decap_pin_distance_inferred',
+                                        'decap_pin_uncovered'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         i = intent_from_dict(_base(severity={name: WARN}))

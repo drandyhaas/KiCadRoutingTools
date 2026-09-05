@@ -3,14 +3,16 @@ KiCad PCB Parser - Extracts pads, nets, tracks, vias, and board info from .kicad
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
 import math
 import json
+import sys
 import routing_defaults as defaults  # fab-floor outline width for 0-stroke copper polys (#337/M2)
 from swig_compat import patch_swig_iterators as _patch_swig_iterators
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Sequence, Tuple, Optional
 from pathlib import Path
 
 # #795: KiCad's own `__iter__` for GetTracks()/GetDrawings() calls the py2
@@ -445,6 +447,17 @@ class Footprint:
     # (#481); None for a reference-less footprint or an unparseable node.
     # APPENDED (never mid-insert): positional Footprint(...) constructions
     # exist across the tree and a mid-list field would silently shift them.
+    owns_edge_cuts: bool = False    # draws Edge.Cuts geometry of its own (#829)
+    owns_board_outline: bool = False
+    # #829. `owns_edge_cuts` is the FACT (this footprint's pose transforms a
+    # piece of Edge.Cuts); `owns_board_outline` is the DECISION that follows
+    # from it -- True only when that geometry lies outside every ring the
+    # board-level Edge.Cuts forms, i.e. it IS part of the board boundary.
+    # A milled relief or a window parented to a part so it travels with the
+    # part (crkbd's 184 per-LED windows; #628's owned rings) is
+    # owns_edge_cuts=True, owns_board_outline=False, and stays movable.
+    # Movers must gate on `owns_board_outline`; see kicad_parser.
+    # footprint_outline_owners. Also APPENDED, for the reason above.
 
 
 @dataclass
@@ -544,6 +557,22 @@ class PCBData:
     # dropped. Empty on every board in the corpus -- no in-repo board uses
     # groups -- so consumers must treat absence as normal, not as an error.
     groups: Dict[str, List[str]] = field(default_factory=dict)
+    #: #726: {reference as the FILE spells it: how many blocks claim it}, for
+    #: the references claimed by more than one. The value is the total
+    #: occurrence count (`TP4: 2`), not the number of extras.
+    #:
+    #: `footprints` keys are the DISAMBIGUATED names -- the first block keeps
+    #: the bare reference, later ones get `~2`, `~3` -- so every block is
+    #: present and `len(footprints)` is the block count. This dict is what
+    #: says the disambiguation happened, and it is how a consumer reports the
+    #: board's own spelling back to a human who has to go and fix the
+    #: schematic. Filled identically by BOTH parse paths.
+    #:
+    #: Advisory. A duplicate reference is legal in KiCad and can be deliberate
+    #: (a paired testpoint, a net tie), so nothing here refuses. It measured 5
+    #: of the 22 tracked boards: watchy TP4/TP5 (real test points), esp_prog
+    #: Ref*, glasgow_revC REF** x7, orangecrab_ext_pll G*** x3, ulx3s EMARD.
+    duplicate_references: Dict[str, int] = field(default_factory=dict)
 
     def net_tie_exempt_pad_ids(self, net_id: int):
         """id()s of pads whose keep-out copper of `net_id` may IGNORE.
@@ -612,6 +641,48 @@ class PCBData:
             total += stackup[i].thickness
 
         return total
+
+
+def flip_layer_token(name: str) -> str:
+    """The other face's spelling of a layer token (#714).
+
+    A PREFIX RULE, deliberately not a table. Three name->id tables in this repo
+    already happen to enumerate the F/B pairs (`fix_kicad_drc_settings.
+    _TECH_LAYER_IDS`, and twice in this file's pcbnew paths); a fourth
+    enumeration is a fourth thing to keep in sync, and the enumeration is not
+    where the knowledge is. The knowledge is that KiCad spells a sided layer
+    `F.<x>` / `B.<x>` and an unsided one anything else.
+
+    Measured over the 22 tracked boards, the layer tokens that appear inside a
+    `(footprint ...)` block are exactly:
+
+        F.Cu F.Mask F.Paste F.SilkS F.CrtYd F.Fab F.Adhes
+        B.Cu B.Mask B.Paste B.SilkS B.CrtYd B.Fab
+        *.Cu *.Mask Dwgs.User Cmts.User Eco1.User Eco2.User User.1
+
+    This flips the THIRTEEN sided ones and returns the other SEVEN unchanged --
+    including both wildcards, which pcbnew also leaves alone (`*.Cu` is KiCad's
+    ALL-copper set and is already its own mirror; rewriting it to `B*.Cu` or
+    `B.Cu` would silently narrow 66 pads on rp2350's U8 alone).
+
+    Inner copper passes through unchanged, and that is what KiCad does too:
+    probed against pcbnew 10.0.0 on a six-layer board, `FOOTPRINT::Flip` leaves
+    a pad on `In1.Cu` and an `fp_line` on `In2.Cu` exactly where they are. An
+    earlier version of this docstring asserted the mirror image would be
+    `In<n+1-k>.Cu` -- that was reasoning, and the oracle this repo uses as
+    ground truth everywhere else contradicts it.
+
+    The identity answer is therefore CORRECT for KiCad 10, not merely
+    conservative. `placement.writer` still refuses a pad naming an explicit
+    `In<n>.Cu`, which is a separate and deliberate choice: no tracked board
+    carries one, so this repo has no regression test that would notice if a
+    future KiCad started remapping them.
+    """
+    if name.startswith('F.'):
+        return 'B.' + name[2:]
+    if name.startswith('B.'):
+        return 'F.' + name[2:]
+    return name
 
 
 def local_to_global(fp_x: float, fp_y: float, fp_rotation_deg: float,
@@ -1439,6 +1510,26 @@ def _mask_pad_primitives(content: str) -> str:
     return ''.join(out)
 
 
+def _footprint_blocks_by_key(content: str):
+    """Ordered `(start, end, key)` for every `(footprint ...)` block, keyed the
+    way `extract_footprints_and_pads` keys the footprints dict (#829).
+
+    Routed through #726's `footprint_raw_reference` and
+    `disambiguate_references` rather than resolving a reference locally. Two
+    blocks may claim one name, and #726 keys the second `TP4~2`; an owner map
+    keyed by the RAW name would stamp `owns_board_outline` onto whichever block
+    won the dict, which on a duplicated reference need not be the block that
+    draws the outline. Sharing the disambiguator is what keeps the two in step.
+    """
+    spans, raws = [], []
+    for m in re.finditer(r'\(footprint\s+"', content):
+        end = find_matching_paren(content, m.start())
+        spans.append((m.start(), end))
+        raws.append(footprint_raw_reference(content[m.start():end]))
+    return [(a, b, k) for (a, b), k in
+            zip(spans, disambiguate_references(raws))]
+
+
 def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
     """GLOBAL points of footprint-embedded Edge.Cuts shapes (fp_line/fp_rect/
     fp_arc/fp_circle/fp_poly), transformed by each footprint's (at x y rot).
@@ -1448,15 +1539,60 @@ def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
     board-level gr_* scan alone reports no bounds, which silently disables
     the routing edge keep-out. KiCad's own edges bounding box includes
     footprint shapes, so these points belong in board_bounds."""
-    pts: List[Tuple[float, float]] = []
+    return [p for pts in _footprint_edge_points_by_ref(content).values()
+            for p in pts]
+
+
+@functools.lru_cache(maxsize=2)
+def _footprint_edge_points_by_ref_cached(content: str):
+    return _footprint_edge_points_by_ref_uncached(content)
+
+
+def _footprint_edge_points_by_ref(
+        content: str) -> Dict[str, List[Tuple[float, float]]]:
+    """Memoised wrapper. See `_footprint_edge_points_by_ref_uncached`.
+
+    A single `parse_kicad_pcb` asks this question TWICE -- once through
+    `extract_board_bounds` (which has always made this pass) and once through
+    `footprint_outline_owners` (#829) -- and the pass is a
+    `find_matching_paren` walk plus a slice of every footprint block on the
+    board. Without the memo #829 added a second full scan to every parse:
+    measured +15% on ulx3s, +18% on glasgow_revC, +29% on watchy. With it the
+    second call is free and a parse costs what it did before.
+
+    The returned dict is treated as read-only by both callers; do not mutate it.
+    `maxsize=2` because the only repeat caller is one parse, and a big cache of
+    board texts is not worth the memory.
+    """
+    try:
+        return _footprint_edge_points_by_ref_cached(content)
+    except TypeError:                                            # unhashable
+        return _footprint_edge_points_by_ref_uncached(content)
+
+
+def _footprint_edge_points_by_ref_uncached(
+        content: str) -> Dict[str, List[Tuple[float, float]]]:
+    """The SAME scan as `_footprint_edge_points`, keyed by owning ref (#829).
+
+    The scan always had the reference in hand and threw it away, so nothing
+    downstream could ask "which footprint owns this piece of the outline?" --
+    and the placement movable set, gated on pads alone, would happily move it.
+    One scan and one predicate feed both callers deliberately: the tree already
+    carries FOUR disagreeing answers to "which fp shapes are Edge.Cuts
+    geometry" (this scan, `_collect_footprint_edge_segments`, and the two
+    pcbnew mirrors, whose class filters differ), and a fifth written by hand
+    would drift from all of them.
+
+    A footprint appears here only if it contributed at least one point.
+    """
+    owners: Dict[str, List[Tuple[float, float]]] = {}
     if '"Edge.Cuts"' not in content:
-        return pts
-    for m in re.finditer(r'\(footprint\s+"', content):
-        start = m.start()
-        end = find_matching_paren(content, start)
-        fp_text = content[start:end]
+        return owners
+    for _start, _end, _key in _footprint_blocks_by_key(content):
+        fp_text = content[_start:_end]
         if '"Edge.Cuts"' not in fp_text:
             continue
+        pts: List[Tuple[float, float]] = []
         at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
         if not at_match:
             continue
@@ -1509,7 +1645,215 @@ def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
             for xm in re.finditer(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', poly_text):
                 pts.append(local_to_global(fx, fy, frot,
                                            float(xm.group(1)), float(xm.group(2))))
-    return pts
+        if pts:
+            owners.setdefault(_key, []).extend(pts)
+    return owners
+
+
+# #829: tolerance for "does this point extend the board?". A point on the
+# board-level boundary is CARRIED, not structural -- a shape flush with the
+# edge did not move the edge.
+_OUTLINE_EPS = 1e-6
+
+
+def _mask_footprint_blocks(content: str, only_refs=None) -> str:
+    """`content` with `(footprint ...)` blocks blanked to spaces.
+
+    Length-preserving, so any offset computed against the masked text still
+    lines up with the original. With `only_refs`, mask just those references;
+    otherwise mask every footprint, which asks what the board's Edge.Cuts would
+    say if no footprint contributed any.
+    """
+    out = list(content)
+    for start, end, key in _footprint_blocks_by_key(content):
+        if only_refs is not None and key not in only_refs:
+            continue
+        for i in range(start, end):
+            if out[i] != '\n':
+                out[i] = ' '
+    return ''.join(out)
+
+
+def footprint_outline_owners(content: str) -> Dict[str, bool]:
+    """`{ref: owns_board_outline}` for every footprint that draws Edge.Cuts.
+
+    #829. A footprint's pose transforms its Edge.Cuts shapes, so moving one
+    moves board geometry. But that is only a DEFECT for some of them, and the
+    split is what this function computes:
+
+    * **Structural** (`True`) -- the shape lies outside every ring the
+      BOARD-LEVEL Edge.Cuts forms, so it is part of the board's own boundary.
+      Moving it resizes the board, which is never a placement decision. A board
+      whose outline lives entirely in footprints (Adiuvo's rp2350_fpga_eensy)
+      has no board-level rings at all, so every owner is structural.
+    * **Carried** (`False`) -- the shape sits inside the board outline: a
+      milled relief or a window the designer PARENTED to the part precisely so
+      it would travel with it. crkbd draws 184 per-LED cutout windows this way
+      (see `_collect_edge_cuts_segments`), and #628 exists to keep exactly this
+      class of part PLACEABLE -- it exempts a part's own milled ring from the
+      edge-margin test, because without that exemption run 20's SW2, sitting
+      inside its own strap slot, had 0 legal poses of 14884 (`legality.py`).
+      Locking every owner would freeze the very parts that work protects.
+
+    Deciding by containment rather than by "does it own Edge.Cuts at all" is
+    the whole point: parentage is the designer's statement about which of the
+    two a shape is, and the first draft of this fix read it backwards.
+
+    Costs nothing on a board with no footprint-embedded Edge.Cuts (which is
+    every board in this repo's corpus): the owner scan short-circuits and the
+    second contour pass never runs.
+    """
+    # The cheap gate first: the bounds scan is already memoised from this same
+    # parse, and on every board in this repo's corpus it answers "nobody", so
+    # nothing below ever runs.
+    if not _footprint_edge_points_by_ref(content):
+        return {}
+    segs_by_ref = _collect_footprint_edge_segments_by_ref(content)
+    board_only = _mask_footprint_blocks(content)
+    outers, _cutouts = extract_board_contours(board_only)
+    return classify_outline_owners(segs_by_ref,
+                                   extract_board_bounds(board_only), outers)
+
+
+def outline_fingerprint(board_info) -> Tuple:
+    """A canonical, comparable summary of a board's Edge.Cuts geometry (#829).
+
+    `board_bounds` alone is NOT a sufficient detector and this is the reason
+    this helper exists: an interior cutout moving never touches the bounding
+    box, and `_footprint_edge_points` treats an `fp_circle` as rotation-
+    invariant about its moved centre, so rotating a footprint that owns a
+    circular window changes nothing in the bbox. Rings and cutouts catch what
+    bounds cannot; bounds catch an open stub that never chains into a ring,
+    which rings cannot. Both are needed -- measured: the #829 repro changed
+    `board_bounds` while `board_outlines` stayed identical.
+
+    Rounded to 1 nm, and rings are compared as SETS of rounded vertices so a
+    chainer that happens to start or wind a ring differently is not reported as
+    a moved outline.
+    """
+    def ring(r):
+        return tuple(sorted((round(x, 6), round(y, 6)) for x, y in r))
+
+    b = board_info.board_bounds
+    return (
+        tuple(round(v, 6) for v in b) if b else None,
+        tuple(sorted(ring(r) for r in (board_info.board_outlines or []))),
+        tuple(sorted(ring(r) for r in (board_info.board_cutouts or []))),
+        len(getattr(board_info, 'board_edge_contours', None) or []),
+    )
+
+
+def structural_outline_fingerprint(content: str) -> Tuple:
+    """`outline_fingerprint` of the board's STRUCTURAL outline only (#829).
+
+    The board-level Edge.Cuts plus the footprints that draw the boundary --
+    with every CARRIED owner masked out. That distinction is the whole reason
+    this exists rather than a plain whole-board fingerprint: a relief parented
+    to a part is *supposed* to travel with it, so a run that legitimately moves
+    one changes `board_cutouts`, and comparing the full outline would refuse
+    exactly the move #829's fix is careful to permit. Measured while writing
+    this: the naive version fired on the carried case on its first run.
+
+    Invariant under any permitted placement move, by construction. A change
+    means something moved a footprint that draws the board.
+    """
+    owners = footprint_outline_owners(content)
+    carried = {ref for ref, structural in owners.items() if not structural}
+    if carried:
+        content = _mask_footprint_blocks(content, only_refs=carried)
+    outers, cutouts = extract_board_contours(content)
+    return outline_fingerprint(BoardInfo(
+        layers={}, copper_layers=[],
+        board_bounds=extract_board_bounds(content),
+        board_outlines=outers, board_cutouts=cutouts))
+
+
+def _segments_close_on_themselves(segments, tol: float = 0.01) -> bool:
+    """Do these segments form only CLOSED loops?
+
+    Euler's condition: a set of edges decomposes into closed circuits exactly
+    when every vertex has even degree. Endpoints are snapped to `tol` (10 um,
+    the chainer's own tolerance) so a KiCad rounding difference between two
+    shapes that meet does not read as two odd vertices.
+
+    Cheap, exact for the question asked, and it does not need the chainer --
+    which cannot answer it: `_chain_segments_into_contours` returns the same
+    vertex list for a closed square and for three sides of one.
+    """
+    if not segments:
+        return False
+    deg = {}
+    for a, b in segments:
+        for p in (a, b):
+            k = (round(p[0] / tol), round(p[1] / tol))
+            deg[k] = deg.get(k, 0) + 1
+    return all(d % 2 == 0 for d in deg.values())
+
+
+def classify_outline_owners(owners, board_only_bounds, board_only_outers):
+    """`{ref: owns_board_outline}` from per-ref SEGMENTS and the board's own
+    outline. Shared by BOTH parse paths (#829) so they cannot decide
+    differently -- each supplies its own three inputs, the rule lives here once.
+
+    `owners` is `{ref: [((x1,y1),(x2,y2)), ...]}` in global mm.
+
+    A footprint is CARRIED (its geometry travels with it, and it stays movable)
+    only when BOTH hold:
+
+      1. its Edge.Cuts segments CLOSE ON THEMSELVES -- it is a window, a slot,
+         a relief: a shape cut out of the board; and
+      2. that shape lies inside the outline the board draws without it.
+
+    Anything else is STRUCTURAL. Closedness carries most of the weight, and it
+    is what the first version of this function lacked. Deciding on containment
+    alone was wrong in three measured ways:
+
+      * a connector drawing the real board's fourth EDGE (an open path joining
+        the board-level outline) sits inside the panel frame on a panelised
+        board, so containment called it carried -- and it draws the boundary;
+      * `extract_board_contours` short-circuits a 4-segment axis-aligned
+        rectangle to NO rings, so the same physical geometry classified
+        differently depending on whether the board's outline was spelled with 4
+        segments or 8;
+      * an open stub flush with the edge read as "on the boundary, therefore
+        carried", when a shape flush with the edge IS the edge.
+
+    An open path cannot be a cut-out, so all three become structural on rule 1
+    without consulting containment at all.
+    """
+    if not owners:
+        return {}
+    if board_only_bounds is None:
+        # The board-level Edge.Cuts draws nothing at all, so the footprints ARE
+        # the outline (rp2350_fpga_eensy). Every owner is structural.
+        return {ref: True for ref in owners}
+
+    rings = [r for r in (board_only_outers or []) if len(r) >= 3]
+
+    if rings:
+        def inside(px, py):
+            return any(_pt_in_ring(px, py, r) for r in rings)
+    else:
+        # Bounds but no CLOSED ring -- and that is NOT "no outline":
+        # splitflap_driver has a perfectly good board-level outline whose
+        # segments never chain closed, so extract_board_contours returns 0
+        # outers while extract_board_bounds returns the right rectangle. The
+        # bbox is weaker than a ring test (it cannot see a concave notch), but
+        # rule 1 has already rejected everything that is not a closed shape, so
+        # what reaches here is a window being asked "are you on this board".
+        x0, y0, x1, y1 = board_only_bounds
+
+        def inside(px, py):
+            return (x0 - _OUTLINE_EPS <= px <= x1 + _OUTLINE_EPS
+                    and y0 - _OUTLINE_EPS <= py <= y1 + _OUTLINE_EPS)
+
+    out = {}
+    for ref, segs in owners.items():
+        if not _segments_close_on_themselves(segs):
+            out[ref] = True
+            continue
+        out[ref] = not all(inside(*p) for seg in segs for p in seg)
+    return out
 
 
 def extract_board_bounds(content: str) -> Optional[Tuple[float, float, float, float]]:
@@ -1694,12 +2038,27 @@ def _collect_edge_cuts_segments(content: str) -> List[Tuple[Tuple[float, float],
 def _collect_footprint_edge_segments(content: str):
     """Edge.Cuts fp_line/fp_arc/fp_circle/fp_rect segments inside footprints,
     transformed to global coordinates (issue #304)."""
-    out = []
-    for fm in re.finditer(r'\(footprint\s+"[^"]*"', content):
-        end = find_matching_paren(content, fm.start())
-        block = content[fm.start():end]
+    return [s for segs in
+            _collect_footprint_edge_segments_by_ref(content).values()
+            for s in segs]
+
+
+def _collect_footprint_edge_segments_by_ref(content: str):
+    """The same scan, keyed by owning ref (#829).
+
+    The classifier needs SEGMENTS rather than the bounds scan's points: a
+    circle's points there are its bounding-box CORNERS (deliberately, because
+    bounds are rotation-invariant that way), and a corner of a round window can
+    sit outside a round board while every point of the actual circle is inside
+    -- which classified a 4 mm relief on a 40 mm round board as structural and
+    froze it, the exact #628 over-lock this fix exists to avoid.
+    """
+    out_by_ref = {}
+    for _bstart, _bend, _key in _footprint_blocks_by_key(content):
+        block = content[_bstart:_bend]
         if '"Edge.Cuts"' not in block:
             continue
+        out = out_by_ref.setdefault(_key, [])
         at = re.search(r'\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)', block)
         if not at:
             continue
@@ -1756,7 +2115,7 @@ def _collect_footprint_edge_segments(content: str):
                    for xm in re.finditer(r'\(xy\s+([\d.-]+)\s+([\d.-]+)\)', poly_text)]
             for i in range(len(pts)):
                 out.append((pts[i], pts[(i + 1) % len(pts)]))
-    return out
+    return {r: segs for r, segs in out_by_ref.items() if segs}
 
 
 def _parse_gr_polys_on_layer(content: str, layer: str) -> List[List[Tuple[float, float]]]:
@@ -2325,21 +2684,193 @@ def _parse_ref_label(fp_text: str, ref_start: int,
     )
 
 
-def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: Dict[str, int] = None) -> Tuple[Dict[str, Footprint], Dict[int, List[Pad]]]:
-    """Extract footprints and their pads with global coordinates."""
+#: KiCad 8+ property form, then the KiCad 6/7 fallback. Both require at least
+#: one character, so an EMPTY `(property "Reference" "")` falls through to the
+#: uuid branch -- deliberate, and load-bearing (see #78 and the reference-less
+#: note in `footprint_raw_reference`).
+_FP_REF_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]+)"')
+_FP_REF_LEGACY_RE = re.compile(r'\(fp_text\s+reference\s+"([^"]+)"')
+_FP_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"')
+_FP_START_RE = re.compile(r'\(footprint\s+"')
+
+#: Separator between a duplicated reference and its file-order ordinal (#726).
+#: `~` is NOT an fnmatch metacharacter (those are `*?[]`), so `--lock 'TP4*'`
+#: still covers both twins and no existing literal reference is newly shadowed:
+#: measured over the tracked corpus, the parser produced 547 distinct keys
+#: before this change, and ZERO of them contain `~`. `#` is NOT free, and the
+#: same measurement says why -- 3 of those 547 begin with it, because it is
+#: already the reference-less key prefix and `placement/labels.py` keys its
+#: skip off `ref.startswith('#')`.
+#:
+#: A SUFFIX rather than a prefix because `placement/part_class._PREFIX_RE` is
+#: `^([A-Za-z]+)`, which a prefix destroys. Measured honestly, that costs
+#: nothing on THIS corpus: a prefix scheme reclassifies 0 of the 18 duplicate
+#: blocks, because `classify_part` matches the footprint NAME
+#: (`Fiducial1x3_transp`, `TestPoint_Pad_D1.0mm`) before it ever reads the
+#: prefix. The suffix is still the right choice -- for a part whose footprint
+#: name carries no class keyword, the prefix is the only channel there is --
+#: but this corpus does not demonstrate the harm, and an earlier version of
+#: this comment claimed it did.
+DUP_REF_SEP = '~'
+
+
+def _footprint_header_end(fp_text: str) -> int:
+    """Index of the footprint block's first CHILD element.
+
+    Bounds a header-only search so a PAD's or a graphic's own ``(uuid ...)``
+    cannot be read as the footprint's. The reference-less branch used to run
+    this search unbounded; the two agree on every corpus board, and the
+    bounded form is the one that is actually correct.
+    """
+    end = len(fp_text)
+    for tok in ('(pad', '(fp_', '(zone', '(model', '(property'):
+        i = fp_text.find(tok)
+        if i != -1:
+            end = min(end, i)
+    return end
+
+
+def footprint_uuid(fp_text: str) -> str:
+    """The footprint's OWN uuid, or '' when it has none."""
+    m = _FP_UUID_RE.search(fp_text[:_footprint_header_end(fp_text)])
+    return m.group(1) if m else ""
+
+
+def footprint_raw_reference(fp_text: str) -> str:
+    """The reference this block claims, BEFORE duplicate disambiguation.
+
+    KiCad 8+ uses ``(property "Reference" "R1")``; KiCad 6/7 use
+    ``(fp_text reference "R1" ...)``. Without the fallback every 6/7 footprint
+    got reference "?" and collapsed onto one dict key, so a whole board parsed
+    as a single footprint (issue #78).
+
+    A reference-LESS footprint (a locked NPTH drill dot; thunderscope has 86)
+    is keyed by its uuid instead, because a shared '' / '?' key would collapse
+    them all onto one entry and lose the rest's pads.
+    """
+    m = _FP_REF_RE.search(fp_text) or _FP_REF_LEGACY_RE.search(fp_text)
+    if m:
+        return m.group(1)
+    uid = footprint_uuid(fp_text)
+    return "#" + uid if uid else "?"
+
+
+def disambiguate_references(raw_refs: Sequence[str]) -> List[str]:
+    """Ordered raw references -> ordered UNIQUE keys, by file-order ordinal.
+
+    The first bearer of a name keeps it; the n-th appends ``~n`` (#726). Pure
+    and order-only: both parse paths call this on their own ordered list and
+    therefore agree, which is the whole contract between them.
+
+    Why the FIRST occurrence keeps the bare name, when today the LAST block is
+    the one the dict retains: `placement/floorplan.py` writes `'refs'` into an
+    ``--emit-intent`` file the user keeps and edits, and resolves it back with
+    `fnmatch.filter`. Suffixing every occurrence would make a saved intent
+    naming `TP4` resolve to nothing on a file the user never touched.
+
+    Why uuid is NOT the key: uuids are supposed to be unique, and in real
+    KiCad exports they are -- but hand-made and copy-pasted boards repeat them.
+    `kicad_files/cap_chain.kicad_pcb` shares one footprint uuid across C1/C2
+    and another across J1/J2, so keying on it would reintroduce exactly this
+    bug on a board already in the repo (`extract_groups` reached the same
+    verdict for group members). A KiCad 6/7 block carries `tstamp` rather than
+    `uuid` at all.
+
+    The ordinal is issued against BOTH the file's own names and the names
+    already issued, so a board that genuinely contains `TP4`, `TP4` and
+    `TP4~2` cannot be handed two identical keys whatever the file order.
+    """
+    taken = set(raw_refs)
+    issued = set()
+    seen: Dict[str, int] = {}
+    out: List[str] = []
+    for ref in raw_refs:
+        n = seen.get(ref, 0) + 1
+        seen[ref] = n
+        if n == 1:
+            out.append(ref)
+            issued.add(ref)
+            continue
+        cand = '%s%s%d' % (ref, DUP_REF_SEP, n)
+        while cand in taken or cand in issued:
+            n += 1
+            cand = '%s%s%d' % (ref, DUP_REF_SEP, n)
+        out.append(cand)
+        issued.add(cand)
+    return out
+
+
+def iter_footprint_blocks(content: str):
+    """(start, end, fp_text, raw_reference, key) per block, in FILE ORDER.
+
+    The single place that decides what a footprint block is CALLED. The text
+    parser, `placement/writer.py` and `placement/parser.py` all scan the same
+    file for the same blocks; before #726 each did it with its own regex and
+    its own ref-keyed dict, so the writer could rewrite a block the parser had
+    dropped. They resolve names here now, together or not at all.
+
+    `end` comes from the shipped string-aware `find_matching_paren`, so a lone
+    paren inside a property value (an MPN like "TCR2EF115,LM(CT") cannot run
+    the scan into the next footprint (#113).
+
+    A match that starts INSIDE the block already accepted is skipped. The
+    block-END scan is string-aware and the block-START scan is a plain regex,
+    so a property value containing the literal `(footprint "` matches -- and
+    where that used to produce a phantom entry that last-wins quietly
+    swallowed, it would now be a first-class key that SHIFTS every later
+    ordinal and splits the two parse paths. Contrived, and #113 exists because
+    parens in property values are not.
+    """
+    spans = []
+    raw = []
+    reach = -1
+    for m in _FP_START_RE.finditer(content):
+        start = m.start()
+        if start < reach:
+            continue
+        end = find_matching_paren(content, start)
+        reach = end
+        text = content[start:end]
+        spans.append((start, end, text))
+        raw.append(footprint_raw_reference(text))
+    for (start, end, text), r, key in zip(spans, raw,
+                                          disambiguate_references(raw)):
+        yield start, end, text, r, key
+
+
+def duplicate_reference_counts(raw_refs: Sequence[str]) -> Dict[str, int]:
+    """{raw reference: how many blocks claim it}, for the ones claimed twice.
+
+    The VALUE is the total occurrence count, not the number of extras --
+    `check_assembly` prints it as "TP4 x2" and derives the block total from it.
+    """
+    counts: Dict[str, int] = {}
+    for r in raw_refs:
+        counts[r] = counts.get(r, 0) + 1
+    return {r: c for r, c in counts.items() if c > 1}
+
+
+def extract_footprints_and_pads(content: str, nets: Dict[int, Net],
+                                name_to_id: Dict[str, int] = None,
+                                duplicates: Dict[str, int] = None) -> Tuple[Dict[str, Footprint], Dict[int, List[Pad]]]:
+    """Extract footprints and their pads with global coordinates.
+
+    `duplicates`, when given, is FILLED with `duplicate_reference_counts` --
+    an out-param rather than a third return value, because the 2-tuple is a
+    documented public signature (`docs/api-kicad-parser.md`).
+    """
     footprints = {}
     pads_by_net: Dict[int, List[Pad]] = {}
 
-    # Find all footprints - need to handle nested parentheses properly
-    # Strategy: find (footprint and then match balanced parens
-    footprint_starts = [m.start() for m in re.finditer(r'\(footprint\s+"', content)]
+    # Find all footprints - need to handle nested parentheses properly.
+    # Named through iter_footprint_blocks so this path and every writer agree
+    # on what each block is called, including when two blocks claim one
+    # reference (#726).
+    _blocks = list(iter_footprint_blocks(content))
+    if duplicates is not None:
+        duplicates.update(duplicate_reference_counts([b[3] for b in _blocks]))
 
-    for start in footprint_starts:
-        # Find the matching end parenthesis (string-aware: a property value with
-        # a lone paren must not throw off the count — see find_matching_paren).
-        end = find_matching_paren(content, start)
-
-        fp_text = content[start:end]
+    for start, end, fp_text, _raw_reference, _block_key in _blocks:
 
         # Extract footprint name. May be EMPTY: KiCad writes (footprint "")
         # for reference-less drill/graphic footprints (thunderscope's 86 locked
@@ -2363,25 +2894,22 @@ def extract_footprints_and_pads(content: str, nets: Dict[int, Net], name_to_id: 
         layer_match = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
         fp_layer = layer_match.group(1) if layer_match else "F.Cu"
 
-        # Extract reference. KiCad 8+ uses (property "Reference" "R1"); KiCad
-        # 6/7 use (fp_text reference "R1" ...). Without the fallback every 6/7
-        # footprint got reference "?" and collapsed onto one dict key, so a
-        # whole board parsed as a single footprint (issue #78).
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_text)
+        # The name this block answers to. `footprint_raw_reference` handles the
+        # KiCad 8+ property form, the 6/7 `fp_text` fallback (#78) and the
+        # reference-LESS `#uuid` key (thunderscope's 86 NPTH dots);
+        # `disambiguate_references` then makes it unique when two blocks claim
+        # one reference (#726). `build_pcb_data_from_board` runs the same two
+        # functions over its own ordered list, so the GUI and file models stay
+        # comparable.
+        #
+        # `ref_match` is still resolved locally, but only for its OFFSET: the
+        # #481 label parser needs the position of the Reference sub-node, and
+        # `None` there means "reference-less, so no label".
+        reference = _block_key
+        ref_match = _FP_REF_RE.search(fp_text)
         ref_is_property = ref_match is not None
         if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', fp_text)
-        if ref_match:
-            reference = ref_match.group(1)
-        else:
-            # Reference-less footprint (e.g. a locked NPTH drill dot). The
-            # footprints dict is keyed by reference, so a shared '' / '?' key
-            # would collapse them all onto one entry and lose the rest's pads
-            # (86 NPTH holes on thunderscope). Key by the footprint's uuid --
-            # build_pcb_data_from_board synthesizes the same key, so the GUI
-            # and file models stay comparable.
-            uid_match = re.search(r'\(uuid\s+"([^"]+)"', fp_text)
-            reference = "#" + uid_match.group(1) if uid_match else "?"
+            ref_match = _FP_REF_LEGACY_RE.search(fp_text)
 
         # Extract value (component part number or value)
         value_match = re.search(r'\(property\s+"Value"\s+"([^"]+)"', fp_text)
@@ -3678,7 +4206,39 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
     # Extract components in order
     board_info = extract_layers(content)
     nets, name_to_id = extract_nets(content, kicad_version)
-    footprints, pads_by_net = extract_footprints_and_pads(content, nets, name_to_id)
+    _dups: Dict[str, int] = {}
+    footprints, pads_by_net = extract_footprints_and_pads(
+        content, nets, name_to_id, duplicates=_dups)
+    if _dups:
+        # ON STDERR, not stdout: 9 shipped call sites across 4 files emit bare
+        # JSON on stdout (`route.py`, `converge.py`, `check_reachability.py`,
+        # `krt_capabilities.py`), where a WARNING line in front is a
+        # JSONDecodeError at char 0. Said at all because a duplicated
+        # reference is a schematic
+        # fact the operator has to decide about -- the parser keeps every
+        # block, but two parts answering to one name is still something only
+        # the human can resolve.
+        _n = sum(_dups.values())
+        print("WARNING: %d footprint block(s) share %d reference(s) -- %s. "
+              "Every block is kept; the later ones are keyed %s2, %s3 ... in "
+              "file order, so this board parses as %d parts. Legal in KiCad "
+              "(a paired testpoint, a net tie), but rename them if they are "
+              "meant to be distinct parts."
+              % (_n, len(_dups),
+                 ', '.join('%s x%d' % rc for rc in sorted(_dups.items())),
+                 DUP_REF_SEP, DUP_REF_SEP, len(footprints)),
+              file=sys.stderr)
+    # #829: which footprints draw Edge.Cuts, and which of those are drawing the
+    # BOARD's boundary rather than a relief that travels with the part. Stamped
+    # here because it needs the footprints and the board-level contours
+    # together, and neither extractor sees both. Keyed through #726's
+    # `disambiguate_references`, so on a board where two blocks share a
+    # reference the flag lands on the block that actually draws the outline.
+    for _ref, _structural in footprint_outline_owners(content).items():
+        _fp = footprints.get(_ref)
+        if _fp is not None:
+            _fp.owns_edge_cuts = True
+            _fp.owns_board_outline = _structural
     vias = extract_vias(content, name_to_id)
     segments = extract_segments(content, name_to_id)
     zones = extract_zones(content, name_to_id)
@@ -3707,6 +4267,7 @@ def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
         guide_paths=guide_paths,
         keepout_zones=keepout_zones,
         groups=groups,
+        duplicate_references=_dups,
         source_path=os.path.abspath(filepath) if filepath else ""
     )
 
@@ -4712,12 +5273,48 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
     # unchanged board -> hash hit -> cached islands, changed board -> miss.
     _live_fill_memo = {}
 
+    def _warn_live_fill_fallback(why):
+        """LOUD fallback (#713 item 4). There is no in-process fallback filler
+        under IPC (no pcbnew in the plugin process), so a provider that yields
+        nothing sends every exact-fill consumer to the FILE at source_path --
+        which mid-plan is missing the live board's copper. The operator must
+        know which fill truth they got.
+
+        ONE function, TWO callers, because the two ways of arriving here used
+        to be one loud and one silent: the warning fired only from `except`,
+        so a refill that RETURNED nothing -- a timeout above all -- fell
+        through to `return None` without a word, on the routing worker thread
+        where nobody is watching.
+
+        "did not yield a fill" rather than "failed", because one of the ways
+        to arrive is a refill that SUCCEEDED and poured nothing.
+        """
+        print(f"WARNING: live-board staged refill did not yield a fill "
+              f"({why}); exact-fill consumers will fall back to the last "
+              f"SAVED file, which mid-plan is missing copper this session "
+              f"already applied.")
+
     def _live_fill(_board=board, _memo=_live_fill_memo):
         import copy as _copy
         import hashlib
         import tempfile
-        from kicad_exact_fill import refill_islands
+        from kicad_exact_fill import refill_islands_ex
         tmp = None
+        # #831: the provider's own account of WHICH fill it returned, read by
+        # plane_fragility (`provider.last_status`) so a fallback stops being
+        # reported as "the LIVE board" and a MACHINE-DEPENDENT one (the refill
+        # timed out) reaches the JSON summary. Published in the `finally`, so
+        # every return path leaves an account. A function attribute on this
+        # closure, not a module global: it lives exactly as long as this
+        # PCBData.
+        #
+        # IPC note on `source`: there is no in-process filler on this front,
+        # so the fallback is not 'live_board_in_process' as on SWIG -- it is
+        # the last SAVED FILE, which is a different and WORSE fidelity (it can
+        # be missing copper this session already applied). Naming it honestly
+        # matters more than matching the other front's vocabulary.
+        _acct = {'source': 'saved_file', 'refill_status': None,
+                 'why': 'no account recorded', 'machine_dependent': False}
         try:
             from kicad_ipc_adapter import (save_board_snapshot,
                                            get_board_full_path)
@@ -4734,9 +5331,16 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
             # different project must be removed, not inherited.
             save_board_snapshot(tmp)
             import shutil
+            # #711: the ONE canonical sibling list, not a hand-written tuple.
+            # This site used to spell the project and rules extensions itself,
+            # which is exactly how a newly-added sibling type (the design
+            # brief) comes to be carried everywhere except here. The gate that
+            # enforces this is a TEXT scan, so do not quote such a pair even
+            # in a comment -- it cannot tell prose from code.
+            from copy_board import SIBLING_EXTS
             _src = get_board_full_path()
             _pro = None
-            for _ext in ('.kicad_pro', '.kicad_dru'):
+            for _ext in SIBLING_EXTS:
                 _sib = (os.path.splitext(_src)[0] + _ext) if _src else None
                 _dst = os.path.splitext(tmp)[0] + _ext
                 try:
@@ -4762,27 +5366,35 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
                 # Deep copy on hit: a caller mutating its polygons must not
                 # poison later consumers (same contract as refill_islands'
                 # own memo).
+                _acct = {'source': 'live_board', 'refill_status': 'ok',
+                         'why': 'memo hit', 'machine_dependent': False}
                 return _copy.deepcopy(_memo[_key])
-            islands = refill_islands(tmp)
+            islands, _st = refill_islands_ex(tmp)
             if islands:
                 _memo.clear()          # one board state at a time
                 _memo[_key] = _copy.deepcopy(islands)
+                _acct = {'source': 'live_board', 'refill_status': _st.reason,
+                         'why': _st.why(), 'machine_dependent': False}
                 return islands
+            # #713 item 4: the quiet arrival. A refill that returned NOTHING
+            # is just as much a fallback as one that raised, and it is the
+            # one reached by a timeout.
+            _warn_live_fill_fallback(_st.why())
+            _acct = {'source': 'saved_file', 'refill_status': _st.reason,
+                     'why': _st.why(), 'machine_dependent': _st.is_timeout}
         except Exception as _e:
-            # LOUD (review DRC-4): there is no in-process fallback filler
-            # under IPC (no pcbnew in the plugin process), so the consumer
-            # falls back to the FILE at source_path -- which mid-plan is
-            # missing the live board's copper. The operator must know which
-            # fill truth they got.
-            print(f"WARNING: live-board staged refill failed "
-                  f"({type(_e).__name__}: {_e}); exact-fill consumers will "
-                  f"fall back to the last SAVED file, which mid-plan is "
-                  f"missing copper this session already applied.")
+            _warn_live_fill_fallback(f"{type(_e).__name__}: {_e}")
+            _acct = {'source': 'saved_file', 'refill_status': 'error',
+                     'why': f"{type(_e).__name__}: {_e}",
+                     'machine_dependent': False}
         finally:
+            _live_fill.last_status = _acct
             if tmp:
-                for _p in (tmp, os.path.splitext(tmp)[0] + '.kicad_pro',
-                           os.path.splitext(tmp)[0] + '.kicad_dru',
-                           os.path.splitext(tmp)[0] + '.kicad_prl'):
+                # Same canonical list the staging above copies from (#711),
+                # so a newly-added sibling type is cleaned up, not leaked.
+                from copy_board import SIBLING_EXTS as _SX
+                for _p in ((tmp,) + tuple(os.path.splitext(tmp)[0] + _e
+                                          for _e in _SX)):
                     try:
                         os.unlink(_p)
                     except OSError:
@@ -5644,6 +6256,35 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
             diffs.append(f"Net {net_id} '{bn.name}' pad count: board={len(bn.pads)} file={len(fn.pads)}")
 
     # --- Compare footprints ---
+    # #726: name the duplicate-reference disagreement DIRECTLY. Both paths
+    # derive their keys with `disambiguate_references` over their own ordered
+    # footprint list, so a KiCad whose `GetFootprints()` no longer iterates in
+    # file order shows up below as a pile of position mismatches -- true, but it
+    # reads as a parser bug rather than as the ordering change it is.
+    #
+    # Compared as a key -> uuid MAP, not as `duplicate_references`. That dict is
+    # order-INVARIANT -- a permutation of the twins leaves it byte-identical --
+    # so the obvious version of this check cannot fire on the one thing it
+    # exists to name. (Measured: swapping two twins produced 8 footprint diffs
+    # and 0 duplicate-reference lines.)
+    if from_board.duplicate_references != from_file.duplicate_references:
+        diffs.append(
+            f"Duplicate references disagree: board={from_board.duplicate_references} "
+            f"file={from_file.duplicate_references}")
+    _dup_names = set(from_board.duplicate_references) | set(from_file.duplicate_references)
+    if _dup_names:
+        def _twin_uuids(pcb):
+            return {k: getattr(f, 'uuid', '') for k, f in pcb.footprints.items()
+                    if k.split(DUP_REF_SEP)[0] in _dup_names}
+        bu, fu = _twin_uuids(from_board), _twin_uuids(from_file)
+        moved = sorted(k for k in set(bu) & set(fu) if bu[k] != fu[k])
+        if moved:
+            diffs.append(
+                f"Duplicate-reference ORDINALS name different blocks: {moved[:6]}. "
+                f"The two parse paths enumerated the footprints in different "
+                f"orders, so their `{DUP_REF_SEP}n` suffixes landed on different "
+                f"parts (see disambiguate_references).")
+
     board_refs = set(from_board.footprints.keys())
     file_refs = set(from_file.footprints.keys())
     if board_refs != file_refs:

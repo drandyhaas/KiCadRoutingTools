@@ -1424,6 +1424,19 @@ def _retry_victim_main_with_ripup(
         pcb_data=pcb_data, context="phase3 victim reroute")
     if not rippable_blockers:
         print(f"    {victim_name}: main re-route blocked, no rippable blockers")
+        try:   # #652
+            from routing_diagnostics import (fanout_dropped_ball_hint,
+                                             condense_hint as _ch652)
+            _h652, _v652 = fanout_dropped_ball_hint(
+                pcb_data, config, victim_id, victim_name,
+                return_verdict=True)
+            if _h652:
+                _c652 = _ch652(_h652)
+                if _c652:
+                    print(f"    {_c652}")
+                record_net_event(state, victim_id, "fanout_dropped", _v652)
+        except Exception:
+            pass
         return None, []
 
     nested_ripped = []

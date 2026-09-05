@@ -12,7 +12,7 @@ grid degenerates to the seed point only (n = int(max_disp/1000) = 0), which
 is skipped as the current pose, so ANY movement must come from the swap
 block. The final test runs the full optimizer on a real board and checks the
 headline #430 invariant: no returned part ends up further than
-max_displacement (+ grid snap slop) from where it started.
+max_displacement from where it started (exactly, since #708).
 """
 
 import math
@@ -182,8 +182,8 @@ def test_swap_cap_validation():
 
 def test_no_stranding_after_full_run():
     """Headline #430 invariant on a real board: a full quench run (nudges,
-    rotations AND swaps) leaves every reported part within max_displacement
-    (plus the grid_step snap slop) of its input position."""
+    rotations AND swaps) leaves every reported part within max_displacement of
+    its input position -- EXACTLY, with no snap slop, since #708."""
     pcb = parse_kicad_pcb(INTERF_U)
     orig = {ref: (fp.x, fp.y) for ref, fp in pcb.footprints.items()}
     max_disp = 3.0
@@ -194,9 +194,14 @@ def test_no_stranding_after_full_run():
         ref = placement['reference']
         ox, oy = orig[ref]
         dist = math.hypot(placement['new_x'] - ox, placement['new_y'] - oy)
-        # 0.1 = default grid_step: candidate positions snap to the grid, so a
-        # radius-capped candidate can end up at most one snap past the cap.
-        assert dist <= max_disp + 0.1 + 1e-6, \
+        # EXACT, with no snap slop, since #708. The old bound was
+        # `max_disp + 0.1` because `_candidate_positions` tested the radius on
+        # the UNSNAPPED candidate and snapped afterwards, so a final pose could
+        # sit up to grid_step*sqrt(2)/2 past the cap. It now snaps the offset
+        # first and tests the radius on that, so the cap is the cap. Measured
+        # on this fixture: the largest displacement is 2.8575mm -- 9 x 0.3175,
+        # the board's own lattice -- against a 3.0mm cap.
+        assert dist <= max_disp + 1e-6, \
             f"{ref} stranded {dist:.3f}mm from seed (cap {max_disp}mm)"
 
 

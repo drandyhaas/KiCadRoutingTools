@@ -45,7 +45,8 @@ from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
 from placement.legality import (BoardOutlineGate, PadClearanceModel, PadFloor,
                                 _pad_carries_copper, format_required_clause,
-                                point_to_seg_dist, rect_gap, ring_is_rect,
+                                pad_half_extents, point_to_seg_dist,
+                                rect_gap, ring_is_rect,
                                 rotate_local_bounds)
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
@@ -644,11 +645,7 @@ class _Cap:
                 continue  # paste/mask-only aperture, not copper
             off_x = p.global_x - fp.x
             off_y = p.global_y - fp.y
-            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-            c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
-            hx, hy = p.size_x / 2, p.size_y / 2
-            half_x = hx * c + hy * s
-            half_y = hx * s + hy * c
+            half_x, half_y = pad_half_extents(p)
             self.pads.append((off_x, off_y, half_x, half_y, p.net_id))
             # The GEOMETRY filter above stays loose on purpose (see the
             # comment), but a FLOOR must not: PadClearanceModel.pad_floor
@@ -765,17 +762,39 @@ class _Cap:
 
 
 def _candidate_positions(cap, max_disp, step, grid_step):
+    """Candidate cap centres, snapped on the OFFSET rather than the position.
+
+    Same #708 correction as `quench._candidate_positions`: snapping
+    `cap.seed_x + ix*step` to a lattice through board ORIGIN discards the
+    seed's residue and walks the part off whatever pitch the board was laid out
+    on, for nothing -- at every step this tool ships, the absolute snap removed
+    zero candidates.
+
+    Unlike quench, this site keeps the `grid_step` RASTER rather than the
+    board's inferred lattice, and that asymmetry is deliberate and measured.
+    This search IS the clearance repair: its whole job is to find the
+    sub-millimetre pose that clears a foreign via. At `step=0.2` the candidate
+    count is 81 on the raster, 29 on a 0.3175mm lattice and 9 on 0.635 -- so a
+    coarse lattice would starve exactly the search that must not be starved,
+    and the #313 nudge downstream of it relocates VIAS inside a 0.6mm budget --
+    a fraction of a millimetre, which a 1.27 lattice could not express at all.
+
+    The radius test now runs AFTER the snap, so `max_disp` is an exact cap. The
+    `grid_step*sqrt(2)/2` overshoot the via- and track-prune margins budget for
+    (see `_prune_vias` and the track channel note) is therefore gone rather
+    than merely bounded; both margins gain that much slack.
+    """
     seen = set()
     out = []
     n = int(max_disp / step)
     for ix in range(-n, n + 1):
         for iy in range(-n, n + 1):
-            cx = cap.seed_x + ix * step
-            cy = cap.seed_y + iy * step
-            if math.hypot(cx - cap.seed_x, cy - cap.seed_y) > max_disp + 1e-9:
+            dx = snap_to_grid(ix * step, grid_step)
+            dy = snap_to_grid(iy * step, grid_step)
+            if math.hypot(dx, dy) > max_disp + 1e-9:
                 continue
-            cx = snap_to_grid(cx, grid_step)
-            cy = snap_to_grid(cy, grid_step)
+            cx = cap.seed_x + dx
+            cy = cap.seed_y + dy
             key = (round(cx, 4), round(cy, 4))
             if key not in seen:
                 seen.add(key)
@@ -1159,8 +1178,15 @@ class _Repair:
             # test and wrongly exclude it from placement (#130).
             n_copper = sum(1 for p in fp.pads
                            if any(str(l).endswith('.Cu') for l in p.layers))
+            # #829: a cap that draws the board's own outline is not movable
+            # either. This gate is INDEPENDENT of free_refs and QuenchState --
+            # it is its own movable set, and its moves reach disk through
+            # place_fanout_clearance.py and the live board through
+            # fanout_gui.py -- so the rule has to be repeated here or it does
+            # not apply on this path at all.
             is_cap = (ref.startswith(self._cap_prefixes) and n_copper <= 2
-                      and ref not in locked)
+                      and ref not in locked
+                      and not getattr(fp, 'owns_board_outline', False))
             if is_cap:
                 cap = _Cap(fp, lb, self._floors, self._all_cu_ordered)
                 if self._near_any(cap.rect(), bga_bboxes, near_margin):
@@ -1221,11 +1247,7 @@ class _Repair:
                 through = (p.drill or 0) > 0
                 pside = None if through else (
                     'B' if any(str(l).startswith('B') for l in copper) else 'F')
-                tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-                c, s = abs(math.cos(tilt)), abs(math.sin(tilt))
-                hx, hy = p.size_x / 2, p.size_y / 2
-                half_x = hx * c + hy * s
-                half_y = hx * s + hy * c
+                half_x, half_y = pad_half_extents(p)
                 self.foreign_pads.append(
                     (p.global_x - half_x, p.global_y - half_y,
                      p.global_x + half_x, p.global_y + half_y,
@@ -3137,10 +3159,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # by (sqrt(2)-1)*half along the board axes -- 0.14mm on glasgow's
             # 45-degree R9. Converting the clearance term and leaving the shape
             # would be exactly the half-conversion this change is about.
-            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
-            _c, _s = abs(math.cos(tilt)), abs(math.sin(tilt))
-            _hx, _hy = p.size_x / 2.0, p.size_y / 2.0
-            ex, ey = _hx * _c + _hy * _s, _hx * _s + _hy * _c
+            ex, ey = pad_half_extents(p)
             rect = (p.global_x - ex, p.global_y - ey,
                     p.global_x + ex, p.global_y + ey)
             # Graded at the pair's REAL requirement, like everything else.

@@ -1035,10 +1035,16 @@ def _min_via_center_distance(config):
     so a pair placed to the copper rule ships 0.088mm inside the fab's drill
     spacing -- legal copper, unmanufacturable holes. The router READ the board
     constraint correctly and then never applied it to via placement.
+
+    The rule itself now lives in `fab_tiers.min_via_center_distance`, so the
+    placement escape ledger can price a via slot by the SAME arithmetic without
+    importing this module (which drags in grid_router, numpy and the parser).
+    This stays as the config-shaped adapter its three callers already use.
     """
-    return max(config.via_size + config.clearance,
-               config.via_drill
-               + (getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0))
+    from fab_tiers import min_via_center_distance
+    return min_via_center_distance(
+        config.via_size, config.clearance, config.via_drill,
+        getattr(config, 'hole_to_hole_clearance', 0.0))
 
 
 def _pair_via_offset(config, spacing_mm):
@@ -2252,10 +2258,13 @@ def _try_route_direction(src, tgt, pcb_data, config, obstacles, base_obstacles,
             obstacles.clear_source_target_cells()
 
         # Add allowed cells around source and target
-        for dx in range(-allow_radius, allow_radius + 1):
-            for dy in range(-allow_radius, allow_radius + 1):
-                obstacles.add_allowed_cell(s_gx + dx, s_gy + dy)
-                obstacles.add_allowed_cell(t_gx + dx, t_gy + dy)
+        # #800: two crossings instead of 2*(2r+1)^2. The two blocks were
+        # interleaved cell-by-cell; `allowed_cells` is a SET, so emitting one
+        # block then the other admits the identical set.
+        obstacles.add_allowed_rect(s_gx - allow_radius, s_gy - allow_radius,
+                                   s_gx + allow_radius, s_gy + allow_radius)
+        obstacles.add_allowed_rect(t_gx - allow_radius, t_gy - allow_radius,
+                                   t_gx + allow_radius, t_gy + allow_radius)
         obstacles.add_source_target_cell(s_gx, s_gy, src_layer)
         obstacles.add_source_target_cell(t_gx, t_gy, tgt_layer)
 
@@ -2542,8 +2551,8 @@ def _connector_grazes_foreign_copper(new_segments, pcb_data, p_net_id, n_net_id,
                 continue  # the connector legitimately lands on its own-net pad
             pclr = _obs_clr(pad_net, seg.layer)
             for pad in pads:
-                # per-pad override (#326) wins where larger (keep-clear rings etc.)
-                pc = max(pclr, getattr(pad, 'local_clearance', 0.0) or 0.0)
+                # per-pad override (#326) REPLACES the pair value (KiCad, measured)
+                pc = config.pad_override_clearance(pclr, pad)
                 # Coarse bounding-box reject before the exact rect-distance test.
                 pm = pc + seg.width / 2 + max(pad.size_x, pad.size_y) / 2
                 if (pad.global_x < sxmin - pm or pad.global_x > sxmax + pm or
@@ -2908,10 +2917,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         tgt_thetas = _theta_options(tgt_ex, tgt_ey, _slx, _sly, arrival=True)
         obstacles.clear_allowed_cells()
         obstacles.clear_source_target_cells()
-        for ox in range(-2, 3):
-            for oy in range(-2, 3):
-                obstacles.add_allowed_cell(s_gx + ox, s_gy + oy)
-                obstacles.add_allowed_cell(t_gx + ox, t_gy + oy)
+        obstacles.add_allowed_rect(s_gx - 2, s_gy - 2, s_gx + 2, s_gy + 2)  # #800
+        obstacles.add_allowed_rect(t_gx - 2, t_gy - 2, t_gx + 2, t_gy + 2)  # #800
         obstacles.add_source_target_cell(s_gx, s_gy, a_layer)
         obstacles.add_source_target_cell(t_gx, t_gy, b_layer)
         # Middle angle selection (issue #244). The straight src->tgt line is the

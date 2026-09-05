@@ -50,8 +50,10 @@ def main():
                 fails.append("seed: Default net class clearance not 0.15")
             if "priority" not in (default or {}):
                 fails.append("seed: created Default class is not complete")
-            if p["board"]["design_settings"]["rule_severities"].get("starved_thermal") != "warning":
-                fails.append("seed: starved_thermal not demoted to warning")
+            # #856: a routing step never touches severities unless asked.
+            if p["board"]["design_settings"]["rule_severities"].get("starved_thermal") is not None:
+                fails.append("seed: starved_thermal severity was written without "
+                             "--relax-drc-severities")
         if _md5(out) != md5_before:
             fails.append("seed: the .kicad_pcb was modified")
 

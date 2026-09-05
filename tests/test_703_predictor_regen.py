@@ -64,48 +64,161 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #: and no statistic is computed from them; they are a change detector.
 #:
 #: MEASURED, from the run recorded in the pull request. Never predicted.
+#:
+#: RE-RECORDED 2026-09-03 (#530 decision 3). `truth.quality` moved on the three
+#: esp_prog rows and the cause is named: a pad clearance OVERRIDE now REPLACES
+#: the class value (KiCad 10, measured by tests/oracle/constraint_agreement.py)
+#: instead of max()-ing with it, and esp_prog carries 13 pads at a 0.0508 mm
+#: override -- so the router prices those pads as KiCad does and lays different
+#: copper past them. `truth.blocking` is 0 on all three, as before; it had read
+#: 49/25/34 for one commit because the writeback then stamped rules.min_clearance
+#: 0.2193 into the project and KiCad floors an override at min_clearance (the
+#: writeback now caps min_clearance at the smallest honoured override).
+#:
+#:   esp_prog:authored            vias 31 -> 33, copper 336.35 -> 345.52, segs 236 -> 373
+#:   esp_prog:perturb-scatter-d1  vias 38 -> 29, copper 377.83 -> 341.07, segs 286 -> 288
+#:   esp_prog:portfolio-1         vias 37 -> 32, copper 319.41 -> 347.03, segs 260 -> 270
+#:   splitflap_driver:authored    -- unchanged (no overrides on that board)
+#:
+#: RE-RECORDED 2026-08-30 (second time this day). `truth.quality` moved on TWO
+#: of the four rows, and the cause is named rather than assumed: #816's
+#: `GRID_TIE_EPS`, which resolves a keep-out boundary cell OPEN instead of
+#: letting float rounding decide it. esp_prog's geometry sits on such a tie
+#: (track 0.2/2 + clearance 0.2 = 0.3 = 3 x a 0.1 grid), so the router gets a
+#: slightly different -- and now position-INDEPENDENT -- set of legal cells.
+#:
+#:   esp_prog:authored     vias 28 -> 31, copper 320.71 -> 336.35, segs 229 -> 236
+#:   esp_prog:portfolio-1  vias 30 -> 28, copper 303.26 -> 299.93, segs 252 -> 231
+#:   esp_prog:perturb-scatter-d1, splitflap_driver:authored  -- unchanged
+#:
+#: The direction is MIXED (one worse, one better, two flat) and `truth.blocking`
+#: is unchanged on all four -- no net became unrouted or broken. That is what a
+#: boundary-convention change should look like: it perturbs which cells are
+#: legal without making the board harder to route. Recorded here rather than
+#: smoothed over, because "quality moved both ways by a few vias" is the finding.
+#:
+#: PREVIOUS RE-RECORD, same day:
+#: RE-RECORDED 2026-08-30. `truth.quality` moved on all four rows; both causes
+#: were BISECTED before re-recording, because a baseline re-recorded without a
+#: named cause hides whatever moved it:
+#:
+#:   * vias / copper_mm -- `99196134` (#805, "commit the #189 unblock via to
+#:     pcb_data when it is kept"). The unblock barrel was never appended to
+#:     pcb_data, so for the whole window before its deferred multipoint result
+#:     committed it blocked nobody; committing it makes it block, which changes
+#:     what routes. esp_prog:authored 30 vias / 342.83 mm -> 28 / 320.71, i.e.
+#:     FEWER vias and LESS copper -- better on this repo's own tie-break.
+#:   * segments -- `661c88b3` (#811, the collinear merge). It is exactly
+#:     copper-preserving in a single route call (measured bit-identical on two
+#:     boards), so on its own it moves ONLY this column.
+#:
+#: One second-order effect is worth recording rather than rounding away: the
+#: merge changes how copper is SEGMENTED, which changes rip/restore granularity
+#: for later steps of a multi-step chain, so end-to-end copper can shift a
+#: hair. Isolated on esp_prog:authored with only KICAD_MERGE_COLLINEAR toggled:
+#: 320.69 -> 320.71 mm (+0.006%), segments 241 -> 229, vias unchanged. That is
+#: why the copper column moved on rows where the merge is the only new input.
+#: RE-RECORDED for #726 (the parser stops losing a footprint block whose
+#: reference another block already claims). esp_prog carries TWO blocks named
+#: `Ref*` and only the second was parsed, so this board measured as 20 parts
+#: where the file has 21. All THREE esp_prog rows moved and
+#: `splitflap_driver:authored` did not -- which is the signature to check
+#: before believing any of this: splitflap has no duplicate reference, so a
+#: change that moved it too would be a different change.
+#:
+#: `provenance.poses_sha256` moves on all three by construction: the pose set
+#: it hashes gained a part. Two of the deltas are worth reading rather than
+#: rounding away:
+#:
+#:   * `esp_prog:authored` -- `pad_clearance_pairs` 0 -> 1. The #697 census now
+#:     reaches a part it was structurally blind to; that pair was always there.
+#:     `truth` is unchanged (headline 0, vias 31, copper 336.35, segs 236), so
+#:     the ROUTE is identical and only the census sees more.
+#:   * `esp_prog:portfolio-1` -- `truth.headline` 3 -> 0. The quench candidate
+#:     that used to route to blocking 3 now routes clean. The header's
+#:     commentary about this row being "the study's headline in miniature"
+#:     (23 crossings against the authored board's 53, routing WORSE) no longer
+#:     holds for the blocking half, and is left standing above with this
+#:     correction rather than quietly edited.
+#:
 EXPECTED = {
     'esp_prog:authored': dict(
-        poses_sha256='439485f758347d1929cde06f8ab34ce7c6e6e2174df5d85be98d48afbde51783',
+        poses_sha256='67a9712d200814442b4a25cf1fa8ccd075c1968d5b08c0ad58c4662f0a479da7',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=8.2,
         truth={'headline': 0,
-               'quality': {'vias': 30, 'copper_mm': 342.83, 'segments': 247}},
+               # re-recorded 2026-09-03 with the #530 defaults --fab-tier auto /
+               # --escalation fab (the pre-#857 ladder): 33/345.52/373 -> 39/353.93/256
+               'quality': {'vias': 39, 'copper_mm': 353.93, 'segments': 256}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
-            'halo': 125.4377644075392, 'overlap_area': 1.1400451712000104,
-            'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 16.612682999999876, 'total': 914.1253439875175,
+            'halo': 127.48707486477095, 'overlap_area': 1.1400451712000104,
+            'pad_copper': 0, 'pad_clearance_pairs': 1,
+            'edge': 16.612682999999876, 'total': 916.1746544447492,
             'oob_count': 0,
         }),
     'esp_prog:perturb-scatter-d1': dict(
-        poses_sha256='f58b7226eee4c4826a6430d1c972deb2cab1daf05ec2a17b1b7d56c9f88c4bdc',
+        poses_sha256='ce4d5a3803cfcf56d4ab3cfbf4f1be3ffd61242a1be78ef4ce2cae110dc96eca',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=11.2,
         truth={'headline': 0,
-               'quality': {'vias': 36, 'copper_mm': 340.87, 'segments': 282}},
+               # re-recorded 2026-09-03 (auto/fab defaults): 29/341.07/288 -> 32/327.31/282
+               'quality': {'vias': 32, 'copper_mm': 327.31, 'segments': 282}},
         predictors={
-            'crossings': 56, 'hpwl': 253.13733999999994,
-            'halo': 132.15233459554824, 'overlap_area': 1.1400451712000104,
+            'crossings': 50, 'hpwl': 252.34828000000005,
+            'halo': 130.46454030971682, 'overlap_area': 1.1400451712000104,
             'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 15.019439919999892, 'total': 948.3549654632784,
+            'edge': 16.498992539999946, 'total': 887.3384166729421,
             'oob_count': 0,
         }),
     # The quench candidate, kept because it is the study's own headline in
     # miniature: this placement scores 23 crossings against the authored
     # board's 53 -- the best on the slate -- and routes to blocking 3 where the
     # authored board routes to 0.
+    # RE-RECORDED AGAIN for #826 (the portfolio jitter now snaps its offset to
+    # the board's lattice). Second consecutive re-record of this row, and both
+    # times for the same reason: it is the detector the header describes, and
+    # it fired. esp_prog is authored on 0.05mm; the jitter used to hand the
+    # quench a seed board at 0.525 occupancy -- below the inference floor --
+    # and now hands it one at 0.825, so this candidate's poses genuinely
+    # differ. Reproduced twice.
+    #
+    # What did NOT move, which is why the commentary below still stands:
+    # `truth.headline` is still 3 and `predictors.crossings` is still 23. The
+    # routed board is marginally worse this time -- vias 23 -> 25, copper
+    # 263.91 -> 264.89mm, segments 203 -> 207 -- at the same blocking. That is
+    # a different placement, not a better or worse fix; the escape landed
+    # somewhere else.
+    #
+    # `esp_prog:perturb-scatter-d1` deliberately did NOT move: `perturb.py`'s
+    # scatter kind calls perturb_jitter positionally and keeps the continuous
+    # sampler, so its damage model is untouched. That row regenerating
+    # identically is the evidence for it.
+    #
+    # RE-RECORDED for #708 (the seed-relative candidate snap). This row is the
+    # detector the header describes -- "a change to the placement engine ...
+    # silently moving the numbers the study measured" -- and it fired, which is
+    # it working. The quench now offers candidates on the board's own lattice,
+    # so this candidate's poses genuinely differ; `poses_sha256`, the four
+    # geometry predictors and the routed `quality` moved with them, and the
+    # values below are from the run, reproduced twice.
+    #
+    # What did NOT move, and is why the commentary above still stands:
+    # `truth.headline` is still 3 and `predictors.crossings` is still 23. The
+    # routed board is in fact slightly better -- vias 28 -> 23, copper
+    # 299.93 -> 263.91mm, segments 231 -> 203 -- at the same blocking.
     'esp_prog:portfolio-1': dict(
-        poses_sha256='4c299873cd66c843dc6b27fcadf99c9782a7e7e1a3b51328a5b5cee9ca6593d8',
+        poses_sha256='d1290d938a770bb17f2c6a4869b8224eb30aeba6bb37e11c2ae2f3c6c042695b',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=23.8,
-        truth={'headline': 3,
-               'quality': {'vias': 30, 'copper_mm': 303.26, 'segments': 270}},
+        seconds=9.5,
+        truth={'headline': 0,
+               # re-recorded 2026-09-03 (auto/fab defaults): 32/347.03/270 -> 31/341.99/263
+               'quality': {'vias': 31, 'copper_mm': 341.99, 'segments': 263}},
         predictors={
-            'crossings': 23, 'hpwl': 236.74883999999992,
-            'halo': 113.8065780241933, 'overlap_area': 1.0,
+            'crossings': 23, 'hpwl': 260.0687799999999,
+            'halo': 101.01900525631262, 'overlap_area': 1.0,
             'pad_copper': 0, 'pad_clearance_pairs': 0,
-            'edge': 11.574407139199987, 'total': 582.4219077763819,
+            'edge': 21.49349600000009, 'total': 605.1074633433927,
             'oob_count': 0,
         }),
     # A SECOND board, so a change that only moves one board's numbers cannot
@@ -117,7 +230,7 @@ EXPECTED = {
         seconds=32.6,
         truth={'headline': 0,
                'quality': {'vias': 168, 'copper_mm': 2915.15,
-                           'segments': 1437}},
+                           'segments': 1422}},
         predictors={
             'crossings': 300, 'hpwl': 2504.4400000000014,
             'halo': 297.4273114820511, 'overlap_area': 1.7621459846850488e-13,

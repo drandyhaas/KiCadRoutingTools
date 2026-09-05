@@ -465,6 +465,50 @@ def predictors_for(board_path):
         if fnd.get('courtyard_census_error'):
             gaps.append(f'legality.courtyard_census_error='
                         f'{fnd["courtyard_census_error"]}')
+
+    # The pocket census (#709). SEPARATE from the placement model on purpose:
+    # it is the aggregate question -- how much of the board is EMPTY, and does
+    # the part mass sit where the demand does -- which the per-part legality
+    # checklist structurally does not ask.
+    #
+    # #703's comment set the bar and it is the right one: this family has to
+    # earn its place against legality counts already at median rho +0.785 on
+    # 6/6 boards. Adding the columns is what makes that answerable by the
+    # per-board sign test instead of by argument.
+    #
+    # On the CHOICE of scalars: the hot ranking is the weaker candidate, not
+    # because of any measurement I can point at -- `rank_stats` asserts an
+    # empty ranked list on three of five boards but names none of them, and at
+    # HEAD the ranked list is NON-empty on all 8 study/calibration boards
+    # (esp_prog 15 rows, glasgow_revC 242) -- but because it is bounded below
+    # by the >= 2-net rule and can empty out, where the cold scalars are
+    # defined on every board. That is the honest form of the argument.
+    #
+    # A failure is recorded as a gap with its exception and every key stays
+    # None -- never a number. Computed into a LOCAL and assigned only once the
+    # whole block has succeeded, because a partial failure that had already
+    # written two of four keys shipped real-looking values from a census that
+    # did not finish, and `board_rho` drops only None/NaN.
+    try:
+        import check_pockets as _cp
+        _doc, _hot = _cp.pocket_census(pcb, board_path)
+        _sc = _cp.census_scalars(_doc)
+        _pock = {
+            'cold_area_frac': _sc.get('cold_area_frac'),
+            'cold_regions': _sc.get('cold_regions'),
+            'cold_top_area_mm2': _sc.get('cold_top_area_mm2'),
+            # The MAGNITUDE, not the X term: the study's own `translate` and
+            # `wrong_side` damage kinds move mass in Y, and an X-only column
+            # is blind to them. Measured on esp_prog, translating every
+            # footprint +10mm in Y leaves the X term at 0.0127 while the Y
+            # term goes 0.0581 -> 0.7478.
+            'centroid_offset_frac': _sc.get('centroid_offset_frac'),
+        }
+    except Exception as e:                                      # noqa: BLE001
+        gaps.append(f'pockets:{type(e).__name__}: {e}')
+    else:
+        pred.update(_pock)
+
     for k, v in list(pred.items()):
         if v is None and f'metrics.{k}' not in gaps:
             gaps.append(f'predictor.{k}')

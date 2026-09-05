@@ -176,19 +176,28 @@ Examples:
                         "the ranking: island count before hpwl, neck sum "
                         "after it. A bare NET pours the last copper layer. "
                         "Needs KiCad python; see plane_score.py")
-    p.add_argument("--plane-score-budget", type=float, default=300.0,
-                   help="total seconds for --plane-score across all "
-                        "candidates; on overrun the plane terms are "
-                        "annotated but EXCLUDED from the ranking "
-                        "(default: 300)")
+    # NO --plane-score-budget. It was a 300 s wall clock over all candidates
+    # and, on overrun, it stripped the plane terms from the rank key for EVERY
+    # candidate -- so the same board on a slower machine ranked on a different
+    # key set and could promote a different winner, and could probe-route a
+    # different set of boards as a consequence. #621 deleted every wall-clock
+    # budget in the repo on that rule; this was the survivor. The work is
+    # bounded by --candidates, a COUNT, which is the whole of the bound it
+    # needed (#713 item 1).
     p.add_argument("--full-probe", action="store_true",
                    help="After the shared-window probe, route the WHOLE "
                         "board on the baseline + the window winner; that "
                         "verdict outranks the window one (a candidate can "
                         "win its window while losing the board). Costs two "
                         "extra full routes.")
-    p.add_argument("--route-timeout", type=float, default=900,
-                   help="Seconds per probe route (default: 900)")
+    # NO --route-timeout. It wrapped each probe in subprocess.run(timeout=900)
+    # and recorded the expiry as `failures: None`, which the ranking below then
+    # DROPPED -- so a clock did not rank a candidate worse, it stopped it being
+    # a contender, and a total expiry silently downgraded the run to the static
+    # crossings/hpwl ranking with no error and no exit-code change. route.py
+    # has no self-budget by design (#621) and place_route_loop already calls it
+    # unbounded. The bound is SCOPE -- --nets, which the probe already passes
+    # (#713 item 2).
     # Presentation & provenance
     p.add_argument("--no-render", action="store_true",
                    help="Skip the per-candidate PNGs")
@@ -268,18 +277,8 @@ def _affected_nets(pcb_data, cands, ignore_ids):
 
 def _probe(board, nets, args):
     """One probe route; returns the JSON-safe verdict row."""
-    from converge import scoped_route, route_verdict
-    try:
-        res = scoped_route(board, nets, extra_args=args.route_args or [],
-                           timeout=args.route_timeout)
-    except subprocess.TimeoutExpired:
-        return {'failures': None, 'note': f'timeout after {args.route_timeout}s',
-                'iterations': None, 'nets': len(nets)}
-    n, note = route_verdict(res['summary'])
-    return {'failures': n, 'note': note,
-            'iterations': res['summary'].get('total_iterations'),
-            'vias': res['summary'].get('total_vias'), 'nets': len(nets),
-            'returncode': res['returncode']}
+    from converge import probe_route
+    return probe_route(board, nets, extra_args=args.route_args or [])
 
 
 def _render(board, before, out_png, ignore_nets):
@@ -470,44 +469,105 @@ def main():
     # Pour the declared plane nets on a scratch copy of every board (KiCad
     # refill, the #424 exact-fill truth) and fold the result into the rank:
     # island count before hpwl, neck sum after it (see portfolio.rank_key).
-    # All-or-nothing: partial coverage would rank scored candidates against
-    # unscored ones, so on budget overrun / no KiCad python the flat rank
-    # keys are stripped and only the annotation (metrics['plane']) survives.
+    #
+    # ALL-OR-NOTHING, and it has to be: `rank_key` reads the two terms as
+    # `m.get('plane_islands', 0)` / `m.get('plane_neck', 0.0)`, and 0 is the
+    # OPTIMUM of both -- so a per-candidate strip would hand every unscored
+    # candidate a perfect plane score and float it above every scored one.
+    #
+    # What CHANGED in #713 item 1 is not the strip but what may trigger it.
+    # There used to be a `--plane-score-budget` (300 s over all candidates):
+    # on overrun the loop broke and stripped, so the same board on a slower
+    # machine ranked on a different key set and could promote a different
+    # winner. The flag is gone. The work is bounded by a COUNT already --
+    # `contenders` is at most `--candidates`, one refill each -- which is the
+    # repo's rule since #621: bound by scope, never by a clock.
+    #
+    # The remaining causes are split by `PlaneScoreStatus.uniform`, because
+    # they are not the same kind of fact:
+    #   uniform     the board has no bounds, none of the named nets exists,
+    #               this machine has no pcbnew. Identical for every candidate,
+    #               so the strip is FAIR and the run continues, ranking on the
+    #               flag-off key set exactly as if --plane-score were absent.
+    #   non-uniform a timeout, a failed refill, an empty pour. These can
+    #               strike candidate 7 and spare candidate 1, so a strip means
+    #               "this run's ranking depended on which candidates happened
+    #               to score" -- which is the defect, one layer up. --plane-
+    #               score is a DEMAND, so the run REFUSES rather than quietly
+    #               ranking on a different key set (plane_score.py's own
+    #               documented contract: "exits 3 when unavailable rather than
+    #               guessing").
+    plane_status = None
     if args.plane_score:
-        import time as _time
-        from plane_score import parse_plane_specs, plane_fragility_score
+        from plane_score import parse_plane_specs, plane_fragility_score_ex
         specs = parse_plane_specs(
             args.plane_score,
             list(pcb.board_info.copper_layers or ['F.Cu', 'B.Cu']))
-        contenders = [baseline] + [c for c in cands if c.board]
-        t0 = _time.time()
-        incomplete = False
+        # `c.viable`, not `c.board`: rank_static only ranks viable candidates,
+        # so a candidate that failed its hard gates was paying a full pcbnew
+        # refill for a rank slot it can never occupy. --plane-score's own help
+        # text has always said "every viable candidate"; the code said
+        # otherwise.
+        contenders = [baseline] + [c for c in cands if c.viable]
+        scored = 0
+        bad = None
         for c in contenders:
-            spent = _time.time() - t0
-            if spent > args.plane_score_budget:
-                print(f"[plane] budget {args.plane_score_budget:.0f}s "
-                      f"exhausted before cand {c.index} -- plane terms "
-                      f"EXCLUDED from ranking (partial coverage ranks "
-                      f"unfairly); annotations kept")
-                incomplete = True
-                break
-            sc = plane_fragility_score(c.board, specs,
-                                       grid_step=args.grid_step)
+            sc, st = plane_fragility_score_ex(c.board, specs,
+                                              grid_step=args.grid_step)
             if sc is None:
-                print("[plane] refill unavailable (KiCad python not found, "
-                      "or no named net) -- plane scoring skipped")
-                incomplete = True
+                bad = (c, st)
                 break
             c.metrics['plane'] = sc
             c.metrics['plane_islands'] = sc['islands']
             c.metrics['plane_neck'] = sc['neck_sum']
+            scored += 1
             who = 'baseline' if c.index == 0 else f'cand {c.index}'
             print(f"[plane] {who}: islands={sc['islands']} "
                   f"neck={sc['neck_sum']}mm-eq")
-        if incomplete:
-            for c in contenders:
-                c.metrics.pop('plane_islands', None)
-                c.metrics.pop('plane_neck', None)
+        if bad is not None:
+            c, st = bad
+            who = 'baseline' if c.index == 0 else f'cand {c.index}'
+            for other in contenders:
+                other.metrics.pop('plane_islands', None)
+                other.metrics.pop('plane_neck', None)
+            plane_status = {'status': 'refused' if not st.uniform else
+                            'unavailable',
+                            'reason': st.reason, 'why': st.why(),
+                            'at': c.index, 'scored': scored,
+                            'of': len(contenders)}
+            if st.uniform:
+                print(f"[plane] {st.why()} -- plane scoring unavailable on "
+                      f"this board/machine; ranking without the plane terms, "
+                      f"exactly as an un-flagged run would")
+            else:
+                print(f"[plane] REFUSING to rank: {st.why()}, at {who} "
+                      f"({scored} of {len(contenders)} scored).\n"
+                      f"        This cause can strike one candidate and spare "
+                      f"another, so dropping the plane terms would make the "
+                      f"winner depend on which candidates happened to score.\n"
+                      f"        --plane-score is a demand: fix the cause, or "
+                      f"drop the flag to rank without plane terms.",
+                      file=sys.stderr)
+                # `complete: false` is the repo's existing disclosure for a run
+                # whose tallies are not a whole-board result (route_summary.py,
+                # refused on by place_route_loop). A refusal emits one rather
+                # than inventing a second channel.
+                print("JSON_SUMMARY: " + json.dumps(
+                    {'candidates': len(cands) + 1, 'complete': False,
+                     'status': 'plane_score_refused',
+                     'plane_score': plane_status,
+                     'out_dir': args.out_dir}, sort_keys=True))
+                return 3
+        else:
+            # SAME KEY SET as the failure shapes below. The first draft gave
+            # the ok arm only {status, reason, scored, of}, so a consumer
+            # reading plane_score['why'] got a KeyError on the happy path --
+            # in a change whose headline is that a probe row's keys must not
+            # depend on its outcome.
+            plane_status = {'status': 'ok', 'reason': 'ok',
+                            'why': 'every contender scored',
+                            'at': None,
+                            'scored': scored, 'of': len(contenders)}
 
     # Rule 1 of the acceptance conjunction, K-way (run-7 S6): annotate every
     # candidate whose crossings/hpwl are WORSE than the baseline row.
@@ -587,14 +647,28 @@ def main():
                     base_rat, {'crossings': c.metrics.get('crossings'),
                                'hpwl': c.metrics.get('hpwl')}, 25.0)
                 if skip:
-                    c.route = {'failures': None, 'iterations': None,
-                               'note': f'route skipped: {note}'}
+                    from converge import screened_row
+                    c.route = screened_row(nets, f'route skipped: {note}')
+                    c.route['probe_kind'] = window_kind
                     print(f"[probe] cand {c.index}: skipped ({note})")
                     continue
                 c.route = _probe(c.board, nets, args)
                 c.route['probe_kind'] = window_kind
                 print(f"[probe] cand {c.index}: failures="
                       f"{c.route['failures']} ({c.route['note']})")
+            # A candidate with no verdict is still DROPPED from the routed
+            # ranking -- but the causes are named now, and a route.py crash is
+            # reported rather than looking like a deliberate skip. `screened`
+            # is the one absence that is a decision rather than a failure.
+            _no_verdict = [c for c in [baseline] + probe_cands
+                           if c.route and c.route.get('failures') is None
+                           and c.route.get('status') != 'screened']
+            for c in _no_verdict:
+                who = 'baseline' if c.index == 0 else f'cand {c.index}'
+                print(f"[probe] WARNING {who} produced NO VERDICT "
+                      f"({c.route.get('status')}: {c.route.get('note')}) -- "
+                      f"it is excluded from the routed ranking, so the winner "
+                      f"is decided without it", file=sys.stderr)
             probed = [c for c in [baseline] + probe_cands
                       if c.route and c.route.get('failures') is not None]
             static_pos = {idx: k for k, idx in
@@ -623,8 +697,25 @@ def main():
             who = 'baseline' if c.index == 0 else f'cand {c.index}'
             print(f"[probe/full] {who}: failures={c.route_full['failures']} "
                   f"({c.route_full['note']})")
+        # The full probe is the tier that OUTRANKS the window one, so losing a
+        # verdict here is worse than losing one there: if both drop,
+        # `ranking_primary = ranking_full or ranking_routed` falls back to the
+        # very ranking the full probe existed to overrule, silently. The first
+        # draft warned on the window leg only.
+        for c in contenders:
+            if c.route_full and c.route_full.get('failures') is None:
+                who = 'baseline' if c.index == 0 else f'cand {c.index}'
+                print(f"[probe/full] WARNING {who} produced NO VERDICT "
+                      f"({c.route_full.get('status')}: "
+                      f"{c.route_full.get('note')}) -- excluded from the "
+                      f"FULL ranking, which outranks the window one",
+                      file=sys.stderr)
         probed_f = [c for c in contenders
                     if c.route_full and c.route_full.get('failures') is not None]
+        if not probed_f and contenders:
+            print("[probe/full] WARNING no full-board verdict at all -- the "
+                  "slate falls back to the WINDOW ranking, which this tier "
+                  "exists to overrule", file=sys.stderr)
         probed_f.sort(key=lambda c: (c.route_full['failures'],
                                      c.route_full.get('iterations') or 0,
                                      c.index))
@@ -691,6 +782,13 @@ def main():
            'rank_crossing_band': args.rank_crossing_band,
            'rank_band_q': band_q,
            'corridor_weight': args.corridor_weight,
+           # #826: which lattice the jitter offsets snapped to, and why. Without
+           # it a run cannot show whether the snap happened -- "the board kept
+           # its lattice" and "there was no lattice to snap to" would read the
+           # same, and the fix could ship inert with nothing saying so.
+           # `source` is 'inferred' or 'none'; `reason` carries the cause,
+           # including the radius guard.
+           'jitter_lattice': result.get('jitter_lattice'),
            'baseline': baseline.to_dict(),
            'candidates': [c.to_dict() for c in cands],
            'ranking_static': ranking_static,
@@ -728,6 +826,11 @@ def main():
         'baseline_crossings': baseline.metrics.get('crossings'),
         'best_hpwl': best_c.metrics.get('hpwl') if best_c else None,
         'baseline_hpwl': baseline.metrics.get('hpwl'),
+        # On the wire, because nothing recorded it before: a consumer reading
+        # portfolio.json could not tell "no --plane-score given" from
+        # "capability absent" from "the clock ran out" -- all three were
+        # candidates with no plane_islands key.
+        'plane_score': plane_status,
         'out_dir': args.out_dir}, sort_keys=True))
     return 0 if viable else 4
 

@@ -599,14 +599,17 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     the fab-floor ladder's smaller vias (shrink-to-fit, same spirit as #189's
     escalation); return the first that clears foreign copper mm-exactly, or
     None when nothing fits (caller keeps the registered size -- honest DRC)."""
-    from fab_tiers import fab_floor_ladder
+    from fab_tiers import escalation_rungs
     import routing_defaults as defaults
     clearance = config.clearance
     eps = defaults.UNBLOCK_REFIT_MARGIN_MM
     layers = [l for l in (pcb_data.board_info.copper_layers or []) if l.endswith('.Cu')]
     ncu = len(layers) or 2
     cands = [rec]
-    for f in fab_floor_ladder(ncu):
+    # escalation_rungs, not the ladder: empty under --escalation off, raised
+    # to the board's own minimums under board (#857) and the net's rule
+    # minimums (#530).
+    for f in escalation_rungs(ncu, extra_floors=config.rule_floors(net_id)):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
@@ -717,7 +720,9 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
     `floor` defaults to the board's fab track-width minimum (issue #176): necking
     to the grid step (0.05 mm) used to emit sub-fab-floor copper."""
     if floor is None:
-        floor = _fab_track_floor(pcb_data)
+        # #530: the fab floor raised to this net's own rule / board minimum.
+        floor = config.track_floor(net_id, None, _fab_track_floor(pcb_data)) \
+            if hasattr(config, 'track_floor') else _fab_track_floor(pcb_data)
     # #436: neck against the moving net's own class floor, folding each foreign
     # object's class excess, so a terminal grazing a wider (controlled-impedance)
     # neighbour necks to the pairwise max(classOwn, classForeign), not the flat
@@ -759,6 +764,14 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
                 continue
             new_w = max(floor, 2.0 * allowed_half)
             if new_w < s.width - 1e-9:
+                # --escalation off: a graze that only a narrower terminal can
+                # clear is a refusal, not narrower copper. It joins the hard
+                # list so the caller fails the route and reports it (#842).
+                from fab_tiers import may_narrow, note_narrowing
+                if not may_narrow():
+                    hard.append((s, d_raw))
+                    continue
+                note_narrowing(net_id, 'track_width', s.width, new_w, 'terminal neck')
                 s.width = round(new_w, 4)
                 necked += 1
     return necked, hard
@@ -1657,6 +1670,23 @@ def route_oracle_links(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
     return merged
 
 
+def _per_net_via_config(config: GridRouteConfig, pcb_data, net_id: int) -> GridRouteConfig:
+    """#530 decision 4: the config this net is searched and emitted with --
+    its own via geometry (config.net_via_sizes) and the obstacle map's
+    via-legality rung for that geometry (obstacle_cache.rung_for_net). The
+    run config is returned untouched for a net at the run's via."""
+    sizes = getattr(config, 'net_via_sizes', None)
+    if not sizes or net_id not in sizes:
+        return config
+    try:
+        from obstacle_cache import rung_for_net
+        d, h = sizes[net_id]
+        return replace(config, via_size=float(d), via_drill=float(h),
+                       via_rung=rung_for_net(config, pcb_data, net_id))
+    except Exception:                                          # noqa: BLE001
+        return config
+
+
 def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               obstacles: GridObstacleMap,
                               attraction_path: Optional[List[Tuple[int, int, int]]] = None,
@@ -1689,6 +1719,8 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 derivation then aims at two fragments of the same trunk while
                 the rescued island is dropped entirely.
     """
+    # #530 decision 4: this net's own via geometry + legality rung.
+    config = _per_net_via_config(config, pcb_data, net_id)
     # Find endpoints (segments or pads)
     if sources_override is not None and targets_override is not None:
         sources, targets, error = list(sources_override), list(targets_override), None
@@ -1803,10 +1835,13 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             hi_y = gy + allow_radius
             if hi_y > bounds[3]:
                 hi_y = bounds[3]
-        add_allowed = obstacles.add_allowed_cell
-        for ax in range(lo_x, hi_x + 1):
-            for ay in range(lo_y, hi_y + 1):
-                add_allowed(ax, ay)
+        # #800: ONE crossing for the whole clipped block. The ranges above are
+        # already the exact cell set the per-cell loop admitted, and
+        # add_allowed_rect is inclusive of both bounds and no-ops on an
+        # inverted range -- so a terminal clipped wholly outside `bounds`
+        # still adds nothing. 509,109,266 crossings per route on rp2350 became
+        # one per terminal.
+        obstacles.add_allowed_rect(lo_x, lo_y, hi_x, hi_y)
 
     # Mark exact source/target cells so routing can start/end there even if blocked by
     # adjacent track expansion (but NOT blocked by BGA zones - use allowed_cells for that)
@@ -2448,9 +2483,12 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     inflight_vias, inflight_segments = inflight_copper_dicts(pcb_data)
     ncu = len([l for l in layer_names if l.endswith('.Cu')]) or 2
     # Forced last-resort via sizes, largest first: the configured via, then the
-    # active fab-tier floor ladder (nominal floor, then any escalation rung). The
-    # advanced rung is the more-costly small via 'standard' escalates to (#237).
-    ladder = fab_floor_ladder(ncu)
+    # rungs the escalation policy allows (nominal floor, then any escalation
+    # rung; nothing under --escalation off; raised to the board's own minimums
+    # under board). The advanced rung is the more-costly small via 'auto'
+    # escalates to (#237/#857).
+    from fab_tiers import escalation_rungs, note_narrowing
+    ladder = escalation_rungs(ncu, extra_floors=config.rule_floors(net_id))
     candidates = [(config.via_size, config.via_drill, False)]
     candidates += [(f['via_diameter'], f['via_drill'], i > 0)
                    for i, f in enumerate(ladder)]
@@ -2498,6 +2536,8 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
                     continue
                 if (vd, dr) in escalated_pair:
                     warn_fab_escalation(f"last-resort via for net {net_id} ({vd}/{dr}mm)")
+                note_narrowing(net_id, 'via_diameter', config.via_size, vd,
+                               'last-resort via-in-pad')
                 _used_radius = _radius
                 break
         if tap_res is not None and tap_res.success and tap_res.via is not None:
@@ -2642,9 +2682,7 @@ def _register_unblock_via(obstacles, vgx, vgy, layer_names):
     obstacles.add_free_via(vgx, vgy)
     for li in range(len(layer_names)):
         obstacles.add_source_target_cell(vgx, vgy, li)
-    for dx in range(-5, 6):
-        for dy in range(-5, 6):
-            obstacles.add_allowed_cell(vgx + dx, vgy + dy)
+    obstacles.add_allowed_rect(vgx - 5, vgy - 5, vgx + 5, vgy + 5)   # #800
 
 
 def _route_with_via_unblock(router, obstacles, config, sources, targets, track_margin,
@@ -4223,9 +4261,10 @@ def route_multipoint_taps(
             _rc = np.array(ring_cells, dtype=np.int32)
             obstacles.remove_blocked_vias_batch(_rc)
             try:    # #568: mirror of the ring's small stamp (refcount balance)
-                from obstacle_map import _rung_small_armed as _rsa
+                from obstacle_map import _rung_small_armed as _rsa, _mirror_rungs_remove
                 if _rsa() and hasattr(obstacles, 'remove_blocked_vias_small_batch'):
                     obstacles.remove_blocked_vias_small_batch(_rc)
+                _mirror_rungs_remove(obstacles, _rc)   # #530 per-net rungs
             except (AttributeError, ImportError):
                 pass
 
@@ -4307,10 +4346,12 @@ def _route_multipoint_taps_impl(
     _vv_radius = (config.via_size + config.clearance) * coord.inv_step
 
     try:        # #568: armed once per tap run (see the ring mirror below)
-        from obstacle_map import _rung_small_armed as _rsa
+        from obstacle_map import _rung_small_armed as _rsa, _per_net_rungs as _pnr
         _small_rung_on = _rsa() and hasattr(obstacles, 'add_blocked_via_small')
+        _pn_rungs = list(_pnr(obstacles))   # #530 per-net rungs (above the small map)
     except ImportError:
         _small_rung_on = False
+        _pn_rungs = []
 
     def _register_inprogress_via(v):
         vgx, vgy = coord.to_grid(v.x, v.y)
@@ -4336,6 +4377,8 @@ def _route_multipoint_taps_impl(
                     # wrapper's finally removes both maps' cells (#309).
                     if _small_rung_on:
                         obstacles.add_blocked_via_small(vgx + ex, vgy + ey)
+                    for _r in _pn_rungs:   # #530 per-net rungs
+                        obstacles.add_blocked_via_rung(_r, vgx + ex, vgy + ey)
                     # Ref-counted raw add: the wrapper removes these on exit so
                     # they can't leak into a persistent working map (#309).
                     if _ring_cells is not None:
@@ -4616,9 +4659,8 @@ def _route_multipoint_taps_impl(
         # Add allowed cells around target to escape blocked areas
         allow_radius = 5
         tgt_gx, tgt_gy = tgt_pad[0], tgt_pad[1]
-        for dx in range(-allow_radius, allow_radius + 1):
-            for dy in range(-allow_radius, allow_radius + 1):
-                obstacles.add_allowed_cell(tgt_gx + dx, tgt_gy + dy)
+        obstacles.add_allowed_rect(tgt_gx - allow_radius, tgt_gy - allow_radius,
+                                   tgt_gx + allow_radius, tgt_gy + allow_radius)  # #800
 
         # Check which proximity zones the endpoints are in for precise heuristic estimate
         src_in_stub = any(obstacles.get_stub_proximity_cost(gx, gy) > 0 for gx, gy, _ in sources)

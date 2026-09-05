@@ -15,7 +15,8 @@ from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord
 import routing_defaults as defaults
 from routing_utils import build_layer_map, iter_pad_blocked_cells, \
-    pad_blocked_cells_array, segment_blocked_cells_array, circle_offsets
+    pad_blocked_cells_array, segment_blocked_cells_array, segment_blocked_spans, \
+    circle_offsets, GRID_TIE_EPS
 from net_queries import expand_pad_layers
 
 
@@ -219,7 +220,7 @@ def ledger_raw_delta(obstacles, site_tag: str, d_cells: int, d_vias: int) -> Non
 
 def run_obstacle_audit(base_obstacles, working_obstacles,
                        net_obstacles_cache: Dict[int, "NetObstacleData"],
-                       label: str = "") -> None:
+                       label: str = "", pcb_data=None, config=None) -> None:
     """End-of-run ref-count integrity audit (issue #309), shared by every
     front-end that maintains a persistent working map + per-net cache dict.
 
@@ -227,6 +228,13 @@ def run_obstacle_audit(base_obstacles, working_obstacles,
     map, removes every net's CURRENT cache, and compares entry counts to the
     base. Any residual in the ref-counted sets is a leak (an add not mirrored
     by a remove) or an over-decrement. Fully defensive; env-gated by callers.
+
+    With `pcb_data` and `config` it also runs the CONTENT audit (#806,
+    invariant E): the ref-count invariants above say nothing about whether
+    the cells in the map are the RIGHT cells -- a cache entry computed before
+    a net was routed, never refreshed, and removed/re-added in balance passes
+    A/B/C while the routed copper is invisible to every search on the map.
+    See `run_obstacle_content_audit`.
     """
     try:
         if base_obstacles is None or working_obstacles is None:
@@ -267,6 +275,114 @@ def run_obstacle_audit(base_obstacles, working_obstacles,
             obstacle_ledger_report(net_obstacles_cache)
     except Exception as e:
         print(f"[OBSTACLE AUDIT] skipped ({e})")
+    if pcb_data is not None and config is not None:
+        run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
+                                   pcb_data, config, label=label)
+
+
+def _cache_cells_and_vias(cd: "NetObstacleData"):
+    """A cache entry's (N,3) blocked cells and (M,2) blocked via cells, with
+    the #815 spans expanded -- the cell multiset the map actually holds."""
+    cells = [np.asarray(cd.blocked_cells, dtype=np.int64).reshape(-1, 3)]
+    spans = getattr(cd, 'blocked_cell_spans', None)
+    if spans is not None and len(spans):
+        s = np.asarray(spans, dtype=np.int64).reshape(-1, 4)
+        n = (s[:, 2] - s[:, 1] + 1)
+        gx = np.repeat(s[:, 0], n)
+        li = np.repeat(s[:, 3], n)
+        gy = np.concatenate([np.arange(lo, hi + 1) for lo, hi in zip(s[:, 1], s[:, 2])]) \
+            if len(s) else np.empty(0, dtype=np.int64)
+        cells.append(np.stack([gx, gy, li], axis=1))
+    vias = [np.asarray(cd.blocked_vias, dtype=np.int64).reshape(-1, 2)]
+    vspans = getattr(cd, 'blocked_via_spans', None)
+    if vspans is not None and len(vspans):
+        vias.append(np.asarray(expand_via_spans(np.asarray(vspans, dtype=np.int32)),
+                               dtype=np.int64).reshape(-1, 2))
+    return np.concatenate(cells), np.concatenate(vias)
+
+
+def run_obstacle_content_audit(working_obstacles, net_obstacles_cache,
+                               pcb_data, config, label: str = "") -> Optional[Dict]:
+    """Invariant E (#806): the working map BLOCKS every cell the board's
+    CURRENT copper says it should, for every net the cache tracks.
+
+    Recomputes each cached net's footprint from `pcb_data` exactly as
+    rip_up_net / restore_net do, and queries the working map cell by cell.
+    A cell the fresh footprint holds that the map does not block is an
+    UNDER-BLOCK: copper a later search on this map (a ripped victim's
+    reroute, a terminal restore, the mincut probe) will route straight
+    through. Distinct from A/B/C, which only check that adds and removes
+    balance -- a stale-but-balanced entry passes them.
+
+    Returns the counts (also printed), or None when nothing could be checked.
+    """
+    try:
+        if working_obstacles is None or not net_obstacles_cache:
+            return None
+        n_nets = n_cells = n_missing = n_vias = n_vmissing = 0
+        n_entry_stale = 0
+        stale_nets = []
+        stale_entries = []
+        for nid in sorted(net_obstacles_cache):
+            fresh = precompute_net_obstacles(pcb_data, nid, config)
+            cells, vias = _cache_cells_and_vias(fresh)
+            if len(cells):
+                cells = _unique_rows(cells.astype(np.int32))
+            if len(vias):
+                vias = _unique_rows(vias.astype(np.int32))
+            n_nets += 1
+            # Bookkeeping staleness, independent of what ELSE covers a cell:
+            # cells the board's copper says this net owns that its cache
+            # entry (= what the map was told) does not carry.
+            ent_cells, _ent_vias = _cache_cells_and_vias(net_obstacles_cache[nid])
+            ent_keys = set(map(tuple, ent_cells.tolist()))
+            entry_missing = sum(1 for c in cells.tolist() if tuple(c) not in ent_keys)
+            miss = 0
+            for gx, gy, li in cells:
+                if not working_obstacles.is_blocked(int(gx), int(gy), int(li)):
+                    miss += 1
+            vmiss = 0
+            for gx, gy in vias:
+                if not working_obstacles.is_via_blocked(int(gx), int(gy)):
+                    vmiss += 1
+            n_cells += len(cells)
+            n_vias += len(vias)
+            n_missing += miss
+            n_vmissing += vmiss
+            n_entry_stale += entry_missing
+            name = getattr(pcb_data.nets.get(nid), 'name', None) or str(nid)
+            if entry_missing:
+                stale_entries.append((name, entry_missing, len(cells)))
+            if miss or vmiss:
+                stale_nets.append((name, miss, len(cells), vmiss, len(vias)))
+        print("\n" + "=" * 60)
+        print(f"[OBSTACLE CONTENT{' ' + label if label else ''}] "
+              f"{n_nets} nets recomputed from pcb_data: {n_cells} cells checked, "
+              f"{n_missing} NOT blocked in working map; {n_vias} via cells checked, "
+              f"{n_vmissing} NOT via-blocked; {n_entry_stale} cells absent from "
+              f"their net's cache entry ({len(stale_entries)} stale entries)")
+        for name, em, c in stale_entries[:12]:
+            print(f"    stale entry {name}: {em}/{c} current cells not in its entry")
+        if len(stale_entries) > 12:
+            print(f"    ... and {len(stale_entries) - 12} more stale entries")
+        if stale_nets:
+            print(f"  UNDER-BLOCK: {len(stale_nets)} net(s) whose current copper "
+                  f"the working map does not block:")
+            for name, m, c, vm, vc in stale_nets[:12]:
+                print(f"    {name}: {m}/{c} cells, {vm}/{vc} via cells missing")
+            if len(stale_nets) > 12:
+                print(f"    ... and {len(stale_nets) - 12} more")
+        else:
+            print("  CONTENT OK: every cached net's current copper is blocked "
+                  "in the working map.")
+        print("=" * 60)
+        return {'nets': n_nets, 'cells': n_cells, 'missing': n_missing,
+                'vias': n_vias, 'via_missing': n_vmissing,
+                'entry_stale': n_entry_stale, 'stale_entries': stale_entries,
+                'stale_nets': stale_nets}
+    except Exception as e:
+        print(f"[OBSTACLE CONTENT] skipped ({e})")
+        return None
 
 
 def obstacle_ledger_report(final_cache: Dict[int, "NetObstacleData"]) -> None:
@@ -312,6 +428,31 @@ def obstacle_ledger_report(final_cache: Dict[int, "NetObstacleData"]) -> None:
 # Bitmap dedupe allocates one bool per cell in the rows' bounding box; cap the
 # allocation (200M bools = 200MB) and fall back to sorting for outliers.
 _BITMAP_DEDUPE_MAX_CELLS = 200_000_000
+
+
+def expand_via_spans(spans: "np.ndarray") -> "np.ndarray":
+    """(K,3) [gx, lo, hi] spans -> (N,2) [gx, gy] cells.
+
+    Only for the few consumers that genuinely need cells (the #568 small-via
+    array, diagnostics). The routing path never calls this: expanding in Python
+    costs 7.4 us against a 0.17 us memo hit, which is why the stamping APIs
+    expand in Rust instead.
+    """
+    if spans is None or len(spans) == 0:
+        return np.empty((0, 2), dtype=np.int32)
+    lo = spans[:, 1].astype(np.int64)
+    counts = (spans[:, 2].astype(np.int64) - lo + 1)
+    counts[counts < 0] = 0
+    total = int(counts.sum())
+    if total == 0:
+        return np.empty((0, 2), dtype=np.int32)
+    out = np.empty((total, 2), dtype=np.int32)
+    out[:, 0] = np.repeat(spans[:, 0], counts)
+    starts = np.zeros(len(counts), dtype=np.int64)
+    np.cumsum(counts[:-1], out=starts[1:])
+    out[:, 1] = (np.repeat(lo, counts)
+                 + (np.arange(total, dtype=np.int64) - np.repeat(starts, counts)))
+    return out
 
 
 def _unique_rows(arr: np.ndarray) -> np.ndarray:
@@ -362,6 +503,33 @@ class NetObstacleData:
     # EXCLUSIVELY for dynamic copper, so an unbalanced stamp doesn't just leak
     # cells, it makes small vias legal where they aren't (audit-enforced).
     blocked_vias_small: np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.int32))
+    # #530 decision 4: via-block cells at every OTHER via geometry a routed net
+    # uses ({rung: (M, 2)}; rung r >= 1 per obstacle_cache.via_rungs). Stamped
+    # and removed in lockstep with blocked_vias, like blocked_vias_small (which
+    # is the env-armed #568 small rung and stays a separate channel).
+    blocked_vias_rungs: dict = field(default_factory=dict)
+    # #815: SEGMENT keep-outs, as capsule SPANS instead of cells --
+    # (K, 4) [gx, gy_lo, gy_hi, layer] and (K, 3) [gx, gy_lo, gy_hi].
+    #
+    # Why segments and not everything: a capsule is convex, so a column is one
+    # contiguous run and a span costs 12 bytes where its ~8.3 cells cost 66 --
+    # 5.2x denser. That density is the point: the capsule memo was thrashing
+    # (on glasgow, 2,270,477 of 2,317,497 misses were EVICTIONS, ~54 s/route
+    # re-rasterising capsules it had already computed), and the memo can only
+    # hold a working set the CONSUMER is willing to take in span form.
+    # Pad and via keep-outs stay cells: they come from the integer offset
+    # tables (circle_offsets / pad_blocked_cells_array), not the capsule memo,
+    # so spans would buy nothing there.
+    #
+    # These are stamped and UNSTAMPED in lockstep with the cell arrays by
+    # add_/remove_net_obstacles_from_cache. Rust expands them, so the add and
+    # the remove walk the identical cell multiset and the refcounts balance --
+    # the invariant route.py asserts and test_obstacle_addremove_parity.py /
+    # test_obstacle_map_balance.py defend. Unlike the cell arrays these are NOT
+    # row-deduplicated: two overlapping same-net capsules refcount a shared
+    # cell twice, which is harmless precisely because the remove is symmetric.
+    blocked_cell_spans: np.ndarray = field(default_factory=lambda: np.empty((0, 4), dtype=np.int32))
+    blocked_via_spans: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.int32))
 
 
 # #568 run-scoped interlock. `_via_rung_unsafe` lives on pcb_data, but the
@@ -385,6 +553,53 @@ def rung_small_armed() -> bool:
     return env_knobs.VIA_RUNG_2 and not _RUNG_UNSAFE
 
 
+def _rung_api(obstacles_or_none=None) -> bool:
+    """True when the loaded grid_router carries the #530 rung API (0.22.0+)."""
+    try:
+        import grid_router as _gr
+        return hasattr(_gr.GridObstacleMap, 'add_blocked_vias_rung_batch')
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def via_rungs(config, pcb_data=None):
+    """#530 decision 4: the via geometries the obstacle map carries a
+    legality rung for, as an ordered list of (diameter, drill); rung r is
+    ``via_rungs(...)[r-1]`` (rung 0 is the run's via_size/via_drill). One
+    rung per DISTINCT per-net via geometry in ``config.net_via_sizes``,
+    largest first; the env-armed #568 small fab rung, when it exists, keeps
+    its historical slot as rung 1 ahead of them. Empty on a board where
+    every net uses the run's via, and on a 0.21.x binary."""
+    if not _rung_api():
+        return []
+    rungs = []
+    small = _small_via_pair(config, pcb_data) if pcb_data is not None else None
+    if small is not None:
+        rungs.append((round(small[0], 4), round(small[1], 4)))
+    sizes = getattr(config, 'net_via_sizes', None) or {}
+    run = (round(config.via_size, 4), round(config.via_drill, 4))
+    extra = sorted({(round(d, 4), round(h, 4)) for d, h in sizes.values()},
+                   key=lambda p: (-p[0], -p[1]))
+    for p in extra:
+        if p != run and p not in rungs:
+            rungs.append(p)
+    return rungs
+
+
+def rung_for_net(config, pcb_data, net_id: int) -> int:
+    """The via-legality rung a search for ``net_id`` must use: 0 at the run's
+    via, else the index of the net's own geometry in ``via_rungs``."""
+    sizes = getattr(config, 'net_via_sizes', None) or {}
+    v = sizes.get(net_id)
+    if not v:
+        return 0
+    key = (round(v[0], 4), round(v[1], 4))
+    for i, p in enumerate(via_rungs(config, pcb_data), 1):
+        if p == key:
+            return i
+    return 0
+
+
 def _small_via_pair(config, pcb_data):
     """#568: the fab-ladder (diameter, drill) the rung-1 legality map is
     stamped at -- the FIRST ladder entry smaller than the configured via,
@@ -405,10 +620,11 @@ def _small_via_pair(config, pcb_data):
         set_rung_unsafe(True)   # make the raw mirrors honor it too
         return None
     try:
-        from fab_tiers import fab_floor_ladder
+        from fab_tiers import escalation_rungs
         ncu = len([l for l in (pcb_data.board_info.copper_layers or [])
                    if l.endswith('.Cu')]) or 2
-        for f in fab_floor_ladder(ncu):
+        # None under --escalation off: no small-via rung exists to search at.
+        for f in escalation_rungs(ncu):
             pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
             if pair[0] < config.via_size - 1e-9:
                 return pair
@@ -451,6 +667,11 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # unique-cell semantics as the per-cell sets this replaces)
     blocked_cells_set: List["np.ndarray"] = []
     blocked_vias_set: List["np.ndarray"] = []
+    # #815: segment keep-outs accumulate here in SPAN form; pads and vias stay
+    # in the cell lists above (they come from integer offset tables, not the
+    # capsule memo, so spans buy nothing there).
+    blocked_cell_spans_set: List["np.ndarray"] = []
+    blocked_via_spans_set: List["np.ndarray"] = []
 
     # Precompute per-layer expansion values for impedance-controlled and power net routing
     # Use to_grid_dist_safe for via-related clearances to avoid grid quantization DRC errors
@@ -510,11 +731,11 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 via_block_mm = (config.via_size / 2 + seg_w / 2
                                 + config.layer_clearance(seg.layer, obs_clearance)  # #498
                                 + extra_clearance)
-                cells = segment_blocked_cells_array(
+                _vs = segment_blocked_spans(          # #815
                     seg.start_x, seg.start_y, seg.end_x, seg.end_y,
                     via_block_mm, coord.grid_step)
-                if len(cells):
-                    blocked_vias_set.append(np.asarray(cells, dtype=np.int32))
+                if len(_vs):
+                    blocked_via_spans_set.append(_vs)
             continue
         layer_w = config.get_net_track_width(net_id, seg.layer)
         seg_w = seg.width if (getattr(seg, 'width', 0) and seg.width > 0) else layer_w
@@ -530,7 +751,8 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                                + config.route_reserve_width(seg.layer) / 2 + extra_clearance)
             via_block_mm = config.via_size / 2 + own_half + _clr_l + extra_clearance
         _collect_segment_obstacles(seg, coord, layer_idx, expansion_mm,
-                                   blocked_cells_set, blocked_vias_set, via_block_mm)
+                                   blocked_cell_spans_set, blocked_via_spans_set,
+                                   via_block_mm)
 
     # Process vias. Keep-out from the via's ACTUAL size, not config.via_size: a
     # fanout via-in-pad is larger (e.g. 0.45 vs 0.3), and using config under-
@@ -572,7 +794,13 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
             _dxg, _dyg = np.meshgrid(_off, _off, indexing="ij")
             _cx = (_gx + _dxg) * config.grid_step
             _cy = (_gy + _dyg) * config.grid_step
-            _dm = ((_cx - via.x) ** 2 + (_cy - via.y) ** 2) < _req * _req
+            # Boundary cells resolve OPEN (GRID_TIE_EPS), exactly as
+            # block_via_cells_near_drills does -- this disc is a documented
+            # MIRROR of it, and giving one side the epsilon and not the other
+            # desynced the incremental via map from a fresh rebuild by 2 cells
+            # (test_shared_via_maps). drill/2 + via_drill/2 + h2h lands on an
+            # exact grid multiple readily: 0.15 + 0.15 + 0.5 = 0.8 = 16 x 0.05.
+            _dm = ((_cx - via.x) ** 2 + (_cy - via.y) ** 2) < (_req - GRID_TIE_EPS) ** 2
             if _dm.any():
                 blocked_vias_set.append(
                     np.column_stack([(_gx + _dxg)[_dm], (_gy + _dyg)[_dm]]).astype(np.int32))
@@ -596,9 +824,21 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     else:
         blocked_vias_arr = np.empty((0, 2), dtype=np.int32)
 
+    # Spans are NOT row-deduplicated: overlapping same-net capsules refcount a
+    # shared cell more than once, which is harmless because the unstamp walks
+    # the identical array (see NetObstacleData.blocked_cell_spans).
+    blocked_cell_spans_arr = (np.concatenate(blocked_cell_spans_set)
+                              if blocked_cell_spans_set
+                              else np.empty((0, 4), dtype=np.int32))
+    blocked_via_spans_arr = (np.concatenate(blocked_via_spans_set)
+                             if blocked_via_spans_set
+                             else np.empty((0, 3), dtype=np.int32))
+
     data = NetObstacleData(
         blocked_cells=blocked_cells_arr,
-        blocked_vias=blocked_vias_arr
+        blocked_vias=blocked_vias_arr,
+        blocked_cell_spans=blocked_cell_spans_arr,
+        blocked_via_spans=blocked_via_spans_arr,
     )
     # #568 dual stamping: a second pass with the via size/drill swapped for the
     # small fab rung; only its blocked_vias survive (blocked_cells are
@@ -612,7 +852,36 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
                 pcb_data, net_id,
                 _dc_replace(config, via_size=_sp[0], via_drill=_sp[1]),
                 extra_clearance, diagonal_margin, _small_pass=True)
-            data.blocked_vias_small = _sd.blocked_vias
+            # #568 small rung still stamps CELLS (add_blocked_vias_small_batch
+            # has no span twin, and this path is off unless KICAD_VIA_RUNG=2),
+            # so expand the segment spans back and merge with the cell part.
+            _small_cells = [_sd.blocked_vias]
+            if len(_sd.blocked_via_spans):
+                _small_cells.append(expand_via_spans(_sd.blocked_via_spans))
+            _small_cat = [a for a in _small_cells if len(a)]
+            data.blocked_vias_small = (_unique_rows(np.concatenate(_small_cat))
+                                       if _small_cat
+                                       else np.empty((0, 2), dtype=np.int32))
+        # #530 decision 4: one more pass per distinct per-net via geometry, so
+        # a net searched at its own via sees this net's copper at the right
+        # reserve. The env-armed small rung above is rung 1 when present;
+        # via_rungs() orders them the same way rung_for_net numbers them.
+        _rungs = via_rungs(config, pcb_data)
+        for _r, (_d, _h) in enumerate(_rungs, 1):
+            if _sp is not None and _r == 1:
+                data.blocked_vias_rungs[1] = data.blocked_vias_small
+                continue
+            from dataclasses import replace as _dc_replace
+            _rd = precompute_net_obstacles(
+                pcb_data, net_id,
+                _dc_replace(config, via_size=_d, via_drill=_h),
+                extra_clearance, diagonal_margin, _small_pass=True)
+            _cells = [_rd.blocked_vias]
+            if len(_rd.blocked_via_spans):
+                _cells.append(expand_via_spans(_rd.blocked_via_spans))
+            _cat = [a for a in _cells if len(a)]
+            data.blocked_vias_rungs[_r] = (_unique_rows(np.concatenate(_cat)) if _cat
+                                           else np.empty((0, 2), dtype=np.int32))
     if not _small_pass:
         # A STABLE identity for every cache object, armed or not. id() cannot
         # serve: CPython recycles ids, and make_local_window mints a
@@ -634,20 +903,32 @@ def _collect_segment_obstacles(seg, coord: GridCoord, layer_idx: int,
                                 blocked_cells: List["np.ndarray"],
                                 blocked_vias: List["np.ndarray"],
                                 via_block_mm: float):
-    """Collect segment obstacle cells into lists (no obstacle map modification).
+    """Collect segment obstacle SPANS into lists (no obstacle map modification).
 
     Both keep-outs are an exact capsule measured from the REAL float segment
     (handles off-grid endpoints + diagonals): the track at `track_margin_mm`, the
-    via at `via_block_mm`. Matches build_base's _add_segment_obstacle."""
-    cells = segment_blocked_cells_array(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
-                                        track_margin_mm, coord.grid_step)
-    rows = np.empty((len(cells), 3), dtype=np.int32)
-    rows[:, :2] = cells
-    rows[:, 2] = layer_idx
-    blocked_cells.append(rows)
+    via at `via_block_mm`. Matches build_base's _add_segment_obstacle.
 
-    blocked_vias.append(segment_blocked_cells_array(
-        seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step))
+    #815: appends SPANS, not cells -- `blocked_cells` receives (K, 4)
+    [gx, gy_lo, gy_hi, layer] and `blocked_vias` (K, 3) [gx, gy_lo, gy_hi].
+    The lists are therefore the span accumulators, not the cell ones.
+    """
+    # #815: SPAN form. Same membership as segment_blocked_cells_array (both
+    # derive from routing_utils._capsule_mask, so they cannot disagree), at
+    # ~5.2x less memory -- which is what lets the capsule memo hold a working
+    # set the cell form evicted. Rust expands these when stamping.
+    spans = segment_blocked_spans(seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                                  track_margin_mm, coord.grid_step)
+    if len(spans):
+        rows = np.empty((len(spans), 4), dtype=np.int32)
+        rows[:, :3] = spans
+        rows[:, 3] = layer_idx
+        blocked_cells.append(rows)
+
+    vspans = segment_blocked_spans(
+        seg.start_x, seg.start_y, seg.end_x, seg.end_y, via_block_mm, coord.grid_step)
+    if len(vspans):
+        blocked_vias.append(vspans)
 
 
 def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
@@ -730,8 +1011,11 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # rule replaces the net/class fallback; the pad's local keep-clear stays a
     # hard floor on top. Layers sharing a resolved value share one
     # rasterization -- a board without rules takes the old single-margin path.
+    # A pad override REPLACES the resolved value, floored at the board
+    # minimum (KiCad semantics, measured) -- parity with _add_pad_obstacle.
     def _layer_clr(layer_name):
-        return max(config.layer_clearance(layer_name, clearance), lc)
+        return config.pad_override_clearance(
+            config.layer_clearance(layer_name, clearance), pad)
 
     def _clr_groups(expanded):
         groups = {}
@@ -743,10 +1027,9 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
 
     def _via_clr(expanded):
         return max((_layer_clr(l) for l in expanded if l.endswith('.Cu')),
-                   default=max(clearance, lc))
+                   default=config.pad_override_clearance(clearance, pad))
 
-    if lc > clearance:
-        clearance = lc
+    clearance = config.pad_override_clearance(clearance, pad)
 
     # Custom comb/finger pads: rasterize the real copper polygon(s), leaving the
     # finger channels open, instead of the bounding box (issue #188). This is the
@@ -754,7 +1037,7 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
     # here as well as in _add_pad_obstacle.
     pad_polys = getattr(pad, 'polygons', None)
     if pad_polys:
-        from obstacle_map import _rasterize_polygon
+        from obstacle_map import _rasterize_polygon_box, _box_masked_cells
         expanded_layers = expand_pad_layers(pad.layers, config.layers)
         clr_groups = _clr_groups(expanded_layers)
         on_copper = any(l.endswith('.Cu') for l in expanded_layers)
@@ -762,22 +1045,26 @@ def _collect_pad_obstacles(pad, coord: GridCoord, layer_map: Dict[str, int],
         for poly in pad_polys:
             for g_clr, g_idxs in clr_groups.items():
                 margin = config.track_width / 2 + g_clr + extra_clearance
-                gxf, gyf, inside, edist = _rasterize_polygon(poly, coord, margin)
-                if gxf is not None:
-                    m = inside | (edist <= margin)
+                gx_lo, gy_lo, nx, ny, inside, edist = _rasterize_polygon_box(
+                    poly, coord, margin)
+                if inside is not None:
+                    m = inside | (edist <= margin - GRID_TIE_EPS)
                     if m.any():
-                        cells = np.column_stack([gxf[m], gyf[m]]).astype(np.int32)
+                        gxs, gys = _box_masked_cells(gx_lo, gy_lo, nx, m)
+                        cells = np.column_stack([gxs, gys])
                         for li in g_idxs:
                             rows = np.empty((len(cells), 3), dtype=np.int32)
                             rows[:, :2] = cells
                             rows[:, 2] = li
                             blocked_cells.append(rows)
             if on_copper:
-                vgxf, vgyf, vin, ved = _rasterize_polygon(poly, coord, via_margin)
-                if vgxf is not None:
-                    vm = vin | (ved <= via_margin)
+                vgx_lo, vgy_lo, vnx, vny, vin, ved = _rasterize_polygon_box(
+                    poly, coord, via_margin)
+                if vin is not None:
+                    vm = vin | (ved <= via_margin - GRID_TIE_EPS)
                     if vm.any():
-                        blocked_vias.append(np.column_stack([vgxf[vm], vgyf[vm]]).astype(np.int32))
+                        vgxs, vgys = _box_masked_cells(vgx_lo, vgy_lo, vnx, vm)
+                        blocked_vias.append(np.column_stack([vgxs, vgys]))
         return
 
     # Corner radius based on pad shape (circle/oval use min dimension, roundrect uses rratio)
@@ -856,9 +1143,22 @@ def add_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetObst
         obstacles.add_blocked_cells_batch(cache_data.blocked_cells)
     if len(cache_data.blocked_vias) > 0:
         obstacles.add_blocked_vias_batch(cache_data.blocked_vias)
+    # #815: segment keep-outs, expanded in Rust. Must be mirrored EXACTLY by
+    # remove_net_obstacles_from_cache or cells leak blocked.
+    _cs = getattr(cache_data, 'blocked_cell_spans', None)
+    if _cs is not None and len(_cs) > 0:
+        obstacles.add_blocked_cell_spans_batch(_cs)
+    _vs = getattr(cache_data, 'blocked_via_spans', None)
+    if _vs is not None and len(_vs) > 0:
+        obstacles.add_blocked_via_spans_batch(_vs)
     _small = getattr(cache_data, 'blocked_vias_small', None)
-    if _small is not None and len(_small) > 0:
+    _rungs = getattr(cache_data, 'blocked_vias_rungs', None) or {}
+    if _small is not None and len(_small) > 0 and 1 not in _rungs:
         obstacles.add_blocked_vias_small_batch(_small)
+    # #530: the per-net via rungs (rung 1 may BE the small map above).
+    for _r, _cells in sorted(_rungs.items()):
+        if _cells is not None and len(_cells) > 0:
+            obstacles.add_blocked_vias_rung_batch(_r, _cells)
     if _CELL_WATCH != []:
         ledger_cell_watch(obstacles, "cache-add " + _ledger_site(depth=2, frames=3))
 
@@ -879,9 +1179,21 @@ def remove_net_obstacles_from_cache(obstacles: GridObstacleMap, cache_data: NetO
         obstacles.remove_blocked_cells_batch(cache_data.blocked_cells)
     if len(cache_data.blocked_vias) > 0:
         obstacles.remove_blocked_vias_batch(cache_data.blocked_vias)
+    # #815: exact mirror of the add above -- same arrays, same order.
+    _cs = getattr(cache_data, 'blocked_cell_spans', None)
+    if _cs is not None and len(_cs) > 0:
+        obstacles.remove_blocked_cell_spans_batch(_cs)
+    _vs = getattr(cache_data, 'blocked_via_spans', None)
+    if _vs is not None and len(_vs) > 0:
+        obstacles.remove_blocked_via_spans_batch(_vs)
     _small = getattr(cache_data, 'blocked_vias_small', None)
-    if _small is not None and len(_small) > 0:
+    _rungs = getattr(cache_data, 'blocked_vias_rungs', None) or {}
+    if _small is not None and len(_small) > 0 and 1 not in _rungs:
         obstacles.remove_blocked_vias_small_batch(_small)
+    # #530: exact mirror of the add above -- same arrays, same order.
+    for _r, _cells in sorted(_rungs.items()):
+        if _cells is not None and len(_cells) > 0:
+            obstacles.remove_blocked_vias_rung_batch(_r, _cells)
     if _CELL_WATCH != []:
         ledger_cell_watch(obstacles, "cache-remove " + _ledger_site(depth=2, frames=3))
 
@@ -926,6 +1238,35 @@ def update_net_obstacles_after_routing(pcb_data, net_id: int, result: Dict,
         pcb_data, net_id, config,
         extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN
     )
+
+
+def refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
+                          config, net_ids) -> None:
+    """Bring the working map's view of `net_ids` back in line with the copper
+    that is on the board NOW: remove each net's current entry, recompute it
+    from `pcb_data`, add the new entry. This is the single-ended loop's
+    contract after every commit (and rip_up_net's / restore_net's after
+    every rip and restore), spelled once.
+
+    #806: the diff-pair engine committed copper at eight sites without doing
+    this, so a routed pair's entry stayed the pre-route (stubs-only) one it
+    was built with. The ref-count invariants A/B/C held -- the stale entry
+    was removed and re-added in balance -- while measured on
+    dual_ipex_csi_interposer 30862 of 47448 cells the board's copper owned
+    were NOT blocked in the map a ripped victim's reroute searched.
+
+    A net absent from the cache gets an entry (mirrors rip_up_net, which
+    recomputes unconditionally), so restored copper of a net the run had not
+    tracked is stamped rather than silently invisible. No-op when the caller
+    has no persistent map (GUI dry paths, tests).
+    """
+    if working_obstacles is None or net_obstacles_cache is None:
+        return
+    for nid in net_ids:
+        if nid in net_obstacles_cache:
+            remove_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[nid])
+        net_obstacles_cache[nid] = precompute_net_obstacles(pcb_data, nid, config)
+        add_net_obstacles_from_cache(working_obstacles, net_obstacles_cache[nid])
 
 
 # =============================================================================
@@ -1045,7 +1386,8 @@ def precompute_via_placement_obstacles(
         h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
         if h2h > 0 and via.drill > 0:
             req = via.drill / 2.0 + config.via_drill / 2.0 + h2h
-            req_sq = req * req
+            # tie -> OPEN, mirroring block_via_cells_near_drills (see above)
+            req_sq = (req - GRID_TIE_EPS) ** 2
             de = coord.to_grid_dist_safe(req) + 1  # ceil + 1-cell bbox margin (matches source)
             doff = np.arange(-de, de + 1)
             dxg, dyg = np.meshgrid(doff, doff, indexing="ij")
@@ -1061,7 +1403,11 @@ def precompute_via_placement_obstacles(
                     + config.layer_clearance(layer, obs_clr)  # #543 (#434/#498)
                     + config.grid_step / 2)
             rg = coord.to_grid_dist_safe(r_mm)
-            r_sq = r_mm * r_mm
+            # tie -> OPEN. Mirrors build_routing_obstacle_map's via loop, which
+            # applies the identical epsilon -- the half-cell buffer in r_mm puts
+            # this radius on an exact grid multiple readily (0.25 + 0.1 + 0.2 +
+            # 0.05 = 0.6 = 6 x a 0.1 grid).
+            r_sq = (r_mm - GRID_TIE_EPS) ** 2
             off = np.arange(-rg, rg + 1)
             exg, eyg = np.meshgrid(off, off, indexing="ij")
             ddx = (gx + exg) * config.grid_step - via.x

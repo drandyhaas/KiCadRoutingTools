@@ -45,6 +45,8 @@ from connectivity import compute_mst_edges
 from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
+from placement.board_grid import (describe as describe_lattice,
+                                  resolve_snap_lattice)
 from placement import legality
 from placement.legality import (CONTAINER_RATIO, CONTAINMENT_FRAC,
                                 BoardOutlineGate, containment_frac,
@@ -68,13 +70,21 @@ EPS_IMPROVE = 1e-6
 #: re-typing it: a rule added here enters the A/B signal automatically, and a
 #: rule removed to flatter a row trips a test rather than passing quietly.
 #:
-#: The other six floorplan rules are deliberately absent, each for its own
+#: The other NINE floorplan rules are deliberately absent, each for its own
 #: reason -- `must_lock` and `edge_connector` are enforced by FREEZING the ref
 #: (no pose satisfies or violates them), `zone_side` is invariant under every
-#: move this engine can make, `envelope` is a claim about the intent file,
+#: move this engine can make and `assembly_side` (#837) is invariant for the
+#: same reason one level up, `envelope` is a claim about the intent file,
 #: `decap_distance` is graded in a currency this engine does not carry (pad
-#: centroid to an inflated pad bbox, not courtyard to courtyard), and
-#: `legality` is a whole-board budget rather than a per-pose predicate.
+#: centroid to an inflated pad bbox, not courtyard to courtyard),
+#: `decap_ungraded` and `decap_pin_distance` are claims about what the GRADE
+#: covers rather than about any pose, and `legality` is a whole-board budget
+#: rather than a per-pose predicate.
+#:
+#: The count said "six" and named six while nine were absent: `decap_ungraded`
+#: (#794) and `decap_pin_distance` (#705) arrived without being added here, and
+#: #837 made it three. Stated as a number AND an enumeration so the next
+#: addition is visibly missing from both.
 INTENT_ENFORCED_RULES = ('zone_containment', 'zone_exclusive', 'keepout')
 
 
@@ -164,6 +174,76 @@ def build_zone_spec(zones, parts, refs=None
         if _terms:
             spec[_ref] = tuple(_terms)
     return spec
+
+
+def exclusive_spec(zones, parts, refs=None
+                   ) -> Dict[str, Tuple[_IntentTerm, ...]]:
+    """The `zone_exclusive` slice of `build_zone_spec`, and NOTHING else (#797).
+
+    A SLICE rather than a second walk, so membership, the `z.side` filter and
+    the load-bearing `elif` that exempts a block's own members are resolved in
+    exactly ONE place, and the seat gate and the quench gate read the same
+    construction rather than two that happen to agree today.
+
+    ONE DELIBERATE DIVERGENCE, stated because the sentence above used to claim
+    there were none: the unresolved-zone filter below applies to the SEAT gate
+    and not to the quench's #702 channel. It is a policy about which claims may
+    STRAND a part, and the quench cannot strand one -- it only declines moves.
+    Widening it to `build_zone_spec` would change #702's admitted-move set
+    inside the wrong issue. `floorplan.rule_zone_exclusive` carries the SAME
+    filter, so the seat gate and the GRADE -- the pair whose disagreement is an
+    exit 4 on a correct board -- still agree exactly.
+
+    THE `zone_containment` TERMS ARE DROPPED HERE, AND MUST NEVER REACH A SEAT
+    GATE. `pose_score.make_state` withholds `intent_zones` from every seat
+    state, and `tests/test_698_reseat_acceptance.py` arm H parses `seeder.py`
+    to enforce that, because a MONOTONE containment gate would make a repair
+    refuse its own target: the re-seat's whole job is to move a part that is
+    already outside its zone back into it. `zone_exclusive` is the opposite
+    shape -- a must-be-OUTSIDE claim, whose target is clean by definition --
+    which is why it can be gated absolutely and containment cannot. The
+    seeder's containment channel remains `zone_gate` plus the per-call
+    `constraint`, which is anchor-aware and per-part.
+
+    This filter is the one line that keeps that argument true. Widening it back
+    to every term would re-open the bug arm H exists to prevent, so
+    `test_698`'s runtime half asserts on the RESULT -- every term here is a
+    `zone_exclusive` one, and a member binds none -- rather than on this
+    source.
+    """
+    # A zone whose members did not RESOLVE binds nobody here. "Stranger" means
+    # "not a member", so with an empty member set EVERY part on the board is
+    # one, and enforcing such a zone evicts the very parts it was drawn
+    # around. Measured on `fanout_output1.kicad_pcb`, whose block is
+    # `group:`-shaped: resolved at bare `()` sources the seat gate refused all
+    # 5 of its OWN members at their own poses, and `repair_placement` then
+    # walked 4 of them 4.00mm out of the region their block reserved.
+    #
+    # Nothing is silently admitted by this: `resolve_blocks` already reports an
+    # unresolved block as `block_unresolved`, an ERROR, so such a board fails
+    # on the real finding rather than on a rule that cannot tell a member from
+    # a stranger.
+    #
+    # Applied HERE rather than in `build_zone_spec`, so the quench's #702 gate
+    # is untouched -- this is a SEAT-gate policy, and widening it would be a
+    # behaviour change shipped inside the wrong issue.
+    # Membership is tested against the PARTS THIS WALK CAN SEE, not against
+    # the mere presence of a ref string. A first version asked only
+    # `z.get('refs')`, and a blind review found the hole: `QuenchState.parts`
+    # drops a footprint with no pads and no courtyard, so a block whose only
+    # member is one of those RESOLVES non-empty, keeps its zone, and then
+    # finds no member here -- the same inversion one step further along, and
+    # with no `block_unresolved` finding to point at it.
+    zones = tuple(z for z in (zones or ())
+                  if not z.get('exclusive')
+                  or any(r in parts for r in (z.get('refs') or ())))
+    full = build_zone_spec(zones, parts, refs)
+    out: Dict[str, Tuple[_IntentTerm, ...]] = {}
+    for _ref, _terms in full.items():
+        _keep = tuple(t for t in _terms if t.rule == 'zone_exclusive')
+        if _keep:
+            out[_ref] = _keep
+    return out
 
 
 def intent_spec(zone_spec, keepouts_for, ref) -> Tuple[_IntentTerm, ...]:
@@ -690,7 +770,18 @@ class QuenchState:
                  # `floorplan.grade` builds a state of its own that has to keep
                  # measuring independently of whatever the optimizer was gated
                  # on (tests/test_701_keepout_predicate.py:395).
-                 intent_zones: Optional[Sequence[Dict]] = None):
+                 intent_zones: Optional[Sequence[Dict]] = None,
+                 # --- #797 declared EXCLUSIVE zones, for the SEAT predicate.
+                 # A SEPARATE parameter from `intent_zones` on purpose, and not
+                 # merely a different spelling of it: this one carries the
+                 # must-be-OUTSIDE slice alone, so it can be gated ABSOLUTELY
+                 # without arming the monotone containment gate that
+                 # `pose_score.make_state` and test_698 arm H exist to keep off
+                 # the seat paths. Same plain data (`floorplan.zone_entries`),
+                 # same empty-by-default bit-identity, and the quench itself
+                 # never passes it -- its zone_exclusive enforcement stays
+                 # where #702 put it, in `intent_ok`.
+                 exclusive_zones: Optional[Sequence[Dict]] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -729,6 +820,7 @@ class QuenchState:
 
         self.parts: Dict[str, _Part] = {}
         no_courtyard = []
+        outline_locked = []   # #829, reported below
         for ref, fp in pcb_data.footprints.items():
             if not fp.pads:
                 # Zero-pad footprints (graphics-only mechanical parts, logos
@@ -740,8 +832,27 @@ class QuenchState:
                     self.parts[ref] = _Part(ref, fp, courtyards, True,
                                             halo_base, halo_coef)
                 continue
+            # #829: a footprint that draws part of the BOARD's own boundary is
+            # never this tool's to move -- its pose transforms that Edge.Cuts
+            # geometry, so moving it resizes the board, which is a mechanical
+            # decision the user owns. A fourth lock INPUT with the same
+            # property the other three have (see the union note in `quench()`):
+            # no un-lock operator, so it can never override what a caller
+            # asked for.
+            #
+            # `owns_board_outline`, NOT `owns_edge_cuts`. Geometry parented to
+            # a footprint is usually a relief the designer bound to the part so
+            # it travels with it -- crkbd draws 184 per-LED windows that way,
+            # and #628 exempts a part's own milled ring from the edge-margin
+            # test precisely to keep such a part placeable (without it run 20's
+            # SW2 had 0 legal poses of 14884). Only geometry lying outside the
+            # board-level outline is the board's.
+            owns_outline = getattr(fp, 'owns_board_outline', False)
             locked = (ref in locked_refs
+                      or owns_outline
                       or (move_refs is not None and ref not in move_refs))
+            if owns_outline:
+                outline_locked.append(ref)
             if ref not in courtyards:
                 no_courtyard.append(ref)
             self.parts[ref] = _Part(ref, fp, courtyards, locked,
@@ -755,6 +866,17 @@ class QuenchState:
             # Ignored nets (e.g. plane-routed power) don't contribute airwires
             self.parts[ref].nets = [n for n in self.parts[ref].nets
                                     if n not in ignore]
+        # #829. DISCLOSED, never silent: a freeze nobody is told about is
+        # the failure mode lock_advisor's 'advice, never action' rule
+        # exists to prevent. The reader needs the ref AND why, because
+        # the remedy is not in this toolchain -- part and outline have to
+        # move together, in KiCad.
+        self.outline_locked = sorted(outline_locked)
+        if self.outline_locked:
+            print(f"  Locked because they draw the board outline (#829): "
+                  f"{', '.join(self.outline_locked)} -- moving one would"
+                  f" resize the board. Edit the part and the outline"
+                  f" together in KiCad if it really must move.")
         warn_missing_courtyards(no_courtyard, 'quench')
 
         # #701 intent keep-outs, resolved ONCE per state rather than once per
@@ -790,6 +912,29 @@ class QuenchState:
         self._intent_spec: Dict[str, Tuple[_IntentTerm, ...]] = build_zone_spec(
             self.intent_zones, self.parts)
         self._intent_active = bool(self._intent_spec or self.keepouts_for)
+
+        # --- #797 declared EXCLUSIVE zones, for the SEAT predicate ----------
+        # Resolved once per state, like `keepouts_for`, and for the same
+        # reason: membership and the side filter are pose-invariant, and
+        # `_try_place` evaluates thousands of poses per part.
+        #
+        # DELIBERATELY NOT FOLDED INTO `_intent_spec`, and not counted in
+        # `_intent_active`. Those drive `candidate_valid`'s MONOTONE
+        # `intent_ok`, which admits any pose termwise no worse than the one the
+        # part is IN -- and before a part is seated, that is its generator
+        # pile coordinate. A stranger whose pile coordinate already sits inside
+        # a reserved zone would then be admitted to every pose no worse than
+        # that, i.e. seated inside it: #797's own bug, back through the door
+        # `pose_ok`'s docstring names for keep-outs. Folding it in would also
+        # change `intent_spec_for`'s arity, which is the coupling
+        # `seeder.count_legal_poses` clears `_inc_intent` for.
+        #
+        # Empty on every board that declares no exclusive zone -- which is
+        # every board in the corpus today -- and `exclusive_clear` guards on
+        # that emptiness, so the channel is inert unless asked for.
+        self.exclusive_zones = tuple(exclusive_zones or ())
+        self.exclusive_for: Dict[str, Tuple[_IntentTerm, ...]] = exclusive_spec(
+            self.exclusive_zones, self.parts)
         # ref -> the incumbent pose's term vector. Cleared beside
         # `_inc_violation` on every move, for the same reason. Never computed
         # on a compliant board: `intent_ok` returns on its absolute branch.
@@ -1428,6 +1573,37 @@ class QuenchState:
         return [str(k.get('name') or '<unnamed>')
                 for k in self.keepouts_for.get(ref, ())
                 if _fp.keepout_hit(k, rects)]
+
+    def exclusive_clear(self, ref, rects) -> bool:
+        """The zone_exclusive slice of `intent_clear`, ABSOLUTE (#797).
+
+        `keepout_clear`'s policy, one rule over, and for the same reason:
+        placement from scratch has no incumbent worth improving on, so a seat
+        search demands cleanliness rather than non-worsening. See
+        `seeder.pose_ok`, which states the two-policies-one-loop split.
+
+        Measured through `intent_term_values`, never a local `rect_overlap_area`
+        call: that function's `zone_exclusive` branch is where the decision to
+        read the COURTYARD ONLY lives ("matching the grade includes matching
+        what it declines to measure"), and a second copy here is how the seat
+        gate would come to grade a through-hole part's leads that
+        `rule_zone_exclusive` does not.
+        """
+        spec = self.exclusive_for.get(ref) if self.exclusive_for else None
+        if not spec:
+            return True
+        return all(v <= t.threshold
+                   for v, t in zip(intent_term_values(spec, rects), spec))
+
+    def exclusive_blockers(self, ref, rects) -> List[str]:
+        """Names of the BLOCKS whose exclusive zone `ref` intrudes on at this
+        pose. #701's doctrine one rule over: a claim that strands a part is a
+        NAMED verdict, not a silent missing pose."""
+        spec = self.exclusive_for.get(ref) if self.exclusive_for else None
+        if not spec:
+            return []
+        return [t.name for v, t in zip(intent_term_values(spec, rects), spec)
+                if v > t.threshold]
 
     def _incumbent_intent(self, ref) -> Tuple[float, ...]:
         """The term vector of the pose `ref` is IN, cached until it moves.
@@ -2292,7 +2468,7 @@ class QuenchState:
             self._neighbors[ref] = lst
 
 
-def _group_offsets(state, refs, max_disp: float, step: float, grid_step: float):
+def _group_offsets(state, refs, max_disp: float, step: float, lattice: float):
     """Rigid (dx, dy) offsets a whole block may take (#459).
 
     The block translates as one body, so a single offset applies to every
@@ -2321,43 +2497,85 @@ def _group_offsets(state, refs, max_disp: float, step: float, grid_step: float):
         for iy in range(-n, n + 1):
             if ix == 0 and iy == 0:
                 continue
-            dx, dy = ix * step, iy * step
-            if math.hypot(dx, dy) > max_disp + 1e-9:
+            # Snap the OFFSET, so the block stays rigid: snapping each member
+            # independently would shear it by up to a lattice step. Snapping to
+            # the BOARD's lattice rather than the raster is #708: an offset
+            # that is a whole number of the designer's grid units carries every
+            # member from an on-lattice pose to another one.
+            sdx = snap_to_grid(ix * step, lattice)
+            sdy = snap_to_grid(iy * step, lattice)
+            if math.hypot(sdx, sdy) > max_disp + 1e-9:
                 continue
+            if (sdx, sdy) in seen or (sdx == 0.0 and sdy == 0.0):
+                continue
+            # Probe the pose that will actually be APPLIED. This used to snap
+            # the ABSOLUTE p.x + dx while the emitted offset was snap(dx), so
+            # the per-member seed cap -- the thing this docstring says keeps
+            # build_neighbor_lists' pruning exact and edges_near's cache valid
+            # -- was tested against a pose the block never takes. The gap was
+            # under 0.07mm at the raster and is under a lattice step now, but
+            # it was always the wrong quantity.
             ok = True
             for ref in refs:
                 p = state.parts[ref]
-                nx = snap_to_grid(p.x + dx, grid_step)
-                ny = snap_to_grid(p.y + dy, grid_step)
-                if math.hypot(nx - p.seed_x, ny - p.seed_y) > max_disp + 1e-9:
+                if math.hypot(p.x + sdx - p.seed_x,
+                              p.y + sdy - p.seed_y) > max_disp + 1e-9:
                     ok = False
                     break
             if not ok:
-                continue
-            # Snap the OFFSET, so the block stays rigid: snapping each member
-            # independently would shear it by up to a grid step.
-            sdx = snap_to_grid(dx, grid_step)
-            sdy = snap_to_grid(dy, grid_step)
-            if (sdx, sdy) in seen or (sdx == 0.0 and sdy == 0.0):
                 continue
             seen.add((sdx, sdy))
             yield sdx, sdy
 
 
 def _candidate_positions(part: _Part, max_disp: float, step: float,
-                         grid_step: float):
-    """Grid of candidate centers within max_disp of the seed position."""
+                         lattice: float):
+    """Grid of candidate centers within max_disp of the seed position.
+
+    The snap is on the OFFSET, not on the absolute position, and that
+    distinction is the whole of #708. `seed_x + ix*step` already carries
+    whatever phase the designer laid the board out on; snapping the SUM to a
+    lattice through board ORIGIN discards it, because seed_x is not generally a
+    multiple of anything. Snapping the offset instead inherits the seed's
+    phase, so a part on a 0.3175mm (12.5 mil) lattice is offered only poses on
+    that same lattice.
+
+    Two measurements behind this, both in `tests/measure_708_lattice.py`:
+
+      * the old absolute snap removed ZERO candidates at every step the tool
+        ships -- it was a pure translation of the whole set by the seed's
+        residue -- so nothing is lost by dropping it;
+      * snapping the offset to the RASTER would not be enough. At step=1.0 the
+        raster offsets are {0, +/-1.0, +/-2.0, ...} and 1.0 is not a multiple
+        of 0.3175, so only the zero offset lands back on the board's lattice.
+        Snapping to the lattice gives {0, +/-0.9525, +/-1.905, ...} and every
+        candidate stays on the seed's coset of it.
+
+    Reach is comparable but NOT uniformly better, and the honest bound is worth
+    stating: sweeping max_disp 0.5..19.5 at step=1.0 on a 0.3175 lattice, 12
+    values gain candidates, 17 tie and 10 LOSE -- worst 81 -> 69 at
+    max_disp=5.0, because an offset the raster admitted at exactly the cap can
+    snap UP past it. That is the price of the exact cap below, paid knowingly.
+    At the shipped default (10.0 / 1.0) it is 317 -> 325.
+
+    `lattice` is the board's own pitch when one can be read off it and the
+    `grid_step` raster otherwise, so a board with no inferable lattice keeps
+    exactly the offsets it has always had (see `placement/board_grid.py`).
+
+    The radius test runs AFTER the snap, so `max_disp` is an exact cap rather
+    than one overshot by up to lattice*sqrt(2)/2.
+    """
     seen = set()
     out = []
     n = int(max_disp / step)
     for ix in range(-n, n + 1):
         for iy in range(-n, n + 1):
-            cx = part.seed_x + ix * step
-            cy = part.seed_y + iy * step
-            if math.hypot(cx - part.seed_x, cy - part.seed_y) > max_disp + 1e-9:
+            dx = snap_to_grid(ix * step, lattice)
+            dy = snap_to_grid(iy * step, lattice)
+            if math.hypot(dx, dy) > max_disp + 1e-9:
                 continue
-            cx = snap_to_grid(cx, grid_step)
-            cy = snap_to_grid(cy, grid_step)
+            cx = part.seed_x + dx
+            cy = part.seed_y + dy
             key = (round(cx, 4), round(cy, 4))
             if key not in seen:
                 seen.add(key)
@@ -2531,6 +2749,32 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         corridor_specs=corridor_specs,
                         keepouts=(intent_gate or {}).get('keepouts'),
                         intent_zones=(intent_gate or {}).get('zones'))
+    # #708: the lattice candidate OFFSETS are multiples of. The board's own
+    # pitch when one can be read off it, the `grid_step` raster otherwise.
+    # There is deliberately no flag: the fallback IS the off state and the
+    # board picks it. Note the fallback restores the OFFSET GRANULARITY, not
+    # the old poses -- the seed-relative half applies either way, which is the
+    # bug fix.
+    lattice, lattice_evidence = resolve_snap_lattice(pcb_data, grid_step)
+    # A lattice COARSER than the search step would quantize the search rather
+    # than merely phase it: `snap(0.1, 0.3175)` is 0.0, so at `--step 0.1` on an
+    # imperial board every +/-1 offset collapses onto the zero offset and
+    # `_group_offsets` discards it as "no move at all". The finest rung of the
+    # search would vanish silently. `--step` is a plain float on three CLIs with
+    # nothing relating it to the board, so the guard lives here.
+    if lattice > step + 1e-9:
+        lattice_evidence = dict(lattice_evidence, source='grid_step',
+                                resolved=grid_step,
+                                reason='inferred %g mm is coarser than --step '
+                                       '%g mm, which would quantize the search'
+                                       % (lattice, step))
+        lattice = grid_step
+    print(describe_lattice(lattice_evidence))
+
+    # Unchanged, and now conservative rather than exact: the offsets are
+    # snapped BEFORE the radius test, so a candidate is within max_displacement
+    # of its seed rather than up to a snap diagonal past it. The old
+    # `+ grid_step` slack covered that overshoot and now simply exceeds it.
     state.build_neighbor_lists(max_displacement + grid_step)
 
     before = state.total_cost()
@@ -2610,7 +2854,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
             base_cost = eval_group(0.0, 0.0)
             best = (base_cost, 0.0, 0.0)
             for ddx, ddy in _group_offsets(state, refs, max_displacement, step,
-                                           grid_step):
+                                           lattice):
                 if not state.group_move_valid(refs, ddx, ddy):
                     continue
                 c = eval_group(ddx, ddy)
@@ -2670,7 +2914,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
 
             best = (current_cost, part.x, part.y, part.rot)
             for cx, cy in _candidate_positions(part, max_displacement, step,
-                                               grid_step):
+                                               lattice):
                 for rot in rotations:
                     if (cx, cy, rot) == (part.x, part.y, part.rot):
                         continue
@@ -2867,6 +3111,13 @@ def quench(pcb_data: PCBData, pcb_file: str,
         metrics_out['before'] = dict(before)
         metrics_out['after'] = dict(after)
         metrics_out['legality'] = state.legality_metrics()
+        # #708: which lattice the candidate offsets were multiples of, and how
+        # that was decided. `source` distinguishes "the board declared one"
+        # from "it did not and we used the raster" -- without it, a run on a
+        # board with no lattice and a run where the inference was never wired
+        # report the same thing.
+        metrics_out['board_grid'] = dict(lattice_evidence,
+                                         resolved=lattice)
         # #702: what the declared-intent gate actually DID. Always present when
         # a gate was built, and `rejected: 0` is a real answer -- without this
         # key, "the gate refused nothing" and "the gate was never wired" are

@@ -54,6 +54,24 @@ import placement.perturb as P  # noqa: E402
 from stage_blind import (board_scale_mm, DOSE_BAND, MIN_MATERIAL_MM,  # noqa: E402
                          MATERIAL_FRAC)
 
+#: The kinds a DOSE means something for, drawn from explicitly rather than
+#: from `P.KINDS` (#837, found while auditing #714's `layer_flip`).
+#:
+#: The material gate below keeps a draw only when the APPLIED dose reaches a
+#: fraction of the requested one -- it is what stops a run grading a
+#: perturbation nobody actually applied. `layer_flip` holds the pose exactly
+#: and inverts the side, so its applied dose is 0 BY CONSTRUCTION and the gate
+#: can never pass. Drawing it from `P.KINDS` therefore spent 1 draw in 6 on a
+#: kind guaranteed to be discarded, and depressed the land rate this tool
+#: exists to measure -- silently, because a discarded draw and a draw that
+#: failed to land look identical here.
+#:
+#: A literal, deliberately: every other arm list in `tests/stress/` is one
+#: (`block_relocation_study.EVIDENCE_KINDS`, `diagnosis_recall.ARMS`,
+#: `predictor_study.DOSED_KINDS`), so a new damage kind joins the studies that
+#: can grade it by being named, never by existing.
+DOSED_KINDS = ('translate', 'wrong_side', 'swap', 'scatter', 'pile')
+
 #: Verdict bands. A board must land a material dose ALMOST every time to be a
 #: subject, not merely more often than not: a run stakes an hour of chain time
 #: on a single draw, so a 50% clip rate is a coin flip on whether the run has a
@@ -130,7 +148,7 @@ def qualify(board, draws=5, seed=None):
     landed, fired, applied, blocked = 0, 0, [], []
     try:
         for _ in range(draws):
-            kind = rng.choice(P.KINDS)
+            kind = rng.choice(DOSED_KINDS)
             dose = max(3.0, scale * rng.uniform(*DOSE_BAND))
             out = os.path.join(tmp, 'p.kicad_pcb')
             buf = io.StringIO()

@@ -14,6 +14,10 @@ differently from pcbnew (build_pcb_data_from_board):
 4. Reference-less footprints -- (footprint "") with no Reference property
    (thunderscope's 86 locked NPTH drill dots): dropped entirely, losing their
    hole obstacles. Now keyed by their uuid.
+4b. Two blocks claiming ONE reference (#726): the later one silently replaced
+   the earlier, so 5 of the 22 tracked boards parsed short -- watchy lost two
+   real test points -- and the dropped block's pads stayed in pads_by_net with
+   no footprint to reach them. Now keyed by a file-order ordinal.
 5. Multi-layer (layers "F.Cu" "B.Cu" ...) zones: pinned to the first
    filled_polygon's layer instead of one Zone per copper layer.
 6. KiCad-10 (net "") copper: "" must map to net 0 (no-net), not a synthetic id.
@@ -96,6 +100,16 @@ BOARD = '''(kicad_pcb (version 20260206) (generator test)
    )
   )
  )
+ (footprint "test:tp" (layer "F.Cu") (at 5 20)
+  (uuid "tp4-first")
+  (property "Reference" "TP4" (at 0 -2) (layer "F.SilkS"))
+  (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net "SIG"))
+ )
+ (footprint "test:tp" (layer "F.Cu") (at 15 20)
+  (uuid "tp4-second")
+  (property "Reference" "TP4" (at 0 -2) (layer "F.SilkS"))
+  (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net "SIG"))
+ )
  (segment (start 1 1) (end 2 1) (width 0.2) (layer "F.Cu") (net "") (uuid "seg-nonet-1"))
  (segment (start 2 2) (end 3 2) (width 0.2) (layer "F.Cu") (net "N\\ESC") (uuid "seg-esc-1"))
  (via blind (at 6 6) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net "SIG") (uuid "via-blind-1"))
@@ -165,6 +179,26 @@ def run():
         check("both no-ref footprints kept", len(noref) == 2)
         check("no-ref NPTH pads kept",
               all(len(pcb.footprints[r].pads) == 1 for r in noref))
+
+        # 4b. #726: two blocks claiming one reference both survive, keyed in
+        #     FILE ORDER, and their pads reach the net model exactly once each.
+        check("both TP4 blocks kept", sorted(
+            r for r in pcb.footprints if r.startswith('TP4')) == ['TP4', 'TP4~2'])
+        check("the FIRST block keeps the bare name",
+              abs(pcb.footprints['TP4'].x - 5) < 1e-9
+              and pcb.footprints['TP4'].uuid == 'tp4-first')
+        check("the second block is the ordinal",
+              abs(pcb.footprints['TP4~2'].x - 15) < 1e-9
+              and pcb.footprints['TP4~2'].uuid == 'tp4-second')
+        check("duplicate_references counts occurrences",
+              pcb.duplicate_references == {'TP4': 2})
+        check("the key reaches Pad.component_ref",
+              pcb.footprints['TP4~2'].pads[0].component_ref == 'TP4~2')
+        # The asymmetry the collapse used to leave behind: the dropped block's
+        # pads stayed in pads_by_net with no reachable Footprint.
+        check("every pad is reachable from a footprint",
+              sum(len(f.pads) for f in pcb.footprints.values())
+              == sum(len(v) for v in pcb.pads_by_net.values()))
 
         # 5. multi-layer zone -> one Zone per copper layer
         gnd_zones = [z.layer for z in pcb.zones if z.uuid == 'zz']

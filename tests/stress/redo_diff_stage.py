@@ -84,7 +84,10 @@ def resolve_diff_output(argv):
     p.add_argument("net_patterns", nargs="*")
     p.add_argument("--output")
     p.add_argument("--nets", "-n", nargs="+")
-    p.add_argument("--clearance", default="0.2")
+    p.add_argument("--clearance", default=None)
+    # #530: the recorded manifests carry --clearance-ceiling on the routing
+    # steps (the pre-#530 reading); the step routes at the smaller of the two.
+    p.add_argument("--clearance-ceiling", default=None)
     p.add_argument("--overwrite", action="store_true")
     ns, _ = p.parse_known_args(argv[1:])  # drop the python script path token
     out = ns.output or ns.output_file
@@ -94,7 +97,8 @@ def resolve_diff_output(argv):
         else:
             base, ext = os.path.splitext(ns.input_file)
             out = base + "_routed" + ext
-    return out, str(ns.clearance)
+    given = [float(v) for v in (ns.clearance, ns.clearance_ceiling) if v is not None]
+    return out, str(min(given)) if given else "0.2"
 
 
 ROUTE_DIFF_DEFAULT_CLEARANCE = 0.25  # route_diff.py argparse default
@@ -118,8 +122,10 @@ def board_floor_clearance(all_lines):
             a = shlex.split(ln)
         except ValueError:
             continue
-        if "--clearance" in a:
-            i = a.index("--clearance")
+        for flag in ("--clearance", "--clearance-ceiling"):   # #530: either spelling
+            if flag not in a:
+                continue
+            i = a.index(flag)
             try:
                 cls.append(float(a[i + 1]))
             except (IndexError, ValueError):

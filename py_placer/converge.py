@@ -61,12 +61,17 @@ _ROUTE_PY = os.path.join(ROOT, 'py_router', 'route.py')
 
 # --------------------------------------------------------------------- tier 3
 
-def scoped_route(board, nets, out=None, extra_args=(), timeout=None):
+def scoped_route(board, nets, out=None, extra_args=()):
     """Route ONLY `nets`, and return the merged summary. Seconds, not minutes.
 
     This is the tier that actually discriminates: placement cost says a pose
     looks better, and only a route says the copper agrees. Scoping it to the
-    affected nets is what makes it affordable enough to run per candidate.
+    affected nets is what makes it affordable enough to run per candidate --
+    and that SCOPE is the bound. There is no `timeout`: it existed only to
+    serve the two probe budgets #713 item 2 removed, no caller passes one now,
+    and leaving the parameter would invite a clock straight back into a
+    comparison. The temp dir is deliberately NOT cleaned up -- callers read
+    `res['board']` after the call returns.
     """
     tmp = tempfile.mkdtemp(prefix='converge_t3_')
     out = out or os.path.join(tmp, 'routed.kicad_pcb')
@@ -74,19 +79,145 @@ def scoped_route(board, nets, out=None, extra_args=(), timeout=None):
     argv = [sys.executable, '-X', 'utf8', _ROUTE_PY, board, out,
             '--nets'] + list(nets) + ['--json-out', js] + list(extra_args)
     r = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', timeout=timeout, cwd=ROOT)
+                       errors='replace', cwd=ROOT)
     summary = {}
+    # A summary we cannot READ is a non-verdict, not an exception. This file
+    # can exist and not parse -- a killed router, ENOSPC, a flush that fails at
+    # close, a stale file at a reused path -- and route.py exits 0 on that path
+    # having printed only a WARNING. Raising here does not spoil one candidate;
+    # it empties the CALLER's loop, and none of the four call sites catch it
+    # (cmd_poses has no try at all; place_portfolio._probe and compare_seeds
+    # catch only subprocess.TimeoutExpired). compare_seeds collects its rows
+    # and writes seeds.json only AFTER the loop, so a throw on seed 3 of 8
+    # ships no document at all, at an exit code not in its own vocabulary.
+    #
+    # `summary` stays {} -- the no-verdict channel every caller already handles
+    # -- and `summary_error` says WHICH absence this was, because the return
+    # code is 0 either way and the router's own WARNING has usually fallen out
+    # of the 1500-character stdout_tail by the time we return:
+    #     summary truthy           -> a verdict
+    #     {} + summary_error None  -> the router wrote nothing
+    #     {} + summary_error set   -> the router wrote something unreadable
+    # Same shape, and the same reasoning, as _load_defects below.
+    #
+    # (OSError, ValueError) rather than the narrower JSONDecodeError: json.load
+    # decodes the text handle first, so a tail cut mid-UTF-8-sequence raises
+    # UnicodeDecodeError -- a ValueError that is NOT a JSONDecodeError.
+    summary_error = None
     if os.path.isfile(js):
-        with open(js, encoding='utf-8') as f:
-            summary = json.load(f)
+        try:
+            with open(js, encoding='utf-8') as f:
+                summary = json.load(f)
+        except (OSError, ValueError) as exc:                    # noqa: BLE001
+            summary_error = f'{type(exc).__name__}: {exc}'
+            # stderr, never stdout: `converge poses` pipes a JSON document.
+            print(f"  WARNING: unreadable route summary {js} "
+                  f"({summary_error}); rc={r.returncode} -- treating as "
+                  f"no summary", file=sys.stderr)
     return {'argv': argv, 'returncode': r.returncode, 'board': out,
-            'json': js, 'summary': summary, 'stdout_tail': r.stdout[-1500:]}
+            'json': js, 'summary': summary, 'summary_error': summary_error,
+            'stdout_tail': r.stdout[-1500:]}
+
+
+#: A probe row's `status`, and the ONLY place the vocabulary is written down.
+#: `ok` is the one value carrying a verdict; the rest are ways of not having
+#: one, and before #713 item 2 they all shared a single `failures: None` that
+#: no consumer inspected -- so a route.py crash, a "No nets matched" exit, a
+#: deliberate ratsnest skip and a wall-clock timeout were the same row.
+PROBE_STATUSES = ('ok', 'crashed', 'no_summary', 'screened')
+
+
+def probe_route(board, nets, extra_args=(), out=None, note_prefix=''):
+    """One probe route -> a JSON-safe verdict row, shaped IDENTICALLY whatever
+    happens.
+
+    ONE helper because there were two, in place_portfolio and compare_seeds,
+    whose timeout rows dropped different subsets of the success row's keys
+    (`vias`/`returncode` in one; `probe_kind`/`iterations`/`vias`/`returncode`
+    in the other). tests/test_compare_seeds.py:96 reads `probe_kind`
+    unconditionally, so it was a latent KeyError on any timed-out row rather
+    than the assertion it looks like.
+
+    NO TIMEOUT. Both callers used to wrap this in `subprocess.run(timeout=...)`
+    -- 900 s in one, 1800 s in the other -- and record the expiry as
+    `failures: None`, which both then DROPPED from their rankings. A candidate
+    whose verdict a clock erased is not ranked worse; it stops being a
+    contender. route.py has no self-budget by design (#621) and the repo's own
+    main loop, place_route_loop._run_route_cmd, already calls it unbounded. The
+    bound here is SCOPE: `nets`, which both callers already pass.
+    """
+    res = scoped_route(board, nets, out=out, extra_args=list(extra_args))
+    summary = res['summary']
+    if not summary:
+        # Two different absences, kept apart: the router died, or it ran and
+        # wrote nothing we can read. Both used to be 'no summary'.
+        # `summary_error` (#830) is the third: the file existed and did not
+        # parse. It shares the 'no_summary' status -- there IS no readable
+        # summary, and the vocabulary stays closed -- but the note says which,
+        # because rc is 0 either way. `.get()`: probe tests replace
+        # scoped_route with lambdas returning hand-built dicts.
+        status = 'crashed' if res['returncode'] != 0 else 'no_summary'
+        _err = res.get('summary_error')
+        _what = (f"unreadable JSON summary ({_err})" if _err
+                 else "no JSON summary")
+        return {'failures': None, 'status': status,
+                'note': f"{note_prefix}rc={res['returncode']}, {_what}",
+                'iterations': None, 'vias': None, 'nets': len(nets),
+                'returncode': res['returncode']}
+    n, note = route_verdict(summary)
+    return {'failures': n, 'status': 'ok', 'note': note_prefix + note,
+            'iterations': summary.get('total_iterations'),
+            'vias': summary.get('total_vias'), 'nets': len(nets),
+            'returncode': res['returncode']}
+
+
+def screened_row(nets, note):
+    """The row for a probe DELIBERATELY not run (the ratsnest screen). Same
+    shape, distinct status -- it was previously another `failures: None`."""
+    return {'failures': None, 'status': 'screened', 'note': note,
+            'iterations': None, 'vias': None, 'nets': len(nets),
+            'returncode': None}
 
 
 def route_verdict(summary):
     """(failures, note) from a route summary -- the tier-3 comparison key."""
     if not summary:
         return None, 'no summary'
+    # A summary that is not a MAPPING at all. `json.load` is happy to return a
+    # str, a list or a number, and the whole premise here is documents route.py
+    # did not write -- a stale file at a reused path, another tool's output.
+    # Without this the guard below is worse than useless on a str: `k in
+    # summary` becomes a SUBSTRING test, so a document merely mentioning
+    # "failed_single" passes it and then dies on `.get` two lines down. On an
+    # int it raises TypeError outright. Either way the crash lands back in the
+    # caller's loop -- the exact failure scoped_route's guard just closed.
+    if not isinstance(summary, dict):
+        return None, 'unreadable summary'
+    # Every read below is a `.get(..., default)`, so a dict that is truthy but
+    # carries NONE of the verdict's own keys scores 0 failures and 'clean' --
+    # the best possible result, for a document that never mentioned routing.
+    # `{}` was caught above; `{'x': 1}` was not.
+    #
+    # PRESENCE, not truthiness: a genuinely clean route sets `failed_single:
+    # []`, and ANY ONE key is enough to judge -- a summary carrying
+    # failed_single but not open_single must still degrade to the old
+    # arithmetic (tests/test_open_single_verdict.py). `protected_skipped` is
+    # deliberately absent from the tuple: it only decorates the note, so a
+    # document carrying it alone would still fabricate a 0.
+    #
+    # HARDENING, not a live bug: route.py's summary literal sets failed_single,
+    # open_single AND multipoint_pads_total unconditionally (route.py:3606,
+    # 3611, 3624), and there is one append site into _SUMMARY_SINK, so nothing
+    # it writes today lands here. This is the schema-drift tripwire.
+    #
+    # The tuple is INLINE rather than a module constant on purpose: the gap
+    # between scoped_route and route_verdict is where #713's probe helpers land,
+    # and a constant parked there would collide with them for no benefit.
+    if not any(k in summary for k in ('failed_single', 'open_single',
+                                      'failed_multipoint',
+                                      'multipoint_pads_total',
+                                      'multipoint_pads_connected')):
+        return None, 'unreadable summary'
     failed = list(summary.get('failed_single') or [])
     # Routed-but-OPEN nets (kept result, disconnected pads). Before this key a
     # non-multipoint open net weighed ZERO here -- probes read failures=0 on
@@ -409,9 +540,22 @@ def cmd_poses(a):
                                                      'new_rotation': p['rot']}])
                 res = scoped_route(cand, a.affected, extra_args=a.route_args or [])
                 n, note = route_verdict(res['summary'])
+                # `nets`/`returncode`/`summary_error` so a row that carries no
+                # verdict still says what happened. `failures: None` alone
+                # cannot distinguish "the router died", "it wrote nothing" and
+                # "it wrote something unreadable". A `status` vocabulary
+                # belongs with #713's probe helpers, which own it; this row
+                # deliberately does not invent a second one.
+                # .get() for BOTH of the new reads, not a subscript: #713's
+                # probe tests replace scoped_route with a lambda returning a
+                # hand-built dict, and a row that is defensive about one key
+                # while subscripting the next is not defensive at all.
                 p['route'] = {'failures': n, 'note': note,
                               'iterations': res['summary'].get('total_iterations'),
-                              'vias': res['summary'].get('total_vias')}
+                              'vias': res['summary'].get('total_vias'),
+                              'nets': len(a.affected),
+                              'returncode': res.get('returncode'),
+                              'summary_error': res.get('summary_error')}
     # A cut sweep returns a DIFFERENT best pose with a byte-identical document
     # shape -- measured, r=3/s=0.25: a full sweep chose rot 0 where a truncated
     # one chose rot 90, with no key marking it partial. A ranking nobody can
@@ -545,8 +689,20 @@ def cmd_record(a):
     if a.score:
         try:
             _score_doc = json.loads(a.score)
-        except Exception:                                       # noqa: BLE001
-            _score_doc = None
+        except (OSError, ValueError) as exc:                    # noqa: BLE001
+            # REFUSE, rather than carrying None forward. This used to swallow
+            # the failure here and at the board_sha check below, then hit a
+            # THIRD, unguarded `json.loads(a.score)` while building the ledger
+            # entry -- so a truncated --score-file crashed with a traceback at
+            # exit 1, AFTER store.put() had already written the board into the
+            # content store. Same defect as the route-summary read this change
+            # is about, in the same file: a document that exists and does not
+            # parse. `--score-file` reads it off disk, so the "valid prefix of
+            # a killed writer" case applies here too.
+            print(f"record: --score is not readable JSON "
+                  f"({type(exc).__name__}: {exc}). Nothing was written.",
+                  file=sys.stderr)
+            return 2
     if a.lens and isinstance(_score_doc, dict) and \
             _grades_another_board(a.board, _score_doc):
         # NEVER SILENT. The skip is correct -- a verdict about this board must
@@ -787,7 +943,10 @@ def cmd_record(a):
              'parent_sha': (prev or {}).get('result_sha'),
              'result_sha': sha, 'lever': a.lever,
              'lever_argv': list(a.argv) if a.argv else None,
-             'score': json.loads(a.score) if a.score else None,
+             # _score_doc, not a THIRD json.loads: the payload was parsed and
+             # validated once at the top of this function, which is the only
+             # place that can still refuse before anything is written.
+             'score': _score_doc,
              'renders': list(a.render_json) if a.render_json else None,
              # The MEASUREMENT the next lap is aimed at, not a paragraph
              # about it. Run 20 recorded "throat 0.409mm vs 0.450 needed,

@@ -344,6 +344,81 @@ class GridRouteConfig:
     # consults it (KiCad's Type=='track' binds tracks only). An empty map is
     # a strict no-op. Like the layer map: no CLI flag, no GUI control.
     track_clearances: Dict[int, float] = field(default_factory=dict)
+    # #530: the board's design rules resolved in KiCad's order
+    # (design_rules.DesignRules), installed engine-side by
+    # kicad_dru.install_layer_clearances for both fronts. None until then.
+    # The legacy per-channel maps above are being migrated onto it; consumers
+    # that resolve through it must treat None as "no rules declared".
+    rules: Optional[object] = None
+    # #530 decision 4: per-net VIA geometry {net_id: (diameter, drill)} for
+    # nets whose resolved draw size differs from via_size/via_drill (their
+    # net class or a .kicad_dru via_diameter/hole_size rule). Filled by
+    # batch_route when --via-size was omitted (via_from_class); empty when
+    # the operator gave an explicit via, which applies to every net. The
+    # search prices each such net at its own via through the obstacle map's
+    # via-legality RUNGS (obstacle_cache.via_rungs) and emits vias at it.
+    net_via_sizes: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+
+    def net_via(self, net_id: int) -> Tuple[float, float]:
+        """(diameter, drill) this net's vias are drawn at."""
+        v = self.net_via_sizes.get(net_id) if self.net_via_sizes else None
+        return (float(v[0]), float(v[1])) if v else (self.via_size, self.via_drill)
+
+    def rule_floors(self, net_id: int, layer: Optional[str] = None) -> Dict[str, float]:
+        """The .kicad_dru / Board Setup size minimums that bind ``net_id`` (on
+        ``layer`` when given), in fab_tiers FLOOR_KEYS vocabulary, for the
+        descent sites: a rescue may narrow a track or shrink a via only down
+        to these under ``--escalation board``. Empty when the board declares
+        none, or under ``--escalation fab`` (which may go below them)."""
+        out = {}
+        # #530 (corpus A/B, core1106_cam): a net in a NON-Default class is graded
+        # by KiCad at that class's clearance whatever this run narrowed to --
+        # the writeback lowers only the Default class (decision 2) -- so no
+        # automatic clearance descent for the net may go below its own class.
+        # Applies under EVERY policy: this is a grading floor, not a fab one.
+        cc = self.net_clearances.get(net_id) if self.net_clearances else None
+        if cc:
+            out['clearance'] = float(cc)
+        rules = self.rules
+        if rules is None or not (getattr(rules, 'rules', None) or getattr(rules, 'board_min', None)):
+            return out
+        try:
+            from fab_tiers import get_escalation_policy
+            if get_escalation_policy()[0] == 'fab':
+                return out
+        except Exception:                                      # noqa: BLE001
+            return out
+        try:
+            tw = rules.floor('track_width', net_id, layer)
+            if tw:
+                out['track_width'] = tw
+            vd = rules.floor('via_diameter', net_id, layer, type='via')
+            if vd:
+                out['via_diameter'] = vd
+            hs = rules.floor('hole_size', net_id, layer, type='via')
+            if hs:
+                out['via_drill'] = hs
+        except Exception:                                      # noqa: BLE001
+            return out
+        return out
+
+    def track_floor(self, net_id: int, layer: Optional[str], fab_value: float) -> float:
+        """The narrowest track a descent may deliver on ``net_id``: the fab
+        floor raised to the net's own rule / board minimum (see rule_floors)."""
+        rf = self.rule_floors(net_id, layer).get('track_width')
+        return max(fab_value, rf) if rf else fab_value
+
+    def pad_override_clearance(self, base: float, pad, other_pad=None) -> float:
+        """The pair clearance against ``pad`` (and ``other_pad``) once a pad /
+        footprint clearance OVERRIDE is applied: KiCad's max(overrides) floored
+        at rules.min_clearance, REPLACING ``base`` (design_rules.override_clearance).
+        ``base`` is returned unchanged when neither pad carries one, so a board
+        without overrides is byte-identical to before."""
+        from design_rules import override_clearance
+        rules = self.rules
+        bm = (rules.board_min.get('min_clearance', 0.0) if rules is not None
+              and getattr(rules, 'board_min', None) else 0.0)
+        return override_clearance(base, bm, pad, other_pad)
 
     def track_obstacle_clearance(self, net_id: int, resolved: float) -> float:
         """Track-rule seg-vs-seg clearance against obstacle net ``net_id``:

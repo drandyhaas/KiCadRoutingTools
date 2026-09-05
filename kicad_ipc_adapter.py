@@ -1013,8 +1013,17 @@ def apply_oracle_reconnect(board, *, nets, config, pcb_data,
     from routing_utils import pos_key
     import os
     import tempfile
-    if find_kicad_cli() is None or not nets:
-        return {}
+    # #713: a bare {} here made "the oracle could not run" byte-identical to
+    # "the oracle ran and found everything connected" -- both an empty dict,
+    # both silent. `oracle_reconnect` itself reports {'available', 'reason',
+    # 'why'}; this front used to drop that on the floor before ever calling
+    # it. Say WHICH refusal it was so the caller can disclose it.
+    if find_kicad_cli() is None:
+        return {'available': False, 'reason': 'no_link_source',
+                'why': 'kicad-cli not found and no other source is enabled'}
+    if not nets:
+        return {'available': False, 'reason': 'no_nets',
+                'why': 'no nets were handed to the oracle leg'}
 
     def name_for(net_id):
         if pcb_data is None or net_id is None:

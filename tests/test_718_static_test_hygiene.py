@@ -362,10 +362,209 @@ def test_the_scanners_still_match_something():
           f'{joins} literal join(s)')
 
 
+#: Modules the standard library ships on POSIX and NOT on Windows. Imported at
+#: module scope, any of these makes its file unimportable there -- and a file
+#: that cannot be imported takes down everything that imports it, at import
+#: time, before a single assertion runs.
+_POSIX_ONLY = ('resource', 'fcntl', 'termios', 'pwd', 'grp', 'posix',
+               'crypt', 'syslog', 'nis', 'spwd')
+
+
+def test_no_module_scope_posix_only_import():
+    """A POSIX-only module imported at top level is a Windows-wide outage.
+
+    #882: `tests/stress/fill_timing_census.py` imported `resource` at module
+    scope, so `tests/test_831_fill_preflight_census.py` -- a collected test
+    that only calls the pure `analyse()` and never touches CPU accounting --
+    died at IMPORT on every Windows machine. The suite carried a standing
+    failure there, which is the expensive part: a permanent red teaches the
+    reader to skim the failure list.
+
+    The repo already had the right shape in both available forms --
+    `py_router/memory_debug.py` guards with a `_HAS_RESOURCE` flag, and
+    `tests/stress/redo_stress_test.py` imports inside the one function that
+    needs it. This gate is what stops the third instance being written.
+
+    Scoped to the WHOLE repo, not just `tests/`, deliberately: the same import
+    in `py_router/` would break the router itself on Windows rather than one
+    test, so the cheaper place to catch it is everywhere.
+    """
+    roots = [TESTS_DIR] + [os.path.join(ROOT, d) for d in
+                           ('py_router', 'py_placer', 'py_tools',
+                            'kicad_routing_plugin')]
+    bad, scanned, unparseable = [], 0, []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in sorted(dirnames)
+                           if d not in ('__pycache__', '.pytest_cache')]
+            for fname in sorted(filenames):
+                if not fname.endswith('.py'):
+                    continue
+                path = os.path.join(dirpath, fname)
+                try:
+                    with open(path, encoding='utf-8', errors='replace') as fh:
+                        tree = ast.parse(fh.read())
+                except SyntaxError as exc:
+                    # REPORTED, not skipped. A file this gate cannot parse is
+                    # a file it cannot clear, and swallowing that is how the
+                    # gate would go quiet on exactly the file someone just
+                    # broke -- caught when a deliberate mutation of
+                    # fill_timing_census.py produced a SyntaxError and this
+                    # check printed PASS over one file FEWER. `_code_only`
+                    # above already states the rule: a gate that goes quiet on
+                    # a file it cannot parse is worse than one that is
+                    # slightly noisy.
+                    unparseable.append(
+                        f'{os.path.relpath(path, ROOT)}: {exc.__class__.__name__}'
+                        f' line {exc.lineno}')
+                    continue
+                except OSError:                            # pragma: no cover
+                    continue
+                scanned += 1
+                # TOP-LEVEL only. An import inside a function or a try/except
+                # is the correct shape and must not be flagged.
+                for node in tree.body:
+                    names = []
+                    if isinstance(node, ast.Import):
+                        names = [a.name.split('.')[0] for a in node.names]
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        names = [node.module.split('.')[0]]
+                    for name in names:
+                        if name in _POSIX_ONLY:
+                            bad.append(
+                                f'{os.path.relpath(path, ROOT)}'
+                                f':{node.lineno}: {name}')
+    assert not bad, (
+        'POSIX-only module(s) imported at module scope, so these files cannot '
+        'be imported on Windows:\n  ' + '\n  '.join(bad)
+        + '\n  Guard with try/except and a _HAS_X flag (see '
+          'py_router/memory_debug.py), or import inside the function that '
+          'needs it (see tests/stress/redo_stress_test.py).')
+    assert not unparseable, (
+        'file(s) this gate could not parse, so it cleared them without '
+        'looking:\n  ' + '\n  '.join(unparseable))
+    print(f'  PASS: no module-scope POSIX-only import, over {scanned} file(s)')
+def _guard_end(tree):
+    """Line of the last top-level `if __name__ == '__main__':` block's end."""
+    end = None
+    for node in tree.body:
+        if (isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == '__name__'):
+            end = max(end or 0, node.end_lineno or node.lineno)
+    return end
+
+
+def _defines_tests(node):
+    """Does this top-level node define test(s), and under what name?"""
+    if isinstance(node, ast.ClassDef):
+        if any(isinstance(b, ast.FunctionDef) and b.name.startswith('test')
+               for b in node.body):
+            return f'class {node.name}'
+    elif (isinstance(node, ast.FunctionDef)
+          and node.name.startswith('test')):
+        return f'def {node.name}'
+    return None
+
+
+def test_no_test_is_defined_after_its_own_runner():
+    """A test defined BELOW `if __name__ == '__main__':` never runs.
+
+    The guard executes the runner and the runner exits, so anything defined
+    after it does not exist yet -- `unittest.main()` discovers what is bound
+    at the moment it is called, and a hand-rolled `for t in TESTS` cannot list
+    a function defined later. Either way the file reports OK and `run_all`
+    records a PASS, which is indistinguishable from having checked.
+
+    Measured when this gate was written (#876): FIVE files, 27 dead tests.
+    `test_run6_body_overlap.py` ran 9 of 20 and hid four stale corpus
+    assertions; `test_431_render_placement.py` had 8 unregistered functions,
+    one of which was red the moment it ran. This is the same failure as
+    `test_every_test_in_this_file_is_registered` below, one file wider -- that
+    one caught the pattern in THIS file, and nothing looked at the others.
+    """
+    bad = {}
+    for rel, src in _py_files(only_tests=True):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:                                # pragma: no cover
+            continue
+        end = _guard_end(tree)
+        if end is None:
+            continue
+        after = [name for node in tree.body
+                 if node.lineno > end
+                 for name in [_defines_tests(node)] if name]
+        if after:
+            bad[rel] = after
+    assert not bad, (
+        'test(s) defined after the runner that would have run them, so they '
+        'never run:\n  ' + '\n  '.join(
+            f'{rel}: {", ".join(names)}' for rel, names in sorted(bad.items()))
+        + '\n  Move `if __name__ == ...` to the END of the file.')
+    print(f'  PASS: no test defined after its own runner, over '
+          f'{sum(1 for _ in _py_files(only_tests=True))} test file(s)')
+
+
+def test_every_test_is_registered_in_its_files_own_list():
+    """A file with a module-level `TESTS = [...]` must list every test it
+    defines.
+
+    The registry idiom is hand-maintained, so a function added to the bottom
+    of such a file runs only if someone also adds it to the list -- and one
+    that never runs is indistinguishable from one that passes. Measured at
+    #876: `test_431_render_placement.py` defined 28 tests and registered 20.
+
+    Scoped to files that HAVE such a list: a unittest file has no registry and
+    is covered by the gate above instead.
+    """
+    bad = {}
+    for rel, src in _py_files(only_tests=True):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:                                # pragma: no cover
+            continue
+        listed = None
+        for node in tree.body:
+            if (isinstance(node, ast.Assign)
+                    and any(getattr(t, 'id', None) == 'TESTS'
+                            for t in node.targets)
+                    and isinstance(node.value, (ast.List, ast.Tuple))):
+                listed = {e.id for e in node.value.elts
+                          if isinstance(e, ast.Name)}
+        if listed is None:
+            continue
+        # `TESTS.append(...)` is an accepted way to register one late.
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'append'
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == 'TESTS'):
+                listed |= {a.id for a in node.args if isinstance(a, ast.Name)}
+        defined = {node.name for node in tree.body
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name.startswith('test')}
+        missing = sorted(defined - listed)
+        if missing:
+            bad[rel] = missing
+    assert not bad, (
+        'test(s) defined but absent from their file\'s own TESTS list, so '
+        'they never run:\n  ' + '\n  '.join(
+            f'{rel}: {", ".join(names)}' for rel, names in sorted(bad.items())))
+    print('  PASS: every registry-style test file lists all its tests')
+
+
 TESTS = [
     test_wk_dependent_tests_are_declared,
     test_no_test_spawns_a_script_that_moved,
     test_the_scanners_still_match_something,
+    test_no_module_scope_posix_only_import,
+    test_no_test_is_defined_after_its_own_runner,
+    test_every_test_is_registered_in_its_files_own_list,
 ]
 
 

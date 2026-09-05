@@ -72,6 +72,68 @@ def load_intent_or_exit(args):
         return None, 2
 
 
+def add_brief_arg(parser) -> None:
+    """`--brief` / `--no-brief`: the DECLARED design intent (#711).
+
+    Defined here for the same reason `--intent` is: one spelling, one
+    description of what it buys. The sibling is auto-discovered, following the
+    `.kicad_dru` precedent -- the artifact is the source of truth and a board
+    that carries one should not need a flag to be believed.
+
+    `--no-brief` exists because an auto-discovered input that changes placement
+    needs an OFF arm: an A/B with no way to turn the variable off is not an
+    A/B, and a board whose sibling brief you deliberately want ignored has no
+    other way to say so.
+    """
+    parser.add_argument(
+        "--brief", metavar="JSON", default=None,
+        help="Design brief JSON: what the board file cannot know -- which "
+             "connectors are user-facing, which edge each belongs on and "
+             "where along it, what the enclosure forbids. Auto-discovered as "
+             "the sibling <board>.design-brief.json when this is omitted; "
+             "pass a path to override. A DECLARED claim outranks the edge "
+             "this toolchain would otherwise infer from the part's current "
+             "pose (#711)")
+    parser.add_argument(
+        "--no-brief", action="store_true",
+        help="Do not read the sibling design brief, even if one exists. The "
+             "OFF arm: without it there is no way to measure what declaring "
+             "changed")
+
+
+def load_brief_or_exit(args, board_path: str):
+    """(brief, path, exit_code). `exit_code` is 2 when a brief is unreadable.
+
+    Called BEFORE `record_invocation`, as `load_intent_or_exit` is, so an exit
+    2 never records a manifest command that touched no file.
+
+    An EXPLICIT `--brief` that does not exist is an error; a MISSING sibling
+    is not. Those are different acts: naming a file that is not there is a
+    mistake worth stopping for, and not having written one is the ordinary
+    case this whole channel is designed around.
+    """
+    import os
+    import sys
+    from placement import design_brief
+    if getattr(args, 'no_brief', False):
+        return None, '', 0
+    path = getattr(args, 'brief', None)
+    if path:
+        if not os.path.isfile(path):
+            print(f"cannot read design brief {path}: no such file",
+                  file=sys.stderr)
+            return None, path, 2
+    else:
+        path = design_brief.discover_brief(board_path)
+        if not path:
+            return None, '', 0
+    try:
+        return design_brief.load_brief(path), path, 0
+    except (OSError, ValueError) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return None, path, 2
+
+
 def resolve_intent_gate_for_cli(intent, pcb_data, sources, path):
     """(bundle, problems) plus the one report every quenching CLI must print.
 
@@ -98,8 +160,27 @@ def resolve_intent_gate_for_cli(intent, pcb_data, sources, path):
     resolve_sources = tuple(sources) or parse_sources('auto')
     bundle, problems = floorplan.resolve_intent_gate(
         intent, pcb_data, resolve_sources)
+    # Print the severity the finding CARRIES. This loop labelled everything
+    # `INTENT ERROR`, which was harmless while every finding reaching it
+    # defaulted to error -- and became a lie with #793, whose whole design is a
+    # finding at WARN so it can be loud without being fatal. Relabelling it
+    # ERROR at the four CLIs the issue was written for would have undone that.
+    # Default-severity output is unchanged: every pre-#793 finding here is an
+    # error, so only a demoted one now reads differently, which is correct and
+    # was previously wrong.
+    n_err = 0
     for v in problems:
-        print(f"  INTENT ERROR [{v.rule}] {v.message}", file=sys.stderr)
+        is_err = v.severity == floorplan.ERROR
+        n_err += is_err
+        label = 'INTENT ERROR' if is_err else 'INTENT WARN '
+        print(f"  {label} [{v.rule}] {v.message}", file=sys.stderr)
+    if problems:
+        # A tally, because these four CLIs PRINT the problems and act on none
+        # of them: without a count, "nothing was wrong" and "several things
+        # were wrong and scrolled past" look the same to a reader.
+        print(f"  ({n_err} error(s), {len(problems) - n_err} warning(s) from "
+              f"the intent; this gate reports, it does not exit)",
+              file=sys.stderr)
     zoned = [z for z in bundle['zones'] if z['refs']]
     bound = len({r for z in zoned for r in z['refs']})
     if not (zoned or bundle['keepouts'] or bundle['lock_refs']):

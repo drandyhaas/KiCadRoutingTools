@@ -29,7 +29,7 @@ import sys
 
 # Sibling files a staged board carries with it (the .kicad_pro is the DRC floor
 # a later step reads; #441).
-_SIBLING_EXTS = ('.kicad_pro', '.kicad_dru', '.kicad_prl')
+from copy_board import SIBLING_EXTS as _SIBLING_EXTS  # ONE list (#711)
 
 
 def _promote_staged(staged: str, final: str) -> None:

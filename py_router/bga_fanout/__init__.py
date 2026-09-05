@@ -27,7 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import routing_defaults as defaults
 from kicad_parser import parse_kicad_pcb, Pad, Footprint, PCBData, find_components_by_type
 from net_queries import matches_net_filter
-from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation
+from list_nets import fab_floors, fab_floor_ladder, fab_floor_min, warn_fab_escalation  # noqa: F401
+from list_nets import escalation_rungs
 from kicad_writer import add_tracks_and_vias_to_pcb
 from bga_fanout.types import (
     create_track,
@@ -51,6 +52,9 @@ from bga_fanout.geometry import (
     clamp_via_to_pad,
     immovable_foreign_pads,
     via_clears_pad_rects,
+    PendingVias,
+    thin_drill_to_clear,
+    via_anchors_route,
 )
 from bga_fanout.escape import (
     find_escape_channel,
@@ -612,6 +616,55 @@ def create_single_ended_route(
 _H2H_ANNOUNCED = set()
 
 
+def ball_has_copper(pad, vias, tracks, track_width: float = 0.0) -> bool:
+    """Is this ball connected by copper THIS PASS placed?
+
+    Layer-aware: an SMD ball is connected by a net VIA that REACHES it (a via
+    spans every layer) or by a net track ENDPOINT on its own layer -- copper
+    merely crossing the pad on an inner layer is not a connection. Drilled or
+    '*.Cu' balls conduct on every layer.
+
+    The two arms ask different questions on purpose, and the difference is the
+    #854 fix:
+
+    * The VIA arm asks REACH (``via_anchors_route``). It used to ask
+      ``max(size_x, size_y) / 2 + 0.01`` in BOTH axes -- the scalar-radius shape
+      PR #852's review removed from ``PendingVias.verdict``, surviving here as
+      the DOWNSTREAM ball-anchor test that rule appeals to by name. Two graders
+      agreeing in the wrong direction is why the stranding was silent: on the
+      issue's own repro that tolerance is 0.51mm, so a ball whose only via sat
+      0.4mm away read as ANCHORED and ``_strap_unescaped_extras`` never strapped
+      it.
+    * The TRACK arm keeps the pad-box tolerance. "Is there a track endpoint at
+      this pad" is a different question, and an endpoint anywhere on the pad
+      copper does connect it.
+
+    Module-level rather than a closure because a predicate nothing can call is
+    a predicate nothing tests: as a closure it survived a mutation that reverted
+    the via arm to the old box.
+    """
+    if any(v['net_id'] == pad.net_id
+           and via_anchors_route(v['x'], v['y'], v.get('size') or 0.0,
+                                 (pad.global_x, pad.global_y), track_width)
+           for v in vias):
+        return True
+    tol = max(pad.size_x, pad.size_y) / 2 + 0.01
+    pad_layer = None
+    for lay in (pad.layers or []):
+        if lay.endswith('.Cu') and not lay.startswith('*'):
+            pad_layer = lay
+            break
+    any_layer = pad_layer is None or (pad.drill or 0) > 0
+    return any(
+        t['net_id'] == pad.net_id
+        and (any_layer or t['layer'] == pad_layer) and (
+            (abs(t['start'][0] - pad.global_x) < tol
+             and abs(t['start'][1] - pad.global_y) < tol)
+            or (abs(t['end'][0] - pad.global_x) < tol
+                and abs(t['end'][1] - pad.global_y) < tol))
+        for t in tracks)
+
+
 def manage_vias(
     routes: List[FanoutRoute],
     pcb_data: 'PCBData',
@@ -619,7 +672,8 @@ def manage_vias(
     via_size: float,
     via_drill: float,
     clearance: float,
-) -> Tuple[List[Dict], List[Dict]]:
+    track_width: float = 0.0,
+) -> Tuple[List[Dict], List[Dict], List['FanoutRoute']]:
     """
     Manage vias for fanout routes.
 
@@ -633,25 +687,59 @@ def manage_vias(
         via_size: Size of vias to add
         via_drill: Drill size for vias
         clearance: Minimum clearance between vias
+        track_width: Width of the tracks these routes emit. Only the same-net
+            via-merge (#854) uses it: a committed via serves another route
+            when it reaches that route's track start at via_radius +
+            track_width / 2. 0 (the default) means "the via's copper only" --
+            the conservative reading, correct for a caller that does not know
+            the width.
 
     Returns:
-        Tuple of (vias_to_add, vias_to_remove)
+        Tuple of (vias_to_add, vias_to_remove, via_blocked_routes)
 
-    KNOWN GAP, NOT FIXED HERE -- D10's self-blindness, in this function.
-    `vias_to_add` is appended to below and never read back, and BOTH guards
-    that gate an append iterate `pcb_data.vias` only: `would_overlap_existing_via`
-    and `via_in_pad_conflict`'s drill loop. So two vias added in ONE call are
-    never tested against each other -- the same shape as the qfn underpad
-    escape's, where the fix was to test each candidate against this run's own
-    output as well as the input board (`qfn_fanout.run_output_conflict`, which
-    is reusable and would be this code's second caller).
+    D10's SELF-BLINDNESS, CLOSED HERE (#620). `vias_to_add` was appended to
+    below and never read back, and BOTH guards that gate an append iterate
+    `pcb_data.vias` only: `would_overlap_existing_via` and
+    `via_in_pad_conflict`'s drill loop. So two vias added in ONE call were
+    never tested against each other. `PendingVias` (bga_fanout/geometry.py) is
+    the missing half, and its docstring argues what it tests -- the drill
+    always, the ring only for a via the clamp could not fit inside its pad --
+    from a sweep rather than from first principles.
 
-    Structurally verified by reading; the IMPACT is UNMEASURED, deliberately
-    stated as such. A 0.5mm-pitch BGA taking via 0.45 + clearance 0.1 needs
-    0.55mm between adjacent ball centres and has 0.50 -- but `clamp_via_to_pad`
-    shrinks a via to fit its pad first, and on that pitch it may clamp far
-    enough to make the pair legal anyway. Whether this bites needs measuring
-    on a real fine-pitch BGA before anyone claims it does.
+    The impact, which the issue deliberately left UNMEASURED, is measured now:
+    on an empty board two 0.30mm-pitch balls with 0.25mm pads ship holes
+    0.15mm apart against a 0.20mm fab floor, `added=2 blocked=0`, and two
+    coincident same-net balls ship TWO `(via ...)` s-exprs at one point. The
+    issue's own worked example -- 0.5mm pitch, via 0.45, clearance 0.1 -- was
+    right to hedge: `clamp_via_to_pad` shrinks that via to the ball pad first
+    and the pair is legal. **No board in this repo reaches the refusal branch
+    at CLI defaults**, which is why the evidence is a constructed fixture and
+    the corpus arms are a safety check, not a headline.
+
+    The cost is stated where it is paid: a refusal drops the escape (see the
+    #756 block below), so the conflict branch descends the fab drill ladder
+    before giving one up, and `--fab-overrides` -- which collapses that ladder
+    to one hard rung -- cannot descend at all. That is the configuration the
+    #620 contributor measured as pure loss, and their measurement is why this
+    has a ladder and a same-site rule at all.
+
+    THREE RESIDUALS, named rather than hidden. An adversarial review found the
+    second and third; all are deterministic, none is a correctness bug, and
+    each costs escapes in a case no in-repo board reaches.
+
+    1. A conflict is resolved against the vias committed SO FAR, while the two
+       whole-net drops that run after this function returns (`esc_dropped`, and
+       the via-vs-foreign-track pass) can later delete a via a refusal was
+       measured against. Twins are immune -- same net, dropped together -- but
+       a distinct-pair loser is not recoverable once its tracks are gone.
+    2. The loser of a conflict is whichever route arrives LATER, with no
+       tiebreak. Route order is a deterministic list order, so the output is
+       reproducible, but it is not escape-maximising: three balls in a row at
+       0.30mm pitch keep 2 escapes in four of six route permutations and 1 in
+       the two that place the middle ball first.
+    3. A refusal costs the net's WHOLE fanout, not the one ball, because the
+       caller drops every route of a blocked net (the #508 coherence rule at
+       this function's call site). The disclosure below says so.
 
     `via_in_pad_conflict`'s drill floor was the OTHER gap here -- priced at
     the flat `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the
@@ -665,10 +753,10 @@ def manage_vias(
     **The cost, which the via-nudge half does not pay:** a refusal here
     DROPS the escape rather than searching again, so a tighter floor can
     turn an escaped ball into a failed net. The via-nudge answers that with
-    a two-rung ladder; this pass has no second rung to descend to. Stated
-    at the resolution site with the numbers.
-
-    The self-blindness above is untouched and still open.
+    a two-rung ladder; this pass had no second rung to descend to. Stated
+    at the resolution site with the numbers. #620 gives the SAME-CALL arm one
+    (`thin_drill_to_clear`); the board-facing arm above still has none, so a
+    board declaration can still refuse an escape outright.
     """
     def find_nearby_via(x: float, y: float, net_id: int, max_dist: float):
         """Find an existing via on the same net within max_dist of position."""
@@ -851,10 +939,22 @@ def manage_vias(
     # fab-tier ladder so the clamp escalates standard->advanced when a sub-0.45mm
     # pad can't take the standard via (issue #237).
     copper = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
-    floors = fab_floor_ladder(copper)
+    # escalation_rungs: empty under --escalation off (the clamp then holds the
+    # nominal via), raised to the board's own minimums under board (#857).
+    floors = escalation_rungs(copper)
     clamped_count = 0
     floor_pads = 0
     escalated_count = 0
+
+    # #620: this run's OWN output, queryable as it grows. Every guard above
+    # scans `pcb_data`, and `vias_to_add` was appended to and never read back,
+    # so two vias placed in one call were spaced against the input board and
+    # against nothing else. `PendingVias` is the missing half; what it tests
+    # and what it deliberately does not is argued at its definition.
+    _pending = PendingVias(_h2h, clearance)
+    _twin_shared = 0       # routes an already-placed via REACHES (#854)
+    _thinned = []          # (from, to) drills a deeper fab rung rescued
+    _pending_refused = []  # (net name, reason) escapes no rung could place
 
     # Check distance threshold: via is "at pad" if within via radius + small tolerance
     via_proximity_threshold = via_size / 2 + 0.1
@@ -906,15 +1006,120 @@ def manage_vias(
                                        route.net_id) is not None:
                     via_blocked_routes.append(route)
                     continue
-                if not would_overlap_existing_via(pad_x, pad_y, v_size):
-                    vias_to_add.append({
-                        'x': pad_x,
-                        'y': pad_y,
-                        'size': v_size,
-                        'drill': v_drill,
-                        'layers': ['F.Cu', 'B.Cu'],
-                        'net_id': route.net_id
-                    })
+                # #620: the pair test the input-board guards above cannot do.
+                # Placed AFTER them so the board keeps its present precedence
+                # -- this only decides among sites THIS call is creating.
+                _bulges = status == 'floor'
+                # A committed via is this ball's only when it REACHES the
+                # track this route starts at the pad centre. Testing the
+                # candidate's pad RECTANGLE instead let a large pad swallow a
+                # smaller overlapping same-net pad's via and strand the
+                # loser's route (#854) -- see `via_anchors_route`.
+                _v, _detail = _pending.verdict(pad_x, pad_y, v_size, v_drill,
+                                               route.net_id, _bulges,
+                                               track_width=track_width)
+                if _v == 'twin':
+                    # Two routes, one physical hole. Both keep their tracks and
+                    # both anchor to the via already committed here, because
+                    # 'twin' means that via REACHES this route's track start
+                    # (#854), and the downstream ball-anchor test
+                    # (`ball_has_copper`) asks the same question of the same
+                    # via. Today's code appends a second identical dict and the
+                    # writer, which does not dedupe, emits both as stacked
+                    # copper.
+                    #
+                    # The SURVIVOR must be the tighter pad's clamp. Which via
+                    # survived used to be whichever route arrived first, so two
+                    # coincident same-net pads of 0.25 and 0.60 kept a 0.45 via
+                    # bulging past the 0.25 pad -- the #202 violation
+                    # `clamp_via_to_pad` exists to prevent, re-created by the
+                    # merge. Tighten instead.
+                    #
+                    # BUT TIGHTENING CAN BREAK THE REACH THAT JUSTIFIED THE
+                    # MERGE, and only since #854: `verdict` decided 'twin' from
+                    # the COMMITTED via's size, and `tighten` then replaces it
+                    # with min(that, this route's clamp) -- a smaller barrel
+                    # reaches less far. Under the old pad-BOX rule this could
+                    # not happen, because a box test does not depend on via
+                    # size, so the interaction is new. A pre-push review found
+                    # it before any board did (no corpus twin is far enough
+                    # from its pad for the shrink to matter -- every one sits
+                    # at distance 0). Re-check after the shrink and fall
+                    # through to the normal path, where this route gets its own
+                    # via. Skipping the tighten instead would ship the #202
+                    # bulge; refusing the merge is the honest half.
+                    _tx, _ty, _ts, _td = _detail
+                    if not via_anchors_route(_tx, _ty, min(_ts, v_size),
+                                             (pad_x, pad_y), track_width):
+                        _v = 'clear'
+                    else:
+                        if _pending.tighten(_tx, _ty, v_size, v_drill):
+                            for _v_dict in vias_to_add:
+                                if (_v_dict['x'] == _tx and _v_dict['y'] == _ty
+                                        and _v_dict['net_id'] == route.net_id):
+                                    _v_dict['size'] = min(_v_dict['size'],
+                                                          v_size)
+                                    _v_dict['drill'] = min(_v_dict['drill'],
+                                                           v_drill)
+                                    break
+                        _twin_shared += 1
+                        continue
+                if _v == 'conflict':
+                    # A refusal here drops the escape -- there is no re-sweep
+                    # -- so descend the fab ladder's drill floors first. The
+                    # twin branch above cannot re-fire for a thinner drill, so
+                    # 'clear' is the right predicate.
+                    _thin = thin_drill_to_clear(
+                        v_drill, floors, rung,
+                        lambda cand: _pending.verdict(
+                            pad_x, pad_y, v_size, cand, route.net_id,
+                            _bulges, track_width=track_width)[0] == 'clear')
+                    if _thin is None:
+                        via_blocked_routes.append(route)
+                        _pending_refused.append(
+                            (route.pad.net_name or f"net{route.net_id}",
+                             _detail[0]))
+                        continue
+                    _thinned.append((v_drill, _thin))
+                    v_drill = _thin
+                if would_overlap_existing_via(pad_x, pad_y, v_size):
+                    # #620, second half: this used to be `if not ...: append`,
+                    # so a refusal here dropped the VIA and kept the route --
+                    # its inner-layer track shipped anyway, connected to
+                    # nothing, while the ball still counted as escaped. The
+                    # sibling guard two lines up does the opposite, and the
+                    # #508 comment at this function's call site says why: the
+                    # old code "left the sibling routes in `routes` -- still
+                    # counted escaped, shipping via-in-pad balls with no
+                    # track". This is the same defect with the halves swapped.
+                    #
+                    # THE REFUSAL SET IS UNCHANGED -- only the bookkeeping is.
+                    # `would_overlap_existing_via` stays net-BLIND (a same-net
+                    # via inside the pad is already handled by the
+                    # `existing_via` branch above); making it foreign-only
+                    # would change WHICH sites get a via, which is not this
+                    # issue.
+                    #
+                    # Measured on orangecrab_ext_pll U3 at defaults, the one
+                    # in-repo board that reaches this branch: it fires 11
+                    # times over the retry passes (4 distinct nets, every
+                    # blocker foreign), and the output board is UNCHANGED --
+                    # each stranded route was removed by a later filter
+                    # anyway, and its net already reported unescaped. So this
+                    # ships as a coherence fix with no measured board effect,
+                    # said plainly rather than dressed up.
+                    via_blocked_routes.append(route)
+                    continue
+                vias_to_add.append({
+                    'x': pad_x,
+                    'y': pad_y,
+                    'size': v_size,
+                    'drill': v_drill,
+                    'layers': ['F.Cu', 'B.Cu'],
+                    'net_id': route.net_id
+                })
+                _pending.add(pad_x, pad_y, v_size, v_drill, route.net_id,
+                             _bulges)
 
     if vias_to_add:
         print(f"  Adding {len(vias_to_add)} vias at pads on non-top layers")
@@ -926,14 +1131,44 @@ def manage_vias(
         print(f"  WARNING: {floor_pads} pad(s) smaller than the fab via floor "
               f"({fab_floor_min(copper)['via_diameter']:.2f}mm dia); via held at the "
               f"floor and still bulges past the pad edge")
+    # #620 disclosure. Separate from the #253/#370 line below because these are
+    # this run's own vias meeting each other, which the reader cannot act on in
+    # the same way: the levers are the pitch, the drill and the fab tier.
+    if _twin_shared:
+        print(f"  #620: {_twin_shared} same-net route(s) reached an already "
+              f"placed via instead of stacking a second one")
+    if _thinned:
+        # The SET of drills, not min(): several rungs can be used in one run
+        # and "thinned to 0.15mm" would misdescribe a via thinned to 0.17.
+        _to = ', '.join(f"{d:g}" for d in sorted({t[1] for t in _thinned}))
+        warn_fab_escalation(
+            f"{len(_thinned)} via-in-pad drill(s) thinned to {_to}mm to hold "
+            f"the {_h2h:g}mm hole-to-hole floor ({_h2h_src}) against this "
+            f"run's own vias")
+    if _pending_refused:
+        _names = sorted({n for n, _r in _pending_refused})
+        _reasons = sorted({r for _n, r in _pending_refused})
+        print(f"  WARNING: {len(_pending_refused)} escape(s) dropped: this "
+              f"run's own via-in-pads cannot be spaced at the {_h2h:g}mm "
+              f"hole-to-hole floor ({_h2h_src}) on this pitch, and no fab rung "
+              f"is thin enough ({'; '.join(_reasons)}); retry with "
+              f"--escape-method underpad, a smaller --via-drill, or a fab tier "
+              f"whose floor this pitch can meet: {', '.join(_names)}")
+        # The caller drops the whole NET of a blocked route (#508 coherence:
+        # `blocked_net_ids` removes every route of that net plus its tracks),
+        # so one refused ball costs its net's entire fanout. Named here
+        # because the count above reads like a per-ball cost and is not.
+        print(f"           each of those nets loses its WHOLE fanout, not "
+              f"just the refused ball ({len(_names)} net(s))")
     if vias_to_remove:
         print(f"  Removing {len(vias_to_remove)} unnecessary vias at pads on top layer")
     if via_blocked_routes:
         names = sorted(r.pad.net_name or f"net{r.net_id}" for r in via_blocked_routes)
         print(f"  WARNING: {len(via_blocked_routes)} escape(s) dropped: via-in-pad "
               f"would hit an immovable foreign pad (locked part/connector/test "
-              f"point, #253), a drill within hole-to-hole of another hole, or a "
-              f"foreign track (#370): {', '.join(names)}")
+              f"point, #253), a drill within hole-to-hole of another hole, a "
+              f"foreign track (#370), or an existing via's ring (#620): "
+              f"{', '.join(names)}")
 
     return vias_to_add, vias_to_remove, via_blocked_routes
 
@@ -1905,9 +2140,10 @@ def _underpad_shrink_rescue(footprint, pcb_data, grid, layers, up_kw,
     tw0 = up_kw['track_width']
     vs0, vd0 = up_kw['via_size'], up_kw['via_drill']
     cl0 = up_kw['clearance']
-    # Ladder rungs strictly smaller than what we just tried.
+    # Ladder rungs strictly smaller than what we just tried (none under
+    # --escalation off; raised to the board's minimums under board).
     rungs = []
-    for f in fab_floor_ladder(ncu):
+    for f in escalation_rungs(ncu):
         tw = min(tw0, f['track_width'])
         vs, vd = min(vs0, f['via_diameter']), min(vd0, f['via_drill'])
         cl = min(cl0, f['clearance'])
@@ -2206,7 +2442,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
     # Pair re-runs go straight to the tightest rung (same reasoning as the
     # shrink rescue: an intermediate rung cannot fit where the floor does not).
     floor = None
-    for f in fab_floor_ladder(ncu):
+    for f in escalation_rungs(ncu):
         floor = f
     tw = min(up_kw['track_width'], floor['track_width']) if floor else up_kw['track_width']
     vs = min(up_kw['via_size'], floor['via_diameter']) if floor else up_kw['via_size']
@@ -2798,33 +3034,9 @@ def _generate_bga_fanout_core(footprint: Footprint,
             _escaped_names = {n for n in ({_p.net_name for _p in _extras}
                                           | set())
                               if n not in failed_nets}
-            def _has_copper(_p):
-                # Layer-aware: an SMD ball is connected by a net VIA inside its
-                # pad (spans all layers) or a net track endpoint ON ITS OWN
-                # layer -- copper crossing the pad on an inner layer is not a
-                # connection. Drilled / '*.Cu' balls conduct on every layer.
-                tol = max(_p.size_x, _p.size_y) / 2 + 0.01
-                if any(_v['net_id'] == _p.net_id
-                       and abs(_v['x'] - _p.global_x) < tol
-                       and abs(_v['y'] - _p.global_y) < tol
-                       for _v in vias_to_add):
-                    return True
-                _pl = None
-                for _l in (_p.layers or []):
-                    if _l.endswith('.Cu') and not _l.startswith('*'):
-                        _pl = _l
-                        break
-                any_layer = _pl is None or (_p.drill or 0) > 0
-                return any(
-                    _t['net_id'] == _p.net_id
-                    and (any_layer or _t['layer'] == _pl) and (
-                        (abs(_t['start'][0] - _p.global_x) < tol
-                         and abs(_t['start'][1] - _p.global_y) < tol)
-                        or (abs(_t['end'][0] - _p.global_x) < tol
-                            and abs(_t['end'][1] - _p.global_y) < tol))
-                    for _t in tracks)
             _bare = [_p for _p in _extras
-                     if _p.net_name in _escaped_names and not _has_copper(_p)]
+                     if _p.net_name in _escaped_names
+                     and not ball_has_copper(_p, vias_to_add, tracks, _tw)]
             if _bare:
                 _prog(f"strapping {len(_bare)} unescaped extra ball(s)...")
                 _n_strap, _still = _strap_unescaped_extras(
@@ -3447,7 +3659,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # Via management: add vias where needed, remove unnecessary ones
         _prog("placing vias...")
         vias_to_add, vias_to_remove, via_blocked_routes = manage_vias(
-            routes, pcb_data, layers[0], via_size, via_drill, clearance
+            routes, pcb_data, layers[0], via_size, via_drill, clearance,
+            track_width=track_width
         )
 
         # Routes whose required via-in-pad would hit an immovable foreign pad
@@ -3548,7 +3761,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # guard below, which previously scanned pre-repair vias against
         # post-repair tracks.
         vias_to_add, vias_to_remove, _reblocked = manage_vias(
-            best_routes, pcb_data, layers[0], via_size, via_drill, clearance)
+            best_routes, pcb_data, layers[0], via_size, via_drill, clearance,
+            track_width=track_width)
         if _reblocked:
             from bga_fanout.reroute import _remove_route_tracks
             _rb_net_ids = {r.net_id for r in _reblocked}
@@ -4247,6 +4461,7 @@ def main():
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.pcb)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     set_default_fab_tier(*fab_tier_from_args(args))
+    __import__('fab_tiers').set_policy_from_args(args, args.pcb)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.pcb),
         track_width=getattr(args, 'track_width', None),
@@ -4451,6 +4666,20 @@ def main():
                     pro_path_for_board(out_path), args.same_net_pad_clearance)
         except Exception as _e:
             print(f"  (skipped same-net pad clearance record: {_e})")
+    # #678: the balls this fanout promised to serve by fill contact -- a later
+    # route step's plane finalize defends them (pour_promise.py). Merged into
+    # the project, so a chain of several fanouts accumulates every component's
+    # promises. NOT gated on --no-fix-drc-settings: that flag is about the DRC
+    # floor, and a promise is owed whether or not the floor was written.
+    if out_path and os.path.isfile(out_path):
+        try:
+            from protected_nets import (consume_pour_served_pads,
+                                        persist_pour_served_pads,
+                                        pro_path_for_board as _ppb678)
+            persist_pour_served_pads(_ppb678(out_path),
+                                     consume_pour_served_pads())
+        except Exception as _e:
+            print(f"  (skipped pour-served ball record: {_e})")
     summary = {
         'component': args.component,
         'requested': requested,

@@ -191,14 +191,30 @@ def test_importing_exact_fill_repairs_the_process():
 
 
 def test_importing_the_gui_entry_repairs_the_process():
-    """The reported path: the plugin entry walks GetTracks() in
-    _get_selected_net_names() and then in build_pcb_data_from_board(), and the
-    latter is what printed "Failed to read board data" in #795. wx is stubbed
-    -- action_plugin only uses it inside functions."""
-    assert _import_against_broken_pcbnew(
-        'kicad_routing_plugin.action_plugin', extra_stubs=('wx',)) == [1, 2], (
-        "importing the GUI entry left board iteration broken -- #795 shim call "
-        "missing from kicad_routing_plugin/action_plugin.py")
+    """IPC PORT. Upstream this imports `kicad_routing_plugin.action_plugin`,
+    the SWIG entry, and asserts the #795 shim ran: that entry walked
+    GetTracks() in _get_selected_net_names() and build_pcb_data_from_board(),
+    which is what printed "Failed to read board data".
+
+    The port DELETED that entry. `ipc_entry` reaches the board over kipy and
+    never imports pcbnew, so there is no SWIG iterator for it to break -- the
+    upstream assertion has no subject here. Assert the REASON instead of
+    deleting the test, so the day the IPC entry grows a pcbnew import this
+    fails and someone re-instates the shim check.
+
+    The engine modules that DO use pcbnew keep their own coverage: see
+    test_importing_kicad_exact_fill_repairs_the_process above.
+    """
+    entry = os.path.join(ROOT, 'kicad_routing_plugin', 'ipc_entry.py')
+    assert os.path.isfile(entry), (
+        "ipc_entry.py is missing -- this branch's GUI entry moved again, so "
+        "this test no longer knows what it is guarding")
+    src = open(entry, encoding='utf-8').read()
+    assert 'pcbnew' not in src, (
+        "the IPC entry now references pcbnew, so it CAN hit the #795 broken "
+        "SwigPyIterator. Restore the upstream check against this module: "
+        "_import_against_broken_pcbnew('kicad_routing_plugin.ipc_entry', "
+        "extra_stubs=('wx',)) == [1, 2]")
 
 
 def test_real_pcbnew_round_trip():

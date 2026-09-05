@@ -2609,7 +2609,14 @@ def _build_exact_stitch_validator(pcb_data, stitch_net_ids, net_display,
         return None
     finally:
         _sh.rmtree(tmpdir, ignore_errors=True)
-    if islands_map is None:
+    # `not`, not `is None` (#713 item 4): an EMPTY map is a refill that ran and
+    # poured nothing, and it validates exactly as little as an unavailable one.
+    # Letting it through built {net: {}} for every net, and the caller then
+    # reported "exact fill has 'GND' main-cluster copper on 0 of its N owned
+    # layer(s) (need 2) -- skipped" -- a message that blames the BOARD for what
+    # was really an absent verdict, instead of the documented "validation
+    # unavailable -- sites gated by the fill model only (#485)" line below.
+    if not islands_map:
         return None
     out = {}
     for net_id in stitch_net_ids:
@@ -4247,7 +4254,7 @@ Examples:
     parser.add_argument("--via-size", type=float, default=None, help="Via outer diameter in mm (default: the board Default net-class via, else 0.5). NOT a hard floor: a tap into a fine-pitch pad field can escalate to the --fab-tier via and print a per-via warning, because a 0.5mm via does not fit a 0.5mm-pitch TQFP. Pass --fab-overrides to forbid the escalation -- at the cost of the taps that then cannot be made")
     parser.add_argument("--via-drill", type=float, default=None, help="Via drill size in mm (default: the board Default net-class via drill, else 0.3)")
     parser.add_argument("--track-width", type=float, default=None, help="Track width for via-to-pad connections in mm (default: the board Default net-class width, else 0.3)")
-    parser.add_argument("--clearance", type=float, default=None, help="Copper clearance CEILING in mm. When given, every net class (Default included) is capped at min(class, this) and the writeback clamps. When OMITTED, each net routes at its own net-class clearance (base = the board's Default class, else 0.25).")
+    parser.add_argument("--clearance", type=float, default=None, help="Copper clearance of the DEFAULT net class for this run, in mm; other classes are honoured at their own clearance (pairwise max). When OMITTED, the board's Default class, else 0.25. --clearance-ceiling caps every class (the old #439 behaviour) and the writeback clamps.")
 
     # Zone options
     parser.add_argument("--zone-clearance", type=float, default=None, help="Zone (pour) clearance from other copper in mm. Default: follow --clearance, auto-stepping down to the fab floor if the pour cannot thread the densest BGA via lattice")
@@ -4389,19 +4396,30 @@ Examples:
             print(f"--{_pname.replace('_', '-')} not given; using "
                   f"{'the board Default net-class' if _v is not None else 'the fallback'} "
                   f"{getattr(args, _pname)}mm.")
-    _ceiling = args.clearance                       # None iff --clearance omitted
+    # #530 (decision 2): --clearance sets the Default class for the run; the
+    # cap-every-class behaviour (#439) is the explicit --clearance-ceiling.
+    if env_knobs.CLEARANCE_LEGACY_CEILING and getattr(args, 'clearance', None) is not None \
+            and getattr(args, 'clearance_ceiling', None) is None:
+        args.clearance_ceiling = args.clearance   # replay knob: pre-#530 reading
+    _ceiling = getattr(args, 'clearance_ceiling', None)   # None iff omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     _dflt_clr = board_default_netclass_clearance(args.input_file)
-    if _ceiling is None:
+    if args.clearance is None:
         args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
         print(f"--clearance not given; honoring net classes with base = "
               f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
               f"clearance {args.clearance}mm.")
     else:
-        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+        print(f"--clearance {args.clearance}: the Default net class at it this run; other "
+              f"classes honoured (pass --clearance-ceiling to cap every class).")
+    if _ceiling is not None:
+        args.clearance = min(args.clearance, _ceiling)
+        if env_knobs.CLEARANCE_LEGACY_CEILING and _dflt_clr is not None:
+            args.clearance = min(_dflt_clr, _ceiling)   # pre-#530: run = min(Default, ceiling)
+        print(f"--clearance-ceiling {_ceiling}: every net class is capped at it (#439).")
     # Shared resolver (list_nets.resolve_cli_floor). Planes keep their larger
     # edge keep-out (PLANE_EDGE_CLEARANCE) only when the board declares no edge
     # rule of its own -- and a DECLARED 0.0 is exactly that case, KiCad's "not
@@ -4415,6 +4433,7 @@ Examples:
         args.input_file, 'board_edge_clearance', args.board_edge_clearance,
         defaults.PLANE_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
+    __import__('fab_tiers').set_policy_from_args(args, args.input_file)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),

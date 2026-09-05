@@ -531,6 +531,28 @@ def arm_H_seat_gate_stays_disarmed(wd):
           seen.get('probe_spec', {}).get('U1') == 1,
           str(seen.get('probe_spec')))
 
+    # #797 gave the seat state a SECOND zone-shaped channel, `exclusive_for`.
+    # It is deliberately ALLOWED here where `_intent_spec` is not, because it
+    # carries only the must-be-OUTSIDE slice and is gated ABSOLUTELY -- so it
+    # cannot refuse a re-seat its own target, which is the entire argument
+    # this arm protects.
+    #
+    # NO ASSERTION ON IT HERE, and that is the honest position rather than a
+    # gap. A first version checked "every term is a zone_exclusive one" and
+    # "a member binds none" on this fixture, and a blind review showed both
+    # were VACUOUS: `keepout_intent` declares its block with no `zone`, so
+    # `exclusive_for` is `{}`, `all([])` is True and `{}.get('U1')` is None --
+    # the pair passed unchanged with `exclusive_spec` widened to return every
+    # term, which is exactly the mutation they named. The real guard, on a
+    # fixture that HAS a zone, is
+    # `tests/test_797_zone_exclusive_predicate.py`'s first arm, and
+    # `tests/mutate_797.py` row `the-exclusive-slice-keeps-every-term`
+    # records it killing that edit.
+    #
+    # What this arm still pins, and what matters here, is the line above:
+    # `_intent_spec` stays EMPTY, so no CONTAINMENT term reached the seat
+    # state by any route, new channel included.
+
     # A source guard, because the tempting "simplification" is to hand
     # `intent_zones=` to make_state and re-open the bug pose_score describes.
     #

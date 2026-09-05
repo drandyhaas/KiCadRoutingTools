@@ -501,6 +501,29 @@ def install_track_clearances(config, track_clearances, input_file,
 _ANNOUNCED = set()  # (board path, map items) already printed this process
 
 
+def _install_rules_quietly(config, input_file, pcb_data):
+    """#530: attach the full DesignRules table as ``config.rules`` at the same
+    chokepoint every engine already passes through for the layer map. Report-
+    only in this phase (the resolver announces unsupported rules once per
+    board); the legacy channels below keep deciding the copper until each
+    consumer is migrated. Never raises into an engine."""
+    if pcb_data is None:
+        return
+    try:
+        from design_rules import install_design_rules
+        from fab_tiers import fab_floors
+        copper = list(getattr(getattr(pcb_data, 'board_info', None),
+                              'copper_layers', None) or getattr(config, 'layers', []) or [])
+        fab = None
+        try:
+            fab = fab_floors(len(copper) or 2)
+        except Exception:                                       # noqa: BLE001
+            fab = None
+        install_design_rules(config, input_file, pcb_data, fab_floor=fab)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  WARNING: design rules not installed ({e})")
+
+
 def board_layer_clearance_map(pcb_data) -> Dict[str, float]:
     """Fab-pinned #498 layer-clearance map for a PCBData, discovered via its
     ``source_path`` sibling .kicad_dru. Quiet ({} when there is none) -- for
@@ -544,11 +567,13 @@ def install_layer_clearances(config, layer_clearances, input_file, pcb_data=None
     and pinned up to the fab tier's clearance floor. Prints what is honored."""
     if layer_clearances is not None:
         config.layer_clearances = dict(layer_clearances)
+        _install_rules_quietly(config, input_file, pcb_data)
         return
     if not input_file:
         # Engines whose signatures carry no input path (planes, fanout, oracle
         # sub-configs) discover the board file via PCBData.source_path.
         input_file = getattr(pcb_data, 'source_path', "") or ""
+    _install_rules_quietly(config, input_file, pcb_data)
     copper = None
     if pcb_data is not None and getattr(pcb_data, 'board_info', None) is not None:
         copper = list(pcb_data.board_info.copper_layers or [])

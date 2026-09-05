@@ -540,6 +540,71 @@ def preexisting_blocker_hint(blocked_cells, config, pcb_data, net_id,
             f"cannot be), then bisect if you want a minimal rip." + prot_txt, names)
 
 
+def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
+                             return_verdict=False, plane_like_pads=6):
+    """`no rippable blockers found` is TRUE. It is also useless (#652).
+
+    A ball the fanout dropped is removed from the output, and every later
+    routing step then fails its net with `no rippable blockers found` -- which
+    invites retries that can never work (rip authority, force-reroute, smaller
+    vias), because the ball has no escape stub for any of them to work with.
+    Measured on orangecrab: EXT_PLL+ and LED_R shipped unrouted in ~15 route-step
+    variants across an entire campaign, including `--rip-existing-nets '*'` and
+    `--force-reroute`, before the cause was traced back to the fanout log.
+
+    Unlike the other hints in this module this one is not a heuristic about the
+    search -- it is a statement about the BOARD: this net has a pad buried
+    inside a package's own pad field with no copper attached to it. Nothing
+    downstream can route that; the fix is upstream, in the fanout.
+
+    Re-derived from geometry because it has to be: the fanout's
+    `unescaped_nets` is printed and then lost -- no consumer, no sidecar, and
+    #472 settled that this machinery stays board-state-driven -- so a later
+    `route.py` PROCESS cannot be told, only shown.
+
+    Returns '' (or `('', None)`) when the net has no such pad, which is the
+    common case: the caller should print whatever it was going to print.
+    """
+    def _ret(hint, verdict=None):
+        return (hint, verdict) if return_verdict else hint
+
+    if pcb_data is None or not net_id:
+        return _ret('')
+    try:
+        from routing_common import entombed_bare_pads
+        bare = entombed_bare_pads(pcb_data, [net_id])
+    except Exception:
+        return _ret('')
+    if not bare:
+        return _ret('')
+    pad, ref = bare[0]
+    where = f"{ref}.{pad.pad_number}"
+    name = net_name or pad.net_name or f"net{net_id}"
+    # A net with many pads is usually plane-destined, and telling its owner to
+    # re-run the FANOUT is the wrong remedy: on a pre-plane board `zones` is
+    # empty, so `entombed_bare_pads` cannot tell a dropped signal ball from a
+    # GND ball waiting for its pour, and measured, power/ground dominates that
+    # population (118 of 120 hits on orangecrab_ext_pll). The observation is
+    # the same either way -- this pad owns no copper -- so the hint is not
+    # suppressed; the ADVICE is what changes. 6 is `fanout_candidate_nets`'
+    # own plane_min_pads, so the two agree about what looks like a plane.
+    n_pads = len(pcb_data.pads_by_net.get(net_id, []))
+    plane_like = n_pads >= plane_like_pads
+    remedy = ("re-create the plane for this net (route_planes.py), or fan it "
+              "out explicitly" if plane_like else
+              "re-run the fanout for this net (bga_fanout.py / qfn_fanout.py "
+              "--escape-method underpad, or a smaller --via-size)")
+    hint = (f"Hint: pad {where} is a fanout-dropped ball (no escape stub) -- "
+            f"it sits inside {ref}'s pad field with no copper of {name} "
+            f"attached, so no rip authority or retry can reach it"
+            + (f". {name} has {n_pads} pads, so it looks plane-destined: "
+               f"{remedy}." if plane_like else f". {remedy[0].upper()}"
+               f"{remedy[1:]}."))
+    return _ret(hint, {'verdict': 'fanout_dropped', 'pad': where,
+                       'component': ref, 'plane_like': plane_like,
+                       'pads': [f"{r}.{p.pad_number}" for p, r in bare[:6]]})
+
+
 def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
     """One-line hint when a route died immediately with nothing rippable.
 

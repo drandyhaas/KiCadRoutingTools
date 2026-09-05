@@ -208,9 +208,12 @@ def _fab_wrap(board, floors, tier=None, overrides=None):
     Returns `(values, fab)` -- the wrapped floors and the fab floor dict, which
     the caller needs to wrap the PER-NET clearance map at the same minimum.
     """
-    from fab_tiers import fab_floor_min, count_copper_layers_in_file
+    # #857: the PHYSICAL fab floor (override file, else the advanced rung),
+    # not the selected tier's -- the tier bounds automatic descents, and a
+    # reachability prediction is not a descent.
+    from fab_tiers import physical_fab_floor, count_copper_layers_in_file
     try:
-        fab = fab_floor_min(count_copper_layers_in_file(board), tier, overrides)
+        fab = physical_fab_floor(count_copper_layers_in_file(board), overrides)
     except Exception:                                          # noqa: BLE001
         fab = {}
     for name, key in _FAB_KEYS.items():

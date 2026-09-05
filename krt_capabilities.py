@@ -20,6 +20,8 @@ everything missing, so a consumer's check is one line and its failure message
 names the gap instead of the symptom.
 """
 import argparse
+import ast
+import functools
 import json
 import os
 import re
@@ -58,8 +60,16 @@ KNOWN_MODULES = (
     'bga_fanout.py', 'qfn_fanout.py',
     'check_drc.py', 'check_connected.py', 'check_floorplan.py',
     'check_impedance.py', 'check_orphan_stubs.py', 'check_pads.py',
+    'check_pockets.py', 'place_seed.py',
     'kicad_unconnected.py', 'net_forensics.py', 'copy_board.py',
     'make_movie.py', 'render_placement.py', 'list_nets.py', 'route_summary.py',
+    # The two pre-route placement instruments. `check_channels.py` is the
+    # per-face lane ledger the placement skill tells an operator to run before
+    # blaming the router; `check_capacity.py` is the only tool that answers
+    # "would more copper layers help" (#700) and was in no capability list and
+    # no .md file anywhere -- an instrument nobody can discover produces no
+    # findings.
+    'check_channels.py', 'check_capacity.py',
 )
 
 # Scripts whose flag set a consumer may want to pin.
@@ -67,9 +77,24 @@ FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
                 'repair_planes.py', 'place_route_loop.py',
                 'place_optimize.py', 'check_drc.py', 'check_floorplan.py')
 
-_FLAG_RE = re.compile(r'add_argument\(\s*["\'](--[A-Za-z0-9][A-Za-z0-9-]*)["\']')
+# The long option, whether or not a SHORT one is declared before it. 46 call
+# sites in the tracked tree spell `add_argument('-q', '--quiet', ...)`, and
+# requiring the long form to come first reported every one as unsupported --
+# `check_floorplan.py:--quiet` was the last flag still missing once #798's
+# registrar resolution landed. A third under-reporting mechanism, in the
+# cheapest possible place.
+_FLAG_RE = re.compile(
+    r'add_argument\(\s*(?:["\']-[A-Za-z0-9]["\']\s*,\s*)?'
+    r'["\'](--[A-Za-z0-9][A-Za-z0-9-]*)["\']')
 # local `import x` / `from x import ...` -- the shared-registrar hop in script_flags
 _IMPORT_RE = re.compile(r'^\s*(?:from|import)\s+([a-z_][a-z0-9_]*)', re.M)
+# The same, DOTTED, for the per-function hop (#798). Kept separate rather than
+# widening the one above: the module-level hop's `<mod>.py`-beside-the-script
+# rule is what keeps it from wandering, and `placement.cli_gates` resolving to
+# the 0-byte `py_placer/placement/__init__.py` is precisely the bug -- the hop
+# was TAKEN, into an empty file, rather than skipped.
+_DOTTED_IMPORT_RE = re.compile(
+    r'^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_.]*)', re.M)
 
 
 _PARSER_RE = re.compile(r'\bArgumentParser\s*\(')
@@ -86,6 +111,222 @@ def _builds_own_parser(path):
             return bool(_PARSER_RE.search(f.read()))
     except OSError:
         return True          # unreadable: assume the risky direction
+
+
+def _module_candidates(root, dotted):
+    """Every file a dotted import could resolve to, across the #522 layout.
+
+    `_TOOL_DIRS` already encodes that a tool may live in py_router/, py_tools/
+    or py_placer/, and the registrar hop needs the same map because the scripts
+    reach across it at runtime: `py_tools/_path.py` puts ../py_router and
+    ../py_placer on sys.path, which is how `py_tools/check_floorplan.py`
+    imports `placement.cli_gates` out of py_placer/. A hop rooted at the
+    SCRIPT's own directory could never resolve that, whatever the regex did.
+    """
+    parts = dotted.split('.')
+    out = []
+    for d in _TOOL_DIRS:
+        base = os.path.join(root, d, *parts)
+        out.append(base + '.py')
+        out.append(os.path.join(base, '__init__.py'))
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def _read_source(path):
+    """A module's text, read once. Both #798 filters are substring tests over
+    it, and the parse below wants the same bytes."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except OSError:
+        return ''
+
+
+@functools.lru_cache(maxsize=None)
+def _registrar_functions(path):
+    """``{function_name: {flag, ...}}`` for each REGISTRAR function in `path`.
+
+    MEMOISED, and pre-filtered before parsing, because the naive version was a
+    40x regression on the one call this module exists for. Every FLAG_SCRIPT
+    follows every one of its dotted imports, so without a memo the same
+    modules are re-parsed over and over: measured, 252 parses over 108
+    distinct files, `kicad_parser.py` (279 KB, and it defines no registrar at
+    all) eight times. `capabilities()` went 0.65s -> 26s, on an agent-facing
+    pre-flight gate whose whole value is being cheaper than the chain it
+    guards.
+
+    Three guards, in cost order, and 26s -> 2.7s:
+      * `_read_source` / `_registrar_functions` / `_called_names_at` memoised
+        by path;
+      * a module with no `add_argument` in its text cannot hold a registrar;
+      * a module that defines none of the functions THIS script calls cannot
+        contribute -- which is what keeps the hop off the engine modules.
+    Then one `ast.walk` per function instead of five: collecting the Assign
+    bindings in the same pass removed the last 20%.
+
+    2.7s against the 0.65s this module cost before is the honest residual --
+    the AST work is what the fix requires. All three guards give
+    byte-identical flag sets, pinned by `tests/test_798_registrar_flags.py`.
+
+    A registrar function adds arguments to a parser it was HANDED -- directly,
+    or through a group derived from it -- and never constructs an
+    `ArgumentParser` of its own. That is `_builds_own_parser`'s structural
+    discriminator moved down one level, and the move is the whole fix (#798),
+    because BOTH of the ways the module-level rule got the answer wrong are
+    module-shaped:
+
+      * `placement/cli_gates.py` holds FOUR registrars and each placement CLI
+        calls a different subset. Unioning the module credits
+        `place_portfolio.py` with `--suggest-locks`, which argparse rejects --
+        a FALSE POSITIVE, the direction this module exists to prevent.
+      * `fix_kicad_drc_settings.py` registers `--keep-thermal`,
+        `--enable-used-layers` and `--no-fix-drc-settings` into route.py's
+        parser via `add_drc_fix_args(parser)`, and owns a CLI as well. The
+        module-level veto therefore skipped it entirely, so route.py
+        under-reported three flags it accepts.
+
+    Group-derived locals are followed (`g = parser.add_argument_group(...)`,
+    then `g.add_argument(...)`) because that is exactly how `add_drc_fix_args`
+    is written; a resolver that missed it would fix the placement half only.
+    """
+    src = _read_source(path)
+    # A module that never says `add_argument` cannot hold a registrar, and the
+    # substring test costs a millionth of parsing a 279 KB engine module to
+    # find that out.
+    if 'add_argument' not in src:
+        return {}
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return {}
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        holders = {a.arg for a in node.args.args}
+        holders |= {a.arg for a in node.args.kwonlyargs}
+        if not holders:
+            continue
+        # ONE walk of the body, not five. The first draft walked each function
+        # once for the ArgumentParser test, three more for the group chain and
+        # once for the flags, which turned out to be where the 40x regression
+        # actually lived: 544k `ast.walk` steps per `capabilities()`.
+        builds = False
+        derived = []      # (base_name, target_name) from `g = p.add_*_group()`
+        adds = []         # (base_name, [flag, ...])
+        for c in ast.walk(node):
+            # An Assign whose value is a group call gives the binding directly,
+            # so the group chain needs no parent search -- the first version of
+            # this did one `ast.walk` per group and cost more than the five
+            # walks it replaced.
+            if isinstance(c, ast.Assign) and isinstance(c.value, ast.Call):
+                gfn = c.value.func
+                if getattr(gfn, 'attr', '') in ('add_argument_group',
+                                                'add_mutually_exclusive_group'):
+                    gbase = getattr(getattr(gfn, 'value', None), 'id', None)
+                    if gbase is not None:
+                        for tgt in c.targets:
+                            if isinstance(tgt, ast.Name):
+                                derived.append((gbase, tgt.id))
+                continue
+            if not isinstance(c, ast.Call):
+                continue
+            fn = c.func
+            if (getattr(fn, 'id', '') == 'ArgumentParser'
+                    or getattr(fn, 'attr', '') == 'ArgumentParser'):
+                builds = True
+                break                 # a CLI's own builder, not a registrar
+            if getattr(fn, 'attr', '') != 'add_argument':
+                continue
+            base = getattr(getattr(fn, 'value', None), 'id', None)
+            if base is not None:
+                adds.append((base, [a.value for a in c.args
+                                    if isinstance(a, ast.Constant)
+                                    and isinstance(a.value, str)
+                                    and a.value.startswith('--')]))
+        if builds:
+            continue
+        # A parser handed in as a parameter propagates to the locals bound
+        # from its groups, and those to theirs.
+        for _ in range(3):
+            grew = False
+            for base, name in derived:
+                if base in holders and name not in holders:
+                    holders.add(name)
+                    grew = True
+            if not grew:
+                break
+        flags = {f for base, fl in adds if base in holders for f in fl}
+        if flags:
+            out[node.name] = flags
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def _called_names_at(path):
+    """`_called_names` for a file, memoised. `script_flags` recurses, so the
+    same large CLI would otherwise be parsed once per hop."""
+    return _called_names(_read_source(path))
+
+
+def _called_names(src):
+    """Every function name this source CALLS, bare or attribute-qualified.
+
+    Both spellings are in use and both must resolve: route.py does
+    `from fab_tiers import add_fab_tier_args` then `add_fab_tier_args(parser)`,
+    while a module imported whole is called as `fab_tiers.add_fab_tier_args(p)`.
+    """
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return set()
+    out = set()
+    for c in ast.walk(tree):
+        if isinstance(c, ast.Call):
+            name = getattr(c.func, 'id', None) or getattr(c.func, 'attr', None)
+            if name:
+                out.add(name)
+    return out
+
+
+def _registrar_flags(path, root, src):
+    """Flags from the registrar FUNCTIONS this script actually calls (#798).
+
+    Strictly ADDITIVE over the module-level hop in `script_flags`, and that is
+    what makes it safe to land: the module-level pass produces zero false
+    positives today (measured over all eight FLAG_SCRIPTS against their real
+    parsers), so unioning a second pass can only be wrong if the second pass
+    itself over-reports. It cannot over-report by following another CLI,
+    because a function that builds its own parser is not a registrar --
+    checked structurally, and `route.py` exposes no parser-taking registrar at
+    all, so `route_planes.py` cannot inherit its 97-flag vocabulary however
+    this resolution changes.
+    """
+    called = _called_names_at(path)
+    if not called:
+        return set()
+    me = os.path.abspath(path)
+    # One cheap substring per candidate, before any parse: a module can only
+    # contribute through a function this script CALLS, so it must define one.
+    # This is what keeps the hop off the engine modules -- route.py has 97
+    # `add_argument` calls and would otherwise be parsed for every script that
+    # imports it, to discover it has no parser-taking registrar at all.
+    wanted = tuple('def %s(' % n for n in called)
+    flags = set()
+    for dotted in sorted(set(_DOTTED_IMPORT_RE.findall(src))):
+        for cand in _module_candidates(root, dotted):
+            if not os.path.isfile(cand) or os.path.abspath(cand) == me:
+                continue
+            cand_src = _read_source(cand)
+            if 'add_argument' not in cand_src:
+                continue
+            if not any(w in cand_src for w in wanted):
+                continue
+            for name, fl in _registrar_functions(cand).items():
+                if name in called:
+                    flags |= fl
+    return flags
 
 
 def script_flags(path, _depth=1):
@@ -121,6 +362,17 @@ def script_flags(path, _depth=1):
     ArgumentParser); a CLI builds its own (`route.py`: 97 add_argument, 1
     ArgumentParser). Only a module that never constructs an ArgumentParser can
     be contributing its flags to this script's parser.
+
+    #798: that module-level rule still UNDER-reports, on SEVEN of the eight
+    FLAG_SCRIPTS, by 3 to 12 flags each -- the four routing CLIs and
+    check_floorplan miss 3 apiece (the `fix_kicad_drc_settings` registrar,
+    which owns a CLI of its own and so was vetoed), the two placement CLIs
+    miss 12 (the `placement.cli_gates` sub-package, whose dotted import
+    resolved to an empty `__init__.py`), and `check_drc.py` was already
+    exact. `_registrar_flags` is the per-FUNCTION pass that answers both. It
+    is unioned in rather than replacing anything, because the module-level
+    pass is measured to produce zero false positives and a strictly additive
+    second pass can only be wrong if it over-reports on its own.
     """
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
@@ -146,6 +398,10 @@ def script_flags(path, _depth=1):
                 if (os.path.isfile(sib) and os.path.abspath(sib) != me
                         and (own_package or not _builds_own_parser(sib))):
                     flags.update(script_flags(sib, _depth - 1))
+        # #798, the per-FUNCTION pass. Additive, and rooted at the REPO rather
+        # than beside the script, because the layout the scripts import across
+        # is the repo's, not the directory's.
+        flags |= _registrar_flags(path, ROOT, src)
     return sorted(flags)
 
 

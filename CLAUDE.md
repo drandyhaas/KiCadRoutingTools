@@ -93,25 +93,52 @@ Validate routed boards against the *real* spec, with the right checker — most
   writing, and whatever still stacks (e.g. two same-net barrels at one point with
   DIFFERENT drill/size, which is a fab question, not a bookkeeping one) is named
   in the summary rather than shipped silently.
-- **Net classes are RESPECTED (PR392), and `--clearance` is a pure CEILING over ALL
-  of them (#439).** The router honors KiCad's pairwise `max(classA, classB)` between
-  nets of different classes — including copper routed earlier in the SAME call (in-run)
-  — pricing each foreign obstacle at `config.obstacle_clearance(net_id)` (see
-  `docs/api-routing-config.md`). `route.py` / `route_diff.py` / the fanout and plane
-  scripts **always auto-read** every net's class clearance from the sibling `.kicad_pro`
-  (override with `--net-clearances <json>`; all-Default boards are inert). **The
-  PRESENCE of `--clearance` is the clamp switch, and there is nothing special about the
-  Default class:**
-  - **`--clearance` GIVEN** → it is a ceiling on *every* class (Default included): each
-    net routes and grades at `min(its class, --clearance)` (the base/Default-net
-    clearance is `min(Default class, --clearance)`; non-Default classes are capped in
-    the map). A class tighter than `--clearance` survives; a looser one is capped. The
-    output `.kicad_pro` writeback clamps every class DOWN to the routed floor so KiCad
-    grades exactly what was routed.
-  - **`--clearance` OMITTED** → no ceiling: each net routes at its OWN net-class
-    clearance (base = the board's Default class, else `routing_defaults.CLEARANCE`
-    0.25), and the writeback PRESERVES the classes. This is how you honor a genuine
-    impedance board's class spec — just don't pass `--clearance`.
+- **Net classes are RESPECTED (PR392); `--clearance` sets the DEFAULT class and
+  `--clearance-ceiling` caps every class (#530 decision 2, replacing #439's implicit
+  switch).** The router honors KiCad's pairwise `max(classA, classB)` between nets of
+  different classes — including copper routed earlier in the SAME call (in-run) —
+  pricing each foreign obstacle at `config.obstacle_clearance(net_id)` (see
+  `docs/api-routing-config.md`). `route.py` / `route_diff.py` / the plane scripts
+  **always auto-read** every net's class clearance from the sibling `.kicad_pro`
+  (override with `--net-clearances <json>`; all-Default boards are inert). On the
+  ROUTING CLIs and the GUI routing tabs:
+  - **`--clearance X`** → the Default net class routes at X this run (above OR below
+    the board's Default class; it is written back lower-only). Other classes route at
+    their OWN clearance, honoured, as KiCad's own router does. GUI: the Min Clearance
+    override alone.
+  - **`--clearance-ceiling X`** → every class (Default included) is capped at
+    `min(its class, X)` in the map and the `.kicad_pro` writeback clamps every class
+    DOWN to it, so KiCad grades exactly what was routed — the "stock classes are
+    aspirational" workflow. GUI: the **Class ceiling** checkbox with Min Clearance.
+  - **Both omitted** → base = the board's Default class, else
+    `routing_defaults.CLEARANCE` 0.25; classes preserved.
+  - **In a CHAIN, pass `--clearance-ceiling <floor>`, not `--clearance`.** The
+    ceiling reading (`min(project's Default class, value)` for the run, every
+    class capped) is what 0.21.4 did for a bare `--clearance`, and a late step
+    saying 0.2 on a project an earlier step lowered to 0.1 then keeps routing
+    at 0.1. A bare `--clearance 0.2` now routes at 0.2 there, which is wider
+    than the chain's own floor -- measured on the sets 1-5 corpus as +28 real
+    DRC / +83 open nets (arm E vs arm D, 2026-09-03). The recorded manifests
+    were rewritten to the ceiling on their routing steps that day, and the
+    routing skills pass it; `tests/stress/ab_replay_grade.route_clearance`
+    reads either spelling.
+  - **Sizes and escalation (#857/#530):** `--fab-tier` / `--escalation` default to
+    `auto` / `fab` — the standard floor escalating to advanced when a fan-out, plane
+    tap or last-resort via cannot fit, and descents allowed below the board's own
+    declared minimums to the tier floor. Completion first, DISCLOSED: every
+    narrowing is in `JSON_SUMMARY.design_rules`, the end-of-run `Design rules [...]`
+    line and `--strict-sizes` (exit 3). `standard` / `advanced` are HARD tiers and
+    `board` / `off` the bounded policies, opt-in. **The two defaults live in
+    `routing_defaults.py` (`FAB_TIER`, `ESCALATION`) and nowhere else** — the CLIs
+    read them through `fab_tiers.DEFAULT_TIER` / `DEFAULT_ESCALATION`, the GUI
+    controls select them from the same constants. An explicit `--track-width` /
+    `--via-size` / `--clearance` is drawn as asked, floored only at the PHYSICAL fab
+    floor; a request below a stock Board Setup minimum marks that minimum stale for
+    the run (said so on the console) rather than being pinned up to it.
+  - The PLACEMENT CLI `place_fanout_clearance.py` keeps its `--clearance` = ceiling
+    contract (#768/#769, pinned by its test family); the GUI fanout tab prices that
+    ceiling from the Min Clearance override alone (`placement_clearance_ceiling`).
+    Gated by the phase-7 corpus A/B in `docs/design-rules-proposal.md` before merge.
   - **`place_fanout_clearance.py` obeys the same two branches (#768/#769)**, and
     it is the only PLACEMENT step that does, because it is the only one that
     lays copper (the #313 via nudge) and therefore the only one that writes a
@@ -125,6 +152,30 @@ Validate routed boards against the *real* spec, with the right checker — most
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
     `list_nets.board_constraint`), else the fixed default.
+- **A board may DECLARE what it is for (#711), in a sibling
+  `<board>.design-brief.json`.** Placement otherwise infers everything from the
+  board: `emit_intent` is "a starter intent READ OFF the board", and every
+  connector's edge is guessed from its current pose by `_nearest_edge`, which is
+  the only source of an edge in the toolchain. The brief is the channel for the
+  facts a board file cannot contain -- which connectors are user-facing, which
+  edge each belongs on and **where along it**, what the enclosure forbids. It is
+  auto-discovered by `check_floorplan.py` and `board_brief.py` the way
+  `kicad_dru` discovers a `.kicad_dru`, carried by `copy_board.SIBLING_EXTS`
+  (which every other sibling-copy site now imports), and **compiled** into the
+  existing intent by `check_floorplan --emit-intent` rather than being a second
+  constraint system -- so it adds no intent key, and the placement CLIs receive
+  it through the `--intent` they already take rather than through a flag of
+  their own. (Unlike `.kicad_dru`, which EVERY routing step reads, the brief is
+  read by those two tools and reaches the rest as a compiled intent.)
+  `--brief PATH` overrides, `--no-brief` is the OFF arm,
+  `--require-brief` refuses a grade with nothing declared behind it. On the
+  `--intent` path it reports DRIFT instead of merging, because the graded
+  document must be the file the caller pointed at. "I do not know" is a first-
+  class value: `"unknown"` (the author looked) is reported apart from an absent
+  key (nobody looked), and neither is ever guessed. `envelope`, `outline` and
+  `height` are refused BY NAME -- the outline is not ours to change, and nothing
+  in the placement stack measures z, so a declared height limit would grade
+  nothing at all. See `docs/design-brief.md`.
 - **Protected nets (#521): matched groups and routed diff pairs are recorded in
   the sibling `.kicad_pro`** (`kicad_routing_tools.protected_nets`, written next
   to the DRC-floor writeback, carried down chains by the project copy) and later
@@ -140,7 +191,29 @@ Validate routed boards against the *real* spec, with the right checker — most
   impedance nets stay rippable, but a later step touching them without
   `--impedance` recomputes the same widths from the stackup and applies them
   per-net (config `net_layer_widths`; route_diff reapplies call-level, one
-  spec only).
+  spec only). **Pour-served balls (#678)** persist the same way
+  (`pour_served_pads` key: `"REF.PAD"` -> net/layer/how): the BGA fanout's
+  pour-direct promises a ball will be served by fill contact instead of a
+  drop via, and the route step's in-run plane finalize audits every promise
+  against the exact fill AFTER routing (`pour_promise.py`), re-audits the
+  shipped board, and discloses the populations in
+  `JSON_SUMMARY.pour_served` -- the post-route half of #662's connectivity
+  contract. **The AUDIT is always on; the WELD is opt-in**
+  (`KICAD_POUR_PROMISE_WELD=1`), which turns a carved-off ball into a custody
+  link anchored at the ball plus a promise-scoped oracle pass. It is opt-in
+  because a weld that changes copper has not cleared the bar for a default.
+  **Corpus A/B, 2026-09-04** (sets 1-5 on Modal, 72 boards complete in both
+  arms at one commit): real DRC **21 vs 21**, unconnected nets **86 -> 85** --
+  one board better (orangecrab, which carries 180 recorded promises), **none
+  worse**, out of 16 eligible boards (BGA fanout + planes). Positive but under
+  the two-board bar. Note also that a SINGLE replay pair cannot judge this at
+  all: **two replays of IDENTICAL code over orangecrab's recorded 15-command
+  chain graded 1 vs 3 DRC and 8 vs 14 connectivity issues.** That is the chain's own run-to-run spread (the
+  oracle/kicad-cli stage jitters reported anchors), so a single-run
+  comparison on it measures the spread, not the change -- **grade a plane /
+  oracle chain change by a corpus A/B, never by one replay pair.** Same rule
+  as `KICAD_ORACLE_SUMMARY`: disclosure may depend on the environment, copper
+  may not. No CLI flag and no GUI control either way.
 - **Per-layer clearance comes from the board's `.kicad_dru` (#498) and OUTRANKS
   `--clearance`.** KiCad stores layer-scoped clearance in custom rules
   (`(rule x (layer inner) (constraint clearance (min 0.15mm)))`); netclasses can't
@@ -362,6 +435,19 @@ same change — and vice versa. When adding a flag, grep the
 through there too.
 
 **Parity gates (run these when touching CLI/GUI routing):**
+- `tests/gui_parity/test_714_mirror_pcbnew_parity.py` — needs KiCad python; the
+  acceptance gate for the placement writer's **layer flip**. Compares the
+  footprint block `write_placed_output` emits for a side change against the
+  block pcbnew writes after `FOOTPRINT.Flip(pos, FLIP_DIRECTION_TOP_BOTTOM)` +
+  `SaveBoard()`, as canonical trees: numbers to integer nanometres (so the
+  tolerance is exactly zero, not a float epsilon), `at` angles folded, children
+  sorted, and the uuid multiset asserted rather than normalised away. **Exits 2
+  when pcbnew is absent and does NOT self-skip** — `tests/mutate_714.py` uses
+  it as a killer gate, and a killer gate that exits 0 reports every row it
+  guards as SURVIVED. Run it whenever you touch `placement/writer.py`'s flip
+  path or `kicad_parser.flip_layer_token`; ~2 min. Its wx-free siblings are
+  `tests/test_714_{mirror_discriminates,side_self_consistency,flip_roundtrip,
+  refusals,identity_write_unchanged}.py`, which `run_all.py` does collect.
 - `tests/gui_parity/test_manifest_plan_parity.py` — no wx; asserts every CLI
   `--flag` survives `manifest_to_plan` into the GUI plan step (plan→params).
 - `tests/gui_parity/test_cli_postpass_coverage.py` — no wx; asserts every CLI
@@ -493,7 +579,17 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
 
 ### PCBData Structure
 
-- `pcb.footprints` - Dict[str, Footprint] keyed by reference (e.g., 'U9', 'R1')
+- `pcb.footprints` - Dict[str, Footprint] keyed by reference (e.g., 'U9', 'R1').
+  **Every footprint BLOCK is an entry (#726)**: when two blocks claim one
+  reference the first keeps the bare name and later ones get a file-order
+  ordinal (`TP4`, `TP4~2`), so `len(pcb.footprints)` is the block count. A
+  reference-LESS block is keyed `#<uuid>`. `pcb.duplicate_references`
+  ({reference as the FILE spells it: occurrence count}) is how a consumer
+  reports the board's own spelling back to a human. Both parse paths derive
+  the keys with the same `disambiguate_references` over their own ordered
+  footprint list, so they agree. **Writers must resolve blocks through
+  `iter_footprint_blocks`**, never by matching the Reference string: one
+  placement used to rewrite every block carrying the name.
 - `pcb.nets` - Dict[int, Net] keyed by net_id
 - `pcb.segments` - List of track segments
 - `pcb.vias` - List of vias
@@ -523,6 +619,25 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   the tied net's copper may contact the partner pad only where the contact
   lies on its own pad. Consumers: `PCBData.net_tie_exempt_pad_ids(net_id)`,
   the obstacle builders (own-pad-sliver lift), and check_drc's waiver.
+- `footprint.owns_edge_cuts` / `footprint.owns_board_outline` - #829. The
+  first is the FACT (this footprint draws Edge.Cuts of its own, so its
+  `(at x y rot)` transforms part of the outline); the second is the DECISION
+  (that geometry is the BOARD's boundary rather than a relief the part
+  carries). A footprint is CARRIED -- `owns_board_outline` False, still
+  movable -- only when its segments **close on themselves** (a window, slot or
+  milled relief) AND that shape lies inside the outline the board draws without
+  it. An open path cannot be a cut-out, so it is always boundary.
+  **Anything that MOVES a footprint gates on `owns_board_outline`, never on
+  `owns_edge_cuts`** -- a relief parented to a part travels WITH it by the
+  designer's intent (crkbd draws 184 per-LED windows that way; #628 measured
+  that freezing such a part costs it every legal pose it has), and must stay
+  movable. Deciding on containment ALONE was wrong three measured ways: a
+  connector drawing the real board's edge on a PANELISED board sits inside the
+  panel frame; `extract_board_contours` short-circuits a 4-segment axis-aligned
+  rectangle to no rings, so the same geometry classified differently depending
+  on how the outline was spelled; and a round window's bounding-box CORNER
+  escapes a round board while the circle does not. Both parse paths fill these,
+  sharing one decision function (`kicad_parser.classify_outline_owners`).
 - `footprint.ref_label` - Optional[RefLabel]: the Reference silkscreen text's
   geometry (#481): `at_x/at_y` (footprint-LOCAL mm), `rotation` (the stored
   angle, which is ABSOLUTE board angle — probed on KiCad 10, `% 360`

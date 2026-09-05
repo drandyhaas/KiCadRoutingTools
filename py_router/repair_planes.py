@@ -2574,10 +2574,12 @@ def repair_planes(
         # 0.25/0.15 via 'standard' escalates to, #237). A fine-pitch pad flanked by
         # other-net copper often cannot take the nominal via but fits a smaller
         # fab-legal one; we never go below the deepest fab floor.
-        from list_nets import fab_floor_ladder, warn_fab_escalation
+        from list_nets import escalation_rungs, warn_fab_escalation, note_narrowing
         _ncu = len([l for l in (pcb_data.board_info.copper_layers or routing_layers)
                     if l.endswith('.Cu')]) or 2
-        _ladder = fab_floor_ladder(_ncu)
+        # escalation_rungs: empty under --escalation off, raised to the
+        # board's own minimums under board (#857).
+        _ladder = escalation_rungs(_ncu)
         _cands = [(via_size, via_drill, False)]
         _cands += [(f['via_diameter'], f['via_drill'], _i > 0)
                    for _i, f in enumerate(_ladder)]
@@ -2710,6 +2712,8 @@ def repair_planes(
                                 warn_fab_escalation(
                                     f"last-resort plane via for net "
                                     f"{net_id} ({vtry}/{dtry}mm)")
+                            note_narrowing(net_id, 'via_diameter', via_size, vtry,
+                                           'last-resort plane via')
                             break
                     if result is not None and result.success \
                             and result.via is not None:
@@ -3315,7 +3319,7 @@ Examples:
 
     # Clearance options
     parser.add_argument("--clearance", type=float, default=None,
-                        help="Trace-to-trace clearance CEILING in mm. When given, every net class (Default included) is capped at min(class, this) and the writeback clamps. When OMITTED, each net routes at its own net-class clearance (base = the board's Default class, else 0.25).")
+                        help="Trace-to-trace clearance of the DEFAULT net class for this run, in mm; other classes are honoured (pairwise max). When OMITTED, the board's Default class, else 0.25. --clearance-ceiling caps every class (the old #439 behaviour) and the writeback clamps.")
     parser.add_argument("--zone-clearance", type=float, default=defaults.PLANE_ZONE_CLEARANCE,
                         help="Zone fill clearance around obstacles in mm (default: 0.2)")
     # #381 D9: accept route_planes.py's --plane-track-via-clearance spelling too
@@ -3429,19 +3433,30 @@ Examples:
             print(f"--{_pname.replace('_', '-')} not given; using "
                   f"{'the board Default net-class' if _v is not None else 'the fallback'} "
                   f"{getattr(args, _pname)}mm.")
-    _ceiling = args.clearance                       # None iff --clearance omitted
+    # #530 (decision 2): --clearance sets the Default class for the run; the
+    # cap-every-class behaviour (#439) is the explicit --clearance-ceiling.
+    if env_knobs.CLEARANCE_LEGACY_CEILING and getattr(args, 'clearance', None) is not None \
+            and getattr(args, 'clearance_ceiling', None) is None:
+        args.clearance_ceiling = args.clearance   # replay knob: pre-#530 reading
+    _ceiling = getattr(args, 'clearance_ceiling', None)   # None iff omitted
     args._clamp_netclasses = _ceiling is not None
     args._clearance_ceiling = _ceiling
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
     _dflt_clr = board_default_netclass_clearance(args.input_file)
-    if _ceiling is None:
+    if args.clearance is None:
         args.clearance = _dflt_clr if _dflt_clr is not None else defaults.CLEARANCE
         print(f"--clearance not given; honoring net classes with base = "
               f"{'the board Default net-class' if _dflt_clr is not None else 'the fallback'} "
               f"clearance {args.clearance}mm.")
     else:
-        args.clearance = min(_dflt_clr, _ceiling) if _dflt_clr is not None else _ceiling
+        print(f"--clearance {args.clearance}: the Default net class at it this run; other "
+              f"classes honoured (pass --clearance-ceiling to cap every class).")
+    if _ceiling is not None:
+        args.clearance = min(args.clearance, _ceiling)
+        if env_knobs.CLEARANCE_LEGACY_CEILING and _dflt_clr is not None:
+            args.clearance = min(_dflt_clr, _ceiling)   # pre-#530: run = min(Default, ceiling)
+        print(f"--clearance-ceiling {_ceiling}: every net class is capped at it (#439).")
     # Shared resolver (list_nets.resolve_cli_floor); see route_planes.py -- a
     # DECLARED 0.0 is "no edge rule of its own", not a rule of zero, so the
     # plane inset stays PLANE_EDGE_CLEARANCE as the GUI's plane tab already had
@@ -3453,6 +3468,7 @@ Examples:
         args.input_file, 'board_edge_clearance', args.board_edge_clearance,
         defaults.PLANE_EDGE_CLEARANCE, '--board-edge-clearance')
     set_default_fab_tier(*fab_tier_from_args(args))
+    __import__('fab_tiers').set_policy_from_args(args, args.input_file)  # #857
     _pinned_floors = enforce_fab_floors(
         count_copper_layers_in_file(args.input_file),
         track_width=getattr(args, 'track_width', None),
@@ -3634,9 +3650,12 @@ Examples:
         except Exception:
             pass
         if not _orc.get('available'):
-            print('NOTE: kicad-cli not found -- the oracle reconnect pass '
-                  'did not run; output may differ from machines that have '
-                  'KiCad installed (replay-determinism caveat).')
+            # Was hardcoded to "kicad-cli not found", which was the cause for
+            # only one of the ways to get here (#713 item 3). The oracle now
+            # says which, so print what it said.
+            print(f"NOTE: {_orc.get('why', 'the oracle could not run')} -- "
+                  f"the oracle reconnect pass did not run; output may differ "
+                  f"from machines where it can (replay-determinism caveat).")
 
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route_planes.py, so a manual DRC in

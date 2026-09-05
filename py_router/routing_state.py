@@ -400,6 +400,53 @@ def get_net_history_summary(state: RoutingState, net_id: int, pcb_data: 'PCBData
         elif event == "reroute_succeeded":
             lines.append(f"[{seq}] Re-route succeeded")
 
+        # The three diagnosis events (#860 follow-up). They were reaching the
+        # bare-name `else` below, so a failed net's history printed
+        # "preexisting_blockers" / "boxed_in_static" / "fanout_dropped" with
+        # none of the detail each one is recorded WITH -- which is the whole
+        # reason they are recorded. Rendered from their own keys, and each
+        # falls back to the bare name if a producer ever records nothing.
+        elif event == "preexisting_blockers":
+            blockers = details.get("blockers") or []
+            if blockers:
+                lines.append(f"[{seq}] Blocked by pre-existing copper: "
+                             + ", ".join(str(b) for b in blockers[:3])
+                             + (f" (+{len(blockers) - 3} more)"
+                                if len(blockers) > 3 else ""))
+            else:
+                lines.append(f"[{seq}] Blocked by pre-existing copper")
+            hint = details.get("hint")
+            if hint:
+                lines.append(f"       {hint}")
+
+        elif event == "boxed_in_static":
+            geom = details.get("geometry") or {}
+            iters = details.get("iterations", "?")
+            bits = [f"{k.replace('_', ' ')} {v:g}"
+                    for k, v in (("grid", geom.get("grid_step")),
+                                 ("clearance", geom.get("clearance")),
+                                 ("track", geom.get("track_width")),
+                                 ("via", geom.get("via_diameter")))
+                    if isinstance(v, (int, float))]
+            lines.append(f"[{seq}] Boxed in at this geometry after "
+                         f"{iters} iteration(s)"
+                         + (f" ({', '.join(bits)} mm)" if bits else ""))
+
+        elif event == "fanout_dropped":
+            # The fix for this one is UPSTREAM (re-run the fanout), which is
+            # the point of naming it apart from the two above.
+            pad = details.get("pad")
+            comp = details.get("component")
+            where = pad or comp or "a pad"
+            lines.append(f"[{seq}] Fanout never escaped {where}"
+                         + (" (plane-like net: the fix is a plane drop, not a "
+                            "fanout re-run)" if details.get("plane_like")
+                            else " -- no escape stub exists for a retry to rip"))
+            pads = details.get("pads") or []
+            if len(pads) > 1:
+                lines.append(f"       Also bare: "
+                             + ", ".join(str(x) for x in pads[1:4]))
+
         else:
             lines.append(f"[{seq}] {event}")
 

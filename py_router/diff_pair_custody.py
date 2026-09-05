@@ -559,7 +559,9 @@ def run_casualty_reconcile(state, progress_callback=None,
                     state.remaining_net_ids, state.routed_net_ids,
                     state.routed_net_paths, state.routed_results,
                     state.diff_pair_by_net_id, state.track_proximity_cache,
-                    state.layer_map)
+                    state.layer_map,
+                    working_obstacles=state.working_obstacles,    # #806
+                    net_obstacles_cache=state.net_obstacles_cache)
                 record_pair_diag(state, pair_name, casualty='rerouted')
                 rerouted = True
         else:
@@ -614,6 +616,10 @@ def run_casualty_reconcile(state, progress_callback=None,
             pruned['partial_restore_134'] = True
             add_route_to_pcb_data(pcb_data, pruned,
                                   debug_lines=config.debug_lines)
+            from obstacle_cache import refresh_net_obstacles  # #806
+            refresh_net_obstacles(state.working_obstacles,
+                                  state.net_obstacles_cache, pcb_data, config,
+                                  sorted(set(ripped_ids or []) | {net_id}))
             state.results.append(pruned)
             print(f"  {RED}PARTIAL{RESET} {name}: reroute failed; restored "
                   f"{len(keep_segs)} segment(s) + {len(keep_vias)} via(s) of "

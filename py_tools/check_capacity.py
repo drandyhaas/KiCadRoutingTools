@@ -48,6 +48,15 @@ def main(argv=None):
     p.add_argument("--track-width", type=float, default=None)
     p.add_argument("--only", nargs="+", metavar="OPTION",
                    help="Measure only these options")
+    p.add_argument("--intent", default=None, metavar="JSON",
+                   help="Floorplan intent; only its `assembly.sides` is read")
+    p.add_argument("--assembly-sides", default=None,
+                   choices=("F", "B", "both"),
+                   help="Which faces the fab will populate, without an intent "
+                        "file. Overrides --intent. Undeclared (the default) "
+                        "charges the parts against the BUSIER face; F or B "
+                        "charges the sum, because every part has to fit on "
+                        "the one face that gets populated")
     p.add_argument("-q", "--quiet", action="store_true")
     a = p.parse_args(argv)
 
@@ -80,9 +89,43 @@ def main(argv=None):
         edge = 0.55 if a.board_edge_clearance is None else a.board_edge_clearance
         floors = {'error': f"{type(e).__name__}: {e}"}
 
+    # #837. Flag > intent > undeclared, and the SOURCE is printed, because
+    # "the busier face was charged" and "the sum was charged" are different
+    # answers to the same question and a reader must not have to guess which
+    # one they are looking at. No auto-discovery of a sibling intent: nothing
+    # in the tree discovers one, and a verdict that changed with an invisible
+    # file next to the board would be the worst of both.
+    sides, sides_src = a.assembly_sides, 'cli'
+    if sides is None and a.intent:
+        try:
+            from placement.floorplan import load_intent
+            # The RAW key, not `assembly_sides()`, which resolves an absent
+            # key to 'both'. An intent that declares nothing and one that
+            # declares `both` produce the same arithmetic and are different
+            # STATEMENTS, and reading them alike made both machine channels
+            # assert a policy the intent never made -- including dropping the
+            # "back-side area is credited free" disclosure, which exists
+            # precisely for the case where nobody declared.
+            declared = (load_intent(a.intent).assembly or {}).get('sides')
+            if declared:
+                sides, sides_src = declared, 'intent'
+            else:
+                sides_src = 'intent declares none'
+        except (OSError, ValueError) as e:
+            print(f"cannot load intent {a.intent}: {e}", file=sys.stderr)
+            return 2
+    if sides is None and sides_src == 'cli':
+        sides_src = 'not declared'
+    if not a.quiet:
+        print(f"  assembly sides: {sides or 'not declared'}  [{sides_src}]"
+              + ("" if sides in ('F', 'B') else
+                 " -- the busier face is charged, so back-side area is "
+                 "credited free"))
+
     opts = capacity_options(pcb, a.board, clearance=clearance,
                             board_edge_clearance=edge,
-                            track_width=a.track_width, only=a.only)
+                            track_width=a.track_width,
+                            assembly_sides=sides, only=a.only)
     if not a.quiet:
         print(format_text(opts))
 
@@ -99,6 +142,19 @@ def main(argv=None):
         'board': a.board,
         'fits_by_area': grow.get('fits_by_area'),
         'utilisation': (grow.get('measured') or {}).get('utilisation'),
+        # #837, forwarded explicitly: this dict is a hand-written literal, so
+        # a new `measured` key does not arrive here on its own -- and a
+        # utilisation whose basis the one-line machine channel cannot state is
+        # a number a loop driver will compare against one taken on the other
+        # basis.
+        'assembly_sides': sides,
+        # WHERE the policy came from, not just what it was: "the intent
+        # declares none" and "the intent declares both" are different claims
+        # with the same arithmetic, and a loop driver comparing two runs has
+        # to be able to tell them apart.
+        'assembly_sides_source': sides_src,
+        'charged_area_is_sum':
+            (grow.get('measured') or {}).get('charged_area_is_sum'),
         'shortfall_mm2_at_least':
             (grow.get('measured') or {}).get('shortfall_mm2_at_least'),
         'measured': sorted(k for k, v in opts.items() if v.get('ran')),

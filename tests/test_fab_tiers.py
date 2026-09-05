@@ -32,26 +32,56 @@ def _vias(ladder):
 
 def test_tiers_and_ladder(v):
     fails = []
-    # standard ladder = [standard, (fine-via rung on 4+ layers), advanced];
-    # advanced ladder = [advanced]. The 0.30/0.15 fine-via rung is 4+-layer only
-    # (fine BGA-pitch escape), restored on the standard ladder in commit 926bf3f.
-    expected_standard = {
+    # #857: standard and advanced are HARD (one rung); auto = [standard,
+    # (fine-via rung on 4+ layers), advanced]. The 0.30/0.15 fine-via rung is
+    # 4+-layer only (fine BGA-pitch escape), restored in commit 926bf3f.
+    expected_auto = {
         2: [(0.45, 0.20), (0.25, 0.15)],
         4: [(0.45, 0.20), (0.30, 0.15), (0.25, 0.15)],
     }
     for ncu in (2, 4):
-        lad = ft.fab_floor_ladder(ncu, 'standard')
-        if _vias(lad) != expected_standard[ncu]:
-            fails.append(f"{ncu}L standard ladder vias {_vias(lad)} != "
-                         f"{expected_standard[ncu]}")
+        lad = ft.fab_floor_ladder(ncu, 'auto')
+        if _vias(lad) != expected_auto[ncu]:
+            fails.append(f"{ncu}L auto ladder vias {_vias(lad)} != "
+                         f"{expected_auto[ncu]}")
+        std = ft.fab_floor_ladder(ncu, 'standard')
+        if len(std) != 1 or _vias(std) != [(0.45, 0.20)]:
+            fails.append(f"{ncu}L standard ladder {_vias(std)} is not one hard rung (#857)")
         adv = ft.fab_floor_ladder(ncu, 'advanced')
         if len(adv) != 1 or _vias(adv) != [(0.25, 0.15)]:
             fails.append(f"{ncu}L advanced ladder {_vias(adv)} unexpected")
     # nominal vs deepest
-    if ft.fab_floors(4, 'standard')['via_diameter'] != 0.45:
-        fails.append("standard nominal via != 0.45")
-    if ft.fab_floor_min(4, 'standard')['via_diameter'] != 0.25:
-        fails.append("standard deepest via != 0.25")
+    if ft.fab_floors(4, 'auto')['via_diameter'] != 0.45:
+        fails.append("auto nominal via != 0.45")
+    if ft.fab_floor_min(4, 'auto')['via_diameter'] != 0.25:
+        fails.append("auto deepest via != 0.25")
+    if ft.fab_floor_min(4, 'standard')['via_diameter'] != 0.45:
+        fails.append("standard deepest via != 0.45 (standard must be hard, #857)")
+    # escalation policy: 'off' offers no rung to descend; 'board' raises every
+    # rung to the board's own declared floors and collapses duplicates.
+    prev = ft.get_escalation_policy()
+    try:
+        ft.set_escalation_policy('off')
+        if ft.escalation_rungs(4, 'auto') != []:
+            fails.append("escalation off still offers rungs")
+        if ft.fab_floors(4, 'auto')['via_diameter'] != 0.45:
+            fails.append("escalation off changed the nominal floor")
+        ft.set_escalation_policy('board', {'via_diameter': 0.4, 'track_width': 0.2})
+        lad = ft.fab_floor_ladder(4, 'auto')
+        # The fine and advanced rungs both rise to the board's 0.4 via; they
+        # stay distinct rungs because their track/clearance floors differ.
+        if _vias(lad) != [(0.45, 0.20), (0.4, 0.15), (0.4, 0.15)]:
+            fails.append(f"board policy ladder {_vias(lad)} (expected every sub-0.4 "
+                         f"via raised to the board's 0.4)")
+        if any(r['via_diameter'] < 0.4 - 1e-9 for r in lad):
+            fails.append("board policy left a rung below the board's via minimum")
+        if ft.fab_floors(4, 'auto')['track_width'] != 0.2:
+            fails.append("board policy did not raise the track floor to the board minimum")
+        ft.set_escalation_policy('fab')
+        if _vias(ft.fab_floor_ladder(4, 'auto')) != expected_auto[4]:
+            fails.append("fab policy altered the ladder")
+    finally:
+        ft.set_escalation_policy(*prev)
     # advanced via must never exceed standard via (the escalation invariant)
     for ncu in (2, 4):
         if ft.fab_floor_min(ncu, 'advanced')['via_diameter'] > ft.fab_floors(ncu, 'standard')['via_diameter']:
@@ -143,19 +173,31 @@ def test_args(v):
 
 def test_param_floors(v):
     fails = []
-    # 4-layer deepest floors: track 0.0762, clearance 0.09, via 0.25, drill 0.15, h2h 0.20
-    viols = ft.check_param_floors(4, 'standard', track_width=0.05, clearance=0.2,
+    # 4-layer deepest floors of the AUTO tier: track 0.0762, clearance 0.09,
+    # via 0.25, drill 0.15, h2h 0.20 (#857: standard is hard at 0.45/0.20).
+    viols = ft.check_param_floors(4, 'auto', track_width=0.05, clearance=0.2,
                                   via_size=0.2, via_drill=0.1, hole_to_hole_clearance=0.1)
     names = {n for n, _, _ in viols}
     if names != {'track_width', 'via_size', 'via_drill', 'hole_to_hole_clearance'}:
         fails.append(f"check_param_floors flagged {names}")
     # at/above floor -> no violation
-    if ft.check_param_floors(4, 'standard', via_size=0.25, track_width=0.0762):
+    if ft.check_param_floors(4, 'auto', via_size=0.25, track_width=0.0762):
         fails.append("at-floor values wrongly flagged")
+    # ...and an EXPLICIT request is checked against the PHYSICAL floor (the
+    # advanced rung), not the selected tier's: --via-size 0.25 under the hard
+    # standard tier is accepted (the tier only bounds automatic descents).
+    if ft.check_param_floors(4, 'standard', via_size=0.25):
+        fails.append("an explicit 0.25 via was pinned up under the standard tier")
+    if {n for n, _, _ in ft.check_param_floors(4, 'standard', via_size=0.2)} != {'via_size'}:
+        fails.append("a 0.2 via below the physical 0.25 floor was not flagged")
+    if ft.physical_fab_floor(4)['via_diameter'] != 0.25 or \
+            ft.physical_fab_floor(4, {'via_diameter': 0.4})['via_diameter'] != 0.4:
+        fails.append("physical_fab_floor is not the advanced rung / the override file")
     # enforce pins up to the floor and reports the clamp (issue #237: warn + pin,
     # don't abort the run -- the fab can't make sub-floor, so clamp and continue).
     pinned = ft.enforce_fab_floors(4, 'standard', via_drill=0.05)
-    if pinned.get('via_drill') != ft.fab_floor_min(4, 'standard')['via_drill']:
+    # pinned to the PHYSICAL floor (the advanced rung's drill), not the tier's
+    if pinned.get('via_drill') != ft.physical_fab_floor(4)['via_drill']:
         fails.append(f"enforce_fab_floors did not pin sub-floor via_drill up to "
                      f"the floor (got {pinned})")
     # at/above-floor params return no clamps

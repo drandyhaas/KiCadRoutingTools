@@ -254,6 +254,137 @@ def _dist_point_to_polygon(x: float, y: float, polygon: List[Tuple[float, float]
     return best
 
 
+def entombed_bare_pads(pcb_data, net_ids, *, reach: float = 0.05,
+                       min_net_pads: int = 2, min_package_pads: int = 8,
+                       inset: float = 0.65):
+    """Pads a package's own pad field encloses that own NO escape copper (#652).
+
+    This is the geometry behind "the fanout dropped this ball": a pad deep
+    inside a fine-pitch package, with nothing of its net attached to it, cannot
+    be reached by any later routing step -- and the step that reports the
+    failure says `no rippable blockers found`, which is true and useless.
+
+    Re-derived from the board on purpose. A fanout's ``unescaped_nets`` is
+    printed and then lost -- nothing persists it, and #472 already settled that
+    this machinery is board-state-driven so no sidecar file is load-bearing --
+    so a later ``route.py`` process can only see the geometry.
+
+    NOT keyed on ``auto_detect_bga_exclusion_zones``. That helper walks
+    ``find_components_by_type(pcb_data, 'BGA')`` only, and measured on this
+    repo's own boards it returns 3 zones for routed_output (IC1, U3, U1) and
+    none for its QFN-76 U2, and ZERO zones for tigard -- so a zone-keyed
+    diagnosis would stay silent on exactly the fine-pitch parts that drop
+    balls. Entombment is computed from the footprint's own pad bounding box
+    instead, which works for any package.
+
+    Returns ``[(pad, footprint_ref), ...]``.
+
+    NOTE ON WHAT THIS POPULATION LOOKS LIKE, measured before trusting it: on a
+    pre-plane board it is dominated by power and ground. orangecrab_ext_pll
+    gives 120 hits of which 118 are GND / P1.1V / P1.35V / P3.3V; ulx3s gives
+    305, 141 of them GND / +1V1 / +3V3. Those balls are not wrong -- they
+    really do own no copper -- but their FIX is a plane drop, not a re-run of
+    the fanout, and `pcb_data.zones` is empty at that point in the chain so the
+    pour exemption above cannot tell them apart. Callers that turn this into
+    advice must say so: `routing_diagnostics.fanout_dropped_ball_hint` names
+    the plane route for a net with `plane_like_pads` or more pads.
+
+    Arguments that are deliberately explicit rather than shared constants:
+
+    * ``reach`` -- how close copper must be to count as attached. This repo
+      asks that question at two different tolerances for two different
+      questions: 0.05mm for "is there copper AT this pad" (the #472 zone
+      exemption, route.py's direct-first ordering) and
+      ``max(size)/2 + 0.35`` for "is there copper NEAR it" (net_rescue's #666
+      rung). Collapsing them into one constant would be the bug, so the caller
+      states which it means.
+    * ``min_net_pads`` -- a single-pad net's ball is trivially bare, and
+      counting it disabled U6/U7's zones spuriously on ottercast (#472).
+    * ``inset`` -- how far past the pitch band a pad must sit to count as
+      entombed. Outer-ring bare balls are reachable through the band.
+
+    A pad served by a POUR is not bare: ``pcb_data.zones`` is consulted, which
+    the #472 closure this generalises never did -- it built its attachment set
+    from segments and vias only, so an interior ball connected solely by a
+    plane read as BARE, and the entombment filter selects exactly the region
+    where plane-served balls live.
+    """
+    import math
+    from check_connected import point_in_polygon
+
+    want = set()
+    for n in (net_ids or ()):
+        want.add(n[1] if isinstance(n, (tuple, list)) else n)
+    want = {n for n in want
+            if n and len(pcb_data.pads_by_net.get(n, [])) >= min_net_pads}
+    if not want:
+        return []
+
+    attached = {}
+    for seg in pcb_data.segments:
+        if seg.net_id in want:
+            attached.setdefault(seg.net_id, []).append((seg.start_x,
+                                                        seg.start_y))
+            attached[seg.net_id].append((seg.end_x, seg.end_y))
+    for via in pcb_data.vias:
+        if via.net_id in want:
+            attached.setdefault(via.net_id, []).append((via.x, via.y))
+    zones_by_net = {}
+    for z in (getattr(pcb_data, 'zones', None) or ()):
+        if z.net_id in want and z.polygon:
+            zones_by_net.setdefault(z.net_id, []).append(z.polygon)
+
+    out = []
+    for fp in pcb_data.footprints.values():
+        pads = [p for p in fp.pads if p.net_id is not None]
+        if len(pads) < min_package_pads:
+            continue
+        # Nothing below can report a pad of a net this footprint does not
+        # carry, and the pitch sweep is the expensive part -- so ask first.
+        # Without this the cost is O(failing nets x whole board): measured
+        # 3-5 ms per call on corpus boards, and it scales with FOOTPRINT
+        # count, not with the net being asked about.
+        if not any(p.net_id in want for p in pads):
+            continue
+        xs = [p.global_x for p in pads]
+        ys = [p.global_y for p in pads]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        # The band an outer ring occupies, as a pitch: the smallest non-zero
+        # centre-to-centre between pads of this footprint.
+        #
+        # Swept over ALL pads, in x order, with early exit -- not over the
+        # first 60 in FILE order, which an earlier draft did. That was
+        # measurably wrong: on glasgow_revC U1 (87 pads) the truncated prefix
+        # gives 0.5000 where the true minimum is 0.4031, a 24% overestimate
+        # that widens `band` and silences the hint on pads it should reach.
+        # And it was order-dependent, which a geometric predicate must not be.
+        pitch = 0.0
+        order = sorted(pads, key=lambda p: (p.global_x, p.global_y))
+        for i, a in enumerate(order):
+            for b in order[i + 1:]:
+                dx = b.global_x - a.global_x
+                if pitch and dx >= pitch:
+                    break          # x-sorted: no later pad can be closer
+                d = math.hypot(dx, a.global_y - b.global_y)
+                if d > 1e-6 and (pitch == 0.0 or d < pitch):
+                    pitch = d
+        band = pitch * 1.1 + inset
+        for pad in pads:
+            if pad.net_id not in want or (pad.drill or 0) > 0:
+                continue      # a barrel already reaches every layer
+            if min(pad.global_x - x0, x1 - pad.global_x,
+                   pad.global_y - y0, y1 - pad.global_y) <= band:
+                continue      # outer ring: reachable through the band
+            if any(abs(x - pad.global_x) < reach and abs(y - pad.global_y) < reach
+                   for (x, y) in attached.get(pad.net_id, ())):
+                continue      # this pass or an earlier one attached copper
+            if any(point_in_polygon(pad.global_x, pad.global_y, poly)
+                   for poly in zones_by_net.get(pad.net_id, ())):
+                continue      # served by a pour, not bare
+            out.append((pad, fp.reference))
+    return out
+
+
 def warn_targets_outside_board(pcb_data: PCBData,
                                net_ids: List[Tuple[str, int]],
                                edge_margin: float = 0.0,
@@ -620,13 +751,35 @@ def sync_pcb_data_segments(
     routed_results: Dict[int, Dict],
     original_segment_ids: Set[int],
     state=None,
-    config: GridRouteConfig = None
+    config: GridRouteConfig = None,
+    original_via_ids: Set[int] = None
 ) -> None:
     """
-    Sync routed segments back to pcb_data and update obstacle cache.
+    Sync routed copper back to pcb_data and update the obstacle cache.
 
-    Preserves original stubs (segments from input file) and replaces only
-    routed segments.
+    Preserves original copper (from the input file) and replaces only the
+    routed copper, for BOTH segments and vias (#874).
+
+    Vias matter here for the same reason segments do, and the asymmetry was a
+    real bug: the output is written from "input file text + the RESULTS", never
+    from ``pcb_data.vias``, so the two lists say different things about the same
+    board the moment a result's via list is rebuilt after it was committed --
+    which ``apply_meanders_to_diff_pair`` does on every meandered coupled pair,
+    replacing ``new_vias`` wholesale with fresh objects. That leaves
+
+      * a result via absent from ``pcb_data`` -- SHIPPED copper that no obstacle
+        map can see, so the Phase 3 taps routed immediately after this call
+        drive straight through a barrel that is on the board (measured on
+        ddr5_testbed: one VDDQ via at (139.300, 89.200), present in the written
+        output and missing from ``pcb_data`` at the sync point); and
+      * a superseded via still in ``pcb_data`` -- a phantom that BLOCKS the map
+        at a place no copper will be written.
+
+    Both are the under/over-block class #806 fixed for the diff-pair loop. The
+    removal keeps anything an input-file original OR referenced by any current
+    result, so it can only drop genuinely superseded barrels; measured over
+    ddr5_testbed and orangecrab that population is 0 except where a meander
+    rebuild actually happened.
 
     Args:
         pcb_data: Parsed PCB data (modified in place)
@@ -634,6 +787,10 @@ def sync_pcb_data_segments(
         original_segment_ids: Set of id() for original segments to preserve
         state: Optional RoutingState for cache updates
         config: Optional config for cache recomputation
+        original_via_ids: Set of id() for original vias to preserve. Omit it and
+            the via half is skipped entirely -- callers that hold no via
+            keep-alive cannot tell an input-file barrel from a superseded one,
+            and guessing would strip real copper off the map.
     """
     if not routed_results:
         return
@@ -662,10 +819,46 @@ def sync_pcb_data_segments(
             total_added += 1
     print(f"\nSync pcb_data: {seg_count_before} -> {seg_count_after_remove} (kept stubs) -> {len(pcb_data.segments)} (after adding {total_added})")
 
+    # Same reconciliation for VIAS (#874). Identity, not geometry: two distinct
+    # objects at one point are two real barrels, and the writer holds each once.
+    touched_net_ids = set(routed_net_ids_set)
+    if original_via_ids is not None:
+        result_via_ids = set()
+        for result in routed_results.values():
+            for via in result.get('new_vias', []):
+                result_via_ids.add(id(via))
+        via_count_before = len(pcb_data.vias)
+        pcb_data.vias = [v for v in pcb_data.vias
+                         if v.net_id not in routed_net_ids_set
+                         or id(v) in original_via_ids
+                         or id(v) in result_via_ids]
+        via_count_after_remove = len(pcb_data.vias)
+        present_vias = set(id(v) for v in pcb_data.vias)
+        vias_added = 0
+        for result in routed_results.values():
+            for via in result.get('new_vias', []):
+                if id(via) in present_vias:
+                    continue
+                present_vias.add(id(via))
+                pcb_data.vias.append(via)
+                # A pair result carries its partner's and its GND vias too, so
+                # the net a via lands on is not always a key of routed_results.
+                touched_net_ids.add(via.net_id)
+                vias_added += 1
+        if via_count_before != via_count_after_remove or vias_added:
+            print(f"Sync pcb_data vias: {via_count_before} -> "
+                  f"{via_count_after_remove} (kept originals) -> "
+                  f"{len(pcb_data.vias)} (after adding {vias_added})")
+
     # Sync working_obstacles with the updated pcb_data
     if state is not None and config is not None:
         if state.working_obstacles is not None and state.net_obstacles_cache is not None:
-            for net_id in routed_net_ids_set:
+            # A net the cache never held keeps its copper in the BASE map, so
+            # computing a cache for it here and ADDING it would stamp that net
+            # twice (#874: the pair results carry GND barrels). Refresh only
+            # what is already cached, plus the routed nets as before.
+            for net_id in sorted(routed_net_ids_set
+                                 | (touched_net_ids & set(state.net_obstacles_cache))):
                 # Remove old cache from working
                 if net_id in state.net_obstacles_cache:
                     remove_net_obstacles_from_cache(state.working_obstacles, state.net_obstacles_cache[net_id])

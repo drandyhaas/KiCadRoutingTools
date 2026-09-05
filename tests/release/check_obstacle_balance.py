@@ -38,6 +38,17 @@ THE INVARIANTS, and which are enforced:
   B. no unbalanced cache OBJECT             ENFORCED
   C. no cells unaccounted for by any cache  ENFORCED
   D. raw add/remove op deltas cancel        RECORDED, NOT ENFORCED
+  E. map CONTENT matches the board (#806)   RECORDED, NOT ENFORCED here
+
+E is the invariant A/B/C cannot see: an entry computed before its net was
+routed and never refreshed is removed and re-added in BALANCE while the
+routed copper is invisible to every search on the map. `run_obstacle_content_
+audit` recomputes every cached net from pcb_data and queries the map cell by
+cell. It is enforced at ZERO on route_diff's PRE-SYNC line by
+tests/test_806_diff_pair_working_map.py (that is where the map's in-run
+consumers use it); the END-of-run line is recorded here only, because
+route.py's post-passes (reconciliation, plane finalize) legitimately move
+copper after the last map consumer ran.
 
 D is a REAL, SEPARATE, PRE-EXISTING leak, recorded here rather than dropped so
 it stays a change detector instead of folklore. It is NOT caused by the trim --
@@ -90,6 +101,18 @@ def parse_audit(text):
             r"^\s+cells ([+-]?\d+) vias ([+-]?\d+)\s+(\S+ @ \S+)", text, re.M),
         "repairs": sum(int(m) for m in
                        re.findall(r"\[RESIDENCY\] map repairs performed: (\d+)", text)),
+        # E (#806): CONTENT -- cells the board's copper owns that the working
+        # map does not block, per audit label. RECORDED, not enforced here:
+        # the end-of-run map of route.py legitimately drifts after its own
+        # post-passes; the pre-sync line of route_diff is enforced at zero by
+        # tests/test_806_diff_pair_working_map.py.
+        "content": [(lab, int(c), int(m), int(v), int(vm), int(se)) for
+                    lab, c, m, v, vm, se in re.findall(
+                        r"\[OBSTACLE CONTENT ([^\]]*)\] \d+ nets recomputed from "
+                        r"pcb_data: (\d+) cells checked, (\d+) NOT blocked in "
+                        r"working map; (\d+) via cells checked, (\d+) NOT "
+                        r"via-blocked; \d+ cells absent from their net's cache "
+                        r"entry \((\d+) stale entries\)", text)],
     }
 
 
@@ -110,6 +133,12 @@ def report(a):
               f" {len(a['raw_ops'])}")
         for cells, vias, site in a["raw_ops"][:4]:
             print(f"    cells {cells} vias {vias}  {site}")
+    if a["content"]:
+        print(f"  [recorded, invariant E not enforced here] content audits:"
+              f" {len(a['content'])}")
+        for lab, c, m, v, vm, se in a["content"]:
+            print(f"    {lab}: {m}/{c} cells NOT blocked, {vm}/{v} via cells NOT "
+                  f"via-blocked, {se} stale entries")
 
 
 def verdict(a):
@@ -309,6 +338,7 @@ def self_test():
   cache-object ledger BALANCED (leak, if any, is in raw ops below)
     cells +19529 vias +5984  add_segments_list @ phase3_routing.py:try_phase3_ripup:1117
 [RESIDENCY] map repairs performed: 3
+[OBSTACLE CONTENT route_diff pre-sync] 41 nets recomputed from pcb_data: 47448 cells checked, 30862 NOT blocked in working map; 71537 via cells checked, 31330 NOT via-blocked; 31613 cells absent from their net's cache entry (20 stale entries)
 """
     bad = """
 [OBSTACLE AUDIT] working - sum(caches) vs base (226 net caches removed)
@@ -335,6 +365,11 @@ def self_test():
     # D is RECORDED, never enforced: good text has a raw-op site and still passes.
     if not ga["raw_ops"]:
         fails.append("parser missed the recorded raw-op site")
+    # E (#806) is RECORDED here, never enforced: the good text carries the
+    # measured pre-fix dual_ipex line (30862 of 47448 NOT blocked) and still
+    # passes; the parser must read its real counts.
+    if ga["content"] != [("route_diff pre-sync", 47448, 30862, 71537, 31330, 20)]:
+        fails.append(f"parser misread the content audit: {ga['content']}")
     # An empty log is a BROKEN GATE, not a pass.
     ok_e, f_e = verdict(parse_audit(""))
     if ok_e or "BROKEN GATE" not in f_e[0]:

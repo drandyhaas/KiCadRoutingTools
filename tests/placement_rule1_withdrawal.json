@@ -9,7 +9,8 @@
     "tests/test_789_rule1_withdrawal.py, failing if the mark changes.",
     "",
     "Numbers are from the slate run recorded in docs/placement-predictors.md.",
-    "They are metrics, not board bytes, so the test needs no wk/ tree."
+    "They are metrics, not board bytes, so the test needs no wk/ tree.",
+    "STALE SINCE #826 for the JITTER rows only: indices 1, 4 and 5 are esp_prog portfolio jitter candidates, and the jitter now snaps its offset to the board's 0.05mm lattice, so a regenerated slate gives different numbers for them. Index 0 is the BASELINE -- the plain quench of the input board, which #826 does not touch -- and is still reproducible. The test re-derives rule1_check / rule1_advisory / select_best as PURE FUNCTIONS of the literals below, so nothing here can fail."
   ],
   "rejected": true,
   "expect": "crossings-clause WITHDRAWN",

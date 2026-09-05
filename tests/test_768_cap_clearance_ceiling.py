@@ -984,7 +984,11 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         """It was the one step tab whose shared params did not carry it, so the
         gate above had nothing to read on either call path."""
         src = self._src(self.SWIG)
-        self.assertIn("'clamp_netclasses': self.clearance_check.GetValue(),",
+        # #530: the routing tabs' switch is the class-ceiling box (_ceiling_on);
+        # the PLACEMENT switch the fanout tab prices with is still the Min
+        # Clearance override alone (placement_clamp_netclasses).
+        self.assertIn("'clamp_netclasses': self._ceiling_on(),", src)
+        self.assertIn("'placement_clamp_netclasses': self.clearance_check.GetValue(),",
                       src)
         self.assertIn("'clearance_ceiling': (self.clearance.GetValue()", src,
                       'the ceiling must be the RAW spin value; '
@@ -1006,9 +1010,9 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         """
         src = self._src(self.GUI)
         for key in ("\n            'clamp_netclasses': "
-                    "shared.get('clamp_netclasses', False),",
+                    "shared.get('placement_clamp_netclasses',",
                     "\n            'clearance_ceiling': "
-                    "shared.get('clearance_ceiling'),"):
+                    "shared.get('placement_clearance_ceiling',"):
             self.assertIn(key, src,
                           'the STANDALONE cfg (run_cap_optimization, one '
                           'indent shallower than the inline one) must '
@@ -1024,7 +1028,7 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         there now."""
         src = self._src(self.GUI)
         self.assertIn("\n                'clearance_ceiling': "
-                      "shared.get('clearance_ceiling'),", src,
+                      "shared.get('placement_clearance_ceiling',", src,
                       'the INLINE cap config must carry the ceiling; '
                       'without it the checkbox path runs the OMITTED '
                       'branch whatever the operator ticked')
@@ -1067,12 +1071,23 @@ class TestTheManifestCarriesTheFlag(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 class TestInertOnTheTrackedCorpus(unittest.TestCase):
-    """The self-expiring bound. 20 of the 22 tracked boards carry no sibling
+    """The self-expiring bound. 19 of the 22 tracked boards carry no sibling
     project at all, so there is no class to cap and no project to preserve, and
     every branch above resolves to the packaged default.
 
     A "0 diffs on the corpus" run therefore proves NOTHING on its own, which is
-    why this class asserts the REASON as well as the outcome."""
+    why this class asserts the REASON as well as the outcome.
+
+    RE-RECORDED 2026-08-30 and the expiry worked exactly as designed: `d00032d8`
+    (#805's obstacle ref-count release gate) added a sibling `.kicad_pro` for
+    glasgow_revC for reasons of its own, which moved that board out of the
+    project-less majority -- 20 of 22 became 19 of 22. Re-measured rather than
+    adjusted: every one of the 19 still resolves to the packaged default, and
+    glasgow_revC lands on its OWN declaration (0.2, board netclass) exactly like
+    flat_hierarchy, so the finding is unchanged in substance and only its
+    membership grew. Note what this costs: the fanout-clearance step is no
+    longer inert on glasgow_revC, so a future corpus A/B that uses it as a
+    control has to account for the clamp."""
 
     def setUp(self):
         self.boards = run_utils.corpus_boards()
@@ -1083,11 +1098,12 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
                                 'the tracked corpus collapsed to %d boards; '
                                 'nothing below is a bound' % len(self.boards))
 
-    def test_exactly_two_tracked_boards_can_declare_anything(self):
+    def test_exactly_three_tracked_boards_can_declare_anything(self):
         withpro = sorted(os.path.basename(b) for b in self.boards
                          if os.path.exists(os.path.splitext(b)[0] + '.kicad_pro'))
         self.assertEqual(
-            withpro, ['flat_hierarchy.kicad_pcb', 'routed_output.kicad_pcb'],
+            withpro, ['flat_hierarchy.kicad_pcb', 'glasgow_revC.kicad_pcb',
+                      'routed_output.kicad_pcb'],
             'the set of tracked boards carrying a project has CHANGED: %r. '
             'The inertness claim in the #768 PR has EXPIRED -- re-run the '
             'four-arm A/B and record the new numbers' % withpro)
@@ -1102,8 +1118,8 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
                 odd.append((os.path.basename(b), got))
         self.assertEqual(odd, [], odd)
 
-    def test_the_two_declaring_boards_move_and_in_which_direction(self):
-        """NOT inert on these two, and the PR must say so rather than let a
+    def test_the_declaring_boards_move_and_in_which_direction(self):
+        """NOT inert on these three, and the PR must say so rather than let a
         reviewer find it. Both move to the board's OWN declaration, which is
         what KiCad grades them at."""
         got = {}
@@ -1113,6 +1129,7 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
             got[os.path.basename(b)] = resolve_pair_clearance(b, None)
         self.assertEqual(got, {
             'flat_hierarchy.kicad_pcb': (0.2, 'board netclass'),
+            'glasgow_revC.kicad_pcb': (0.2, 'board netclass'),
             'routed_output.kicad_pcb': (0.09, 'board netclass'),
         }, 'the declaring boards moved: %r' % got)
 

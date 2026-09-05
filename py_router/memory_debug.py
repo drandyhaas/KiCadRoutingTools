@@ -72,6 +72,12 @@ def estimate_net_obstacles_cache_mb(cache: Dict) -> float:
             else:
                 total += sys.getsizeof(data.blocked_vias)
                 total += len(data.blocked_vias) * 16  # tuple of 2 ints (legacy)
+        # #815: segment keep-outs live in the SPAN arrays, so a report that
+        # counts only the cell arrays now under-reports the cache badly.
+        for _attr in ('blocked_cell_spans', 'blocked_via_spans', 'blocked_vias_small'):
+            _a = getattr(data, _attr, None)
+            if _a is not None and hasattr(_a, 'nbytes'):
+                total += _a.nbytes
     return total / (1024 * 1024)
 
 

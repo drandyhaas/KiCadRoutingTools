@@ -708,6 +708,25 @@ boards" and "which commit broke connectivity".
   baseline. Six stages, pick with `--only`: `plan` (prices it, spends nothing) /
   `upload` / `run` / `harvest` / `baseline` / `compare`.
 
+  **The image carries KiCad by default (since 2026-08-23).** `--with-kicad` is
+  the default and builds on `kicad/kicad:10.0.0`, so the **oracle legs actually
+  run**. `--no-kicad` builds `debian_slim` instead, and there every oracle leg
+  is **DEAD, not degraded** -- `oracle_reconnect` returns `available=False` the
+  moment `find_kicad_cli()` is None -- so a change acting through the finalize
+  audit, the plane/oracle recheck or #589 measures as exactly zero on such a
+  wave. Prefer the default unless you are deliberately reproducing an old one.
+
+  A KiCad wave suffixes its label `-kc`, because the results volume RESUMES by
+  arm name and arm = label + sha: two waves at the same commit differing only by
+  the image would otherwise share rows, which is precisely the
+  "the baseline was not the baseline" failure `arm_name()` exists to prevent.
+
+  Note the crate is built IN the image. When `rust_router/Cargo.toml` is ahead
+  of the latest release tag (i.e. a crate bump whose binaries are not published
+  yet) `build_router.py` skips the prebuilt and compiles from source -- rustup
+  is installed for exactly this, at the cost of a ~10 min cold build that Modal
+  then caches.
+
   ```bash
   # where does HEAD stand vs the recorded runs, sets 10-19?
   python3 tests/stress/cloud_replay_sets.py --sets set10-set19
@@ -745,13 +764,61 @@ boards" and "which commit broke connectivity".
   regrade drops (`arm`, `steps`, `rescue_steps`, `patched_defaults`) — feed
   rank_arms the regraded rows alone and you silently disable its arm
   identification, its chain-identity guard and its rescue cell at once. Rows
-  the regrade could not re-score (cloud-graded, so no kicad-cli `drc_real`)
-  are dropped rather than paired against locally-graded rows, per rule 2.
+  the regrade could not re-score are dropped rather than paired against
+  locally-graded rows, per rule 2 (waves banked before 2026-08-23, or launched
+  `--no-kicad`, carry no `drc_real` at all).
 
   **Launch the arms at ONE commit and do not commit in between.** The image is
   `git archive HEAD`, so a commit landing between two launches makes the arms
   differ by more than the knob — the arm name records the sha it was launched
   at, so check that both wave dirs carry the same one.
+
+  **Manifests recorded before #530 read `--clearance` as a ceiling.** Since
+  decision 2 an explicit `--clearance` IS the Default class for the run;
+  before, it capped every class at `min(class, value)`, so a late chain step
+  saying `--clearance 0.2` after an earlier step had lowered the project's
+  Default class to 0.1 routed at 0.1. Replaying such a manifest on a post-#530
+  engine measures that semantics change on top of the engine (rp2040_dev: 3
+  nets that fit at 0.1 do not at 0.2). For an engine-only A/B ride the replay
+  knob in the arm spec:
+
+  ```bash
+  python3 tests/stress/cloud_replay_sets.py --sets set1-set5 --label legacy \
+      --env KICAD_CLEARANCE_LEGACY_CEILING=1
+  ```
+
+  The knob is for replay arms only; a real run wanting that reading passes
+  `--clearance-ceiling`.
+
+  **The recorded manifests were rewritten on 2026-09-03** (`runs_set*/*/
+  redo_commands.sh`, 1509 lines in 400 manifests): on `route.py`,
+  `route_diff.py`, `route_planes.py` and `repair_planes.py` every
+  `--clearance X` became `--clearance-ceiling X`, which is exactly the reading
+  those runs were recorded under. Fanout, placement and grading commands keep
+  `--clearance`. So a plain replay of a recorded manifest routes like the
+  record without the knob; the knob remains for manifests recorded elsewhere.
+  Graders that read the routed floor off a manifest accept either spelling
+  (`ab_replay_grade.route_clearance`).
+
+  **After editing recorded manifests, re-upload the sets by hand** --
+  `cloud_replay_sets`' upload stage skips a set the corpus volume already
+  has (presence, not content), so a cloud arm launched after an in-place
+  rewrite replays the OLD manifests from the volume and measures nothing
+  new (the first `final2` arm did exactly that). Run
+  `python3 tests/stress/modal_sweep/upload_corpus.py --sets set1,...`
+  (extraction overwrites whole files) and confirm with
+  `modal volume get kicad-corpus /runs_setN/<board>/redo_commands.sh`
+  before launching.
+
+  Likewise for the escalation ladder: `KICAD_FAB_TIER_DEFAULT` and
+  `KICAD_ESCALATION_DEFAULT` set the default of the two flags a manifest
+  omits. The shipped defaults are now `auto` / `fab` (the pre-#857 ladder,
+  disclosed), so the knobs matter when a future default moves again or an
+  arm wants the hard tier (`standard` / `board`) on manifests that pass
+  neither flag. The clearance knob plus these two replayed the pre-#530
+  manifests under the old policy on the new engine -- the engine-only arm of
+  the 2026-09-03 four-way A/B (old engine / new engine old policy / new
+  engine new policy), which read -3 real DRC / -11 incomplete nets.
 
 ### Rules that make these trustworthy
 
@@ -761,11 +828,24 @@ boards" and "which commit broke connectivity".
    wave did, so diffing against it mixes a different PLAN in with the engine
    delta. `--baseline recorded` (the default) compares like with like; preflight
    refuses a wave whose chains disagree.
-2. **Grade both sides on the same terms.** The cloud image ships no KiCad, so
-   `drc_real` falls back to raw DRC and connectivity uses the raster fill model.
-   Comparing a cloud row against a locally-graded baseline measures the GRADER:
-   it once reported "DRC +40 worse" when the truth was "-37 better". Harvest
+2. **Grade both sides on the same terms.** Comparing a row graded one way
+   against a baseline graded another measures the GRADER, not the engine: it
+   once reported "DRC +40 worse" when the truth was "-37 better". Harvest
    re-grades the kept boards locally by default (`--no-local-regrade` opts out).
+
+   **On a KiCad image you can grade in the cloud and skip the regrade.** Since
+   2026-08-23 `--with-kicad` is the default (`kicad/kicad:10.0.0`), so the
+   containers run the SAME `kicad-cli` grader your machine does, and the two
+   have been checked to agree (drandyhaas, 2026-08-31). `--no-local-regrade` is
+   therefore the faster path on such a wave, and it does not violate this rule:
+   the rule is same-TERMS, and same terms is exactly what a shared grader gives.
+
+   What the rule still forbids is mixing GRADERS, and that is what the "+40
+   worse / -37 better" incident actually was -- a wave whose `drc_real` had
+   fallen back to raw DRC, paired against a kicad-cli baseline. So the regrade
+   remains mandatory for a wave banked before 2026-08-23 or launched
+   `--no-kicad`: those rows carry no `drc_real` at all, and nothing about a
+   shared grader applies to them.
 3. **Compare arms only on boards that replayed an IDENTICAL chain** — same step
    count and same final board. A short chain grades artificially WELL, because
    nets its missing steps never attempted are not counted as incomplete.
@@ -829,6 +909,67 @@ boards" and "which commit broke connectivity".
    every replay ran the shipped default and burned the 3 h cap. Before trusting
    a recorded run as a baseline, grep its `transcript.jsonl` for `KICAD_`
    exports (the timing sidecar cannot tell you).
+
+## Exact-fill timing census (#831)
+
+`kicad_exact_fill.refill_islands_ex` runs pcbnew's ZONE_FILLER under
+`EXACT_FILL_TIMEOUT` (300 s); on expiry `plane_fragility` (and the GUI's
+`kicad_parser._live_fill`) fall back to the drawn zone OUTLINES, so which
+geometry the router priced depends on whether pcbnew finished on THIS machine.
+#831 asked whether a deterministic pre-flight predicate over
+`kicad_oracle._fill_cost_key` -- `('fill', zones, pads, footprints, bbox)` --
+could separate "will finish" from "will not". The answer had to be measured,
+and the tool that measures it is general:
+
+```bash
+python3 tests/stress/fill_timing_census.py --out fills.jsonl --timeout 1800 \
+    --workers 2 ~/Documents/kicad_stress_test/runs_set*/*/*planes*.kicad_pcb
+python3 tests/stress/fill_timing_census.py --report fills.jsonl   # table + separation
+```
+
+One JSONL row per board: the signature, extra features (segments, vias,
+copper layers, summed zone-outline area, file size), the fill's wall and
+child-CPU seconds, and the `RefillStatus` reason. The corpus is read in place
+(the refill stages every board into its own temp dir). `--report` prints the
+sorted table and, for each candidate predicate, the largest threshold that
+still refuses every over-budget board, the under-budget boards it would
+wrongly refuse, and the margin between the two populations.
+
+**The recorded census (`tests/831_fill_timing_census.json`, 2026-09-04, Apple
+M3 8-core, KiCad 10.0.0, timeout 1800 s, 2 workers).** Population: every
+route-step INPUT carrying zones in the recorded corpus runs -- 383 pour-step
+outputs, 398 last-step routed boards, 18 in-repo `kicad_files/` boards; 790
+distinct files, 100% `ok`, 0 parse failures (no `('path', ...)` signatures).
+
+| | fill wall s | child CPU s |
+|---|---|---|
+| median | 2.0 | -- |
+| p99 | 13.8 | 9.9 |
+| max (duodyne_z80_proc step4, 1 zone, 1289 pads, 18847 segs + 3280 vias) | 116.7 | 55.8 |
+| boards >= 150 s (half the budget) | **0** | 0 |
+| boards >= 300 s | **0** | 0 |
+
+Wall times were measured under contention (other sessions ran ~4 CPU-bound
+processes on the same 8 cores; the slowest board's wall is 2.1x its CPU), so
+they are an OVERestimate of an idle machine.
+
+**Verdict: does not separate, and nothing to separate.** No board reached the
+budget, so the "will not finish" class is empty on this machine and a
+threshold could only be an extrapolation. And the signature does not rank
+fill time: Spearman with fill seconds is 0.07 (zones), 0.18 (pads), 0.25
+(bbox area), 0.27 (zones x area) -- while the slowest board has **20
+signature twins** (every component within 2x of its own) that fill in a
+median **4.0 s** (max 14.1 s). What separates it from them is the copper the
+fill must clear -- 22127 segments+vias against the twins' median of 155 -- which
+`_fill_cost_key` does not carry; even the best feature measured (zone area x
+segments+vias) reaches only 0.43. A predicate over the signature therefore
+has no threshold with provenance, and none was implemented: the machine-
+dependent fallback is DISCLOSED instead (`JSON_SUMMARY.plane_fragility`,
+`docs/api-routing-config.md`). `tests/test_831_fill_preflight_census.py` pins
+these numbers as a change detector; re-record with the tool above (and
+`--report`) if the corpus or the fill engine changes, and re-ask the question
+if the census then shows a board near the budget or a signature component
+above ~0.5.
 
 ## Multi-set waves & release sign-off
 

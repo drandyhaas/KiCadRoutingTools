@@ -289,10 +289,14 @@ _PARAM_CONTROL_ALIASES = {
     # carry it under the fallthrough name `fab_overrides`; the control is
     # fab_overrides_path. New conversions emit fab_overrides_path directly.
     'fab_overrides': 'fab_overrides_path',
+    # #856: the opt-in severity relaxation checkbox (Options tab).
+    'relax_drc_severities': 'relax_drc_severities_check',
 }
 # _PARAM_SPECIAL: params handled by _apply_special() (composite / inverted /
 # panel-backed controls that a plain SetValue can't fill).
 _PARAM_SPECIAL = {'layers', 'no_bga_zone', 'no_bga_zones', 'power_nets',
+                  # #530: --clearance-ceiling -> Min Clearance + the ceiling box
+                  'clearance_ceiling',
                   'power_nets_widths', 'escape_method', 'no_gnd_vias',
                   # #381 D5:
                   'impedance', 'length_match_groups', 'swappable_nets',
@@ -579,16 +583,41 @@ def apply_step_params(step, dialog):
             chk.SetValue(not bool(value))
             return True
         if name == 'escape_method':
-            # Fanout escape dropdown lives on the BGA options panel and shows
-            # DISPLAY strings ("Auto (channel, under-pad retry)"), while the
-            # plan/CLI value is the engine token ('auto'/'channel'/'underpad').
-            # Map value -> index via the panel's ESCAPE_METHODS tuple.
-            opts = getattr(getattr(dialog, 'fanout_tab', None), 'bga_options', None)
+            # THE TWO FANOUT PANELS MODEL THE ESCAPE DIFFERENTLY, so this cannot
+            # resolve to one control (#860 follow-up). BGA has a 4-way dropdown
+            # showing DISPLAY strings ("Auto (channel, under-pad retry)") while
+            # the plan/CLI value is the engine token, mapped via ESCAPE_METHODS.
+            # QFN has no dropdown at all: it has a BOOLEAN `underpad_escape`
+            # checkbox, and QFNOptionsPanel's config emits 'underpad' when it is
+            # set and 'stub' when it is not.
+            #
+            # This used to reach `bga_options` unconditionally and RETURN TRUE,
+            # so a QFN step set the BGA panel's dropdown, reported "set
+            # escape_method=underpad", and left the QFN panel untouched -- the
+            # under-pad escape stayed off, which in turn made `allow_via_in_pad`
+            # inert, since it is under-pad-only. A plan carrying
+            # `--escape-method underpad --allow-via-in-pad` therefore replayed a
+            # STUB fanout while claiming both params had been applied.
+            #
+            # Dispatch on `step['kind']`, the same key the fanout action block
+            # below uses and which manifest_to_plan sets from the tool name.
+            tab = getattr(dialog, 'fanout_tab', None)
+            v = str(value).strip().lower()
+            if (step.get('kind') or 'bga').lower() == 'qfn':
+                chk = getattr(getattr(tab, 'qfn_options', None),
+                              'underpad_escape', None)
+                if chk is None:
+                    return False
+                # Only 'underpad' turns the checkbox ON; 'stub' (and anything
+                # else this panel cannot express) turns it off, which is what
+                # the panel's own config->token mapping means in reverse.
+                chk.SetValue(v == 'underpad')
+                return True
+            opts = getattr(tab, 'bga_options', None)
             choice = getattr(opts, 'escape_method_choice', None)
             if choice is None:
                 return False
             methods = getattr(type(opts), 'ESCAPE_METHODS', ('auto', 'channel', 'underpad'))
-            v = str(value).lower()
             if v in methods:
                 choice.SetSelection(methods.index(v))
                 return True
@@ -603,6 +632,22 @@ def apply_step_params(step, dialog):
                 return False
             chk.SetValue(str(value).strip().lower() not in ('off', '0', 'false', 'no'))
             return True
+        if name == 'clearance_ceiling':
+            # #530: --clearance-ceiling X == Min Clearance X with the class-
+            # ceiling box checked (both fronts cap every class at X).
+            spin = getattr(dialog, 'clearance', None)
+            chk = getattr(dialog, 'clearance_check', None)
+            ceil = getattr(dialog, 'clearance_ceiling_check', None)
+            if spin is None or chk is None or ceil is None:
+                return False
+            try:
+                spin.SetValue(float(value))
+                spin.Enable(True)
+                chk.SetValue(True)
+                ceil.SetValue(True)
+                return True
+            except (TypeError, ValueError):
+                return False
         if name == 'impedance':
             # #381 D5: route.py's --impedance drives a checkbox+value pair on the
             # Basic tab (impedance_check enables impedance-based width). A plain
@@ -1398,12 +1443,16 @@ class PlanExecutor:
                 try:
                     from protected_nets import (consume_protection_candidates,
                                                 consume_impedance_specs,
+                                                consume_pour_served_pads,
                                                 persist_protected_nets,
                                                 persist_impedance_specs,
+                                                persist_pour_served_pads,
                                                 pro_path_for_board)
                     _pro = pro_path_for_board(board_file)
                     persist_protected_nets(_pro, consume_protection_candidates())
                     persist_impedance_specs(_pro, consume_impedance_specs())
+                    # #678: the plan's fanout steps' pour-served balls.
+                    persist_pour_served_pads(_pro, consume_pour_served_pads())
                 except Exception as _pe:
                     self.log(f"AI plan: protected-nets record skipped: {_pe}")
                 if _fixdrc693:

@@ -37,7 +37,10 @@ BASE_CMD = [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_router', 'bga_f
             '--nets', '*', '!GND', '!+3V3', '!+1V2',
             '--diff-pairs', '*_P', '*_N',
             '--track-width', '0.13', '--clearance', '0.1',
-            '--via-size', '0.45', '--via-drill', '0.2', '--diff-pair-gap', '0.15']
+            '--via-size', '0.45', '--via-drill', '0.2', '--diff-pair-gap', '0.15',
+            # #857: the via-in-pad clamp descends the ladder for sub-0.45 balls;
+            # that is the AUTO tier's now (standard is a hard floor).
+            '--fab-tier', 'auto']
 
 
 def _grid():

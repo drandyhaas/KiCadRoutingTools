@@ -57,7 +57,10 @@ def main():
         "--component", "U9", "--nets", "*", "!GND",
         "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
         "--track-width", "0.2", "--clearance", "0.2",
-        "--via-size", "0.5", "--via-drill", "0.3"])
+        "--via-size", "0.5", "--via-drill", "0.3",
+        # #857: the contended-escape rescue descends the via ladder; that is
+        # the AUTO tier's now (standard is a hard floor).
+        "--fab-tier", "auto"])
     check("uncontended board: no priority machinery (legacy verbatim, #367)",
           "Escape priority" not in txt)
     m = re.search(r'"escaped": (\d+), "failed": (\d+)', txt)
@@ -75,7 +78,8 @@ def main():
             "--layers", "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
             "--escape-method", "underpad",
             "--via-size", "0.35", "--via-drill", "0.2",
-            "--track-width", "0.12", "--clearance", "0.1"])
+            "--track-width", "0.12", "--clearance", "0.1",
+            "--fab-tier", "auto"])
         m_drop = re.search(r"single pass dropped (\d+) ball", txt2)
         check("contended board: single pass drops balls", m_drop is not None)
         m_win = re.search(r"Escape priority wins: (\d+) -> (\d+) dropped", txt2)

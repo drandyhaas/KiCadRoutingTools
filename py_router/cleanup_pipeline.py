@@ -49,6 +49,7 @@ from pcb_modification import (
     neck_wide_segments_grazing_pads,
     smooth_octolinear_chains,
     close_soft_joints,
+    merge_collinear_segments,
 )
 
 from terminal_colors import RED, RESET
@@ -99,6 +100,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            keep_input_copper: bool = False,
                            progress_callback=None,
                            smooth: bool = False,
+                           merge_collinear: bool = True,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -135,6 +137,16 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                                   _restore_soft_joint_bridges guard, so every
                                   joint close sees is router-born, never one a
                                   cleanup pass manufactured.
+     11. merge_collinear_segments -- #811: join collinear same-net/layer/width
+                                  pieces into one track. Runs AFTER close on
+                                  purpose, and is the only pass allowed to:
+                                  it MOVES NO COPPER (a vertex merges only
+                                  when it lies within 1nm of the line joining
+                                  its neighbours), so it cannot reopen a joint
+                                  close just bridged -- it absorbs the bridge
+                                  into the track instead. It must run last to
+                                  catch the joints close, smooth and the cycle
+                                  prune each leave behind.
 
     ``label`` prefixes the progress prints (e.g. "Diff-pair "). The pass
     switches exist for front parity, not taste:
@@ -385,9 +397,20 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
               + (f", {_oi_nv} via(s)" if _oi_nv else "") + ")")
 
     _prog("dead-end sweep")
-    _de_segs, _de_vias, _de_strip = sweep_dead_ends(results, pcb_data, scope_net_ids,
-                                                    protect_net_ids=protect_net_ids,
-                                                    keep_input_copper=keep_input_copper)
+    _de_segs, _de_vias, _de_strip = sweep_dead_ends(
+        results, pcb_data, scope_net_ids,
+        protect_net_ids=protect_net_ids,
+        keep_input_copper=keep_input_copper,
+        # #672: protected (unfinished) nets still shed sub-CELL dead-end
+        # slivers -- rip/restore/prune debris no landing needs. One routing
+        # cell is the epsilon: no A* span is shorter. Plane-flow namespace
+        # configs carry no grid_step, which disables the pass there.
+        # #672: OPT-IN (env_knobs.SLIVER_TRIM). One routing cell is the
+        # epsilon -- no A* span is shorter -- but trimming sub-cell debris
+        # off a net the ladder is still retrying measured as a LOST NET on
+        # orangecrab, so it is off by default. See the knob's note.
+        sliver_eps=(float(getattr(config, 'grid_step', 0.0) or 0.0)
+                    if env_knobs.SLIVER_TRIM else 0.0))
     counts['dead_ends_swept'] = _de_segs
     counts['dead_end_vias'] = _de_vias
     _trace('sweep')
@@ -473,6 +496,23 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if _bridged:
             print(f"{label}Bridged {_bridged} same-net soft joint(s) with a tiny "
                   f"connector")
+
+    # #811 FINAL pass. Geometry-preserving by construction (see the pass
+    # docstring), which is what lets it run after close_soft_joints and what
+    # makes it safe on every front without a per-front switch. KICAD_MERGE_
+    # COLLINEAR=0 ablates it for A/B isolation.
+    if merge_collinear and env_knobs.MERGE_COLLINEAR:
+        _prog("collinear merge")
+        _mc_n, _mc_nets, _mc_strip, _mc_added, _mc_stats = merge_collinear_segments(
+            results, pcb_data, scope_net_ids,
+            keep_input_copper=keep_input_copper)
+        counts['collinear_merged'] = _mc_n
+        counts['collinear_joints'] = _mc_stats.get('joints', 0)
+        _trace('merge_collinear')
+        strip.extend(_mc_strip)
+        if _mc_n:
+            print(f"{label}Merged {_mc_stats.get('joints', 0)} collinear joint(s) "
+                  f"on {_mc_nets} net(s): -{_mc_n} redundant segment(s) (#811)")
 
     return out
 
