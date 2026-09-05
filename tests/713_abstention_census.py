@@ -116,17 +116,36 @@ def run(argv, repo):
                           errors='replace', cwd=repo, timeout=900)
 
 
-def refusal_text(text, tmp):
-    """The tail of a refusal, with the per-run temp path taken out.
+def refusal_text(text, tmp, repo):
+    """The tail of a refusal, with every path that is not the same everywhere
+    taken out.
 
-    The raw tail embeds the `tempfile.mkdtemp` directory, which changes every
-    run -- so a board that starts refusing would make this census flap forever
-    on a random string, and the gate would report it as DRIFT every time. No
-    board refuses today (0 of 22), which is exactly why it is worth removing
-    now: the first one to refuse would otherwise turn the gate into noise at
-    the moment it finally had something to say.
+    Two of them, and both would make this file un-gateable:
+
+    * the `tempfile.mkdtemp` directory changes every RUN, so a refusing board
+      would make the census flap forever on a random string and the gate would
+      report DRIFT every time;
+    * the repo root differs per CHECKOUT -- and this repo is worked in several
+      worktrees at once -- so a recorded absolute path makes the baseline
+      machine-specific: the gate reports permanent DRIFT anywhere else, and
+      re-recording there just breaks it for the first tree. Ping-pong.
+
+    SCRUB BEFORE TRUNCATING. The other order only works when the whole path
+    happens to fall inside the last 300 characters, and in the one real refusal
+    measured (`--emit-intent` on an outline-less board) the boundary landed
+    five characters into the temp path -- forty more characters of message and
+    the substitution would have silently stopped happening.
+
+    No board refuses today (0 of 22), which is exactly why this is worth
+    getting right now: the first one to refuse would otherwise turn the gate
+    into noise at the moment it finally had something to say.
     """
-    return (text.strip()[-300:]).replace(tmp, '<tmp>')
+    for path, token in ((tmp, '<tmp>'), (os.path.abspath(repo), '<repo>')):
+        # Both spellings: a subprocess may echo back either separator, and on
+        # Windows the two are the same path but not the same string.
+        for spelling in (path, path.replace(os.sep, '/')):
+            text = text.replace(spelling, token)
+    return text.strip()[-300:]
 
 
 def summary_of(text):
@@ -161,7 +180,8 @@ def census(repo, quiet=False):
             e = run([check, board, '--emit-intent', intent, '-q'], repo)
             row['emit_rc'] = e.returncode
             if not os.path.isfile(intent):
-                row['emit_refused'] = refusal_text(e.stdout + e.stderr, tmp)
+                row['emit_refused'] = refusal_text(e.stdout + e.stderr,
+                                                   tmp, repo)
                 rows.append(row)
                 say(f"  {name:42s} emit rc={e.returncode} NO INTENT",
                     flush=True)
@@ -171,7 +191,8 @@ def census(repo, quiet=False):
             row['grade_rc'] = g.returncode
             s = summary_of(g.stdout)
             if s is None:
-                row['grade_refused'] = refusal_text(g.stdout + g.stderr, tmp)
+                row['grade_refused'] = refusal_text(g.stdout + g.stderr,
+                                                    tmp, repo)
                 rows.append(row)
                 say(f"  {name:42s} grade rc={g.returncode} NO SUMMARY",
                     flush=True)
@@ -252,11 +273,24 @@ def write(doc, path):
     committed baseline, so a plain `'w'` truncates it before serialising and a
     Ctrl-C in that window leaves it destroyed. Cheap insurance on the one file
     this whole gate exists to protect.
+
+    The temp file is cleaned up on failure. `tests/*.tmp` is not gitignored, so
+    a Ctrl-C -- the very case above -- would otherwise leave a partial
+    `713_abstention_census.json.tmp` for the next `git add -A` to ship.
     """
     tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(doc, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        # BaseException, not Exception: KeyboardInterrupt is the motivating
+        # case and does not inherit from Exception.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def main(argv=None):
@@ -277,11 +311,29 @@ def main(argv=None):
     # Fail on an unwritable --out BEFORE spending 42 s, not after. A
     # `FileNotFoundError` traceback from `write()` at the end of a full census
     # is the same information delivered at the worst possible moment.
+    # `isdir` alone is not enough: it answers "is there a directory here", not
+    # "can I write there". An illegal filename (`tests/a?b.json`), a read-only
+    # directory, a full disk all pass it and then raise from `write()` 42 s
+    # later. So PROBE the exact path `write()` will use, and delete the probe.
     out_dir = os.path.dirname(os.path.abspath(a.out))
     if not os.path.isdir(out_dir):
         p.error(f"--out directory does not exist: {out_dir}")
     if os.path.isdir(a.out):
         p.error(f"--out is a directory, not a file: {a.out}")
+    probe = a.out + '.tmp'
+    probe_existed = os.path.exists(probe)
+    try:
+        with open(probe, 'a', encoding='utf-8'):
+            pass
+    except OSError as exc:
+        p.error(f"--out is not writable: {a.out} ({exc})")
+    if not probe_existed:
+        # Only remove what this probe created. A `.tmp` already sitting there
+        # is somebody else's business -- possibly a concurrent recorder's.
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
 
     doc = census(a.repo, quiet=a.quiet)
 

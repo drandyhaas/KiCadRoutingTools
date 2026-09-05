@@ -57,8 +57,11 @@ sys.path[:0] = [os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_placer')
 
 #: 42.6 s measured on the author's machine, dominated by `parse_kicad_pcb` on
 #: the four large boards. Declared with headroom so a slower box reports FAIL
-#: rather than TIME -- and note the recorder's own per-subprocess timeout is
-#: 900 s, so a genuinely hung `check_floorplan` blows that first.
+#: rather than TIME. The recorder's own per-subprocess timeout is also 900 s,
+#: and this one ALWAYS expires first: the outer clock starts when the recorder
+#: launches, the inner one when the hung board's `check_floorplan` does. So a
+#: hang surfaces here, which is why the timeout is caught and named rather than
+#: left to raise.
 RUN_ALL_TIMEOUT = 900
 
 BASELINE = os.path.join(TESTS, '713_abstention_census.json')
@@ -100,6 +103,70 @@ def _load_recorder():
 # nothing to reverse. Saying so here is cheaper than leaving the next reader to
 # wonder which verdict went missing and why.
 
+def diff_value(label, exp_v, cur_v, problems):
+    """One value -- or one level deeper when both sides are objects.
+
+    `channels_seen` is a nested dict, and reporting it whole hands the reader
+    two five-key objects to diff by eye. That is the aggregate-verdict mistake
+    #694 is about, in the one place in this document where it could still
+    happen: `DRIFT channels_seen.budget_abstained` names the input that moved,
+    where the whole-dict form only says the dict is different.
+    """
+    if isinstance(exp_v, dict) and isinstance(cur_v, dict):
+        for k in sorted(set(exp_v) | set(cur_v)):
+            if k not in exp_v:
+                problems.append(f"NEW KEY {label}.{k}: measured {cur_v[k]!r}")
+            elif k not in cur_v:
+                problems.append(f"MISSING KEY {label}.{k}: the baseline "
+                                f"records {exp_v[k]!r}")
+            else:
+                diff_value(f'{label}.{k}', exp_v[k], cur_v[k], problems)
+        return
+    if exp_v != cur_v:
+        problems.append(f"DRIFT {label}: baseline {exp_v!r}, "
+                        f"measured {cur_v!r}")
+
+
+def index_rows(rows, where):
+    """`board` -> row, and the problems found while indexing.
+
+    The obvious `{r['board']: r for r in rows}` is LAST-WINS, and it silently
+    drops any row without a usable `board`. Both matter here:
+
+    * A duplicated board makes one of the two copies invisible to every
+      comparison downstream -- so a baseline row claiming `pass: false` about a
+      board that passes can sit in the committed file while the gate reports
+      zero problems. That is not exotic for a 22-row JSON array: it is what a
+      merge conflict resolved by keeping both hunks produces, and a
+      hand-edited baseline is this gate's entire threat model.
+    * A row with no `board` key indexes under `None`, and `sorted()` over a set
+      holding `None` and strings raises `TypeError` -- a traceback after a 40 s
+      re-derive, which is not a verdict and is indistinguishable from a broken
+      test.
+
+    Both are REPORTED, by name and row index.
+    """
+    indexed, problems, seen = {}, [], {}
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            problems.append(f"MALFORMED {where}.rows[{i}]: expected an "
+                            f"object, got {type(row).__name__}")
+            continue
+        board = row.get('board')
+        if not isinstance(board, str):
+            problems.append(f"MALFORMED {where}.rows[{i}]: 'board' is "
+                            f"{board!r}, not a string")
+            continue
+        if board in seen:
+            problems.append(f"DUPLICATE {where}.rows[{i}]: {board} is already "
+                            f"row {seen[board]}; only one of the two would be "
+                            f"compared, so the other never had to be right")
+            continue
+        seen[board] = i
+        indexed[board] = row
+    return indexed, problems
+
+
 def compare(current, expected):
     """Problems, as strings. Every class is fatal; they are kept apart because
     they mean different things."""
@@ -119,17 +186,18 @@ def compare(current, expected):
         elif key not in current:
             problems.append(f"MISSING KEY {key}: the baseline records "
                             f"{expected[key]!r}, this run produced nothing")
-        elif current[key] != expected[key]:
-            problems.append(f"DRIFT {key}: baseline {expected[key]!r}, "
-                            f"measured {current[key]!r}")
+        else:
+            diff_value(key, expected[key], current[key], problems)
 
-    cur_rows = {r.get('board'): r for r in (current.get('rows') or [])}
-    exp_rows = expected.get('rows')
-    if not isinstance(exp_rows, list):
+    cur_rows, cur_problems = index_rows(current.get('rows') or [], 'measured')
+    problems += cur_problems
+    exp_raw = expected.get('rows')
+    if not isinstance(exp_raw, list):
         problems.append("MALFORMED baseline.rows: expected a list, got "
-                        f"{type(exp_rows).__name__}")
+                        f"{type(exp_raw).__name__}")
         return problems
-    exp_rows = {r.get('board'): r for r in exp_rows if isinstance(r, dict)}
+    exp_rows, exp_problems = index_rows(exp_raw, 'baseline')
+    problems += exp_problems
 
     for board in sorted(set(cur_rows) | set(exp_rows)):
         cur, exp = cur_rows.get(board), exp_rows.get(board)
@@ -150,9 +218,8 @@ def compare(current, expected):
             elif key not in cur:
                 problems.append(f"MISSING KEY {board}.{key}: the baseline "
                                 f"records {exp[key]!r}")
-            elif cur[key] != exp[key]:
-                problems.append(f"DRIFT {board}.{key}: baseline {exp[key]!r}, "
-                                f"measured {cur[key]!r}")
+            else:
+                diff_value(f'{board}.{key}', exp[key], cur[key], problems)
     return problems
 
 
@@ -180,7 +247,17 @@ def arm_mirror(census_mod):
     if stale:
         fail(f"NOT_ASKED carries {len(stale)} reason(s) _SKIP_REASON no longer "
              f"produces: {stale}")
-    if not missing and not stale:
+    # An exemption is a claim, so hold it in both directions too. Subtracting a
+    # set without asserting it is PRESENT means `not requested` can be deleted
+    # from the mirror and both arms above stay silent -- the exemption quietly
+    # covering its own absence.
+    absent = sorted(extra_by_design - mirrored)
+    if absent:
+        fail(f"NOT_ASKED no longer carries {absent}, which floorplan raises "
+             f"OUTSIDE the RULES loop (the `.get(name, ...)` fallback) and "
+             f"_SKIP_REASON therefore never declares. Dropped, that reason "
+             f"classifies as a real abstention.")
+    if not missing and not stale and not absent:
         print(f"  ok   MIRROR: NOT_ASKED == _SKIP_REASON values "
               f"({len(declared)} reasons, both directions)")
 
@@ -223,10 +300,21 @@ def main():
     # document it is comparing against and then report a match.
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, 'fresh.json')
-        r = subprocess.run(
-            [sys.executable, '-X', 'utf8', RECORDER, ROOT, '--out', out, '-q'],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', cwd=ROOT, timeout=RUN_ALL_TIMEOUT)
+        try:
+            r = subprocess.run(
+                [sys.executable, '-X', 'utf8', RECORDER, ROOT,
+                 '--out', out, '-q'],
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', cwd=ROOT, timeout=RUN_ALL_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # A traceback here reads as a broken test, not as a verdict --
+            # CLAUDE.md's rule that a non-zero exit is not evidence, assert the
+            # REASON. Say which clock ran out and how long it was given.
+            print(f"FAIL: the recorder did not finish within "
+                  f"RUN_ALL_TIMEOUT={RUN_ALL_TIMEOUT} s (measured 42.6 s), so "
+                  f"there is no census to compare. A hung `check_floorplan` "
+                  f"surfaces here, not on the recorder's own equal timer.")
+            return 1
         if r.returncode != 0 or not os.path.isfile(out):
             tail = (r.stdout + r.stderr).strip()[-800:]
             print(f"FAIL: the recorder did not produce a census "
@@ -243,15 +331,21 @@ def main():
         for p in problems[:40]:
             print(f"  {p}")
         if len(problems) > 40:
-            print(f"  ... and {len(problems) - 40} more")
+            print(f"  ... and {len(problems) - 40} more (sorted, so what is "
+                  f"cut is the tail of the alphabet -- re-record and read the "
+                  f"diff for the whole set)")
         print("\n  READ THE DIFF BEFORE RE-RECORDING. A number that moved for "
               "someone else's reason becomes yours the moment you re-record "
               "it and cite it -- which is the mistake this gate exists to "
               "prevent (#879).\n"
               f"  {REMEDY}")
     else:
-        print(f"  ok   DRIFT: {len(current.get('rows') or ())} board(s) match "
-              f"{os.path.basename(BASELINE)}")
+        # Count the BASELINE's rows, not the fresh run's. The success line is
+        # a claim about the committed file, and counting the thing that was
+        # just measured would report 22 about a 24-row baseline.
+        print(f"  ok   DRIFT: {len(expected.get('rows') or ())} baseline "
+              f"row(s) match this run of "
+              f"{os.path.basename(RECORDER)}")
 
     print(f"\n{'FAIL' if FAILURES else 'PASS'}: #879 census drift, "
           f"{len(FAILURES)} failure(s)")
