@@ -54,6 +54,7 @@ ap.add_argument('--png-dir', default='')
 ap.add_argument('--victims', type=int, default=4)
 ap.add_argument('--rounds', type=int, default=3)
 ap.add_argument('--size', type=int, default=1400)
+ap.add_argument('--reberth', action='store_true', help='let the negotiation move BERTHS (relay) as well as lanes')
 a = ap.parse_args()
 
 names = sg.k_nets(a.k).split(',')
@@ -71,7 +72,8 @@ ends = {nm: (ctx.ends[nm][0], ctx.tooth_layer[nm],
 N = ng.Negotiator(pcb_b, ctx.cfg, byname, ends, fo, state, rest,
                   window_pts={nm: [ctx.ends[nm][0], ctx.ends[nm][1]]
                               for nm in names},
-                  b_alts=ctx.dest_alts, chains=ctx.dest_chain)
+                  b_alts=ctx.dest_alts, chains=ctx.dest_chain,
+                  board_path=a.fo, dst=a.dest, reberth=a.reberth)
 
 rp = a.braided.rsplit('.', 1)[0] + '_refusals.json'
 if os.path.exists(rp):
@@ -185,7 +187,8 @@ if a.negotiate and open_:
           f'; still open {sorted(still)}')
     if a.apply:
         from kicad_writer import add_tracks_and_vias_to_pcb
-        changed = [nm for nm in names if N.state[nm] is not orig[nm]]
+        changed = [nm for nm in names if N.state[nm] is not orig[nm]
+                   or nm in N.reberthed]
         txt = open(a.braided, encoding='utf-8').read()
         for nm in changed:
             nid, net = byname[nm]

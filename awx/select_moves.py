@@ -20,6 +20,7 @@ silent assignment is impossible to audit.
 from __future__ import annotations
 
 import math
+import topo_strings as ts
 import os
 from typing import (Callable, Dict, Iterable, List, Optional, Sequence,
                     Tuple)
@@ -737,7 +738,10 @@ def select(menu: Dict[str, List[Move]],
            # wash at K11; 24.0 regresses at K51.
            cross_weight: float = 6.0,
            align_rounds: int = 4,
-           log=None, geo: Optional['Corridor'] = None
+           log=None, geo: Optional['Corridor'] = None,
+           pads: Optional[Dict[str, Pt]] = None,
+           wall_weight: float = float(os.environ.get('PLAN_WALL', '0') or 0),
+           wall_reach: float = 0.55
            ) -> Tuple[Dict[str, Move], List[str]]:
     """Pick one move per net. `launch[n]` is where the net enters the
     corridor, used to price how far the corridor must carry it to reach
@@ -753,6 +757,35 @@ def select(menu: Dict[str, List[Move]],
     if geo is None:
         geo = Corridor(keep_out, launch) if keep_out else None
 
+    _wall_cache: Dict[Tuple, int] = {}
+
+    def walled(n: str, m: Move) -> int:
+        """WALL TERM (PLAN_WALL=<weight>, 0904): the other run nets'
+        balls this move's legs pass within `wall_reach` of. A dogbone
+        leg run along a pad row to a far face walls every ball on that
+        row for the nets still to be laid (K41 wall census: 12 balls
+        sandwiched by four such rides, one of them a ball the fanout
+        could then not escape at all; braid 5 open / 3 drc). The plan
+        is where that is decided -- the ride search only obeys it.
+        Measured K41 at weight 8: 1 ball sandwiched, 40/41 balls in the
+        planned direction, one via in the whole fanout, 0 drc; braid
+        4 open / 0 drc / 82 vias plain, 1 open with the negotiation."""
+        if not pads or wall_weight <= 0:
+            return 0
+        key = (n, id(m))
+        w = _wall_cache.get(key)
+        if w is None:
+            w = 0
+            for on, pp in pads.items():
+                if on == n:
+                    continue
+                for (a_, b_, _lay) in m.legs:
+                    if ts.seg_pt_dist(a_, b_, pp) < wall_reach:
+                        w += 1
+                        break
+            _wall_cache[key] = w
+        return w
+
     def cost(n: str, m: Move) -> float:
         lx, ly = launch[n]
         if keep_out is None:
@@ -763,7 +796,8 @@ def select(menu: Dict[str, List[Move]],
             reach = around_box((lx, ly), m.exit_pt, keep_out)
         # the move's own run occupies a channel INSIDE the array, which
         # is scarcer than corridor length -- weight it above `reach`
-        return via_weight * m.vias + channel_weight * _length(m) + reach
+        return (via_weight * m.vias + channel_weight * _length(m) + reach
+                + wall_weight * walled(n, m))
 
     # a bus enters the destination on ONE side, certified for capacity
     # before it is committed there; deviating from it means crossing

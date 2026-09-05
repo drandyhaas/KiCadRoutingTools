@@ -371,6 +371,32 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         list(result.get('new_vias') or [])
 
 
+def tube_band(poly, hw: float, layer: Optional[str] = None):
+    """A band callable (xs, ys, L) -> mask: the cells within `hw` of the
+    polyline `poly`, on every layer (layer=None) or on `layer` alone
+    (the other layers closed). The PLANNED lane as a tube -- what a
+    re-lay is confined to instead of a free window."""
+    sx = np.array([q[0] for q in poly], dtype=float)
+    sy = np.array([q[1] for q in poly], dtype=float)
+
+    def band(xs, ys, lname):
+        if layer is not None and lname != layer:
+            return np.zeros((len(xs), len(ys)), dtype=bool)
+        X, Y = np.meshgrid(xs, ys, indexing='ij')
+        best = np.full(X.shape, np.inf)
+        for a0, a1, b0, b1 in zip(sx[:-1], sy[:-1], sx[1:], sy[1:]):
+            dx, dy = b0 - a0, b1 - a1
+            ll = dx * dx + dy * dy
+            if ll < 1e-12:
+                d2 = (X - a0) ** 2 + (Y - a1) ** 2
+            else:
+                t = np.clip(((X - a0) * dx + (Y - a1) * dy) / ll, 0.0, 1.0)
+                d2 = (X - a0 - t * dx) ** 2 + (Y - a1 - t * dy) ** 2
+            best = np.minimum(best, d2)
+        return best <= hw * hw
+    return band
+
+
 def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
                 soft, soft_vias, soft_cost: float) -> None:
     """Price the clearance footprint of `soft` copper per cell, per
@@ -393,7 +419,11 @@ def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
                          dtype=np.int64)
             disks[r_grid] = d
         return d
-    for (p, q, layer, w) in soft:
+    for ent in soft:
+        (p, q, layer, w) = ent[:4]
+        # a 5th element is this entry's own cost (mm-equivalent): a
+        # STUB is priced above a lane, because moving it is a re-berth
+        c_ent = cfg.cell_cost(ent[4]) if len(ent) > 4 else cost
         li = layer_map.get(layer)
         if li is None:
             continue
@@ -408,9 +438,11 @@ def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
         r[:, 0] = li
         r[:, 1] = gx
         r[:, 2] = gy
-        r[:, 3] = cost
+        r[:, 3] = c_ent
         rows.append(r)
-    for (x, y, size) in soft_vias:
+    for ent in soft_vias:
+        (x, y, size) = ent[:3]
+        c_ent = cfg.cell_cost(ent[3]) if len(ent) > 3 else cost
         hw = coord.to_grid_dist(size / 2 + cfg.clearance + cfg.track_width / 2)
         gx0, gy0 = coord.to_grid(x, y)
         off = disk(hw)
@@ -419,11 +451,14 @@ def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
             r[:, 0] = li
             r[:, 1] = gx0 + off[:, 0]
             r[:, 2] = gy0 + off[:, 1]
-            r[:, 3] = cost
+            r[:, 3] = c_ent
             rows.append(r)
     if not rows:
         return
-    arr = np.unique(np.concatenate(rows), axis=0).astype(np.int32)
+    arr = np.concatenate(rows)
+    # set_layer_proximity_batch keeps the MAX per cell, so duplicates
+    # with different costs resolve to the dearer one on their own
+    arr = np.unique(arr, axis=0).astype(np.int32)
     obstacles.set_layer_proximity_batch(arr)
 
 

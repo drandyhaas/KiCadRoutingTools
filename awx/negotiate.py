@@ -42,6 +42,7 @@ with it. Nothing reads a face, an axis or a board name.
 import contextlib
 import copy
 import io
+import os
 import re
 from collections import Counter
 
@@ -167,14 +168,25 @@ def conflicts(path, others, cfg):
     return out
 
 
+STUB_COST = 6.0     # mm-equivalent per cell through a STUB: three lanes'
+                    # worth -- moving a stub is a re-berth, not a re-lay
+
+
 def soft_probe(pcb_base, nid, a, al, b, bl, cfg, lanes, margins=(2.0, 4.0, 6.0),
-               window_pts=None, b_alts=None, soft_cost=2.0):
+               window_pts=None, b_alts=None, soft_cost=2.0, stubs=None):
     """Route `nid` over `pcb_base` (NO lane copper of the run's other
     nets on it) with `lanes` {name: (segs, vias)} priced instead of
-    blocked. Returns (path, blockers Counter) or (None, None)."""
+    blocked -- and, with `stubs` {name: (segs, vias)} (the other nets'
+    FANOUT copper, absent from pcb_base too), those priced at STUB_COST.
+    Returns (path, lane blockers, stub blockers) or (None, None, None)."""
     soft = [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer, s.width)
             for segs, _ in lanes.values() for s in segs]
     soft_v = [(v.x, v.y, v.size) for _, vias in lanes.values() for v in vias]
+    if stubs:
+        soft += [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer, s.width,
+                  STUB_COST) for segs, _ in stubs.values() for s in segs]
+        soft_v += [(v.x, v.y, v.size, STUB_COST)
+                   for _, vias in stubs.values() for v in vias]
     big = big_cfg(cfg)
     for mg in margins:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -182,8 +194,9 @@ def soft_probe(pcb_base, nid, a, al, b, bl, cfg, lanes, margins=(2.0, 4.0, 6.0),
                              margin=mg, window_pts=window_pts, b_alts=b_alts,
                              soft=soft, soft_vias=soft_v, soft_cost=soft_cost)
         if res is not None:
-            return res, conflicts(res, lanes, cfg)
-    return None, None
+            return (res, conflicts(res, lanes, cfg),
+                    conflicts(res, stubs, cfg) if stubs else Counter())
+    return None, None, None
 
 
 class Negotiator:
@@ -196,7 +209,8 @@ class Negotiator:
     """
 
     def __init__(self, pcb, cfg, byname, ends, fo, state, rest, log=print,
-                 window_pts=None, b_alts=None, protected=(), chains=None):
+                 window_pts=None, b_alts=None, protected=(), chains=None,
+                 board_path=None, dst='DU1', reberth=False):
         self.pcb, self.cfg, self.byname = pcb, cfg, byname
         self.ends, self.fo, self.state, self.rest = ends, fo, state, rest
         self.log = log
@@ -214,7 +228,20 @@ class Negotiator:
         self.tgt = {}                 # nm -> (b, b_alts) after a trim
         self.protected = set(protected)
         self.history = Counter()
+        self.rungs = Counter()
         self.nid = {nm: byname[nm][0] for nm in ends}
+        # RE-BERTH (reberth=True, needs board_path: the fanout board the
+        # state was read from): a stub is a wall to every lane, so a
+        # net boxed by another net's STUB is 'walled' to the lane-only
+        # probe. With stubs priced too, the probe can name the stub,
+        # and the remedy is to move that net's berth through its escape
+        # menu (relay_net: other faces, layers, keep-position flips)
+        # and re-lay its lane -- the rip-up of a berth.
+        self.board_path = board_path
+        self.dst = dst
+        self.reberth = reberth and board_path is not None
+        self.reberthed = {}          # nm -> (new fo segs, new fo vias)
+        self._bare_txt = None
 
     # -- views -------------------------------------------------------
     def lane(self, nm):
@@ -235,10 +262,108 @@ class Negotiator:
         skip_ids = {self.nid[nm] for nm in skip}
         return board_with(self.pcb, self.rest, st, skip=skip_ids)
 
-    def base_board(self):
-        """Every run net at its FANOUT copper: the board with no lane."""
-        st = {self.nid[nm]: self.fo[nm] for nm in self.state}
+    def base_board(self, bare_others=False, keep=()):
+        """Every run net at its FANOUT copper: the board with no lane.
+        bare_others: every net's fanout copper off the board too, except
+        the nets in `keep` (for the stub-priced probe)."""
+        st = {self.nid[nm]: self.fo[nm] for nm in self.state
+              if not bare_others or nm in keep}
         return board_with(self.pcb, self.rest, st)
+
+    # -- re-berth machinery -------------------------------------------
+    def bare_text(self):
+        """The fanout board's text with every run net's copper stripped:
+        what a state is written onto."""
+        if self._bare_txt is None:
+            import surgical as sg
+            txt = open(self.board_path, encoding='utf-8').read()
+            for nm in self.state:
+                nid, net = self.byname[nm]
+                m = sg._matcher(nid, net.name)
+                txt = sg._walk_strip(txt, 'segment', m)
+                txt = sg._walk_strip(txt, 'via', m)
+            self._bare_txt = txt
+        return self._bare_txt
+
+    def write_state(self, out, override=None):
+        """Write the current state (or `override` {nm: (segs, vias)}
+        for some nets) as a board next to board_path."""
+        import os
+        import shutil
+        from kicad_writer import add_tracks_and_vias_to_pcb
+        tmp = out + '.bare.kicad_pcb'
+        open(tmp, 'w', encoding='utf-8').write(self.bare_text())
+        tracks, vias = [], []
+        for nm in self.state:
+            segs, vs = (override or {}).get(nm, self.state[nm])
+            nid = self.nid[nm]
+            for s in segs:
+                tracks.append(dict(start=(s.start_x, s.start_y),
+                                   end=(s.end_x, s.end_y), width=s.width,
+                                   layer=s.layer, net_id=nid))
+            for v in vs:
+                vias.append(dict(x=v.x, y=v.y, size=v.size, drill=v.drill,
+                                 layers=list(v.layers), net_id=nid))
+        add_tracks_and_vias_to_pcb(tmp, out, tracks, vias,
+                                   net_id_to_name={i: n.name for i, n
+                                                   in self.pcb.nets.items()})
+        os.remove(tmp)
+        for ext in ('.kicad_pro', '.kicad_prl'):
+            src = os.path.splitext(self.board_path)[0] + ext
+            if os.path.exists(src):
+                shutil.copy(src, os.path.splitext(out)[0] + ext)
+        return out
+
+    def relay_candidates(self, om):
+        """The berth menu for `om` at the destination: faces x layers
+        and the keep-position layer flips (surgical.Menu)."""
+        import surgical as sg
+        menu = sg.Menu(self.board_path, dst=self.dst)
+        return [c for c in menu.cands(om) if '--ref' in c[1]]
+
+    def try_reberth(self, om, largs, stem):
+        """Relay om's berth on a board carrying the CURRENT lanes of
+        every other net (om itself at its fanout copper), read the new
+        stub back, and install it: fo[om], ends[om] (new tip + layer),
+        chains[om] (none), state[om] = the bare new stub. Returns the
+        delivered key or None; the caller restores on failure."""
+        import os
+        import surgical as sg
+        import braid as te
+        from kicad_parser import parse_kicad_pcb
+        board = self.write_state(stem + '_rb_in.kicad_pcb',
+                                 override={om: self.fo[om]})
+        out = stem + '_rb_out.kicad_pcb'
+        key = sg.relay(board, om, largs, out)
+        if key is None or not os.path.exists(out):
+            return None
+        pr = parse_kicad_pcb(out)
+        nid = self.nid[om]
+        segs = [x for x in pr.segments if x.net_id == nid]
+        vias = [x for x in pr.vias if x.net_id == nid]
+        byn = {n.name.split('/')[-1]: (i, n) for i, n in pr.nets.items()}
+        try:
+            e = te.endpoints(pr, [om], byn, dest_ref=self.dst)[om]
+        except AssertionError:
+            return None
+        tip = e[1]
+        lay = te._layer_at(pr, nid, tip, self.ends[om][3])
+        # the relay was laid on a board carrying every other lane, but
+        # its own collision check is the engine's: grade the new stub
+        # against the state's copper here (K41 pp41: a relayed SCKE0
+        # stub grazed SA2 by 0.013 mm on F -- accepted, shipped 2 drc)
+        others = self.others_of(om)
+        if conflicts((segs, vias), others, self.cfg):
+            return None
+        a, al, _b, _bl = self.ends[om]
+        self.fo[om] = (segs, vias)
+        self.state[om] = (list(segs), list(vias))
+        self.ends[om] = (a, al, tip, lay)
+        self.chains[om] = []
+        self.tgt.pop(om, None)
+        self.b_alts[om] = []
+        self.reberthed[om] = (segs, vias)
+        return key
 
     def others_of(self, nm):
         d = {om: self.state[om] for om in self.state if om != nm}
@@ -317,10 +442,26 @@ class Negotiator:
         # vias are what the search lands on and what the same-net via
         # rule keeps a new via clear of (a via 0.14 mm from its own
         # fanout via, K51 SBA1, was placed with that copper absent)
-        res = hard_route(self.board(skip=set(skip)), self.nid[nm],
-                         a, al, b, bl, self.cfg,
-                         window_pts=self.window_pts.get(nm),
-                         b_alts=alts, capture=capture)
+        # the PLANNED lane as a tube first (0.5, 1.0, 2.0 mm), the free
+        # window last: a re-lay confined to its plan cannot take another
+        # net's landing (rungs counted in self.rungs)
+        wp = self.window_pts.get(nm) or [a, b]
+        board = self.board(skip=set(skip))
+        res = None
+        big = big_cfg(self.cfg)
+        for hw in (0.5, 1.0, 2.0):
+            with contextlib.redirect_stdout(io.StringIO()):
+                res = cn.connect(board, self.nid[nm], a, al, b, bl, big,
+                                 band=cn.tube_band(wp, hw), margin=1.0,
+                                 window_pts=wp, b_alts=alts)
+            if res is not None:
+                self.rungs[f'tube{hw}'] += 1
+                break
+        if res is None:
+            res = hard_route(board, self.nid[nm], a, al, b, bl, self.cfg,
+                             window_pts=wp, b_alts=alts, capture=capture)
+            if res is not None:
+                self.rungs['free'] += 1
         if res is not None:
             # a band-free search with a wide window will wrap a whole
             # array to complete (K41 SA3 re-laid round the destination
@@ -353,12 +494,25 @@ class Negotiator:
             return 'WALLED', None, stuck_blockers(cap[0] if cap else '')
         lanes = {om: self.lane(om) for om in self.state
                  if om != nm and self.routed(om)}
-        path, bl_ = soft_probe(base, self.nid[nm], a, al, b, bl, self.cfg,
-                               lanes, window_pts=self.window_pts.get(nm),
-                               b_alts=self.b_alts.get(nm))
+        path, bl_, _sb = soft_probe(base, self.nid[nm], a, al, b, bl, self.cfg,
+                                    lanes, window_pts=self.window_pts.get(nm),
+                                    b_alts=self.b_alts.get(nm))
         if path is None:
             return 'NO_PATH', r0, None
         return 'BLOCKED', path, bl_
+
+    def stub_probe(self, nm):
+        """The probe with the other nets' STUBS priced as well (their
+        lanes too): (path, lane blockers, stub blockers) or Nones."""
+        (a, al, b, bl) = self.ends[nm]
+        b, _alts = self.tgt.get(nm, (b, None))
+        base = self.base_board(bare_others=True, keep={nm})
+        lanes = {om: self.lane(om) for om in self.state
+                 if om != nm and self.routed(om)}
+        stubs = {om: self.fo[om] for om in self.state if om != nm}
+        return soft_probe(base, self.nid[nm], a, al, b, bl, self.cfg, lanes,
+                          window_pts=self.window_pts.get(nm),
+                          b_alts=self.b_alts.get(nm), stubs=stubs)
 
     # -- the rip-up --------------------------------------------------
     def negotiate(self, nm, max_victims=4, depth=2, _protect=frozenset()):
@@ -374,6 +528,8 @@ class Negotiator:
         if kind == 'WALLED':
             log(f'    negotiate {nm}: WALLED by static copper '
                 f'{dict(blk) if blk else "(unnamed)"} -- a fanout matter')
+            if self.reberth:
+                return self.negotiate_stubs(nm, before, _protect)
             return False, 'walled'
         if kind == 'NO_PATH':
             log(f'    negotiate {nm}: no soft path found')
@@ -437,7 +593,64 @@ class Negotiator:
             self.state, self.tgt = best[1], best[2]
             return True, 'ripped'
         self.state = saved
+        if self.reberth:
+            return self.negotiate_stubs(nm, before, _protect)
         return False, 'contested'
+
+    def negotiate_stubs(self, nm, before, _protect=frozenset(), max_victims=2,
+                        max_cands=6):
+        """The berth rip-up: name the STUBS in the way (stub-priced
+        probe), and for each (worst first) try its berth menu: relay,
+        lay `nm`, re-lay the victim to its new tip, keep a strict
+        improvement."""
+        import copy as _copy
+        log = self.log
+        path, lb, sb = self.stub_probe(nm)
+        if path is None or not sb:
+            log(f'    reberth {nm}: no stub in the way'
+                + (f' (lanes {dict(lb)})' if lb else ''))
+            return False, 'no_stub'
+        victims = [v for v, _ in sorted(sb.items(), key=lambda kv: -kv[1])
+                   if v not in _protect and v not in self.protected][:max_victims]
+        log(f'    reberth {nm}: stubs in the way {dict(sb)}'
+            + (f', lanes {dict(lb)}' if lb else ''))
+        stem = os.path.splitext(self.board_path)[0] + f'_neg_{nm}'
+        for om in victims:
+            saved = (dict(self.state), dict(self.fo), dict(self.ends),
+                     dict(self.chains), dict(self.tgt), dict(self.b_alts),
+                     dict(self.reberthed))
+            for k, (label, largs) in enumerate(self.relay_candidates(om)[:max_cands]):
+                key = self.try_reberth(om, largs, stem + f'_{om}_{label}')
+                if key is None:
+                    continue
+                res = self.try_hard(nm)
+                story = f'{om} -> {label} {key}: '
+                if res is None:
+                    story += f'{nm} still refused'
+                else:
+                    self.lay(nm, res)
+                    r2 = self.try_hard(om)
+                    if r2 is not None:
+                        self.lay(om, r2)
+                    else:
+                        # the mover took the freed row: the victim may
+                        # still land by ripping LANES of its own, the
+                        # mover protected
+                        ok2, _ = self.negotiate(om, max_victims=3, depth=1,
+                                                _protect=_protect | {nm})
+                        r2 = True if ok2 else None
+                    after = (-self.n_routed(), self.n_vias())
+                    story += (f'{nm} routed ({len(res[1])} via), {om} '
+                              + ('re-laid' if r2 is not None else 'OPEN')
+                              + f' -> routed {-after[0]} vias {after[1]}')
+                    if after < before:
+                        log(f'      reberth {story}  ACCEPTED')
+                        self.history[om] += 1
+                        return True, 'reberthed'
+                log(f'      reberth {story}')
+                (self.state, self.fo, self.ends, self.chains, self.tgt,
+                 self.b_alts, self.reberthed) = [dict(x) for x in saved]
+        return False, 'reberth_failed'
 
     def run(self, refused, rounds=3, max_victims=4):
         """Negotiate every refused net, repeatedly, until a round makes
@@ -454,7 +667,7 @@ class Negotiator:
                     progress = True
                 open_ = [o for o in self.state if not self.routed(o)]
             self.log(f'  negotiate round {rnd}: {len(open_)} open '
-                     f'{sorted(open_)}, {self.n_vias()} vias')
+                     f'{sorted(open_)}, {self.n_vias()} vias; rungs {dict(self.rungs)}')
             if not open_ or not progress:
                 break
         return open_

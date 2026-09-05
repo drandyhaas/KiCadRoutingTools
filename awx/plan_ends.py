@@ -175,7 +175,7 @@ def plan_ends(src_menu: Dict[str, List[Move]],
               log=None,
               src_seed: Optional[Dict[str, Move]] = None,
               objective: str = 'floor',
-              model=None):
+              model=None, pads=None):
     """Returns (src_choice, dst_choice, launch, report). `objective`:
     'floor' (the crossing floor, the plan's original) or 'spend' (what
     the braid spends, for a chain that APPLIES the source moves --
@@ -249,7 +249,8 @@ def plan_ends(src_menu: Dict[str, List[Move]],
         # JOINERS between faces by the braid's schedule -- the decision
         # the projection got wrong (K28 SWE/SCAS)
         dst_choice, un = sm.select(dst_menu, launch, keep_out=dst_box,
-                                   buses=buses, tooth_layer=tooth, log=log)
+                                   buses=buses, tooth_layer=tooth, log=log,
+                                   pads=pads)
         if not dst_choice:
             break
         if model is not None:

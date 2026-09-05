@@ -156,6 +156,87 @@ W_GATE = 0.33                  # narrowest swap column the gated schedule
                                # vias instead (see Corridor.run)
 
 
+def landing_strips(ctx, nm):
+    """LANDING STRIPS (BRAID_LAND=<mm>): for every net whose lane is not
+    on the board yet (any corridor), a short virtual segment from each
+    of its two free ends OUTWARD along its stub's escape direction, on
+    the end's layer -- so no earlier lane runs across the approach of a
+    berth or tooth still waiting for its lane. Measured need (K41,
+    base chain): SA3's band-free last-call lane came down the
+    destination's east edge column innermost, directly in front of the
+    tips of SA2, SCAS and SRAS (0.2 mm off), and walled all three; the
+    corridor's own virtual copper is its members' planned straight
+    lines, which say nothing about a side exit's landing, and nothing
+    at all about another corridor's ends (K35 SA6: tooth boxed by two
+    lanes of the first corridor). Unset = no strips, bit-identical."""
+    L = float(os.environ.get('BRAID_LAND', '0') or 0)
+    if L <= 0:
+        return []
+    out = []
+    for om, e in ctx.ends.items():
+        if om == nm or om in ctx.landed:
+            continue
+        for k, (pt, lay, dirs) in enumerate(((e[0], ctx.tooth_layer[om], ctx.tooth_dir),
+                                            (e[1], ctx.dest_layer[om], ctx.stub_dir))):
+            d = dirs.get(om) if isinstance(dirs, dict) else None
+            if not d:
+                continue
+            h = math.hypot(d[0], d[1]) or 1.0
+            out.append((pt, (pt[0] + d[0] / h * L, pt[1] + d[1] / h * L), lay))
+    return out
+
+
+def cross_reserve(ctx, nm):
+    """CROSS-CORRIDOR RESERVATION (BRAID_XRES, default on): the PLANNED
+    lanes of every corridor not routed yet, as virtual copper for the
+    corridor routing now -- a page lane's whole planned line on its
+    page layer, a swimmer's or a frameless corridor's rigid ENDS on
+    the end layers (1.5 mm), a corner corridor's taut path likewise.
+    Without it an earlier corridor's lanes take whatever a later
+    corridor planned through (K35: two lanes of the 32-net corridor on
+    the tooth of the 3-net corner corridor's SA6)."""
+    if os.environ.get('BRAID_XRES', '1') != '1':
+        return []
+    out = []
+    for c in getattr(ctx, 'corridors', ()):
+        if c.idx in getattr(ctx, 'corr_done', ()):
+            continue
+        sc = getattr(c, 'sched_cur', None)
+        for om in c.members:
+            if om == nm or om in ctx.landed:
+                continue
+            poly = (getattr(c, 'lane_xy', {}) or {}).get(om)
+            if not poly or len(poly) < 2:
+                poly = ctx.paths.get(om) or [ctx.ends[om][0], ctx.ends[om][1]]
+            # ENDS ONLY: corridors overlap in space (the second's spine
+            # runs beside the first's), so a whole planned line of a
+            # later corridor stamped through the earlier one starved it
+            # (K28 0 -> 2 open, K41 5 -> 14). The landing is the
+            # reservation; the run is negotiated.
+            if os.environ.get('BRAID_XRES_FULL') == '1':
+                page = sc.page.get(om) if (sc is not None and getattr(sc, 'two_page', False)) else None
+                if page is not None and len(poly) >= 2:
+                    out.extend((p, q, page) for p, q in zip(poly, poly[1:]))
+                    continue
+            for pts, lay in ((poly, ctx.tooth_layer[om]),
+                             (list(reversed(poly)), ctx.dest_layer[om])):
+                acc = 0.0
+                for p, q in zip(pts, pts[1:]):
+                    d = math.hypot(q[0] - p[0], q[1] - p[1])
+                    if acc >= 1.5:
+                        break
+                    if acc + d > 1.5 and d > 1e-9:
+                        t = (1.5 - acc) / d
+                        q = (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t)
+                    out.append((p, q, lay))
+                    acc += d
+    return out
+
+
+def reserve(ctx, nm):
+    return landing_strips(ctx, nm) + cross_reserve(ctx, nm)
+
+
 def build_obstacles(pcb, nid, kids, layer):
     """A static-copper model for one net on one layer: every foreign
     pad as a disc, every foreign segment as a capsule, every foreign
@@ -1499,7 +1580,7 @@ class Corridor:
                     pts.update((v - eps, v, v + eps))
         return np.array(sorted(pts))
 
-    def band_of(self, nm):
+    def band_of(self, nm, slack=0.0, open_layers=False):
         """The lane's corridor as a cell mask: between the neighbouring
         lanes present on that layer (never narrower than a grid cell),
         closed where the schedule requires the other layer; the join
@@ -1532,7 +1613,8 @@ class Corridor:
             mo = np.array([p[1] for p in self.mid[nm]])
             present = (S >= ms[0] - 1e-9) & (S <= ms[-1] + 1e-9)
             o_nm = np.interp(S, ms, mo)
-            okL = self.allowed_vec(nm, S, L)
+            okL = (np.ones(S.shape, dtype=bool) if open_layers
+                   else self.allowed_vec(nm, S, L))
             sc = getattr(self, 'sched_cur', None)
             if (sc is not None and getattr(sc, 'two_page', False)
                     and sc.page.get(nm) is None):
@@ -1592,12 +1674,13 @@ class Corridor:
                 fl = 0.03 + SLOPE_W * np.minimum(sl[seg_i], 30.0)
             else:
                 fl = 0.03
-            lo = np.minimum(lo, o_nm - fl)
-            hi = np.maximum(hi, o_nm + fl)
+            lo = np.minimum(lo, o_nm - fl) - slack
+            hi = np.maximum(hi, o_nm + fl) + slack
             ok = present & okL & (O >= lo) & (O <= hi)
             for (s_l, oa, ob) in self.legs[nm]:
-                rect = ((np.abs(S - s_l) <= LEG_W)
-                        & (O >= min(oa, ob) - LEG_O) & (O <= max(oa, ob) + LEG_O))
+                rect = ((np.abs(S - s_l) <= LEG_W + slack)
+                        & (O >= min(oa, ob) - LEG_O - slack)
+                        & (O <= max(oa, ob) + LEG_O + slack))
                 ok |= rect & okL
             for ((sa, oa), (sb, ob)) in self.jogs.get(nm, ()):
                 rect = ((S >= min(sa, sb) - LEG_O) & (S <= max(sa, sb) + LEG_O)
@@ -1784,6 +1867,7 @@ class Corridor:
         # b_alts unconditionally: more finish points only help there,
         # and collapse_dives.py captures the economy per-board.
         balts_on = os.environ.get('BRAID_BALTS') == '1'
+        virt = list(virt or []) + reserve(ctx, nm)
         for hop, ((a, aL), (b, bL)) in enumerate(zip(way, way[1:])):
             final = hop == len(way) - 2
             res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg, band=band,
@@ -1888,8 +1972,16 @@ class Corridor:
                          pages=getattr(ctx, 'pages', None))
         if plan_only:
             # #622 plan dump: the corridor's PLAN (orders + pages) with
-            # no copper -- the fanout-contract emitters read it
+            # no copper -- the fanout-contract emitters read it; the
+            # planned lanes too (cross_reserve reads lane_xy)
             self.sched_cur = sched
+            try:
+                cols, _gate = self.plan_columns(
+                    sched, {d: 1 for d in sched.divers},
+                    {d: 0 for d in sched.divers})
+                self.lay_lanes(cols)
+            except Exception as e:
+                self.log(f'  plan-only lanes not laid ({e})')
             return
         gaps = {d: 1 for d in sched.divers}
         lead = {d: 0 for d in sched.divers}
@@ -1922,6 +2014,7 @@ class Corridor:
             ctx.pcb.segments = list(ctx.base_segments)
             ctx.pcb.vias = list(ctx.base_vias)
             self.out_segs, self.out_vias = {}, {}
+            ctx.landed -= set(M)
             if getattr(self, '_obs_cache', None) is not None:
                 self._obs_cache.reset()
             divers = set(sched.divers)
@@ -2009,6 +2102,7 @@ class Corridor:
                         self.debug_lane(nm)
                     continue
                 routed.add(nm)
+                ctx.landed.add(nm)
                 segs_o, vias_o = res
                 self.out_segs[nm] = segs_o
                 self.out_vias[nm] = vias_o
@@ -2067,6 +2161,7 @@ class Corridor:
                         lead[nm] += 1
         if best is not None and best[0] != self.refused:
             refused, nv, ly_b, cols_b, segs_b, vias_b, pcb_s, pcb_v, sched = best
+            ctx.landed = (ctx.landed - set(M)) | (set(M) - set(refused))
             log(f'  keeping attempt with {len(M) - len(refused)}/{len(M)} '
                 f'routed, {nv} via(s)')
             self.offsets(ly_b)
@@ -2104,18 +2199,10 @@ class Corridor:
                     # BAND is walled (wc SA0: corridor 2's band under
                     # corridor 1's copper, 5-via detour at 2.0) may
                     # have a short path just outside the first window
-                    for mg in (2.0, 4.0, 6.0):
-                        res = cn.connect(
-                            ctx.pcb, nid, self.teeth[nm],
-                            ctx.tooth_layer[nm],
-                            self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
-                            band=None, margin=mg,
-                            virtual=self.virtual_of(others),
-                            window_pts=self.lane_xy[nm],
-                            virtual_vias=self.virtual_vias_of(others),
-                            b_alts=ctx.dest_alts.get(nm))
-                        if res is not None:
-                            break
+                    res = self.connect_ladder(
+                        nm, self.virtual_of(others),
+                        self.virtual_vias_of(others), 'last_call',
+                        b_alts=ctx.dest_alts.get(nm))
                     if res is None and os.environ.get('RIP_CALL', '1') == '1':
                         # RIP-ASSISTED LAST CALL: the final refusals
                         # fail because ONE earlier lane took their
@@ -2137,6 +2224,7 @@ class Corridor:
                     self.out_segs[nm] = segs_o
                     self.out_vias[nm] = vias_o
                     still.remove(nm)
+                    ctx.landed.add(nm)
                     log(f'    last call routed: {nm} ({len(vias_o)} via(s))')
                 self.refused = still
             finally:
@@ -2264,6 +2352,42 @@ class Corridor:
                 ctx.cfg = cfg0
         self.finish()
 
+    def connect_ladder(self, nm, virt, virt_vias, stage, b_alts=None,
+                       nm_ends=None):
+        """A re-lay that keeps to the PLAN: the lane's own band widened
+        in steps (slack 0.3, 0.8 in o; then 1.6 with both layers open),
+        or -- for a corridor with no frame -- a tube round its taut
+        path (0.6, 1.2, 2.0 mm); only then, and only with
+        BRAID_FREE_LAST=1 (default), the band-free window that used to
+        be the first thing every refusal got. ctx.rungs counts which
+        rung landed each lane, so the band-free share is measured."""
+        ctx = self.ctx
+        nid, _ = ctx.byname[nm]
+        a, aL, b, bL = nm_ends or (self.teeth[nm], ctx.tooth_layer[nm],
+                                   self.stubs[nm], ctx.dest_layer[nm])
+        framed = nm in getattr(self, 'mid', {}) and hasattr(self, 'legs')
+        if framed:
+            rungs = [('slack0.3', lambda: self.band_of(nm, 0.3), 2.0),
+                     ('slack0.8', lambda: self.band_of(nm, 0.8), 2.0),
+                     ('slack1.6+open', lambda: self.band_of(nm, 1.6, True), 3.0)]
+        else:
+            path = ctx.paths.get(nm) or [a, b]
+            rungs = [(f'tube{hw}', (lambda hw=hw: cn.tube_band(path, hw)), 2.0)
+                     for hw in (0.6, 1.2, 2.0)]
+        if os.environ.get('BRAID_FREE_LAST', '1') == '1':
+            rungs += [('free', lambda: None, 4.0), ('free', lambda: None, 6.0)]
+        wp = (getattr(self, 'lane_xy', {}) or {}).get(nm) or [a, b]
+        for label, mk, mg in rungs:
+            res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg,
+                             band=mk(), margin=mg,
+                             virtual=list(virt or []) + reserve(ctx, nm),
+                             window_pts=wp, virtual_vias=virt_vias,
+                             b_alts=b_alts)
+            if res is not None:
+                ctx.rungs[(stage, label)] += 1
+                return res
+        return None
+
     def _rip_assist(self, nm, others, log):
         """One-victim rip for a lane the last call still refuses: the
         routed lanes nearest the refused net's own chord, tried one at
@@ -2299,22 +2423,13 @@ class Corridor:
             via0 = list(ctx.pcb.vias)
             ctx.pcb.segments = [s for s in seg0 if id(s) not in ids_s]
             ctx.pcb.vias = [v for v in via0 if id(v) not in ids_v]
-            r1 = cn.connect(ctx.pcb, nid, a_, ctx.tooth_layer[nm],
-                            b_, ctx.dest_layer[nm], ctx.cfg,
-                            band=None, margin=2.5, virtual=virt,
-                            window_pts=self.lane_xy[nm],
-                            virtual_vias=vv)
+            r1 = self.connect_ladder(nm, virt, vv, 'rip_assist')
             if r1 is not None:
                 s1_, v1_ = r1
                 ctx.pcb.segments.extend(s1_)
                 ctx.pcb.vias.extend(v1_)
                 oid, _ = ctx.byname[om]
-                r2 = cn.connect(ctx.pcb, oid, self.teeth[om],
-                                ctx.tooth_layer[om], self.stubs[om],
-                                ctx.dest_layer[om], ctx.cfg,
-                                band=None, margin=2.5, virtual=virt,
-                                window_pts=self.lane_xy[om],
-                                virtual_vias=vv)
+                r2 = self.connect_ladder(om, virt, vv, 'rip_assist')
                 if r2 is not None:
                     s2_, v2_ = r2
                     ctx.pcb.segments.extend(s2_)
@@ -2369,12 +2484,13 @@ class Corridor:
                     for om in M if om != nm and om not in routed
                     for L in ('F.Cu', 'B.Cu')]
             res = None
-            for cfg_, vv, mg in ((ctx.cfg, virt, 2.0), (big, virt, 2.0),
-                                 (big, None, 4.0), (big, None, 6.0)):
-                res = cn.connect(ctx.pcb, nid, self.teeth[nm],
-                                 ctx.tooth_layer[nm], self.stubs[nm],
-                                 ctx.dest_layer[nm], cfg_,
-                                 band=None, margin=mg, virtual=vv)
+            cfg0 = ctx.cfg
+            for cfg_, vv in ((ctx.cfg, virt), (big, virt), (big, None)):
+                ctx.cfg = cfg_
+                try:
+                    res = self.connect_ladder(nm, vv, None, 'free_corner')
+                finally:
+                    ctx.cfg = cfg0
                 if res is not None:
                     break
             if res is None:
@@ -2400,6 +2516,7 @@ class Corridor:
             self.out_segs[nm] = segs_o
             self.out_vias[nm] = vias_o
             routed.add(nm)
+            ctx.landed.add(nm)
             log(f'    free-routed: {nm} ({len(vias_o)} via(s))')
         log(f'    lanes: {len(routed)}/{len(M)} routed')
         if self.refused:
@@ -2427,13 +2544,14 @@ class Corridor:
                                     if om != nm and om not in routed])
             res = cn.connect(ctx.pcb, nid, self.teeth[nm], ctx.tooth_layer[nm],
                              self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
-                             virtual=virt, margin=0.6,
+                             virtual=virt + reserve(ctx, nm), margin=0.6,
                              window_pts=self.lane_xy[nm])
             if res is None:
                 self.refused.append(nm)
                 self.log(f'    refused: {nm}')
                 continue
             routed.add(nm)
+            ctx.landed.add(nm)
             self.out_segs[nm], self.out_vias[nm] = res
             ctx.pcb.segments.extend(res[0])
             ctx.pcb.vias.extend(res[1])
@@ -2738,10 +2856,32 @@ def main():
         return 0
     corridors = []
     for ci, members in enumerate(groups):
-        c = Corridor(ci, members, ctx, log)
-        if (2 <= len(members) <= 5
+        corridors.append(Corridor(ci, members, ctx, log))
+    ctx.corridors = corridors
+
+    def is_free(c):
+        return (2 <= len(c.members) <= 5
                 and os.environ.get('TWO_PAGE') == '1'
-                and os.environ.get('FREE_CORNER', '1') == '1'):
+                and os.environ.get('FREE_CORNER', '1') == '1')
+    if os.environ.get('BRAID_XRES', '1') == '1':
+        # PHASE 1 -- every corridor PLANNED (spine, offsets, schedule,
+        # planned lanes) before any is routed, each spine relaxed round
+        # the ones planned before it, so that while a corridor routes,
+        # the others' planned lanes are reservations (cross_reserve)
+        for c in corridors:
+            if is_free(c):
+                continue
+            try:
+                c.run(plan_only=True)
+                ctx.laid.extend(c.lane_xy[nm] for nm in c.members
+                                if nm in getattr(c, 'lane_xy', {}))
+            except Exception as e:
+                log(f'  plan phase: corridor {c.idx} not planned ({e})')
+        ctx.laid = []
+        ctx.pcb.segments = list(ctx.base_segments)
+        ctx.pcb.vias = list(ctx.base_vias)
+    for c in corridors:
+        if is_free(c):
             # small CORNER corridors skip the spine/schedule machinery
             # entirely -- it is exactly where that machinery fails
             # (K32's 5-net corner group routed 0/5 for a month; the
@@ -2751,7 +2891,10 @@ def main():
             c.run_free()
         else:
             c.run()
-        corridors.append(c)
+        ctx.corr_done.add(c.idx)
+    if ctx.rungs:
+        log('re-lay rungs: ' + ', '.join(f'{st}/{r} {n}' for (st, r), n
+                                         in sorted(ctx.rungs.items())))
     if os.environ.get('BRAID_PACK', '0') in ('1', '2'):
         pack_lanes(ctx, corridors, names, log,
                    hw=float(os.environ.get('BRAID_PACK_HW', '0.3')),
@@ -2790,6 +2933,10 @@ def setup(board, names, dest, log, cluster=6.0):
     ctx.dest_alts = {}
     ctx.trim_spans = {}
     ctx.refusal_info = {}
+    ctx.landed = set()            # nets whose lane is on the board
+    ctx.rungs = Counter()         # (stage, rung) -> lanes it landed
+    ctx.corridors = []
+    ctx.corr_done = set()
     for nm in names:
         nid, net = byname[nm]
         segs_n = [s for s in pcb.segments if s.net_id == nid]

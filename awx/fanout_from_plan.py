@@ -248,7 +248,8 @@ schoice, choice, lp, report = pe.plan_ends(
     # measured 0903 on a fresh seed, 'spend' alone (no apply) cost K28
     # 34 -> 48 and K35 84 -> 96, while the apply recovered 14 at K35
     objective=os.environ.get('SRC_OBJECTIVE') or ('spend' if SOURCE else 'floor'),
-    model=model)
+    model=model,
+    pads={nm: (dst_pad[nm].global_x, dst_pad[nm].global_y) for nm in names})
 if TWO_PAGE_PLAN and choice:
     # STEP 3: pages from the braid's own orders for THIS choice, and
     # each page net's escape re-picked to its page layer at both ends
@@ -1252,6 +1253,8 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
         return wobs[k]
 
     laid_b, b_tracks, b_vias = [], [], []
+    import collections as _collections
+    ride_rungs = _collections.Counter()
     hx, hy = dgrid.pitch_x / 2.0, dgrid.pitch_y / 2.0
     pad_r = (te.VIA_SIZE - te.TRACK) / 2
     used_exit = []          # B stub ends already landed on a face
@@ -1348,12 +1351,51 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
                                               te.TRACK, 'F.Cu', nid))
             pcb_w.vias.append(Via(site[0], site[1], te.VIA_SIZE,
                                   te.VIA_DRILL, ['F.Cu', 'B.Cu'], nid))
+            # TP_PAD_PROX=<mm-eq cost>: the ride's search prices a disc
+            # of one pitch round every OTHER run net's ball, so it rides
+            # the array's open gaps rather than hugging the pad rows --
+            # a ride laid along a row at 0.4 mm walls every ball on
+            # that row for the nets still to come (K41 wall census:
+            # SA0's bare ball sandwiched between SRAS's and SCAS's
+            # rides at 0.4 mm, SA7/SA9/SA13/SRST/SA5/SBA2/SA2 likewise;
+            # at 2.0: sandwiched 12 -> 2, fanout drc 3 -> 0)
+            _pp = os.environ.get('TP_PAD_PROX')
+            _soft_v = ([(q_.global_x, q_.global_y, dgrid.pitch_x, float(_pp))
+                        for q_ in pcb_w.footprints[dref].pads
+                        if q_.net_id in kids and q_.net_id != nid]
+                       if _pp else None)
+            # TP_RIDE_TUBE=<hw>: the ride keeps to the PLAN's own leg --
+            # a tube of hw round [site, the move's B legs, exit] on B,
+            # widened once (x2) -- and only then the free (priced)
+            # search that used to be the only form. Alone it obeys a
+            # plan whose dogbone leg IS the row ride (sandwiches back
+            # to 12); with PLAN_WALL the plan stops choosing those.
+            _rt = os.environ.get('TP_RIDE_TUBE')
+            _rungs = []
+            if _rt:
+                _hw0 = float(_rt)
+                _bl = [q for lg in m0.legs if lg[2] == 'B.Cu' for q in (lg[0], lg[1])]
+                _rungs = [(_hw0, 1.0), (2 * _hw0, 1.5)]
             for ex in exits:
-                for mg in (1.2, 2.5):
+                res = None
+                for _hw, _mg in _rungs:
+                    _poly = [site] + _bl + [ex]
+                    _poly = [q for i_, q in enumerate(_poly)
+                             if i_ == 0 or math.hypot(q[0] - _poly[i_ - 1][0],
+                                                      q[1] - _poly[i_ - 1][1]) > 1e-6]
+                    res = te.cn.connect(pcb_w, nid, site, 'B.Cu', ex, 'B.Cu',
+                                        cfg_w, band=te.cn.tube_band(_poly, _hw, 'B.Cu'),
+                                        margin=_mg, window_pts=_poly)
+                    if res is not None:
+                        ride_rungs[f'tube{_hw}'] += 1
+                        break
+                for mg in ((1.2, 2.5) if res is None else ()):
                     res = te.cn.connect(pcb_w, nid, site, 'B.Cu',
                                         ex, 'B.Cu', cfg_w,
-                                        band=None, margin=mg)
+                                        band=None, margin=mg,
+                                        soft_vias=_soft_v)
                     if res is not None:
+                        ride_rungs['free'] += 1
                         break
                 if res is not None:
                     ex_got = ex
@@ -1477,6 +1519,8 @@ elif TWO_PAGE_PLAN and not NO_HINTS \
         if laid_s:
             print(f'  split SOURCE pass: {len(laid_s)} tooth(s) '
                   'taken to B: ' + ','.join(laid_s))
+    if ride_rungs:
+        print(f'  split B pass rides: ' + ', '.join(f'{k} {v}' for k, v in sorted(ride_rungs.items())))
     print(f'  split B pass: {len(laid_b)} of {len(split_targets)} '
           'berth(s) via-and-routed on B: ' + ','.join(laid_b))
     binter = f'{stem2}_dst_bsplit.kicad_pcb'
