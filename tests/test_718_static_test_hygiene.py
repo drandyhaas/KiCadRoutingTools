@@ -558,6 +558,168 @@ def test_every_test_is_registered_in_its_files_own_list():
     print('  PASS: every registry-style test file lists all its tests')
 
 
+#: Every committed baseline under `tests/`, mapped to the test that RE-DERIVES
+#: it -- or, in `_BASELINE_UNGATED`, to the reason it has none (#879).
+#:
+#: A baseline nothing re-derives is free to drift arbitrarily far from the tree
+#: while still reading as authoritative, and whoever eventually re-records it
+#: inherits every delta since the last recording as apparently their own. Not
+#: hypothetical: `713_abstention_census.json` drifted for four days, and the
+#: re-record was then published in a commit message AND a code comment as one
+#: change's effect. It was somebody else's.
+#:
+#: Declared rather than discovered, and held in BOTH directions like
+#: `_WK_DEPENDENT` above: a baseline missing from the map fails, and an entry
+#: naming a gate that does not exist -- or a gate that never mentions the file
+#: it claims to guard -- fails too. A registration nobody checks is how the
+#: #696 containment guard passed 28/28 while the thing it named had moved.
+_BASELINE_GATES = {
+    'tests/553_diagnosis_recall_baseline.json':
+        'tests/test_553_recall_regen.py',
+    'tests/554_block_relocation_baseline.json':
+        'tests/test_554_relocation_regen.py',
+    'tests/554_relocation_reach_baseline.json':
+        'tests/test_554_reach_regen.py',
+    'tests/713_abstention_census.json':
+        'tests/test_713_abstention_drift.py',
+    'tests/799_feasibility_summary.json':
+        'tests/test_799_feasibility_claims.py',
+    'tests/831_fill_timing_census.json':
+        'tests/test_831_fill_preflight_census.py',
+    'tests/placement_ab_baseline.json': 'tests/test_placement_ab.py',
+    'tests/placement_calibration_recovered.json':
+        'tests/test_803_calibration_claims.py',
+    'tests/placement_calibration_rows.json':
+        'tests/test_803_calibration_claims.py',
+    'tests/placement_rule1_withdrawal.json':
+        'tests/test_789_rule1_withdrawal.py',
+    'tests/data/714_identity_sha256.json':
+        'tests/test_714_identity_write_unchanged.py',
+}
+
+#: Committed baselines with NO gate, each with its reason. Being on this list
+#: is a DISCLOSURE, not an exemption -- see `_UNGATED_BASELINE_COUNT`.
+_BASELINE_UNGATED = {
+    'tests/797_seed_exclusive_baseline.json':
+        'no test names it; its own `reproduce` key carries a two-command '
+        'recipe, which is a recipe rather than a gate',
+    'tests/836_flip_vs_reseat_baseline.json':
+        'test_836_flip_census.py is a real gate on the two MECHANISMS the '
+        'answer rests on, but it re-derives them from the engine and never '
+        'opens this file, so the recorded verdict itself is unguarded',
+    'tests/measure_847_calibration.json':
+        'nothing references it; only measure_847_calibration.py is cited, in '
+        'docs/utilities.md and check_channels.py',
+    'tests/stress/corpus_noop_baseline.json':
+        'read by tests/stress/corpus_noop_sweep.py, which is not a test_*.py '
+        'and lives outside run_all.py the non-recursive glob',
+}
+
+#: A PINNED literal, never `len(_BASELINE_UNGATED)`. Deriving it from the map
+#: it guards would make this agree with whatever the map currently says, and
+#: the point is that a fifth ungated baseline be a decision somebody takes
+#: rather than a line somebody adds.
+_UNGATED_BASELINE_COUNT = 4
+
+#: Committed JSON under `tests/` that is an INPUT, not a recorded measurement.
+#: Prefix-matched, each with its reason.
+_NOT_A_BASELINE = (
+    ('tests/stress/manifest_set',
+     'stress-corpus manifests: they name the boards to fetch and record '
+     'nothing'),
+    ('tests/stress/modal_sweep/',
+     'sweep arm configurations, an input to a study'),
+    ('tests/fixtures/',
+     'fixture inputs a test feeds in, not measurements it took'),
+)
+
+
+def test_every_committed_baseline_is_declared():
+    """A committed baseline is either re-derived by a test, or says why not.
+
+    Three failures, each meaning something different:
+
+      unlisted -- a new baseline arrived and nobody decided how it stays
+                  honest. (Or a scratch .json is sitting in tests/, which is
+                  also worth being told about.)
+      stale    -- the map names a gate that does not exist, or one that never
+                  mentions the file it claims to guard. Both are worse than no
+                  map: they certify nothing while looking like they do.
+      count    -- the number of UNGATED baselines moved and nobody re-stated
+                  it.
+    """
+    problems = []
+    for path, gate in sorted(_BASELINE_GATES.items()):
+        if not os.path.isfile(os.path.join(ROOT, path)):
+            problems.append(f'{path}: registered, but the file is gone')
+            continue
+        gate_full = os.path.join(ROOT, gate)
+        if not os.path.isfile(gate_full):
+            problems.append(f'{path}: its gate {gate} does not exist')
+            continue
+        # THIS file can never be the gate. It names every baseline -- that is
+        # what a registry is -- so the "does the gate mention it" check below
+        # is satisfied trivially by pointing an entry here, and the entry then
+        # certifies nothing. Found by mutating an entry to do exactly that and
+        # watching the row survive.
+        if os.path.abspath(gate_full) == os.path.abspath(__file__):
+            problems.append(
+                f'{path}: registered against this registry, which declares '
+                f'every baseline and re-derives none. Name the test that '
+                f're-computes it, or move it to _BASELINE_UNGATED')
+            continue
+        # The gate must NAME the file. A pairing nobody checks survives the
+        # gate being rewritten to guard something else entirely.
+        with open(gate_full, encoding='utf-8', errors='replace') as fh:
+            src = fh.read()
+        if os.path.basename(path) not in src:
+            problems.append(
+                f'{path}: {gate} never mentions it, so the registration is a '
+                f'claim nothing supports')
+
+    for path, reason in sorted(_BASELINE_UNGATED.items()):
+        if not os.path.isfile(os.path.join(ROOT, path)):
+            problems.append(f'{path}: listed as ungated, but the file is gone')
+        if not (reason or '').strip():
+            problems.append(f'{path}: listed as ungated with no reason given')
+
+    declared = set(_BASELINE_GATES) | set(_BASELINE_UNGATED)
+    both = set(_BASELINE_GATES) & set(_BASELINE_UNGATED)
+    if both:
+        problems.append(f'listed as both gated and ungated: {sorted(both)}')
+
+    found = 0
+    for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
+        dirnames[:] = [d for d in sorted(dirnames)
+                       if d not in ('__pycache__', '.pytest_cache')]
+        for fname in sorted(filenames):
+            if not fname.endswith('.json'):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fname),
+                                  ROOT).replace(os.sep, '/')
+            if any(rel.startswith(pre) for pre, _why in _NOT_A_BASELINE):
+                continue
+            found += 1
+            if rel not in declared:
+                problems.append(
+                    f'{rel}: a committed baseline nothing declares. Register '
+                    f'it against the test that re-derives it, or in '
+                    f'_BASELINE_UNGATED with the reason it has none. (A '
+                    f'scratch file? Delete it.)')
+
+    if len(_BASELINE_UNGATED) != _UNGATED_BASELINE_COUNT:
+        problems.append(
+            f'_UNGATED_BASELINE_COUNT says {_UNGATED_BASELINE_COUNT}, the map '
+            f'holds {len(_BASELINE_UNGATED)}. Re-state the literal '
+            f'deliberately -- an ungated baseline is a decision, not a line')
+
+    assert not problems, ('committed-baseline registry:\n  '
+                          + '\n  '.join(problems))
+    print(f'  PASS: {found} committed baseline(s) declared -- '
+          f'{len(_BASELINE_GATES)} re-derived by a named gate, '
+          f'{len(_BASELINE_UNGATED)} ungated with a stated reason')
+
+
 TESTS = [
     test_wk_dependent_tests_are_declared,
     test_no_test_spawns_a_script_that_moved,
@@ -565,6 +727,9 @@ TESTS = [
     test_no_module_scope_posix_only_import,
     test_no_test_is_defined_after_its_own_runner,
     test_every_test_is_registered_in_its_files_own_list,
+
+
+    test_every_committed_baseline_is_declared,
 ]
 
 
