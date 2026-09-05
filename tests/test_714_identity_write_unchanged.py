@@ -65,11 +65,33 @@ def _all_at_current(pcb):
 
 
 def _sha(path):
-    h = hashlib.sha256()
-    with open(path, 'rb') as fh:
-        for chunk in iter(lambda: fh.read(1 << 16), b''):
-            h.update(chunk)
-    return h.hexdigest()
+    """sha256 of the written board, with LINE ENDINGS NORMALISED to \n.
+
+    The normalisation is not cosmetic and it is not a loosened tolerance. This
+    writer does string surgery on the text it read, so its output inherits
+    whatever line endings the CHECKOUT has -- and on Windows `core.autocrlf`
+    gives `kicad_files/` CRLF. Hashing the raw bytes therefore pins the
+    developer's git config rather than the writer's behaviour: the baseline
+    first recorded here was a CRLF one, and it failed on all 22 boards on
+    every LF checkout (macOS, Linux, CI) with none of the writer's output
+    actually different. Measured at the time: all 22 matched EXACTLY once
+    CRLF-ised, 0 genuinely different, and `main`'s own pre-#714 writer
+    reproduced the "now" hashes byte for byte.
+
+    That red gate was not merely noisy -- `tests/mutate_714.py` lists this
+    file in `BASELINE`, so it REFUSED to run the whole 19-row battery
+    ("BROKEN: the gates do not pass on the UNMUTATED tree"), which is the
+    correct failure mode and also meant #714's central evidence could not be
+    reproduced off one machine.
+
+    What is given up is exactly one regression: a writer that changed nothing
+    but line endings board-wide. That is worth it to have the gate mean the
+    same thing on every machine, and the substantive failures this exists to
+    catch -- a reformatted number, a rewritten `(layer ...)`, a reordered
+    node -- all survive the normalisation.
+    """
+    raw = open(path, 'rb').read()
+    return hashlib.sha256(raw.replace(b'\r\n', b'\n')).hexdigest()
 
 
 def measure():
