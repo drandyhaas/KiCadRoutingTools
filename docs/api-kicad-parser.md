@@ -356,6 +356,41 @@ Converts footprint-local pad coordinates to absolute board coordinates.
 KiCad's rotation convention means the angle is **negated** inside the
 standard rotation matrix — use this helper rather than rolling your own.
 
+There is **no mirror term**, and that is correct rather than an omission: KiCad
+stores a B-side footprint's children *pre-mirrored*, so a plain rotate and
+translate resolves them. A consumer that adds a mirror of its own for B-side
+parts double-applies it.
+
+## Board side: `flip_layer_token`
+
+```python
+flip_layer_token(name: str) -> str
+```
+
+The other face's spelling of a layer token (#714): `F.SilkS` → `B.SilkS`,
+`B.Cu` → `F.Cu`, and **anything else unchanged**.
+
+A prefix rule, deliberately not a table — the knowledge is that KiCad spells a
+sided layer `F.<x>` / `B.<x>`, not the list of which ones exist. Measured over
+the 22 tracked boards, the layer tokens appearing inside a `(footprint ...)`
+block are `F.Cu F.Mask F.Paste F.SilkS F.CrtYd F.Fab F.Adhes B.SilkS B.Fab B.Cu
+B.CrtYd B.Mask B.Paste *.Cu *.Mask Dwgs.User Cmts.User Eco1.User Eco2.User
+User.1`; this flips the thirteen sided ones and returns the other seven as they
+are.
+
+Two things it deliberately does **not** do, because both would be guesses:
+
+- `*.Cu` and `*.Mask` pass through. They are KiCad's ALL-copper / all-mask sets
+  and are already their own mirror; narrowing `*.Cu` to `B.Cu` would silently
+  drop 66 pads on `rp2350_fpga_eensy_prePlane` U8 alone.
+- Inner copper passes through unchanged, and that matches KiCad: probed
+  against pcbnew 10.0.0 on a six-layer board, `FOOTPRINT::Flip` leaves a pad on
+  `In1.Cu` and an `fp_line` on `In2.Cu` where they are. So the identity answer
+  is correct here, not merely conservative. `placement.writer` nonetheless
+  **refuses** a pad naming an explicit `In<n>.Cu`, for a different reason: no
+  tracked board carries one, so nothing here would notice if a future KiCad
+  began remapping them.
+
 ## Utility functions
 
 ```python

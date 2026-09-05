@@ -435,6 +435,19 @@ same change — and vice versa. When adding a flag, grep the
 through there too.
 
 **Parity gates (run these when touching CLI/GUI routing):**
+- `tests/gui_parity/test_714_mirror_pcbnew_parity.py` — needs KiCad python; the
+  acceptance gate for the placement writer's **layer flip**. Compares the
+  footprint block `write_placed_output` emits for a side change against the
+  block pcbnew writes after `FOOTPRINT.Flip(pos, FLIP_DIRECTION_TOP_BOTTOM)` +
+  `SaveBoard()`, as canonical trees: numbers to integer nanometres (so the
+  tolerance is exactly zero, not a float epsilon), `at` angles folded, children
+  sorted, and the uuid multiset asserted rather than normalised away. **Exits 2
+  when pcbnew is absent and does NOT self-skip** — `tests/mutate_714.py` uses
+  it as a killer gate, and a killer gate that exits 0 reports every row it
+  guards as SURVIVED. Run it whenever you touch `placement/writer.py`'s flip
+  path or `kicad_parser.flip_layer_token`; ~2 min. Its wx-free siblings are
+  `tests/test_714_{mirror_discriminates,side_self_consistency,flip_roundtrip,
+  refusals,identity_write_unchanged}.py`, which `run_all.py` does collect.
 - `tests/gui_parity/test_manifest_plan_parity.py` — no wx; asserts every CLI
   `--flag` survives `manifest_to_plan` into the GUI plan step (plan→params).
 - `tests/gui_parity/test_cli_postpass_coverage.py` — no wx; asserts every CLI

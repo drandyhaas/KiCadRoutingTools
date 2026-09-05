@@ -408,12 +408,31 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # READER_VERSION is the number an author copies into `min_reader`. At 1 a
     # document could claim a reader-1 build acts on a claim it has never heard
     # of, which is a false statement in the one field whose job is to be true.
-    assert fp.READER_VERSION == 2, fp.READER_VERSION
-    assert fp.intent_from_dict(dict(base, min_reader=2))
-    msg = rejects(dict(base, min_reader=3), 'a claim this build cannot act on')
-    assert 'this build is reader 2' in msg, msg
+    #
+    # TWO assertions, because they fail for different reasons and a reader has
+    # to be able to tell which. The first is #712's own claim -- these fields
+    # need a reader that knows them. The second is the change detector: a
+    # hand-stated literal that fires when the vocabulary grows, so the bump is
+    # re-stated deliberately rather than absorbed. It was 2 before #837 added
+    # `assembly.sides`.
+    assert fp.READER_VERSION >= 2, (
+        f"{fp.READER_VERSION}: #712's fields need a reader that knows them")
+    assert fp.READER_VERSION == 3, (
+        f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
+        f"literal and say which field arrived, the way #712 and #837 did")
+    # What this pair checks is the GATE -- a document may demand at most what
+    # this build can serve. Written against `READER_VERSION` rather than a
+    # literal 2/3, because the change-detector duty is already carried by the
+    # `== 3` literal above and duplicating it here made the gate's own test
+    # fail for a reason that had nothing to do with the gate (#837's bump).
+    # This is not the vacuous re-derivation the repo warns about: it still
+    # fails outright if the version check stops firing.
+    assert fp.intent_from_dict(dict(base, min_reader=fp.READER_VERSION))
+    msg = rejects(dict(base, min_reader=fp.READER_VERSION + 1),
+                  'a claim this build cannot act on')
+    assert f'this build is reader {fp.READER_VERSION}' in msg, msg
     print(f"  PASS: {len(cases)} malformed along-edge claims refused by "
-          f"reason; both forms load alone; READER_VERSION 2")
+          f"reason; both forms load alone; READER_VERSION {fp.READER_VERSION}")
 
 
 def test_rules_run_bookkeeping_is_untouched():

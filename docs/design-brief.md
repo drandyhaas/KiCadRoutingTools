@@ -87,6 +87,15 @@ it.
 }
 ```
 
+`user_top_side` is which face the **user looks at** — an enclosure fact. It is
+not the intent's `assembly.sides` (#837), which is which faces the **fab
+populates**. The two are independent and cannot contradict each other: a
+back-populated board whose front carries the label is `assembly.sides: "B"`
+with `user_top_side: "F"`, and that is coherent. `user_top_side` is carried and
+graded by nothing, and the brief report says so under `not_graded`;
+`assembly.sides` is graded by `rule_assembly_side` and charged by
+`options.grow_board`.
+
 Every key is optional. Strictness is the same as the intent's, at every level
 and for the same reason (#710): a typo'd key that loads clean is a constraint
 the author believes they set and nothing ever checks.

@@ -1,0 +1,340 @@
+{
+ "clearance": 0.2,
+ "engine_sha": "417ebfa07850a6462d6ea8d09ab3ab5aa169a086",
+ "preregistration": {
+  "C4_ratio": 0.5,
+  "E_build": 6,
+  "E_close": 1,
+  "E_material_build": 3,
+  "V1_floor": 0.85,
+  "boards": [
+   "ulx3s",
+   "glasgow_revC",
+   "orangecrab_ext_pll"
+  ],
+  "gate_keys": [
+   "blocking",
+   "containment_blocking",
+   "courtyard_blocking",
+   "pad_conflicts",
+   "hole_conflicts",
+   "oob_pad_count"
+  ],
+  "question": "how many parts does a flip help that no same-side move within reach helps"
+ },
+ "rank_radius_mm": 3.0,
+ "routed": {
+  "glasgow_revC": {
+   "better": [
+    [
+     "RN5",
+     "vias",
+     15,
+     14,
+     true
+    ]
+   ],
+   "control_moved": [
+    [
+     "R50",
+     "failed",
+     0,
+     1,
+     false
+    ],
+    [
+     "C40",
+     "failed",
+     0,
+     1,
+     false
+    ]
+   ],
+   "control_no_change": [
+    "C86",
+    "C89"
+   ],
+   "control_refs": [
+    "R50",
+    "C86",
+    "C89",
+    "C40"
+   ],
+   "immaterial": [
+    [
+     "R58",
+     "vias",
+     23,
+     24,
+     false
+    ]
+   ],
+   "no_change": [
+    "D23"
+   ],
+   "no_verdict": [],
+   "probed": 11,
+   "scope_skipped": [],
+   "worse": [
+    [
+     "D20",
+     "vias",
+     35,
+     38,
+     false
+    ],
+    [
+     "RN11",
+     "vias",
+     15,
+     17,
+     false
+    ],
+    [
+     "RN12",
+     "vias",
+     15,
+     16,
+     false
+    ],
+    [
+     "RN6",
+     "vias",
+     14,
+     15,
+     false
+    ]
+   ]
+  },
+  "orangecrab_ext_pll": {
+   "refused": "carries copper (742 segments, 136 vias): a flip strands it, so a routed comparison here measures copper damage rather than placement. Strip the copper first if this board is wanted."
+  },
+  "ulx3s": {
+   "better": [],
+   "control_moved": [
+    [
+     "R39",
+     "vias",
+     14,
+     13,
+     true
+    ],
+    [
+     "D1",
+     "vias",
+     35,
+     36,
+     false
+    ],
+    [
+     "D12",
+     "vias",
+     0,
+     3,
+     false
+    ],
+    [
+     "C29",
+     "vias",
+     43,
+     46,
+     false
+    ]
+   ],
+   "control_no_change": [],
+   "control_refs": [
+    "R39",
+    "D1",
+    "D12",
+    "C29"
+   ],
+   "immaterial": [],
+   "no_change": [
+    "H2"
+   ],
+   "no_verdict": [],
+   "probed": 5,
+   "scope_skipped": [],
+   "worse": []
+  }
+ },
+ "screen": {
+  "flat_hierarchy": {
+   "area_relief_parts": 58,
+   "blind_halo_relief_frac": 0.0,
+   "blind_halo_relief_parts": 0,
+   "blind_halo_relief_sum": 0.0,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 5927.41,
+    "containment_blocking": 0,
+    "courtyard_blocking": 0,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 0,
+   "exclusive_refs": [],
+   "flip_refused": 0,
+   "helps_flip": 0,
+   "helps_move": 0,
+   "movable": 58,
+   "sides_observed": "F"
+  },
+  "glasgow_revC": {
+   "area_relief_parts": 157,
+   "blind_halo_relief_frac": 0.8977,
+   "blind_halo_relief_parts": 237,
+   "blind_halo_relief_sum": 2566.924,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 3047.11,
+    "containment_blocking": 0,
+    "courtyard_blocking": 23,
+    "hole_conflicts": 0,
+    "oob_pad_count": 1,
+    "pad_conflicts": 1
+   },
+   "control_write_inert": true,
+   "exclusive": 7,
+   "exclusive_refs": [
+    "D20",
+    "D23",
+    "R58",
+    "RN11",
+    "RN12",
+    "RN5",
+    "RN6"
+   ],
+   "flip_refused": 0,
+   "helps_flip": 11,
+   "helps_move": 4,
+   "movable": 243,
+   "sides_observed": "both"
+  },
+  "orangecrab_ext_pll": {
+   "area_relief_parts": 80,
+   "blind_halo_relief_frac": 0.9329,
+   "blind_halo_relief_parts": 153,
+   "blind_halo_relief_sum": 2416.247,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 999.94,
+    "containment_blocking": 0,
+    "courtyard_blocking": 5,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 0,
+   "exclusive_refs": [],
+   "flip_refused": 2,
+   "helps_flip": 0,
+   "helps_move": 0,
+   "movable": 164,
+   "sides_observed": "both"
+  },
+  "splitflap_driver": {
+   "area_relief_parts": 65,
+   "blind_halo_relief_frac": 0.3538,
+   "blind_halo_relief_parts": 23,
+   "blind_halo_relief_sum": 138.131,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 2936.52,
+    "containment_blocking": 0,
+    "courtyard_blocking": 0,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 0,
+   "exclusive_refs": [],
+   "flip_refused": 0,
+   "helps_flip": 0,
+   "helps_move": 0,
+   "movable": 65,
+   "sides_observed": "F"
+  },
+  "ulx3s": {
+   "area_relief_parts": 63,
+   "blind_halo_relief_frac": 0.9159,
+   "blind_halo_relief_parts": 207,
+   "blind_halo_relief_sum": 1995.929,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 4175.64,
+    "containment_blocking": 0,
+    "courtyard_blocking": 18,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 1,
+   "exclusive_refs": [
+    "H2"
+   ],
+   "flip_refused": 0,
+   "helps_flip": 2,
+   "helps_move": 1,
+   "movable": 226,
+   "sides_observed": "both"
+  },
+  "watchy": {
+   "area_relief_parts": 84,
+   "blind_halo_relief_frac": 0.9167,
+   "blind_halo_relief_parts": 77,
+   "blind_halo_relief_sum": 1330.729,
+   "control_instruments": {
+    "blocking": 0,
+    "busiest_area_mm2": 739.8,
+    "containment_blocking": 0,
+    "courtyard_blocking": 4,
+    "hole_conflicts": 0,
+    "oob_pad_count": 0,
+    "pad_conflicts": 0
+   },
+   "control_write_inert": true,
+   "exclusive": 1,
+   "exclusive_refs": [
+    "J1"
+   ],
+   "flip_refused": 0,
+   "helps_flip": 2,
+   "helps_move": 1,
+   "movable": 84,
+   "sides_observed": "F"
+  }
+ },
+ "verdict": {
+  "E": 8,
+  "E_boards": 2,
+  "E_material": 0,
+  "artefact_rate_worst_control": 0.0119,
+  "not_measured": [
+   "orangecrab_ext_pll could not be routed: it ships 742 segments and 136 vias, and flipping a footprint strands its copper, so a routed A/B there measures copper damage rather than placement. It contributed 0 EXCLUSIVE parts to the screen either way.",
+   "the B->F direction-reversal control (C4)",
+   "a multi-flip (stacked) arm -- one flip at a time against a fixed placement is conservative in the BUILD direction",
+   "a DAMAGED board. Every board here is a shipping placement, already near-clean on the assembly gate, so the screen can only see a flip that fixes an EXISTING legality defect."
+  ],
+  "primaries_beating_the_artefact_rate": [
+   "glasgow_revC"
+  ],
+  "routed_better": 1,
+  "routed_control_moved": 6,
+  "routed_control_no_change": 2,
+  "routed_neutral": 3,
+  "routed_worse": 4,
+  "verdict": "DO NOT BUILD",
+  "why": [
+   "The routed arbiter -- the only instrument here that charges the via a flip creates -- says the candidates do not pay: of the 8 EXCLUSIVE parts it could route, 1 improved, 4 got WORSE and 3 did not move. Every move was on the LAST rung (vias); E_material, the count improving any rung above it, is 0.",
+   "The arbiter discriminates, so \"no change\" is not what it always says: of the 8 control parts flipped and routed identically, 6 moved the ladder.",
+   "The screen agrees for a second reason. watchy has NO back-side pad copper, so every flip on it lands in an empty face and its 1.19% EXCLUSIVE rate is the artefact rate. ulx3s scores below it and orangecrab_ext_pll scores zero: 1 of 3 primaries beat a board where the effect cannot be real.",
+   "SAID PLAINLY: the pre-registered CLOSE arm required E <= 1 and E was 8, so the letter of the threshold is not met and this conclusion rests on the routed arm the design named as decisive rather than on the screen count. Both numbers are published here so a reader can disagree with the reading rather than with the data."
+  ]
+ }
+}

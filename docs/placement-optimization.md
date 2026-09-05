@@ -345,10 +345,52 @@ precedent), which is simpler and may capture most of the value:
     wins; mixed-size swaps are usually illegal anyway, so restrict by
     footprint compatibility)
   - *side flip* (optional; mirrored courtyard): treated as a first-class move
-    in recent PCB literature. **Not implemented as a move.** Board side *is*
-    now modelled by the clearance/halo terms (#456): a part occupies its own
-    side with its courtyard and the far side only with its drilled-pad box, so
-    cross-side parts no longer collide or repel — but nothing flips a part.
+    in recent PCB literature. **Still not implemented as a move** — and that
+    sentence wants reading carefully, because half of what used to block it is
+    gone. Board side *is* modelled by the clearance/halo terms (#456): a part
+    occupies its own side with its courtyard and the far side only with its
+    drilled-pad box, so cross-side parts no longer collide or repel. And since
+    **#714** the WRITER can emit a real flip: `write_placed_output` mirrors a
+    footprint to the other face on request, held to pcbnew's own
+    `FOOTPRINT.Flip` node for node, so `perturb` can stage a `layer_flip`
+    damage kind. What is missing is the SEARCH — `_Part.side` is assigned once
+    at construction and no move signature carries it, so nothing in the
+    optimizer *chooses* a face. That is #836, and it was gated on its own
+    pre-registered measurement, because `reseat.py` is already side-aware and
+    the open question is how many parts a flip helps that a re-seat does not.
+
+    **That measurement has been run, and the answer is DO NOT BUILD IT.**
+    `tests/measure_836_flip_vs_reseat.py`, numbers in
+    `tests/836_flip_vs_reseat_baseline.json`, thresholds committed before the
+    results. Three things it found, in order of weight:
+
+    1. **The routed arbiter says the flips do not pay.** Of the 8 parts the
+       screen called EXCLUSIVE — helped by a flip and by no same-side move
+       within reach — 1 improved, **4 got worse** and 3 did not move, every
+       one of them on the last rung (vias). `E_material`, the count improving
+       any rung above it, is **0**. The arbiter discriminates: of 8 control
+       parts flipped and routed identically, 6 moved the ladder.
+    2. **#836's premise about the objective is backwards, and this is the
+       correction that matters most.** It says the objective cannot price a
+       flip. Measured: `_halo_pair_penalty` returns 0.0 for a cross-side SMD
+       pair, `candidate_valid` skips cross-side pairs entirely, and `align`
+       has no side filter at all — so **207 of ulx3s's 226 movable parts and
+       237 of glasgow_revC's 243** have their whole same-side halo charge
+       zeroed by a flip. A greedy quench handed this move and this objective
+       would flip nearly every part on the board. The danger was never that
+       the search could not see the move; it is that it could only see the
+       upside.
+    3. **The screen agrees for a second reason.** `watchy` has no back-side
+       pad copper, so every flip on it lands in an empty face; its 1.19%
+       EXCLUSIVE rate is the artefact rate, and only 1 of the 3 primaries
+       beats it.
+
+    Said plainly: the pre-registered CLOSE arm asked for `E <= 1` and E was 8,
+    so this rests on the routed arm rather than on the screen count, and both
+    numbers are published so a reader can disagree with the reading rather
+    than with the data. `tests/test_836_flip_census.py` re-derives the two
+    mechanisms in five seconds and fails naming #836 if an engine change ever
+    makes a flip cost something — that test is the reopening signal.
   - *rigid-group moves*: an IC plus its decoupling caps moves as one
     super-component. **Translation is implemented** (`--group-by`, #459);
     rigid *rotation* of a block is not. Blocks come from KiCad `(group ...)`,
