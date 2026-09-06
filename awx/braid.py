@@ -25,15 +25,11 @@ the lane farthest from the teeth so no join leg crosses a lane already
 present. The exits mirror this: a stub receives its lane head-on when
 its offset is free of every stub upstream; otherwise the lane peels
 off to it, first exiter innermost. Launch order and target order are
-the lanes' offsets at the two ends of the schedule region; the divers
-are the complement of the longest increasing subsequence of that
-permutation, and the wave schedule (schedule.py) turns the inversions
-into columns of adjacent swaps -- at each crossing the mover on the
-back layer, the passed net on the front. A corridor whose joins and
-exits are all side legs (the flank "river" of earlier takes) is not a
-second kind of thing: nearly all of it dives, and a diver that passes
-everyone stays on the back layer for the whole run, which is the
-constant-layer river that emerged as a hand mechanism before.
+the lanes' offsets at the two ends of the schedule region. The two-page
+schedule (schedule.py) keeps the longest in-order subsequence on the
+front layer, the worst crossers of the rest on the back layer, and
+routes what is left as SWIMMERS: free searches that take the other
+layer from whichever page lane they cross and pay a via at each change.
 
 COPPER. All of it is the real router's (connect.py). Every lane is
 routed from its tooth to its stub end inside its band -- the corridor
@@ -482,17 +478,6 @@ def _relax_pitch(vals, floor):
     return py
 
 
-def _intervals_union(ivs):
-    ivs = sorted((a, b) for a, b in ivs if b > a)
-    out = []
-    for a, b in ivs:
-        if out and a <= out[-1][1]:
-            out[-1] = (out[-1][0], max(out[-1][1], b))
-        else:
-            out.append((a, b))
-    return out
-
-
 class Corridor:
     """One corridor: its members, spine, lanes, schedule and copper."""
 
@@ -810,53 +795,14 @@ class Corridor:
         self.py = [target_o[nm] for nm in self.target]
 
     def reserve_intervals(self):
-        """s-intervals that hold no swap column: corner wedges, and the
-        stretches where this corridor runs through one laid earlier."""
-        sp, ctx = self.spine, self.ctx
-        # a lane at offset o has its corner displaced by o*tan(turn/2)
-        # along the spine: that is the wedge, plus a margin -- not the
-        # whole half-width, which for a shallow bend reserved everything
-        omax = max([abs(v) for v in self.Ly + self.py] + [0.0])
-        ivs = []
-        for (_i, s_c, turn) in sp.corners():
-            half = omax * math.tan(math.radians(min(abs(turn), 170.0) / 2)) + 0.3
-            ivs.append((s_c - half, s_c + half))
-        cross = []
-        if ctx.laid:
-            within = self.H + LPITCH
-            ss = np.arange(self.s0, self.s1, 0.1)
-            marks = []
-            for s in ss:
-                p = sp.xy(float(s), 0.0)
-                near = any(ts.seg_pt_dist(a, b, p) <= within
-                           for poly in ctx.laid
-                           for a, b in zip(poly, poly[1:]))
-                marks.append(near)
-            a = None
-            for s, m in zip(ss, marks):
-                if m and a is None:
-                    a = s
-                if not m and a is not None:
-                    cross.append((a - 0.3, s + 0.3))
-                    a = None
-            if a is not None:
-                cross.append((a - 0.3, self.s1 + 0.3))
-        self.cross_iv = _intervals_union(cross)
-        self.reserved = _intervals_union(ivs + cross)
-        # u(s): arc-length with the reserved stretches collapsed
-        S_pts, U_pts = [self.s0], [0.0]
-        for (a, b) in self.reserved:
-            a, b = max(a, self.s0), min(b, self.s1)
-            if b <= a:
-                continue
-            ua = U_pts[-1] + (a - S_pts[-1])
-            S_pts += [a, b]
-            U_pts += [ua, ua]
-        U_pts.append(U_pts[-1] + (self.s1 - S_pts[-1]))
-        S_pts.append(self.s1)
-        self.S_pts, self.U_pts = np.array(S_pts), np.array(U_pts)
-        self.L_free = float(U_pts[-1])
-
+        """The free length of the corridor along its spine: the whole
+        of it (a straight spine has no corner wedges, and a corridor
+        laid earlier that this one runs through would reserve the
+        overlap -- see cross_reserve for the planned-lane form)."""
+        self.reserved = []
+        self.S_pts = np.array([self.s0, self.s1])
+        self.U_pts = np.array([0.0, self.s1 - self.s0])
+        self.L_free = float(self.s1 - self.s0)
 
     def s_of_u(self, u):
         # the inverse: U_pts is non-decreasing; take the LAST s of a flat
@@ -1256,9 +1202,6 @@ class Corridor:
             ok &= inb
         return ok
 
-    def in_cross(self, s):
-        return any(a <= s <= b for (a, b) in self.cross_iv)
-
     def _band_samples(self, nm, s_lo, s_hi, step=0.002, eps=1e-7):
         """The s values the lane's band edges are evaluated at (see
         band_of): a fine grid over [s_lo, s_hi], every lane's polyline
@@ -1403,9 +1346,6 @@ class Corridor:
                 rect = ((S >= min(sa, sb) - LEG_O) & (S <= max(sa, sb) + LEG_O)
                         & (np.abs(O - oa) <= LEG_O))
                 ok |= rect & okL
-            for (a, b) in self.cross_iv:
-                ok |= ((S >= a) & (S <= b) & present
-                       & (np.abs(O - o_nm) <= CROSS_TUBE))
             return ok
         return band
 
@@ -1441,8 +1381,6 @@ class Corridor:
                 bounds = [sa] + inner + [sb]
                 for s_a, s_b in zip(bounds, bounds[1:]):
                     s_mid = (s_a + s_b) / 2
-                    if self.in_cross(s_mid):
-                        continue
                     t_a = (s_a - sa) / max(sb - sa, 1e-9)
                     t_b = (s_b - sa) / max(sb - sa, 1e-9)
                     o_a = a_[1] + t_a * (b_[1] - a_[1])
@@ -1604,9 +1542,6 @@ class Corridor:
         ly_floor = 0.35
         self.offsets(ly_floor)
         self.reserve_intervals()
-        if self.reserved:
-            log('  reserved: ' + ', '.join(f'[{a:.2f},{b:.2f}]' for a, b in self.reserved)
-                + f'  (free {self.L_free:.2f} of {self.s1 - self.s0:.2f} mm)')
         sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log,
                          dest_layer=ctx.dest_layer)
         if plan_only:
@@ -2189,21 +2124,20 @@ def main():
         corridors.append(Corridor(ci, members, ctx, log))
     ctx.corridors = corridors
 
-    if True:
-        # PHASE 1 -- every corridor PLANNED (spine, offsets, schedule,
-        # planned lanes) before any is routed, each spine relaxed round
-        # the ones planned before it, so that while a corridor routes,
-        # the others' planned lanes are reservations (cross_reserve)
-        for c in corridors:
-            try:
-                c.run(plan_only=True)
-                ctx.laid.extend(c.lane_xy[nm] for nm in c.members
-                                if nm in getattr(c, 'lane_xy', {}))
-            except Exception as e:
-                log(f'  plan phase: corridor {c.idx} not planned ({e})')
-        ctx.laid = []
-        ctx.pcb.segments = list(ctx.base_segments)
-        ctx.pcb.vias = list(ctx.base_vias)
+    # PHASE 1 -- every corridor PLANNED (spine, offsets, schedule,
+    # planned lanes) before any is routed, each spine relaxed round
+    # the ones planned before it, so that while a corridor routes,
+    # the others' planned lanes are reservations (cross_reserve)
+    for c in corridors:
+        try:
+            c.run(plan_only=True)
+            ctx.laid.extend(c.lane_xy[nm] for nm in c.members
+                            if nm in getattr(c, 'lane_xy', {}))
+        except Exception as e:
+            log(f'  plan phase: corridor {c.idx} not planned ({e})')
+    ctx.laid = []
+    ctx.pcb.segments = list(ctx.base_segments)
+    ctx.pcb.vias = list(ctx.base_vias)
     for c in corridors:
         c.run()
         ctx.corr_done.add(c.idx)
@@ -2455,27 +2389,26 @@ def write_out(a, ctx, corridors, names, log):
     # (and the join the plan drew) hanging in free space.
     smoothed = False
     final_segs = {}
-    if True:
-        from pcb_modification import smooth_octolinear_chains
-        pre_len = {nm: sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
-                           for s in out_segs[nm]) for nm in names}
-        _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
-            [{'new_segments': list(out_segs[nm])} for nm in names],
-            pcb, kids, clearance=0.1, keep_input_copper=True)
-        for nm in names:
-            nid, _ = byname[nm]
-            final_segs[nm] = [s for s in pcb.segments if s.net_id == nid]
-        post_len = {nm: sum(math.hypot(s.end_x - s.start_x,
-                                       s.end_y - s.start_y)
-                            for s in final_segs[nm]) for nm in names}
-        log(f'\nsmooth_octolinear_chains (#536): '
-            f'{stt.get("spans", 0)} spans on {_nets} nets, '
-            f'-{stt.get("saved_mm", 0):.2f} mm; segments '
-            f'{sum(len(s) for s in out_segs.values())} -> '
-            f'{sum(len(s) for s in final_segs.values())}; length '
-            f'{sum(pre_len.values()):.2f} -> '
-            f'{sum(post_len.values()):.2f} mm')
-        smoothed = True
+    from pcb_modification import smooth_octolinear_chains
+    pre_len = {nm: sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+                       for s in out_segs[nm]) for nm in names}
+    _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
+        [{'new_segments': list(out_segs[nm])} for nm in names],
+        pcb, kids, clearance=0.1, keep_input_copper=True)
+    for nm in names:
+        nid, _ = byname[nm]
+        final_segs[nm] = [s for s in pcb.segments if s.net_id == nid]
+    post_len = {nm: sum(math.hypot(s.end_x - s.start_x,
+                                   s.end_y - s.start_y)
+                        for s in final_segs[nm]) for nm in names}
+    log(f'\nsmooth_octolinear_chains (#536): '
+        f'{stt.get("spans", 0)} spans on {_nets} nets, '
+        f'-{stt.get("saved_mm", 0):.2f} mm; segments '
+        f'{sum(len(s) for s in out_segs.values())} -> '
+        f'{sum(len(s) for s in final_segs.values())}; length '
+        f'{sum(pre_len.values()):.2f} -> '
+        f'{sum(post_len.values()):.2f} mm')
+    smoothed = True
 
     # ---- write board
     txt = open(a.board, encoding='utf-8').read()

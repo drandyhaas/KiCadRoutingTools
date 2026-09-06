@@ -13,7 +13,7 @@ corridor's business, not this module's.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set
 
 
 def lis_keep(ranks: Sequence[int]) -> Set[int]:
@@ -104,41 +104,29 @@ class Schedule:
         rest = [nm for i, nm in enumerate(self.launch)
                 if i not in keep]
         if len(rest) >= 2:
-            # the B page policy is 'worst' (2026-08-31): with
-            # the diamond reservation + free swimmers, the
-            # worst-crosser B page ties 'lis' at every K below
-            # 28 (4/10/24/32 vias, all complete) and beats it
-            # at K28 (50/0 vs 56/0, human 46) -- the demoted
-            # risers it strands are exactly the class the last
-            # call rescues at 2 vias. 'lis' selects the old
-            # length-first page, 'wmax' the weighted middle.
-            if True:
-                # the B-page RESCUES THE WORST CROSSERS first
-                # -- the human's constant-layer SWE idiom. On
-                # an all-F-escape fanout this measured WORSE
-                # (K11 10/11 -> 7/11: it demotes the mutually-
-                # increasing risers to swimmers against a
-                # saturated F layer); with escapes BY PAGE
-                # (step 3) it is the arm to re-try, hence a
-                # knob rather than a default.
-                inv = {nm: sum(1 for om in self.launch
-                               if om != nm and self.inverted(nm, om))
-                       for nm in rest}
-                page_b: List[str] = []
-                for nm in sorted(rest,
-                                 key=lambda n: (-inv[n],
-                                                -on(n, 'B.Cu'))):
-                    if all(not self.inverted(nm, om)
-                           for om in page_b):
-                        page_b.append(nm)
-                for nm in page_b:
-                    self.page[nm] = 'B.Cu'
-            else:
-                keep_b = lis_keep_weighted(
-                    [self.trank[nm] for nm in rest],
-                    [on(nm, 'B.Cu') for nm in rest])
-                for i in keep_b:
-                    self.page[rest[i]] = 'B.Cu'
+            # the B page RESCUES THE WORST CROSSERS first (measured
+            # 2026-08-31 against a length-first LIS page: ties at
+            # every K below 28, beats it at K28 50/0 vs 56/0)
+            # the B-page RESCUES THE WORST CROSSERS first
+            # -- the human's constant-layer SWE idiom. On
+            # an all-F-escape fanout this measured WORSE
+            # (K11 10/11 -> 7/11: it demotes the mutually-
+            # increasing risers to swimmers against a
+            # saturated F layer); with escapes BY PAGE
+            # (step 3) it is the arm to re-try, hence a
+            # knob rather than a default.
+            inv = {nm: sum(1 for om in self.launch
+                           if om != nm and self.inverted(nm, om))
+                   for nm in rest}
+            page_b: List[str] = []
+            for nm in sorted(rest,
+                             key=lambda n: (-inv[n],
+                                            -on(n, 'B.Cu'))):
+                if all(not self.inverted(nm, om)
+                       for om in page_b):
+                    page_b.append(nm)
+            for nm in page_b:
+                self.page[nm] = 'B.Cu'
         elif rest:
             self.page[rest[0]] = 'B.Cu'
         self.b_page = [nm for nm in self.launch if self.page[nm] == 'B.Cu']
