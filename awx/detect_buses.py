@@ -94,8 +94,7 @@ def togetherness(pa: List[Pt], pb: List[Pt], width: float) -> float:
 
 
 def cluster(nets: Sequence[str], paths: Dict[str, List[Pt]],
-            width: float = 1.5, thresh: float = 0.55,
-            linkage: str = 'average') -> List[List[str]]:
+            width: float = 1.5, thresh: float = 0.55) -> List[List[str]]:
     """Cluster nets by how much of their length runs together.
 
     Single link was the first choice -- a bus is a chain of neighbours,
@@ -108,34 +107,11 @@ def cluster(nets: Sequence[str], paths: Dict[str, List[Pt]],
 
     `average` requires a net to run with the cluster as a whole, not
     with one member of it, which is what stops the chain."""
-    idx = {n: i for i, n in enumerate(nets)}
-    parent = list(range(len(nets)))
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
     sim = {}
     for i, a in enumerate(nets):
         for b in nets[i + 1:]:
             sim[(a, b)] = sim[(b, a)] = togetherness(paths[a], paths[b],
                                                      width)
-    if linkage == 'single':
-        for i, a in enumerate(nets):
-            for b in nets[i + 1:]:
-                if sim[(a, b)] >= thresh:
-                    ra, rb = find(idx[a]), find(idx[b])
-                    if ra != rb:
-                        parent[ra] = rb
-        groups: Dict[int, List[str]] = {}
-        for n in nets:
-            groups.setdefault(find(idx[n]), []).append(n)
-        return sorted(groups.values(), key=len, reverse=True)
-
-    # agglomerative with average linkage: merge the two clusters whose
-    # MEAN pairwise togetherness is highest, while it clears `thresh`
     clus = [[n] for n in nets]
 
     def link(ca, cb):
