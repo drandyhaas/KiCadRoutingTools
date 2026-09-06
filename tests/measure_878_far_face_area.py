@@ -29,10 +29,11 @@ the public reader, not from `quench._through_pad_bounds_local`.
 
 TWO NEGATIVE CONTROLS, and a failure of either REFUSES the whole report:
 
-  NC1  currency `none` must reproduce `options.grow_board` EXACTLY -- eight
-       fields per (board, basis), not just the answer. This is what proves the
-       harness measures the engine and not itself. A report whose control did
-       not reproduce is a page of numbers about nothing.
+  NC1  the arm the ENGINE implements must reproduce `options.grow_board`
+       EXACTLY -- nine fields per (board, basis), not just the answer. This is
+       what proves the harness measures the engine and not itself, and since
+       #878 landed it also pins WHICH currency ships. A report whose control
+       did not reproduce is a page of numbers about nothing.
   NC2  a board carrying NO drilled pad must be bit-identical under all three
        currencies on every basis. If a currency moves one of those, the harness
        is charging something other than the far face and every cell is suspect.
@@ -220,11 +221,21 @@ def _board_geometry(pcb, path):
 
 
 def _per_side(geom, currency, *, bare_far=False):
-    """`per_side` under one currency. `none` reproduces options.py:245-246."""
+    """The POPULATION and OBSTRUCTION dicts under one currency.
+
+    `pop` is each part once on its own face -- what `options.py:245-246` has
+    always built, identical under every currency. `per` adds the far-face
+    charge this currency says a drilled part presents. They are returned
+    separately because the engine keeps them separately (#878), and a control
+    that compared one against the other would report a mismatch on every board
+    carrying a through-hole part.
+    """
     per = {'F.Cu': 0.0, 'B.Cu': 0.0}
+    pop = {'F.Cu': 0.0, 'B.Cu': 0.0}
     near_total = far_total = 0.0
     for r in geom['rows']:
         per[r['own']] += r['near']
+        pop[r['own']] += r['near']
         near_total += r['near']
         if currency == 'none' or not r['has_tht']:
             continue
@@ -244,7 +255,7 @@ def _per_side(geom, currency, *, bare_far=False):
             raise ValueError(currency)
         per[r['far']] += add
         far_total += add
-    return per, near_total, far_total
+    return per, pop, near_total, far_total
 
 
 def _usable(bounds, edge):
@@ -253,7 +264,8 @@ def _usable(bounds, edge):
 
 
 def _arm(geom, currency, basis, *, edge=BOARD_EDGE_CLEARANCE, bare_far=False):
-    per, near_total, far_total = _per_side(geom, currency, bare_far=bare_far)
+    per, pop, near_total, far_total = _per_side(geom, currency,
+                                                bare_far=bare_far)
     usable = _usable(geom['bounds'], edge)
     busiest = max(per.values()) if per else 0.0
     one_face = basis != 'busiest'
@@ -264,7 +276,11 @@ def _arm(geom, currency, basis, *, edge=BOARD_EDGE_CLEARANCE, bare_far=False):
         'charged_area_mm2': round(charged, 2),
         'utilisation': round(util, 4),
         'fits_by_area': charged <= usable,
-        'part_area_by_side_mm2': {k: round(v, 2) for k, v in sorted(per.items())},
+        # The engine's two dicts, kept apart for the same reason it keeps them
+        # apart: one is the population, one is the obstruction.
+        'part_area_by_side_mm2': {k: round(v, 2) for k, v in sorted(pop.items())},
+        'obstructed_area_by_side_mm2': {k: round(v, 2)
+                                        for k, v in sorted(per.items())},
         'busiest_side_area_mm2': round(busiest, 2),
         'near_charge_mm2': round(near_total, 2),
         'far_charge_mm2': round(far_total, 2),
@@ -280,23 +296,59 @@ def _arm(geom, currency, basis, *, edge=BOARD_EDGE_CLEARANCE, bare_far=False):
 
 # --- the negative controls ---------------------------------------------------
 
-#: The eight fields NC1 compares. Chosen to pin the CHAIN, not just the answer:
+#: The currency the shipping engine implements. NC1 compares
+#: `options.grow_board` against THIS, not against a fixed `none`.
+#:
+#: Before #878 it was `none`, and NC1 read "the harness reproduces the engine".
+#: After, it reads "the harness and the engine agree about which currency
+#: SHIPS" -- strictly more, and still a proof the harness is not measuring
+#: itself, because the harness computes every arm without consulting
+#: `grow_board` at all.
+ENGINE_CURRENCY = 'tht'
+
+
+def _engine_shaped_arm(geom, basis):
+    """The arm the ENGINE actually computes, which is not one of the study arms.
+
+    The distinction is the whole of #878's post-hoc finding, so it is modelled
+    rather than asserted. The engine charges the far face into `obstructed`
+    ALWAYS -- the dict does not depend on the basis -- and then takes
+    `max(obstructed)` on the busiest basis but `sum(per_side)` on the one-face
+    one, because that sum is defined as each part exactly once.
+
+    The study arms deliberately do the other thing on the one-face basis
+    (`sum(obstructed)`), which is what measured the double count. So a control
+    comparing the engine to a study arm would report a mismatch on every board
+    with a through-hole part -- as it did, before this function existed.
+    """
+    a = _arm(geom, ENGINE_CURRENCY, basis)
+    if basis != 'busiest':
+        pop = _arm(geom, 'none', basis)
+        a = dict(a)
+        for k in ('charged_area_mm2', 'utilisation', 'fits_by_area',
+                  'binding_side'):
+            a[k] = pop[k]
+    return a
+
+
+#: The nine fields NC1 compares. Chosen to pin the CHAIN, not just the answer:
 #: each one fails for a different reason.
 NC1_FIELDS = ('charged_area_mm2', 'utilisation', 'fits_by_area',
               'busiest_side_area_mm2', 'part_area_by_side_mm2',
+              'obstructed_area_by_side_mm2',
               'containers_excluded', 'extent_from_courtyard',
               'extent_from_pad_bbox')
 
 
 def _control_row(pcb, path, geom, basis, declared):
-    """currency `none` against the real engine, eight fields."""
+    """The arm the engine implements (`ENGINE_ARM`) against the real engine."""
     eng = O.grow_board(pcb, path, clearance=CLEARANCE,
                        board_edge_clearance=BOARD_EDGE_CLEARANCE,
                        assembly_sides=declared)
     if not eng.get('ran'):
         return {'basis': basis, 'skipped': eng.get('reason', 'did not run')}
     m = eng['measured']
-    mine = _arm(geom, 'none', basis)
+    mine = _engine_shaped_arm(geom, basis)
     mine_extra = {
         'containers_excluded': [r for _a, r in sorted(geom['containers'],
                                                       reverse=True)],
@@ -575,7 +627,7 @@ def headline(rows):
 # --- tables ------------------------------------------------------------------
 
 def table_control(doc, rows):
-    print('\n== control: currency `none` against the engine, %d fields =='
+    print('\n== control: the engine-shaped arm against the engine, %d fields =='
           % len(NC1_FIELDS))
     n = bad = 0
     for name, d in rows:

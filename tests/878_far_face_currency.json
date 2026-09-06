@@ -1886,7 +1886,7 @@
   "courtyard_sides_drawn": 2
  },
  "control": {
-  "nc1_fields_per_row": 8,
+  "nc1_fields_per_row": 9,
   "nc1_mismatches": [],
   "nc1_rows": 37,
   "nc2_boards": [
@@ -1898,7 +1898,7 @@
   ],
   "nc2_mismatches": []
  },
- "engine_sha": "b58d5924f3644576634d29600d53502f16ab0d9a",
+ "engine_sha": "c487e00ff88e8d7709de9b5b55fe6f9562ea4408",
  "headline": {
   "double": {
    "busiest.courtyard": [

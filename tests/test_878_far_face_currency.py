@@ -98,7 +98,7 @@ def main():
     check('NC1: currency `none` still reproduces grow_board exactly',
           not c['nc1_mismatches'], str(c['nc1_mismatches'][:2]))
     check('NC1 is not vacuous (it compared some rows)',
-          c['nc1_rows'] >= 30 and c['nc1_fields_per_row'] == 8,
+          c['nc1_rows'] >= 30 and c['nc1_fields_per_row'] == len(M.NC1_FIELDS),
           '%d rows x %d fields' % (c['nc1_rows'], c['nc1_fields_per_row']))
     check('NC2: a board with no drilled pad is identical across currencies',
           not c['nc2_mismatches'], str(c['nc2_mismatches'][:2]))
