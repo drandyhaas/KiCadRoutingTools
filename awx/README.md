@@ -32,8 +32,8 @@ not), which is the regression test for any change here.
    corridors from the geometry (`corridor.py`), a spine per corridor,
    order and layers from the two-page schedule (`schedule.py`), every
    lane routed by the real router inside its band (`connect.py`,
-   `topo_strings.py`). Refused lanes get a last call, a rip assist, and
-   the economy re-lay; what is still refused is reported and left open.
+   `topo_strings.py`). Refused lanes get a wider last call and the economy re-lay;
+   what is still refused is reported and left open.
 4. `grade_k.py BOARD NETS` -- connectivity scoped to the run's nets,
    whole-board DRC at the routed floor, the via census
    (`via_census.py`).
