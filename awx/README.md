@@ -11,19 +11,21 @@ braid routes the lanes:
 Results on the bench (2026-09-06), against the previous chain on the same
 engine (a face-hinted `auto` fanout, the bench's own source teeth):
 
-| K  | previous vias | this chain | plan's own prediction | fanout vs plan |
-|----|---------------|------------|-----------------------|----------------|
-| 4  | 4             | 4          | 4                     | 100 %, per net |
-| 8  | 8             | 10         | 10                    | 100 %          |
-| 15 | 22            | 20         | 20                    | 100 %          |
-| 28 | 38, 0 open    | 45, 2 open | 40                    | 100 %          |
+| K  | previous vias | this chain | plan's own prediction | fanout vs plan | human |
+|----|---------------|------------|-----------------------|----------------|-------|
+| 4  | 4             | 4          | 4                     | 100 %, per net | --    |
+| 8  | 8             | 6          | 6                     | 100 %          | --    |
+| 15 | 22            | 14         | 14, per net           | 100 %          | 22    |
+| 28 | 38, 0 open    | 40         | 36                    | 100 %          | 46    |
 
-All complete and DRC-clean at the routed 0.1 mm floor except K28 (SA9,
-SDQ9 refused by the braid). The plan's total prediction equals the
-braid's result at K4/K8/K15; K28 is the open frontier (see the end).
-Every board the chain writes -- each realized source board, the fanout
-board, the braided board -- is DRC-gated at 0.1 with the quantization
-margin, and the fanout boards are clean with the margin off as well.
+All complete and DRC-clean at the routed 0.1 mm floor (K15 ~20 s, K28
+~75 s with a warm taut memo, 189 s cold; the plan loop is most of it).
+The plan's prediction is exact per net at K15; at K28 the residual is
+two lanes refused in-band and re-laid with a dive at last call, and a
+swimmer at 4 (see the via model below). Every board the chain writes
+-- each realized source board, the fanout board, the braided board --
+is DRC-gated at 0.1 with the quantization margin, and the fanout boards
+are clean with the margin off as well.
 
 ## The chain
 
@@ -137,9 +139,51 @@ inputs. At every K the braid's orders and pages are the planner's.
 Results (bench, same engine, previous chain -> this one): K4 4 -> 4 vias
 (predicted 4, per net identical), K8 8 -> 6 (predicted 6), K15 22 -> 14
 (predicted 12), K28 38 -> 42 (predicted 32); all complete and DRC-clean,
-every berth laid as planned. The prediction still misses page lanes that
-the braid routes with an under-pass (a required stretch on the other
-layer); pricing those is the next modelling item.
+every berth laid as planned. The prediction missed every page lane the
+braid had to route with an under-pass; see the via model below.
+
+### The plan's via model
+
+What a page lane costs is the number of LAYER CHANGES along its whole
+profile (`braid.Corridor.layer_profile`): the tooth's layer, then every
+stretch the schedule requires in s order -- its page over the schedule
+region, and in the tail the OTHER layer wherever a same-layer exit leg
+crosses it -- then its exit leg's layer, then the berth's. Adjacent
+equal layers merge; the changes plus the tooth's and the berth's own
+vias are the lane's prediction (`plan_ends.vias_from_pages(changes=)`).
+The old count saw only the corridor's interior (`xa < s1`), so every
+dive under an exit leg in the tail was free on paper: K28 predicted 32
+for 42 laid, and each miss was a lane forced to the other layer after
+s1. Two things follow from the profile:
+
+- Exit legs choose their layer ALONG s (`lay_lanes`): a lane is crossed
+  only by legs earlier than its own, so with the legs decided in
+  ascending s every stretch the earlier legs imposed -- on the leg's
+  own lane and on the lanes it crosses -- is known when it chooses. A
+  crossed lane already on the other layer pays nothing more; a leg on
+  the layer its lane is already on needs no corner via. Judged by pages
+  alone the old rule sent K28's SA9 F -> B -> F -> B (three changes) for
+  the one the router found. In-band the braid now routes 22 of 28 K28
+  lanes at the first attempt where it routed 8.
+- A later corridor's lane that crosses an earlier corridor's planned
+  lanes on a layer they may use pays one dive, two vias
+  (`braid.cross_corridor_vias`). Unpriced, the honest judge preferred a
+  K15 plan that made SA9 a corridor of its own (predicted 0, realized
+  2, the board 18 for 14).
+
+Measured (HEAD f8b04714 -> this, same bench, warm taut memo, chain time
+unchanged): K15 14 -> 14 vias with the prediction exact per net; K28 42
+-> 40 (predicted 36); K35 56 -> 54 (predicted 59); K41 12 open -> 9
+open, 72 -> 92 vias (three more nets routed; 18 of 37 lanes swim, the
+two-page schedule is past its capacity there, and the plan is the same
+in both arms). The residual at K28 is the braid's in-band execution:
+the lanes it refuses are re-laid at last call, where some pick up a
+dive the plan never asked for. Six execution changes were measured on
+K15/K28 the same day (a layer-blind self-stamp in `cross_reserve`, a
+symmetric launch pitch with a longer fan-in, re-running the best
+attempt, the dodge tube kept out of the fan-in, wider virtual copper,
+exit-corner via reservations set in along the leg) and none was a net
+gain: each moved vias by two to four between lanes. They are not here.
 
 Speed: a taut path depends only on its two ends and the static copper it
 relaxes against, and the loop asked for the same ones at every judgment

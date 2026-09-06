@@ -80,18 +80,27 @@ def plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
 
 
 def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
-                    underpasses=None):
+                    changes=None, cross=None):
     """Per-net vias implied by a page assignment ({net: layer | None}):
-    tooth vias + tooth/page mismatch + the arrival -- straight into the
-    berth: page/berth mismatch; through a side-exit leg on `leg_layer`:
-    page/leg mismatch + leg/berth mismatch -- + berth vias; a swimmer:
-    tooth vias + SWIM_VIAS + berth vias."""
+    tooth vias + the lane's layer CHANGES + berth vias. `changes` is the
+    braid planner's count over the lane's whole profile (tooth, page,
+    the tail stretches under same-layer exit legs, the exit leg, the
+    berth; braid.Corridor.layer_profile); `cross` its dives under
+    earlier corridors' lanes (braid.cross_corridor_vias), which no page
+    sees. Without `changes` the profile is tooth -> page -> (leg) ->
+    berth: tooth/page mismatch + the arrival -- straight into the berth:
+    page/berth mismatch; through a side-exit leg on `leg_layer`: page/leg
+    + leg/berth mismatch. A swimmer: tooth vias + SWIM_VIAS + berth vias."""
     pred = {}
     for n, m in dst_choice.items():
         pg = pages.get(n)
-        tv = tooth_vias.get(n, 0)
+        tv = tooth_vias.get(n, 0) + (cross or {}).get(n, 0)
         if pg is None:
             pred[n] = tv + SWIM_VIAS + m.vias
+            continue
+        ch = (changes or {}).get(n)
+        if ch is not None:
+            pred[n] = tv + ch + m.vias
             continue
         leg = (leg_layer or {}).get(n)
         if leg:
@@ -99,8 +108,7 @@ def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
         else:
             arrive = 1 if m.layer != pg else 0
         pred[n] = (tv + (1 if tooth_layer.get(n, 'F.Cu') != pg else 0)
-                   + arrive + m.vias
-                   + 2 * (underpasses or {}).get(n, 0))
+                   + arrive + m.vias)
     return pred
 
 
