@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""connect(): the ONE braid -> stub connection primitive, on the real router.
+
+The trunk decides order and layers; a connection is the short piece of
+copper from where a net leaves the trunk to the free end of its fanout
+stub. It used to be four hand-drawn mechanisms (a west-face jog, a
+south-port A*, a river climb, a via under a B.Cu stub end), each written
+for one face/layer combination met on one board. This is the general
+form: route the net between the copper island at `a` and the island at
+`b` with the production grid A* (`route_net_with_obstacles`), inside a
+fenced window around the two points, against the production obstacle
+model -- exact pad shapes, per-net clearances, hole-to-hole, everything
+the braid's own disc-and-capsule model approximates. A layer mismatch
+is solved by the search placing the via ("A* only for via placement").
+
+Nothing here knows the board: inputs are a PCBData carrying every piece
+of copper placed so far, a net, two points with their layers, a config,
+and an optional BAND -- two functions of x giving the y interval the
+connection may use, stamped as blocked cells, so a connection routed
+early can never wander into the corridor a later neighbour needs.
+"""
+import math
+import os
+import sys
+from typing import Callable, List, Optional, Tuple
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+
+import numpy as np  # noqa: E402
+from kicad_parser import PCBData, Segment, Via  # noqa: E402
+from routing_config import GridRouteConfig, GridCoord  # noqa: E402
+from routing_utils import build_layer_map  # noqa: E402
+from plane_pad_tap import make_local_window  # noqa: E402
+from obstacle_map import (build_base_obstacle_map,  # noqa: E402
+                          add_same_net_via_clearance,
+                          add_same_net_pad_drill_via_clearance,
+                          same_net_pad_via_keepout_cells)
+from routing_context import _add_free_via_positions  # noqa: E402
+from net_rescue import _fence_window, _result_escapes_window  # noqa: E402
+from single_ended_routing import route_net_with_obstacles  # noqa: E402
+
+Point = Tuple[float, float]
+Band = Tuple[Optional[Callable[[float], float]],
+             Optional[Callable[[float], float]]]
+
+
+def make_config(pcb: PCBData, track: float, clearance: float,
+                via_size: float, via_drill: float, grid_step: float = 0.05,
+                **kw) -> GridRouteConfig:
+    """A routing config for connections: the caller's geometry, the
+    board's own copper layers, a fine grid (the trunk is drawn at
+    arbitrary angles, so the exit points are not on any coarse grid)."""
+    layers = list(pcb.board_info.copper_layers or ['F.Cu', 'B.Cu'])
+    return GridRouteConfig(track_width=track, clearance=clearance,
+                           via_size=via_size, via_drill=via_drill,
+                           grid_step=grid_step, layers=layers, **kw)
+
+
+def _band_cells(coord: GridCoord, window: PCBData, band,
+                layers: List[str], slack: float) -> np.ndarray:
+    """Every window cell outside the band, as an (N, 3) int32 array for
+    add_blocked_cells_batch.
+
+    `band` is one of:
+      * (lo(x), hi(x)) applied to every layer;
+      * {layer_name: fn(x) -> (lo, hi)} -- a per-layer corridor, where
+        lo > hi means the layer is closed at that x. That is how a
+        caller REQUIRES a layer: close the other one. A layer absent
+        from the dict is closed everywhere;
+      * a callable band(xs, ys, layer_name) -> bool mask of shape
+        (len(xs), len(ys)), True where the lane may go -- the general
+        form, for a corridor that is not a function of x (a lane with
+        a corner, a peel leg, a way round an array). `slack` is the
+        callable's own business."""
+    x0, y0, x1, y1 = window.board_info.board_bounds
+    gx0, gy0 = coord.to_grid(x0, y0)
+    gx1, gy1 = coord.to_grid(x1, y1)
+    if callable(band) and not isinstance(band, (tuple, dict)):
+        gxs = np.arange(gx0, gx1 + 1)
+        gys = np.arange(gy0, gy1 + 1)
+        xs = np.array([coord.to_float(int(g), 0)[0] for g in gxs])
+        ys = np.array([coord.to_float(0, int(g))[1] for g in gys])
+        parts = []
+        for L, lname in enumerate(layers):
+            ok = np.asarray(band(xs, ys, lname), dtype=bool)
+            bi, bj = np.nonzero(~ok)
+            if len(bi):
+                parts.append(np.stack([gxs[bi], gys[bj],
+                                       np.full(len(bi), L)], axis=1))
+        if not parts:
+            return np.zeros((0, 3), dtype=np.int32)
+        return np.concatenate(parts).astype(np.int32)
+    # vectorized over gy (the pure-Python double loop was 3.5s of an
+    # 18s braid); the per-gx fn(x) and to_grid calls are kept
+    # CALL-FOR-CALL identical to the loop they replace, so the cell
+    # SET is bit-identical -- only the assembly is numpy
+    per_layer = isinstance(band, dict)
+    gys = np.arange(gy0, gy1 + 1, dtype=np.int32)
+    parts = []
+    for gx in range(gx0, gx1 + 1):
+        x = coord.to_float(gx, 0)[0]
+        for L, lname in enumerate(layers):
+            if per_layer:
+                fn = band.get(lname)
+                if fn is None:
+                    lo, hi = 1e9, -1e9
+                else:
+                    lo, hi = fn(x)
+            else:
+                lo_fn, hi_fn = band
+                lo = lo_fn(x) if lo_fn is not None else -1e9
+                hi = hi_fn(x) if hi_fn is not None else 1e9
+            lo, hi = lo - slack, hi + slack
+            if lo > hi:
+                bad = gys
+            else:
+                glo = coord.to_grid(0.0, lo)[1]
+                ghi = coord.to_grid(0.0, hi)[1]
+                bad = gys[(gys < glo) | (gys > ghi)]
+            if len(bad):
+                arr = np.empty((len(bad), 3), dtype=np.int32)
+                arr[:, 0] = gx
+                arr[:, 1] = bad
+                arr[:, 2] = L
+                parts.append(arr)
+    if not parts:
+        return np.zeros((0, 3), dtype=np.int32)
+    return np.concatenate(parts)
+
+
+VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
+
+
+def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
+            b: Point, b_layer: str, cfg: GridRouteConfig,
+            band=None, margin: float = 1.0,
+            band_slack: float = 0.0,
+            virtual: Optional[List[Tuple[Point, Point, str]]] = None,
+            window_pts: Optional[List[Point]] = None,
+            virtual_vias: Optional[List[Point]] = None,
+            b_alts: Optional[List[Tuple[float, float, str]]] = None,
+            ) -> Optional[Tuple[List[Segment], List[Via]]]:
+    """Route `net_id` from the copper end at `a` (on `a_layer`) to the
+    copper end at `b` (on `b_layer`).
+
+    `pcb` must carry every piece of copper placed so far -- the trunk of
+    every net, the stubs, the connections already made -- because that is
+    what the connection is routed against. Returns the new (segments,
+    vias), NOT yet appended to `pcb`, or None when no route exists inside
+    the window (the caller decides what a refusal means).
+
+    `band`: (lo(x), hi(x)) in board mm, the y interval the connection may
+    occupy (either side None), or {layer: fn(x) -> (lo, hi)} per layer
+    with lo > hi closing that layer at that x -- which is how a caller
+    REQUIRES a layer somewhere. `virtual`: copper that does not exist
+    yet but will -- (p, q, layer) centrelines of lanes not routed yet --
+    stamped as foreign obstacles so a via is never placed where a later
+    lane must pass. `margin`: how far the search window extends past
+    the bounding box of the two points -- and of `window_pts`, the
+    planned path, when the lane goes somewhere the two points' box
+    does not cover (round the far side of an array).
+    """
+    coord = GridCoord(cfg.grid_step)
+    layer_map = build_layer_map(cfg.layers)
+    if a_layer not in layer_map or b_layer not in layer_map:
+        raise ValueError(f'layer not routable: {a_layer} / {b_layer}')
+
+    pts = [a, b] + list(window_pts or [])
+    bx0, bx1 = min(p[0] for p in pts), max(p[0] for p in pts)
+    by0, by1 = min(p[1] for p in pts), max(p[1] for p in pts)
+    cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    half = max(bx1 - bx0, by1 - by0) / 2 + margin
+    window = make_local_window(pcb, cx, cy, half)
+    if not window.board_info.board_bounds:
+        return None
+    if virtual:
+        w = cfg.track_width
+        window.segments = list(window.segments) + [
+            Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
+            for (p, q, layer) in virtual if layer in layer_map]
+    if virtual_vias:
+        # vias that do not exist yet but will: a point a later lane
+        # must change layer at (the corner where it turns onto its
+        # exit leg), stamped as a foreign via so this connection
+        # keeps a via's clearance from it -- a track's band edge is
+        # exactly a via's clearance from the neighbour's
+        # centreline, so a lane hugging its band edge there left
+        # the neighbour's corner no legal via site (K19 SCAS)
+        window.vias = list(window.vias) + [
+            Via(p[0], p[1], cfg.via_size, cfg.via_drill,
+                list(cfg.layers), VIRTUAL_NET) for p in virtual_vias]
+
+    # static_base: the #422 static-bitmap stamp path -- engine-
+    # documented byte-identical, hasattr-guarded, and measured
+    # ~2x on the cold/large windows the margin-escalated retries
+    # build (19.9 -> 10.5 ms; warm small windows equal)
+    obstacles = build_base_obstacle_map(window, cfg, [net_id],
+                                        static_base=True)
+    _fence_window(obstacles, window, cfg)
+    # the net's own barrels are free layer changes, and its own
+    # via/drill spacing still applies (the rescue recipe, #470 and
+    # the h2h guard)
+    _add_free_via_positions(obstacles, window, [net_id], cfg)
+    add_same_net_via_clearance(obstacles, window, net_id, cfg)
+    add_same_net_pad_drill_via_clearance(obstacles, window, net_id, cfg)
+    keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
+    if len(keep):
+        obstacles.add_blocked_vias_batch(keep)
+    if band is not None and (isinstance(band, dict) or callable(band)
+                             or band[0] is not None or band[1] is not None):
+        cells = _band_cells(coord, window, band, list(cfg.layers),
+                            band_slack)
+        if len(cells):
+            obstacles.add_blocked_cells_batch(cells)
+
+    x0, y0, x1, y1 = window.board_info.board_bounds
+    g0 = coord.to_grid(x0, y0)
+    g1 = coord.to_grid(x1, y1)
+    bounds = (g0[0], g0[1], g1[0], g1[1])
+    ga = coord.to_grid(*a)
+    gb = coord.to_grid(*b)
+    sources = [(ga[0], ga[1], layer_map[a_layer], a[0], a[1])]
+    targets = [(gb[0], gb[1], layer_map[b_layer], b[0], b[1])]
+    # b_alts: ALTERNATIVE finish points (earlier stops on the dest
+    # stub) -- the search terminates at whichever target it reaches
+    # cheapest, so a lane that passes the pad no longer climbs to the
+    # stub tip and pays the span twice (#622 berth overshoot)
+    for (xx, yy, ll) in (b_alts or ()):
+        if ll not in layer_map:
+            continue
+        gg = coord.to_grid(xx, yy)
+        targets.append((gg[0], gg[1], layer_map[ll], xx, yy))
+    result = route_net_with_obstacles(window, net_id, cfg, obstacles,
+                                      bounds=bounds,
+                                      sources_override=sources,
+                                      targets_override=targets)
+    debug = False
+    if not result or result.get('failed'):
+        if debug and result:
+            info = {k: v for k, v in result.items()
+                    if k not in ('new_segments', 'new_vias', 'segments',
+                                 'vias', 'path')}
+            print(f'  connect net {net_id}: router failed: {info}')
+        return None
+    if _result_escapes_window(result, window, cfg):
+        if debug:
+            segs = result.get('new_segments') or []
+            xs = [v for s in segs for v in (s.start_x, s.end_x)]
+            ys = [v for s in segs for v in (s.start_y, s.end_y)]
+            print(f'  connect net {net_id}: route escaped the window '
+                  f'[{x0:.2f},{y0:.2f}]-[{x1:.2f},{y1:.2f}]: copper spans '
+                  f'x [{min(xs):.2f},{max(xs):.2f}] y [{min(ys):.2f},{max(ys):.2f}]'
+                  if segs else '  (no segments)')
+        return None
+    return list(result.get('new_segments') or []), \
+        list(result.get('new_vias') or [])
+
+
+def tube_band(poly, hw: float, layer: Optional[str] = None):
+    """A band callable (xs, ys, L) -> mask: the cells within `hw` of the
+    polyline `poly`, on every layer (layer=None) or on `layer` alone
+    (the other layers closed). The PLANNED lane as a tube -- what a
+    re-lay is confined to instead of a free window."""
+    sx = np.array([q[0] for q in poly], dtype=float)
+    sy = np.array([q[1] for q in poly], dtype=float)
+
+    def band(xs, ys, lname):
+        if layer is not None and lname != layer:
+            return np.zeros((len(xs), len(ys)), dtype=bool)
+        X, Y = np.meshgrid(xs, ys, indexing='ij')
+        best = np.full(X.shape, np.inf)
+        for a0, a1, b0, b1 in zip(sx[:-1], sy[:-1], sx[1:], sy[1:]):
+            dx, dy = b0 - a0, b1 - a1
+            ll = dx * dx + dy * dy
+            if ll < 1e-12:
+                d2 = (X - a0) ** 2 + (Y - a1) ** 2
+            else:
+                t = np.clip(((X - a0) * dx + (Y - a1) * dy) / ll, 0.0, 1.0)
+                d2 = (X - a0 - t * dx) ** 2 + (Y - a1 - t * dy) ** 2
+            best = np.minimum(best, d2)
+        return best <= hw * hw
+    return band
+
+
+def seg_len(segs: List[Segment]) -> float:
+    return sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
+               for s in segs)
