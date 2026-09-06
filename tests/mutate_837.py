@@ -257,6 +257,12 @@ ROWS = [
      (CEN,), 'KILLED'),
 ]
 
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
+
 
 def _git_clean(paths):
     r = subprocess.run(['git', 'diff', '--quiet', '--'] + list(paths), cwd=_ROOT)
@@ -382,17 +388,31 @@ def main(argv=None):
     print(f"baseline: {why}")
 
     rows = [r for r in ROWS if not a.row or r[0] in set(a.row)]
-    originals = {k: io.open(v, encoding='utf-8').read()
-                 for k, v in TARGETS.items()}
+    # RAW BYTES for the restore, decoded text for the match (#877). Every write
+    # below lacked `newline=''`, so on Windows a single run rewrote all five
+    # targets in CRLF and left them permanently "modified" -- which then
+    # tripped THIS battery's own dirty-tree refusal on the next run.
+    # `.gitattributes` pins `*.py text eol=lf`, so that was a real corruption.
+    raws = {k: io.open(v, 'rb').read() for k, v in TARGETS.items()}
+    originals = {k: v.decode('utf-8').replace('\r\n', '\n')
+                 for k, v in raws.items()}
     wrong = broken = 0
     try:
         for name, target, old, new, tests, expect in rows:
             src = originals[target]
+            # The count, checked BEFORE the write. This battery had none: its
+            # only protection was the pre-flight, so a stale anchor here was
+            # the silent false KILLED #877 describes rather than a BROKEN.
+            n = src.count(old)
+            if n != 1:
+                print(f"  BROKEN    {name}  (anchor matched {n} times)")
+                broken += 1
+                continue
             _drop_pyc()
-            io.open(TARGETS[target], 'w', encoding='utf-8').write(
+            io.open(TARGETS[target], 'w', encoding='utf-8', newline='').write(
                 src.replace(old, new, 1))
             killed, why = _run(tests)
-            io.open(TARGETS[target], 'w', encoding='utf-8').write(src)
+            io.open(TARGETS[target], 'wb').write(raws[target])
             _drop_pyc()
             got = 'KILLED' if killed else 'SURVIVED'
             mark = 'ok ' if got == expect else 'BAD'
@@ -401,7 +421,7 @@ def main(argv=None):
             print(f"  {mark} {got:9} {name}  ({why})")
     finally:
         for k, v in TARGETS.items():
-            io.open(v, 'w', encoding='utf-8').write(originals[k])
+            io.open(v, 'wb').write(raws[k])   # byte-exact, from what was read
         _drop_pyc()
 
     killed = sum(1 for r in rows if r[5] == 'KILLED')

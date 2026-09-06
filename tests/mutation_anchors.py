@@ -566,6 +566,47 @@ def _prose_problems(anchors):
     return problems
 
 
+def preflight(path, repo_wide=False):
+    """Refuse to mutate anything until every anchor in `path` matches once.
+
+    ONE line at the top of a battery, right after its table:
+
+        from mutation_anchors import preflight
+        preflight(__file__)
+
+    and it also IS the battery's `--verify-anchors`: the flag is handled here
+    and stripped from `sys.argv` before the battery's own argparse sees it, so
+    no battery needs a flag, a help string or a branch of its own. That matters
+    because the alternative was a 38th hand-rolled copy in each of 37 files,
+    each free to drift -- which is how only 5 of them had the check at all.
+
+    Exits 2 on a bad anchor, matching the batteries' existing refusal code, so
+    a stale anchor stops the run in ONE SECOND rather than reporting BROKEN
+    after the witnesses have been paid for. With `--verify-anchors` it reports
+    and exits either way, mutating nothing.
+    """
+    only = '--verify-anchors' in sys.argv
+    if only:
+        sys.argv = [a for a in sys.argv if a != '--verify-anchors']
+    name = os.path.basename(path)
+    anchors, reason = resolve_static(path)
+    if reason:
+        print('%s: ANCHORS UNRESOLVED -- %s' % (name, reason), file=sys.stderr)
+        raise SystemExit(2)
+    problems = verify(anchors, repo_wide=repo_wide)
+    for p in problems:
+        print('  %s' % p, file=sys.stderr)
+    if problems:
+        print('%s: %d of %d anchor(s) do not match exactly once. Re-anchor '
+              'them before running -- a stale row mutates nothing and every '
+              'gate it names passes for free (#877).'
+              % (name, len(problems), len(anchors)), file=sys.stderr)
+        raise SystemExit(2)
+    if only:
+        print('%s: all %d anchor(s) match exactly once' % (name, len(anchors)))
+        raise SystemExit(0)
+
+
 def batteries():
     """Every `tests/mutate_*.py`, sorted. The corpus both callers run over."""
     names = sorted(n for n in os.listdir(TESTS_DIR)

@@ -282,6 +282,12 @@ ROWS = [
      (PERT,), 'KILLED'),
 ]
 
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
+
 
 def _git_clean(paths):
     r = subprocess.run(['git', 'diff', '--quiet', '--'] + list(paths), cwd=_ROOT)
