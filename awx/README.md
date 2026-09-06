@@ -1,45 +1,82 @@
-# awx -- the K28 bus chain (#622)
+# awx -- the K-bus chain (#622): one plan, a fanout that follows it, a braid
 
-The minimal tool set that reproduces the current best practice for
-routing a fanned-out bus between two BGAs (the `fb_t2q_fresh` bench:
-an FPGA `U1` and a DDR3 `DU1`, 28 nets of the coherent K-ladder):
+The tool set for routing a fanned-out bus between two BGAs (the
+`fb_t2q_fresh` bench: an FPGA `U1` and a DDR3 `DU1`, the coherent
+K-ladder), where the PLAN decides both ends of every net, the FANOUT lays
+exactly the plan's moves (and tells the plan what it could not), and the
+braid routes the lanes:
 
-    bash chain_k.sh TAG 28          # -> tmp/TAG_k28.kicad_pcb, graded
+    bash chain_k.sh TAG 4 8 15 28   # -> tmp/TAG_k<K>.kicad_pcb, graded
 
-Reference result on the bench (2026-09-06): 28/28 connected, 0 DRC at
-the routed 0.1 mm floor, 38 vias, 1440 segments, ~52 s end to end.
-The chain is deterministic: `cmp_copper.py A.kicad_pcb B.kicad_pcb`
-reports IDENTICAL copper between two runs (UUIDs differ, copper does
-not), which is the regression test for any change here. Every commit
-on this branch was gated on that identity, for the fanout board and
-the braided board both.
+Results on the bench (2026-09-06), against the previous chain on the same
+engine (a face-hinted `auto` fanout, the bench's own source teeth):
+
+| K  | previous vias | this chain | plan's own prediction | fanout vs plan |
+|----|---------------|------------|-----------------------|----------------|
+| 4  | 4             | 4          | 4                     | 100 %, per net |
+| 8  | 8             | 10         | 10                    | 100 %          |
+| 15 | 22            | 20         | 20                    | 100 %          |
+| 28 | 38, 0 open    | 45, 2 open | 40                    | 100 %          |
+
+All complete and DRC-clean at the routed 0.1 mm floor except K28 (SA9,
+SDQ9 refused by the braid). The plan's total prediction equals the
+braid's result at K4/K8/K15; K28 is the open frontier (see the end).
+Every board the chain writes -- each realized source board, the fanout
+board, the braided board -- is DRC-gated at 0.1 with the quantization
+margin, and the fanout boards are clean with the margin off as well.
 
 ## The chain
 
 1. `coherent_nets.py K` -- the first K routable nets of the coherent
    ladder (`k_ladder_coherent.txt`: whole rivers, tightest first; a
    prefix never splits a river).
-2. `fanout_from_plan.py OUT.kicad_pcb K --board=BASE` -- the PLAN
-   and the destination fanout. `plan_ends.py` picks one escape per
-   ball at the destination from menus of legal moves
-   (`escape_moves.py`), judged by the crossing floor of the lane order
-   the braid will see (`select_moves.py`: bus sides certified by
-   capacity, greedy selection, LIS refinement, layer alignment;
-   `taut_clean.py` and `detect_buses.py` for the taut-path buses,
-   average-linkage clustering), with the source refinement run for its
-   effect on the launch points (its moves are never applied). The
-   chosen directions go to the production engine
-   (`py_router/bga_fanout`, `escape_dir_hints`) which lays the copper;
-   the copper that actually leaves each ball is measured against the
-   plan (`obeyed`). A fanout that is not DRC-clean and complete stops
-   the chain.
+2. `fanout_from_plan.py OUT.kicad_pcb K --board=BASE` -- ONE consistent
+   loop over the plan and both fanouts:
+   * `plan_state` reads everything off the board AS IT IS: the menus of
+     legal escape moves at both ends (`escape_moves.py`; the source menu
+     prices its moves against the other nets' real stubs), the launch
+     points (the source teeth on the board), each tooth's layer and
+     vias, the taut-path buses.
+   * The destination is chosen against those teeth (`select_moves.py`),
+     the source refined on paper against that destination
+     (`plan_ends.refine_source`), and the refinement is REALIZED:
+     `source_realize.py` strips those nets' source copper and re-fans
+     them with the production engine in the plan's full moves, restores
+     any ball the engine refuses, DRC-gates the board, and audits every
+     tooth -- original vs asked vs achieved, per dimension (face, exit
+     gap along the face, layer, kind) and as an ORDER along each face.
+     The next round chooses the destination against the teeth that
+     copper produced; the best round's board and choice are kept.
+   * FEEDBACK: a move the engine did not lay exactly leaves that net's
+     menu (`banned`, keyed by `source_realize.move_sig`) and the round
+     re-plans; the destination is its own select -> fan out -> audit ->
+     ban -> re-select loop that ends only at "every berth laid as
+     planned". The engine is the authority on what is possible.
+   * What the plan is JUDGED on (`plan_ends.judged_cost`): the vias its
+     own model implies -- per net a dive if the corridor cannot keep it
+     on its tooth layer, a via where the delivered layer is not the berth
+     escape's, the berth escape's vias (`select_moves.true_vias`) -- plus
+     the SOURCE escape's vias, plus the ride round BOTH arrays at
+     `VIA_MM` per via (`around_box`, hit-tested against a box shrunk by a
+     hair so a leg along a face is not a hit). Keepers are judged within
+     the corridors the braid will form: `planned_buses` calls the braid's
+     own `corridor.cluster_corridors` on taut paths from each tooth to
+     its planned exit. `explain_plan` prints the model per net (launch
+     and exit order, keepers, predicted vias, crossing pairs) so it can
+     be held against `via_census.py`.
+   * The plan's lane model: two moves cannot share a gap on one layer
+     over overlapping stretches, a dog-bone via is a THROUGH obstacle in
+     any other lane, two teeth cannot share an exit point whatever their
+     layers, and a dog-bone site must be an inter-ball gap (not the
+     boundary line).
 3. `braid.py --board FO.kicad_pcb --dest DU1 --nets ... --out STEM` --
    corridors from the geometry (`corridor.py`: nets whose stubs one
    spine can reach), a straight spine per corridor, launch and target
    orders from the lanes' offsets, the two-page schedule
-   (`schedule.py`: the longest in-order subsequence on the front
-   layer, the worst crossers of the rest on the back layer, the
-   remainder swimmers), and every lane routed by the real router inside
+   (`schedule.py`: pages BY TOOTH LAYER -- page F seeded by the largest
+   crossing-free set among front-born nets, page B among back-born, the
+   rest filling whichever page they do not cross, own layer first; what
+   fits neither swims), and every lane routed by the real router inside
    its band (`connect.py`, `topo_strings.py`), the lanes not yet routed
    stamped as virtual copper. Up to six attempts widen the launch pitch
    and route refused lanes earlier; refused lanes then get a wider last
@@ -55,18 +92,42 @@ No environment variables, no options beyond BASE / DEST (the inputs).
 
 ## What this adds to `py_router` (and nothing else)
 
-`generate_bga_fanout(..., escape_dir_hints=None)`: a per-pad planned
-escape side, keyed by board-frame pad position. Re-keyed into the
-footprint frame for a rotated part, threaded through the
-escape-priority passes and the auto-retry ladder, taken first by the
-channel engine (`preferred_dir`; the target-side preference fills the
-rest when it is on) and by the under-pad engine (a side-constrained
-A* -- per-side heuristic, exit on that side only -- tried before the
-unconstrained one, misses reported). With no hints every path is
-unchanged. The under-pad engine is what lays the whole K28 destination
-fanout (it wins the auto retry after the channel engine drops three
-balls); without the side-aware A* the plan is obeyed by 13 of 28 balls
-instead of 24 and the braid ships 1 open at 64 vias.
+`generate_bga_fanout(..., escape_dir_hints=...)`: a per-pad planned
+escape keyed by board-frame pad position -- a bare FACE (`'down'`), or a
+FULL MOVE (`{'face', 'exit', 'layer', 'kind', 'site'}`: the exit point on
+the boundary line, the layer the run leaves on, `surface` /
+`via_in_pad` / `dogbone`, the dog-bone via point). Re-keyed and
+transformed into the footprint frame for a rotated part
+(`rotate_frame.forward_transform`), threaded through the escape-priority
+passes and the auto-retry ladder; the channel engine reads the face of
+either. The UNDER-PAD engine follows a full move in its plan-follow
+phase (`underpad._follow_plan`): planned balls leave the generic phases,
+their via sites are reserved first (an asked dog-bone site validated
+exactly as the engine's own), every ball is routed to its EXACT move
+deepest-first (the A* takes a goal cell: the boundary cell at the asked
+gap, the only way out), a ball whose exact move is blocked negotiates --
+its blockers among the same call's escapes are found by routing it on a
+pre-commit occupancy snapshot, ripped, the ball laid, the blockers
+re-laid, the state kept only if the count of balls landed as asked rises
+-- and what is still short degrades along the least damaging dimension:
+the nearest free gaps first (+-6 pitches), then the other layer/kind,
+then any face. Every ball's outcome is reported per dimension and
+returned in `pcb_data._fanout_plan_report`. With face-only hints every
+path is unchanged (copper identical to the previous chain); with no hints
+nothing changes at all.
+
+## What is next: one planner
+
+The plan decides each net's lane layer (keeper: its tooth layer; diver:
+the other) and the braid's schedule decides it again from its own orders.
+The two agree in total at K4/K8/K15 and disagree net by net in
+tie-breaks; at K28 the plan predicts 40 and the braid pays 45, because the
+plan prices every non-keeper as a two-via diver while the braid's B page
+must itself be crossing-free, so some divers swim. The plan should compute
+pages with the schedule's own code, price that, and hand the pages to the
+braid. Two K28 specifics: a far-face berth (SA13, DU1's east face) is
+predicted free and costs a corridor of its own, and two lanes (SA9, SDQ9)
+are refused by the braid's virtual-copper walling.
 
 ## History: what `bus622-take4` still has
 

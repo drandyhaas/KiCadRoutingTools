@@ -111,16 +111,28 @@ VIA_MM = 7.5
 
 
 def ride_mm(sel: Dict[str, 'Move'], launch: Dict[str, Pt],
-            keep_out) -> float:
-    """Total corridor ride length the destination choice implies: each
-    net's around-the-array distance from its launch point to its berth
-    exit. The judged plan objective adds this at VIA_MM per via so a
-    berth on a far face pays its wrap -- the general cost that replaces
-    face restrictions (a floor-only objective walked berths to far
-    faces for free and unrestricted plans routed WORSE than restricted
-    ones)."""
-    return sum(around_box(launch[n], m.exit_pt, keep_out)
-               for n, m in sel.items() if n in launch)
+            keep_out, src_box=None) -> float:
+    """Total corridor ride length the choice implies: each net's
+    around-the-arrays distance from its launch point to its berth exit.
+    The judged plan objective adds this at VIA_MM per via so a berth on
+    a far face pays its wrap -- the general cost that replaces face
+    restrictions (a floor-only objective walked berths to far faces for
+    free and unrestricted plans routed WORSE than restricted ones). With
+    `src_box` the SOURCE array is a wall too: a tooth on the face away
+    from the destination pays its way round it (K28: the plan sent
+    SDQ15 out U1's west face for free, and the braid made it a corridor
+    of one)."""
+    tot = 0.0
+    for n, m in sel.items():
+        if n not in launch:
+            continue
+        a, b = launch[n], m.exit_pt
+        d = around_box(a, b, keep_out)
+        if src_box is not None:
+            straight = math.hypot(b[0] - a[0], b[1] - a[1])
+            d += around_box(a, b, src_box) - straight
+        tot += d
+    return tot
 
 
 def around_box(a: Pt, b: Pt, box, pad: float = 0.3) -> float:
@@ -131,16 +143,23 @@ def around_box(a: Pt, b: Pt, box, pad: float = 0.3) -> float:
     could ever realise."""
     x0, y0, x1, y1 = box
     box = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
-    if not _seg_hits_box(a, b, box):
+    # the hit tests run against a box shrunk by a hair: a tooth sits a
+    # few tens of microns outside the padded box, and the leg from it to
+    # a corner runs ALONG the face -- it touches the boundary, and a touch
+    # counted as a hit vetoed every way round, so a west-face tooth was
+    # priced at the straight line through the array (K4 SDQ11)
+    e = 0.05
+    inner = (box[0] + e, box[1] + e, box[2] - e, box[3] - e)
+    if not _seg_hits_box(a, b, inner):
         return math.hypot(b[0] - a[0], b[1] - a[1])
     x0, y0, x1, y1 = box
     corners = ((x0, y0), (x1, y0), (x0, y1), (x1, y1))
     best = float('inf')
     for c1 in corners:
         for c2 in corners:
-            if _seg_hits_box(a, c1, box) or _seg_hits_box(c2, b, box):
+            if _seg_hits_box(a, c1, inner) or _seg_hits_box(c2, b, inner):
                 continue
-            if c1 != c2 and _seg_hits_box(c1, c2, box):
+            if c1 != c2 and _seg_hits_box(c1, c2, inner):
                 continue
             d = (math.hypot(c1[0] - a[0], c1[1] - a[1])
                  + math.hypot(c2[0] - c1[0], c2[1] - c1[1])
@@ -509,7 +528,38 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
         return True
     if m.site is not None and _site_key(om) == _site_key(m):
         return True
+    # a dog-bone's via spans every layer: if it sits in the other
+    # move's gap, inside the stretch that move runs along it, the two
+    # cannot both be laid whatever their layers (K28: SODT0's site in
+    # SCKE0's column gap, SDQ0's in SDQ14's row gap -- the fanout, which
+    # now lays the plan's moves exactly, refused the second of each pair)
+    if _site_in_lane(om, key, a, b) or _site_in_lane(m, ok, oa, ob):
+        return True
+    # two teeth cannot share one exit point, whatever their layers: the
+    # braid orders lanes by their offset at the array, and two lanes at
+    # one offset have no pitch between them (K28: SA6 on F and SBA1 on B
+    # at DU1's (146.35, 62.56), a corridor of two, both refused)
+    if (abs(m.exit_pt[0] - om.exit_pt[0]) < _EXIT_TOL
+            and abs(m.exit_pt[1] - om.exit_pt[1]) < _EXIT_TOL):
+        return True
     return False
+
+
+_EXIT_TOL = 0.16    # half a fine-pitch gap
+
+
+_VIA_REACH = 0.30   # via radius + clearance + half a track, rounded up
+
+
+def _site_in_lane(dm: Move, key, a, b) -> bool:
+    """Does dm's dog-bone via (any layer) sit inside the lane `key`
+    over [a, b]?"""
+    if dm.kind != 'dogbone' or dm.site is None:
+        return False
+    sx, sy = dm.site
+    if key[0] == 'row':
+        return abs(sy - key[1]) < _VIA_REACH and a - _VIA_REACH < sx < b + _VIA_REACH
+    return abs(sx - key[1]) < _VIA_REACH and a - _VIA_REACH < sy < b + _VIA_REACH
 
 
 def lanes_free(m: Move, sel: Dict[str, Move], me: str,

@@ -35,12 +35,37 @@ Pt = Tuple[float, float]
 
 
 
+def judged_cost(dst_choice, launch, dst_box, cache, src_box,
+                tooth_layer, tooth_vias, buses=None):
+    """What a plan is judged on: the VIAS it implies, in the plan's own
+    model -- per net a dive if the corridor cannot keep it on its tooth
+    layer, a via where the delivered layer is not the berth escape's, the
+    berth escape's own vias (select_moves.true_vias) -- PLUS the source
+    escape's own vias (a dog-bone or via-in-pad tooth is a via the
+    crossing floor never saw: at K4 the floor-only objective sent SDQ15
+    out the north face and SDQ11 out the WEST face on dog-bones to buy
+    a crossing-free order, 4 -> 6 realized vias), plus the ride round
+    both arrays at VIA_MM per via."""
+    geo = sm.Corridor(dst_box, launch, cache=cache)
+    # the groups a keeper is judged within are the BRAID's corridors --
+    # the taut-path clusters (detect_buses), which is how the braid
+    # decomposes the bus -- not the destination faces: at K8 the braid
+    # routes all eight nets as one corridor, and a net the face model
+    # called a free keeper of a three-net 'up' group crossed the 'left'
+    # nets and paid two vias
+    groups = list(buses) if buses else sm.corridor_groups(dst_choice)
+    return (sm.true_vias(dst_choice, groups, geo, tooth_layer)
+            + sum(tooth_vias.get(n, 0) for n in dst_choice)
+            + sm.ride_mm(dst_choice, launch, dst_box, src_box) / sm.VIA_MM)
+
+
 def refine_source(src_choice: Dict[str, Move],
                   src_menu: Dict[str, List[Move]],
                   dst_choice: Dict[str, Move],
                   dst_box, launch0: Dict[str, Pt],
                   rounds: int = 5, cache=None, log=None,
-                  ):
+                  src_box=None, tooth_layer0=None, tooth_vias0=None,
+                  buses=None):
     """Move source exits to cut the WHOLE-PLAN cost, one net at a time.
 
     select() at the source end optimises select()'s cost -- reach,
@@ -68,14 +93,17 @@ def refine_source(src_choice: Dict[str, Move],
     """
     cache = cache if cache is not None else {}
     launch = dict(launch0)
+    tl = dict(tooth_layer0 or {})
+    tv = dict(tooth_vias0 or {})
     for n, m in src_choice.items():
         launch[n] = m.exit_pt
+        tl[n] = m.layer
+        tv[n] = m.vias
 
-    def cost(launch_c):
-        geo = sm.Corridor(dst_box, launch_c, cache=cache)
-        return (sm.plan_floor(dst_choice, geo)
-                + sm.ride_mm(dst_choice, launch_c, dst_box) / sm.VIA_MM)
-    cur = cost(launch)
+    def cost(launch_c, tl_c, tv_c):
+        return judged_cost(dst_choice, launch_c, dst_box, cache, src_box,
+                           tl_c, tv_c, buses)
+    cur = cost(launch, tl, tv)
     best = (cur, dict(launch), dict(src_choice))
     for r in range(rounds):
         moved = 0
@@ -83,17 +111,21 @@ def refine_source(src_choice: Dict[str, Move],
             if n not in dst_choice:
                 continue
             for m in src_menu[n]:
-                if m.exit_pt == launch.get(n):
+                if m.exit_pt == launch.get(n) and m.layer == tl.get(n):
                     continue
                 if not sm.lanes_free(m, src_choice, n, strict=False):
                     continue
                 cand = dict(launch)
                 cand[n] = m.exit_pt
-                f = cost(cand)
+                ctl = dict(tl)
+                ctl[n] = m.layer
+                ctv = dict(tv)
+                ctv[n] = m.vias
+                f = cost(cand, ctl, ctv)
                 if f <= cur:
                     if f < cur:
                         moved += 1
-                    cur, launch = f, cand
+                    cur, launch, tl, tv = f, cand, ctl, ctv
                     src_choice[n] = m
                     if cur < best[0]:
                         best = (cur, dict(launch), dict(src_choice))

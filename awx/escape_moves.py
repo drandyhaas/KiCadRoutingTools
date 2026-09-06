@@ -149,6 +149,12 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
     # site to the direction hid half the options.
     for (sx, sy) in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
         site = (px + sx * hx, py + sy * hy)
+        # the site must be an INTER-ball gap: an edge ball's outward
+        # diagonal lies on the boundary line, where the run from the via
+        # to the exit is a few microns long and the braid reads no tooth
+        # (K28 SODT0: a corridor of one net, refused)
+        if not (x0 < site[0] < x1 and y0 < site[1] < y1):
+            continue
         if via_clear and not all(via_clear(site, lay) for lay in layers):
             continue
         if not clear((px, py), site, home):

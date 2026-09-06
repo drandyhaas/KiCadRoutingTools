@@ -36,6 +36,23 @@ def _fold_angle(a: float) -> float:
     return a if a <= 90.0 else a - 180.0
 
 
+def forward_transform(pcb_data: PCBData, ref: str
+                      ) -> Callable[[float, float], Tuple[float, float]]:
+    """The real -> rotated point map to_axis_aligned_frame applies to `ref`'s
+    pads (the same rotation about the same centre), for callers that must
+    carry their own board points -- a planned escape's exit or via site --
+    into the routing frame."""
+    fp = pcb_data.footprints[ref]
+    cx, cy = fp.x, fp.y
+    fr = math.radians(fp.rotation)
+    fcos, fsin = math.cos(fr), math.sin(fr)
+
+    def fwd(x, y):
+        dx, dy = x - cx, y - cy
+        return (cx + fcos * dx - fsin * dy, cy + fsin * dx + fcos * dy)
+    return fwd
+
+
 def to_axis_aligned_frame(pcb_data: PCBData, ref: str
                           ) -> Tuple[PCBData, Callable[[float, float], Tuple[float, float]]]:
     """Return (rotated_pcb, back_transform).

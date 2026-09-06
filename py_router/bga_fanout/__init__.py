@@ -2778,16 +2778,32 @@ def _generate_bga_fanout_core(footprint: Footprint,
                     'down': (0.0, 1.0), 'up': (0.0, -1.0)}
             _th = _m.radians(-footprint.rotation)
             _c, _s = _m.cos(_th), _m.sin(_th)
+            from bga_fanout.rotate_frame import forward_transform
+            _fwd = forward_transform(pcb_data, footprint.reference)
             _moved = {}
             for p in footprint.pads:
                 d = _hints.get((round(p.global_x, 3), round(p.global_y, 3)))
                 q = _rot.get(p.pad_number)
-                if d is None or q is None or d not in _vec:
+                if d is None or q is None:
+                    continue
+                _full = d if isinstance(d, dict) else None
+                d = _full['face'] if _full else d
+                if d not in _vec:
                     continue
                 vx, vy = _vec[d]
                 rx, ry = vx * _c - vy * _s, vx * _s + vy * _c
                 nd = min(_vec, key=lambda k: (_vec[k][0] - rx) ** 2
                          + (_vec[k][1] - ry) ** 2)
+                if _full:
+                    # a full move's exit and via site are BOARD points: carry
+                    # them into the routing frame with the pads
+                    _m = dict(_full)
+                    _m['face'] = nd
+                    if _m.get('exit') is not None:
+                        _m['exit'] = _fwd(*_m['exit'])
+                    if _m.get('site') is not None:
+                        _m['site'] = _fwd(*_m['site'])
+                    nd = _m
                 _moved[(round(q.global_x, 3), round(q.global_y, 3))] = nd
             _hints = _moved
         tracks, vias_to_add, vias_to_remove, failed_nets = _generate_bga_fanout_core(
@@ -3521,7 +3537,10 @@ def _generate_bga_fanout_core(footprint: Footprint,
         # the caller's planned directions (escape_dir_hints, keyed by
         # pad position) take precedence; the target-side preference
         # fills in the rest when it is on
-        _toward_targets = dict(escape_dir_hints or {})
+        # a hint may be a bare face or a FULL planned move (a dict, see
+        # underpad._move_of); the channel engine reads the face of either
+        _toward_targets = {_k: (_v['face'] if isinstance(_v, dict) else _v)
+                           for _k, _v in (escape_dir_hints or {}).items()}
         _n_planned = len(_toward_targets)
         if env_knobs.FANOUT_TOWARD_TARGETS:
             from bga_fanout.escape import preferred_escape_dirs
