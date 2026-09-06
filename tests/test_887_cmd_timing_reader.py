@@ -268,9 +268,18 @@ def test_the_reader_imports_without_pillow():
 #: everywhere in ordinary code: `metadata` contains one and `enumerate`
 #: contains the other -- which this list caught the moment it was written.
 #: The rest are specific enough to match as substrings.
+#:
+#: `remaining` is deliberately NOT here, and the reason is the whole point of
+#: the feature. A remaining figure computed as `t1 - instant`, from a ledger
+#: that demonstrably spans the film, is the SUBTRACTION OF TWO RECORDED FACTS --
+#: the movie is built after the run, so the total is not a guess. Banning the
+#: word would have forced a worse name onto an honest number. What actually
+#: needs guarding is the BEHAVIOUR, and
+#: `test_a_remaining_figure_is_exact_or_absent` does that: it must equal
+#: t1 - instant exactly, and must be absent whenever coverage is not proven.
 _BANNED_TOKENS = ('eta', 'rate')
 _BANNED_SUBSTRINGS = ('estimate', 'forecast', 'predict', 'extrapolat',
-                      'projection', 'remaining')
+                      'projection')
 
 
 def _predicting_names(src):
