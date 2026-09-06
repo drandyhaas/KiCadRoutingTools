@@ -154,11 +154,11 @@ for label, rel, old, new, why in ROWS:
         # RAW BYTES for the restore, decoded text for the match (#877).
         # Writing without `newline=''` translates every '\n' to os.linesep, so
         # on Windows one run rewrote the whole target in CRLF and left it
-        # permanently "modified" -- which then tripped a dirty-tree refusal on
-        # the next run. `.gitattributes` pins `*.py text eol=lf`, so that was a
-        # real corruption, not a preference. `mutate_711.py:296-321` has the
-        # same pair and records the other half: matching a multi-line anchor
-        # against a RAW decode silently found nothing in three rows.
+        # modified in `git status`. `.gitattributes` pins `*.py text eol=lf`,
+        # so that is a real corruption, not a preference -- and this battery
+        # has NO dirty-tree refusal to notice it. `mutate_711.py` has the same
+        # raw/decoded pair and records the other half: matching a multi-line
+        # anchor against a RAW decode silently found nothing in three rows.
         raw = open(path, 'rb').read()
         with open(path, encoding='utf-8') as f:
             original = f.read()

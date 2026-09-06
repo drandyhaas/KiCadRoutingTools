@@ -20,11 +20,14 @@ implementation of that question in the tree, for two callers:
   * `tests/test_718_static_test_hygiene.py`, over every battery, without
     importing any of them (`resolve_static` -> `verify`).
 
-The second caller exists today; the batteries are converted in the same PR.
-Until that lands, the five hand-rolled `--verify-anchors` implementations
-(`mutate_714`, `726`, `837`, `847`, `850_848`) are still the shipped state, and
-`mutate_726.py:248-280`'s is STRICTER than this module's default -- its prose
-check is always on, where here it needs `--repo-wide`.
+Both callers exist. Every battery calls `preflight`, which also HANDLES
+`--verify-anchors` and strips it from `sys.argv`, so the five hand-rolled
+implementations that predate this (`mutate_714`, `726`, `837`, `847`,
+`850_848`) are no longer what answers that flag. One of them was STRICTER than
+this module's default -- `mutate_726`'s also refuses an anchor occurring in
+another tracked file, the prose trap -- so that battery passes
+`repo_wide=True`. A shared check that silently weakened a battery's own would
+be this module's defect in miniature.
 
 **Static resolution is not an optimisation, it is the only safe way.**
 `mutate_713_census.py`, `mutate_713_phase1.py` and `mutate_760.py` run their
@@ -42,8 +45,8 @@ Distinctions a plain `count(old) != 1` does not draw:
     rows as stale.
 
   * **NEWLINE_SENSITIVE**: the anchor's verdict changes with how the target is
-    read. This module reads universal-newline, and so does `mutate_711.py`
-    (`:296-305`), whose comment records that matching a raw byte decode
+    read. This module reads universal-newline, and so does `mutate_711.py`,
+    whose comment records that matching a raw byte decode
     "silently found NOTHING in three rows". But 18 batteries read their target
     with `newline=''`, so on a CRLF checkout the census and the battery would
     disagree. Dormant on this tree -- `.gitattributes` pins `*.py text eol=lf`
@@ -52,7 +55,7 @@ Distinctions a plain `count(old) != 1` does not draw:
   * A **create row** (`old is None`, `mutate_713_census.py`'s "a NEW file with
     a clock, registered nowhere") carries no anchor, but it is not unchecked:
     the battery reports BROKEN when the file it means to create already exists
-    (`mutate_713_census.py:129-132`), and that is what is graded here.
+    (`mutate_713_census.py's create-exists check`), and that is what is graded here.
 
     python3 tests/mutation_anchors.py               # census over every battery
     python3 tests/mutation_anchors.py --verbose     # every anchor, one a line
@@ -87,10 +90,10 @@ _TABLE_NAME_RE = re.compile(r'^(ROWS|[A-Z_]*_ROWS)$')
 class Anchor(object):
     """One `old` string, and the file it must occur in exactly once.
 
-    `nth` is the optional occurrence selector `mutate_760.py:65-79` implements
-    (`row[4]`), which replaces the Nth match instead of the first -- so its
-    requirement is "at least nth+1 matches", not "exactly one". No row uses it
-    today; the form is supported because the battery accepts it.
+    `nth` is the optional occurrence selector `mutate_760.py` implements as a
+    fifth row element, which replaces the Nth match instead of the first -- so
+    its requirement is "at least nth+1 matches", not "exactly one". No row uses
+    it today; the form is supported because that battery accepts it.
 
     `old is None` marks a create-this-file row, which has no anchor.
     """
@@ -256,6 +259,24 @@ def _is_row_table(value):
     return True
 
 
+def _looks_like_a_table(node):
+    """SYNTACTICALLY a mutation table: a non-empty list/tuple of tuples.
+
+    The name test alone was not enough. A second table called `GUI_TABLE`,
+    `ROWS2` or `MUTATIONS` -- or one built by a comprehension -- fell through
+    both arms of `_tables` and VANISHED, and the battery reported clean about
+    rows nobody checked. Shape catches what the name misses, and a table this
+    can see but not fold is exactly the case that must refuse rather than
+    disappear.
+    """
+    if isinstance(node, (ast.ListComp, ast.GeneratorExp)):
+        return True
+    if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+        return False
+    return all(isinstance(e, (ast.Tuple, ast.List, ast.Call, ast.Starred))
+               for e in node.elts)
+
+
 def _tables(tree, env):
     """([(name, rows)], reason) for the module-level mutation tables.
 
@@ -274,16 +295,16 @@ def _tables(tree, env):
     rebound at module scope twice over, silently doubling its anchors.
     """
     seen, out = set(), []
-    for name, _node in _assignments(tree):
+    for name, node in _assignments(tree):
         if name in seen:
             continue
         seen.add(name)
         value = env.get(name, UNKNOWN)
         if _is_row_table(value):
             out.append((name, value))
-        elif _TABLE_NAME_RE.match(name):
-            return [], ('%s is named like a mutation table but did not '
-                        'resolve to one' % name)
+        elif _TABLE_NAME_RE.match(name) or _looks_like_a_table(node):
+            return [], ('%s is shaped or named like a mutation table but did '
+                        'not resolve to one' % name)
     if not out:
         return [], 'no mutation table found'
     return out, None
@@ -342,7 +363,7 @@ def _edits(old):
     """The `old` of each edit in a row, expanding the list-valued form.
 
     14 batteries let `old` be a list of `(old, new)` pairs with `new` None
-    (`mutate_554.py:78-83`); `mutate_553.py:301-310` applies them as
+    (`mutate_554.py:78-83`); `mutate_553.py's edit loop` applies them as
     `for o, nw in edits`, so element 0 of each pair is the anchor. Each pair is
     its own anchor -- one going stale breaks the row exactly as a scalar anchor
     would, and #877's census counted the ROW rather than the pair.
@@ -491,7 +512,7 @@ def verify(anchors, repo_wide=False):
         if a.old is None:
             # A create row has no anchor, but it is not unchecked: the battery
             # refuses when the file it means to create is already there
-            # (`mutate_713_census.py:129-132`).
+            # (`mutate_713_census.py's create-exists check`).
             if os.path.exists(a.target):
                 problems.append(Problem(
                     a, CREATE_EXISTS, 0,
@@ -533,13 +554,21 @@ def verify(anchors, repo_wide=False):
 def _prose_problems(anchors):
     """Anchors that also occur in another tracked file.
 
-    `mutate_726.py:248-280`'s check, kept: a comment quoting code has satisfied
+    `mutate_726.py's verify_anchors`'s check, kept: a comment quoting code has satisfied
     a grep-shaped test in this repo before, and a battery that mutates a
     comment reports SURVIVED for a mutation that changed nothing executable.
     """
     import subprocess
-    listed = subprocess.run(['git', 'ls-files', '*.py', '*.md'], cwd=ROOT,
-                            capture_output=True, text=True).stdout.split()
+    r = subprocess.run(['git', 'ls-files', '*.py', '*.md'], cwd=ROOT,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        # Zero tracked files would mean zero prose problems and a clean
+        # report -- the same shape as the defect this module polices. Refuse
+        # instead of answering from an empty list.
+        raise RuntimeError(
+            'git ls-files failed (%d), so the prose check has no corpus and '
+            'cannot answer: %s' % (r.returncode, (r.stderr or '').strip()))
+    listed = r.stdout.split()
     texts = {}
     for rel in listed:
         path = os.path.join(ROOT, rel)

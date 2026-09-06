@@ -209,7 +209,12 @@ ROWS = [
 # rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
 # witnesses have been paid for; this is the one second (#877).
 from mutation_anchors import preflight   # noqa: E402
-preflight(__file__)
+# `repo_wide=True` because THIS battery's own check was the strictest in the
+# tree: `verify_anchors` below also refuses an anchor that occurs in another
+# tracked file, the prose trap its docstring describes. `preflight` handles
+# `--verify-anchors` itself, so without this the shared check would have
+# SHADOWED the stricter one and quietly dropped that column.
+preflight(__file__, repo_wide=True)
 
 
 def _uncache(path):

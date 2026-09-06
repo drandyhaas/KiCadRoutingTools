@@ -390,9 +390,15 @@ def main(argv=None):
     rows = [r for r in ROWS if not a.row or r[0] in set(a.row)]
     # RAW BYTES for the restore, decoded text for the match (#877). Every write
     # below lacked `newline=''`, so on Windows a single run rewrote all five
-    # targets in CRLF and left them permanently "modified" -- which then
-    # tripped THIS battery's own dirty-tree refusal on the next run.
-    # `.gitattributes` pins `*.py text eol=lf`, so that was a real corruption.
+    # targets in CRLF. `.gitattributes` pins `*.py text eol=lf`, so that is a
+    # real corruption of the working tree, and `git status --porcelain` shows
+    # all five as modified afterwards.
+    #
+    # It does NOT trip this battery's own refusal, which is `git diff --quiet`
+    # (:267): that applies the `text eol=lf` clean filter and reports a pure
+    # CRLF rewrite as CLEAN. So the damage was silent to the one guard that
+    # might have caught it -- worse than the first draft of this comment
+    # claimed, not better.
     raws = {k: io.open(v, 'rb').read() for k, v in TARGETS.items()}
     originals = {k: v.decode('utf-8').replace('\r\n', '\n')
                  for k, v in raws.items()}
@@ -400,9 +406,18 @@ def main(argv=None):
     try:
         for name, target, old, new, tests, expect in rows:
             src = originals[target]
-            # The count, checked BEFORE the write. This battery had none: its
-            # only protection was the pre-flight, so a stale anchor here was
-            # the silent false KILLED #877 describes rather than a BROKEN.
+            # The count, checked BEFORE the write. This battery had none --
+            # every other one counts here -- so its ONLY protection was the
+            # pre-flight at the top of main(). Belt and braces, not a live
+            # bug: with the pre-flight in place this branch is unreachable.
+            #
+            # What a stale anchor here would produce is SURVIVED, not KILLED:
+            # `replace` of an absent needle is a no-op, the witnesses pass, and
+            # `_run` reports not-killed. Of the 26 rows, 24 expect KILLED and
+            # would print `BAD SURVIVED` and exit 1; only the 2 that expect
+            # SURVIVED would pass silently. #877's title says such a row
+            # "reports KILLED", and that direction is wrong -- `mutate_702`'s
+            # own docstring has it right.
             n = src.count(old)
             if n != 1:
                 print(f"  BROKEN    {name}  (anchor matched {n} times)")

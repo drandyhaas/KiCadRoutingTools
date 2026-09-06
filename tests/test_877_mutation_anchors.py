@@ -17,7 +17,7 @@ reported a clean result for all five. They are kept as change detectors:
   3. a table bound twice at module scope, which was counted TWICE -- and an
      inflated anchor count is invisible against a floor;
   4. a create-this-file row aimed at a file that already exists, the one
-     condition `mutate_713_census.py:129-132` reports BROKEN for and the one
+     condition `mutate_713_census.py's create-exists check` reports BROKEN for and the one
      the first draft skipped outright;
   5. a table both layouts fit, which must be REFUSED rather than guessed; and
   6. a row whose `old` is itself a path to a real file, which was read as the
@@ -125,6 +125,34 @@ def test_a_helper_built_table_is_refused_not_dropped():
     print('  PASS: a helper-built table is named, not dropped')
 
 
+def test_an_unreadable_table_is_refused_whatever_it_is_called():
+    """The refusal must rest on SHAPE, not only on the name `*_ROWS`.
+
+    The first fix keyed only on the name, so a second table called `GUI_TABLE`,
+    `ROWS2` or `MUTATIONS` -- or one built by a comprehension -- still vanished
+    and the battery still reported clean. Each fixture below hides a row whose
+    anchor matches nothing, so a silent drop is a silent false pass.
+    """
+    bodies = {
+        'GUI_TABLE': 'GUI_TABLE = [_row(%r, %r, %r)]\n' % ('r2', GONE, 'y'),
+        'ROWS2': 'ROWS2 = [_row(%r, %r, %r)]\n' % ('r2', GONE, 'y'),
+        'MUTATIONS': ('MUTATIONS = [(n, %r, "y") for n in ("r2",)]\n' % GONE),
+    }
+    missed = []
+    for name, extra in bodies.items():
+        with _Fixture() as fx:
+            _a, reason, _p = fx.battery('mutate_probe_%s.py' % name.lower(), (
+                'def _row(a, b, c):\n    return (a, b, c)\n'
+                'ROWS = [(%r, %r, %r)]\n' % ('r1', UNIQUE, 'x')) + extra)
+        if reason is None:
+            missed.append(name)
+    assert not missed, (
+        f'a second, unreadable table named {missed} was dropped in silence. '
+        f'The guard must key on the SHAPE of the value -- a list of tuples '
+        f'that would not fold -- not only on the name matching *_ROWS.')
+    print('  PASS: an unreadable table is refused whatever it is called')
+
+
 def test_an_annotated_table_assignment_is_seen():
     """`ROWS: List[Row] = [...]` binds exactly as `ROWS = [...]` does.
 
@@ -170,12 +198,16 @@ def test_a_create_row_whose_file_exists_is_reported():
     """The one condition a create row can fail, graded rather than skipped.
 
     A create row carries no anchor, so skipping it looked right -- but
-    `mutate_713_census.py:129-132` reports BROKEN when the file it means to
+    `mutate_713_census.py's create-exists check` reports BROKEN when the file it means to
     create is already there. Skipping meant the row the resolver singles out
     for special handling was the one row it checked nothing about.
     """
     with _Fixture() as fx:
-        rel = os.path.relpath(fx.engine, ROOT).replace(os.sep, '/')
+        # ABSOLUTE, not repo-relative: `os.path.relpath` raises
+        # ValueError when TEMP and the repo are on different Windows
+        # drives, which turned this gate into an error on an ordinary
+        # C:-temp / D:-repo box. `_abs_target` takes either.
+        rel = fx.engine.replace(os.sep, '/')
         _a, reason, problems = fx.battery('mutate_probe_h.py', (
             'GATE = ENGINE_TEST\n'
             'ROWS = [(%r, %r, None, %r, %r)]\n'
@@ -196,7 +228,11 @@ def test_an_ambiguous_table_is_refused_not_guessed():
     read by a person.
     """
     with _Fixture() as fx:
-        rel = os.path.relpath(fx.engine, ROOT).replace(os.sep, '/')
+        # ABSOLUTE, not repo-relative: `os.path.relpath` raises
+        # ValueError when TEMP and the repo are on different Windows
+        # drives, which turned this gate into an error on an ordinary
+        # C:-temp / D:-repo box. `_abs_target` takes either.
+        rel = fx.engine.replace(os.sep, '/')
         _a, reason, _p = fx.battery('mutate_probe_i.py', (
             'ROWS = [(%r, %r, %r)]\n' % ('r', rel, 'x')))
     assert reason and 'two ways' in reason, (
@@ -287,6 +323,7 @@ def test_the_corpus_is_populated():
 
 TESTS = [
     test_a_helper_built_table_is_refused_not_dropped,
+    test_an_unreadable_table_is_refused_whatever_it_is_called,
     test_an_annotated_table_assignment_is_seen,
     test_a_table_bound_twice_is_counted_once,
     test_a_create_row_whose_file_exists_is_reported,

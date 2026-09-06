@@ -217,10 +217,18 @@ ROWS = [
      'SURVIVED'),
 
     # ---- the reconciliation ---------------------------------------------
+    # The mutation is on the ADMISSION TEST only. `b31adcea` turned the
+    # comprehension into a loop where `shared` feeds two consumers -- the
+    # filter AND the charged rect -- so mutating `shared` would also inflate
+    # every admitted neighbour's box, and a kill could no longer be attributed
+    # to the one-sided test the row is named for. Mutating the `if` keeps the
+    # rect identical on both arms, which is what the comprehension's
+    # `_geom[g.ref].rect` did.
     ('routability-keeps-its-one-sided-side-test', 'rou',
-     """        shared = own_sides & g.sides""",
-     """        shared = (g.sides if footprint_side(fp) in g.sides
-                  else frozenset())""",
+     """        if not shared:
+            continue""",
+     """        if footprint_side(fp) not in g.sides:
+            continue""",
      (T835,), 'KILLED'),
 
     ('routability-goes-back-to-double-charging', 'rou',

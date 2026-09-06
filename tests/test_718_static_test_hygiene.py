@@ -958,13 +958,32 @@ def test_every_mutation_anchor_matches_exactly_once():
     "a stale anchor reports BROKEN 50 minutes into a run rather than in one
     second before it". This is the one second, and it is the only thing in the
     tree that runs over ALL the batteries: they are deliberately not named
-    `test_*`, so `run_all.discover()` never collects them, and at the time #877
-    was filed 8 of the 37 had been red for months with nobody looking.
+    `test_*`, so `run_all.discover()` never collects them, and nothing else
+    does either.
+
+    HOW LONG THEY HAD BEEN RED, measured rather than guessed, because the first
+    draft of this docstring said "months" and that flattered the change: the
+    earliest staling commit is `b02761b7` (2026-08-26) and #877 was filed
+    2026-09-05, so the worst case is TEN DAYS and two batteries had been red
+    for one. The argument for this gate is not that the rot is ancient -- it is
+    that nothing in the tree could see it at all, so its age was never bounded
+    by anything but luck.
 
     Measured at 0aff32c0, before the re-anchoring pass: 29 stale anchors and 3
-    ambiguous ones across 9 batteries, of 831. #877 reported 24, missing
-    `mutate_834_835.py`'s 7 entirely and counting `mutate_703.py`'s 3 ambiguous
-    rows as stale.
+    ambiguous ones across 9 batteries, of 831 anchors in 822 rows.
+
+    #877 reported 24 of 581. Neither number reproduces, and the difference is
+    method, not drift -- both re-measure identically at the commit it cites:
+
+      * it MISSED `mutate_834_835.py` entirely, which has 7 (the third-worst);
+      * it counted `mutate_703.py`'s 3 rows as stale where they are AMBIGUOUS,
+        matching twice rather than never; and
+      * its denominators are SCALAR-ROW counts, so it dropped the 8 multi-edit
+        rows -- under its own rule the total should have read 814, not 581.
+
+    So 24 = 28 (stale scalar rows) - 7 (missed) + 3 (miscounted); the 29th
+    stale anchor is the second edit of a multi-edit row, which it could not
+    see.
 
     AMBIGUOUS (>1 match) fails here as well as STALE (0). It is a milder
     defect -- the row still mutates -- but which of the matching sites it hits
