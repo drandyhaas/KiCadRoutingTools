@@ -22,7 +22,7 @@ early can never wander into the corridor a later neighbour needs.
 import math
 import os
 import sys
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
@@ -41,8 +41,6 @@ from net_rescue import _fence_window, _result_escapes_window  # noqa: E402
 from single_ended_routing import route_net_with_obstacles  # noqa: E402
 
 Point = Tuple[float, float]
-Band = Tuple[Optional[Callable[[float], float]],
-             Optional[Callable[[float], float]]]
 
 
 def make_config(pcb: PCBData, track: float, clearance: float,
@@ -62,71 +60,30 @@ def _band_cells(coord: GridCoord, window: PCBData, band,
     """Every window cell outside the band, as an (N, 3) int32 array for
     add_blocked_cells_batch.
 
-    `band` is one of:
-      * (lo(x), hi(x)) applied to every layer;
-      * {layer_name: fn(x) -> (lo, hi)} -- a per-layer corridor, where
-        lo > hi means the layer is closed at that x. That is how a
-        caller REQUIRES a layer: close the other one. A layer absent
-        from the dict is closed everywhere;
-      * a callable band(xs, ys, layer_name) -> bool mask of shape
-        (len(xs), len(ys)), True where the lane may go -- the general
-        form, for a corridor that is not a function of x (a lane with
-        a corner, a peel leg, a way round an array). `slack` is the
-        callable's own business."""
+    `band` is a callable band(xs, ys, layer_name) -> bool mask of shape
+    (len(xs), len(ys)), True where the lane may go; a layer the band
+    closes everywhere is how a caller REQUIRES the other layer."""
     x0, y0, x1, y1 = window.board_info.board_bounds
     gx0, gy0 = coord.to_grid(x0, y0)
     gx1, gy1 = coord.to_grid(x1, y1)
-    if callable(band) and not isinstance(band, (tuple, dict)):
-        gxs = np.arange(gx0, gx1 + 1)
-        gys = np.arange(gy0, gy1 + 1)
-        xs = np.array([coord.to_float(int(g), 0)[0] for g in gxs])
-        ys = np.array([coord.to_float(0, int(g))[1] for g in gys])
-        parts = []
-        for L, lname in enumerate(layers):
-            ok = np.asarray(band(xs, ys, lname), dtype=bool)
-            bi, bj = np.nonzero(~ok)
-            if len(bi):
-                parts.append(np.stack([gxs[bi], gys[bj],
-                                       np.full(len(bi), L)], axis=1))
-        if not parts:
-            return np.zeros((0, 3), dtype=np.int32)
-        return np.concatenate(parts).astype(np.int32)
+    gxs = np.arange(gx0, gx1 + 1)
+    gys = np.arange(gy0, gy1 + 1)
+    xs = np.array([coord.to_float(int(g), 0)[0] for g in gxs])
+    ys = np.array([coord.to_float(0, int(g))[1] for g in gys])
+    parts = []
+    for L, lname in enumerate(layers):
+        ok = np.asarray(band(xs, ys, lname), dtype=bool)
+        bi, bj = np.nonzero(~ok)
+        if len(bi):
+            parts.append(np.stack([gxs[bi], gys[bj],
+                                   np.full(len(bi), L)], axis=1))
+    if not parts:
+        return np.zeros((0, 3), dtype=np.int32)
+    return np.concatenate(parts).astype(np.int32)
     # vectorized over gy (the pure-Python double loop was 3.5s of an
     # 18s braid); the per-gx fn(x) and to_grid calls are kept
     # CALL-FOR-CALL identical to the loop they replace, so the cell
     # SET is bit-identical -- only the assembly is numpy
-    per_layer = isinstance(band, dict)
-    gys = np.arange(gy0, gy1 + 1, dtype=np.int32)
-    parts = []
-    for gx in range(gx0, gx1 + 1):
-        x = coord.to_float(gx, 0)[0]
-        for L, lname in enumerate(layers):
-            if per_layer:
-                fn = band.get(lname)
-                if fn is None:
-                    lo, hi = 1e9, -1e9
-                else:
-                    lo, hi = fn(x)
-            else:
-                lo_fn, hi_fn = band
-                lo = lo_fn(x) if lo_fn is not None else -1e9
-                hi = hi_fn(x) if hi_fn is not None else 1e9
-            lo, hi = lo - slack, hi + slack
-            if lo > hi:
-                bad = gys
-            else:
-                glo = coord.to_grid(0.0, lo)[1]
-                ghi = coord.to_grid(0.0, hi)[1]
-                bad = gys[(gys < glo) | (gys > ghi)]
-            if len(bad):
-                arr = np.empty((len(bad), 3), dtype=np.int32)
-                arr[:, 0] = gx
-                arr[:, 1] = bad
-                arr[:, 2] = L
-                parts.append(arr)
-    if not parts:
-        return np.zeros((0, 3), dtype=np.int32)
-    return np.concatenate(parts)
 
 
 VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
@@ -235,16 +192,10 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
                                       bounds=bounds,
                                       sources_override=sources,
                                       targets_override=targets)
-    debug = False
     if not result or result.get('failed'):
-        if debug and result:
-            info = {k: v for k, v in result.items()
-                    if k not in ('new_segments', 'new_vias', 'segments',
-                                 'vias', 'path')}
-            print(f'  connect net {net_id}: router failed: {info}')
         return None
     if _result_escapes_window(result, window, cfg):
-        if debug:
+        if False:
             segs = result.get('new_segments') or []
             xs = [v for s in segs for v in (s.start_x, s.end_x)]
             ys = [v for s in segs for v in (s.start_y, s.end_y)]

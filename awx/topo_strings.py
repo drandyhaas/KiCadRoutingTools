@@ -146,31 +146,12 @@ class Obstacles:
             self._pack[k] = (dd, tuple(cc))
 
     def near_discs(self, p):
-        nd = getattr(self, '_near_d', None)
-        if nd is not None:
-            return nd.get((int(p[0] / self.cell),
-                           int(p[1] / self.cell)), ())
-        key = (int(p[0] / self.cell), int(p[1] / self.cell))
-        out = []
-        for dx_ in (-1, 0, 1):
-            for dy_ in (-1, 0, 1):
-                out.extend(self._grid.get((key[0] + dx_, key[1] + dy_), ()))
-        return out
+        return self._near_d.get((int(p[0] / self.cell),
+                                 int(p[1] / self.cell)), ())
 
     def near_caps(self, p):
-        nc = getattr(self, '_near_c', None)
-        if nc is not None:
-            return nc.get((int(p[0] / self.cell),
-                           int(p[1] / self.cell)), ())
-        cg = getattr(self, '_cgrid', None)
-        if cg is None:
-            return range(len(self.caps))
-        key = (int(p[0] / self.cell), int(p[1] / self.cell))
-        out = set()
-        for dx_ in (-1, 0, 1):
-            for dy_ in (-1, 0, 1):
-                out.update(cg.get((key[0] + dx_, key[1] + dy_), ()))
-        return out
+        return self._near_c.get((int(p[0] / self.cell),
+                                 int(p[1] / self.cell)), ())
 
     def point_violation(self, p, pad=0.0):
         """Deepest violated obstacle at point p -> (depth, push_dir) or
@@ -229,43 +210,6 @@ class Obstacles:
                     ((px - x) / d, (py - y) / d)
                 return (best, dirv)
             return None
-        worst = None
-        for i in self.near_discs(p):
-            x, y, r, _n = self.discs[i]
-            r += pad
-            d = math.hypot(p[0] - x, p[1] - y)
-            if d < r:
-                depth = r - d
-                if worst is None or depth > worst[0]:
-                    if d < 1e-9:
-                        dirv = (1.0, 0.0)
-                    else:
-                        dirv = ((p[0] - x) / d, (p[1] - y) / d)
-                    worst = (depth, dirv)
-        for ci in self.near_caps(p):
-            a, b, r, _n = self.caps[ci]
-            r += pad
-            d = seg_pt_dist(a, b, p)
-            if d < r:
-                depth = r - d
-                if worst is None or depth > worst[0]:
-                    # push perpendicular away from capsule axis
-                    ax, ay = a
-                    bx, by = b
-                    dx, dy = bx - ax, by - ay
-                    L2 = dx * dx + dy * dy
-                    t = 0.0 if L2 < 1e-12 else max(
-                        0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy)
-                                 / L2))
-                    cx, cy = ax + t * dx, ay + t * dy
-                    dd = math.hypot(p[0] - cx, p[1] - cy)
-                    if dd < 1e-9:
-                        dirv = (-dy / math.sqrt(L2), dx / math.sqrt(L2)) \
-                            if L2 > 1e-12 else (1.0, 0.0)
-                    else:
-                        dirv = ((p[0] - cx) / dd, (p[1] - cy) / dd)
-                    worst = (depth, dirv)
-        return worst
 
     def seg_clear(self, a, b):
         # disc candidates from the grid, sampled along the segment

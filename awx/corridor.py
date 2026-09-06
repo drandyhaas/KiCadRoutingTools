@@ -274,10 +274,6 @@ class Spine:
         return (float(self.P[k, 0] + t * self.d[k, 0] + o * self.nrm[k, 0]),
                 float(self.P[k, 1] + t * self.d[k, 1] + o * self.nrm[k, 1]))
 
-    def dir(self, s: float) -> Pt:
-        k = self.seg_of(s)
-        return (float(self.d[k, 0]), float(self.d[k, 1]))
-
     def corners(self, min_deg: float = 5.0) -> List[Tuple[int, float, float]]:
         """(vertex index, s, turn degrees) for every real corner."""
         return [(j + 1, float(self.S[j + 1]), float(self.turn[j]))
@@ -317,20 +313,6 @@ class Spine:
             best_k = np.where(better, k, best_k)
             best_t = np.where(better, tc, best_t)
         # outer wedges: nearest point is an interior vertex
-        at_end = (best_t >= self.len[best_k] - 1e-9) & (best_k < self.n - 1)
-        at_start = (best_t <= 1e-9) & (best_k > 0)
-        wedge = at_end | at_start
-        if wedge.any():
-            vk = np.where(at_end, best_k + 1, best_k)
-            # a point whose nearest point is a vertex lies on the OUTER
-            # side of that corner (an inner point always has a foot on
-            # one of the two legs), so its sign is the outer side's:
-            # opposite to the turn
-            outer = -np.sign(self.turn[np.clip(vk - 1, 0, self.n - 2)])
-            outer = np.where(outer == 0, 1.0, outer)
-            r = np.sqrt(best_d2)
-            best_o = np.where(wedge, outer * r, best_o)
-            best_s = np.where(wedge, self.S[vk], best_s)
         return best_s.reshape(shape), best_o.reshape(shape)
 
     def project_pt(self, p: Pt) -> Tuple[float, float]:
@@ -363,32 +345,6 @@ class Spine:
         for (sa, oa), (sb, ob) in zip(so, so[1:]):
             push(self.xy(sa, oa))
             # vertices strictly inside (sa, sb)
-            for j in range(1, self.n):
-                Sj = self.S[j]
-                if not (sa + 1e-9 < Sj < sb - 1e-9):
-                    continue
-                if abs(self.turn[j - 1]) < 1e-6:
-                    continue
-                o = oa + (ob - oa) * (Sj - sa) / max(sb - sa, 1e-12)
-                n1 = self.nrm[j - 1]
-                n2 = self.nrm[j]
-                V = self.P[j]
-                if o * self.turn[j - 1] > 0:
-                    # inner side: the mitre of the two offset lines
-                    den = 1.0 + float(n1 @ n2)
-                    m = (n1 + n2) / max(den, 1e-6)
-                    push((float(V[0] + o * m[0]), float(V[1] + o * m[1])))
-                elif abs(o) > 1e-9:
-                    # outer side: an arc from o*n1 to o*n2 about V
-                    a1 = math.atan2(n1[1], n1[0])
-                    ang = math.radians(self.turn[j - 1])
-                    steps = max(1, int(math.ceil(abs(ang) / math.radians(30))))
-                    for q in range(steps + 1):
-                        a = a1 + ang * q / steps
-                        push((float(V[0] + o * math.cos(a)),
-                              float(V[1] + o * math.sin(a))))
-                else:
-                    push((float(V[0]), float(V[1])))
             push(self.xy(sb, ob))
         if len(out) == 1:
             out.append(out[0])
@@ -548,25 +504,6 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
     # a bundle never doubles back: a vertex the string folded at (a
     # string stuck between two pushes) is dropped, and the polyline
     # re-simplified, until every turn is a real corner
-    while len(sp) > 2:
-        s_ = Spine(sp)
-        bad = [j + 1 for j in range(s_.n - 1) if abs(s_.turn[j]) > 120.0]
-        if not bad:
-            break
-        sp = simplify([p for j, p in enumerate(sp) if j not in set(bad)], 0.08)
-    # a spine with MANY near-right-angle corners is not a corridor
-    # axis -- it is the elastic band OSCILLATING between pushes, which
-    # the fold filter (>120 deg) never catches (K35 corridor
-    # SA6/SA4/SBA1: 56 mean pts -> 1023 relaxed -> 34 vertices with 32
-    # corners, 47 mm of spine for a ~20 mm run -- rendered as a white
-    # scribble-ball, and every lane's frame-mapped centreline curled
-    # with it). The frame is a coordinate AXIS, not a route: fall back
-    # to the straight chord and let the lanes morph.
-    if sum(1 for _i, _s, t in Spine(sp).corners() if abs(t) > 80.0) > 4:
-        if log:
-            log(f'    spine DEGENERATE ({len(sp)} vertices, '
-                f'{polyline_len(sp):.1f} mm) -- straight-chord fallback')
-        sp = simplify([a, b], 0.08)
     if log:
         log(f'    spine: {len(init)} mean pts -> {len(pts)} relaxed -> '
             f'{len(sp)} vertices, {polyline_len(sp):.2f} mm, '
