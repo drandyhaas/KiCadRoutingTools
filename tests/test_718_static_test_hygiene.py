@@ -925,6 +925,108 @@ def test_every_committed_baseline_is_declared():
           f'{len(_BASELINE_UNGATED)} ungated with a stated reason')
 
 
+#: Batteries whose row table `mutation_anchors.resolve_static` cannot read.
+#:
+#: Declared with the reason and held in BOTH directions, like `_WK_DEPENDENT`
+#: above: an entry that no longer applies is as much a defect as a missing one,
+#: because a stale exemption is indistinguishable from a gate that still covers
+#: the file. Empty today -- all 37 resolve -- and it exists so that a battery
+#: written in a shape the resolver has never seen fails LOUDLY here instead of
+#: being counted as "no anchors, nothing to check".
+_UNRESOLVABLE = {}
+
+#: Every `tests/mutate_*.py` in the tree, pinned. A resolver that quietly stops
+#: finding batteries would otherwise report a clean sweep over nothing -- the
+#: exact shape of the defect #877 is about, reproduced in its own gate.
+_BATTERY_COUNT = 37
+
+#: A floor well under today's 831, not a target. Same purpose as
+#: `test_the_scanners_still_match_something`: prove the corpus is populated.
+_MIN_ANCHORS = 600
+
+
+def test_every_mutation_anchor_matches_exactly_once():
+    """A mutation row whose anchor no longer matches guards NOTHING (#877).
+
+    A row is applied with `src.replace(old, new, 1)`. When `old` has gone --
+    a rename, a reflow, a dedent -- the row rewrites nothing, and every gate it
+    names passes for a reason that has nothing to do with the claim next to it.
+
+    Every battery does detect this and reports BROKEN rather than a kill. What
+    it cannot do is detect it CHEAPLY: the check runs per row, mid-run, after
+    the witnesses have been paid for. #877 quotes `mutate_847.py`'s own words --
+    "a stale anchor reports BROKEN 50 minutes into a run rather than in one
+    second before it". This is the one second, and it is the only thing in the
+    tree that runs over ALL the batteries: they are deliberately not named
+    `test_*`, so `run_all.discover()` never collects them, and at the time #877
+    was filed 8 of the 37 had been red for months with nobody looking.
+
+    Measured at 0aff32c0, before the re-anchoring pass: 29 stale anchors and 3
+    ambiguous ones across 9 batteries, of 831. #877 reported 24, missing
+    `mutate_834_835.py`'s 7 entirely and counting `mutate_703.py`'s 3 ambiguous
+    rows as stale.
+
+    AMBIGUOUS (>1 match) fails here as well as STALE (0). It is a milder
+    defect -- the row still mutates -- but which of the matching sites it hits
+    is decided by their order in the file rather than by the row, so the row's
+    subject is not what its name says it is.
+    """
+    sys.path.insert(0, TESTS_DIR)
+    import mutation_anchors
+
+    paths = mutation_anchors.batteries()
+    assert len(paths) == _BATTERY_COUNT, (
+        f'expected {_BATTERY_COUNT} mutation batteries, found {len(paths)}. '
+        f'If a battery was added or removed, update _BATTERY_COUNT -- the pin '
+        f'is here so a scan that stops finding them cannot report a clean '
+        f'sweep over an empty corpus.')
+
+    problems, unresolved, total = [], {}, 0
+    for path in paths:
+        name = os.path.basename(path)
+        anchors, reason = mutation_anchors.resolve_static(path)
+        if reason:
+            unresolved[name] = reason
+            continue
+        total += len(anchors)
+        assert anchors, (
+            f'{name}: resolved to ZERO anchors and reported no reason. That '
+            f'is a resolver failure wearing a clean result -- the battery has '
+            f'rows.')
+        for p in mutation_anchors.verify(anchors):
+            problems.append(str(p))
+
+    undeclared = sorted(set(unresolved) - set(_UNRESOLVABLE))
+    assert not undeclared, (
+        'battery(s) whose row table could not be resolved:\n  '
+        + '\n  '.join(f'{n}: {unresolved[n]}' for n in undeclared)
+        + '\nAn unreadable table is not an empty one. Either teach '
+          'mutation_anchors the shape, or declare it in _UNRESOLVABLE with '
+          'the reason -- silence here means the battery is unchecked.')
+    departed = sorted(set(_UNRESOLVABLE) - set(unresolved))
+    assert not departed, (
+        '_UNRESOLVABLE names battery(s) that now resolve fine:\n  '
+        + '\n  '.join(departed)
+        + '\nDrop them. A stale exemption is indistinguishable from a gate '
+          'that still covers the file.')
+
+    assert total >= _MIN_ANCHORS, (
+        f'only {total} anchor(s) resolved across {len(paths)} batteries -- the '
+        f'resolver has stopped reading the tables, so a green result here '
+        f'means nothing')
+
+    assert not problems, (
+        f'mutation row(s) whose anchor does not match its target exactly '
+        f'once:\n  ' + '\n  '.join(problems)
+        + '\nSTALE means the row rewrites nothing and the gates it names pass '
+          'for free. AMBIGUOUS means replace(..., 1) picks a site by file '
+          'order rather than by the row. Re-anchor the row to the code as it '
+          'now stands, expressing the SAME mutation -- never widen it to '
+          'whatever is convenient to quote (#877).')
+    print(f'  PASS: {total} mutation anchor(s) across {len(paths)} batteries '
+          f'each match their target exactly once')
+
+
 TESTS = [
     test_wk_dependent_tests_are_declared,
     test_no_test_spawns_a_script_that_moved,
@@ -933,6 +1035,7 @@ TESTS = [
     test_no_test_is_defined_after_its_own_runner,
     test_every_test_is_registered_in_its_files_own_list,
     test_every_committed_baseline_is_declared,
+    test_every_mutation_anchor_matches_exactly_once,
 ]
 
 
