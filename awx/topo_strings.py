@@ -77,6 +77,21 @@ class Obstacles:
         self._grid = {}
         self.cell = 1.0
 
+    def signature(self):
+        """A hash of the model's content (discs and capsules, rounded to
+        0.1 um), so a caller can memoise work that depends only on it."""
+        sig = getattr(self, '_sig', None)
+        if sig is None:
+            import hashlib
+            h = hashlib.sha1()
+            for (x, y, r, n) in self.discs:
+                h.update(f'd{x:.4f},{y:.4f},{r:.4f},{n};'.encode())
+            for (a, b, r, n) in self.caps:
+                h.update(f'c{a[0]:.4f},{a[1]:.4f},{b[0]:.4f},{b[1]:.4f},{r:.4f},{n};'.encode())
+            sig = h.hexdigest()          # stable across processes
+            self._sig = sig
+        return sig
+
     def add_disc(self, x, y, r, name):
         self.discs.append((x, y, r, name))
 

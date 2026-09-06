@@ -123,9 +123,13 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
             if dx:
                 gate = (px, py + sgn * hy)          # into the row gap
                 e = (edge(d)[0], gate[1])
+                if not (y0 < gate[1] < y1):
+                    continue        # the gap outside the outer row is no gap
             else:
                 gate = (px + sgn * hx, py)          # into the column gap
                 e = (gate[0], edge(d)[1])
+                if not (x0 < gate[0] < x1):
+                    continue        # the gap outside the outer column is no gap
             if clear((px, py), gate, home) and clear(gate, e, home):
                 out.append(Move(net, 'surface', d, home, e, 0,
                                 [((px, py), gate, home),

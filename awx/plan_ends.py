@@ -35,6 +35,75 @@ Pt = Tuple[float, float]
 
 
 
+SWIM_VIAS = 2      # a swimmer's dive and surface; its mid-corridor changes are the braid's
+
+
+def plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
+    """The PAGES the braid will route on, decided here with the braid's
+    own schedule code (schedule.Schedule) on the plan's launch and exit
+    orders per corridor, with both ends' layers -- so there is one
+    planner: the braid only verifies these in its own orders. Returns
+    ({net: 'F.Cu' | 'B.Cu' | None}, {net: predicted vias}), the
+    prediction per net = tooth-layer mismatch with the page + berth-layer
+    mismatch + the berth escape's vias (a swimmer: SWIM_VIAS + berth vias)."""
+    import schedule as sch
+    geo = sm.Corridor(dst_box, launch, cache=cache)
+    pages = {}
+    pred = {}
+    for grp in buses:
+        grp = [n for n in grp if n in dst_choice]
+        if not grp:
+            continue
+        if len(grp) == 1:
+            n = grp[0]
+            pages[n] = tooth_layer.get(n, 'F.Cu')
+            pred[n] = ((1 if dst_choice[n].layer != pages[n] else 0)
+                       + dst_choice[n].vias)
+            continue
+        t = geo.axis(grp, dst_choice)
+        lo = geo.order(grp, dst_choice, t)
+        li = {n: i for i, n in enumerate(lo)}
+        tgt = sorted(grp, key=lambda n: (round(geo.exit_key(n, dst_choice[n], t), 6),
+                                         li[n]))
+        sc = sch.Schedule(lo, tgt, {n: tooth_layer.get(n, 'F.Cu') for n in grp},
+                          dest_layer={n: dst_choice[n].layer for n in grp})
+        for n in grp:
+            pg = sc.page.get(n)
+            pages[n] = pg
+            if pg is None:
+                pred[n] = SWIM_VIAS + dst_choice[n].vias
+            else:
+                pred[n] = ((1 if tooth_layer.get(n, 'F.Cu') != pg else 0)
+                           + (1 if dst_choice[n].layer != pg else 0)
+                           + dst_choice[n].vias)
+    return pages, pred
+
+
+def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
+                    underpasses=None):
+    """Per-net vias implied by a page assignment ({net: layer | None}):
+    tooth vias + tooth/page mismatch + the arrival -- straight into the
+    berth: page/berth mismatch; through a side-exit leg on `leg_layer`:
+    page/leg mismatch + leg/berth mismatch -- + berth vias; a swimmer:
+    tooth vias + SWIM_VIAS + berth vias."""
+    pred = {}
+    for n, m in dst_choice.items():
+        pg = pages.get(n)
+        tv = tooth_vias.get(n, 0)
+        if pg is None:
+            pred[n] = tv + SWIM_VIAS + m.vias
+            continue
+        leg = (leg_layer or {}).get(n)
+        if leg:
+            arrive = (1 if leg != pg else 0) + (1 if m.layer != leg else 0)
+        else:
+            arrive = 1 if m.layer != pg else 0
+        pred[n] = (tv + (1 if tooth_layer.get(n, 'F.Cu') != pg else 0)
+                   + arrive + m.vias
+                   + 2 * (underpasses or {}).get(n, 0))
+    return pred
+
+
 def judged_cost(dst_choice, launch, dst_box, cache, src_box,
                 tooth_layer, tooth_vias, buses=None):
     """What a plan is judged on: the VIAS it implies, in the plan's own
@@ -46,15 +115,13 @@ def judged_cost(dst_choice, launch, dst_box, cache, src_box,
     out the north face and SDQ11 out the WEST face on dog-bones to buy
     a crossing-free order, 4 -> 6 realized vias), plus the ride round
     both arrays at VIA_MM per via."""
-    geo = sm.Corridor(dst_box, launch, cache=cache)
-    # the groups a keeper is judged within are the BRAID's corridors --
-    # the taut-path clusters (detect_buses), which is how the braid
-    # decomposes the bus -- not the destination faces: at K8 the braid
-    # routes all eight nets as one corridor, and a net the face model
-    # called a free keeper of a three-net 'up' group crossed the 'left'
-    # nets and paid two vias
+    # the vias per net come from the PAGES the braid's own schedule code
+    # assigns on the plan's orders (plan_pages), judged within the
+    # corridors the braid will form (buses = planned_buses); the source
+    # escape's vias and the ride round both arrays are added
     groups = list(buses) if buses else sm.corridor_groups(dst_choice)
-    return (sm.true_vias(dst_choice, groups, geo, tooth_layer)
+    _pages, pred = plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, groups)
+    return (sum(pred.values())
             + sum(tooth_vias.get(n, 0) for n in dst_choice)
             + sm.ride_mm(dst_choice, launch, dst_box, src_box) / sm.VIA_MM)
 

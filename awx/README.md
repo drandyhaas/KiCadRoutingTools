@@ -116,18 +116,41 @@ returned in `pcb_data._fanout_plan_report`. With face-only hints every
 path is unchanged (copper identical to the previous chain); with no hints
 nothing changes at all.
 
-## What is next: one planner
+## One planner
 
-The plan decides each net's lane layer (keeper: its tooth layer; diver:
-the other) and the braid's schedule decides it again from its own orders.
-The two agree in total at K4/K8/K15 and disagree net by net in
-tie-breaks; at K28 the plan predicts 40 and the braid pays 45, because the
-plan prices every non-keeper as a two-via diver while the braid's B page
-must itself be crossing-free, so some divers swim. The plan should compute
-pages with the schedule's own code, price that, and hand the pages to the
-braid. Two K28 specifics: a far-face berth (SA13, DU1's east face) is
-predicted free and costs a corridor of its own, and two lanes (SA9, SDQ9)
-are refused by the braid's virtual-copper walling.
+The braid's own planning stage is the planner. `braid.setup(plan=)` takes
+the ends, their layers and their escape directions from a plan instead
+of reading them off copper, and `braid.plan_braid(board, names, dest,
+plan)` runs the plan-only stage on them: corridors as the braid forms
+them, spines, offsets, launch and target orders, the schedule's pages
+and swimmers, side-exit legs. The fanout loop judges EVERY round and
+every destination re-plan with it (`fanout_from_plan.judge_by_braid`:
+per net the vias the pages imply -- `plan_ends.vias_from_pages`: tooth
+vias, tooth/page mismatch, the arrival through a side-exit leg, the
+berth's vias, a swimmer's dive and surface -- plus the ride round both
+arrays); the fast proxy (`plan_ends.judged_cost`) serves only the source
+refinement's inner loop. The shipped plan is written beside the fanout
+board as `<board>.plan.json` with the ACHIEVED stub ends, and the braid
+reads it (`setup` finds it) and builds its corridors from the identical
+inputs. At every K the braid's orders and pages are the planner's.
+
+Results (bench, same engine, previous chain -> this one): K4 4 -> 4 vias
+(predicted 4, per net identical), K8 8 -> 6 (predicted 6), K15 22 -> 14
+(predicted 12), K28 38 -> 42 (predicted 32); all complete and DRC-clean,
+every berth laid as planned. The prediction still misses page lanes that
+the braid routes with an under-pass (a required stretch on the other
+layer); pricing those is the next modelling item.
+
+Speed: a taut path depends only on its two ends and the static copper it
+relaxes against, and the loop asked for the same ones at every judgment
+(210 relaxations for 15 nets), so `detect_buses.taut_paths` memoises on
+the ends and `Obstacles.signature()`, persisted in `tmp/taut_memo.json`
+across processes (the braid reuses the fanout stage's paths);
+`braid.build_obstacles` memoises per board file. K15: 67 s -> 40 s cold,
+19 s with a warm memo, copper identical. The obstacle model still counts
+the run's nets' VIAS while excluding their segments (inconsistent, and it
+changes the memo key on every realized board); excluding them changes
+taut paths and needs an A/B.
 
 ## History: what `bus622-take4` still has
 
