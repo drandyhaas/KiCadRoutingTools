@@ -316,6 +316,60 @@ def test_a_failed_render_keeps_the_box_and_says_so():
 
 # ------------------------------------------------------------- the cadence
 
+def test_a_render_that_succeeds_but_will_not_decode_is_counted_as_failed():
+    """The gap between "kicad-cli exited 0" and "there is an image".
+
+    The other failure test hands back `(None, 'boom')`, which the composer
+    already counted. This is the path where the render REPORTS success and the
+    file is junk -- a full disk, a killed child -- which only iso_panel can
+    discover. Counting only falsy `png` survived, and so did deleting the
+    drawing of the reason.
+    """
+    fr, marks, final = _frames()
+    saved_r, saved_c, saved_i = kir.render_many, kir.resolve_cli, kir.render_iso
+
+    def junk(jobs, cli, workers=None, **kw):
+        out = {}
+        for key, _b, png, _rot in jobs:
+            open(png, 'wb').write(b'this is not a png')
+            out[key] = (png, '')          # "success"
+        return out
+
+    kir.render_many = junk
+    kir.resolve_cli = lambda explicit=None: ('FAKE', '')
+    kir.render_iso = lambda board, png, cli, **kw: (
+        Image.new('RGBA', (616, 448), (20, 90, 40, 255)).save(png) or png, '')
+    try:
+        out, rep = mp.compose_two_panel(fr, marks, final,
+                                        mp.IsoOpts(max_renders=3))
+    finally:
+        kir.render_many, kir.resolve_cli, kir.render_iso = (
+            saved_r, saved_c, saved_i)
+    want(len({f.size for f in out}) == 1,
+         'the film is still one size', {f.size for f in out})
+    want(rep['failed'] >= 1,
+         'and an undecodable render COUNTS as failed -- otherwise the status '
+         'line claims full success over panels reading "could not read the '
+         'render"', rep['failed'])
+    want(any('could not read' in (s['error'] or '') for s in rep['shots']),
+         'with the reason carried per shot',
+         [s['error'] for s in rep['shots']])
+    want('FAILED' in mp.iso_status_line(rep),
+         'and surfaced in the status line', mp.iso_status_line(rep))
+
+    # And the reason must be DRAWN, not merely reported.
+    box = (220, 100)
+    d = tempfile.mkdtemp()
+    bad = os.path.join(d, 'bad.png')
+    open(bad, 'wb').write(b'this is not a png')
+    blank, _ = mp.iso_panel(box, None, 'cap')
+    drawn_panel, err = mp.iso_panel(box, bad, 'cap')
+    want(err and 'could not read' in err, 'iso_panel reports it', err)
+    want(ImageChops.difference(blank, drawn_panel).getbbox() is not None,
+         'and writes it into the panel, so a viewer sees why that beat is '
+         'blank instead of an unexplained empty box')
+
+
 def test_the_shot_plan_is_capped_and_covers_every_frame():
     owner = ['a'] * 10 + ['b'] * 10 + ['c'] * 5
     shots, f2s = mp.plan_iso_shots(owner, mp.IsoOpts(max_renders=2))
@@ -742,6 +796,7 @@ TESTS_TO_RUN = [
     test_the_stacked_frame_is_one_constant_even_size,
     test_the_iso_panel_never_touches_the_xray_panel,
     test_a_failed_render_keeps_the_box_and_says_so,
+    test_a_render_that_succeeds_but_will_not_decode_is_counted_as_failed,
     test_the_shot_plan_is_capped_and_covers_every_frame,
     test_a_two_board_chain_still_rotates,
     test_a_tiny_film_does_not_pay_a_render_per_frame,
