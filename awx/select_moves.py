@@ -81,16 +81,20 @@ def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
     Returned so the corridor leg can be DRAWN, not just priced."""
     x0, y0, x1, y1 = box
     bx = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
-    if not _seg_hits_box(a, b, bx):
+    # hit tests against a box shrunk by a hair (see around_box): a leg
+    # from a tooth to a corner runs along the face and only touches
+    e = 0.05
+    inner = (bx[0] + e, bx[1] + e, bx[2] - e, bx[3] - e)
+    if not _seg_hits_box(a, b, inner):
         return [a, b]
     x0, y0, x1, y1 = bx
     corners = ((x0, y0), (x1, y0), (x0, y1), (x1, y1))
     best, path = float('inf'), [a, b]
     for c1 in corners:
         for c2 in corners:
-            if _seg_hits_box(a, c1, bx) or _seg_hits_box(c2, b, bx):
+            if _seg_hits_box(a, c1, inner) or _seg_hits_box(c2, b, inner):
                 continue
-            if c1 != c2 and _seg_hits_box(c1, c2, bx):
+            if c1 != c2 and _seg_hits_box(c1, c2, inner):
                 continue
             d = (math.hypot(c1[0] - a[0], c1[1] - a[1])
                  + math.hypot(c2[0] - c1[0], c2[1] - c1[1])

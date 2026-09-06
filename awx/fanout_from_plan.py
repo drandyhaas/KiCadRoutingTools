@@ -132,7 +132,7 @@ def plan_state(pcb, names, banned=frozenset()):
     return {'byname': byname, 'dmenu': dmenu, 'smenu': smenu, 'launch': launch,
             'tooth0': tooth0, 'tooth_vias': tooth_vias, 'src_pad': src_pad,
             'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,
-            'dgrid': dgrid, 'buses': buses, 'obs': obs,
+            'dgrid': dgrid, 'buses': buses, 'obs': obs, 'pcb': pcb,
             'pads_of': {ref: [(p.global_x, p.global_y) for p in fp.pads]
                         for ref, fp in pcb.footprints.items()}}
 
@@ -182,6 +182,45 @@ def planned_buses(st, choice):
         src_centres={nm: centre_of(st['sref']) for nm in names})
 
 
+def braid_plan_of(st, choice, board, achieved=None):
+    """The plan as the braid's planner takes it: ends (tooth on the
+    board, planned exit -- or, once the fanout has laid it, the ACHIEVED
+    stub end, which sits an occupancy cell inside the boundary line: a
+    lane routed to the planned point instead left a 25 um same-net gap at
+    every berth), both layers, escape directions (the tooth's read off
+    its copper by the braid's own _end_dir; the berth's = its face)."""
+    pcb = st['pcb']
+    plan = {'ends': {}, 'tooth_layer': {}, 'dest_layer': {},
+            'tooth_dir': {}, 'stub_dir': {}}
+    for nm, m in choice.items():
+        nid, net = st['byname'][nm]
+        exit_pt = (achieved[nm]['tooth'] if achieved and nm in achieved
+                   else m.exit_pt)
+        plan['ends'][nm] = [list(st['launch'][nm]), list(exit_pt)]
+        plan['tooth_layer'][nm] = st['tooth0'][nm]
+        plan['dest_layer'][nm] = m.layer
+        plan['tooth_dir'][nm] = list(te._end_dir(pcb, nid, st['launch'][nm], net.pads))
+        plan['stub_dir'][nm] = list(DIRS[m.direction])
+    return plan
+
+
+def judge_by_braid(st, choice, board, achieved=None):
+    """THE judgment of a candidate plan: the braid's own planner
+    (braid.plan_braid) on the plan's ends -- corridors as the braid forms
+    them, its orders, its pages -- priced per net (plan_ends.vias_from_pages)
+    plus the ride round both arrays. Returns (cost, per-net vias, the
+    braid's per-net plan, the plan dict)."""
+    plan = braid_plan_of(st, choice, board, achieved)
+    bp = te.plan_braid(board, list(choice), st['dref'], plan)
+    pages = {nm: bp[nm]['page'] for nm in choice}
+    legs = {nm: bp[nm].get('exit_leg_layer') for nm in choice}
+    ups = {nm: bp[nm].get('underpasses', 0) for nm in choice}
+    pred = pe.vias_from_pages(choice, st['tooth0'], st['tooth_vias'], pages, legs, ups)
+    ride = pe.sm.ride_mm(choice, st['launch'], st['dgrid'].bbox,
+                         st['sgrid'].bbox) / pe.sm.VIA_MM
+    return sum(pred.values()) + ride, pred, bp, plan
+
+
 def total(dst_c, st, cache, buses=None):
     """What the plan is judged on (plan_ends.judged_cost): the vias the
     plan's own model implies, both escapes' vias included, plus the ride
@@ -226,14 +265,16 @@ def plan(base, names, work):
         if not dst_choice:
             print(f'  round {r}: no destination choice'); break
         pb = planned_buses(st, dst_choice)
-        f = total(dst_choice, st, cache, pb)
+        f_fast = total(dst_choice, st, cache, pb)
+        f, _pred, bp, _plan = judge_by_braid(st, dst_choice, board)
+        n_corr = len({v['corridor'] for v in bp.values()})
         line = (f'  round {r}: destination vs the teeth ON {os.path.basename(board)}: '
-                f'floor {f:.2f}, {len(dst_choice)} placed'
+                f'braid-judged {f:.2f} (fast proxy {f_fast:.2f}), {len(dst_choice)} placed'
                 + (f', {len(un)} unplaced' if un else ''))
         if best is None or f < best[0]:
             best = (f, board, dst_choice, st, r)
             line += '   <- best'
-        line += f'  ({len(pb)} corridor(s) as the braid will form them)'
+        line += f'  ({n_corr} corridor(s) by the braid\'s planner)'
         print(line)
         if r == ROUNDS:
             break
@@ -277,47 +318,45 @@ def plan(base, names, work):
     return choice, st['dst_pad'], st['dref'], st['byname'], board, realized, banned
 
 
-def explain_plan(choice, st, names):
-    """The plan's OWN via model, per net, so it can be held against what
-    the braid lays: launch and exit order across the corridor, which nets
-    it calls keepers (ride their tooth layer, no dive), the layer it
-    thinks each net is delivered on, the escape's layer and vias, and the
-    vias it predicts; then the crossing pairs its floor is counting."""
-    sm = pe.sm
-    groups = [list(b) for b in planned_buses(st, choice)]   # the braid's corridors
-    geo = sm.Corridor(st['dgrid'].bbox, st['launch'], cache={})
-    tl = st['tooth0']
-    dl = sm.delivered_layers(choice, groups, geo, tl)
-    pred = {}
-    print('  plan model per net (tooth vias; tooth layer -> delivered layer; berth '
-          'escape; predicted vias = tooth vias + dive + handover mismatch + berth vias):')
-    for bus in groups:
-        if not all(n in choice for n in bus):
-            continue
-        w = {n: (1.0 if choice[n].layer == tl.get(n, 'F.Cu') else 0.0) for n in bus}
-        kept = set(geo.keep(bus, choice, w))
-        t = geo.axis(bus, choice)
-        lo = geo.order(bus, choice, t)
-        tgt = sorted(bus, key=lambda n: geo.exit_key(n, choice[n], t))
-        faces = sorted({choice[n].direction for n in bus})
-        print(f'    corridor (taut-path cluster, berth faces {faces}): launch order {lo}')
-        print(f'      exit order   {tgt}')
-        print(f'      keepers ({len(kept)}): {[n for n in lo if n in kept]}')
-        for n in lo:
-            m = choice[n]
-            dive = 0 if n in kept else 1
-            mism = 0 if dl[n] == m.layer else 1
-            pred[n] = dive + mism + m.vias
-            sv = st['tooth_vias'].get(n, 0)
-            pred[n] += sv
-            print(f'      {n:7s} tooth v={sv} {tl.get(n, "F.Cu")[0]}->{dl[n][0]}  berth {m.kind}/{m.direction}/{m.layer[0]} v={m.vias}'
-                  f'  predicted {sv}+{dive}+{mism}+{m.vias} = {pred[n]}')
-        pairs = [(a, b) for i, a in enumerate(bus) for b in bus[i + 1:]
-                 if geo.crosses(a, b, choice)]
-        print(f'      crossing pairs ({len(pairs)}): {pairs[:20]}'
-              + (' ...' if len(pairs) > 20 else ''))
-    tot = sum(pred.values())
-    print(f'  plan model total predicted vias: {tot} over {len(pred)} nets')
+def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
+    """The PLANNER's model of the plan that ships, per net -- the braid's
+    own (plan_braid on the plan's ends): corridor, launch/target index,
+    page, the layers at both ends, the escapes' vias, the vias predicted
+    -- so it can be held against via_census. With `out_path` the plan is
+    written beside the fanout board as `<board>.plan.json`; the braid
+    reads it and builds its corridors from the identical inputs."""
+    import json
+    cost, pred, bp, plan = judge_by_braid(st, choice, board, achieved)
+    corrs = sorted({v['corridor'] for v in bp.values()})
+    print('  planner (the braid\'s own, on the plan\'s ends) per net: corridor, '
+          'launch/target index, page, tooth layer+vias, berth escape, predicted vias')
+    for ci in corrs:
+        mem = sorted([nm for nm in choice if bp[nm]['corridor'] == ci],
+                     key=lambda n: (bp[n]['launch_idx'] if bp[n]['launch_idx'] is not None else -1))
+        print(f'    corridor {ci} ({len(mem)}): launch order {mem}')
+        print(f'      page F: {[n for n in mem if bp[n]["page"] == "F.Cu"]}')
+        print(f'      page B: {[n for n in mem if bp[n]["page"] == "B.Cu"]}   '
+              f'swimmers: {[n for n in mem if bp[n]["page"] is None]}')
+        for nm in mem:
+            m = choice[nm]
+            pg = bp[nm]['page']
+            print(f'      {nm:7s} L{bp[nm]["launch_idx"]}->T{bp[nm]["target_idx"]}  '
+                  f'page {pg[0] if pg else "swim"}  tooth {st["tooth0"][nm][0]} '
+                  f'v={st["tooth_vias"].get(nm, 0)}  berth {m.kind}/{m.direction}/{m.layer[0]} '
+                  f'v={m.vias}  predicted {pred[nm]}'
+                  + ('  joiner' if bp[nm]['joiner'] else '')
+                  + (f'  side-exit leg on {bp[nm]["exit_leg_layer"][0]}'
+                     if bp[nm].get('exit_leg_layer') else
+                     ('  side-exit' if bp[nm]['side_exit'] else ''))
+                  + (f'  under-passes {bp[nm]["underpasses"]}'
+                     if bp[nm].get('underpasses') else ''))
+    print(f'  plan model total predicted vias: {sum(pred.values())} over {len(pred)} nets '
+          f'(braid-judged cost {cost:.2f} incl. ride)')
+    if out_path:
+        side = os.path.splitext(out_path)[0] + '.plan.json'
+        with open(side, 'w', encoding='utf-8') as f:
+            json.dump(plan, f, indent=1, sort_keys=True)
+        print(f'  plan written to {os.path.basename(side)}')
 
 
 def main():
@@ -354,7 +393,10 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
         misses = [nm for nm in choice if not audit_d.get(nm, {}).get('exact')]
         if not misses:
             print(f'  destination pass {it}: every berth laid as planned')
-            explain_plan(choice, st, names)
+            # judged on the WRITTEN fanout board: the same copper the braid
+            # will read, so its taut paths are the memo's (detect_buses)
+            explain_plan(choice, st, names, out_path, out_path,
+                         achieved=getattr(fanout_once, 'achieved', None))
             return 0 if ok else 1
         for nm in misses:
             banned.add((nm, sr.move_sig(choice[nm])))
@@ -368,13 +410,15 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
                                       tooth_layer=st['tooth0'], log=None, pads=pads)
         if not new_choice or new_choice == choice:
             print('  destination: the re-plan changed nothing -- stopping')
-            explain_plan(choice, st, names)
+            explain_plan(choice, st, names, out_path, out_path,
+                         achieved=getattr(fanout_once, 'achieved', None))
             return 0 if ok else 1
-        f = total(new_choice, st, {})
-        print(f'  destination re-plan: floor {f:.2f}, {len(new_choice)} placed'
+        f, _p, _bp, _pl = judge_by_braid(st, new_choice, board)
+        print(f'  destination re-plan: braid-judged {f:.2f}, {len(new_choice)} placed'
               + (f', {len(un)} unplaced' if un else ''))
         choice, dst_pad = new_choice, st['dst_pad']
-    explain_plan(choice, st, names)
+    explain_plan(choice, st, names, out_path, out_path,
+                 achieved=getattr(fanout_once, 'achieved', None))
     return 0
 
 
@@ -422,6 +466,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board):
     achieved = {nm: sr.measure_tooth(pcb_out, nm, dst_pad[nm], byname, dest_ref=dref)
                 for nm in laid}
     audit_d, _counts = sr.audit(choice, achieved, None, laid, print, 'berth')
+    fanout_once.achieved = achieved
     print(f'\nwrote {out_path}: {len(tracks)} tracks, {len(vias_add)} '
           f'vias, {len(set(failed))} failed nets, '
           f'{"DRC clean" if clean else "DRC VIOLATIONS"}')

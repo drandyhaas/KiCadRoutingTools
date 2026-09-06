@@ -2448,15 +2448,19 @@ def generate_underpad_escape(footprint: Footprint,
         NEG_MAX_TRIES = 16
 
         def goal_cell(mv):
+            """The boundary cell at the asked gap, or None when the asked
+            gap lies outside the ball window (a planner's 'gap' beyond the
+            outer row or column): clamping it onto a ball line laid the
+            escape somewhere the plan never asked for."""
             gx, gy = occ.cell(*mv['exit'])
             face = mv['face']
-            if face == 'right':
-                return (bx1 + 1, min(max(gy, by0), by1))
-            if face == 'left':
-                return (bx0 - 1, min(max(gy, by0), by1))
-            if face == 'down':
-                return (min(max(gx, bx0), bx1), by1 + 1)
-            return (min(max(gx, bx0), bx1), by0 - 1)
+            if face in ('right', 'left'):
+                if not (by0 <= gy <= by1):
+                    return None
+                return (bx1 + 1 if face == 'right' else bx0 - 1, gy)
+            if not (bx0 <= gx <= bx1):
+                return None
+            return (gx, by1 + 1 if face == 'down' else by0 - 1)
 
         def face_of_cell(c):
             if c[0] > bx1:
@@ -2473,6 +2477,8 @@ def generate_underpad_escape(footprint: Footprint,
             """Goal cells for the asked gap's neighbours, nearest first
             (+-1, +-2, ... pitches along the face), inside the window."""
             g = goal_cell(mv)
+            if g is None:
+                return []
             ax = 1 if mv['face'] in ('left', 'right') else 0
             step = (grid.pitch_y if ax else grid.pitch_x) / res
             lo, hi = (by0, by1) if ax else (bx0, bx1)
@@ -2502,6 +2508,8 @@ def generate_underpad_escape(footprint: Footprint,
             anchors = [(p.global_x, p.global_y)] + ([site] if site else [])
             carve = _carve_foreign(db_path.get(id(p)) or anchors, home, {p.net_id})
             goal = goal_cell(mv) if level == 0 else goal_override
+            if level == 0 and goal is None:
+                return None, None, None      # the asked gap is not in the window
             side = face if level < 3 else None
 
             def surface():
@@ -2560,7 +2568,8 @@ def generate_underpad_escape(footprint: Footprint,
             got_face = face_of_cell(c)
             got_layer = layers[path[-1][2]]
             return {'face': got_face == mv['face'],
-                    'gap': got_face == mv['face'] and abs(c[ax] - g[ax]) <= 1,
+                    'gap': (g is not None and got_face == mv['face']
+                            and abs(c[ax] - g[ax]) <= 1),
                     'layer': got_layer == mv.get('layer'),
                     'kind': mode == mv.get('kind'),
                     'got': (mode, got_face, got_layer, occ.xy(*c))}
@@ -2598,11 +2607,15 @@ def generate_underpad_escape(footprint: Footprint,
                     occ.block_all(v['x'], v['y'], k)
 
         def score(state):
+            # exact first: a pending ball is laid by the degrade ladder in
+            # any case, so escaping it by ripping exact neighbours is no
+            # gain (K8: three exact balls ripped to land one, 5 -> 4 exact,
+            # accepted because 'escaped' came first)
             d = [r['dims'] for r in state.values()]
-            return (len(d),
-                    sum(1 for x in d if x['face'] and x['gap'] and x['layer']),
+            return (sum(1 for x in d if x['face'] and x['gap'] and x['layer']),
                     sum(1 for x in d if x['face'] and x['layer']),
                     sum(1 for x in d if x['face']),
+                    len(d),
                     -sum(len(r['vias']) for r in state.values()))
 
         def blockers_of(p, mv, state):

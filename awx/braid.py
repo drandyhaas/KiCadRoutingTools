@@ -197,13 +197,35 @@ def reserve(ctx, nm):
     return cross_reserve(ctx, nm)
 
 
+_OBS_MEMO = {}
+
+
 def build_obstacles(pcb, nid, kids, layer):
     """A static-copper model for one net on one layer: every foreign
     pad as a disc, every foreign segment as a capsule, every foreign
     via as a disc, all inflated by clearance + half a track. The PLAN
     prices its candidate moves against it, the taut paths and the
     spines are relaxed against it; the braid's copper is routed against
-    the router's own model and never consults this one."""
+    the router's own model and never consults this one. Memoised per
+    (board file as on disk, net, excluded nets, layer): the plan loop
+    parses the same board several times per round and rebuilt the same
+    model each time (531 builds at K15)."""
+    src = getattr(pcb, 'source_path', None)
+    key = None
+    if src and os.path.exists(src):
+        st_ = os.stat(src)
+        key = (os.path.abspath(src), st_.st_mtime_ns, st_.st_size, nid,
+               frozenset(kids), layer, len(pcb.segments), len(pcb.vias))
+        hit = _OBS_MEMO.get(key)
+        if hit is not None:
+            return hit
+    obs = _build_obstacles(pcb, nid, kids, layer)
+    if key is not None:
+        _OBS_MEMO[key] = obs
+    return obs
+
+
+def _build_obstacles(pcb, nid, kids, layer):
     obs = ts.Obstacles()
     m = CLEAR + TRACK / 2
     for ref, fp in pcb.footprints.items():
@@ -2147,18 +2169,54 @@ def main():
     return write_out(a, ctx, corridors, names, log)
 
 
-def setup(board, names, dest, log):
+def setup(board, names, dest, log, plan=None):
     """Everything the corridors are built from: the board, the ends,
-    the static obstacles, the flow directions, the corridor groups."""
+    the static obstacles, the flow directions, the corridor groups.
+
+    `plan` -- ONE PLANNER (#622): the ends, their layers and their escape
+    directions given by the plan instead of read off copper:
+    {'ends': {net: [tooth_xy, exit_xy]}, 'tooth_layer', 'dest_layer',
+    'tooth_dir': {net: unit xy}, 'stub_dir': {net: unit xy}}. The plan
+    judges a candidate by calling this same stage (plan_braid) before
+    any destination copper exists, and the braid, given the same plan
+    beside its board (`<board>.plan.json`, written by the fanout), builds
+    its corridors from the identical inputs -- so the two cannot drift.
+    Without it (or for nets the plan does not name) everything is read
+    off the board as before."""
     pcb = parse_kicad_pcb(board)
     byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
     kids = {byname[nm][0] for nm in names}
-    ends = endpoints(pcb, names, byname, dest_ref=dest)
+    if plan is None:
+        _pj = os.path.splitext(board)[0] + '.plan.json'
+        if os.path.exists(_pj):
+            import json as _json_pl
+            try:
+                with open(_pj, encoding='utf-8') as _f:
+                    plan = _json_pl.load(_f)
+                if not all(nm in plan.get('ends', {}) for nm in names):
+                    log(f'plan sidecar {os.path.basename(_pj)} does not name every '
+                        f'net of this run -- ignored')
+                    plan = None
+                else:
+                    log(f'plan from {os.path.basename(_pj)}: ends, layers and '
+                        f'escape directions as the plan decided them')
+            except (OSError, ValueError) as _e:
+                log(f'plan sidecar unreadable ({_e}); reading the board')
+                plan = None
+    planned = {nm for nm in names if plan and nm in plan.get('ends', {})}
+    ends = endpoints(pcb, [nm for nm in names if nm not in planned], byname,
+                     dest_ref=dest) if len(planned) < len(names) else {}
+    for nm in planned:
+        e = plan['ends'][nm]
+        ends[nm] = (tuple(e[0]), tuple(e[1]), dest)
     ctx = Ctx()
     ctx.pcb, ctx.byname, ctx.ends, ctx.kids = pcb, byname, ends, kids
-    ctx.tooth_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][0], 'F.Cu')
+    ctx.plan = plan
+    ctx.tooth_layer = {nm: (plan['tooth_layer'][nm] if nm in planned else
+                            _layer_at(pcb, byname[nm][0], ends[nm][0], 'F.Cu'))
                        for nm in names}
-    ctx.dest_layer = {nm: _layer_at(pcb, byname[nm][0], ends[nm][1], 'F.Cu')
+    ctx.dest_layer = {nm: (plan['dest_layer'][nm] if nm in planned else
+                           _layer_at(pcb, byname[nm][0], ends[nm][1], 'F.Cu'))
                       for nm in names}
     # the DEST STUB CHAIN per net: the stub polyline walked from the
     # tip (the free end the braid targets) back toward the pad, on
@@ -2252,10 +2310,12 @@ def setup(board, names, dest, log):
     ctx.obs_for, ctx.obs_but = obs_for, obs_but
     # the direction each free end ESCAPES in, read from the stub's own
     # copper (its run), whatever angle the array sits at
-    ctx.tooth_dir = {nm: _end_dir(pcb, byname[nm][0], ends[nm][0],
-                                  byname[nm][1].pads) for nm in names}
-    ctx.stub_dir = {nm: _end_dir(pcb, byname[nm][0], ends[nm][1],
-                                 byname[nm][1].pads) for nm in names}
+    ctx.tooth_dir = {nm: (tuple(plan['tooth_dir'][nm]) if nm in planned else
+                          _end_dir(pcb, byname[nm][0], ends[nm][0],
+                                   byname[nm][1].pads)) for nm in names}
+    ctx.stub_dir = {nm: (tuple(plan['stub_dir'][nm]) if nm in planned else
+                         _end_dir(pcb, byname[nm][0], ends[nm][1],
+                                  byname[nm][1].pads)) for nm in names}
     # the PLAN's page assignment, written beside the fanout board by
     # the two-page chain: with it the braid's Schedule uses the pages
     # the escapes were laid FOR, instead of re-deriving them from its
@@ -2282,6 +2342,8 @@ def setup(board, names, dest, log):
     except OSError:
         pass
     _cached = {}
+    if planned:
+        _tc_key = None      # the cache keys on the board's own ends
     if _tc_key is not None and os.path.exists(_tc_path):
         try:
             with open(_tc_path, encoding='utf-8') as _f:
@@ -2356,6 +2418,53 @@ def setup(board, names, dest, log):
     ctx.laid = []
     return ctx, groups
 
+
+
+def plan_braid(board, names, dest, plan, log=None):
+    """THE PLANNER, callable on a plan before any destination copper
+    exists: the braid's own setup (corridors as it forms them, spines)
+    and plan-only run (offsets, launch and target orders, the schedule's
+    pages and swimmers) on the plan's ends. Returns
+    {net: {'corridor': i, 'launch_idx', 'target_idx', 'page': 'F.Cu' |
+    'B.Cu' | None, 'birth_b': bool, 'joiner': bool, 'side_exit': bool}}.
+    What the fanout loop judges every round on, and what the braid then
+    computes again -- identically -- from the same plan beside its board."""
+    _log = log or (lambda msg='': None)
+    ctx, groups = setup(board, names, dest, _log, plan=plan)
+    corridors = []
+    for ci, members in enumerate(groups):
+        corridors.append(Corridor(ci, members, ctx, _log))
+    ctx.corridors = corridors
+    out = {}
+    for c in corridors:
+        try:
+            c.run(plan_only=True)
+            ctx.laid.extend(c.lane_xy[nm] for nm in c.members
+                            if nm in getattr(c, 'lane_xy', {}))
+        except Exception as e:
+            _log(f'  plan phase: corridor {c.idx} not planned ({e})')
+        sc = getattr(c, 'sched_cur', None)
+        li = {nm: i for i, nm in enumerate(getattr(c, 'launch', []))}
+        ti = {nm: i for i, nm in enumerate(getattr(c, 'target', []))}
+        for nm in c.members:
+            out[nm] = {'corridor': c.idx,
+                       'launch_idx': li.get(nm), 'target_idx': ti.get(nm),
+                       'page': (sc.page.get(nm) if sc else ctx.tooth_layer[nm]),
+                       'birth_b': bool(sc and nm in sc.birth_b),
+                       'joiner': nm in getattr(c, 'joiners', ()),
+                       'side_exit': nm in getattr(c, 'siders', ()),
+                       # a side exiter's exit leg runs on its block's layer:
+                       # a via where that is not the lane's page, another
+                       # where it is not the berth's layer
+                       'exit_leg_layer': getattr(c, 'leg_layer', {}).get(nm),
+                       # required stretches on the OTHER layer inside the
+                       # corridor (not the tail): each is a dive and a
+                       # surface, two vias the page model does not see
+                       'underpasses': sum(
+                           1 for (xa, xb, L) in getattr(c, 'req', {}).get(nm, ())
+                           if L != (sc.page.get(nm) if sc else ctx.tooth_layer[nm])
+                           and xa < getattr(c, 's1', 1e9) - 0.1)}
+    return out
 
 
 def write_out(a, ctx, corridors, names, log):

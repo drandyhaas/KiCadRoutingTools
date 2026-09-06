@@ -22,9 +22,42 @@ from __future__ import annotations
 import math
 from typing import Callable, Dict, List, Sequence, Tuple
 
+import json
+import os
 import topo_strings as ts
 
 Pt = Tuple[float, float]
+
+_TAUT_MEMO: Dict[str, List[Pt]] = {}
+_TAUT_MEMO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'tmp', 'taut_memo.json')
+_TAUT_MEMO_LOADED = False
+
+
+def _memo_load():
+    """The taut-path memo persists across processes (the fanout loop and
+    the braid are separate runs on the same ends and copper)."""
+    global _TAUT_MEMO_LOADED
+    if _TAUT_MEMO_LOADED:
+        return
+    _TAUT_MEMO_LOADED = True
+    try:
+        with open(_TAUT_MEMO_PATH, encoding='utf-8') as f:
+            _TAUT_MEMO.update({k: [tuple(p) for p in v]
+                               for k, v in json.load(f).items()})
+    except (OSError, ValueError):
+        pass
+
+
+def _memo_save():
+    try:
+        os.makedirs(os.path.dirname(_TAUT_MEMO_PATH), exist_ok=True)
+        tmp = _TAUT_MEMO_PATH + f'.{os.getpid()}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({k: [list(p) for p in v] for k, v in _TAUT_MEMO.items()}, f)
+        os.replace(tmp, _TAUT_MEMO_PATH)
+    except OSError:
+        pass
 
 
 def taut_paths(nets: Sequence[str],
@@ -34,6 +67,7 @@ def taut_paths(nets: Sequence[str],
     """One taut string per net, tooth -> ball, avoiding static copper."""
     import taut_clean as tc
     out = {}
+    dirty = False
     for nm in nets:
         # CLEANLINESS, not convergence (user, 0902): relax can settle
         # in a stable cycle THROUGH a thin foreign capsule and report
@@ -41,8 +75,23 @@ def taut_paths(nets: Sequence[str],
         # whole string and reseeds around the offender (wrong SECTOR,
         # never a realisation problem). An INVALID string is a loud
         # line, never a silent spine input.
+        # MEMO (run-wide): a taut path is a pure function of its two ends
+        # and the static copper it relaxes against (the run's own nets'
+        # copper is excluded from that model), and the plan loop asks for
+        # the same paths again at every judgment -- 14 times at K15, 82 %
+        # of the fanout stage. Same inputs, same answer, no recomputation.
+        obs = obs_for(nm)
+        _memo_load()
+        key = (f'{ends[nm][0][0]:.4f},{ends[nm][0][1]:.4f}>'
+               f'{ends[nm][1][0]:.4f},{ends[nm][1][1]:.4f}@{obs.signature()}')
+        hit = _TAUT_MEMO.get(key)
+        if hit is not None:
+            out[nm] = list(hit)
+            continue
         pts, iters, status, n_re = tc.relax_clean(
-            ends[nm][0], ends[nm][1], obs_for(nm))
+            ends[nm][0], ends[nm][1], obs)
+        _TAUT_MEMO[key] = [tuple(p) for p in pts]
+        dirty = True
         out[nm] = pts
         if status == 'reseeded':
             print(f'TAUT RESEEDED: {nm} ({n_re} reseed(s))', flush=True)
@@ -56,6 +105,8 @@ def taut_paths(nets: Sequence[str],
             print(f'TAUT INVALID: {nm} -- no clean homotopy sector found '
                   f'after {n_re} reseed(s); spine input violates copper: '
                   f'{tc.relax_clean.last}', flush=True)
+    if dirty:
+        _memo_save()
     return out
 
 
