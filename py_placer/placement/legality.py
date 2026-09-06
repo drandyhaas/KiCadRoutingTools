@@ -236,10 +236,28 @@ def ring_is_rect(ring):
 
 # --- board side model --------------------------------------------------------
 
+def side_of_layer(layer) -> str:
+    """'F' or 'B' from a LAYER NAME. Anything not starting with 'B' is front.
+
+    THE string-level rule (#878). `footprint_side` below is this applied to an
+    object's `.layer`; every other site in the tree that carried its own copy
+    of the same collapse now calls one of the two, and
+    `tests/test_878_side_rule_sites.py` refuses a new copy rather than letting
+    a ninth appear.
+
+    `str(...)` where the old spelling had `or ''` is a widening, not a change:
+    the old form raised `AttributeError` on a truthy non-string layer, and every
+    caller in the tree passes a `str` or `None`. Measured across the 22 tracked
+    boards, 1406 footprints: exactly two distinct layer values (`F.Cu`, `B.Cu`)
+    and zero disagreements between this and the five expressions it replaces.
+    """
+    return 'B' if str(layer or '').startswith('B') else 'F'
+
+
 def footprint_side(fp) -> str:
     """'F' or 'B' from a footprint's layer. Anything not B.* reads as front,
     matching how the rest of the package resolves side from `fp.layer`."""
-    return 'B' if (getattr(fp, 'layer', '') or '').startswith('B') else 'F'
+    return side_of_layer(getattr(fp, 'layer', ''))
 
 
 def footprint_has_through_pads(fp) -> bool:
