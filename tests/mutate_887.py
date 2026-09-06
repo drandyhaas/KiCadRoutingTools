@@ -3,7 +3,7 @@
 or do their tests merely run?
 
     python3 tests/mutate_887.py
-    python3 tests/mutate_887.py --list          # anchor PRE-FLIGHT, ~1 second
+    python3 tests/mutate_887.py --verify-anchors  # PRE-FLIGHT only, ~1 second
     python3 tests/mutate_887.py --row the-order-of-the-stage-rules-is-reversed
 
 NOT named `test_*`, so `run_all.py` never collects it: it REWRITES engine files
@@ -14,9 +14,10 @@ A row is KILLED when any named test exits non-zero -- a failed assertion and an
 ERROR count the same, because a mutation that makes the graders crash is still a
 mutation the graders noticed. **A row whose anchor does not match EXACTLY ONCE
 is BROKEN, not skipped**: an anchor that silently matches nothing reports every
-mutation as killed and is the most flattering possible bug. `--list` runs that
-check on its own, in about a second, so a stale anchor is found before a full
-run rather than fifty minutes into one.
+mutation as killed and is the most flattering possible bug. The shared
+`mutation_anchors.preflight` (#877) runs that check on every invocation, and
+`--verify-anchors` runs it alone in about a second -- so a stale anchor is found
+before a full run rather than fifty minutes into one.
 
 Expected SURVIVORS are declared WITH THE REASON they are not a test hole.
 
@@ -317,6 +318,17 @@ ROWS = [
 ]
 
 
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877). It also handles
+# --verify-anchors and strips it from sys.argv, so this file needs no flag of
+# its own -- the shared module is deliberately the ONLY implementation of that
+# question in the tree, and a 38th hand-rolled copy here (which this file did
+# carry) is exactly what it exists to stop.
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
+
+
 def run(tests):
     for t in tests:
         r = subprocess.run([sys.executable, '-X', 'utf8', t],
@@ -326,31 +338,10 @@ def run(tests):
     return False, ''
 
 
-def preflight():
-    """Every anchor must match exactly once. Returns the number that do not."""
-    src = {k: open(v, encoding='utf-8').read() for k, v in TARGETS.items()}
-    bad = 0
-    for name, tgt, old, _new, tests, exp in ROWS:
-        n = src[tgt].count(old)
-        flag = '' if n == 1 else '   *** BROKEN: matched %dx' % n
-        if n != 1:
-            bad += 1
-        print('  %-46s %-16s %-9s%s'
-              % (name, os.path.basename(TARGETS[tgt]), exp, flag))
-    return bad
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--row')
-    ap.add_argument('--list', action='store_true',
-                    help='anchor pre-flight only: no mutation, no tests')
     a = ap.parse_args()
-
-    if a.list:
-        bad = preflight()
-        print('\n%d row(s), %d with a stale anchor' % (len(ROWS), bad))
-        return 1 if bad else 0
 
     # A dirty engine tree would be RESTORED to its committed text, silently
     # destroying uncommitted work. Refuse rather than help.
