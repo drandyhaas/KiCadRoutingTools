@@ -16,13 +16,26 @@ splices. That placement is forced, not chosen:
   ``_emit_flip``'s horizontal squash (``movie_camera.py:527-582``), both of which
   operate on whole frames and would squash the 3D view along with the board.
 
-**THE INVARIANT.** Every frame handed to ``save_movie`` must be the same size.
-``_write_mp4`` (``animate_route.py:373-404``) raises on a size change mid-stream,
-CATCHES it, and degrades the whole movie to GIF silently; the Pillow GIF fallback
-then raises ``ValueError: images do not match`` uncaught. So the decision to show
-two panels is taken ONCE, up front, on evidence that a render actually works --
-and after that the box height is fixed and a failed render keeps its box with the
-reason written inside it, rather than dropping a panel mid-list.
+**THE INVARIANT.** Every frame handed to ``save_movie`` must be the same size,
+and the reason is worse than an exception: **nothing raises.**
+
+Measured on this repo's Pillow (12.1.1): saving a GIF whose frames differ in
+size does NOT raise. Pillow writes a valid file in which every later frame has
+been silently resized to the first frame's, so a mixed-size film comes out
+looking almost right and quietly distorted. `_write_mp4`
+(``animate_route.py:373-404``) does fail on a size change -- it prints
+``mp4 encode failed (...); falling back to GIF``, so that half is audible -- and
+the GIF it falls back to then absorbs the mismatch without a word.
+
+(An earlier version of this docstring said the Pillow path "raises
+``ValueError: images do not match`` uncaught". It does not, on any of three
+orderings tried. The invariant is if anything MORE worth keeping for that: a
+loud crash you would notice; a silently squashed frame you would not.)
+
+So the decision to show two panels is taken ONCE, up front, on evidence that a
+render actually works -- and after that the box height is fixed and a failed
+render keeps its box with the reason written inside it, rather than dropping a
+panel mid-list.
 
 **Why this is not wired into ``py_tools/make_film.py``.**
 ``tests/test_film_composition.py:158-159`` probes pixel ``(0, f.height // 2)``

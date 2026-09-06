@@ -220,7 +220,12 @@ def test_the_status_line_distinguishes_every_state():
         mp._report('not_applicable', 'no chain boards to render'),
     ]
     lines = [mp.iso_status_line(r) for r in reps]
-    want(len(set(lines)) == 7, 'seven states, seven distinguishable lines',
+    # SEVEN reports over FIVE states: `ran` appears twice (clean and with a
+    # failed shot) and `not_applicable` twice (no frames, no boards). The
+    # claim is that each REPORT reads differently, not that there are seven
+    # states -- an earlier version of this message said the latter.
+    want(len(set(lines)) == 7,
+         'seven reports over five states, seven distinguishable lines',
          len(set(lines)))
     for r, ln in zip(reps, lines):
         if r['state'] != 'ran':
@@ -655,9 +660,11 @@ def test_model_dirs_defines_the_projects_own_variable():
 
 def test_a_relative_model_path_is_resolved_against_the_board_not_the_cwd():
     """Measured: leaving a bare relative path relative made os.path.isfile
-    answer against os.getcwd(), so the same board captioned "13/15" from one
-    directory and "10/15" from another -- and the extra files it counted were
-    ones kicad-cli would never load."""
+    answer against os.getcwd(), so whether a reference resolved was decided by
+    what happened to sit beside the shell -- and anything found that way is a
+    file kicad-cli would never load. This test plants a decoy at the CWD and
+    asserts it is NOT counted, which is the defect stated as behaviour rather
+    than as a corpus number."""
     import re
     d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
     board = os.path.join(d1, 'b.kicad_pcb')

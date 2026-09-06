@@ -295,9 +295,9 @@ Measured on KiCad 10.0.0, and each number shapes the design:
 
 | | |
 |---|---|
-| one render, `--quality basic` | **2.0–3.4 s**, near enough board-independent (tigard, lvds, ulx3s at 225 models, glasgow_revC at 224) |
-| `--quality high` | ~12.6 s — the help says so, so nobody reaches for it unaware |
-| 8 renders, serial vs 6 workers | **11.9 s vs 4.4 s** |
+| one render, `--quality basic` | **~2–7 s**, machine- and load-dependent. The board matters less than the machine: within one quiet pass the spread across tigard, lvds, ulx3s (225 models) and glasgow_revC (224) is under 2x, with glasgow consistently slowest |
+| `--quality high` | **4.8–6.9 s** at 640×480 with no `--floor`, against 3.3 s for `basic` on the same job. (#887's own table reports 12.6 s, but at 900×700 `--floor`, which is a different question) |
+| 8 renders, serial vs 6 workers | **~2.4x**, e.g. 24.0 s vs 10.2 s |
 | a 900×700 request returns | **872×672** |
 | a 640×480 request returns | **616×448** — the same for two very different boards, and across an 8-step yaw sweep |
 
@@ -310,9 +310,9 @@ rather than blurs.
 
 **Component bodies depend on the board, and their absence is silent.**
 `kicad_files/tigard.kicad_pcb` renders as a *bare board* — pads, mask,
-silkscreen, no parts — because its 84 `(model …)` references are
-`${KISYS3DMOD}/….wrl` while KiCad 10 ships `.step`, and `-D KISYS3DMOD=…` does
-not fix it. `lvds_converter_dualclk` renders fully populated. `kicad-cli` says
+silkscreen, no parts. Its 84 `(model …)` references are 81 `${KISYS3DMOD}` +
+3 `${KIPRJMOD}`, and 82 of them name a `.wrl`, while KiCad 10 ships `.step`;
+`-D KISYS3DMOD=…` does not fix it. `lvds_converter_dualclk` renders fully populated. `kicad-cli` says
 nothing either way, so the panel counts what is actually on disk and captions
 `3D models N/M`, adding `BARE BOARD` and the reason at zero — never an empty
 green rectangle that reads as a bug.
@@ -359,8 +359,9 @@ command's `[t_start, t_end]`: `tee_cmd` stamps `time.time()` and a file's mtime
 is the same clock, and it runs commands serially, so at most one row can contain
 one. On run 24 that resolves all 17 chain boards. argv matching is the fallback
 (mtime does not survive copying a work dir), and it is only a fallback because
-on that same run it is wrong three times — a dry run that never wrote the board,
-a checker that only read it, and a step that exited 1.
+on that same run it picks the wrong command for **9 of the 17** chain boards,
+five of them by more than a minute — a dry run that never wrote the board, a
+checker that only read it, a step that exited 1, and six more.
 
 **The `at` line is UTC, and that is the point.** The ledger's own `iso_start` is
 *local time with no offset* (`tee_cmd` uses `time.localtime`), so it means

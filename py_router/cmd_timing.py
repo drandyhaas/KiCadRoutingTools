@@ -304,12 +304,19 @@ def utc_iso(epoch):
 def fmt_hms(seconds):
     """``H:MM:SS`` for a duration, rounded to the NEAREST second.
 
-    ``floor(s + 0.5)``, deliberately, and both alternatives are wrong:
+    ``floor(s + 0.5)``, deliberately, and the two alternatives fail differently:
 
-      * truncation misses four of the nine H:MM:SS values in the hand-written
-        run-24 report (6.8 -> 0:00:06 not 0:00:07; 4658.7 -> 1:17:38 not
-        1:17:39);
-      * Python's ``round`` is banker's, so ``round(0.5) == 0``.
+      * truncation is wrong ON THIS DATA -- it misses four of the nine H:MM:SS
+        values in the hand-written run-24 report (P* 0:00:54 not 0:00:55, L*
+        0:00:06 not 0:00:07, close-out 0:00:23 not 0:00:24, and the run span
+        1:17:38 not 1:17:39);
+      * Python's ``round`` is wrong IN PRINCIPLE but not on this data: it
+        reproduces all nine, because none of them lands on an exact .5. It is
+        banker's rounding, so ``round(0.5) == 0`` and ``round(1.5) == 2``, and
+        the day a bucket does land on a half-second it would disagree with the
+        report for a reason nobody would look for. Stated separately because an
+        earlier version of this comment said "both alternatives are wrong"
+        against the nine values, and only one of them is.
 
     Not shared with ``kicad_routing_plugin/placement_gui._fmt_elapsed``: that one
     lives in the wx plugin package (unimportable from here without dragging wx
@@ -519,17 +526,34 @@ def anchor_steps(marks, rows, mtimes=None):
     is the same epoch clock, and it runs commands serially and blocks on each --
     so at most one row can contain an mtime, and the resolution is unique by
     construction. Measured on run 24: zero overlapping rows in 153, and 16 of
-    17 chain boards resolved to exactly one row, every one the command that
-    semantically wrote it (r1_pour -> R1-pour, r3_route -> R3-route,
-    r7_lc -> R7-layercosts). The 17th is the seed board, whose mtime precedes
-    the run by 101 s -- which is the right answer, not a miss.
+    17 chain boards resolved to exactly one row (r1_pour -> R1-pour,
+    r3_route -> R3-route, r7_lc -> R7-layercosts). The 17th is the seed board,
+    whose mtime precedes the run by 101 s -- the right answer, not a miss.
+
+    What mtime identifies is WHEN THE CONTENT CAME INTO EXISTENCE, which is
+    usually but not always the command that wrote the file: `copy_board.py` uses
+    `shutil.copy2`, which preserves mtime, so a copied board resolves to the row
+    that produced its SOURCE. Two of run 24's sixteen are copies. That is the
+    right instant for a movie -- the frame shows that content -- but it is not
+    the same claim as "the command that wrote this path".
 
     argv matching is the FALLBACK, not the primary, because mtime is destroyed
     by copying a work dir and by `make_film --from-ledger`, which materialises
-    boards out of a content-addressed store. It is a fallback rather than the
-    rule because on the same run it is wrong three times: `r4` is first
-    mentioned by a DRY run that never wrote it (exit 4), `routed` by a checker
-    that only READ it, and `r5_prune` by a step that exited 1.
+    boards out of a content-addressed store.
+
+    It is a fallback rather than the rule because it is wrong FAR more often
+    than it looks. Graded against the mtime answer over run 24's 17 chain
+    boards: raw first-mention picks the wrong command 10 times, and the rule
+    actually implemented below -- prefer an exit-0 mention -- still picks wrong
+    9 times, five of them by more than a minute (worst: `routed`, off by 470 s).
+    The exit-0 preference does fix `r4`, landing 0.1 s from the truth.
+
+    (An earlier version of this docstring said "wrong three times" and named
+    r4, routed and r5_prune. Each anecdote is accurate, but three was the number
+    of examples looked at, not the number of failures -- r1, r2 and r3 are three
+    MORE instances of the same dry-run category the text presented as happening
+    once. Understating a fallback's error rate by 3x is how it stops being
+    treated as a fallback.)
 
     ``mtimes`` overrides ``os.path.getmtime`` (tests, and any caller that knows
     better).

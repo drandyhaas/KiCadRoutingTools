@@ -7,8 +7,9 @@ three things only a real render can answer, and it exists because each of them
 was measured once and would otherwise be a comment nobody re-checks:
 
   * kicad-cli does NOT return the size you asked for;
-  * parallel renders are byte-identical to serial ones, and really do run in
-    parallel;
+  * parallel renders are identical to serial ones, and really do run in
+    parallel -- and that reproducibility belongs to the DEFAULT quality, not to
+    kicad-cli: at --quality high it is not reproducible against itself;
   * a board whose 3D models do not resolve still renders, and SAYS it is bare.
 """
 import os
@@ -230,8 +231,57 @@ def test_parallel_renders_are_deterministic_and_really_parallel():
          'above would be satisfied by silently serialising', len(threads))
 
 
+def test_reproducibility_is_the_default_qualitys_not_kicad_clis():
+    """Which half of the determinism claim belongs to whom.
+
+    Measured, two SERIAL renders of the same job:
+      --quality basic : bytes and pixels identical, on both boards tried
+      --quality high  : bytes and pixels BOTH differ, on both
+
+    So the movie's reproducibility is a property of the default quality, not of
+    kicad-cli, and `--iso-jobs` is not what changes it. Worth a test because an
+    earlier version of this file's comment had it backwards -- it claimed byte
+    instability at `basic` on the strength of one noisy sample, and changed the
+    determinism assertion from bytes to pixels to work around a problem that was
+    not there.
+    """
+    from PIL import ImageChops
+    d = tempfile.mkdtemp()
+
+    def twice(quality):
+        outs = []
+        for n in (1, 2):
+            p = os.path.join(d, '%s_%d.png' % (quality, n))
+            png, err = kir.render_iso(LVDS, p, CLI, 320, 240, quality=quality)
+            if not png:
+                return None, err
+            outs.append(png)
+        same_bytes = open(outs[0], 'rb').read() == open(outs[1], 'rb').read()
+        a = Image.open(outs[0]).convert('RGBA')
+        b = Image.open(outs[1]).convert('RGBA')
+        return (same_bytes, ImageChops.difference(a, b).getbbox() is None), ''
+
+    basic, err = twice('basic')
+    want(basic is not None, 'the basic renders succeed', err)
+    want(basic == (True, True),
+         'at the DEFAULT quality a render is reproducible in both bytes and '
+         'pixels, so the movie is too', basic)
+
+    high, err2 = twice('high')
+    if high is None:
+        print('  NOTE: --quality high did not render here (%s); skipping the '
+              'other half' % err2)
+        want(True, 'the high-quality arm is unavailable on this machine')
+        return
+    want(high != (True, True),
+         'while at --quality high kicad-cli is not reproducible against ITSELF '
+         'run to run -- nothing here can make it so, and that is the caveat the '
+         '--iso-jobs help now carries', high)
+
+
 def test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare():
-    """tigard: 84 model refs, all .wrl, against a KiCad 10 tree that ships .step."""
+    """tigard: 84 model refs -- 81 ${KISYS3DMOD} + 3 ${KIPRJMOD}, 82 of them
+    .wrl -- against a KiCad 10 tree that ships .step only."""
     d = tempfile.mkdtemp()
     steps, final = MM.resolve_inputs([TIGARD])
     marks = []
@@ -264,15 +314,25 @@ TESTS_TO_RUN = [
     test_the_yaw_sweep_reaches_kicad_cli_and_changes_the_picture,
     test_an_unreadable_render_is_a_failure_not_a_success,
     test_parallel_renders_are_deterministic_and_really_parallel,
+    test_reproducibility_is_the_default_qualitys_not_kicad_clis,
     test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare,
 ]
 
 
 def main():
     print('kicad-cli: %s' % CLI)
+    # Isolated, like the other #887 files: an exception in one test used to
+    # abort the file, leaving every later test neither run nor reported --
+    # indistinguishable, in the output, from tests that were never written.
+    # A NameError from a bad edit is exactly how that was found.
     for fn in TESTS_TO_RUN:
         print('--- %s' % fn.__name__)
-        fn()
+        try:
+            fn()
+        except Exception as exc:                            # noqa: BLE001
+            import traceback
+            BAD.append('%s RAISED %s' % (fn.__name__, exc))
+            traceback.print_exc()
     if BAD:
         print('\nFAILED: %d' % len(BAD))
         for b in BAD:

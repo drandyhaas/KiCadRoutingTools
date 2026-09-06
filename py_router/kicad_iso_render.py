@@ -29,12 +29,13 @@ machine's KiCad. It resolves the binary through ``kicad_oracle.find_kicad_cli``
   than 11.9 s serially.
 * **Component bodies are board-dependent, and their absence is silent.**
   ``kicad_files/tigard.kicad_pcb`` renders as a BARE BOARD -- pads, mask,
-  silkscreen, no parts -- because its 84 ``(model ...)`` references are
-  ``${KISYS3DMOD}/....wrl`` while KiCad 10 ships ``.step`` only, and passing
-  ``-D KISYS3DMOD=<dir>`` does not fix it. ``kicad_files/lvds_converter_dualclk``
-  renders with full bodies. kicad-cli says nothing either way, so
-  ``resolve_models`` counts what is actually on disk and the caller captions the
-  answer instead of shipping an empty green rectangle that reads as a bug.
+  silkscreen, no parts. Its 84 ``(model ...)`` references are 81
+  ``${KISYS3DMOD}`` + 3 ``${KIPRJMOD}``, and 82 of them name a ``.wrl``, against
+  a KiCad 10 tree that ships ``.step`` only; passing ``-D KISYS3DMOD=<dir>``
+  does not fix it. ``kicad_files/lvds_converter_dualclk`` renders with full
+  bodies. kicad-cli says nothing either way, so ``resolve_models`` counts what
+  is actually on disk and the caller captions the answer instead of shipping an
+  empty green rectangle that reads as a bug.
 """
 from __future__ import annotations
 
@@ -61,9 +62,14 @@ ISO_RENDER_HANG_GUARD_S = 120.0
 #: the same at either size (measured), so this is free sharpness.
 _REQUEST_OVERSCAN = 1.15
 
-#: Every path variable a board in this corpus actually uses. Measured over
-#: kicad_files/: KISYS3DMOD (KiCad 5/6 era), KICAD6/7/8/9/10_3DMODEL_DIR,
-#: KIPRJMOD (the board's own directory) and KICAD_USER_DIR.
+#: Model-directory variables. Census over the TRACKED boards in kicad_files/:
+#: KICAD6_3DMODEL_DIR 537, KISYS3DMOD 498 (the KiCad 5/6 spelling), KICAD9 84,
+#: KIPRJMOD 47, KICAD10 33, KICAD8 23, KICAD_USER_DIR 1.
+#:
+#: `KICAD7_3DMODEL_DIR` occurs ZERO times and is here defensively -- KiCad 7
+#: exists and boards from it will arrive eventually. Called out because the
+#: comment used to say all of these were "measured over kicad_files/", which
+#: implied every one had been observed.
 _MODEL_DIR_VARS = ('KISYS3DMOD', 'KICAD6_3DMODEL_DIR', 'KICAD7_3DMODEL_DIR',
                    'KICAD8_3DMODEL_DIR', 'KICAD9_3DMODEL_DIR',
                    'KICAD10_3DMODEL_DIR')
@@ -190,12 +196,20 @@ def resolve_models(board_path, dirs=None):
         dirs = model_dirs(board_path=board_path)
     # A BARE RELATIVE model path is relative to the PROJECT -- it is
     # `${KIPRJMOD}/...` with the variable left off, and that is how KiCad reads
-    # it. Resolving it against os.getcwd() instead made the caption move with
-    # the CALLER: lvds_converter_dualclk reported "3D models 13/15" from one
-    # directory and "10/15" from another, and the files it counted from the
-    # first were ones kicad-cli would never load -- a number under the picture
-    # exceeding what is in the picture. 13 of the 26 boards in kicad_files/
-    # carry at least one relative reference.
+    # it. Resolving it against os.getcwd() instead made the answer depend on
+    # the CALLER'S DIRECTORY: whether a reference resolved was decided by what
+    # happened to sit beside the shell, and anything it found that way was a
+    # file kicad-cli would never load -- a count under the picture that need
+    # not describe the picture.
+    #
+    # 10 of the 22 TRACKED boards in kicad_files/ carry at least one bare
+    # relative reference, so this is the common case, not a corner. (An earlier
+    # comment here said "13 of 26" and illustrated it with lvds reporting 13/15
+    # from one directory and 10/15 from another. Both were measured in a dirty
+    # tree: 26 counts four generated boards that are gitignored, and lvds's
+    # three bare refs name .stp files that exist nowhere in the repo, so no cwd
+    # produces 13. The defect was real and the fix is unchanged; the numbers
+    # were not reproducible and are replaced with ones that are.)
     proj = dirs.get('KIPRJMOD') or os.path.dirname(os.path.abspath(board_path))
     for raw in _MODEL_RE.findall(txt):
         out['total'] += 1
@@ -325,9 +339,22 @@ def render_many(jobs, cli, workers=None, **kw):
     (measured: 8 renders in 11.9 s serial, 4.4 s over six workers).
 
     Results are keyed, never appended in completion order, so the composed movie
-    is byte-identical at any worker count. A test asserts exactly that, and also
-    that more than one thread really ran -- otherwise the determinism claim
-    could be satisfied by silently serialising.
+    is identical at any worker count. A test asserts exactly that, and also that
+    more than one thread really ran -- otherwise the determinism claim could be
+    satisfied by silently serialising.
+
+    **That guarantee is the default quality's, not kicad-cli's.** Measured, two
+    serial renders of the same job on two boards:
+
+        --quality basic : bytes identical, pixels identical  (2 of 2 boards)
+        --quality high  : bytes DIFFER, pixels DIFFER        (2 of 2 boards)
+
+    So at `basic` -- the default, and what the panel uses unless asked otherwise
+    -- a render is reproducible and the movie is too. At `high` kicad-cli is not
+    reproducible against ITSELF, run to run, on one thread; nothing here can make
+    it so, and `--iso-jobs` is not what changes the answer. Said out loud because
+    an earlier version of this comment had it backwards, claiming byte
+    instability at basic on the strength of one noisy sample.
     """
     from concurrent.futures import ThreadPoolExecutor
     out = {}

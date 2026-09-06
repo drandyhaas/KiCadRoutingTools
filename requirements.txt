@@ -10,10 +10,20 @@ shapely>=1.8.0
 # Rasterization: board stills, review sheets, the routing movie and the film.
 # A HARD requirement, not an optional one -- py_router/route_render.py and
 # py_tools/render_placement.py import it at MODULE SCOPE with no fallback, so a
-# fresh clone that followed the README could not render anything. The floor is
-# 9.2 because route_render.load_font calls ImageFont.load_default(size=), which
-# arrived there; it carries a fallback for older builds, but the declared floor
-# should be the version at which the intended path works.
+# fresh clone that followed the README could not render anything.
+#
+# The floor is deliberately LOW: everything the renderer needs (alpha_composite,
+# LANCZOS, ImageChops, PngInfo) is far older than this, and a low floor keeps
+# older environments working. Captions want more: route_render.load_font asks
+# for a SIZED default font, ImageFont.load_default(size=), which arrived in
+# Pillow 10.1.0 -- below that its try/except falls back to the unsized default
+# and labels come out small but present. So 10.1 is the version to have, not the
+# version to require.
+#
+# (A previous comment here put load_default(size=) at 9.2. That is wrong -- it
+# is 10.1.0 -- and the error is worth naming because it was pinned INTO a
+# dependency declaration, where "the version at which the intended path works"
+# would then have been false.)
 Pillow>=9.2.0
 
 # NOT listed, deliberately: imageio and imageio-ffmpeg. They are needed only to

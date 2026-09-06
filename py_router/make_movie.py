@@ -389,7 +389,10 @@ def main():
     iso.add_argument('--iso-zoom', type=float, default=None)
     iso.add_argument('--iso-jobs', type=int, default=None, metavar='N',
                      help='parallel renders (default: min(4, cpu count)). The '
-                          'movie is byte-identical at any value')
+                          'movie is identical at any value. (At '
+                          '--iso-quality high kicad-cli is not reproducible '
+                          'against itself run to run, on any worker count; '
+                          'basic is.)')
     iso.add_argument('--iso-timeout', type=float, default=120.0,
                      metavar='SECONDS',
                      help='HANG GUARD on ONE render -- not a budget, and it '
