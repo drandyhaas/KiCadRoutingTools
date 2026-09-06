@@ -147,6 +147,12 @@ ROWS = [
      (T_849,), 'SURVIVED'),
 ]
 
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
+
 
 #: `run_all.py`'s self-skip code. A test that exits 77 asserted NOTHING, so
 #: reading it as a kill is exactly the "most flattering possible bug" this

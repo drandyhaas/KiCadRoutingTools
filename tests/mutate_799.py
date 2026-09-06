@@ -194,9 +194,13 @@ ROWS = [
      "    violations = list(validate_intent(intent)) + list(block_problems)\n",
      (T793, T799), 'KILLED'),
 
+    # RE-ANCHORED (#877). `a22a968a` ("#705: grade the decoupling cap to the
+    # PIN") EXTENDED `_NON_RULE_SEVERITIES`, so this line no longer closes the
+    # frozenset with `})` and the quote matched nothing. Dropping
+    # `keepout_allow_unresolved` from the registry is still the mutation.
     ('the-rule-name-is-not-registered', 'fp',
-     "    'intent_zone_in_keepout', 'keepout_allow_unresolved'})\n",
-     "    'intent_zone_in_keepout'})\n",
+     "    'intent_zone_in_keepout', 'keepout_allow_unresolved',\n",
+     "    'intent_zone_in_keepout',\n",
      (T549S,), 'KILLED'),
 
     # ---- the board_score prerequisite --------------------------------------
@@ -205,6 +209,12 @@ ROWS = [
      "    return {'ran': True, 'count': len(viols),\n",
      (TBS,), 'KILLED'),
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
 
 
 def _git_clean(paths):

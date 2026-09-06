@@ -144,10 +144,15 @@ ROWS = [
      '                        radius=None,',
      (T747, T725), 'KILLED'),
 
+    # RE-ANCHORED (#877). `f1bfee4d` ("#779: the seed half of the via
+    # disclosure grades seed BARRELS") reformatted the `_register_via(...)`
+    # call: the statement no longer closes on this line, so the trailing `))`
+    # became `)` and the anchor matched nothing. Dropping the keep-out
+    # carry-over is still the mutation.
     ('drop-keepout-carry-over', 'fc',
      """                        radius=None if rec is None else rec[1],
-                        keepout=t[3]))""",
-     """                        radius=0.0 if rec is None else rec[1]))""",
+                        keepout=t[3])""",
+     """                        radius=0.0 if rec is None else rec[1])""",
      (T747,), 'KILLED'),
 
     # ---- the registrar: the match --------------------------------------
@@ -323,6 +328,12 @@ ROWS = [
      None,
      (T747, T736, T746, T775), 'KILLED'),
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
 
 
 def _dirty(path):
