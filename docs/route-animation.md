@@ -9,6 +9,13 @@ Unlike the KiCad-based renderer it replaces, none of this needs KiCad,
 geometry directly with [Pillow](https://python-pillow.org/), so a still is
 ~0.2 s and a full movie renders in about a second.
 
+That is still true of everything below **by default**, and it is the reason this
+subsystem exists. One opt-in feature does need `kicad-cli` — the 3D isometric
+panel (#887) — and it is off unless asked for, costs ~2-3 s per render when it
+is, and degrades to the ordinary single-panel movie, at full speed and with a
+stated reason, when the binary is absent. See
+[the 3D isometric panel](#the-3d-isometric-panel-and-the-run-clock-887).
+
 Three pieces:
 
 | Tool | Role |
@@ -255,3 +262,108 @@ Two implementation notes worth knowing:
 Rotation snaps rather than tweening (quench rotations are 90-degree multiples and
 rare); `--camera-budget SECONDS` caps the runtime, scaling camera shots first and
 only touching the moves as a last resort.
+
+---
+
+## The 3D isometric panel, and the run clock (#887)
+
+Two optional additions to the frame. **Both are off by default, and the fast
+path above is unchanged when they are** — which matters here more than it
+usually would, because this subsystem exists precisely because `kicad-cli` was
+taken out of it, and one of these puts it back on an opt-in path.
+
+### `--panels xray+iso` — a 3D view under the board
+
+```bash
+python3 py_router/make_movie.py WORKDIR --panels xray+iso -o routing.mp4
+KICAD_MOVIE_PANELS=xray+iso python3 py_router/make_movie.py WORKDIR   # env knob, same effect
+```
+
+The X-ray board view keeps the full frame width and a `kicad-cli pcb render` is
+stacked underneath it. Like the camera, it has no GUI control of its own: one
+variable covers the GUI recorder, `run_plan.py --movie` and the stress renderer
+at once.
+
+**What it does NOT show is routing progress.** Copper sits under soldermask, so
+the 3D view barely changes as tracks are laid. What it shows is the parts moving
+across placement rounds, and the board turning: shot *k* of *K* is rendered at
+`yaw0 + sweep·k/(K−1)`, one slow turn across the whole film. That sweep is what
+makes the panel animated, and it is free — a different `--rotate` costs exactly
+the same render.
+
+Measured on KiCad 10.0.0, and each number shapes the design:
+
+| | |
+|---|---|
+| one render, `--quality basic` | **2.0–3.4 s**, near enough board-independent (tigard, lvds, ulx3s at 225 models, glasgow_revC at 224) |
+| `--quality high` | ~12.6 s — the help says so, so nobody reaches for it unaware |
+| 8 renders, serial vs 6 workers | **11.9 s vs 4.4 s** |
+| a 900×700 request returns | **872×672** |
+| a 640×480 request returns | **616×448** — the same for two very different boards, and across an 8-step yaw sweep |
+
+So: **one render per chain STEP, never per frame** (`--iso-max-renders`, default
+24, caps it — a COUNT rather than a number of seconds, so the same chain
+composes the same movie on a fast machine and a slow one), and **the returned
+size is never trusted**. Every panel is letterboxed into a box the composer
+chose, and the render is asked for at 1.15× that box so the fit downscales
+rather than blurs.
+
+**Component bodies depend on the board, and their absence is silent.**
+`kicad_files/tigard.kicad_pcb` renders as a *bare board* — pads, mask,
+silkscreen, no parts — because its 84 `(model …)` references are
+`${KISYS3DMOD}/….wrl` while KiCad 10 ships `.step`, and `-D KISYS3DMOD=…` does
+not fix it. `lvds_converter_dualclk` renders fully populated. `kicad-cli` says
+nothing either way, so the panel counts what is actually on disk and captions
+`3D models N/M`, adding `BARE BOARD` and the reason at zero — never an empty
+green rectangle that reads as a bug.
+
+Without `kicad-cli` you get the single-panel movie at full speed and a line
+saying so, naming `$KICAD_CLI`. That is a whole-movie decision taken **once**,
+before compositing, and it is made on a probe render rather than on the binary
+merely existing — because after the first composed frame the height is fixed and
+cannot change. A single failed render later keeps its box with the reason drawn
+inside it, for the same reason: mixed frame sizes make `_write_mp4` degrade the
+whole movie to GIF, silently.
+
+### The run clock
+
+A run wrapped in `tests/stress/tee_cmd.py` leaves a `cmd_timing.jsonl`, and when
+the movie finds one beside the chain it draws a run-clock overlay bottom-left,
+opposite the caption:
+
+```
+RUN CLOCK  +0:51:23 of 1:17:39
+stage  R3-route
+basis  cmd_timing.jsonl - 153 wrapped commands, mapped by mtime
+remaining  0:26:16  (exact, post-hoc: the run is over; this is a recorded total)
+```
+
+The basis is the **run** clock, and that is measured rather than stylistic: in
+run 24 the wrapped commands account for 253.3 s of a 4658.7 s run — 5.4% — so a
+countdown driven by tool time would read "nearly done" for over an hour.
+
+A frame is mapped to an instant by its board's **mtime** falling inside a
+command's `[t_start, t_end]`: `tee_cmd` stamps `time.time()` and a file's mtime
+is the same clock, and it runs commands serially, so at most one row can contain
+one. On run 24 that resolves all 17 chain boards. argv matching is the fallback
+(mtime does not survive copying a work dir), and it is only a fallback because
+on that same run it is wrong three times — a dry run that never wrote the board,
+a checker that only read it, and a step that exited 1.
+
+**`remaining` is exact or absent, never estimated.** The movie is built after
+the run, so the total is a recorded fact and the subtraction is arithmetic — but
+it is offered only when the ledger demonstrably spans the film. Run 24's own
+chain does not qualify: its last board is written nine minutes before the run
+stops, so no countdown is shown there and the frame says why.
+
+`--png-dir` frames carry the same numbers as PNG text metadata under `krt:`
+keys, so the timeline survives outside the movie. There is no `krt:eta` and no
+`krt:progress`: a percentage invites being read as a prediction.
+
+The same reader is a standalone report — the end-of-run timing audit that used
+to be a hand-run watch subagent:
+
+```bash
+python3 -X utf8 py_router/cmd_timing.py WORKDIR          # step table, subtotals, totals
+python3 -X utf8 py_router/cmd_timing.py WORKDIR --json
+```
