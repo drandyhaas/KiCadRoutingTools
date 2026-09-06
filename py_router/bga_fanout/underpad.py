@@ -506,6 +506,8 @@ def generate_underpad_escape(footprint: Footprint,
                              grid_step: float = 0.0,
                              only_pad_keys: Optional[Set[Tuple[float, float]]] = None,
                              dogbone: bool = False,
+                             escape_dir_hints: Optional[Dict[
+                                 Tuple[float, float], str]] = None,
                              plane_drop_nets: Optional[Set[int]] = None,
                              plane_drop_report: Optional[Dict] = None,
                              plane_net_layers: Optional[Dict[str, List[str]]] = None,
@@ -1219,12 +1221,40 @@ def generate_underpad_escape(footprint: Footprint,
     def heur(ix, iy):
         return max(0, min(ix - bx0, bx1 - ix, iy - by0, by1 - iy))
 
+    # A caller's planned side (escape_dir_hints): the search is then
+    # aimed at THAT boundary and may leave the array on it only. The
+    # nearest-boundary heuristic is the right guess for a ball on its
+    # own and the wrong one for a ball joining a bundle that leaves on
+    # a particular side, since the search races to the near edge and
+    # the plan is lost with no error anywhere.
+    _SIDE_H = {
+        'left': lambda ix, iy: max(0, ix - bx0),
+        'right': lambda ix, iy: max(0, bx1 - ix),
+        'up': lambda ix, iy: max(0, iy - by0),
+        'down': lambda ix, iy: max(0, by1 - iy),
+    }
+
+    def _left_on(side, cx, cy):
+        """Did the path leave the array on `side`?"""
+        if side == 'left':
+            return cx < bx0
+        if side == 'right':
+            return cx > bx1
+        if side == 'up':
+            return cy < by0
+        return cy > by1
+
+    def _side_of(p):
+        return (escape_dir_hints or {}).get((round(p.global_x, 3),
+                                             round(p.global_y, 3)))
+    _hint_missed = []
+
     def depth(p):
         return min(p.global_x - grid.min_x, grid.max_x - p.global_x,
                    p.global_y - grid.min_y, grid.max_y - p.global_y)
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
-              carve=None, start_layer=None, cost_out=None):
+              carve=None, start_layer=None, cost_out=None, side=None):
         """Route from the pad to any boundary cell.
 
         `route_layers` = the set of layer indices the track may run on. The pad
@@ -1250,7 +1280,8 @@ def generate_underpad_escape(footprint: Footprint,
 
         start = (sx, sy, top_idx if start_layer is None else start_layer)
         g = {start: 0.0}
-        pq = [(heur(sx, sy), start)]
+        _h = _SIDE_H[side] if side else heur
+        pq = [(_h(sx, sy), start)]
         came = {}
         # #561 hot-loop: byte-equivalent mechanical speedup -- localize the
         # per-iteration lookups and index the occupancy bytearrays directly
@@ -1271,7 +1302,8 @@ def generate_underpad_escape(footprint: Footprint,
         while pq:
             _, cur = _heappop(pq)
             cx, cy, L = cur
-            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1) \
+                    and (side is None or _left_on(side, cx, cy)):
                 if cost_out is not None:
                     # outside the window the tie-break heuristic is 0, so the
                     # popped priority IS the path's g-cost (#563 layer compare)
@@ -1288,6 +1320,10 @@ def generate_underpad_escape(footprint: Footprint,
                 for dx, dy in _steps:
                     nx, ny = cx + dx, cy + dy
                     if not (0 <= nx < _onx and 0 <= ny < _ony):
+                        continue
+                    if side is not None \
+                            and not (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
+                            and not _left_on(side, nx, ny):
                         continue
                     if (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
                             and _gL[nx * _ony + ny] \
@@ -1318,7 +1354,7 @@ def generate_underpad_escape(footprint: Footprint,
                     if ng < _g_get(nxt, 1e18):
                         g[nxt] = ng
                         came[nxt] = cur
-                        _heappush(pq, (ng + max(0, min(nx - bx0, bx1 - nx, ny - by0, by1 - ny)), nxt))
+                        _heappush(pq, (ng + _h(nx, ny), nxt))
             # The single via, only in the ball's own pad. A through via spans
             # all layers, so the site must also clear immovable foreign copper
             # on layers the run-blocking test never looks at (via_ok, #253/
@@ -1964,8 +2000,16 @@ def generate_underpad_escape(footprint: Footprint,
             sx, sy = occ.cell(p.global_x, p.global_y)
             home = home_of(p)
             carve = _carve_foreign([(p.global_x, p.global_y)], home, {p.net_id})
-            path = astar(sx, sy, home, {top_idx}, allow_via=False,
-                         net_id=p.net_id, carve=carve)
+            _side = _side_of(p)
+            path = None
+            if _side:
+                path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                             net_id=p.net_id, carve=carve, side=_side)
+                if path is None:
+                    _hint_missed.append(p.net_name)
+            if path is None:
+                path = astar(sx, sy, home, {top_idx}, allow_via=False,
+                             net_id=p.net_id, carve=carve)
             if path is not None:
                 commit(p, path, carve)
                 n_fcu += 1
@@ -2036,6 +2080,18 @@ def generate_underpad_escape(footprint: Footprint,
         ex = 1.0 if d_e <= d_w else -1.0
         ey = 1.0 if d_s <= d_n else -1.0
         primary_x = min(d_e, d_w) <= min(d_s, d_n)
+        # A caller's planned side (escape_dir_hints) overrides "toward
+        # the nearest boundary"; the ring-parity stagger and the
+        # candidate ordering are untouched.
+        _h = (escape_dir_hints or {}).get((round(gx, 3), round(gy, 3)))
+        if _h == 'left':
+            ex, primary_x = -1.0, True
+        elif _h == 'right':
+            ex, primary_x = 1.0, True
+        elif _h == 'up':
+            ey, primary_x = -1.0, False
+        elif _h == 'down':
+            ey, primary_x = 1.0, False
         alt = 1.0 if int(round(depth(p) / max(pitch, 1e-9))) % 2 == 0 else -1.0
         if primary_x:
             cands = [(ex * hx, alt * ey * hy), (ex * hx, -alt * ey * hy),
@@ -2327,8 +2383,21 @@ def generate_underpad_escape(footprint: Footprint,
                 _m[key] = ok
             return ok
 
-        path = astar(sx, sy, home, inner_layers, allow_via=True,
-                     via_ok=_via_ok, net_id=p.net_id, carve=carve)
+        _side = _side_of(p)
+        path = None
+        if _side:
+            path = astar(sx, sy, home, inner_layers, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                         side=_side)
+            if path is None and nl > 1:
+                path = astar(sx, sy, home, set(range(nl)), allow_via=True,
+                             via_ok=_via_ok, net_id=p.net_id, carve=carve,
+                             side=_side)
+            if path is None:
+                _hint_missed.append(p.net_name)
+        if path is None:
+            path = astar(sx, sy, home, inner_layers, allow_via=True,
+                         via_ok=_via_ok, net_id=p.net_id, carve=carve)
         if path is None and nl > 1:
             path = astar(sx, sy, home, set(range(nl)), allow_via=True,
                          via_ok=_via_ok, net_id=p.net_id, carve=carve)
@@ -2664,6 +2733,12 @@ def generate_underpad_escape(footprint: Footprint,
         if clamp_stats['clamped']:
             print(f"  Under-pad: clamped {clamp_stats['clamped']} via-in-pad(s) to "
                   f"fit their pad edge (#202)")
+        if _hint_missed:
+            print(f"  Under-pad: {len(_hint_missed)} ball(s) had no route out "
+                  f"the side the caller asked for and escaped elsewhere "
+                  f"[{', '.join(sorted(_hint_missed)[:6])}"
+                  + (f", +{len(_hint_missed) - 6} more" if len(_hint_missed) > 6
+                     else "") + "]")
         if clamp_stats['escalated']:
             warn_fab_escalation(f"under-pad {clamp_stats['escalated']} via-in-pad(s) "
                                 f"(sub-0.45mm pads)")
