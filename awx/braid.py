@@ -890,40 +890,57 @@ class Corridor:
                         leg_cross.setdefault(nm, []).append(om)
         self.crossings = crossings
         leg_req_min = {}
-        # TWO-PAGE LEG ECONOMICS. A leg crossing a lane on the
-        # OTHER layer is free -- the block-wide layer rule priced
-        # every crossing as a forced dive (2 vias per crossed
-        # lane), which is exactly the SA7-class 4-via overspend
-        # (t7 K28: the human pays 2). Each leg picks the layer
-        # that minimises what is actually paid: 2 per crossed
-        # PAGE lane on its own layer, 1 if it differs from its
-        # lane's page (the corner via), 1 if it differs from the
-        # stub's layer. A crossed page lane dives only under a
-        # SAME-layer leg; a swimmer adapts per leg. Overlapping
-        # opposite-layer intervals from adjacent disagreeing legs
-        # are dropped in pairs (the K19 lesson: both layers
-        # closed refuses the lane before the router sees it); the
-        # obstacle map adjudicates there.
-        for nm in self.exit_block:
-            own = sched.page.get(nm) if sched else None
-            pgs = [sched.page.get(om) if sched else None
-                   for om in leg_cross.get(nm, ())]
+        # TWO-PAGE LEG ECONOMICS, decided ALONG s. A leg crossing a
+        # lane on the OTHER layer is free -- the block-wide layer rule
+        # priced every crossing as a forced dive (2 vias per crossed
+        # lane), which is exactly the SA7-class 4-via overspend (t7
+        # K28: the human pays 2). Each leg picks the layer that
+        # minimises what is actually paid: a dive for every crossed
+        # lane that is on that layer THERE (its return charged only if
+        # its berth is on that layer too), a corner via where the leg
+        # differs from the layer its own lane is on there, a via where
+        # it differs from the stub's. "There" is the point: a lane is
+        # crossed only by legs EARLIER than its own (it ends at its
+        # leg), so with the legs decided in ascending s every stretch
+        # the earlier legs imposed -- on this lane and on the lanes it
+        # crosses -- is known when a leg chooses. Judged by pages alone
+        # (2026-09-06) K28's SA9 was sent under two F legs, back up to F
+        # for its own leg and down again into its B berth: three
+        # changes where the router found one, and the plan counted
+        # zero. A crossed page lane dives only under a SAME-layer leg;
+        # a swimmer adapts per leg. Overlapping opposite-layer
+        # intervals from adjacent disagreeing legs are dropped in pairs
+        # (the K19 lesson: both layers closed refuses the lane before
+        # the router sees it); the obstacle map adjudicates there.
+        ivs = {nm: [] for nm in M}
+
+        def cur_layer(om, s):
+            """The layer the plan has lane `om` on at s: its last
+            required stretch starting before s (appended in s order),
+            else its page (None for a swimmer)."""
+            before = [iv for iv in ivs[om] if iv[0] < s]
+            return before[-1][2] if before else (sched.page.get(om) if sched else None)
+
+        for nm in sorted(self.exit_block, key=lambda n: self.exit_leg_s[n]):
+            s_l = self.exit_leg_s[nm]
+            own = cur_layer(nm, s_l)
+            crossed = leg_cross.get(nm, ())
             cost = {}
             for L in ('F.Cu', 'B.Cu'):
-                c = 2 * sum(1 for p in pgs if p == L)
+                c = 0
+                for om in crossed:
+                    if cur_layer(om, s_l) == L:
+                        c += 1 + (1 if self.ctx.dest_layer[om] == L else 0)
                 if own is not None and own != L:
                     c += 1
                 if self.ctx.dest_layer[nm] != L:
                     c += 1
                 cost[L] = c
-            self.leg_layer[nm] = min(('F.Cu', 'B.Cu'),
-                                     key=lambda L: cost[L])
-        ivs = {}
-        for om, hits in cross_by.items():
-            own_p = sched.page.get(om) if sched else None
-            for (s_l, owner) in hits:
-                Lg = self.leg_layer[owner]
-                a = s_l - LEG_REQ
+            Lg = min(('F.Cu', 'B.Cu'), key=lambda L: cost[L])
+            self.leg_layer[nm] = Lg
+            other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
+            a = s_l - LEG_REQ
+            for om in crossed:
                 b = s_l + LEG_REQ
                 if om in self.exit_block:
                     b = min(b, self.exit_leg_s[om] - 0.03)
@@ -931,10 +948,10 @@ class Corridor:
                     b = min(b, self.se[om][0] - 0.03)
                 if b <= a:
                     continue
-                if own_p is not None and own_p != Lg:
-                    continue
-                other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
-                ivs.setdefault(om, []).append((a, b, other))
+                # a lane already on the other layer there gets the
+                # stretch all the same (the band closes the leg's layer
+                # under it), at no change
+                ivs[om].append((a, b, other))
         for om, vv in ivs.items():
             kept_iv = [iv for iv in vv
                        if not any(o[2] != iv[2] and iv[0] < o[1]
@@ -1204,6 +1221,28 @@ class Corridor:
                     spots.append(got)
             if spots:
                 self.hops[nm] = spots
+
+    def layer_profile(self, nm):
+        """The layers the plan requires of one lane along s, as runs
+        [(s, layer), ...] with equal neighbours merged: the tooth's
+        layer, every required stretch in s order (the page over the
+        schedule region; the other layer under a same-layer exit leg in
+        the tail), the exit leg's layer, the berth's. len - 1 is the
+        layer changes -- the vias -- the plan implies for the lane.
+        Counting only the corridor's under-passes missed every tail
+        dive (K28: 32 predicted, 42 laid; every miss a lane forced to
+        the other layer under an exit leg after s1)."""
+        ctx = self.ctx
+        seq = [(self.st[nm][0], ctx.tooth_layer[nm])]
+        seq += [(xa, L) for (xa, _xb, L) in sorted(self.req.get(nm, ()))]
+        if nm in self.exit_block and nm in self.leg_layer:
+            seq.append((self.exit_leg_s[nm], self.leg_layer[nm]))
+        seq.append((self.se[nm][0], ctx.dest_layer[nm]))
+        runs = [seq[0]]
+        for s, L in seq[1:]:
+            if L != runs[-1][1]:
+                runs.append((s, L))
+        return runs
 
     def allowed(self, nm, s, L):
         if any(xa <= s <= xb and RL != L for (xa, xb, RL) in self.req.get(nm, ())):
@@ -2420,6 +2459,71 @@ def setup(board, names, dest, log, plan=None):
 
 
 
+def _poly_crossings(pa, pb):
+    """Proper intersections of two polylines, as board points."""
+    def d(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    out = []
+    for p1, p2 in zip(pa, pa[1:]):
+        for p3, p4 in zip(pb, pb[1:]):
+            d1, d2 = d(p3, p4, p1), d(p3, p4, p2)
+            d3, d4 = d(p1, p2, p3), d(p1, p2, p4)
+            if d1 * d2 < 0 and d3 * d4 < 0:
+                t = d1 / (d1 - d2)
+                out.append((p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])))
+    return out
+
+
+def cross_corridor_vias(corridors):
+    """Vias a lane pays for crossing EARLIER corridors' lanes. Corridors
+    route in index order, so a later corridor meets the earlier ones'
+    lanes as real copper on whatever layer their schedules allowed
+    there; where that includes the layer this lane is on by its own
+    profile it must dive: ONE dive, two vias, however many crossings --
+    the lane takes the other layer through the earlier corridor's
+    copper and stays there (K35: SA9 / SA13 / SA8 of the 3-lane second
+    corridor cross the 32-lane corridor's planned lanes 2-3 mm-clusters
+    apart each and the copper pays 2 each; priced per cluster the judge
+    said 6). The planned polylines also carry block excursions the real
+    lanes do not (K15 SA9 crossed the plan's SRAS three times and the
+    copper once). Unpriced, the judge preferred a K15 plan that made SA9
+    a corridor of its own (predicted 0) which then crossed the main
+    corridor's exit legs on F for 2."""
+    def layer_at(c, nm, s):
+        L = None
+        for (sa, La) in c.layer_profile(nm):
+            if sa <= s or L is None:
+                L = La
+        return L
+    out = {}
+    for j, cj in enumerate(corridors):
+        scj = getattr(cj, 'sched_cur', None)
+        if scj is None or not hasattr(cj, 'req'):
+            continue
+        for nm in cj.members:
+            poly = getattr(cj, 'lane_xy', {}).get(nm)
+            if scj.page.get(nm) is None or not poly:
+                continue
+            hits = []
+            for ci in corridors[:j]:
+                sci = getattr(ci, 'sched_cur', None)
+                if sci is None or not hasattr(ci, 'req'):
+                    continue
+                for om in ci.members:
+                    po = getattr(ci, 'lane_xy', {}).get(om)
+                    if not po:
+                        continue
+                    for pt in _poly_crossings(poly, po):
+                        s_n = cj.spine.project_pt(pt)[0]
+                        s_o = ci.spine.project_pt(pt)[0]
+                        L = layer_at(cj, nm, s_n)
+                        if sci.page.get(om) is None or ci.allowed(om, s_o, L):
+                            hits.append(s_n)
+            if hits:
+                out[nm] = 2
+    return out
+
+
 def plan_braid(board, names, dest, plan, log=None):
     """THE PLANNER, callable on a plan before any destination copper
     exists: the braid's own setup (corridors as it forms them, spines)
@@ -2443,6 +2547,8 @@ def plan_braid(board, names, dest, plan, log=None):
                             if nm in getattr(c, 'lane_xy', {}))
         except Exception as e:
             _log(f'  plan phase: corridor {c.idx} not planned ({e})')
+    cross = cross_corridor_vias(corridors)
+    for c in corridors:
         sc = getattr(c, 'sched_cur', None)
         li = {nm: i for i, nm in enumerate(getattr(c, 'launch', []))}
         ti = {nm: i for i, nm in enumerate(getattr(c, 'target', []))}
@@ -2457,13 +2563,16 @@ def plan_braid(board, names, dest, plan, log=None):
                        # a via where that is not the lane's page, another
                        # where it is not the berth's layer
                        'exit_leg_layer': getattr(c, 'leg_layer', {}).get(nm),
-                       # required stretches on the OTHER layer inside the
-                       # corridor (not the tail): each is a dive and a
-                       # surface, two vias the page model does not see
-                       'underpasses': sum(
-                           1 for (xa, xb, L) in getattr(c, 'req', {}).get(nm, ())
-                           if L != (sc.page.get(nm) if sc else ctx.tooth_layer[nm])
-                           and xa < getattr(c, 's1', 1e9) - 0.1)}
+                       # the layer changes the lane's whole profile needs
+                       # (tooth, page, tail stretches, exit leg, berth):
+                       # the vias the plan implies for a page lane. A
+                       # swimmer (page None) has no profile; its model
+                       # stays SWIM_VIAS.
+                       'changes': (len(c.layer_profile(nm)) - 1
+                                   if sc and sc.page.get(nm) is not None
+                                   and hasattr(c, 'req') else None),
+                       # dives under EARLIER corridors' lanes (2 each)
+                       'cross_vias': cross.get(nm, 0)}
     return out
 
 

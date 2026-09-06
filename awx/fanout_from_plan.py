@@ -214,8 +214,10 @@ def judge_by_braid(st, choice, board, achieved=None):
     bp = te.plan_braid(board, list(choice), st['dref'], plan)
     pages = {nm: bp[nm]['page'] for nm in choice}
     legs = {nm: bp[nm].get('exit_leg_layer') for nm in choice}
-    ups = {nm: bp[nm].get('underpasses', 0) for nm in choice}
-    pred = pe.vias_from_pages(choice, st['tooth0'], st['tooth_vias'], pages, legs, ups)
+    chg = {nm: bp[nm].get('changes') for nm in choice}
+    xv = {nm: bp[nm].get('cross_vias', 0) for nm in choice}
+    pred = pe.vias_from_pages(choice, st['tooth0'], st['tooth_vias'], pages, legs,
+                              changes=chg, cross=xv)
     ride = pe.sm.ride_mm(choice, st['launch'], st['dgrid'].bbox,
                          st['sgrid'].bbox) / pe.sm.VIA_MM
     return sum(pred.values()) + ride, pred, bp, plan
@@ -348,8 +350,10 @@ def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
                   + (f'  side-exit leg on {bp[nm]["exit_leg_layer"][0]}'
                      if bp[nm].get('exit_leg_layer') else
                      ('  side-exit' if bp[nm]['side_exit'] else ''))
-                  + (f'  under-passes {bp[nm]["underpasses"]}'
-                     if bp[nm].get('underpasses') else ''))
+                  + (f'  changes {bp[nm]["changes"]}'
+                     if bp[nm].get('changes') is not None else '')
+                  + (f'  cross-corridor dives {bp[nm]["cross_vias"] // 2}'
+                     if bp[nm].get('cross_vias') else ''))
     print(f'  plan model total predicted vias: {sum(pred.values())} over {len(pred)} nets '
           f'(braid-judged cost {cost:.2f} incl. ride)')
     if out_path:
