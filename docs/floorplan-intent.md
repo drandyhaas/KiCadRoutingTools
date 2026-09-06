@@ -488,6 +488,38 @@ Its leads pass through. `keepout` tests the courtyard **and** the drilled-pad
 rect against every face the part occupies, so a mounting-hole keep-out cannot be
 walked through from the back.
 
+### Four instruments charge a through-hole part per face, and they differ
+
+A drilled part's body is on one face and its leads come out on the other, so
+every per-face instrument has to decide what the far face costs. They do not all
+answer the same way, and that is deliberate — they are not all asking the same
+question. Written down here because until
+[#878](https://github.com/drandyhaas/KiCadRoutingTools/issues/878) the only
+place any of it was recorded was a code comment, and that comment was wrong
+about one of them.
+
+| instrument | its question | near face | far face |
+|---|---|---|---|
+| `legality.rect_on` | may these two parts overlap? | courtyard | **drilled-pad rect** |
+| `options.grow_board` | does the area fit on a face? | courtyard | **drilled-pad rect** (#878) |
+| `check_pockets.courtyard_cover` | is this window clear? | courtyard | **whole courtyard** |
+| `floorplan.rule_assembly_side` | how many reflow passes? | body face only | **nothing** |
+
+`check_pockets` charges the whole courtyard because a window under a part is not
+clear on either face — it asks about *cover*, never about a sum, so overstating
+cannot double-count anything. `rule_assembly_side` charges nothing because a
+through-hole part on the front demands wave or hand soldering, not a second
+reflow pass.
+
+**`floorplan.rule_keepout` is not a fifth model**, though #878's own table listed
+it as one. It uses `part.sides` only to decide *which* keep-outs bind, then hands
+`keepout_hit` both rects and takes a `max` over them, consulting no face at all.
+
+`splitflap_driver` is the board where all four answers are visibly different: 65
+parts, every one on `F.Cu`, 24 of them drilled. Its populated back area is
+`0.00 mm²`, its obstructed back area is `558.34 mm²`, `sides_occupied` calls it
+two-sided, and `rule_assembly_side` calls it `F`.
+
 ### A zone a keep-out leaves no room in is refused
 
 [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) refuses an
