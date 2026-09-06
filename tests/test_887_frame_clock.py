@@ -388,6 +388,78 @@ def test_the_png_block_omits_what_it_cannot_know():
          'while the basis key still says WHY it is missing', m['krt:clock_basis'])
 
 
+def test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain():
+    """THE INTEGRATION, which is the one path nothing exercised.
+
+    Every other test here builds a RunClock directly, and the wiring shipped
+    broken: the gate was `str(timing).lower() not in ('off', 'none', '0')`, and
+    `str(None).lower()` is 'none' -- so the DEFAULT disabled the clock and the
+    feature never ran once, in a movie that otherwise looked perfect. Found by
+    running it on a real work dir and finding no krt: keys in the PNGs.
+    """
+    import glob
+    import shutil
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+    import make_movie as MM
+
+    src = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
+    wd = os.path.join(tempfile.mkdtemp(), 'run')
+    os.makedirs(wd)
+    b1 = os.path.join(wd, 'step1.kicad_pcb')
+    b2 = os.path.join(wd, 'step2.kicad_pcb')
+    shutil.copy(src, b1)
+    shutil.copy(src, b2)
+    os.utime(b1, (1000.0, 1000.0))
+    os.utime(b2, (1200.0, 1200.0))
+    import json
+    with open(os.path.join(wd, 'cmd_timing.jsonl'), 'w', encoding='utf-8') as f:
+        for r in _rows([('P1-place', 990, 20, 0, 'step1.kicad_pcb'),
+                        ('R1-route', 1190, 20, 0, 'step2.kicad_pcb')]):
+            f.write(json.dumps(r) + '\n')
+
+    png_dir = os.path.join(wd, 'frames')
+    out = MM.make_movie([b1, b2], out=os.path.join(wd, 'm.gif'), size=160,
+                        quiet=True, png_dir=png_dir)
+    want(out and os.path.exists(out), 'the movie is written', out)
+    frames = sorted(glob.glob(os.path.join(png_dir, '*.png')))
+    want(frames, 'and PNG frames were dumped', len(frames))
+    text = Image.open(frames[len(frames) // 2]).text
+    krt = {k: v for k, v in text.items() if k.startswith('krt:')}
+    want(krt, 'the frames carry the krt: timing block -- WITHOUT ASKING, '
+              'because a ledger sits beside the chain', sorted(text))
+    want(krt.get('krt:ledger_rows') == '2',
+         'read from that ledger', krt.get('krt:ledger_rows'))
+    want('krt:elapsed_s' in krt and 'krt:stage' in krt,
+         'with an elapsed and a stage', sorted(krt))
+
+    # And the OFF switch really switches it off.
+    png2 = os.path.join(wd, 'frames_off')
+    MM.make_movie([b1, b2], out=os.path.join(wd, 'm2.gif'), size=160,
+                  quiet=True, png_dir=png2, timing='off')
+    f2 = sorted(glob.glob(os.path.join(png2, '*.png')))
+    off = {k for k in Image.open(f2[len(f2) // 2]).text if k.startswith('krt:')}
+    want(not off, 'timing="off" writes no timing block at all', off)
+
+
+def test_a_movie_with_no_ledger_beside_it_carries_no_timing_block():
+    """The presence gate, from the other side: every existing movie is untouched."""
+    import glob
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+    import make_movie as MM
+    src = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
+    d = os.path.join(tempfile.mkdtemp(), 'plain')
+    os.makedirs(d)
+    png_dir = os.path.join(d, 'frames')
+    MM.make_movie([src], out=os.path.join(d, 'm.gif'), size=160, quiet=True,
+                  png_dir=png_dir)
+    frames = sorted(glob.glob(os.path.join(png_dir, '*.png')))
+    want(frames, 'frames were dumped', len(frames))
+    krt = {k for k in Image.open(frames[0]).text if k.startswith('krt:')}
+    want(not krt,
+         'a chain with no cmd_timing.jsonl beside it gets no clock and no '
+         'metadata -- the trigger is the ledger, not a mode', krt)
+
+
 def test_clock_for_returns_none_without_a_ledger():
     want(ct.clock_for([('a', 'b', 0, 1)], None, 1) is None, 'no path, no clock')
     empty = os.path.join(tempfile.mkdtemp(), 'nope.jsonl')
@@ -413,6 +485,8 @@ TESTS_TO_RUN = [
     test_the_overlay_draws_bottom_left_and_leaves_the_top_alone,
     test_the_png_block_is_facts_and_carries_no_prediction,
     test_the_png_block_omits_what_it_cannot_know,
+    test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain,
+    test_a_movie_with_no_ledger_beside_it_carries_no_timing_block,
     test_clock_for_returns_none_without_a_ledger,
 ]
 

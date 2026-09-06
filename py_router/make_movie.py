@@ -228,10 +228,19 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     # opt-in and this is not.
     want_iso = _panels_wanted(panels, quiet)
     ledger = None
-    if str(timing).lower() not in ('off', 'none', '0'):
+    # `timing is None` is AUTO, and testing it as a string was a real bug:
+    # `str(None).lower()` is 'none', which the off-list contained, so the
+    # DEFAULT disabled the clock and the feature never ran once. It shipped
+    # green because every test constructed a RunClock directly rather than
+    # going through make_movie -- the integration was the one path nothing
+    # exercised. Compare the object, not its repr.
+    _timing_off = (isinstance(timing, str)
+                   and timing.strip().lower() in ('off', 'none', '0', ''))
+    if not _timing_off:
         try:
             import cmd_timing
-            ledger = (timing if timing and os.path.isfile(str(timing))
+            ledger = (timing if (isinstance(timing, str)
+                                 and os.path.isfile(timing))
                       else cmd_timing.find_ledger(inputs[0]))
         except Exception:                                       # noqa: BLE001
             ledger = None
