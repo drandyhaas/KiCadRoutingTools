@@ -447,9 +447,14 @@ def main():
     check("capacity: the undeclared run says the back area is credited free",
           'NOT MODELLED' in out_none
           and 'credited free' in out_none, out_none[-700:])
+    # #878 reworded the far-face half: the leads ARE charged now, so the
+    # sentence became "what the far charge is, and what still disagrees with
+    # it" rather than "it is not charged". The claim this arm makes is
+    # unchanged -- the declared run drops the back-area-credit half and keeps
+    # the far-face half -- so only the phrase it greps for moves.
     check("capacity: and the declared run drops that half, keeping the other",
           'NOT MODELLED' in out_f and 'credited free' not in out_f
-          and 'through-hole leads' in out_f, out_f[-700:])
+          and 'through-hole part is charged' in out_f, out_f[-700:])
 
     # An intent that declares NOTHING is not an intent that declares `both`.
     # They share an arithmetic and are different statements, and reading them

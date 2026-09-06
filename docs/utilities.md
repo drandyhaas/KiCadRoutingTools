@@ -241,6 +241,35 @@ rule produced `utilisation` in both the text digest and `JSON_SUMMARY` — a
 utilisation whose basis you cannot see is a number that cannot be compared with
 another one.
 
+Since [#878](https://github.com/drandyhaas/KiCadRoutingTools/issues/878) the
+**busier face is the busier _obstructed_ face**, not the busier populated one. A
+through-hole part's leads come out on the face it is not mounted on and block it
+there, so they are charged to it, at the drilled-pad rect — the same rect
+`legality.rect_on` presents on the far side for the placement search. Four keys
+report it: `obstructed_area_by_side_mm2` beside the unchanged
+`part_area_by_side_mm2`, plus `far_face_area_mm2`, `far_face_parts` and
+`far_face_basis` (a string, so it stays out of the text digest — the prose
+channel for the basis is the `NOT MODELLED` line).
+
+**Reconcile `utilisation` against `obstructed_area_by_side_mm2`**, not against
+`part_area_by_side_mm2`, whenever no `assembly.sides` is declared. The two
+differ on any board carrying a drilled part, and the second is the populated
+area, which is no longer what the busier-face verdict divides.
+
+The `F + B` row above is deliberately **not** affected. That sum is each part
+exactly once — the demand on the single face the fab populates — and a part's
+leads land on the face nobody populates, so charging them there would be the
+same area twice. Measured over the tracked corpus: the far-face charge moves the
+busier face's **area** on **1 of 22** boards (`rp2350_fpga_eensy_prePlane`,
+utilisation 0.6220 → 0.6566) and flips **no** board's verdict. It changes
+*which* face is busier on **none** of them — the only board where the binding
+face moves at all is `ulx3s`, and only under the whole-courtyard currency that
+was not adopted. Folding the charge into the one-face
+sum instead would double-charge 10 of the 15 one-face boards, worst
+`flat_hierarchy` 5927.41 → 9404.40 mm². `tests/measure_878_far_face_area.py`
+regenerates all of that, and `tests/878_far_face_currency.json` is the recorded
+argument for which rect was chosen.
+
 The face has to be **named**: `single` is refused, because single-sided does not
 mean front-sided. `ulx3s` is back-dominant (163 of its 226 pad-bearing parts),
 so "single implies F.Cu" would be wrong about most of a shipping board.

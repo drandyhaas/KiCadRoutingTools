@@ -94,7 +94,10 @@ back-populated board whose front carries the label is `assembly.sides: "B"`
 with `user_top_side: "F"`, and that is coherent. `user_top_side` is carried and
 graded by nothing, and the brief report says so under `not_graded`;
 `assembly.sides` is graded by `rule_assembly_side` and charged by
-`options.grow_board`.
+`options.grow_board` — which since
+[#878](https://github.com/drandyhaas/KiCadRoutingTools/issues/878) also charges
+a through-hole part's leads against the face it is *not* mounted on, so the
+busier face is the busier **obstructed** one.
 
 Every key is optional. Strictness is the same as the intent's, at every level
 and for the same reason (#710): a typo'd key that loads clean is a constraint

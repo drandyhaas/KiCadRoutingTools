@@ -51,8 +51,14 @@ CEN = os.path.join(_TESTS, 'test_837_assembly_sides.py')
 CAP = os.path.join(_TESTS, 'test_capacity_options.py')
 SCH = os.path.join(_TESTS, 'test_549_floorplan_schema.py')
 CLI = os.path.join(_TESTS, 'test_549_floorplan_cli.py')
+#: #878. The corpus-level witness: it re-RUNS the far-face sweep and its NC1
+#: compares `grow_board` against the arm the engine is supposed to implement,
+#: on nine fields per (board, basis) over every tracked board. A per-board
+#: assertion can miss a charge that moves one board it does not look at; this
+#: cannot.
+FFC = os.path.join(_TESTS, 'test_878_far_face_currency.py')
 
-BASELINE = (CEN, CAP, SCH, CLI)
+BASELINE = (CEN, CAP, SCH, CLI, FFC)
 
 ROWS = [
     # ------------------------------------------------- the census's two rules
@@ -187,9 +193,51 @@ ROWS = [
      "            'assembly_sides': 'F',\n",
      (CEN,), 'KILLED'),
 
+    # ----------------------------------------------- #878, the far face
+    # The charge itself. Without it `grow_board` is back to charging a
+    # through-hole part to its footprint layer only, which is the defect.
+    ('the-far-face-charge-goes-away', 'op',
+     "        far = _far_face_area(fp, clearance)\n",
+     "        far = 0.0\n",
+     (CAP, FFC), 'KILLED'),
+
+    # WHICH dict the verdict rests on. This row restores the exact pre-#878
+    # behaviour while leaving the far charge computed and reported, so a gate
+    # that only checks `far_face_area_mm2` is non-zero cannot kill it -- the
+    # number is still right, it has just stopped reaching the answer.
+    ('the-busiest-side-reads-the-population-charge', 'op',
+     "    busiest = max(obstructed.values()) if obstructed else 0.0\n",
+     "    busiest = max(per_side.values()) if per_side else 0.0\n",
+     (CAP, FFC), 'KILLED'),
+
+    # The half that is easy to get wrong in the OTHER direction: charging the
+    # leads into the one-face sum, where each part is meant to appear exactly
+    # once. Measured, this double-charges 10 of the 15 one-face boards.
+    # Shares its anchor with the two #837 rows above -- the anchor must match
+    # its TARGET once, not be unique across rows.
+    ('the-one-face-charge-double-counts-the-leads', 'op',
+     "    charged = sum(per_side.values()) if one_face else busiest\n",
+     "    charged = sum(obstructed.values()) if one_face else busiest\n",
+     (CAP, FFC), 'KILLED'),
+
+    # The far charge landing on the near face: the total is unchanged and
+    # `far_face_area_mm2` still reports the right number, so only an arm that
+    # compares the two per-side dicts can see it.
+    ('the-far-face-charge-lands-on-the-near-face', 'op',
+     "            other = 'F.Cu' if layer == 'B.Cu' else 'B.Cu'\n",
+     "            other = layer\n",
+     (CAP, FFC), 'KILLED'),
+
+    # Commensurability: the near charge is grown by `clearance` on each axis,
+    # so a far charge that is not is a smaller number added to the same sum.
+    ('the-far-face-charge-omits-the-clearance', 'op',
+     "    return (tx1 - tx0 + clearance) * (ty1 - ty0 + clearance)\n",
+     "    return (tx1 - tx0) * (ty1 - ty0)\n",
+     (CAP, FFC), 'KILLED'),
+
     # ------------------------------------------------- disclosed SURVIVORS
     # Every tracked board's footprints are on F.Cu or B.Cu, so reading the raw
-    # layer string and calling `footprint_side` agree on all 23. The helper is
+    # layer string and calling `footprint_side` agree on all 22. The helper is
     # used because the partition must not be ABLE to grow a third key that
     # `max()` would rank against the other two -- an invariant no corpus board
     # can exercise, which is exactly why it is stated here rather than left as
@@ -200,7 +248,7 @@ ROWS = [
      (CAP, CEN), 'SURVIVED'),
 
     # `ctx.parts` (the graded-part population) and the census's pad-bearing
-    # refs agree on every tracked board -- measured, 0 disagreements over 23.
+    # refs agree on every tracked board -- measured, 0 disagreements over 22.
     # They are NOT the same set by construction: `QuenchState` admits a
     # zero-pad footprint that draws a courtyard, and the census excludes it.
     # No corpus board carries one, so this row cannot be killed without a
@@ -413,7 +461,7 @@ def main(argv=None):
             #
             # What a stale anchor here would produce is SURVIVED, not KILLED:
             # `replace` of an absent needle is a no-op, the witnesses pass, and
-            # `_run` reports not-killed. Of the 26 rows, 24 expect KILLED and
+            # `_run` reports not-killed. Of the 31 rows, 29 expect KILLED and
             # would print `BAD SURVIVED` and exit 1; only the 2 that expect
             # SURVIVED would pass silently. #877's title says such a row
             # "reports KILLED", and that direction is wrong -- `mutate_702`'s

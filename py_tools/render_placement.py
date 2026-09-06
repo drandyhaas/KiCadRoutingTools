@@ -1827,9 +1827,15 @@ def main(argv=None):
             print(f"No placement blocks from sources {args.group_by!r}.")
             return 0
         print(f"{len(blocks)} placement block(s) from {args.group_by!r}:")
+        # #878: the CANONICAL side rule, not a fourth copy of it. NOT
+        # `sides_occupied` -- that answers which faces a part OBSTRUCTS, so a
+        # through-hole part counts on both, and splitflap_driver (65 parts, all
+        # on F.Cu, 24 of them drilled) would report 24 back-side parts and get
+        # a B-side panel drawn for a board with nothing on its back.
+        from placement.legality import footprint_side
         for n, refs in sorted(blocks.items(), key=lambda kv: (-len(kv[1]), kv[0])):
             back = sum(1 for r in refs
-                       if (pcb.footprints[r].layer or '').startswith('B'))
+                       if footprint_side(pcb.footprints[r]) == 'B')
             print(f"  {short_name(n):34s} parts={len(refs):3d}  "
                   f"front={len(refs) - back:3d} back={back:3d}")
         return 0
@@ -1969,8 +1975,12 @@ def main(argv=None):
     # exactly how run 5's JP1(B)-under-SW1(F) -- correct, identical on the
     # human board -- read as an overlap to the human eye. --per-side keeps
     # forcing panels; --flat restores the old single view.
+    # #878: the canonical rule. Deliberately NOT `sides_occupied` -- see the
+    # note at --list-groups above; it would force a B-side panel onto
+    # splitflap_driver, which has nothing on its back.
+    from placement.legality import footprint_side
     back = sum(1 for fp in pcb.footprints.values()
-               if (fp.layer or '').startswith('B'))
+               if footprint_side(fp) == 'B')
     want_sides = args.per_side or (back > 0 and not args.flat)
     sides = ('F', 'B') if want_sides else (None,)
     if args.per_side and back == 0 \

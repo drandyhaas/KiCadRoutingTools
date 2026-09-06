@@ -460,7 +460,7 @@ def test_far_side_box_is_not_transposed_on_a_rotated_footprint():
     2.54 x 13.97 where the truth is 3.81 x 12.70, under-blocking 1.27mm on the
     far side. The box must be projected through the pad's local tilt, exactly as
     placement/utility.compute_footprint_bbox_local does."""
-    from placement.quench import _through_pad_bounds_local
+    from placement.legality import through_pad_bounds_local
     board = os.path.join(KICAD_FILES, 'kit-dev-coldfire-xilinx_5213.kicad_pcb')
     if not os.path.exists(board):
         return
@@ -470,7 +470,7 @@ def test_far_side_box_is_not_transposed_on_a_rotated_footprint():
         drilled = [p for p in fp.pads if (p.drill or 0) > 0]
         if not drilled:
             continue
-        b = _through_pad_bounds_local(fp)
+        b = through_pad_bounds_local(fp)
         xs, ys = [], []
         for p in drilled:
             sx, sy = p.size_x, p.size_y
@@ -491,7 +491,7 @@ def test_far_side_box_sits_on_the_hole_not_offset_from_it():
     hole_x/hole_y BEFORE shifting global_x/global_y to the copper centre. The
     old code 'corrected' by (hole - global), which is MINUS the offset, landing
     the box a full offset on the wrong side."""
-    from placement.quench import _through_pad_bounds_local
+    from placement.legality import through_pad_bounds_local
 
     class _P:
         shape = 'circle'
@@ -507,7 +507,7 @@ def test_far_side_box_sits_on_the_hole_not_offset_from_it():
         rotation = 0.0
         pads = [_P()]
 
-    b = _through_pad_bounds_local(_F())
+    b = through_pad_bounds_local(_F())
     cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
     assert abs(cx) < 1e-9 and abs(cy) < 1e-9,         f"far-side box centred at ({cx}, {cy}); the hole is at the local origin"
 

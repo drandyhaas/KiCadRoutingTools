@@ -612,6 +612,8 @@ _BASELINE_GATES = {
         'tests/test_799_feasibility_claims.py',
     'tests/831_fill_timing_census.json':
         'tests/test_831_fill_preflight_census.py',
+    'tests/878_far_face_currency.json':
+        'tests/test_878_far_face_currency.py',
     'tests/placement_ab_baseline.json': 'tests/test_placement_ab.py',
     'tests/placement_calibration_recovered.json':
         'tests/test_803_calibration_claims.py',
@@ -670,7 +672,7 @@ _UNGATED_BASELINE_COUNT = 7
 #: verbatim, because the print string has since been reworded and the counts
 #: have moved -- a "measured" line spliced from two versions is exactly what
 #: #879 is about.)
-_DECLARED_BASELINE_COUNT = 20
+_DECLARED_BASELINE_COUNT = 21
 
 #: Committed JSON/JSONL under `tests/` that is an INPUT, not a recorded
 #: measurement. Full-path regexes, each with its reason.

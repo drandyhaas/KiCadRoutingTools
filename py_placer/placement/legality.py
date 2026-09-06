@@ -236,10 +236,34 @@ def ring_is_rect(ring):
 
 # --- board side model --------------------------------------------------------
 
+def side_of_layer(layer) -> str:
+    """'F' or 'B' from a LAYER NAME. Anything not starting with 'B' is front.
+
+    THE string-level rule (#878). `footprint_side` below is this applied to an
+    object's `.layer`; every other site in the tree that carried its own copy
+    of the same collapse now calls one of the two, and
+    `tests/test_878_side_rule_sites.py` refuses a new copy rather than letting
+    a ninth appear.
+
+    `str(...)` where the old spelling had `or ''` is a widening, not a change:
+    the old form raised `AttributeError` on a truthy non-string layer, and every
+    caller in the tree passes a `str` or `None`.
+
+    On a `str` or `None` layer this and the spellings it replaced are
+    ALGEBRAICALLY equal, so the corpus cannot separate them -- it carries
+    exactly two layer values, `F.Cu` and `B.Cu`, over 1349 footprints. The
+    corpus check in `tests/test_878_side_rule_sites.py` is therefore a change
+    detector for THIS function, not evidence that the spellings differ; the
+    inputs that do separate them (a falsy layer, a truthy non-string) are
+    exercised there synthetically, because no board can supply them.
+    """
+    return 'B' if str(layer or '').startswith('B') else 'F'
+
+
 def footprint_side(fp) -> str:
     """'F' or 'B' from a footprint's layer. Anything not B.* reads as front,
     matching how the rest of the package resolves side from `fp.layer`."""
-    return 'B' if (getattr(fp, 'layer', '') or '').startswith('B') else 'F'
+    return side_of_layer(getattr(fp, 'layer', ''))
 
 
 def footprint_has_through_pads(fp) -> bool:
@@ -250,6 +274,60 @@ def footprint_has_through_pads(fp) -> bool:
     unplated hole blocks the far side exactly as a plated one does.
     """
     return any((getattr(p, 'drill', 0) or 0) > 0 for p in (fp.pads or []))
+
+
+def through_pad_bounds_local(fp):
+    """Local bbox over a footprint's DRILLED pads, or None if it has none.
+
+    PUBLIC and living here since #878. It is the far half of `rect_on`
+    below and of `LocalBounds.tht_local`, so it is legality's own concept.
+    It used to sit in `quench` under a leading underscore and be reached
+    from here by a function-local import -- a private name across a module
+    boundary, which this repo already records as a rule it does not keep
+    (see `options.hosts_the_design`). The import had to be function-local
+    because `quench` imports `legality` at module scope, so the dependency
+    ran backwards; now it does not, and `options.grow_board` can charge the
+    far face without pulling the whole quench search engine into a
+    reporting CLI's import graph.
+
+    This is the footprint's footprint on the OPPOSITE board side: its body and
+    courtyard live on its own side, but its leads pass through, so a part on the
+    far side may not sit inside this box (#456 item 1). Deliberately the drill
+    hole's own extent rather than the pad copper's -- the far side sees the
+    barrel and the lead, and the annular ring on that side is part of it.
+    """
+    # `local_x/local_y` is the pad ANCHOR in the footprint's frame, and for a
+    # drilled pad the anchor IS the hole: kicad_parser records hole_x/hole_y as
+    # the pre-offset position and only then shifts global_x/global_y to the
+    # copper centre. So the hole needs no offset correction at all -- an earlier
+    # version "corrected" local_* by (hole - global), which is minus the offset,
+    # landing the box one full offset on the WRONG side of the hole.
+    #
+    # size_x/size_y are BOARD-axis resolved (kicad_parser swaps them for a pad at
+    # ~90 degrees), so they cannot be used as local half-extents directly -- that
+    # transposed the box on every 90/270-degree footprint (kit-dev SW_ONOFF201
+    # modelled 2.54 x 13.97 where the truth is 3.81 x 12.70, under-blocking
+    # 1.27mm). Project them through the pad's local tilt exactly as
+    # placement/utility.compute_footprint_bbox_local does.
+    xs, ys = [], []
+    for p in (fp.pads or []):
+        d = getattr(p, 'drill', 0) or 0
+        if d <= 0:
+            continue
+        local_tilt = math.radians((getattr(p, 'rect_rotation', 0.0) or 0.0)
+                                  + (fp.rotation or 0.0))
+        c, s = abs(math.cos(local_tilt)), abs(math.sin(local_tilt))
+        hx, hy = (getattr(p, 'size_x', 0) or 0) / 2.0, (getattr(p, 'size_y', 0) or 0) / 2.0
+        # An oval/slotted hole is bounded by the pad extent it sits in; taking
+        # the larger of drill radius and half pad size keeps a slot covered.
+        r = d / 2.0
+        rx = max(r, hx * c + hy * s)
+        ry = max(r, hx * s + hy * c)
+        xs += [p.local_x - rx, p.local_x + rx]
+        ys += [p.local_y - ry, p.local_y + ry]
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 def sides_occupied(side: str, has_tht: bool) -> frozenset:
@@ -1098,7 +1176,6 @@ def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
     `graded_parts_from_file` skips, so both consumers see one universe.
     """
     from placement.parser import courtyard_for_side, extract_courtyard_sides
-    from placement.quench import _through_pad_bounds_local
     from placement.utility import compute_footprint_bbox_local
 
     path = pcb_file or getattr(pcb_data, 'source_path', None)
@@ -1129,7 +1206,7 @@ def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
         tht_local = None
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
-            tht_local = _through_pad_bounds_local(fp)
+            tht_local = through_pad_bounds_local(fp)
         out[ref] = LocalBounds(ref=ref, side=own, local=tuple(local),
                                tht_local=(tuple(tht_local)
                                           if tht_local is not None else None),
