@@ -44,11 +44,6 @@ def taut_paths(nets: Sequence[str],
         pts, iters, status, n_re = tc.relax_clean(
             ends[nm][0], ends[nm][1], obs_for(nm))
         out[nm] = pts
-        if log:
-            log(f'  {nm}: {ts.polyline_len(pts):.2f} mm, {len(pts)} pts, '
-                f'{iters} iters'
-                + (f', {status} ({n_re} reseed)' if status != 'clean'
-                   else ''))
         if status == 'reseeded':
             print(f'TAUT RESEEDED: {nm} ({n_re} reseed(s))', flush=True)
         elif status == 'violating':

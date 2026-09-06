@@ -72,36 +72,8 @@ def simplify(pts: Sequence[Pt], tol: float = 0.03) -> List[Pt]:
     return keep
 
 
-def resample(pts: Sequence[Pt], n: int) -> List[Pt]:
-    """n points at equal fractions of the polyline's length."""
-    if len(pts) == 1:
-        return [tuple(pts[0])] * n
-    seg = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:])]
-    L = sum(seg)
-    if L < 1e-9:
-        return [tuple(pts[0])] * n
-    out = []
-    for k in range(n):
-        t = L * k / (n - 1)
-        acc = 0.0
-        for (a, b), sl in zip(zip(pts, pts[1:]), seg):
-            if acc + sl >= t - 1e-12 and sl > 0:
-                u = (t - acc) / sl
-                out.append((a[0] + u * (b[0] - a[0]), a[1] + u * (b[1] - a[1])))
-                break
-            acc += sl
-        else:
-            out.append(tuple(pts[-1]))
-    return out
 
 
-def mean_path(paths: Sequence[Sequence[Pt]], n: int = 60) -> List[Pt]:
-    """The pointwise mean of the paths, each resampled by fraction of
-    its length: the bundle's medial line, in the homotopy class the
-    members' taut paths chose (which side of a chip they went)."""
-    rs = [resample(p, n) for p in paths]
-    return [(sum(r[k][0] for r in rs) / len(rs),
-             sum(r[k][1] for r in rs) / len(rs)) for k in range(n)]
 
 
 def polyline_len(pts) -> float:
@@ -199,10 +171,7 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
         if len(grp) == 1:
             out.append(grp)
             continue
-        if spine_fn is not None:
-            sp = spine_fn(grp)
-        else:
-            sp = Spine(simplify(mean_path([paths[nm] for nm in grp]), 0.1))
+        sp = spine_fn(grp)
         keep, split = [], []
         P0, d0 = sp.P[0], sp.d[0]
         Pn, dn = sp.P[-1], sp.d[-1]
@@ -485,47 +454,6 @@ class RampedObstacles:
         return True
 
 
-def relax_path(init: Sequence[Pt], obs, rounds: int = 150) -> List[Pt]:
-    """topo_strings.relax from a given initial polyline (it starts from
-    the chord): the elastic band settles in the homotopy class of
-    `init`, pushed out of `obs`."""
-    pts = ts.densify(list(init))
-    ends = (pts[0], pts[-1])
-    # a string that does not settle -- pushed between overlapping
-    # obstacles it wanders, its length grows, densify adds points and
-    # shortcut goes quadratic (K51 corner corridor against the big
-    # corridor's tubes: hours). A relaxed path several chords long is
-    # not a corridor axis; give the chord back and let build_spine's
-    # degenerate fallback have it.
-    chord = math.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1])
-    cap = 3.0 * chord + 10.0
-    it = 0
-    for it in range(rounds):
-        moved = 0.0
-        for i in range(1, len(pts) - 1):
-            p = pts[i]
-            if ts.d2(p, ends[0]) < ts.FREEZE ** 2 or \
-                    ts.d2(p, ends[1]) < ts.FREEZE ** 2:
-                continue
-            q = (0.5 * p[0] + 0.25 * pts[i - 1][0] + 0.25 * pts[i + 1][0],
-                 0.5 * p[1] + 0.25 * pts[i - 1][1] + 0.25 * pts[i + 1][1])
-            for _k in range(6):
-                v = obs.point_violation(q)
-                if v is None:
-                    break
-                depth, (ux, uy) = v
-                q = (q[0] + ux * (depth + 0.01), q[1] + uy * (depth + 0.01))
-            moved += math.hypot(q[0] - p[0], q[1] - p[1])
-            pts[i] = q
-        if polyline_len(pts) > cap:
-            return ts.densify([ends[0], ends[1]])
-        if it % 25 == 24:
-            pts = ts.densify(ts.shortcut(pts, obs))
-        if moved < 1e-4 * len(pts):
-            break
-    if polyline_len(pts) > cap:
-        return ts.densify([ends[0], ends[1]])
-    return ts.densify(ts.shortcut(pts, obs))
 
 
 def _unit(v: Pt) -> Pt:
@@ -576,11 +504,6 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
     lanes' morph, not a tilt of the frame). The middle is the members'
     mean path relaxed against the ramped obstacles, so it bends only
     where something is in the way; a straight channel stays straight."""
-    if teeth is None or stubs is None or not tooth_dirs or not stub_dirs:
-        init = mean_path(paths)
-        obs = RampedObstacles(base_obs, (init[0], init[-1]), H, extra=extra)
-        pts = relax_path(init, obs) if relax else list(init)
-        return Spine(simplify(pts, 0.08))
     Ct = (sum(p[0] for p in teeth) / len(teeth), sum(p[1] for p in teeth) / len(teeth))
     Cs = (sum(p[0] for p in stubs) / len(stubs), sum(p[1] for p in stubs) / len(stubs))
     ut = [flow_dir(pth, d, True) for pth, d in zip(paths, tooth_dirs)]
@@ -620,13 +543,7 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
         # against the ramped obstacles can only add wiggles)
         if obs.seg_clear(p1, p2):
             relax = False
-    else:
-        M = mean_path(paths)
-        keep = [p for p in M
-                if math.hypot(p[0] - Ct[0], p[1] - Ct[1]) > R_t
-                and math.hypot(p[0] - Cs[0], p[1] - Cs[1]) > R_s]
-        init = [p1] + keep + [p2]
-    pts = relax_path(init, obs) if relax else list(init)
+    pts = list(init)
     sp = simplify([a] + list(pts) + [b], 0.08)
     # a bundle never doubles back: a vertex the string folded at (a
     # string stuck between two pushes) is dropped, and the polyline

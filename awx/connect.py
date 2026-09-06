@@ -257,30 +257,6 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
         list(result.get('new_vias') or [])
 
 
-def tube_band(poly, hw: float, layer: Optional[str] = None):
-    """A band callable (xs, ys, L) -> mask: the cells within `hw` of the
-    polyline `poly`, on every layer (layer=None) or on `layer` alone
-    (the other layers closed). The PLANNED lane as a tube -- what a
-    re-lay is confined to instead of a free window."""
-    sx = np.array([q[0] for q in poly], dtype=float)
-    sy = np.array([q[1] for q in poly], dtype=float)
-
-    def band(xs, ys, lname):
-        if layer is not None and lname != layer:
-            return np.zeros((len(xs), len(ys)), dtype=bool)
-        X, Y = np.meshgrid(xs, ys, indexing='ij')
-        best = np.full(X.shape, np.inf)
-        for a0, a1, b0, b1 in zip(sx[:-1], sy[:-1], sx[1:], sy[1:]):
-            dx, dy = b0 - a0, b1 - a1
-            ll = dx * dx + dy * dy
-            if ll < 1e-12:
-                d2 = (X - a0) ** 2 + (Y - a1) ** 2
-            else:
-                t = np.clip(((X - a0) * dx + (Y - a1) * dy) / ll, 0.0, 1.0)
-                d2 = (X - a0 - t * dx) ** 2 + (Y - a1 - t * dy) ** 2
-            best = np.minimum(best, d2)
-        return best <= hw * hw
-    return band
 
 
 def seg_len(segs: List[Segment]) -> float:

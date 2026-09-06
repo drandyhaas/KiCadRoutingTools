@@ -349,10 +349,12 @@ class Corridor:
         return sorted(grp, key=lambda n: self.launch_key(n, t))
 
     @staticmethod
+
     def paths_cross(pa: Sequence[Pt], pb: Sequence[Pt]) -> bool:
         return any(_proper_cross(p, q, r, s)
                    for p, q in zip(pa, pa[1:])
                    for r, s in zip(pb, pb[1:]))
+
 
     def crosses(self, a: str, b: str, sel: Dict[str, Move]) -> bool:
         ea, eb = sel[a].exit_pt, sel[b].exit_pt
@@ -479,18 +481,6 @@ def score(choice: Dict[str, Move], groups, geo: 'Corridor',
     return tv, fl, mm
 
 
-def _site_blocks(site: Optional[Pt], key: Tuple, a: float, b: float,
-                 tol: float = 0.05) -> bool:
-    """Does a via SITE sit in the stretch [a, b] of the lane `key`? A
-    via is on every layer, so a surface escape running through a row
-    gap cannot pass a dogbone's site in that gap whatever layer either
-    is on -- the plan let a B dogbone and an F surface escape share a
-    0.65 mm gap (K15 SDQM0/SDQ15: 9 grazes on the re-fanned source)."""
-    if site is None:
-        return False
-    axis, coord, _L = key
-    along, across = (site[0], site[1]) if axis == 'row' else (site[1], site[0])
-    return abs(across - coord) <= tol and a - tol <= along <= b + tol
 
 
 def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool:
@@ -518,9 +508,6 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
     if same_lane and a < ob and oa < b:
         return True
     if m.site is not None and _site_key(om) == _site_key(m):
-        return True
-    if strict and (_site_blocks(om.site, key, a, b, tol)
-                   or _site_blocks(m.site, ok, oa, ob, tol)):
         return True
     return False
 

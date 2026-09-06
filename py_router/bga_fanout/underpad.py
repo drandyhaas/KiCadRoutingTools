@@ -2080,18 +2080,6 @@ def generate_underpad_escape(footprint: Footprint,
         ex = 1.0 if d_e <= d_w else -1.0
         ey = 1.0 if d_s <= d_n else -1.0
         primary_x = min(d_e, d_w) <= min(d_s, d_n)
-        # A caller's planned side (escape_dir_hints) overrides "toward
-        # the nearest boundary"; the ring-parity stagger and the
-        # candidate ordering are untouched.
-        _h = (escape_dir_hints or {}).get((round(gx, 3), round(gy, 3)))
-        if _h == 'left':
-            ex, primary_x = -1.0, True
-        elif _h == 'right':
-            ex, primary_x = 1.0, True
-        elif _h == 'up':
-            ey, primary_x = -1.0, False
-        elif _h == 'down':
-            ey, primary_x = 1.0, False
         alt = 1.0 if int(round(depth(p) / max(pitch, 1e-9))) % 2 == 0 else -1.0
         if primary_x:
             cands = [(ex * hx, alt * ey * hy), (ex * hx, -alt * ey * hy),

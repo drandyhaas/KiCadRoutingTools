@@ -36,35 +36,6 @@ END_ZONE = 1.5     # mm from either end: the escape COMB, where every string
                    # which the real router threads at exact clearance
 
 
-def relax_from(init, obs, rounds=400):
-    """topo_strings.relax's loop from a given initial polyline (the
-    elastic band settles in the homotopy class of `init`). Returns
-    (pts, iterations). relax(src, dst) == relax_from([src, dst])."""
-    pts = ts.densify(list(init))
-    ends = (pts[0], pts[-1])
-    it = 0
-    for it in range(rounds):
-        moved = 0.0
-        for i in range(1, len(pts) - 1):
-            p = pts[i]
-            if ts.d2(p, ends[0]) < ts.FREEZE ** 2 or \
-                    ts.d2(p, ends[1]) < ts.FREEZE ** 2:
-                continue
-            q = (0.5 * p[0] + 0.25 * pts[i - 1][0] + 0.25 * pts[i + 1][0],
-                 0.5 * p[1] + 0.25 * pts[i - 1][1] + 0.25 * pts[i + 1][1])
-            for _k in range(6):
-                v = obs.point_violation(q)
-                if v is None:
-                    break
-                depth, (ux, uy) = v
-                q = (q[0] + ux * (depth + 0.01), q[1] + uy * (depth + 0.01))
-            moved += math.hypot(q[0] - p[0], q[1] - p[1])
-            pts[i] = q
-        if it % 25 == 24:
-            pts = ts.densify(ts.shortcut(pts, obs))
-        if moved < 1e-4 * len(pts):
-            break
-    return ts.densify(ts.shortcut(pts, obs)), it + 1
 
 
 def violations(pts, obs, freeze=ts.FREEZE):
@@ -113,31 +84,8 @@ def offender(obs, p):
     return who
 
 
-def _unit(v):
-    h = math.hypot(v[0], v[1])
-    return (v[0] / h, v[1] / h) if h > 1e-12 else (1.0, 0.0)
 
 
-def reseeds(src, dst, who, at):
-    """Initial polylines that go AROUND the offender on one side: past
-    each END of a capsule (the two sectors a thin track separates), or
-    past either side of a disc."""
-    kind, geo = who
-    outs = []
-    if kind == 'cap':
-        a, b, r, _n = geo
-        ab = _unit((b[0] - a[0], b[1] - a[1]))
-        for end, away in ((a, (-ab[0], -ab[1])), (b, ab)):
-            e = (end[0] + away[0] * (r + MARGIN),
-                 end[1] + away[1] * (r + MARGIN))
-            outs.append([src, e, dst])
-    else:
-        x, y, r, _n = geo
-        n = _unit((dst[1] - src[1], -(dst[0] - src[0])))
-        for sgn in (1.0, -1.0):
-            e = (x + sgn * n[0] * (r + MARGIN), y + sgn * n[1] * (r + MARGIN))
-            outs.append([src, e, dst])
-    return outs
 
 
 def classify(pts, obs, viol):
@@ -175,61 +123,16 @@ def relax_clean(src, dst, obs, rounds=400, depth=3):
     # reseeded (a reseed was tried and lost on the ladder). A capsule
     # is a single-layer foreign track a lane crosses by diving, so on a
     # two-layer ribbon a chord across one is not wrong-sector.
-    mode = '0'
-    reseed_on = False
-    for _level in range(depth):
-        viol = violations(pts, obs)
-        if not viol:
-            return pts, it, ('clean' if n_re == 0 else 'reseeded'), n_re
-        cls = classify(pts, obs, viol)
-        actionable = cls['midfield_cap'] + cls['midfield_disc']
-        if mode == 'disc':
-            actionable = cls['midfield_disc']
-        if not actionable:
-            # comb-zone / shallow only: reported, never reseeded
-            relax_clean.last = dict(cls=cls, n=len(viol))
-            return pts, it, ('tolerated' if n_re == 0 else 'reseeded'), n_re
-        if not reseed_on:
-            # ASSERT-ONLY mode (default): the string is reported as
-            # VIOLATING with its diagnosis; the reseed policy is gated
-            # until the ladder judges it -- first draw
-            # at K35 moved 82v/1 open -> 86v/2 open with 22/35 reseeds
-            relax_clean.last = dict(cls=cls, n=len(viol))
-            return pts, it, 'violating', 0
-        if mode == 'disc':
-            # the deepest DISC violation drives the reseed
-            a0, b0 = pts[0], pts[-1]
-            dv = [(q, dq) for q, dq in viol
-                  if dq > TOL and not (ts.d2(q, a0) < END_ZONE ** 2
-                                       or ts.d2(q, b0) < END_ZONE ** 2)
-                  and (offender(obs, q) or ('?',))[0] == 'disc']
-            p, _d = max(dv, key=lambda v: v[1])
-        else:
-            p, _d = max(viol, key=lambda v: v[1])
-        who = offender(obs, p)
-        # diagnosis for the caller: what the string violates, how many
-        # samples, how deep, and where along the string (fraction)
-        kinds = {}
-        for q, dq in viol:
-            w = offender(obs, q)
-            k = (w[0] + ':' + str(w[1][3])) if w else '?'
-            kinds[k] = kinds.get(k, 0) + 1
-        relax_clean.last = dict(
-            cls=cls, n=len(viol), deepest=round(_d, 3), at=round(p[0], 2),
-            at_y=round(p[1], 2), offenders=sorted(
-                kinds.items(), key=lambda kv: -kv[1])[:4])
-        if who is None:
-            break
-        cands = []
-        for init in reseeds(src, dst, who, p):
-            q, itq = relax_from(init, obs, rounds)
-            vq = violations(q, obs)
-            cands.append((len(vq), ts.polyline_len(q), q, itq))
-        n_re += 1
-        if not cands:
-            break
-        cands.sort(key=lambda c: (c[0], c[1]))
-        nv, _L, pts, it = cands[0]
-        if nv == 0:
-            return pts, it, 'reseeded', n_re
-    return pts, it, 'INVALID', n_re
+    viol = violations(pts, obs)
+    if not viol:
+        return pts, it, 'clean', 0
+    cls = classify(pts, obs, viol)
+    relax_clean.last = dict(cls=cls, n=len(viol))
+    if not (cls['midfield_cap'] + cls['midfield_disc']):
+        # comb-zone / shallow only: reported, never reseeded
+        return pts, it, 'tolerated', 0
+    # the string is reported as VIOLATING with its diagnosis (a reseed
+    # was tried and lost on the ladder: K35 82v/1 open -> 86v/2 open)
+    return pts, it, 'violating', 0
+
+

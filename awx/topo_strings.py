@@ -14,17 +14,12 @@ Outputs: crossing matrix (straight vs taut), per-string lengths and
 hugged obstacles, a strings JSON, and an Eco2.User overlay board for
 render_eco.py.
 """
-import argparse
-import json
 import math
 import os
-import shutil
 import sys
-from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
-from kicad_parser import parse_kicad_pcb  # noqa: E402
 
 TRACK = 0.127
 CLEAR = 0.1
@@ -305,18 +300,6 @@ class Obstacles:
                 return False
         return True
 
-    def hugs(self, pts, slack=0.05):
-        names = set()
-        for p in pts:
-            for i in self.near_discs(p):
-                x, y, r, n = self.discs[i]
-                if math.hypot(p[0] - x, p[1] - y) < r + slack:
-                    names.add(n)
-            for ci in self.near_caps(p):
-                a, b, r, n = self.caps[ci]
-                if seg_pt_dist(a, b, p) < r + slack:
-                    names.add(n)
-        return names
 
 
 def densify(pts, step=STEP):
@@ -371,167 +354,9 @@ def relax(src, dst, obs, rounds=400):
     return densify(shortcut(pts, obs)), it + 1
 
 
-def polyline_len(pts):
-    return sum(math.hypot(b[0] - a[0], b[1] - a[1])
-               for a, b in zip(pts, pts[1:]))
 
 
-def crossings(sa, sb, end_excl=0.5, dedupe=0.4):
-    hits = []
-    for i in range(len(sa) - 1):
-        for j in range(len(sb) - 1):
-            p = seg_x(sa[i], sa[i + 1], sb[j], sb[j + 1])
-            if p is None:
-                continue
-            if min(d2(p, sa[0]), d2(p, sa[-1]), d2(p, sb[0]),
-                   d2(p, sb[-1])) < end_excl ** 2:
-                continue
-            hits.append(p)
-    out = []
-    for h in hits:
-        if all(d2(h, o) > dedupe ** 2 for o in out):
-            out.append(h)
-    return out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--board', default=os.path.join(HERE,
-                    'fb_t2q_base.kicad_pcb'))
-    ap.add_argument('--nets', default='SDQ15,SDQ14,SDQ13,SDQ11')
-    ap.add_argument('--out', default=os.path.join(HERE, 'topo_k4'))
-    a = ap.parse_args()
-    names = [n.strip() for n in a.nets.split(',') if n.strip()]
-
-    pcb = parse_kicad_pcb(a.board)
-    byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
-    kids = {byname[nm][0] for nm in names}
-
-    # endpoints: source tooth free end (stub census) -> target pad
-    ends = {}
-    tgt_comp = {}
-    for nm in names:
-        nid, net = byname[nm]
-        segs = [s for s in pcb.segments if s.net_id == nid]
-        cnt = Counter()
-        for s in segs:
-            cnt[(round(s.start_x, 3), round(s.start_y, 3))] += 1
-            cnt[(round(s.end_x, 3), round(s.end_y, 3))] += 1
-        padpts = {(round(p.global_x, 3), round(p.global_y, 3)): p
-                  for p in net.pads}
-        free = [pt for pt, c in cnt.items() if c == 1 and pt not in padpts]
-        if len(free) != 1:
-            print(f'{nm}: expected 1 free end, got {free} -- skipping')
-            continue
-        src = free[0]
-        tgt = max(net.pads, key=lambda p: d2((p.global_x, p.global_y), src))
-        ends[nm] = (src, (tgt.global_x, tgt.global_y))
-        tgt_comp[nm] = tgt.component_ref
-
-    # target field bbox (union over requested nets' target components)
-    fields = {}
-    for comp in set(tgt_comp.values()):
-        fp = pcb.footprints[comp]
-        xs = [p.global_x for p in fp.pads]
-        ys = [p.global_y for p in fp.pads]
-        fields[comp] = (min(xs) - 0.4, min(ys) - 0.4,
-                        max(xs) + 0.4, max(ys) + 0.4)
-
-    def in_field(x, y):
-        return any(x0 <= x <= x1 and y0 <= y <= y1
-                   for (x0, y0, x1, y1) in fields.values())
-
-    # obstacles are per-net (own copper excluded)
-    strings = {}
-    iters = {}
-    for nm in names:
-        if nm not in ends:
-            continue
-        nid, _ = byname[nm]
-        obs = Obstacles()
-        for ref, fp in pcb.footprints.items():
-            for p in fp.pads:
-                if p.net_id == nid:
-                    continue
-                if p.pad_type == 'np_thru_hole' and p.drill:
-                    r0 = p.drill / 2
-                elif p.shape in ('circle', 'oval'):
-                    r0 = max(p.size_x, p.size_y) / 2
-                else:
-                    r0 = math.hypot(p.size_x, p.size_y) / 2
-                m = MARGIN_IN if in_field(p.global_x, p.global_y) \
-                    else MARGIN_OUT
-                obs.add_disc(p.global_x, p.global_y, r0 + m,
-                             f'{ref}.{p.pad_number}')
-        for s in pcb.segments:
-            if s.net_id == nid or s.net_id in kids:
-                continue  # own copper; K-net stubs handled at spread time
-            if s.layer != 'F.Cu':
-                continue  # layer-conditional: nominal-F strings only
-            m = MARGIN_IN if in_field(s.start_x, s.start_y) else MARGIN_OUT
-            obs.add_cap((s.start_x, s.start_y), (s.end_x, s.end_y),
-                        s.width / 2 + m, f'seg:{s.net_id}@{s.layer}')
-        for v in pcb.vias:
-            if v.net_id == nid:
-                continue
-            m = MARGIN_IN if in_field(v.x, v.y) else MARGIN_OUT
-            obs.add_disc(v.x, v.y, v.size / 2 + m, f'via:{v.net_id}')
-        obs.build()
-        src, dst = ends[nm]
-        pts, its = relax(src, dst, obs)
-        strings[nm] = pts
-        iters[nm] = its
-        hug = sorted(obs.hugs(pts))
-        print(f'{nm}: len={polyline_len(pts):.2f}mm verts={len(pts)} '
-              f'iters={its} hugs={hug}')
-
-    # crossing matrices: straight chords vs taut strings
-    order = [nm for nm in names if nm in strings]
-    for label, getter in (('straight', lambda nm: [ends[nm][0], ends[nm][1]]),
-                          ('taut', lambda nm: strings[nm])):
-        tot = 0
-        pairs = []
-        for i in range(len(order)):
-            for j in range(i + 1, len(order)):
-                x = crossings(getter(order[i]), getter(order[j]))
-                if x:
-                    pairs.append((order[i], order[j], len(x),
-                                  [(round(p[0], 2), round(p[1], 2))
-                                   for p in x]))
-                tot += len(x)
-        print(f'\n{label} crossings: {tot}')
-        for (na, nb, n, ps) in pairs:
-            print(f'  {na} x {nb}: {n} at {ps}')
-
-    lens = [polyline_len(strings[nm]) for nm in order]
-    mean = sum(lens) / len(lens)
-    sd = math.sqrt(sum((v - mean) ** 2 for v in lens) / len(lens))
-    print(f'\nlengths: avg={mean:.2f} max={max(lens):.2f} '
-          f'std={sd:.2f} ({", ".join(f"{nm}={polyline_len(strings[nm]):.2f}" for nm in order)})')
-
-    # outputs: strings JSON + Eco2 overlay board
-    with open(a.out + '_strings.json', 'w') as f:
-        json.dump({nm: [[round(x, 4), round(y, 4)] for (x, y) in pts]
-                   for nm, pts in strings.items()}, f)
-    txt = open(a.board, encoding='utf-8').read()
-    lines = []
-    for nm, pts in strings.items():
-        for p, q in zip(pts, pts[1:]):
-            lines.append(
-                f'  (gr_line (start {p[0]:.4f} {p[1]:.4f}) '
-                f'(end {q[0]:.4f} {q[1]:.4f}) '
-                f'(stroke (width 0.05) (type solid)) '
-                f'(layer "Eco2.User"))\n')
-    k = txt.rstrip().rfind(')')
-    out_board = a.out + '.kicad_pcb'
-    with open(out_board, 'w') as f:
-        f.write(txt[:k] + ''.join(lines) + txt[k:])
-    pro = os.path.splitext(a.board)[0] + '.kicad_pro'
-    if os.path.exists(pro):
-        shutil.copy(pro, a.out + '.kicad_pro')
-    print(f'wrote {out_board} (+{len(lines)} eco lines), '
-          f'{a.out}_strings.json')
 
 
-if __name__ == '__main__':
-    main()

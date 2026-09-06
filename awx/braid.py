@@ -857,8 +857,6 @@ class Corridor:
         self.S_pts, self.U_pts = np.array(S_pts), np.array(U_pts)
         self.L_free = float(U_pts[-1])
 
-    def u_of(self, s):
-        return np.interp(s, self.S_pts, self.U_pts)
 
     def s_of_u(self, u):
         # the inverse: U_pts is non-decreasing; take the LAST s of a flat
@@ -871,83 +869,6 @@ class Corridor:
         return float(S[k + 1])
 
     # ------------------------------------------------------------ lanes
-    def column_layout(self, cols, sched):
-        """The columns' positions along the free length (u), and the
-        length they need. A FREE column (two page lanes crossing) is a
-        crossing without a via and takes W_FREE; a constrained one
-        (a swimmer in it) must leave via room from the swimmer's
-        previous crossing when its layer changes there, and from the
-        launch for its first crossing on the other layer from its
-        tooth: HW_COL either side of each column is the converging
-        part where the two lanes are too close for one layer, and the
-        via sits between. Returns (u, need)."""
-        if sched is not None:
-            sched.ensure_recolor(cols)
-        u = []
-        last_col, last_layer = {}, {}
-        tl = self.ctx.tooth_layer
-        two = sched is not None and getattr(sched, 'two_page', False)
-        prev_gate = False
-        for k, col in enumerate(cols):
-            if two:
-                # TWO PAGES: a column is priced by its VIA NEED, not by
-                # who is in it. A grouped swimmer crossing page lanes on
-                # its settled layer is as free as an F x B pair -- every
-                # crossing is between two lanes on different layers --
-                # so only a column where some lane's layer CHANGES costs
-                # W_GATE and via room; everything else is W_XING. A
-                # change is vs the lane's previous crossing OR ITS BIRTH
-                # layer: a B-page lane born on F must dive before its
-                # FIRST crossing, free crossings included (K4's SDQ11
-                # had all three of its crossings in tiny columns just
-                # past s0 and nowhere to put its dive via). An EMPTY
-                # column is a spacer the schedule put there for a via:
-                # full pitch. A gated column also holds its neighbour
-                # off at W_GATE (prev_gate), so its via has room along
-                # the corridor on both sides.
-                def _pairs(d, p, _k=k):
-                    if sched.is_free(d, p):
-                        return ((d, sched.page[d]), (p, sched.page[p]))
-                    Ld, Lp = sched.col_layers(_k, d, p)
-                    return ((d, Ld), (p, Lp))
-                changes = any(
-                    last_layer.get(nm, tl.get(nm, 'F.Cu')) != L
-                    for (d, p) in col for nm, L in _pairs(d, p))
-                gate_col = (not col) or changes
-                pitch = W_GATE if (gate_col or prev_gate) else W_XING
-                prev_gate = gate_col
-                uk = (u[-1] + pitch) if u else pitch
-                for (d, p) in col:
-                    for nm, L in _pairs(d, p):
-                        # via room along the corridor between two
-                        # crossings on different layers (a page lane
-                        # changes at most at birth, before it is in
-                        # last_layer, so this never fires for one)
-                        if nm in last_layer and last_layer[nm] != L:
-                            uk = max(uk, u[last_col[nm]] + 2 * HW_COL + VIA_ROOM)
-                        last_col[nm], last_layer[nm] = k, L
-                u.append(uk)
-                continue
-            # single page: the recorded ladders' exact layout
-            free_col = bool(col) and sched is not None and \
-                all(sched.is_free(d, p) for d, p in col)
-            pitch = W_FREE if free_col else W_GATE
-            uk = (u[-1] + pitch) if u else pitch
-            for (d, p) in col:
-                if sched is not None and sched.is_free(d, p):
-                    continue
-                Ld, Lp = sched.col_layers(k, d, p) if sched else ('B.Cu', 'F.Cu')
-                for nm, L in ((d, Ld), (p, Lp)):
-                    if sched is not None and sched.page.get(nm):
-                        continue                 # a page lane never changes
-                    if nm in last_layer and last_layer[nm] != L:
-                        uk = max(uk, u[last_col[nm]] + 2 * HW_COL + VIA_ROOM)
-                    last_col[nm], last_layer[nm] = k, L
-            u.append(uk)
-        # the reserve after the last column is one more pitch, as the
-        # uniform layout had it ((n + 1) columns' worth of length)
-        need = (u[-1] + W_GATE) if u else 0.0
-        return u, need
 
     def lay_lanes(self, cols, sched=None):
         """From a schedule: column positions, required-layer intervals,
@@ -956,12 +877,10 @@ class Corridor:
         sp = self.spine
         M = self.members
         sched = sched or self.sched_cur
-        if sched is not None:
-            sched.ensure_recolor(cols)
         two = getattr(sched, 'two_page', False)
         n = len(cols)
         L_avail = self.L_free - RESERVE
-        u, need = self.column_layout(cols, sched)
+        u, need = [], 0.0
         # the layout is stretched (or squeezed) to the free length, as
         # the uniform layout was: with one page every column is a
         # constrained one at W_GATE and this is exactly (k + 1) W
@@ -1279,12 +1198,6 @@ class Corridor:
         # column midpoints in the order the schedule gives, the target
         # slot at s1, then the tail (head-on) or the run to the exit leg
         orders = [list(self.launch)]
-        for col in cols:
-            o = list(orders[-1])
-            for (d, p) in col:
-                i, j = o.index(d), o.index(p)
-                o[i], o[j] = o[j], o[i]
-            orders.append(o)
         Ly, py = self.Ly, self.py
         u_first = u[0] if u else L_avail
 
@@ -1791,37 +1704,13 @@ class Corridor:
             vias_all.extend(vias_o)
         return segs_all, vias_all
 
+
     def plan_columns(self, sched, gaps, lead):
-        """The schedule's columns under the braid's gate policy; returns
-        (columns, gate). The take-off gate spends columns to save vias
-        (a diver crossed mid-flight surfaces and dives again: two
-        vias), and columns are what this bench's corridor is short of:
-        the swap region between the two escape fields is the same
-        4.5 mm at every K, and a column narrower than W_GATE has no
-        room for a via between two passes. Gated while the columns fit,
-        ungated when they do not (K28: 31 columns at W=0.147 and 9/26
-        lanes gated, 16 at 0.277 and 20/26 ungated; K21 goes from 14
-        columns and attempt 3 to 11 and attempt 0 at the same 28 vias;
-        K4..K19 stay gated, where ungated cost +2..+6 vias). The gated
-        form is 'last' (the strict gate deadlocked on a mutual crossing
-        until the empty-column override: K4..K19 identical, K21 one
-        attempt sooner, K28 31 -> 23 columns). The gate policy pins a
-        policy. The probe tools go through here too, so they diagnose
-        the schedule the braid actually laid."""
+        """The schedule's columns. On the two-page ribbon every crossing
+        is either between pages (free) or a swimmer's (routed free), so
+        there are no swap columns to lay out."""
         self.sched_cur = sched
-        if getattr(sched, 'two_page', False):
-            # RIBBON: two pages need no swap columns at all. Every
-            # lane runs straight from its launch slot to its target
-            # slot; same-page lanes never cross, an inverted pair
-            # crosses once, where the lines cross, and a crossing of
-            # two lanes on different layers costs neither length nor
-            # via. The schedule's remaining job is the pages
-            # themselves and the swimmers' priority.
-            return [], 'last'
-        cols = sched.columns(gaps, lead, gate='last')
-        _u, need = self.column_layout(cols, sched)
-        gate = 'last' if need <= self.L_free - RESERVE else 'off'
-        return sched.columns(gaps, lead, gate=gate), gate
+        return [], 'last'
 
     def run(self, plan_only=False):
         ctx, log = self.ctx, self.log
@@ -1840,10 +1729,6 @@ class Corridor:
             log('  side exits: ' + ', '.join(
                 f'{nm}@s{self.se[nm][0]:.1f}{"+" if self.exit_side[nm] > 0 else "-"}'
                 for nm in sorted(self.siders, key=lambda n: self.se[n][0])))
-        if self.s1 - self.s0 < 0.5:
-            log(f'  SHORT corridor ({self.s1 - self.s0:.2f} mm): routed as '
-                f'tubes, no schedule')
-            return self.run_short()
         ly_floor = 0.35
         self.offsets(ly_floor)
         self.reserve_intervals()
@@ -1876,10 +1761,7 @@ class Corridor:
                              dest_layer=ctx.dest_layer)
             cols, gate = self.plan_columns(sched, gaps, lead)
             self.lay_lanes(cols)
-            swaps = [sw for col in cols for sw in col]
-            n_free = sum(1 for col in cols for (d, p) in col if sched.is_free(d, p))
-            log(f'  attempt {attempt}: {len(swaps)} swaps ({n_free} free) in '
-                f'{len(cols)} columns, need {self.layout_need:.2f} of '
+            log(f'  attempt {attempt}: need {self.layout_need:.2f} of '
                 f'{self.L_free - RESERVE:.2f} mm, W={self.W:.3f}, launch pitch >= '
                 f'{ly_floor:.2f}; pages F {len(M) - len(sched.divers)} / B '
                 f'{len(sched.b_page)} / swimmers {len(sched.swimmers)}'
@@ -2018,33 +1900,6 @@ class Corridor:
             if ly_floor < 0.40 - 1e-9:
                 ly_floor = min(0.40, ly_floor + 0.03)
                 continue
-            for nm in self.refused:
-                if nm in sched.swimmers:
-                    # a pass within two columns of one of its own moves
-                    # (either side) leaves no room for the layer change:
-                    # a spacer. Else, nothing passing it before its
-                    # first swap: its dive via must sit on the launch
-                    # leg -- a lead column.
-                    moves = [k for k, col in enumerate(self.all_cols)
-                             if any(m == nm for (m, _p) in col)]
-                    passes = [k for k, col in enumerate(self.all_cols)
-                              if any(p == nm for (_m, p) in col)]
-                    tight = any(abs(k - j) <= 2 for k in moves for j in passes)
-                    if tight or (passes and moves and min(passes) < min(moves)):
-                        gaps[nm] += 1
-                    else:
-                        lead[nm] += 1
-        if best is not None and best[0] != self.refused:
-            refused, nv, ly_b, cols_b, segs_b, vias_b, pcb_s, pcb_v, sched = best
-            ctx.landed = (ctx.landed - set(M)) | (set(M) - set(refused))
-            log(f'  keeping attempt with {len(M) - len(refused)}/{len(M)} '
-                f'routed, {nv} via(s)')
-            self.offsets(ly_b)
-            self.sched_cur = sched
-            self.lay_lanes(cols_b, sched)
-            self.refused = refused
-            self.out_segs, self.out_vias = segs_b, vias_b
-            ctx.pcb.segments, ctx.pcb.vias = pcb_s, pcb_v
         if self.refused and getattr(sched, 'two_page', False):
             # LAST CALL -- the corridor's own router, off the lattice.
             # Every routed lane is real copper by now, and what
@@ -2074,13 +1929,6 @@ class Corridor:
                         nm, self.virtual_of(others),
                         self.virtual_vias_of(others), 'last_call',
                         b_alts=ctx.dest_alts.get(nm))
-                    if res is None:
-                        # RIP-ASSISTED LAST CALL: the final refusals
-                        # fail because ONE earlier lane took their
-                        # corridor. Try the routed lanes nearest the
-                        # refused chord as single rip victims; keep
-                        # only a rip where BOTH nets re-route.
-                        res = self._rip_assist(nm, others, log)
                     if res is None:
                         info = ctx.refusal_info.setdefault(nm, {})
                         info.update(stage='last_call',
@@ -2233,16 +2081,10 @@ class Corridor:
         nid, _ = ctx.byname[nm]
         a, aL, b, bL = nm_ends or (self.teeth[nm], ctx.tooth_layer[nm],
                                    self.stubs[nm], ctx.dest_layer[nm])
-        framed = nm in getattr(self, 'mid', {}) and hasattr(self, 'legs')
-        if framed:
-            rungs = [('slack0.3', lambda: self.band_of(nm, 0.3), 2.0),
-                     ('slack0.8', lambda: self.band_of(nm, 0.8), 2.0),
-                     ('slack1.6+open', lambda: self.band_of(nm, 1.6, True), 3.0)]
-        else:
-            path = ctx.paths.get(nm) or [a, b]
-            rungs = [(f'tube{hw}', (lambda hw=hw: cn.tube_band(path, hw)), 2.0)
-                     for hw in (0.6, 1.2, 2.0)]
-        rungs += [('free', lambda: None, 4.0), ('free', lambda: None, 6.0)]
+        rungs = [('slack0.3', lambda: self.band_of(nm, 0.3), 2.0),
+                 ('slack0.8', lambda: self.band_of(nm, 0.8), 2.0),
+                 ('slack1.6+open', lambda: self.band_of(nm, 1.6, True), 3.0),
+                 ('free', lambda: None, 4.0), ('free', lambda: None, 6.0)]
         wp = (getattr(self, 'lane_xy', {}) or {}).get(nm) or [a, b]
         for label, mk, mg in rungs:
             res = cn.connect(ctx.pcb, nid, a, aL, b, bL, ctx.cfg,
@@ -2255,174 +2097,8 @@ class Corridor:
                 return res
         return None
 
-    def _rip_assist(self, nm, others, log):
-        """One-victim rip for a lane the last call still refuses: the
-        routed lanes nearest the refused net's own chord, tried one at
-        a time -- pull the victim's copper, route the refused net wide
-        (the last call's own search, ctx.cfg is already the x4
-        budget), re-route the victim the same way; kept only when
-        BOTH land, restored exactly otherwise. The braid-native form
-        of what route.py's rip-up wins the same fights with. Returns
-        the refused net's (segs, vias) NOT yet on the board (the
-        caller's bookkeeping adds them), or None. Without the rip assist
-        disables; it can only fire where something already refused,
-        so a complete board is untouched by construction."""
-        ctx = self.ctx
-        a_, b_ = self.teeth[nm], self.stubs[nm]
-        nid, _ = ctx.byname[nm]
 
-        def chord_d(om):
-            segs = self.out_segs.get(om) or []
-            if not segs:
-                return 1e9
-            return min(ts.seg_seg_dist((s.start_x, s.start_y),
-                                       (s.end_x, s.end_y), a_, b_)
-                       for s in segs)
-        cands = sorted((om for om in self.members
-                        if om != nm and self.out_segs.get(om)),
-                       key=chord_d)[:3]
-        virt = self.virtual_of(others)
-        vv = self.virtual_vias_of(others)
-        for om in cands:
-            ids_s = {id(s) for s in self.out_segs[om]}
-            ids_v = {id(v) for v in self.out_vias[om]}
-            seg0 = list(ctx.pcb.segments)
-            via0 = list(ctx.pcb.vias)
-            ctx.pcb.segments = [s for s in seg0 if id(s) not in ids_s]
-            ctx.pcb.vias = [v for v in via0 if id(v) not in ids_v]
-            r1 = self.connect_ladder(nm, virt, vv, 'rip_assist')
-            if r1 is not None:
-                s1_, v1_ = r1
-                ctx.pcb.segments.extend(s1_)
-                ctx.pcb.vias.extend(v1_)
-                oid, _ = ctx.byname[om]
-                r2 = self.connect_ladder(om, virt, vv, 'rip_assist')
-                if r2 is not None:
-                    s2_, v2_ = r2
-                    ctx.pcb.segments.extend(s2_)
-                    ctx.pcb.vias.extend(v2_)
-                    self.out_segs[om], self.out_vias[om] = s2_, v2_
-                    # hand the refused net's copper back through the
-                    # caller's bookkeeping: remove the tentative add
-                    id1s = {id(x) for x in s1_}
-                    id1v = {id(x) for x in v1_}
-                    ctx.pcb.segments = [s for s in ctx.pcb.segments
-                                        if id(s) not in id1s]
-                    ctx.pcb.vias = [v for v in ctx.pcb.vias
-                                    if id(v) not in id1v]
-                    log(f'    rip-assist: ripped {om}; {nm} routed '
-                        f'({len(v1_)} via), {om} re-laid '
-                        f'({len(v2_)} via)')
-                    return s1_, v1_
-            ctx.pcb.segments = seg0
-            ctx.pcb.vias = via0
-        log(f'    rip-assist: no viable victim for {nm} '
-            f'(tried {[c for c in cands]})')
-        return None
 
-    def run_free(self):
-        """A small CORNER corridor: no frame, no schedule -- the
-        machinery that knotted spines and routed the K32 corner group
-        0/5. Each member routes the way the last call routes refusals:
-        the real router, band-free, a wide window round its own chord,
-        margin and budget escalated, against every earlier corridor's
-        REAL copper; the unrouted members' chords ride along as
-        virtual copper (both layers) so the first lane cannot wall the
-        rest, and the widest retry drops even that and lets the
-        obstacle map adjudicate. Farthest member first (the most
-        constrained window)."""
-        ctx, log = self.ctx, self.log
-        M = self.members
-        log(f'\ncorridor {self.idx} ({len(M)}): {M}  FREE corner route')
-        self.build_spine()
-        self.lane_xy = {nm: [self.teeth[nm], self.stubs[nm]] for nm in M}
-        self.req_xy = {nm: [] for nm in M}
-        self.marks = []
-        self.out_segs, self.out_vias = {}, {}
-        self.refused = []
-        import copy as _copy
-        big = _copy.copy(ctx.cfg)
-        big.max_iterations = 4 * max(ctx.cfg.max_iterations, 50_000)
-        routed = set()
-        for nm in sorted(M, key=lambda n: -ts.d2(self.teeth[n],
-                                                 self.stubs[n])):
-            nid, _ = ctx.byname[nm]
-            virt = [(self.teeth[om], self.stubs[om], L)
-                    for om in M if om != nm and om not in routed
-                    for L in ('F.Cu', 'B.Cu')]
-            res = None
-            cfg0 = ctx.cfg
-            for cfg_, vv in ((ctx.cfg, virt), (big, virt), (big, None)):
-                ctx.cfg = cfg_
-                try:
-                    res = self.connect_ladder(nm, vv, None, 'free_corner')
-                finally:
-                    ctx.cfg = cfg0
-                if res is not None:
-                    break
-            if res is None:
-                self.refused.append(nm)
-                self.out_segs[nm] = []
-                self.out_vias[nm] = []
-                ctx.refusal_info[nm] = {
-                    'stage': 'free_corner',
-                    'corridor': self.idx,
-                    'page': None,
-                    'swimmer': False,
-                    'tooth_layer': ctx.tooth_layer[nm],
-                    'dest_layer': ctx.dest_layer[nm],
-                    'tooth': list(self.teeth[nm]),
-                    'berth': list(self.stubs[nm]),
-                    'margins': [2.0, 2.0, 4.0, 6.0],
-                }
-                log(f'    refused: {nm}')
-                continue
-            segs_o, vias_o = res
-            ctx.pcb.segments.extend(segs_o)
-            ctx.pcb.vias.extend(vias_o)
-            self.out_segs[nm] = segs_o
-            self.out_vias[nm] = vias_o
-            routed.add(nm)
-            ctx.landed.add(nm)
-            log(f'    free-routed: {nm} ({len(vias_o)} via(s))')
-        log(f'    lanes: {len(routed)}/{len(M)} routed')
-        if self.refused:
-            log(f'  REFUSED lanes (left open): {sorted(self.refused)}')
-        ctx.base_segments = list(ctx.pcb.segments)
-        ctx.base_vias = list(ctx.pcb.vias)
-        ctx.laid.extend(self.lane_xy[nm] for nm in M)
-
-    def run_short(self):
-        """A corridor too short for a schedule: every lane a straight
-        (s, o) line inside its own tube."""
-        ctx, sp = self.ctx, self.spine
-        self.req, self.bwin = {}, {nm: [(-1e9, 1e9)] for nm in self.members}
-        self.cross_iv, self.legs = [], {nm: [] for nm in self.members}
-        self.jogs = {nm: [] for nm in self.members}
-        self.mid = {nm: [self.st[nm], self.se[nm]] for nm in self.members}
-        self.mid_xy = {nm: [((self.st[nm][0] + self.se[nm][0]) / 2,
-                             sp.lane_xy(self.mid[nm]))] for nm in self.members}
-        self.lane_xy = {nm: [self.teeth[nm]] + self.mid_xy[nm][0][1]
-                        + [self.stubs[nm]] for nm in self.members}
-        routed = set()
-        for nm in sorted(self.members, key=lambda n: self.st[n][1]):
-            nid, _ = ctx.byname[nm]
-            virt = self.virtual_of([om for om in self.members
-                                    if om != nm and om not in routed])
-            res = cn.connect(ctx.pcb, nid, self.teeth[nm], ctx.tooth_layer[nm],
-                             self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
-                             virtual=virt + reserve(ctx, nm), margin=0.6,
-                             window_pts=self.lane_xy[nm])
-            if res is None:
-                self.refused.append(nm)
-                self.log(f'    refused: {nm}')
-                continue
-            routed.add(nm)
-            ctx.landed.add(nm)
-            self.out_segs[nm], self.out_vias[nm] = res
-            ctx.pcb.segments.extend(res[0])
-            ctx.pcb.vias.extend(res[1])
-        self.finish()
 
     def finish(self):
         ctx = self.ctx
@@ -2667,17 +2343,12 @@ def main():
         corridors.append(Corridor(ci, members, ctx, log))
     ctx.corridors = corridors
 
-    def is_free(c):
-        # a small corner group (2..5 lanes) routes band-free
-        return 2 <= len(c.members) <= 5
     if True:
         # PHASE 1 -- every corridor PLANNED (spine, offsets, schedule,
         # planned lanes) before any is routed, each spine relaxed round
         # the ones planned before it, so that while a corridor routes,
         # the others' planned lanes are reservations (cross_reserve)
         for c in corridors:
-            if is_free(c):
-                continue
             try:
                 c.run(plan_only=True)
                 ctx.laid.extend(c.lane_xy[nm] for nm in c.members
@@ -2688,16 +2359,7 @@ def main():
         ctx.pcb.segments = list(ctx.base_segments)
         ctx.pcb.vias = list(ctx.base_vias)
     for c in corridors:
-        if is_free(c):
-            # small CORNER corridors skip the spine/schedule machinery
-            # entirely -- it is exactly where that machinery fails
-            # (K32's 5-net corner group routed 0/5 for a month; the
-            # 3-net K35 group knotted its spine). Single-net corridors
-            # keep run_short (recorded K28's SA0 baseline), big ones
-            # keep the full braid.
-            c.run_free()
-        else:
-            c.run()
+        c.run()
         ctx.corr_done.add(c.idx)
     if ctx.rungs:
         log('re-lay rungs: ' + ', '.join(f'{st}/{r} {n}' for (st, r), n
@@ -3001,56 +2663,6 @@ def write_out(a, ctx, corridors, names, log):
                 f'duplicate segment(s)')
         emit = {nm: [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer,
                       s.width) for s in final_segs[nm]] for nm in names}
-    else:
-        emit = {nm: [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer,
-                      s.width) for s in out_segs[nm]] for nm in names}
-        # non-smoothed: txt keeps the ORIGINAL stubs, so the bypassed
-        # tail must be stripped from the text (the smoothed branch
-        # re-emits from ctx.pcb, where note_joint already removed it)
-        for nm in names:
-            spans = {frozenset((t, p))
-                     for (t, p) in ctx.trim_spans.get(nm, ())}
-            if not spans:
-                continue
-            nid, net = byname[nm]
-            out2, i2 = [], 0
-            while True:
-                j2 = txt.find('(segment', i2)
-                if j2 < 0:
-                    out2.append(txt[i2:])
-                    break
-                k2, depth = j2, 0
-                while True:
-                    ch = txt[k2]
-                    if ch == '(':
-                        depth += 1
-                    elif ch == ')':
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    k2 += 1
-                block = txt[j2:k2 + 1]
-                m1 = re.search(r'\(net (\d+)\)', block)
-                m2 = re.search(r'\(net "([^"]+)"\)', block)
-                pts2 = re.findall(
-                    r'\((?:start|end) ([-\d.]+) ([-\d.]+)', block)
-                hit = ((m1 and int(m1.group(1)) == nid)
-                       or (m2 and m2.group(1) == net.name)) \
-                    and len(pts2) == 2 \
-                    and frozenset(
-                        (round(float(x), 3), round(float(y), 3))
-                        for x, y in pts2) in {
-                            frozenset(sp) for sp in spans}
-                if hit:
-                    out2.append(txt[i2:j2].rstrip(' \t'))
-                    e2 = k2 + 1
-                    if e2 < len(txt) and txt[e2] == '\n':
-                        e2 += 1
-                    i2 = e2
-                else:
-                    out2.append(txt[i2:k2 + 1])
-                    i2 = k2 + 1
-            txt = ''.join(out2)
     for nm in names:
         nid, _ = byname[nm]
         for (p, q, layer, w) in emit[nm]:
