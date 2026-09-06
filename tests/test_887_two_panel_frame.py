@@ -28,7 +28,7 @@ ROOT = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageChops
 except ImportError:
     print('SKIP: Pillow is not installed, so no frame can be rendered')
     sys.exit(77)
@@ -68,13 +68,22 @@ def _fake_render(png_sizes):
     different ones -- including a 3x3 -- is that the composed frame must be one
     size regardless, because the box is ours and the render's size is not.
     """
+    used = []
+
     def render_many(jobs, cli, workers=None, **kw):
         out = {}
         for i, (key, _board, png, _rot) in enumerate(jobs):
-            w, h = png_sizes[i % len(png_sizes)]
+            # Index by the SHOT key, not by position in this batch. Indexing by
+            # `i` meant the probe shot never came through here at all, so of the
+            # four measured-realistic sizes only the first two were ever used --
+            # the commit message claimed all four and the test docstring said so
+            # too. Keying on `key` spreads them across the real shot indices.
+            w, h = png_sizes[key % len(png_sizes)]
+            used.append((w, h))
             Image.new('RGBA', (w, h), (20, 90, 40, 255)).save(png)
             out[key] = (png, '')
         return out
+    render_many.used = used
     return render_many
 
 
@@ -129,6 +138,12 @@ def test_the_default_movie_is_bit_for_bit_what_it_was():
         MM.make_movie([BOARD_A, BOARD_B], out=a, size=200, quiet=True)
         MM.make_movie([BOARD_A, BOARD_B], out=b, size=200, quiet=True,
                       panels='xray')
+        # NON-EMPTY FIRST. `grabbed.get(a) == grabbed.get(b)` is None == None
+        # when save_movie is never reached, so the comparison proves nothing
+        # until we know there were frames to compare.
+        want(grabbed.get(a) and len(grabbed[a]) > 1,
+             'the spy captured a real frame list (%d frames)'
+             % len(grabbed.get(a) or ()), len(grabbed.get(a) or ()))
         want(grabbed.get(a) == grabbed.get(b),
              'panels="xray" is byte-identical to passing nothing at all')
     finally:
@@ -141,19 +156,27 @@ def test_no_kicad_cli_says_why_and_keeps_one_panel():
     fr, marks, final = _frames()
     ref = {f.size for f in fr}
     ids = [id(f) for f in fr]
-    saved = kir.resolve_cli
-    kir.resolve_cli = lambda explicit=None: (
-        None, 'kicad-cli not found (set $KICAD_CLI to it, or install KiCad)')
+    # Patch the RESOLVER's own source, not resolve_cli itself. Stubbing
+    # resolve_cli made the test assert a string it had just written -- the
+    # 'KICAD_CLI' below was its own injected text, and deleting the env var
+    # from the real message survived the suite. Going one level down means the
+    # message under test is the shipped one.
+    import kicad_oracle
+    saved = kicad_oracle.find_kicad_cli
+    kicad_oracle.find_kicad_cli = lambda *a, **k: None
     try:
+        real_msg = kir.resolve_cli(None)[1]
         out, rep = mp.compose_two_panel(fr, marks, final)
     finally:
-        kir.resolve_cli = saved
+        kicad_oracle.find_kicad_cli = saved
     want({f.size for f in out} == ref, 'the frame size is untouched', ref)
     want([id(f) for f in out] == ids,
          'and the very same Image objects come back, not copies')
     line = mp.iso_status_line(rep)
     want(rep['state'] == 'did_not_run', 'the state is named', rep['state'])
-    want('KICAD_CLI' in line, 'the message names the env var to set', line)
+    want('KICAD_CLI' in real_msg,
+         'the REAL resolver message names the env var to set', real_msg)
+    want('KICAD_CLI' in line, 'and it reaches the status line', line)
     want('OFF' in line and 'full speed' in line,
          'and says the movie is the fast single-panel one', line)
 
@@ -433,7 +456,283 @@ def test_an_unknown_panel_set_is_refused_in_code_and_warned_in_the_env():
              'and the error names the accepted set', str(e))
 
 
+def _panel_text(img):
+    """The caption strip of a panel, as a crude ink signature per column.
+
+    Reading pixels rather than text because the caption is drawn, not stored --
+    two panels whose captions differ produce different ink, and that is all
+    these tests need to tell "per board" from "one note pasted everywhere".
+    """
+    W, H = img.size
+    strip = img.crop((0, int(H * 0.88), W, H)).convert('L')
+    return tuple(sum(strip.getpixel((x, y)) for y in range(strip.height))
+                 for x in range(0, W, 3))
+
+
+def test_each_panels_caption_describes_its_own_board():
+    """The models note used to be computed once from the opening board and
+    pasted under every panel, so a frame showing board B carried board A's
+    count. The fix was made and then not pinned: the mutation that restores the
+    bug survived, and so did one that names shots[0]'s board in every caption.
+    Nothing read a caption at all.
+    """
+    fr, marks, final = _frames()
+    saved_r, saved_c, saved_i = kir.render_many, kir.resolve_cli, kir.render_iso
+    kir.render_many = _fake_render([(616, 448)])
+    kir.resolve_cli = lambda explicit=None: ('FAKE', '')
+    kir.render_iso = lambda board, png, cli, **kw: (
+        Image.new('RGBA', (616, 448), (20, 90, 40, 255)).save(png) or png, '')
+    grabbed = []
+    real_panel = mp.iso_panel
+
+    def spy(box, png, caption, error=''):
+        grabbed.append(caption)
+        return real_panel(box, png, caption, error=error)
+
+    mp.iso_panel = spy
+    try:
+        mp.compose_two_panel(fr, marks, final, mp.IsoOpts(max_renders=4))
+    finally:
+        kir.render_many, kir.resolve_cli, kir.render_iso = (
+            saved_r, saved_c, saved_i)
+        mp.iso_panel = real_panel
+
+    want(len(grabbed) >= 2, 'more than one panel was captioned', len(grabbed))
+    boards = {os.path.splitext(os.path.basename(b))[0]
+              for b in mp.board_for_frames(marks, len(fr), final)}
+    want(len(boards) >= 2, 'and the chain really shows two boards', boards)
+    for name in boards:
+        want(any(c.startswith(name) for c in grabbed),
+             'a caption names %r, the board its own panel is showing' % name,
+             grabbed)
+    notes = {c.split('|')[-1].strip() for c in grabbed}
+    want(len(notes) >= 2,
+         'and the model counts differ between boards, so the note is computed '
+         'PER BOARD rather than once from the opening one', notes)
+
+
+def test_a_failed_shot_draws_the_reason_into_its_panel():
+    """The test named "says so" checked the box SIZE and the report, never that
+    the reason reaches the picture. Deleting the drawing survived."""
+    box = (200, 90)
+    good, _ = mp.iso_panel(box, None, 'cap')
+    bad, drawn = mp.iso_panel(box, None, 'cap', error='boom the render failed')
+    want(good.size == bad.size == box, 'both are the same box', (good.size,
+                                                                bad.size))
+    want(ImageChops.difference(good, bad).getbbox() is not None,
+         'the failed panel has visibly different ink -- the reason is DRAWN, '
+         'not only reported')
+    want(drawn == 'boom the render failed',
+         'and the panel echoes the reason back, so the caller can count it '
+         'whether the failure came from the render or from reading it', drawn)
+    # The case the return value exists FOR: the render "succeeded" but the file
+    # will not decode. Only iso_panel can discover that.
+    d = tempfile.mkdtemp()
+    junk = os.path.join(d, 'junk.png')
+    open(junk, 'wb').write(b'not a png at all')
+    panel, err = mp.iso_panel(box, junk, 'cap')
+    want(panel.size == box, 'the box survives an undecodable file', panel.size)
+    want(err and 'could not read' in err,
+         'and the failure is RETURNED, not only drawn -- returning nothing here '
+         'put three broken panels under a status line claiming full success',
+         err)
+
+
+def test_models_note_reports_found_of_total_in_that_order():
+    """No test read the numbers, only the BARE BOARD substring, so printing
+    them the wrong way round survived."""
+    note = kir.models_note({'total': 15, 'found': 10})
+    want('10/15' in note, 'found comes first, then total', note)
+    want('15/10' not in note, 'and not the other way round', note)
+    bare = kir.models_note({'total': 84, 'found': 0, 'other_ext': 78})
+    want('0/84' in bare and 'BARE BOARD' in bare, 'a bare board reads 0/84',
+         bare)
+    # MOSTLY bare: gating the warning on exactly zero left four corpus boards
+    # rendering essentially empty with no caption at all (1/160, 5/148, 3/58,
+    # 7/75).
+    mostly = kir.models_note({'total': 160, 'found': 1, 'other_ext': 149})
+    want('MOSTLY BARE' in mostly,
+         'and 1 of 160 is called out too, not silently reported as a count',
+         mostly)
+    want('another extension' in mostly,
+         'with the stale-reference reason, which used to stop applying one '
+         'model above zero', mostly)
+    full = kir.models_note({'total': 15, 'found': 15})
+    want('BARE' not in full, 'a fully-resolved board gets no warning', full)
+
+
+def test_model_dirs_defines_the_projects_own_variable():
+    """lvds has two ${KIPRJMOD} refs; the model test plants KIPRJMOD but grades
+    tigard, which uses only ${KISYS3DMOD} -- so dropping KIPRJMOD survived."""
+    dirs = kir.model_dirs(cli_path=None, board_path=BOARD_A)
+    want(dirs.get('KIPRJMOD') == os.path.dirname(os.path.abspath(BOARD_A)),
+         'KIPRJMOD is the board\'s own directory', dirs.get('KIPRJMOD'))
+    # It is defined WITHOUT a kicad-cli path, because it comes from the board
+    # and not from the install -- the versioned 3DMODEL_DIR variables do need
+    # the install, and are legitimately unresolved here.
+    want('KIPRJMOD' in kir.model_dirs(board_path=BOARD_A),
+         'and needs no kicad-cli to be known')
+    # Prove it is USED: substitute it and nothing else, then count.
+    # DERIVED from the board, not guessed: a hardcoded count was wrong twice
+    # here, and a number nobody re-derives is a number that rots.
+    raws = kir._MODEL_RE.findall(
+        open(BOARD_A, encoding='utf-8', errors='replace').read())
+    n_proj = sum(1 for r in raws if '${KIPRJMOD}' in r)
+    n_bare = sum(1 for r in raws if '${' not in r)
+    want(n_proj > 0, 'lvds really does use ${KIPRJMOD}', n_proj)
+    want(n_bare > 0,
+         'and it also carries %d BARE relative paths -- the case that used to '
+         'be resolved against the caller\'s directory' % n_bare, n_bare)
+
+    only_proj = {'KIPRJMOD': dirs['KIPRJMOD']}
+    m = kir.resolve_models(BOARD_A, only_proj)
+    want(m['total'] == len(raws), 'every model reference is counted',
+         (m['total'], len(raws)))
+    want(m['total'] - m['unresolved_var'] == n_proj + n_bare,
+         'with KIPRJMOD as the only key, exactly the ${KIPRJMOD} references '
+         'plus the bare relative ones get as far as a path -- so dropping that '
+         'key would silently make the first group unresolvable',
+         (m['total'] - m['unresolved_var'], n_proj + n_bare))
+    without = kir.resolve_models(BOARD_A, {})
+    want(without['unresolved_var'] == m['total'] - n_bare,
+         'and with no keys at all only the bare paths remain resolvable, '
+         'because they need no variable', (without['unresolved_var'], n_bare))
+
+
+def test_a_relative_model_path_is_resolved_against_the_board_not_the_cwd():
+    """Measured: leaving a bare relative path relative made os.path.isfile
+    answer against os.getcwd(), so the same board captioned "13/15" from one
+    directory and "10/15" from another -- and the extra files it counted were
+    ones kicad-cli would never load."""
+    import re
+    d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
+    board = os.path.join(d1, 'b.kicad_pcb')
+    open(board, 'w', encoding='utf-8').write(
+        '(footprint "x" (model "sub/part.step" (offset (xyz 0 0 0))))\n')
+    here = os.getcwd()
+    try:
+        # Plant a decoy at the CWD, where a cwd-relative resolver would find it.
+        os.makedirs(os.path.join(d2, 'sub'), exist_ok=True)
+        open(os.path.join(d2, 'sub', 'part.step'), 'w').close()
+        os.chdir(d2)
+        m = kir.resolve_models(board)
+        want(m['total'] == 1, 'one model reference', m)
+        want(m['found'] == 0,
+             'the decoy beside the CWD is NOT counted -- kicad-cli would never '
+             'load it', m)
+        # Now plant it where KiCad would actually look: beside the board.
+        os.makedirs(os.path.join(d1, 'sub'), exist_ok=True)
+        open(os.path.join(d1, 'sub', 'part.step'), 'w').close()
+        m2 = kir.resolve_models(board)
+        want(m2['found'] == 1,
+             'while the one beside the BOARD is', m2)
+        os.chdir(here)
+        want(kir.resolve_models(board)['found'] == 1,
+             'and the answer does not change with the caller\'s directory')
+    finally:
+        os.chdir(here)
+
+
+def test_a_non_finite_tuning_value_warns_and_falls_back():
+    """argparse type=float accepts nan and inf, and main() catches only
+    FileNotFoundError -- so --iso-height-frac nan took the whole movie down
+    with `ValueError: cannot convert float NaN to integer`."""
+    o = mp.IsoOpts(height_frac=float('nan'), sweep_deg=float('inf'))
+    want(o.height_frac == 0.62 and o.sweep_deg == 60.0,
+         'non-finite values fall back to the defaults',
+         (o.height_frac, o.sweep_deg))
+    W, Ht, Hi, tot = mp.panel_geometry((200, 150), o.height_frac)
+    want(tot % 2 == 0 and Hi > 0, 'and the geometry still computes', (Hi, tot))
+    for v in (0.0, 0.01, -1.0, 5.0):
+        _W, _Ht, hi, t = mp.panel_geometry((200, 150), v)
+        want(hi >= 48 and t % 2 == 0,
+             'a finite but extreme %r is still handled, not rejected' % v,
+             (hi, t))
+
+
+def test_a_temp_dir_failure_is_a_named_state_not_a_traceback():
+    fr, marks, final = _frames()
+    ref = {f.size for f in fr}
+    saved_c, saved_mk = kir.resolve_cli, mp.tempfile.mkdtemp
+    kir.resolve_cli = lambda explicit=None: ('FAKE', '')
+
+    def boom(*a, **k):
+        raise PermissionError(13, 'Permission denied')
+
+    mp.tempfile.mkdtemp = boom
+    try:
+        out, rep = mp.compose_two_panel(fr, marks, final)
+    finally:
+        kir.resolve_cli, mp.tempfile.mkdtemp = saved_c, saved_mk
+    want(rep['state'] == 'error',
+         'a read-only or full %TEMP% is a named state', rep['state'])
+    want({f.size for f in out} == ref, 'and nothing was composed', ref)
+    want('directory' in rep['detail'], 'the detail says what failed',
+         rep['detail'])
+
+
+def test_the_disabled_message_names_the_value_the_user_typed():
+    fr, marks, final = _frames()
+    _out, rep = mp.compose_two_panel(fr, marks, final,
+                                     mp.IsoOpts(max_renders=-1))
+    want('-1' in mp.iso_status_line(rep),
+         'a negative cap is echoed as -1, not as the hardcoded 0 the user '
+         'never typed', mp.iso_status_line(rep))
+
+
+def test_the_env_knob_turns_the_panel_on_and_a_typo_warns():
+    """The "and warned in the env" half of the original test asserted nothing;
+    no test touched os.environ at all."""
+    import env_knobs
+    d = tempfile.mkdtemp()
+    saved = os.environ.get('KICAD_MOVIE_PANELS')
+    reached = []
+    real = mp.compose_two_panel
+
+    def spy(frames, marks, final, opts=None, quiet=False):
+        reached.append(opts)
+        return frames, mp._report('disabled', 'stubbed')
+
+    mp.compose_two_panel = spy
+    try:
+        os.environ['KICAD_MOVIE_PANELS'] = 'xray+iso'
+        env_knobs.refresh()
+        MM.make_movie([BOARD_A], out=os.path.join(d, 'k.gif'), size=120,
+                      quiet=True)
+        want(len(reached) == 1,
+             'the env knob alone reaches the composer', len(reached))
+
+        os.environ['KICAD_MOVIE_PANELS'] = 'hologram'
+        env_knobs.refresh()
+        import io as _io
+        import contextlib
+        err = _io.StringIO()
+        with contextlib.redirect_stderr(err):
+            MM.make_movie([BOARD_A], out=os.path.join(d, 'k2.gif'), size=120,
+                          quiet=False)
+        want(len(reached) == 1, 'a typo does NOT reach the composer',
+             len(reached))
+        want('KICAD_MOVIE_PANELS' in err.getvalue(),
+             'and the warning names the variable', err.getvalue()[:160])
+    finally:
+        mp.compose_two_panel = real
+        if saved is None:
+            os.environ.pop('KICAD_MOVIE_PANELS', None)
+        else:
+            os.environ['KICAD_MOVIE_PANELS'] = saved
+        env_knobs.refresh()
+
+
 TESTS_TO_RUN = [
+    test_each_panels_caption_describes_its_own_board,
+    test_a_failed_shot_draws_the_reason_into_its_panel,
+    test_models_note_reports_found_of_total_in_that_order,
+    test_model_dirs_defines_the_projects_own_variable,
+    test_a_relative_model_path_is_resolved_against_the_board_not_the_cwd,
+    test_a_non_finite_tuning_value_warns_and_falls_back,
+    test_a_temp_dir_failure_is_a_named_state_not_a_traceback,
+    test_the_disabled_message_names_the_value_the_user_typed,
+    test_the_env_knob_turns_the_panel_on_and_a_typo_warns,
     test_the_fast_path_never_reaches_the_composer,
     test_the_default_movie_is_bit_for_bit_what_it_was,
     test_no_kicad_cli_says_why_and_keeps_one_panel,

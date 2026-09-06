@@ -74,18 +74,112 @@ def test_kicad_cli_returns_something_near_but_not_equal_to_the_asked_size():
 
 
 def test_the_two_panel_movie_writes_and_the_encoded_file_holds_one_size():
-    """Assert on the ENCODED file, the way test_431_animator_port.py:99 does."""
+    """Assert on the ENCODED file, the way test_431_animator_port.py:99 does.
+
+    Every assertion here USED TO PASS with the panel disabled: a one-panel movie
+    is also written, is also one size, and its height at size=240 is also even.
+    Proven by forcing compose_two_panel to return did_not_run -- three green
+    lines about a feature that never ran. So the test now establishes the panel
+    RAN, and compares against a measured single-panel control.
+    """
     d = tempfile.mkdtemp()
-    out = os.path.join(d, 'm.gif')
-    got = MM.make_movie([LVDS, QFN], out=out, size=240, quiet=True,
-                        panels='xray+iso',
-                        iso_opts=mp.IsoOpts(max_renders=2, quality='basic'))
+    one = MM.make_movie([LVDS, QFN], out=os.path.join(d, 'one.gif'), size=240,
+                        quiet=True, panels='xray')
+    with Image.open(one) as im:
+        one_sizes = {f.size for f in ImageSequence.Iterator(im)}
+    want(len(one_sizes) == 1, 'the single-panel control is one size', one_sizes)
+    one_h = one_sizes.pop()[1]
+
+    seen = {}
+    real = mp.compose_two_panel
+
+    def spy(frames, marks, final, opts=None, quiet=False):
+        frames, rep = real(frames, marks, final, opts, quiet=quiet)
+        seen['rep'] = rep
+        return frames, rep
+
+    mp.compose_two_panel = spy
+    try:
+        out = os.path.join(d, 'm.gif')
+        got = MM.make_movie([LVDS, QFN], out=out, size=240, quiet=True,
+                            panels='xray+iso',
+                            iso_opts=mp.IsoOpts(max_renders=2, quality='basic'))
+    finally:
+        mp.compose_two_panel = real
     want(got and os.path.exists(got), 'the two-panel movie is written', got)
+    want(seen.get('rep', {}).get('state') == 'ran',
+         'and the panel actually RAN -- without this, every assertion below is '
+         'equally true of a one-panel movie',
+         seen.get('rep', {}).get('state'))
+    want(seen.get('rep', {}).get('failed') == 0,
+         'with no failed shot', seen.get('rep', {}).get('failed'))
     with Image.open(got) as im:
         sizes = {f.size for f in ImageSequence.Iterator(im)}
     want(len(sizes) == 1, 'and every encoded frame is one size', sizes)
     w, h = sizes.pop()
     want(h % 2 == 0, 'with an even height', h)
+    want(h > one_h,
+         'and the composed frame is TALLER than the single-panel control',
+         (h, one_h))
+
+
+def test_the_yaw_sweep_reaches_kicad_cli_and_changes_the_picture():
+    """The plan's yaw is pinned; that it ARRIVES was not.
+
+    Deleting `--rotate` from the argv entirely -- which would make every shot
+    of every film identical and delete the feature's whole "animated for free"
+    premise -- survived the suite. A pixel comparison is the only thing that
+    can see it, because the plan is still perfectly correct when the flag is
+    dropped.
+    """
+    from PIL import ImageChops
+    d = tempfile.mkdtemp()
+    a, ea = kir.render_iso(LVDS, os.path.join(d, 'y0.png'), CLI, 400, 300,
+                           rotate=(-45.0, 0.0, 20.0))
+    b, eb = kir.render_iso(LVDS, os.path.join(d, 'y1.png'), CLI, 400, 300,
+                           rotate=(-45.0, 0.0, 80.0))
+    want(not ea and not eb, 'both renders succeed', (ea, eb))
+    ia = Image.open(a).convert('RGBA')
+    ib = Image.open(b).convert('RGBA')
+    want(ia.size == ib.size, 'same size', (ia.size, ib.size))
+    want(ImageChops.difference(ia, ib).getbbox() is not None,
+         'a 60-degree yaw change reaches kicad-cli and changes the pixels -- '
+         'without this, dropping --rotate is invisible')
+    c, _ = kir.render_iso(LVDS, os.path.join(d, 'y2.png'), CLI, 400, 300,
+                          rotate=(-45.0, 0.0, 20.0))
+    want(ImageChops.difference(ia, Image.open(c).convert('RGBA')).getbbox()
+         is None,
+         'while the SAME yaw renders the same pixels, so the difference above '
+         'is the rotation and not noise')
+
+
+def test_an_unreadable_render_is_a_failure_not_a_success():
+    """Exit 0 plus a file on disk is not a decodable image.
+
+    A zero-byte write -- a full disk, a killed child -- used to be reported as
+    unqualified success while the composer drew "could not read the render"
+    into the panel: three broken panels under a status line saying everything
+    worked.
+    """
+    d = tempfile.mkdtemp()
+    png = os.path.join(d, 'empty.png')
+    real = kir.subprocess.run
+
+    def fake(argv, **kw):
+        open(png, 'wb').close()          # exit 0, file exists, zero bytes
+        class R:
+            returncode = 0
+            stdout = stderr = ''
+        return R()
+
+    kir.subprocess.run = fake
+    try:
+        got, err = kir.render_iso(LVDS, png, CLI, 320, 240)
+    finally:
+        kir.subprocess.run = real
+    want(got is None, 'an unreadable PNG is not a success', got)
+    want('unreadable' in err and '0 bytes' in err,
+         'and the reason names what was wrong, with the size', err)
 
 
 def test_parallel_renders_are_deterministic_and_really_parallel():
@@ -167,6 +261,8 @@ def test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare():
 TESTS_TO_RUN = [
     test_kicad_cli_returns_something_near_but_not_equal_to_the_asked_size,
     test_the_two_panel_movie_writes_and_the_encoded_file_holds_one_size,
+    test_the_yaw_sweep_reaches_kicad_cli_and_changes_the_picture,
+    test_an_unreadable_render_is_a_failure_not_a_success,
     test_parallel_renders_are_deterministic_and_really_parallel,
     test_a_real_board_with_no_resolvable_models_still_renders_and_says_bare,
 ]

@@ -188,6 +188,15 @@ def resolve_models(board_path, dirs=None):
         return out
     if dirs is None:
         dirs = model_dirs(board_path=board_path)
+    # A BARE RELATIVE model path is relative to the PROJECT -- it is
+    # `${KIPRJMOD}/...` with the variable left off, and that is how KiCad reads
+    # it. Resolving it against os.getcwd() instead made the caption move with
+    # the CALLER: lvds_converter_dualclk reported "3D models 13/15" from one
+    # directory and "10/15" from another, and the files it counted from the
+    # first were ones kicad-cli would never load -- a number under the picture
+    # exceeding what is in the picture. 13 of the 26 boards in kicad_files/
+    # carry at least one relative reference.
+    proj = dirs.get('KIPRJMOD') or os.path.dirname(os.path.abspath(board_path))
     for raw in _MODEL_RE.findall(txt):
         out['total'] += 1
         path = _VAR_RE.sub(lambda m: dirs.get(m.group(1), _UNRESOLVED), raw)
@@ -197,6 +206,8 @@ def resolve_models(board_path, dirs=None):
                 out['example'] = raw
             continue
         path = path.replace('\\', '/')
+        if not os.path.isabs(path):
+            path = os.path.join(proj, path).replace('\\', '/')
         if os.path.isfile(path):
             out['found'] += 1
             continue
@@ -208,6 +219,16 @@ def resolve_models(board_path, dirs=None):
     return out
 
 
+#: Below this share of models resolved, the render is bodies-in-name-only and
+#: the caption says so. NOT `found == 0`: gating on exactly zero meant four
+#: corpus boards that render essentially bare got no warning at all --
+#: kit-dev-coldfire-xilinx_5213 at 1/160, orangecrab_ext_pll 5/148,
+#: splitflap_driver 3/58, watchy 7/75 -- because one resolved model out of 160
+#: is not a populated board, and the stale-reference explanation stopped
+#: applying one model above zero.
+MOSTLY_BARE_FRACTION = 0.25
+
+
 def models_note(models):
     """One human clause for a caption. Never claims more than it counted."""
     if not models or not models.get('total'):
@@ -216,10 +237,17 @@ def models_note(models):
     note = '3D models %d/%d' % (f, t)
     if f == 0:
         note += ' -- BARE BOARD, no component bodies'
-        if models.get('other_ext'):
-            note += ' (%d exist under another extension)' % models['other_ext']
-        elif models.get('unresolved_var'):
-            note += ' (%d paths use an undefined variable)' % models['unresolved_var']
+    elif f < t * MOSTLY_BARE_FRACTION:
+        note += ' -- MOSTLY BARE'
+    else:
+        return note
+    # The REASON, at both severities. A miss whose same-stem twin exists under
+    # another extension is a stale reference in the board, not a missing
+    # install, and the two have different fixes.
+    if models.get('other_ext'):
+        note += ' (%d exist under another extension)' % models['other_ext']
+    elif models.get('unresolved_var'):
+        note += ' (%d paths use an undefined variable)' % models['unresolved_var']
     return note
 
 
@@ -268,6 +296,23 @@ def render_iso(board_path, out_png, cli, width, height, rotate=ISO_ROTATE,
         head = blob.splitlines()[0].strip() if blob else ''
         return None, 'kicad-cli pcb render exited %s%s' % (
             r.returncode, (': ' + head[:160]) if head else '')
+    # Exit 0 and a file on disk does NOT establish a decodable image. A
+    # zero-byte or truncated write (a full disk, a killed child) used to be
+    # reported as unqualified success while the composer quietly drew
+    # "could not read the render" into the panel -- three broken panels under a
+    # status line saying everything worked, which is the one outcome the named
+    # degrade states exist to prevent. Verify here, where a reason can still be
+    # returned.
+    try:
+        from PIL import Image
+        with Image.open(out_png) as probe:
+            probe.verify()
+    except ImportError:
+        pass                    # no Pillow: the composer cannot draw anyway
+    except Exception as exc:                                    # noqa: BLE001
+        return None, ('kicad-cli exited 0 but wrote an unreadable PNG (%s, '
+                      '%d bytes)' % (exc, os.path.getsize(out_png)
+                                     if os.path.isfile(out_png) else 0))
     return out_png, ''
 
 

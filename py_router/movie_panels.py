@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import bisect
 import collections
+import math
 import os
 import sys
 import tempfile
@@ -47,6 +48,24 @@ if _HERE not in sys.path:
 _PANEL_BG = (14, 14, 18)
 _STRIP_BG = (28, 28, 34)
 _STRIP_FG = (228, 228, 236)
+
+
+def _finite(value, default, name):
+    """float(value) when it is finite, else `default` with a warning.
+
+    A refusal would be worse here: the movie is an artifact, and aborting a
+    routing run because a tuning knob was mistyped trades a cosmetic problem for
+    a real one. Saying so on stderr is the middle.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = None
+    if v is None or not math.isfinite(v):
+        print('movie_panels: %s=%r is not a finite number; using %g'
+              % (name, value, default), file=sys.stderr)
+        return default
+    return v
 
 
 class IsoOpts(object):
@@ -70,10 +89,17 @@ class IsoOpts(object):
                  perspective=False, zoom=None, jobs=None, timeout=120.0,
                  cli=None, keep_dir=None):
         self.max_renders = int(max_renders)
-        self.height_frac = float(height_frac)
-        self.yaw0_deg = float(yaw0_deg)
-        self.sweep_deg = float(sweep_deg)
-        self.tilt_deg = float(tilt_deg)
+        # FINITE, checked here rather than trusted. argparse's `type=float`
+        # happily accepts `nan` and `inf`, and make_movie's main() catches only
+        # FileNotFoundError -- so `--iso-height-frac nan` came out of
+        # panel_geometry as `ValueError: cannot convert float NaN to integer`
+        # and took the whole movie down. That is precisely the "not crash" half
+        # of this module's stated contract. 0.0, 0.01, -1.0 and 5.0 are all
+        # legitimate and are handled downstream by the 48-px floor.
+        self.height_frac = _finite(height_frac, 0.62, 'height_frac')
+        self.yaw0_deg = _finite(yaw0_deg, 45.0, 'yaw0_deg')
+        self.sweep_deg = _finite(sweep_deg, 60.0, 'sweep_deg')
+        self.tilt_deg = _finite(tilt_deg, -45.0, 'tilt_deg')
         self.quality = quality
         self.floor = bool(floor)
         # Perspective is OFF by default even though the hand-typed recipe in
@@ -243,7 +269,11 @@ def panel_geometry(top_size, height_frac):
 # --------------------------------------------------------------------------
 
 def iso_panel(box_wh, png_path, caption, error=''):
-    """The bottom panel: a foreign PNG letterboxed into an EXACT box, captioned.
+    """``(panel, error)``: a foreign PNG letterboxed into an EXACT box, captioned.
+
+    The second return value is what the caller must fold into its failure count.
+    An earlier version returned only the image, so a panel that had "could not
+    read the render" written across it still counted as a success.
 
     Same contract as ``make_film._card_frame`` (``py_tools/make_film.py:231``),
     and deliberately so -- fitting an image of untrusted size into a fixed frame
@@ -262,6 +292,7 @@ def iso_panel(box_wh, png_path, caption, error=''):
     canvas = Image.new('RGB', (W, H), _PANEL_BG)
     strip = max(18, H // 10)
     d = ImageDraw.Draw(canvas)
+    drawn_error = error or ''
 
     if error:
         font = load_font(max(11, strip // 2))
@@ -281,15 +312,21 @@ def iso_panel(box_wh, png_path, caption, error=''):
             else:
                 canvas.paste(im.convert('RGB'), (x, y))
         except Exception as exc:                                # noqa: BLE001
+            # DRAWN and REPORTED. Drawing it alone put "could not read the
+            # render" into three panels under a status line saying
+            # "3 render(s)" with nothing failed -- the composer knew and the
+            # report did not, which is exactly the indistinguishable silence
+            # the named states exist to end.
+            drawn_error = 'could not read the render (%s)' % exc
             font = load_font(max(11, strip // 2))
-            _wrapped_text(d, font, 'could not read the render (%s)' % exc,
+            _wrapped_text(d, font, drawn_error,
                           10, max(8, H // 3), W - 20, (196, 128, 128))
 
     d.rectangle([0, H - strip, W, H], fill=_STRIP_BG)
     font = load_font(max(11, strip // 2))
     _clipped_text(d, font, caption or '', 8, H - strip + max(1, strip // 6),
                   W - 16, _STRIP_FG)
-    return canvas
+    return canvas, drawn_error
 
 
 def _clipped_text(d, font, text, x, y, avail, fill):
@@ -371,10 +408,18 @@ def compose_two_panel(frames, marks, final_board, opts=None, quiet=False):
     import kicad_iso_render as kir
 
     opts = opts or IsoOpts()
+    # Reachable only by a direct caller: make_movie returns before this when it
+    # has no frames. Kept as a guard on the FUNCTION's contract rather than on
+    # one caller's behaviour, and a test calls it here -- deleting it used to
+    # survive the suite, which is the same "declared and read by nothing" shape
+    # this PR is otherwise about.
     if not frames:
         return frames, _report('not_applicable', 'no frames')
     if opts.max_renders <= 0:
-        return frames, _report('disabled', '--iso-max-renders 0')
+        # Echo the VALUE the caller actually passed. Hardcoding "0" here named a
+        # number nobody typed when the value was negative.
+        return frames, _report('disabled',
+                               '--iso-max-renders %d' % opts.max_renders)
 
     owner = board_for_frames(marks, len(frames), final_board)
     if not any(owner):
@@ -389,9 +434,19 @@ def compose_two_panel(frames, marks, final_board, opts=None, quiet=False):
     req_w = int(round(W * kir._REQUEST_OVERSCAN))
     req_h = int(round(H_iso * kir._REQUEST_OVERSCAN))
 
-    tmp = opts.keep_dir or tempfile.mkdtemp(prefix='krt_iso_')
-    if opts.keep_dir:
-        os.makedirs(tmp, exist_ok=True)
+    # INSIDE the guard, not above it. These two lines used to sit outside the
+    # try, so a read-only or full %TEMP% (PermissionError) or a keep_dir naming
+    # an existing FILE (FileExistsError) escaped as a traceback through
+    # compose_two_panel and make_movie to the caller -- the one shape this
+    # function promises never to take.
+    try:
+        tmp = opts.keep_dir or tempfile.mkdtemp(prefix='krt_iso_')
+        if opts.keep_dir:
+            os.makedirs(tmp, exist_ok=True)
+    except OSError as exc:
+        return frames, _report('error',
+                               'could not make a directory for the renders (%s)'
+                               % exc)
     render_kw = dict(width=req_w, height=req_h, quality=opts.quality,
                      floor=opts.floor, perspective=opts.perspective,
                      zoom=opts.zoom, timeout=opts.timeout)
@@ -428,16 +483,18 @@ def compose_two_panel(frames, marks, final_board, opts=None, quiet=False):
                 notes[board] = (m, kir.models_note(m))
             return notes[board]
 
-        panels, failed = {}, 0
+        panels, errors = {}, {}
         for k, shot in enumerate(shots):
             png, err = results.get(k, (None, 'not rendered'))
-            if not png:
-                failed += 1
             _m, note = _note_for(shot.board)
             cap = '%s  |  yaw %.0f deg  |  %s' % (
                 os.path.splitext(os.path.basename(shot.board))[0],
                 shot.rotate[2], note)
-            panels[k] = iso_panel((W, H_iso), png, cap, error=err)
+            # The panel reports back: a PNG that rendered but would not DECODE
+            # is a failure the count must see, and it is only discoverable here.
+            panels[k], drawn = iso_panel((W, H_iso), png, cap, error=err)
+            errors[k] = err or drawn or ''
+        failed = sum(1 for e in errors.values() if e)
         # The report's single models figure is the FILM'S OPENING board, and the
         # status line says so; the per-frame truth is in each caption.
         models = notes.get(shots[0].board, ({}, ''))[0]
@@ -447,7 +504,7 @@ def compose_two_panel(frames, marks, final_board, opts=None, quiet=False):
 
         rep = _report('ran', '', shots=[{'board': s.board, 'yaw': s.rotate[2],
                                          'first': s.first, 'last': s.last,
-                                         'error': results.get(k, (None, ''))[1]}
+                                         'error': errors.get(k, '')}
                                         for k, s in enumerate(shots)],
                       failed=failed, models=models, panel_wh=(W, H_iso),
                       boards=len({s.board for s in shots}))

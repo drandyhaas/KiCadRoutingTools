@@ -150,7 +150,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                rip_hold=DEFAULT_RIP_HOLD, chunks=DEFAULT_CHUNKS,
                end_hold=DEFAULT_END_HOLD, png_dir=None, quiet=False,
                camera=None, camera_budget=60.0, tween=10,
-               panels=None, iso_opts=None):
+               panels=None, iso_opts=None, timing=None):
     """Render the movie. ``inputs`` is a run dir (one entry) or a board sequence.
 
     Returns the path actually written -- which is a sibling ``.gif`` when an
@@ -220,14 +220,49 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     # ONLY when the panel is on, and `marks=None` is build_boards' own default,
     # so the fast path below is not merely equivalent to what it was: it is the
     # same call.
+    # #887: the run clock is PRESENCE-GATED, not a mode. cmd_timing.jsonl
+    # exists only in a teed stress-run work dir, so every existing movie --
+    # the GUI recorder's, place_route_loop's, render_run's, and every
+    # board-sequence invocation outside such a run -- is untouched. That is a
+    # far narrower trigger than the #431 camera's, which is why the camera is
+    # opt-in and this is not.
     want_iso = _panels_wanted(panels, quiet)
-    marks = [] if want_iso else None
+    ledger = None
+    if str(timing).lower() not in ('off', 'none', '0'):
+        try:
+            import cmd_timing
+            ledger = (timing if timing and os.path.isfile(str(timing))
+                      else cmd_timing.find_ledger(inputs[0]))
+        except Exception:                                       # noqa: BLE001
+            ledger = None
+    marks = [] if (want_iso or ledger) else None
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks)
     if not frames:
         if not quiet:
             print("make_movie: no frames (nothing routed?)", file=sys.stderr)
         return None
+    frame_meta = None
+    if ledger:
+        try:
+            import cmd_timing
+            clock = cmd_timing.clock_for(marks, ledger, len(frames))
+            if clock is not None:
+                for i, fr in enumerate(frames):
+                    cmd_timing.stamp_run_clock(fr, clock.lines(i))
+                frame_meta = [clock.meta(i) for i in range(len(frames))]
+                if not quiet:
+                    n_res = len(clock.resolved)
+                    print('make_movie: run clock from %s (%d beats mapped'
+                          '%s)' % (os.path.relpath(ledger, os.path.dirname(
+                              os.path.abspath(ledger))), n_res,
+                              '' if clock.covered else
+                              ', no countdown: ' + clock.shortfall()),
+                          file=sys.stderr)
+        except Exception as exc:                                # noqa: BLE001
+            # A clock is decoration; it may never take the movie down.
+            if not quiet:
+                print('make_movie: no run clock (%s)' % exc, file=sys.stderr)
     if want_iso:
         # Imported HERE, not at module scope: make_movie is imported in-process
         # by the GUI recorder, run_plan.py, place_route_loop.py and
@@ -237,12 +272,20 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         import movie_panels
         frames, report = movie_panels.compose_two_panel(
             frames, marks, final, iso_opts, quiet=quiet)
-        if not quiet:
-            print(movie_panels.iso_status_line(report), file=sys.stderr)
+        # PRINTED EVEN WHEN QUIET. `quiet` silences the ordinary progress
+        # chatter, but this line is the only channel that says whether the
+        # panel ran, was skipped, or failed -- and the one front end the env
+        # knob exists for, the GUI recorder, calls make_movie with quiet=True
+        # (movie_recorder.py:160). Suppressing it there meant a user could turn
+        # the panel on, pay 15 s of kicad-cli, and be told nothing at all.
+        # The panel is opt-in, so this line only ever appears when it was asked
+        # for.
+        print(movie_panels.iso_status_line(report), file=sys.stderr)
     out = out or default_output(inputs)
     out = os.path.abspath(out)
     os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
-    if not a.save_movie(frames, out, fps=fps, end_hold=end_hold, png_dir=png_dir):
+    if not a.save_movie(frames, out, fps=fps, end_hold=end_hold,
+                        png_dir=png_dir, frame_meta=frame_meta):
         return None
     # save_movie falls back .mp4 -> .gif when imageio-ffmpeg is missing; report
     # the file that actually exists so callers (and the GUI) point at it.
@@ -345,18 +388,37 @@ def main():
     iso.add_argument('--kicad-cli', default=None, metavar='PATH',
                      help='explicit binary; else $KICAD_CLI, else the shared '
                           'resolver')
+    clock = ap.add_argument_group(
+        'run clock (#887)',
+        'A run wrapped in tests/stress/tee_cmd.py leaves a cmd_timing.jsonl. '
+        'When one is found beside the chain the movie draws a run-clock '
+        'overlay and writes the same numbers into --png-dir frames. Nothing '
+        'to turn on: no ledger, no clock.')
+    clock.add_argument('--no-timing', dest='timing', action='store_const',
+                       const='off', default=None,
+                       help='never draw the run clock, even with a ledger')
+    clock.add_argument('--timing-ledger', dest='timing', metavar='PATH',
+                       help='use THIS cmd_timing.jsonl instead of searching')
     args = ap.parse_args()
 
-    iso_opts = None
-    if args.panels == 'xray+iso' or args.iso_max_renders != 24:
-        import movie_panels
-        iso_opts = movie_panels.IsoOpts(
-            max_renders=args.iso_max_renders,
-            height_frac=args.iso_height_frac, sweep_deg=args.iso_sweep,
-            quality=args.iso_quality, floor=args.iso_floor,
-            perspective=args.iso_perspective, zoom=args.iso_zoom,
-            jobs=args.iso_jobs, timeout=args.iso_timeout,
-            cli=args.kicad_cli)
+    # UNCONDITIONALLY. Gating this on `args.panels == 'xray+iso'` dropped every
+    # --iso-* flag whenever the panel was turned on by KICAD_MOVIE_PANELS
+    # instead of by the flag: the panel ran at full defaults and nine options
+    # were discarded in silence. It looked correct in the obvious test, because
+    # `--panels xray+iso --iso-quality high` does set both. The comparison
+    # against the default 24 had the same shape -- typing the default
+    # explicitly was indistinguishable from not typing it.
+    #
+    # Building it always costs nothing: IsoOpts is inert under `--panels xray`,
+    # where compose_two_panel is never called at all.
+    import movie_panels
+    iso_opts = movie_panels.IsoOpts(
+        max_renders=args.iso_max_renders,
+        height_frac=args.iso_height_frac, sweep_deg=args.iso_sweep,
+        quality=args.iso_quality, floor=args.iso_floor,
+        perspective=args.iso_perspective, zoom=args.iso_zoom,
+        jobs=args.iso_jobs, timeout=args.iso_timeout,
+        cli=args.kicad_cli)
 
     try:
         out = make_movie(args.inputs, out=args.output, size=args.size, fps=args.fps,
@@ -367,7 +429,8 @@ def main():
                        camera=args.camera,
                        camera_budget=args.camera_budget,
                        tween=args.tween,
-                       panels=args.panels, iso_opts=iso_opts)
+                       panels=args.panels, iso_opts=iso_opts,
+                       timing=args.timing)
     except FileNotFoundError as e:
         print(f"make_movie: no such board: {e}", file=sys.stderr)
         return 1

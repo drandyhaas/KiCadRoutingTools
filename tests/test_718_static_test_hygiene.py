@@ -63,6 +63,12 @@ _WK_DEPENDENT = {
     # those literals support -- runs on a clean clone and is what keeps
     # this file from being green-while-covering-nothing when wk/ is absent.
     'test_788_marginal_literals.py': ['wk/703/study'],
+    # #887 CORROBORATION only. The regression lives in
+    # test_887_cmd_timing_reader.py, against two small tracked fixtures, and
+    # passes in full on a clean clone. This arm re-derives run 24's published
+    # audit from the one real 153-row ledger when a machine happens to have
+    # one, and self-skips at exit 77 when it does not.
+    'test_887_run24_regression.py': ['wk/run24/esp_prog/cmd_timing.jsonl'],
     'test_outline_prefilter.py': ['wk/run19/urchin/base.kicad_pcb'],
     'test_part_class.py': ['wk/b2/tigard__swap/d0/perturbed.control.kicad_pcb',
                            'wk/b2/tigard__swap/d0/perturbed.kicad_pcb'],
