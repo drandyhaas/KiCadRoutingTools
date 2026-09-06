@@ -42,6 +42,27 @@ start reports nothing at all.
 
 THE MEASURED TABLE IS IN THE HEADER OF `test_702_quench_intent_gate.py`, FROM
 THE RUN -- never predicted here and never edited afterwards to match.
+
+RE-RUN at 939fec4f, after #877 re-anchored eight of these rows: **22 rows, 18
+killed, 4 survived, 0 broken, 1 disagreeing.** Before it, the same 22 rows were
+14 usable and 8 BROKEN -- 8 of this battery's rows had asserted nothing since
+`c7bef8d9`, which is the worst case #877 measured.
+
+Two things that run found, both recorded rather than tidied away:
+
+  * `the-active-flag-ignores-whether-anything-bound` was recorded SURVIVED and
+    now KILLS. The gate got stronger while the row could not fire: `test_702`
+    has since grown two arms that assert `_intent_active` itself rather than
+    its consequences. Re-graded KILLED, with the arms named at the row.
+
+  * `the-crossed-claim-check-never-fires` SURVIVES and is expected KILLED. It
+    is the one disagreement left, and it is NOT from #877's work: the row, its
+    target (`floorplan.py`) and its witness are byte-identical to
+    upstream/main, so its verdict is deterministic and predates this branch.
+    It was invisible because the battery already exited non-zero on the eight
+    BROKEN rows, so nobody read past them. Left standing as a real finding
+    about this gate's coverage, to be fixed on its own terms rather than
+    folded into an anchor pass.
 """
 from __future__ import annotations
 
@@ -155,16 +176,26 @@ ROWS = [
     # the census went lifted=49 -> lifted=0 on arm Q's fixture, and the
     # verdict degraded from
     # `keepout_blocks` to `no_movable_neighbour`.
-    # The REPLACEMENT is re-spelled too, and deliberately: the old one reached
-    # for `self.keepouts`, the whole board's list, which the free function does
-    # not have. Flattening `keepouts_for.values()` is the same mutation -- hand
-    # the ref every keep-out instead of its own live slice, so removing one
-    # entry from `keepouts_for[ref]` changes nothing and the census lift goes
-    # invisible. Widening it to anything else would be a different experiment.
+    # RE-ANCHORED TO THE CALL SITE (#877), and the first re-anchor here was
+    # WRONG -- recorded because the run caught it and the row is the reason the
+    # run exists. `c7bef8d9` left the free `intent_spec` no `self.keepouts` to
+    # reach for, so the first attempt flattened `keepouts_for.values()`
+    # instead. MEASURED: SURVIVED, expected KILLED. On this fixture one ref
+    # holds every keep-out, so the flattened union EQUALS that ref's own slice
+    # and the mutation is a no-op -- a re-anchor that had quietly stopped
+    # expressing the claim, which is exactly the failure #877 is about.
+    #
+    # `self.keepouts` is still there (quench.py:892); it is the CALLER that has
+    # it now. Mutating the call site reproduces the original edit exactly --
+    # hand the ref every keep-out on the board whenever it has any, so removing
+    # one entry from `keepouts_for[ref]` changes nothing and #701's census lift
+    # goes invisible.
     ('the-keepout-slice-stops-honouring-the-lift', 'q',
-     "    kos = keepouts_for.get(ref, ())\n",
-     "    kos = (tuple(k for _v in keepouts_for.values() for k in _v)\n"
-     "           if keepouts_for.get(ref) else ())\n",
+     "        return intent_spec(self._intent_spec, self.keepouts_for, ref)\n",
+     "        return intent_spec(\n"
+     "            self._intent_spec,\n"
+     "            {ref: self.keepouts} if self.keepouts_for.get(ref) else {},\n"
+     "            ref)\n",
      (T702,), 'KILLED'),
 
     # ---- what the terms MEASURE --------------------------------------------
@@ -268,16 +299,28 @@ ROWS = [
      "        return spec\n",
      (T702,), 'SURVIVED'),
 
-    # ---- expected survivors, recorded rather than deleted -------------------
-    # `_intent_active` is what candidate_valid guards on; flipping it ON with
-    # an empty spec changes nothing, because every lookup misses and
-    # `intent_ok` returns True on `if not spec`. Recorded so it becomes a
-    # detector the day the guard starts meaning something else.
+    # RE-ANCHORED AND RE-GRADED (#877). The anchor was a two-line wrap that
+    # `c7bef8d9` reflowed onto one line.
+    #
+    # It was recorded SURVIVED, with the reasoning that flipping the flag ON
+    # with an empty spec changes nothing: every lookup misses and `intent_ok`
+    # returns True on `if not spec`. MEASURED NOW: KILLED. The gate got
+    # stronger while the row could not fire -- `test_702` has since grown two
+    # arms that assert the FLAG rather than its consequences, and both fail:
+    #
+    #     FAIL a state with no intent binds nothing --
+    #          _intent_active False, _intent_spec empty
+    #     FAIL a no-intent quench never calls the gate --
+    #          the intent gate was reached with no intent
+    #
+    # Graded KILLED, from the run. The old expectation is kept in this comment
+    # rather than overwritten, because "the day the guard starts meaning
+    # something else" is the day this row was written for, and it arrived.
     ('the-active-flag-ignores-whether-anything-bound', 'q',
      "        self._intent_active = bool(self._intent_spec"
      " or self.keepouts_for)\n",
      "        self._intent_active = True\n",
-     (T702,), 'SURVIVED'),
+     (T702,), 'KILLED'),
 
     # MEASURED KILLED, and I had expected SURVIVED. Arm A asserts
     # `by_site['candidate_valid'] > 0`, so the tally is load-bearing after all:
