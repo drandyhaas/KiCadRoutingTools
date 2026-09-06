@@ -647,13 +647,18 @@ def _flip_graphic(node: str, head: str, ref: str) -> str:
 # own function and only the collapse is shared. `legality`'s module
 # scope is `math` + `typing`, so this edge introduces no cycle.
 def _block_side(fp_text: str) -> str:
-    from placement.legality import side_of_layer
     """'F' or 'B' from the block's own `(layer ...)`.
 
     The same first-character rule `legality.footprint_side` applies to the
     parsed object, read here off the text so the writer and the side model
-    cannot disagree about what a block says it is.
+    cannot disagree about what a block says it is. Since #878 it CALLS that
+    rule (`legality.side_of_layer`) rather than spelling it again, so the
+    sentence above is structural instead of a promise two copies must keep.
     """
+    # Below the docstring, deliberately: an import placed above it makes the
+    # string a discarded expression and `__doc__` None, which is how this
+    # function silently lost its documentation once already.
+    from placement.legality import side_of_layer
     m = re.search(r'\(layer\s+"([^"]+)"\)', fp_text)
     return side_of_layer(m.group(1) if m else '')
 

@@ -782,8 +782,25 @@ def build(paths):
                                     'got': arm[c]['charged_area_mm2']})
     sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
                          capture_output=True, text=True).stdout.strip()
+    # A BARE HEAD SHA IS A LIE whenever a run is recorded alongside its own
+    # change, which is the normal case: the numbers come from the working
+    # tree, the sha names its parent. The first recording of this file said
+    # `c487e00f`, a commit at which `grow_board` emitted no obstruction dict
+    # at all -- checking it out and re-running would mismatch on every
+    # through-hole board. So the dirty flag ships beside the sha, and it names
+    # the files that were modified.
+    _dirty = subprocess.run(
+        ['git', 'status', '--porcelain', '--', 'py_placer', 'py_router',
+         'py_tools', 'tests'],
+        cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    engine_dirty = sorted(ln[3:] for ln in _dirty.splitlines() if ln[3:])
     doc = {
         'engine_sha': sha,
+        # True when the numbers above came from a tree that did NOT match
+        # `engine_sha`. A reader who checks that commit out and re-runs will
+        # not reproduce them, and this is what says so.
+        'engine_tree_dirty': bool(engine_dirty),
+        'engine_tree_dirty_files': engine_dirty,
         'preregistration': PREREGISTRATION,
         'basis': {'clearance': CLEARANCE,
                   'board_edge_clearance': BOARD_EDGE_CLEARANCE,
@@ -825,8 +842,9 @@ KEEP_PER_BOARD = ('census_sides', 'parts_charged', 'tht_obstructing',
 
 def compact(doc):
     """The committed shape: the deciding cells, not the whole record."""
-    out = {k: doc[k] for k in ('engine_sha', 'preregistration', 'basis',
-                               'confound', 'headline', 'post_hoc',
+    out = {k: doc[k] for k in ('engine_sha', 'engine_tree_dirty',
+                               'engine_tree_dirty_files', 'preregistration',
+                               'basis', 'confound', 'headline', 'post_hoc',
                                'verdict')}
     out['control'] = {
         'nc1_rows': sum(1 for b in doc['boards'].values()
@@ -946,6 +964,31 @@ def main():
         TABLES[t](doc, rows)
 
     if args.out:
+        # THE NOTARY IS NOT REGENERABLE. `--out` is the prescribed fix for any
+        # red in the gate, so if it also rewrote `preregistration` then moving
+        # a threshold after seeing the numbers would be repaired by the very
+        # command the failure message prints -- and the block would be a
+        # comment with extra steps. So: if the target file already carries a
+        # pre-registration and this module's differs, REFUSE, and name the
+        # keys. Changing a pre-registered threshold is a decision that has to
+        # be taken deliberately, by deleting the file or editing it by hand,
+        # never as a side effect of re-recording numbers.
+        prior = None
+        if os.path.isfile(args.out):
+            try:
+                with open(args.out, encoding='utf-8') as f:
+                    prior = json.load(f).get('preregistration')
+            except Exception:                                # noqa: BLE001
+                prior = None
+        if prior is not None and prior != PREREGISTRATION:
+            moved = sorted(k for k in set(prior) | set(PREREGISTRATION)
+                           if prior.get(k) != PREREGISTRATION.get(k))
+            print('\nREFUSING to write %s: it carries a pre-registration that '
+                  'differs from this module on %s.' % (args.out, moved))
+            print('Re-recording NUMBERS must not re-notarise the RULE that '
+                  'chose them. Edit the file by hand, deliberately, if the '
+                  'pre-registration is genuinely meant to change.')
+            return 2
         with open(args.out, 'w', encoding='utf-8') as f:
             json.dump(compact(doc), f, indent=1, sort_keys=True)
         print('\nwrote %s' % args.out)

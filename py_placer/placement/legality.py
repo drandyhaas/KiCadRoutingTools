@@ -247,9 +247,15 @@ def side_of_layer(layer) -> str:
 
     `str(...)` where the old spelling had `or ''` is a widening, not a change:
     the old form raised `AttributeError` on a truthy non-string layer, and every
-    caller in the tree passes a `str` or `None`. Measured across the 22 tracked
-    boards, 1406 footprints: exactly two distinct layer values (`F.Cu`, `B.Cu`)
-    and zero disagreements between this and the five expressions it replaces.
+    caller in the tree passes a `str` or `None`.
+
+    On a `str` or `None` layer this and the spellings it replaced are
+    ALGEBRAICALLY equal, so the corpus cannot separate them -- it carries
+    exactly two layer values, `F.Cu` and `B.Cu`, over 1349 footprints. The
+    corpus check in `tests/test_878_side_rule_sites.py` is therefore a change
+    detector for THIS function, not evidence that the spellings differ; the
+    inputs that do separate them (a falsy layer, a truthy non-string) are
+    exercised there synthetically, because no board can supply them.
     """
     return 'B' if str(layer or '').startswith('B') else 'F'
 

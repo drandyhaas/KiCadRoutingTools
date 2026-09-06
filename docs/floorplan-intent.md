@@ -501,9 +501,17 @@ about one of them.
 | instrument | its question | near face | far face |
 |---|---|---|---|
 | `legality.rect_on` | may these two parts overlap? | courtyard | **drilled-pad rect** |
-| `options.grow_board` | does the area fit on a face? | courtyard | **drilled-pad rect** (#878) |
+| `options.grow_board`, undeclared | does the area fit on the busier face? | courtyard | **drilled-pad rect** (#878) |
+| `options.grow_board`, declared `F`/`B` | does every part fit on the one populated face? | courtyard | **nothing** — see below |
 | `check_pockets.courtyard_cover` | is this window clear? | courtyard | **whole courtyard** |
 | `floorplan.rule_assembly_side` | how many reflow passes? | body face only | **nothing** |
+
+`grow_board` charges the far face **only when no face is declared**. Under a
+declared `F`/`B` the number is `sum` over the populated dict — each part exactly
+once, on the one face the fab builds — and a part's leads come out on the face
+nobody populates, where they compete with nothing. Charging them there would be
+the same area twice; measured, it would double-charge 10 of the 15 one-face
+boards. The `NOT MODELLED` line on such a run says so explicitly.
 
 `check_pockets` charges the whole courtyard because a window under a part is not
 clear on either face — it asks about *cover*, never about a sum, so overstating

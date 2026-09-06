@@ -1898,7 +1898,19 @@
   ],
   "nc2_mismatches": []
  },
- "engine_sha": "c487e00ff88e8d7709de9b5b55fe6f9562ea4408",
+ "engine_sha": "c9c9c2cd61acfbbbecaaaf126ef3fb638b54c696",
+ "engine_tree_dirty": true,
+ "engine_tree_dirty_files": [
+  "py_placer/placement/options.py",
+  "py_placer/placement/writer.py",
+  "tests/878_far_face_currency.json",
+  "tests/measure_878_far_face_area.py",
+  "tests/mutate_837.py",
+  "tests/test_878_far_face_currency.py",
+  "tests/test_878_side_rule_sites.py",
+  "tests/test_capacity_options.py",
+  "y_placer/placement/legality.py"
+ ],
  "headline": {
   "double": {
    "busiest.courtyard": [

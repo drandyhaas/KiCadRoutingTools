@@ -323,9 +323,11 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
     # nothing changes, and that is not an oversight -- see `charged`.
     busiest = max(obstructed.values()) if obstructed else 0.0
     # #837. WHICH area the utilisation is computed from. `busiest` keeps its
-    # own meaning and its own key on both bases -- it is still the busiest
-    # side's area, and it stops being the number the verdict rests on rather
-    # than becoming a lie.
+    # own key on both bases and stops being the number the verdict rests on
+    # rather than becoming a lie. #878 changed WHAT it is the busiest of: the
+    # busiest OBSTRUCTED face, not the busiest populated one. It is still "the
+    # busiest side's area" only if that phrase means obstruction, which is why
+    # it is spelled out here rather than left to the reader.
     one_face = assembly_sides in ('F', 'B')
     # #878: `per_side`, deliberately, and it is the half of this that is easy
     # to get wrong. Under a one-face policy `sum(per_side)` is each part
@@ -345,10 +347,19 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
         'ran': True,
         'measured': {
             'part_area_mm2': round(total, 2),
-            # Both sides, and the one utilisation is computed from. Reported
-            # because `part_area_mm2` alone cannot be checked against
-            # `utilisation` on a two-sided board, and a reader who tries will
-            # conclude the number is wrong.
+            # Both sides, as POPULATED. Reported because `part_area_mm2` alone
+            # cannot be checked against `utilisation` on a two-sided board,
+            # and a reader who tries will conclude the number is wrong.
+            #
+            # #878: on the busiest basis `utilisation` is NO LONGER computed
+            # from this dict -- it comes from `obstructed_area_by_side_mm2`
+            # below, and the two differ on any board with a drilled part. This
+            # comment used to say "and the one utilisation is computed from",
+            # which after #878 sent a reader to the wrong key and produced
+            # exactly the disagreement the key exists to prevent
+            # (rp2350_fpga_eensy_prePlane: max(this)/usable is 0.6220 against a
+            # reported 0.6566). Reconcile against `obstructed_...` on the
+            # busiest basis and against this one under a declared `F`/`B`.
             'part_area_by_side_mm2': {k: round(v, 2)
                                       for k, v in sorted(per_side.items())},
             # #878. What each face is OBSTRUCTED by, which is not what each
@@ -412,12 +423,41 @@ def grow_board(pcb_data, pcb_file: str, *, clearance: float,
         # either. The one-face basis is deliberately untouched -- see
         # `charged` above. `tests/878_far_face_currency.json` is the sweep.
         'not_modelled': '; '.join(
-            [f'a through-hole part is charged {FAR_FACE_BASIS} on the far '
-             f'face, not its whole courtyard -- '
-             f'`check_pockets.courtyard_cover` charges the whole courtyard on '
-             f'both faces and the two per-face models still differ by that '
-             f'much (#878 charged the smaller one, which is the model the '
-             f'placement search itself enforces)']
+            # BASIS-SPECIFIC, because the far charge does not reach this
+            # board's number on every basis, and a blanket sentence would
+            # claim it does. #878's own pre-registered rule said the
+            # disclosure had to become basis-specific if a basis kept
+            # `none`; the one-face basis does, by the post-hoc finding above.
+            # And it is dropped entirely when the board has no drilled part:
+            # on qfn_interior_pads or routed_output the old wording claimed
+            # two models "differ by that much" when they differ by nothing.
+            ([] if not far_parts else
+             [f'a through-hole part is charged {FAR_FACE_BASIS}, not its '
+              f'whole courtyard -- `check_pockets.courtyard_cover` charges '
+              f'the whole courtyard on both faces, and the two per-face '
+              f'models differ by that much (#878 charged the smaller one, '
+              f'which is the model the placement search itself enforces)'
+              + (' -- and NONE of it reaches `utilisation` here, because a '
+                 'declared one-face policy charges each part exactly once on '
+                 'the face the fab populates, where the leads compete with '
+                 'nothing' if one_face else '')])
+            # The container blind spot, named rather than left to be found.
+            # A container is exempted BEFORE the far charge, and the same
+            # exemption is in the sweep that chose the currency -- so no arm
+            # of that measurement could see it. On rp2350_fpga_eensy_prePlane
+            # the excluded U8 is a through-hole module whose drilled-pad box
+            # equals its courtyard: 728.3 mm2 on the far face, 7x the whole
+            # board's reported far charge. Charging it would take that board
+            # to utilisation 1.60 and `fits_by_area` False, on hardware that
+            # ships. The near-face exemption's argument -- a frame hosts the
+            # parts inside it -- does NOT transfer to the far face, where
+            # nothing is hosted and the pins are real copper. So this is an
+            # open question, disclosed, not a settled one.
+            + ([] if not containers else
+               [f'the far-face area of {len(containers)} excluded container(s)'
+                f' ({", ".join(r for _a, r in sorted(containers, reverse=True))})'
+                f' -- they are exempted before the charge, and the #878 sweep'
+                f' shares that exemption, so it did not measure them'])
             + ([] if assembly_sides else [
                 'whether the back side will be POPULATED -- no assembly.sides '
                 'was declared, so the busier face is charged and back-side '

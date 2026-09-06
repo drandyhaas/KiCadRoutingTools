@@ -237,7 +237,7 @@ ROWS = [
 
     # ------------------------------------------------- disclosed SURVIVORS
     # Every tracked board's footprints are on F.Cu or B.Cu, so reading the raw
-    # layer string and calling `footprint_side` agree on all 23. The helper is
+    # layer string and calling `footprint_side` agree on all 22. The helper is
     # used because the partition must not be ABLE to grow a third key that
     # `max()` would rank against the other two -- an invariant no corpus board
     # can exercise, which is exactly why it is stated here rather than left as
@@ -248,7 +248,7 @@ ROWS = [
      (CAP, CEN), 'SURVIVED'),
 
     # `ctx.parts` (the graded-part population) and the census's pad-bearing
-    # refs agree on every tracked board -- measured, 0 disagreements over 23.
+    # refs agree on every tracked board -- measured, 0 disagreements over 22.
     # They are NOT the same set by construction: `QuenchState` admits a
     # zero-pad footprint that draws a courtyard, and the census excludes it.
     # No corpus board carries one, so this row cannot be killed without a

@@ -3,7 +3,7 @@
 
 `tests/878_far_face_currency.json` is the committed argument for which rect a
 through-hole part presents on the far face. This is the gate that keeps it from
-rotting, and it re-runs the whole sweep (~18 s) rather than reading its
+rotting, and it re-runs the whole sweep (seconds, not minutes) rather than reading its
 conclusions -- `tests/test_803_calibration_claims.py:10-15`'s rule: a regen test
 must RE-DERIVE the aggregate, not read a constant. Five of seven checks in the
 case that motivated that rule read constants, and a 3 mm cap passed green while
@@ -14,12 +14,21 @@ Four things are pinned, and they fail for different reasons on purpose:
   1  THE NOTARY. `measure_878_far_face_area.PREREGISTRATION` must equal the
      copy inside the committed JSON, exactly. The committed file is the
      notarised copy and the module is the live one, so moving a threshold
-     after seeing the numbers turns this red and names the key. That is the
-     whole value of pre-registering: without this check the block is a comment.
-  2  THE CONTROLS. NC1 (currency `none` reproduces `options.grow_board` on
-     eight fields per board/basis) and NC2 (a board with no drilled pad is
-     identical under all three currencies) must both be clean on the FRESH
-     run. A sweep whose control did not reproduce decided nothing.
+     after seeing the numbers turns this red and names the key.
+
+     That only means something because `--out` REFUSES to overwrite a
+     pre-registration it disagrees with. Otherwise the fix printed in this
+     file's own failure message ("re-record with --out") would repair a moved
+     threshold as a side effect of re-recording numbers, and the block would
+     be a comment with extra steps.
+  2  THE CONTROLS. NC1 (the engine reproduces the arm it is meant to
+     implement, on every field per board/basis) and NC2 (a board with no
+     drilled pad is identical under all three currencies) must both be clean
+     on the FRESH run. A sweep whose control did not reproduce decided
+     nothing. The FIELD COUNT is compared against the committed one, not
+     against `len(NC1_FIELDS)` -- the fresh document is built from that same
+     constant, so comparing the two was `len(x) == len(x)`, and it let the
+     count go 8 -> 9 across a commit with nothing reacting.
   3  THE VERDICT AND WHICH FALSIFIER PRODUCED IT. Not just `selected` --
      `bound_by` too. An answer that stayed the same because a different
      criterion started binding is a changed finding wearing the old label,
@@ -95,10 +104,20 @@ def main():
 
     # 2 -- the controls, on the FRESH run.
     c = fresh['control']
-    check('NC1: currency `none` still reproduces grow_board exactly',
+    check('NC1: the engine still reproduces the arm it is meant to implement '
+          '(currency %r)' % M.ENGINE_CURRENCY,
           not c['nc1_mismatches'], str(c['nc1_mismatches'][:2]))
+    # Against the COMMITTED count, not against `len(M.NC1_FIELDS)`. The fresh
+    # doc sets that key FROM `len(NC1_FIELDS)`, so comparing the two was
+    # `len(x) == len(x)` -- unconditionally true, and it let the field count
+    # go 8 -> 9 across a commit with nothing reacting.
+    check('NC1 still compares the same number of fields it was recorded with',
+          c['nc1_fields_per_row'] == base['control']['nc1_fields_per_row'],
+          '%d now vs %d recorded -- if a field was added on purpose, '
+          're-record' % (c['nc1_fields_per_row'],
+                         base['control']['nc1_fields_per_row']))
     check('NC1 is not vacuous (it compared some rows)',
-          c['nc1_rows'] >= 30 and c['nc1_fields_per_row'] == len(M.NC1_FIELDS),
+          c['nc1_rows'] >= 30 and c['nc1_fields_per_row'] >= 8,
           '%d rows x %d fields' % (c['nc1_rows'], c['nc1_fields_per_row']))
     check('NC2: a board with no drilled pad is identical across currencies',
           not c['nc2_mismatches'], str(c['nc2_mismatches'][:2]))

@@ -366,18 +366,31 @@ if os.path.isfile(OC):
           f"{max(mf['obstructed_area_by_side_mm2'].values()):.2f} "
           f"charged {mf['charged_area_mm2']}")
     # The far face IS charged now, and this fixture proves it without needing
-    # the verdict to move: orangecrab has 8 drilled parts, so its obstructed
-    # B.Cu must exceed its populated B.Cu by exactly `far_face_area_mm2`.
-    # Without this arm nothing on this board would notice the charge going
-    # away -- its busiest face does not change either way.
+    # the verdict to move: without this arm nothing on this board would notice
+    # the charge going away, because its busiest face does not change either
+    # way.
+    #
+    # The `== far_face_area_mm2` identity is FIXTURE-SPECIFIC, not a general
+    # law, and saying otherwise would be a reason that is not the reason: it
+    # holds because all 8 of orangecrab's drilled parts sit on F.Cu, so the
+    # whole far charge lands on B.Cu and none on F. On a board with drilled
+    # parts on both faces the B-side delta is a subtotal and this equality
+    # fails for no good reason. Pinned here as a property of this fixture,
+    # asserted alongside the F-side condition that makes it true.
     _pop_b = sides['B.Cu']
     _obs_b = mf['obstructed_area_by_side_mm2']['B.Cu']
     check("the far face is charged, and by the amount reported",
           _obs_b > _pop_b
+          # the condition that makes the identity below hold on THIS board:
+          # nothing is charged far onto F, so the B delta is the whole charge
+          and abs(mf['obstructed_area_by_side_mm2']['F.Cu']
+                  - sides['F.Cu']) < 0.02
           and abs((_obs_b - _pop_b) - mf['far_face_area_mm2']) < 0.02
           and mf['far_face_parts'] == 8,
           f"populated B {_pop_b}, obstructed B {_obs_b}, far "
-          f"{mf['far_face_area_mm2']} over {mf['far_face_parts']} part(s)")
+          f"{mf['far_face_area_mm2']} over {mf['far_face_parts']} part(s); "
+          f"F populated {sides['F.Cu']} obstructed "
+          f"{mf['obstructed_area_by_side_mm2']['F.Cu']}")
     # And the POPULATION dict did not move: it is still each part once, and
     # still sums to `part_area_mm2`. A far-face charge leaking into it would
     # double the one-face demand, which is the regression #878's own
