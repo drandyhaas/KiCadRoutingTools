@@ -194,9 +194,13 @@ ROWS = [
      "    violations = list(validate_intent(intent)) + list(block_problems)\n",
      (T793, T799), 'KILLED'),
 
+    # RE-ANCHORED (#877). `a22a968a` ("#705: grade the decoupling cap to the
+    # PIN") EXTENDED `_NON_RULE_SEVERITIES`, so this line no longer closes the
+    # frozenset with `})` and the quote matched nothing. Dropping
+    # `keepout_allow_unresolved` from the registry is still the mutation.
     ('the-rule-name-is-not-registered', 'fp',
-     "    'intent_zone_in_keepout', 'keepout_allow_unresolved'})\n",
-     "    'intent_zone_in_keepout'})\n",
+     "    'intent_zone_in_keepout', 'keepout_allow_unresolved',\n",
+     "    'intent_zone_in_keepout',\n",
      (T549S,), 'KILLED'),
 
     # ---- the board_score prerequisite --------------------------------------

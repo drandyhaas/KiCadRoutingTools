@@ -194,12 +194,16 @@ ROWS = [
     # Drop the "did the pose actually change?" qualifier and the backstop
     # refuses a write in which nothing moved -- which is exactly
     # `perturb._all_at_current`, and its dose-0 CONTROL board.
+    # RE-ANCHORED (#877). `68d9af16` ("#714: placement.writer can mirror a
+    # footprint to the other face") EXTENDED this disjunction with `side_change`
+    # and a comment block, so the closing paren the anchor quoted moved and the
+    # row matched nothing. Rather than quote thirteen lines to reach the new
+    # paren -- which would go stale again on the next term -- the mutation now
+    # neutralises the FIRST disjunct, making the whole `or` chain true. Same
+    # claim, same verdict: the writer stops refusing a zero-move write.
     ('the-writer-refuses-a-zero-move-write', 'wr',
-     "                and (abs(new_x - float(at_match.group(1))) > _POSE_EPS\n"
-     "                     or abs(new_y - float(at_match.group(2))) > _POSE_EPS\n"
-     "                     or abs((new_rot - old_rot + 180) % 360 - 180) "
-     "> _POSE_EPS)\n",
-     "                and True\n",
+     "                and (abs(new_x - float(at_match.group(1))) > _POSE_EPS\n",
+     "                and (True\n",
      (T829,), 'KILLED'),
 
     # Compare the fingerprint against the OUTPUT file instead of the in-memory

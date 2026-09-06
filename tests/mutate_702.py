@@ -132,13 +132,21 @@ ROWS = [
     # ---- per-ENTRY indexing -------------------------------------------------
     # The whole point of _IntentTerm: aggregate a rule's entries to one scalar
     # per ref and a part hops between two keep-outs at 1.0 -> 1.0.
+    # RE-ANCHORED (#877), and so are the five rows below it. `c7bef8d9` ("#698
+    # prep: the declared-claim measurement leaves the state that enforces it")
+    # moved this gate out of the state class into the module-level
+    # `intent_spec` / `build_zone_spec` / `intent_term_values`, so every anchor
+    # here lost its `self.` and four to eight columns of indent. The CODE is
+    # unchanged and every mutation below is the one it always was; only the
+    # quotation moved. Eight of this battery's 22 rows had been asserting
+    # nothing since that commit, which is what #877 measured.
     ('keepout-terms-collapse-to-one-per-ref', 'q',
-     "        return zones + tuple(\n"
-     "            _IntentTerm('keepout', str(k.get('name') or '<unnamed>'),\n"
-     "                        None, 0.0, False, k)\n"
-     "            for k in kos)\n",
-     "        return zones + (_IntentTerm('keepout', 'all', None, 0.0,\n"
-     "                                    False, kos[0]),)\n",
+     "    return zones + tuple(\n"
+     "        _IntentTerm('keepout', str(k.get('name') or '<unnamed>'),\n"
+     "                    None, 0.0, False, k)\n"
+     "        for k in kos)\n",
+     "    return zones + (_IntentTerm('keepout', 'all', None, 0.0,\n"
+     "                                False, kos[0]),)\n",
      (T702,), 'KILLED'),
 
     # The keep-out slice must stay LIVE, or #701's census lift is defeated:
@@ -147,35 +155,42 @@ ROWS = [
     # the census went lifted=49 -> lifted=0 on arm Q's fixture, and the
     # verdict degraded from
     # `keepout_blocks` to `no_movable_neighbour`.
+    # The REPLACEMENT is re-spelled too, and deliberately: the old one reached
+    # for `self.keepouts`, the whole board's list, which the free function does
+    # not have. Flattening `keepouts_for.values()` is the same mutation -- hand
+    # the ref every keep-out instead of its own live slice, so removing one
+    # entry from `keepouts_for[ref]` changes nothing and the census lift goes
+    # invisible. Widening it to anything else would be a different experiment.
     ('the-keepout-slice-stops-honouring-the-lift', 'q',
-     "        kos = self.keepouts_for.get(ref, ())\n",
-     "        kos = (self.keepouts if self.keepouts_for.get(ref) else ())\n",
+     "    kos = keepouts_for.get(ref, ())\n",
+     "    kos = (tuple(k for _v in keepouts_for.values() for k in _v)\n"
+     "           if keepouts_for.get(ref) else ())\n",
      (T702,), 'KILLED'),
 
     # ---- what the terms MEASURE --------------------------------------------
     ('the-keepout-test-forgets-the-through-hole-rect', 'q',
-     "                out.append(_fp.keepout_hit(t.entry, rects))\n",
-     "                out.append(_fp.keepout_hit(t.entry, (rects[0],)))\n",
+     "            out.append(_fp.keepout_hit(t.entry, rects))\n",
+     "            out.append(_fp.keepout_hit(t.entry, (rects[0],)))\n",
      (T702, T701P), 'KILLED'),
 
     ('the-anchor-branch-is-never-taken', 'q',
-     "                        _anchor = not any(\n"
-     "                            _fp.zone_fits_courtyard(\n"
-     "                                _z['rect'], _p.rect(0.0, 0.0, _r), _tol)\n"
-     "                            for _r in (_p.rot % 360, (_p.rot + 90) % 360))\n",
-     "                        _anchor = False\n",
+     "                _anchor = not any(\n"
+     "                    _fp.zone_fits_courtyard(\n"
+     "                        _z['rect'], _p.rect(0.0, 0.0, _r), _tol)\n"
+     "                    for _r in (_p.rot % 360, (_p.rot + 90) % 360))\n",
+     "                _anchor = False\n",
      (T702,), 'KILLED'),
 
     ('the-zone-tolerance-is-ignored', 'q',
-     "                    _tol = float(_z['tolerance_mm'])\n",
-     "                    _tol = 0.0\n",
+     "            _tol = float(_z['tolerance_mm'])\n",
+     "            _tol = 0.0\n",
      (T702,), 'KILLED'),
 
     ('the-exclusive-zone-term-is-dropped', 'q',
-     "                        _terms.append(_IntentTerm(\n"
-     "                            'zone_exclusive', _z['name'], tuple(_z['rect']),\n"
-     "                            legality.EPS, False, None))\n",
-     "                        pass\n",
+     "                _terms.append(_IntentTerm(\n"
+     "                    'zone_exclusive', _z['name'], tuple(_z['rect']),\n"
+     "                    legality.EPS, False, None))\n",
+     "                pass\n",
      (T702,), 'KILLED'),
 
     # ---- the shared measurement, which the GRADE also calls -----------------
@@ -238,9 +253,19 @@ ROWS = [
      (T702,), 'SURVIVED'),
 
     # ---- inertness ----------------------------------------------------------
+    # RE-ANCHORED (#877). This is the one row whose old anchor names code
+    # `c7bef8d9` DELETED rather than moved: the state no longer guards the
+    # build on "something was declared", it builds unconditionally and lets
+    # `_intent_active` be False. The claim is unchanged -- CONSTRUCTING the
+    # gate when nothing is declared is harmless -- so it is re-pointed at the
+    # early-out that now expresses it, in `build_zone_spec`. Removing that
+    # early-out builds the (empty) spec anyway, which is exactly what the old
+    # `if True:` did, and it must still SURVIVE.
     ('the-gate-is-built-even-with-no-intent', 'q',
-     "        if self.intent_zones or self.keepouts_for:\n",
-     "        if True:\n",
+     "    if not zones:\n"
+     "        return spec\n",
+     "    if False:\n"
+     "        return spec\n",
      (T702,), 'SURVIVED'),
 
     # ---- expected survivors, recorded rather than deleted -------------------
@@ -249,9 +274,9 @@ ROWS = [
     # `intent_ok` returns True on `if not spec`. Recorded so it becomes a
     # detector the day the guard starts meaning something else.
     ('the-active-flag-ignores-whether-anything-bound', 'q',
-     "            self._intent_active = bool(self._intent_spec\n"
-     "                                       or self.keepouts_for)\n",
-     "            self._intent_active = True\n",
+     "        self._intent_active = bool(self._intent_spec"
+     " or self.keepouts_for)\n",
+     "        self._intent_active = True\n",
      (T702,), 'SURVIVED'),
 
     # MEASURED KILLED, and I had expected SURVIVED. Arm A asserts

@@ -105,8 +105,18 @@ _DISCLOSE = """                    if _capped:
 
 _HOLE_KW = "                hole_clearance=_hc,\n"
 
-_GUI_CEILING = ("                netclass_ceiling="
-                "fanout_config.get('clearance_ceiling'),\n")
+# RE-ANCHORED (#877), with the five other GUI rows below. `1c044399` ("#530
+# decision 2: --clearance sets the Default class; --clearance-ceiling caps every
+# class") renamed the shared key `clearance_ceiling` -> `placement_clearance_
+# ceiling`, keeping the old spelling as a two-line `.get(new, .get(old))`
+# fallback, and replaced `self.clearance_check.GetValue()` with
+# `self._ceiling_on()`. Six of this battery's 31 rows quoted the one-line forms
+# and had matched nothing since. The mutations are unchanged.
+_GUI_CEILING = (
+    "                netclass_ceiling=fanout_config.get("
+    "'placement_clearance_ceiling',\n"
+    "                                                   fanout_config.get("
+    "'clearance_ceiling')),\n")
 
 # RE-ANCHORED (#780). The predicate grew a second shape -- a FANOUT step
 # that switches the inline cap pass on runs the same pass -- so the old
@@ -250,18 +260,18 @@ ROWS = [
     # back on the OMITTED one. Found by a parity review measuring the value,
     # after two string-count assertions passed it.
     ('gui-gate-is-fix-drc-settings', 'gui',
-     "netclass_ceiling=fanout_config.get('clearance_ceiling'),",
-     "netclass_ceiling=(fanout_config.get('clearance')\n"
+     _GUI_CEILING,
+     "                netclass_ceiling=(fanout_config.get('clearance')\n"
      "                                  if fanout_config.get("
-     "'fix_drc_settings', True) else None),",
+     "'fix_drc_settings', True) else None),\n",
      (T768, TDLG), 'KILLED'),
     # THE SECOND CUT'S DEFECT, found by an adversarial review: the RESOLVED base
     # is already min(Default class, override), so handing it over as a ceiling
     # caps a class BETWEEN the two down to the Default. Measured 22 cap
     # clearance violations against main's 2 at the default dialog config.
     ('gui-ceiling-is-the-resolved-base', 'gui',
-     "netclass_ceiling=fanout_config.get('clearance_ceiling'),",
-     "netclass_ceiling=fanout_config.get('clearance'),",
+     _GUI_CEILING,
+     "                netclass_ceiling=fanout_config.get('clearance'),\n",
      (TDLG,), 'KILLED'),
     # RE-ANCHORED AND RE-GRADED (#780). The inline cap config gained the
     # same pair of lines at a DEEPER indent, and 12 spaces + the text is a
@@ -275,14 +285,20 @@ ROWS = [
     # driving run_cap_optimization. Both are fixed in the same commit
     # range; T772 is added because it drives the step end to end.
     ('gui-standalone-cfg-drops-the-key', 'gui',
-     "            'clearance_ceiling': shared.get('clearance_ceiling'),\n"
+     "            'clearance_ceiling': shared.get("
+     "'placement_clearance_ceiling',\n"
+     "                                            shared.get("
+     "'clearance_ceiling')),\n"
      "            'fix_drc_settings': shared.get('fix_drc_settings', True),\n",
      "            'fix_drc_settings': shared.get('fix_drc_settings', True),\n",
      (T768, TDLG, T772), 'KILLED'),
     # #780's own half of the same defect, on the INLINE dict. Its only
     # behavioural killer is TDLG's section 2, which drives _run_bga_fanout.
     ('gui-inline-cfg-drops-the-key', 'gui',
-     "                'clearance_ceiling': shared.get('clearance_ceiling'),\n",
+     "                'clearance_ceiling': shared.get("
+     "'placement_clearance_ceiling',\n"
+     "                                                shared.get("
+     "'clearance_ceiling')),\n",
      '',
      (TDLG,), 'KILLED'),
     ('fanout-tab-exports-the-RESOLVED-clearance-as-the-ceiling', 'swig',
@@ -295,7 +311,7 @@ ROWS = [
     # That is the runner behaving exactly as designed.
     ('fanout-tab-stops-exporting-the-override', 'swig',
      "                # what the pass must price at.\n"
-     "                'clamp_netclasses': self.clearance_check.GetValue(),\n",
+     "                'clamp_netclasses': self._ceiling_on(),\n",
      '',
      (T768, TDLG), 'KILLED'),
     # #768's plan-executor half: an OMITTED --clearance must not inherit the

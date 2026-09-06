@@ -69,10 +69,16 @@ _VIA_GATE = """        if override_holes and override_hole_gap(
 _CONN_GATE = """        if override_holes and override_hole_gap(
                 net_id, sx, sy, ex, ey) < hw - 1e-4:
             return False"""
+# RE-ANCHORED (#877), with the three site-E rows that share this quote.
+# `b02761b7` ("legality: the board's own copper-to-hole floor, and the review
+# its tripwire asked for (#761)") replaced `defaults.NPTH_TO_TRACK_CLEARANCE`
+# with the board-resolved local `_npth_floor` and reflowed the two lines into
+# one. The REPLACEMENTS below are re-spelled to `_npth_floor` as well, so each
+# row still changes exactly ONE thing: reverting to the raw default would drop
+# the board floor too, which is a second mutation and a different experiment.
 _E_BLOCK = """                    _lc = ((getattr(p, 'local_clearance', 0.0) or 0.0)
                            if copper_holes else 0.0)
-                    npth_grow = max(0.0, max(defaults.NPTH_TO_TRACK_CLEARANCE,
-                                             _lc) - clearance)"""
+                    npth_grow = max(0.0, max(_npth_floor, _lc) - clearance)"""
 
 # (name, target, old, new, tests, expect)
 ROWS = [
@@ -218,18 +224,17 @@ ROWS = [
        "'s pad requirements\n",
        '        self.max_floor = 0.0    # upper bound on this part'
        "'s pad requirements\n"
-       '        npth_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE'
-       ' - clearance)\n'),
+       '        npth_grow = max(0.0, _npth_floor - clearance)\n'),
       (_E_BLOCK, '                    pass')],
      None, (T730,), 'KILLED'),
     ('site-E-loses-the-fab-floor', 'leg',
-     '                    npth_grow = max(0.0, max(defaults.NPTH_TO_TRACK_CLEARANCE,\n'
-     '                                             _lc) - clearance)',
+     '                    npth_grow = max(0.0, max(_npth_floor, _lc)'
+     ' - clearance)',
      '                    npth_grow = max(0.0, _lc - clearance)',
      (T730,), 'KILLED'),
     ('site-E-threshold-at-clearance', 'leg',
-     '                    npth_grow = max(0.0, max(defaults.NPTH_TO_TRACK_CLEARANCE,\n'
-     '                                             _lc) - clearance)',
+     '                    npth_grow = max(0.0, max(_npth_floor, _lc)'
+     ' - clearance)',
      '                    npth_grow = max(0.0, max(clearance, _lc) - clearance)',
      (T730,), 'KILLED'),
     ('site-E-silk-gate-dropped', 'leg',
@@ -240,9 +245,9 @@ ROWS = [
     # an exact re-spelling of `max`. Recorded so nobody reads its survival as
     # a coverage hole.
     ('site-E-max-respelled-as-a-conditional', 'leg',
-     '                    npth_grow = max(0.0, max(defaults.NPTH_TO_TRACK_CLEARANCE,\n'
-     '                                             _lc) - clearance)',
-     '                    _f = defaults.NPTH_TO_TRACK_CLEARANCE\n'
+     '                    npth_grow = max(0.0, max(_npth_floor, _lc)'
+     ' - clearance)',
+     '                    _f = _npth_floor\n'
      '                    npth_grow = max(0.0, (_lc if _lc > _f else _f)\n'
      '                                    - clearance)',
      (T730,), 'SURVIVED'),

@@ -149,13 +149,19 @@ ROWS = [
      'SURVIVED'),
 
     # ---- #835: the escape ledger ----------------------------------------
+    # RE-ANCHORED (#877), with the six rows below it. This battery is not in
+    # #877's table at all -- 7 of its 22 rows had gone stale and nobody had
+    # measured it. Three causes, all of them later work on the same code:
+    # `b31adcea` (#848, charge a neighbour the sides it SHARES) turned two
+    # comprehensions into loops and moved `oth` out of the branch that used it,
+    # `398d8052` (#862) added kwargs to the ledger call, and `fa594fd1` (#850)
+    # renamed `own` to `geom` in `assign_faces`. Every mutation below is the
+    # one it always was, re-quoted against the code as it now stands.
     ('the-side-filter-goes-away', 'esc',
      """        if own is not None:
-            oth = sides.get(other)
             if oth is not None and not (own & oth):
                 continue""",
      """        if False:
-            oth = sides.get(other)
             if oth is not None and not (own & oth):
                 continue""",
      (T835,), 'KILLED'),
@@ -201,9 +207,9 @@ ROWS = [
 
     ('the-sides-map-is-not-threaded-into-the-ledger', 'esc',
      """                       sides=sides, containers=containers,
-                       obstruction_rects=orects)""",
+                       obstruction_rects=orects,""",
      """                       sides=None, containers=containers,
-                       obstruction_rects=orects)""",
+                       obstruction_rects=orects,""",
      (T835,),
      # Inert by construction: `part_escape` builds its own map when given
      # None. Recorded so that if the fallback is ever removed -- making the
@@ -212,12 +218,9 @@ ROWS = [
 
     # ---- the reconciliation ---------------------------------------------
     ('routability-keeps-its-one-sided-side-test', 'rou',
-     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
-                 if g.ref != ref and (own_sides & g.sides)
-                 and g.ref not in _containers and g.ref in _geom]""",
-     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded
-                 if g.ref != ref and (footprint_side(fp) in g.sides)
-                 and g.ref not in _containers and g.ref in _geom]""",
+     """        shared = own_sides & g.sides""",
+     """        shared = (g.sides if footprint_side(fp) in g.sides
+                  else frozenset())""",
      (T835,), 'KILLED'),
 
     ('routability-goes-back-to-double-charging', 'rou',
@@ -240,15 +243,16 @@ ROWS = [
     # going back to billing routing for assembly margin: the deficit GROWS,
     # so every "is there a deficit" arm is satisfied harder.
     ('routability-goes-back-to-the-courtyard', 'rou',
-     """    neighbors = [(g.ref, _geom[g.ref].rect) for g in _graded""",
-     """    neighbors = [(g.ref, g.rect) for g in _graded""",
+     """        neighbors.append((g.ref, rect_on_sides(_geom[g.ref], shared)))""",
+     """        neighbors.append((g.ref, g.rect))""",
      (T835,), 'KILLED'),
 
     # #841, the other direction. `escape` charged the bbox of pad CENTRES, so
     # this is the exact code that shipped before -- and the per-board table is
     # what has to catch it.
     ('escape-neighbour-goes-back-to-pad-centres', 'esc',
-     """        obstacles.append((other, g.rect if g is not None else _part_rect(ofp)))""",
+     """        obstacles.append((other, _rect_on_sides(g, shared)
+                          if g is not None else _part_rect(ofp)))""",
      """        obstacles.append((other, _part_rect(ofp)))""",
      (T835,), 'KILLED'),
 
@@ -258,7 +262,7 @@ ROWS = [
     # every deficit number goes green DOWNWARD, which is why the demand arm
     # exists to kill it.
     ('escape-face-assignment-forgets-the-pad-edge', 'esc',
-     """        box = None if own is None else _pad_box(own, pad)""",
+     """        box = None if geom is None else _pad_box(geom, pad)""",
      """        box = None""",
      (T835,), 'KILLED'),
 
@@ -308,8 +312,8 @@ ROWS = [
      (T841,), 'KILLED'),
 
     ('routability-stops-exempting-containers', 'rou',
-     """                 and g.ref not in _containers and g.ref in _geom]""",
-     """                 and g.ref not in () and g.ref in _geom]""",
+     """        if g.ref == ref or g.ref in _containers or g.ref not in _geom:""",
+     """        if g.ref == ref or g.ref in () or g.ref not in _geom:""",
      (T835,),
      # Expected SURVIVED on the reasoning that only `escape` is asserted on;
      # measured KILLED, because `test_face_lane_ledger_side_test_is_symmetric`
