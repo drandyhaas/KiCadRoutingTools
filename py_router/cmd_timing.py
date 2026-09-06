@@ -16,11 +16,10 @@ plainly: "no code path in this repo compares it to a limit. There is no budget,
 no cap and no timeout." So this module declares no threshold, takes no deadline
 argument, and never exits non-zero because a run was slow. It reports.
 
-**It never predicts.** Elapsed and the run total are both recorded facts, so a
-"remaining" figure is subtraction, not a forecast -- and it is offered ONLY when
-the ledger demonstrably covers the whole film (see ``RunClock``). There is no
-rate, no projection and no ETA anywhere in here, and a test walks this module's
-AST to keep it that way.
+**It never predicts.** Elapsed and the run total are both recorded facts, so any
+"remaining" figure a consumer derives from them is subtraction, not a forecast.
+There is no rate, no projection and no ETA anywhere in here, and a test walks
+this module's AST to keep it that way.
 
 Why it lives in py_router/: ``make_movie.py`` puts only its own directory on
 ``sys.path`` and is imported in-process by the GUI recorder, ``run_plan.py``,
@@ -31,9 +30,11 @@ must not import from ``tests/``, which is why the reader is not beside its
 writer -- an asymmetry that is correct, since only the harness WRITES the ledger
 while the movie, the film, the loop and the audit pass all READ it.
 
-Pillow is imported inside ``stamp_run_clock`` only (the ``make_film._badge``
-idiom), so ``import cmd_timing`` touches no third-party module and the report
-CLI runs on a machine that has none.
+``import cmd_timing`` touches no third-party module at all -- not numpy, not
+Pillow -- so the report CLI runs on a machine that has none. A test asserts it
+by inspecting ``sys.modules`` after a bare import in a fresh interpreter. Any
+future drawing helper here must keep its PIL import inside the function, the
+way ``py_tools/make_film._badge`` does.
 """
 from __future__ import annotations
 
@@ -48,22 +49,32 @@ LEDGER_NAME = 'cmd_timing.jsonl'
 
 OTHER = 'other'
 
-#: Ordered bucket rules, FIRST MATCH WINS. This encodes the footnotes at
-#: wk/run24/esp_prog/watch/timing.md:33-40, which were the only place they
-#: existed. Two of them fall out of the ORDER and would be silently wrong if it
-#: changed:
+#: Bucket rules, first match wins, encoding the footnotes at
+#: wk/run24/esp_prog/watch/timing.md:33-40 -- which were the only place they
+#: existed.
 #:
-#:   * `fence*` is tested BEFORE every letter bucket, so `fence-audit-start` --
-#:     which ran at run START -- buckets under close-out. That is the footnote's
-#:     "grouped under close-out per the fence-* rule".
-#:   * `Pclose-*` is matched by the `P` rule, NOT by the `close` rule, because
-#:     these are PREFIX tests, not substring tests. That reproduces "Pclose-*
-#:     labels are P-prefixed and therefore counted in the P* placement subtotal".
+#: **The ORDER of these rules is INERT, and the first version of this file was
+#: wrong to say otherwise.** No prefix here is a prefix of another (pinned by
+#: `test_no_rule_prefix_shadows_another`), so at most one rule can match any
+#: label and first-match-wins never arbitrates anything -- reversing the whole
+#: tuple changes no answer. The two footnote outcomes are real, but they come
+#: from the PREFIX TEST, not from precedence:
+#:
+#:   * `fence-audit-start` buckets under close-out because a lowercase `f`
+#:     starts no letter rule -- not because `fence` is tested early;
+#:   * `Pclose-q-render` buckets under `P*` because `close` is not a prefix OF
+#:     `Pclose-q-render` (`P` is) -- these test the head of the LABEL, not
+#:     whether the label contains the word.
+#:
+#: The distinction is what the next person needs: adding a rule whose prefix
+#: SHADOWS an existing one (say `'Pc'`) would make order suddenly decide the
+#: answer, and the guard named above is what catches that.
 #:
 #: Matching is case-SENSITIVE. Nothing in the published run-24 report forces
 #: that choice, so it is a decision: case-insensitivity would swallow `route4`
 #: -- the RUNBOOK's own example label -- into `R*`, and a lowercase tool name is
-#: not a stage.
+#: not a stage. What happens when a whole run ignores this scheme is
+#: `unmatched_note()`, not silence.
 STAGE_RULES = (
     ('staging',   ('staging',)),
     ('close-out', ('fence', 'close')),
@@ -116,7 +127,7 @@ def find_ledger(start, max_up=3):
     if os.path.isfile(p) and p.lower().endswith('.jsonl'):
         return p
     d = p if os.path.isdir(p) else os.path.dirname(p)
-    for _ in range(max(0, int(max_up)) + 1):
+    for _ in range(max(0, int(max_up or 0)) + 1):
         cand = os.path.join(d, LEDGER_NAME)
         if os.path.isfile(cand):
             return cand
@@ -128,11 +139,19 @@ def find_ledger(start, max_up=3):
 
 
 def _num(v):
-    """float(v) or None -- a row with a missing/garbage clock is still a row."""
+    """A FINITE float, or None -- a row with a missing/garbage clock is a row.
+
+    Non-finite is rejected as garbage, not passed through. ``json.loads``
+    accepts bare ``NaN`` and ``Infinity`` by default and ``float()`` is happy
+    with both, so a single such value used to reach ``fmt_hms`` and die there
+    with ``ValueError: cannot convert float NaN to integer`` -- a whole report
+    lost to one bad cell, which is exactly what this function exists to prevent.
+    """
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def load_rows(path):
@@ -149,7 +168,12 @@ def load_rows(path):
     rows = []
     if not path or not os.path.isfile(path):
         return rows
-    with open(path, encoding='utf-8') as f:
+    # utf-8-SIG, not utf-8: this is a Windows-primary repo where PowerShell's
+    # `>` and Out-File default to UTF-8 WITH BOM, so a ledger that has been
+    # copied or filtered through a shell arrives with one. Under plain utf-8
+    # the BOM made line 1 unparseable and the whole ledger read as a refusal.
+    # The -sig codec is a no-op when there is no BOM.
+    with open(path, encoding='utf-8-sig') as f:
         for n, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -210,8 +234,14 @@ def subtotals(rows):
             for stage, rs in buckets.items()]
 
 
+#: ``last_iso_start`` is NOT an end time, and is named so nobody reads it as one.
+#: tee_cmd records ``iso_start`` and nothing else, so the only honest ISO string
+#: for the end of a run is the START of the row that ended last. Calling that
+#: field `iso_end` (as the first version did) exported a value 400 s adrift of
+#: `t1` on a ledger with an overlapping row, under a name that promised the
+#: opposite -- and `report_data` hands these fields to other consumers.
 Totals = collections.namedtuple(
-    'Totals', 'n tool_s t0 t1 run_s outside_s iso_start iso_end '
+    'Totals', 'n tool_s t0 t1 run_s outside_s iso_start last_iso_start '
               'first_label last_label')
 
 
@@ -281,17 +311,49 @@ def fmt_hms(seconds):
 # the report the watch subagent used to write by hand
 # --------------------------------------------------------------------------
 
+def unmatched_note(rows):
+    """A warning when labels fall outside the scheme, or '' when none do.
+
+    The mandate at timing.md:17-22 defined close-out as a CATCH-ALL
+    ("everything after the last route step / remaining labels"); these rules
+    make it a `fence`/`close` prefix and send everything unrecognised to
+    `other`. On run 24 the two agree, because `other` came out empty -- but they
+    are not the same rule, and a run that labels its steps differently is not
+    exotic: the RUNBOOK's own worked example uses `route4`, which lands in
+    `other`, and a lowercase convention (`p0-driver`, `r3-route`) would put
+    100% of a run there.
+
+    Printing an empty `other` row is not enough to notice that. This says so in
+    words, and names the labels, so a misbucketed run is a visible fact instead
+    of a zero someone has to spot.
+    """
+    odd = [r.get('label') for r in rows if stage_of(r.get('label')) == OTHER]
+    if not odd:
+        return ''
+    uniq = sorted(set(odd))
+    shown = ', '.join('`%s`' % u for u in uniq[:6])
+    more = '' if len(uniq) <= 6 else ' (+%d more)' % (len(uniq) - 6)
+    pct = 100.0 * len(odd) / max(1, len(rows))
+    return ('**%d of %d steps (%.0f%%) matched no stage prefix** and are '
+            'counted under `other`: %s%s. The stage subtotals describe the '
+            'rest. If this run labels its steps by another convention, the '
+            'buckets below are not the ones its author had in mind.'
+            % (len(odd), len(rows), pct, shown, more))
+
+
 def _rules_note():
     """The bucketing note, generated FROM STAGE_RULES so prose cannot drift."""
     parts = []
     for stage, prefixes in STAGE_RULES:
         parts.append('%s -> %s' % ('/'.join(p + '*' for p in prefixes), stage))
-    return ('Bucketing, first match wins, case-sensitive: '
+    return ('Bucketing by label PREFIX, case-sensitive: '
             + '; '.join(parts) + '; anything else -> ' + OTHER
-            + '. Note the order: `fence-*` is tested before the letter buckets, '
-              'so `fence-audit-start` buckets under close-out even though it ran '
-              'at run start; and `Pclose-*` matches the `P` PREFIX, not `close`, '
-              'so it counts under P*. Repeated labels are counted once per entry.')
+            + '. These prefixes are pairwise incomparable, so their order does '
+              'not arbitrate anything. `fence-audit-start` buckets under '
+              'close-out because a lowercase `f` starts no letter rule (it ran '
+              'at run START, not at the end); `Pclose-*` counts under P* '
+              'because `close` is not a prefix OF `Pclose-*`. Repeated labels '
+              'are counted once per entry.')
 
 
 def report_markdown(rows, ledger_path=None):
@@ -305,6 +367,10 @@ def report_markdown(rows, ledger_path=None):
     out.append('')
     out.append(_rules_note())
     out.append('')
+    odd = unmatched_note(rows)
+    if odd:
+        out.append(odd)
+        out.append('')
     out.append('This clock is DESCRIPTIVE: `wall_s` is a record, not a limit. '
                'There is no budget, no cap and no timeout, and nothing here '
                'fails a run for being slow.')
@@ -330,8 +396,12 @@ def report_markdown(rows, ledger_path=None):
     out.append('| stage | steps | wall s | H:MM:SS |')
     out.append('|---|---:|---:|---:|')
     for stage, n, wall in subtotals(rows):
+        # ROUND ONCE, then use that value for both columns. Formatting the raw
+        # value at %.1f while handing fmt_hms the unrounded one let the two
+        # disagree: a 26.46 s bucket printed `| 26.5 | 0:00:26 |`.
+        shown = round(wall, 1)
         out.append('| %s | %d | %.1f | %s |'
-                   % (STAGE_TITLES[stage], n, wall, fmt_hms(wall)))
+                   % (STAGE_TITLES[stage], n, shown, fmt_hms(shown)))
     out.append('')
 
     out.append('### 3. Totals')
@@ -351,8 +421,8 @@ def report_markdown(rows, ledger_path=None):
         # `started` is echoed verbatim everywhere else in this file.
         out.append('- Total run time (first t_start %s -> last t_end, from row '
                    '`%s` started %s): %.1f s = **%s**'
-                   % (tot.iso_start or '-', tot.last_label, tot.iso_end or '-',
-                      tot.run_s, fmt_hms(tot.run_s)))
+                   % (tot.iso_start or '-', tot.last_label,
+                      tot.last_iso_start or '-', tot.run_s, fmt_hms(tot.run_s)))
         out.append('- **Time outside the tools** (agent/orchestration): '
                    '%.1f s = **%s**' % (tot.outside_s, fmt_hms(tot.outside_s)))
     out.append('')
@@ -405,7 +475,13 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     rows = load_rows(ledger)
-    rel = os.path.relpath(ledger)
+    try:
+        rel = os.path.relpath(ledger)
+    except ValueError:
+        # Windows: relpath raises across drives ("path is on mount 'D:', start
+        # on mount 'C:'"). A work dir on a second drive or a UNC share is
+        # ordinary, and cosmetics must not take the report down with them.
+        rel = ledger
     if args.json:
         print(json.dumps(report_data(rows, rel), indent=2, sort_keys=True))
     else:
