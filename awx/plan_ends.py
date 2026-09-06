@@ -33,11 +33,6 @@ from escape_moves import Move
 Pt = Tuple[float, float]
 
 
-def _snap_dir(v: Pt) -> str:
-    dirs = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
-    h = (v[0] ** 2 + v[1] ** 2) ** 0.5 or 1.0
-    return min(dirs, key=lambda k: (dirs[k][0] - v[0] / h) ** 2
-               + (dirs[k][1] - v[1] / h) ** 2)
 
 
 def refine_source(src_choice: Dict[str, Move],
