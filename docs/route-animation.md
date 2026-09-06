@@ -335,12 +335,24 @@ opposite the caption:
 RUN CLOCK  +0:51:23 of 1:17:39
 stage  R3-route
 basis  cmd_timing.jsonl - 153 wrapped commands, mapped by mtime
-remaining  0:26:16  (exact, post-hoc: the run is over; this is a recorded total)
+at  2026-08-20T10:03:32Z
 ```
 
 The basis is the **run** clock, and that is measured rather than stylistic: in
 run 24 the wrapped commands account for 253.3 s of a 4658.7 s run — 5.4% — so a
-countdown driven by tool time would read "nearly done" for over an hour.
+clock driven by tool time would sit near zero for over an hour.
+
+**It counts up, and there is deliberately no countdown.** One was implemented
+and it was exact — the movie is built after the run, so `t1 − instant` is the
+subtraction of two recorded facts, not a forecast. It came out anyway, because
+exact is not the same as legible: a countdown *reads* as "time left in this
+video" and *means* "time that remained in the run", and a 25-frame GIF that ends
+in four seconds while showing `remaining 0:15:57` invites exactly that
+misreading. `+0:51:23 of 1:17:39` says the same thing with no way to misread it,
+and anyone who wants the other number can subtract. Removing it also deleted the
+machinery it needed to be safe — a coverage predicate over whether the ledger
+spanned the film, its shortfall message, and an exact-or-absent branch in both
+the overlay and the metadata.
 
 A frame is mapped to an instant by its board's **mtime** falling inside a
 command's `[t_start, t_end]`: `tee_cmd` stamps `time.time()` and a file's mtime
@@ -350,15 +362,25 @@ one. On run 24 that resolves all 17 chain boards. argv matching is the fallback
 on that same run it is wrong three times — a dry run that never wrote the board,
 a checker that only read it, and a step that exited 1.
 
-**`remaining` is exact or absent, never estimated.** The movie is built after
-the run, so the total is a recorded fact and the subtraction is arithmetic — but
-it is offered only when the ledger demonstrably spans the film. Run 24's own
-chain does not qualify: its last board is written nine minutes before the run
-stops, so no countdown is shown there and the frame says why.
+**The `at` line is UTC, and that is the point.** The ledger's own `iso_start` is
+*local time with no offset* (`tee_cmd` uses `time.localtime`), so it means
+different things on different machines; `t_start` is epoch seconds, so UTC is a
+total function of a recorded fact. `--png-dir` frames carry the same instant as
+PNG text metadata:
 
-`--png-dir` frames carry the same numbers as PNG text metadata under `krt:`
-keys, so the timeline survives outside the movie. There is no `krt:eta` and no
-`krt:progress`: a percentage invites being read as a prediction.
+| key | |
+|---|---|
+| `krt:utc` | absolute UTC instant of this frame — the one to read |
+| `krt:run_started_utc` | when the run began, so elapsed is checkable from the PNG alone |
+| `krt:elapsed_s`, `krt:elapsed_hms` | position in the run |
+| `krt:step`, `krt:stage`, `krt:step_wall_s` | which beat, which command, and what that command cost |
+| `krt:run_total_s`, `krt:tool_s`, `krt:outside_s` | the run's totals |
+| `krt:clock_basis` | how this frame was placed: `mtime`, `argv`, `pre-run`, … |
+
+A frame is therefore self-describing: it needs no ledger and no knowledge of the
+machine that produced it to be placed in time, which is the whole reason the
+block exists. There is no `krt:eta`, no `krt:progress` and no `krt:remaining_s`
+— a prediction, a percentage and a countdown all invite being read as forecasts.
 
 The same reader is a standalone report — the end-of-run timing audit that used
 to be a hand-run watch subagent:

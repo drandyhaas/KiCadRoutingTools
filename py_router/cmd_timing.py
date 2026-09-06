@@ -283,6 +283,24 @@ def longest(rows, n=3):
     return ranked[:max(0, int(n))]
 
 
+def utc_iso(epoch):
+    """``2026-08-20T10:03:32Z`` for an epoch instant, or '' for None.
+
+    UTC, and the `Z` is part of the value. The ledger's own `iso_start` is
+    LOCAL time with no offset (``time.strftime(..., time.localtime(t0))`` at
+    tee_cmd.py:179), which is unambiguous only on the machine that wrote it --
+    so it is echoed verbatim in the report, where the reader is that machine's
+    owner, and never used for a frame, which travels. `t_start` is epoch
+    seconds, so this is a total function of a recorded fact.
+    """
+    if epoch is None:
+        return ''
+    import datetime
+    return (datetime.datetime.fromtimestamp(float(epoch),
+                                            datetime.timezone.utc)
+            .strftime('%Y-%m-%dT%H:%M:%SZ'))
+
+
 def fmt_hms(seconds):
     """``H:MM:SS`` for a duration, rounded to the NEAREST second.
 
@@ -465,7 +483,11 @@ def report_data(rows, ledger_path=None):
 # the run clock: which instant a movie frame is showing
 # --------------------------------------------------------------------------
 
-Anchor = collections.namedtuple('Anchor', 'label board first last t stage basis')
+#: ``wall_s`` is what the command that produced this board COST -- the other
+#: reading of "how long did this take". `t` says where in the run the beat sits;
+#: `wall_s` says how long its own step ran, and only the matched row knows that.
+Anchor = collections.namedtuple(
+    'Anchor', 'label board first last t stage basis wall_s')
 
 
 def _basenames(row):
@@ -517,7 +539,7 @@ def anchor_steps(marks, rows, mtimes=None):
     out = []
     for m in (marks or []):
         label, board, first, last = m[0], m[1], m[2], m[3]
-        t, stage, basis = None, None, 'none'
+        t, stage, basis, wall = None, None, 'none', None
         mt = None
         if mtimes and board in mtimes:
             mt = mtimes[board]
@@ -530,6 +552,7 @@ def anchor_steps(marks, rows, mtimes=None):
             inside = [r for r in rows if r['t_start'] <= mt <= r['t_end']]
             if inside:
                 t, stage, basis = mt, inside[0].get('label'), 'mtime'
+                wall = inside[0].get('wall_s')
         if t is None and mt is not None and rows and mt < min(
                 r['t_start'] for r in rows):
             # A file OLDER than the run's first wrapped command was not written
@@ -547,6 +570,7 @@ def anchor_steps(marks, rows, mtimes=None):
             if pick:
                 r0 = min(pick, key=lambda r: r['t_start'])
                 t, stage = r0['t_end'], r0.get('label')
+                wall = r0.get('wall_s')
                 basis = 'argv' if clean else 'argv?'
         if t is None and mt is not None and rows:
             # No `elif mt < t0: pre-run` here. That branch used to exist and
@@ -559,7 +583,7 @@ def anchor_steps(marks, rows, mtimes=None):
             t1 = max(r['t_end'] for r in rows)
             if t0 <= mt <= t1:
                 t, basis = mt, 'mtime-loose'
-        out.append(Anchor(label, board, first, last, t, stage, basis))
+        out.append(Anchor(label, board, first, last, t, stage, basis, wall))
 
     # Monotone clamp in MARK order. The movie's step order is the chain and is
     # authoritative, so an earlier-looking instant is a mapping error, not time
@@ -577,25 +601,37 @@ def anchor_steps(marks, rows, mtimes=None):
 
 
 Reading = collections.namedtuple(
-    'Reading', 'elapsed_s stage basis remaining_s covered interpolated')
+    'Reading', 'elapsed_s stage basis instant interpolated')
 
 
 class RunClock(object):
     """Frame index -> where that frame sits on the RUN's wall clock.
 
+    **It counts UP, and there is deliberately no countdown.**
+
+    A countdown was possible and would have been exact -- the movie is built
+    after the run, so `t1 - instant` is the subtraction of two recorded facts,
+    not a forecast. It was implemented, measured against run 24, and then
+    removed, because exact is not the same as legible: a countdown READS as
+    "time left in this video", and it means "time that remained in the run".
+    A 25-frame GIF that finishes in four seconds while showing
+    "remaining 0:15:57" is inviting exactly that misreading. `+1:01:42 of
+    1:17:39` carries the same information with no way to misread it, and the
+    viewer can subtract if they want the other number.
+
+    Taking it out also deleted the machinery it needed: a `covered` predicate
+    over whether the ledger spanned the film, its shortfall message, and an
+    exact-or-absent branch in both the overlay and the metadata. None of that
+    was wrong; all of it existed only to make one redundant line safe.
+
     The basis is the run clock and nothing else. Tool time is not it: in run 24
     the wrapped commands account for 253.3 s of a 4658.7 s run -- 5.4% -- so a
-    countdown driven by tool time would read "nearly done" for over an hour.
+    clock driven by tool time would sit near zero for over an hour.
 
     Within a step's frame span the instant is INTERPOLATED between two measured
     endpoints (this step's and the next resolved one's) and never projected past
     the last. Copper reveal is not uniform in time, so an interpolated figure is
     a smoothing rather than a measurement, and the overlay says so.
-
-    ``remaining_s`` is offered ONLY when ``covered`` -- see ``_covered`` -- and
-    it is then EXACT: the movie is built after the run, so the total is a
-    recorded fact and the subtraction is arithmetic. It is never an estimate,
-    and when the ledger falls short the field is absent rather than guessed.
     """
 
     def __init__(self, anchors, tot, n_frames):
@@ -603,49 +639,21 @@ class RunClock(object):
         self.tot = tot
         self.n = int(n_frames)
         self.resolved = [a for a in self.anchors if a.t is not None]
-        self.covered = self._covered()
 
-    def _covered(self):
-        """Is every beat of the film placed on the run's clock?
+    def unmapped(self):
+        """The beats with no instant, or [] when every one resolved.
 
-        Two conditions: the ledger has a real span (at least two rows), and
-        EVERY mark resolved to an instant. That second one is the whole guard --
-        an unresolved beat would have to be guessed, and a countdown built on a
-        guess is the thing this must never ship.
-
-        It does NOT require the film to reach the run's last instant, and an
-        earlier version that did was wrong twice over. It could almost never
-        fire: a board is written BEFORE the command that wrote it exits, so the
-        last anchor is always a few seconds short of t1 -- a two-command test
-        ledger failed it by 5 s. And the requirement bought nothing, because
-        `t1 - instant` is honest wherever the film ends: it is the time from
-        this frame to the last command the run recorded. On run 24 the film
-        stops nine minutes before the run does, and the final frame reading
-        "remaining 0:08:50" is not a defect -- it is the true statement that the
-        run was not over when the last board was written.
+        What `covered` used to gate is now just disclosure: the frames that
+        could not be placed say so individually, and this names them for a
+        caller that wants a one-line summary.
         """
-        t = self.tot
-        if not t or not t.n or t.run_s is None or t.run_s <= 0 or t.n < 2:
-            return False
-        if not self.anchors or len(self.resolved) != len(self.anchors):
-            return False
-        return True
-
-    def shortfall(self):
-        """Why `covered` is False, in words, or '' when it is True."""
-        if self.covered:
-            return ''
-        t = self.tot
-        if not t or t.run_s is None or t.n < 2:
-            return 'the ledger has no usable span'
-        return ('ledger covers %d of %d beats'
-                % (len(self.resolved), len(self.anchors)))
+        return [a.label for a in self.anchors if a.t is None]
 
     def at(self, i):
-        """The ``Reading`` for frame ``i``."""
+        """The ``Reading`` for frame ``i``. ``instant`` is an ABSOLUTE epoch."""
         t = self.tot
         if not self.anchors or t is None or t.t0 is None:
-            return Reading(None, None, 'no ledger', None, False, False)
+            return Reading(None, None, 'no ledger', None, False)
         k = None
         for j, a in enumerate(self.anchors):
             if a.first <= i < a.last:
@@ -656,12 +664,11 @@ class RunClock(object):
             # is the run's beginning.
             if i < (self.anchors[0].first if self.anchors else 0):
                 a0 = self.anchors[0]
-                return Reading(0.0, a0.stage, a0.basis, self._rem(t.t0),
-                               self.covered, False)
+                return Reading(0.0, a0.stage, a0.basis, t.t0, False)
             k = len(self.anchors) - 1
         a = self.anchors[k]
         if a.t is None:
-            return Reading(None, a.stage, 'none', None, self.covered, False)
+            return Reading(None, a.stage, 'none', None, False)
         nxt = next((b for b in self.anchors[k + 1:] if b.t is not None), None)
         interp = False
         inst = a.t
@@ -670,22 +677,17 @@ class RunClock(object):
             frac = min(1.0, max(0.0, frac))
             inst = a.t + (nxt.t - a.t) * frac
             interp = frac not in (0.0,)
-        return Reading(max(0.0, inst - t.t0), a.stage, a.basis,
-                       self._rem(inst), self.covered, interp)
-
-    def _rem(self, inst):
-        if not self.covered:
-            return None
-        return max(0.0, self.tot.t1 - inst)
+        return Reading(max(0.0, inst - t.t0), a.stage, a.basis, inst, interp)
 
     def lines(self, i):
         """The overlay text for frame ``i``. Three lines, four when licensed.
 
         The first token is literally RUN CLOCK -- never ETA, never a bare "time
         left" -- because the frame must say what the number is before it says
-        the number. The remaining line carries its qualifier inside one string
-        so a later edit cannot drop the parenthetical and leave a bare countdown
-        on screen.
+        the number. It counts UP, `+elapsed of total`, and the `at` line gives
+        the absolute UTC instant, so a frame lifted out of the movie is still
+        placeable in time. There is no countdown; see the class docstring for
+        why an exact one was removed rather than kept.
         """
         r = self.at(i)
         t = self.tot
@@ -712,16 +714,30 @@ class RunClock(object):
             'mapped by %s' % (r.basis or 'nothing')
         out.append('basis  cmd_timing.jsonl - %d wrapped commands, %s'
                    % (t.n if t else 0, how))
-        if r.remaining_s is not None:
-            out.append('remaining  %s  (exact, post-hoc: the run is over; this '
-                       'is a recorded total)' % fmt_hms(r.remaining_s))
+        # UTC, from the epoch instant. NOT the ledger's `iso_start`, which
+        # tee_cmd writes as LOCAL time with no offset -- unambiguous only on
+        # the machine that produced it. `t_start` is epoch seconds, so UTC is a
+        # total function of it and means the same thing everywhere the movie is
+        # watched. The `Z` is part of the value, not decoration.
+        if r.instant is not None:
+            out.append('at  %s' % utc_iso(r.instant))
         return out
 
     def meta(self, i):
         """The PNG text block for frame ``i``. Every value a recorded fact.
 
-        No `eta` key and no `progress` key: a percentage invites being read as a
-        prediction, and elapsed/total is derivable from two fields already here.
+        **`krt:utc` is the one to read.** An absolute UTC instant makes a frame
+        self-describing: it needs no ledger, no run start and no knowledge of
+        the machine that produced it to be placed in time, so the timeline
+        survives outside the movie -- which is the whole reason the block exists.
+        `krt:t_epoch` is the same instant unrounded, for arithmetic.
+
+        Deliberately NOT here: the ledger's own `iso_start`, which is local time
+        with no offset and therefore ambiguous the moment the PNG leaves the
+        machine; `krt:eta` and `krt:progress`, because a prediction and a
+        percentage both invite being read as forecasts; and `krt:remaining_s`,
+        which was exact but read as "time left in this video" -- see the class
+        docstring.
         """
         r = self.at(i)
         t = self.tot
@@ -733,21 +749,26 @@ class RunClock(object):
         }
         if r.stage:
             m['krt:stage'] = r.stage
+        if r.instant is not None:
+            m['krt:utc'] = utc_iso(r.instant)
+            m['krt:t_epoch'] = round(r.instant, 3)
         if r.elapsed_s is not None:
             m['krt:elapsed_s'] = round(r.elapsed_s, 1)
             m['krt:elapsed_hms'] = fmt_hms(r.elapsed_s)
-            m['krt:t_epoch'] = round(t.t0 + r.elapsed_s, 3)
         if t and t.run_s is not None:
             m['krt:run_total_s'] = round(t.run_s, 1)
             m['krt:run_total_hms'] = fmt_hms(t.run_s)
+            m['krt:run_started_utc'] = utc_iso(t.t0)
             m['krt:tool_s'] = round(t.tool_s, 1)
             m['krt:outside_s'] = round(t.outside_s, 1)
-        if r.remaining_s is not None:
-            m['krt:remaining_s'] = round(r.remaining_s, 1)
-            m['krt:remaining_basis'] = 'exact-post-hoc'
         for k, a in enumerate(self.anchors):
             if a.first <= i < a.last:
                 m['krt:step'] = a.label
+                # What that step COST, which is the other reading of "how long
+                # did this take": the elapsed figure says where in the run this
+                # frame sits, and this says how long its own command ran.
+                if a.wall_s is not None:
+                    m['krt:step_wall_s'] = round(a.wall_s, 3)
                 break
         return m
 

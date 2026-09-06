@@ -7,12 +7,16 @@ time, one JSON row per wrapped command. This file grades the bridge.
 
 Three things it must never do, each of which has a test:
 
-  * claim a "remaining" figure it cannot derive -- and when it can, that figure
-    is EXACT (the movie is built after the run, so the total is a recorded fact
-    and the subtraction is arithmetic, not a forecast);
+  * count DOWN. An exact countdown was possible -- the movie is built after the
+    run, so t1 - instant is arithmetic over recorded facts -- and it was
+    removed anyway, because it reads as "time left in this video" and means
+    "time that remained in the run";
   * present a corrected instant as a measured one -- the monotone clamp marks
     itself in the basis;
   * change a frame's size, which would silently degrade the whole movie to GIF.
+
+Every frame also carries an ABSOLUTE UTC instant, so it is placeable in time
+once it is out of the movie and away from the ledger.
 
 No boards and no rendering here beyond a handful of tiny PIL images, so it runs
 in a second on any machine.
@@ -148,9 +152,9 @@ def test_a_step_with_no_row_at_all_gets_no_number():
          'an unmatched beat carries no instant', (anc[0].t, anc[0].basis))
     clock = ct.RunClock(anc, ct.totals(rows), 5)
     r = clock.at(2)
-    want(r.elapsed_s is None and r.remaining_s is None,
-         'and no elapsed and no remaining are invented for it',
-         (r.elapsed_s, r.remaining_s))
+    want(r.elapsed_s is None and r.instant is None,
+         'and no elapsed and no instant are invented for it',
+         (r.elapsed_s, r.instant))
     lines = clock.lines(2)
     want(any('not in the ledger' in ln for ln in lines),
          'the frame says why, instead of showing a number from the last beat',
@@ -168,7 +172,7 @@ def test_a_seed_board_older_than_the_run_clamps_to_the_run_start():
          'and the instant is the run start, not the older file time', anc[0].t)
 
 
-# ------------------------------------------------------- the exact remainder
+# ----------------------------------------------------- counting up, in UTC
 
 def _full_clock():
     rows = _rows([('P0', 0, 10, 0, 'b1.kicad_pcb'),
@@ -183,49 +187,107 @@ def _full_clock():
     return ct.RunClock(anc, ct.totals(rows), 12), ct.totals(rows)
 
 
-def test_a_remaining_figure_is_exact_or_absent():
-    """The behavioural guard that replaces banning the word 'remaining'.
+def test_the_clock_counts_up_and_never_counts_down():
+    """The clock is a POSITION in the run, not a time-until.
 
-    It must equal `t1 - instant` to the microsecond -- both recorded facts --
-    and must be absent the moment coverage is not proven. There is no third
-    option, and no rate anywhere.
+    A countdown was implemented here and was exact -- `t1 - instant` over two
+    recorded facts, verified against run 24. It came out because exact is not
+    the same as legible: a countdown reads as "time left in this video" and
+    means "time that remained in the run", and a 25-frame GIF that ends in four
+    seconds while showing "remaining 0:15:57" invites precisely that misreading.
+    `+elapsed of total` says the same thing unambiguously.
     """
     clock, tot = _full_clock()
-    want(clock.covered, 'this ledger spans the film', clock.shortfall())
-    for i in range(12):
+    elapsed = [clock.at(i).elapsed_s for i in range(12)]
+    want(all(e is not None for e in elapsed),
+         'every frame has an elapsed reading', elapsed)
+    want(all(a <= b + 1e-9 for a, b in zip(elapsed, elapsed[1:])),
+         'and it is monotone NON-DECREASING across the film -- a clock that '
+         'went backwards would be the visible symptom of a bad mapping',
+         elapsed)
+    want(elapsed[0] == 0.0, 'the film opens at the run start', elapsed[0])
+    want(elapsed[-1] <= tot.run_s + 1e-9,
+         'and never exceeds the run it is measuring', (elapsed[-1], tot.run_s))
+
+    joined = ' '.join(clock.lines(3)).lower()
+    for word in ('remaining', 'countdown', 'time left', 'eta'):
+        want(word not in joined,
+             'no frame offers a %r figure' % word, joined)
+    want(clock.lines(3)[0].startswith('RUN CLOCK  +'),
+         'the reading leads with a PLUS, which is what counting up looks like',
+         clock.lines(3)[0])
+    want(' of ' in clock.lines(3)[0],
+         'and carries the total, so the viewer can subtract if they want the '
+         'other number', clock.lines(3)[0])
+
+
+def test_every_frame_carries_an_absolute_utc_instant():
+    """What makes a frame self-describing once it leaves the movie.
+
+    The ledger's own `iso_start` is LOCAL time with no offset (tee_cmd writes
+    `time.localtime`), so it means different things on different machines.
+    `t_start` is epoch, so UTC is a total function of a recorded fact.
+    """
+    clock, tot = _full_clock()
+    for i in (0, 5, 11):
         r = clock.at(i)
-        want_ok = (r.remaining_s is not None
-                   and abs((tot.t0 + r.elapsed_s + r.remaining_s) - tot.t1) < 1e-6)
-        if not want_ok:
-            want(False, 'frame %d: elapsed + remaining == the run span' % i,
-                 (r.elapsed_s, r.remaining_s))
-            return
-    want(True, 'every frame: elapsed + remaining is EXACTLY the run span, so '
-               'the figure is a subtraction of two recorded facts')
-    # And the LINE must carry the qualifier. Dropping the parenthetical
-    # survived the battery -- nothing read the wording, so a bare countdown
-    # could have shipped, which is the one presentation this feature is not
-    # allowed to have.
-    rem_lines = [ln for ln in clock.lines(3) if ln.startswith('remaining')]
-    want(len(rem_lines) == 1, 'there is a remaining line', clock.lines(3))
-    want('exact' in rem_lines[0] and 'post-hoc' in rem_lines[0],
-         'and it says what kind of number it is, in the same string as the '
-         'number, so an edit cannot drop the qualifier and keep the figure',
-         rem_lines[0])
-    want('recorded total' in rem_lines[0],
-         'naming the run as finished rather than implying a projection',
-         rem_lines[0])
+        want(r.instant is not None, 'frame %d has an absolute instant' % i)
+        m = clock.meta(i)
+        want(m.get('krt:utc', '').endswith('Z'),
+             'the metadata carries UTC with a Z', m.get('krt:utc'))
+        # The instant and the elapsed must agree, or one of them is lying.
+        want(abs((r.instant - tot.t0) - r.elapsed_s) < 1e-6,
+             'and utc - run_start == elapsed, so the two readings are the same '
+             'fact in two forms', (r.instant, tot.t0, r.elapsed_s))
+        want(ct.utc_iso(r.instant) == m['krt:utc'],
+             'the drawn instant and the stored one are the same')
+    want(clock.meta(5).get('krt:run_started_utc', '').endswith('Z'),
+         'and the run start is recorded in UTC too, so elapsed is checkable '
+         'from the metadata alone', clock.meta(5).get('krt:run_started_utc'))
+    at_lines = [ln for ln in clock.lines(5) if ln.startswith('at ')]
+    want(len(at_lines) == 1 and at_lines[0].endswith('Z'),
+         'and the frame DRAWS it', clock.lines(5))
 
 
-def test_the_countdown_never_goes_up():
-    """A countdown that rises is the visible symptom of a bad mapping."""
-    clock, _ = _full_clock()
-    rem = [clock.at(i).remaining_s for i in range(12)]
-    want(all(a >= b - 1e-9 for a, b in zip(rem, rem[1:])),
-         'remaining is monotone non-increasing across the film', rem)
+def test_utc_iso_is_utc_and_not_local():
+    want(ct.utc_iso(0) == '1970-01-01T00:00:00Z', 'the epoch is the epoch',
+         ct.utc_iso(0))
+    want(ct.utc_iso(None) == '', 'None is empty, not a crash')
+    # The point of the function: on a machine that is NOT at UTC, this must not
+    # follow the local zone. Compare against a value computed independently.
+    import calendar
+    import time
+    epoch = 1787220830.761
+    want(ct.utc_iso(epoch)
+         == time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(epoch)),
+         'it is gmtime, not localtime', ct.utc_iso(epoch))
+    want(calendar.timegm(time.strptime(ct.utc_iso(epoch),
+                                       '%Y-%m-%dT%H:%M:%SZ')) == int(epoch),
+         'and it round-trips back to the epoch it came from', ct.utc_iso(epoch))
 
 
-def test_no_remaining_figure_when_the_ledger_falls_short():
+def test_a_step_reports_what_its_own_command_cost():
+    """The other reading of "how long did this take": elapsed says WHERE in the
+    run the frame sits, wall_s says how long that step itself ran."""
+    rows = _rows([('P0', 0, 10, 0, 'b1.kicad_pcb'),
+                  ('R1', 100, 42.5, 0, 'b2.kicad_pcb')])
+    marks = [('s1', '/w/b1.kicad_pcb', 0, 4), ('s2', '/w/b2.kicad_pcb', 4, 8)]
+    mt = {'/w/b1.kicad_pcb': 5.0, '/w/b2.kicad_pcb': 120.0}
+    clock = ct.RunClock(ct.anchor_steps(marks, rows, mtimes=mt),
+                        ct.totals(rows), 8)
+    want(clock.anchors[1].wall_s == 42.5,
+         'the anchor carries its own row\'s wall_s', clock.anchors[1].wall_s)
+    want(clock.meta(5).get('krt:step_wall_s') == 42.5,
+         'and the frame records it', clock.meta(5).get('krt:step_wall_s'))
+    want(clock.meta(1).get('krt:step_wall_s') == 10.0,
+         'per step, not one figure for the film',
+         clock.meta(1).get('krt:step_wall_s'))
+
+
+def test_an_unmapped_beat_is_named_rather_than_gated():
+    """`covered` used to withhold the countdown for the whole film when one
+    beat was unmapped. With no countdown there is nothing to withhold, so the
+    unmapped beats are simply DISCLOSED -- per frame, and as a list."""
     rows = _rows([('P0', 0, 10, 0, 'b1.kicad_pcb'),
                   ('R1', 100, 10, 0, 'b2.kicad_pcb')])
     marks = [('s1', '/w/b1.kicad_pcb', 0, 4),
@@ -235,31 +297,15 @@ def test_no_remaining_figure_when_the_ledger_falls_short():
           '/w/missing.kicad_pcb': None}
     clock = ct.RunClock(ct.anchor_steps(marks, rows, mtimes=mt),
                         ct.totals(rows), 12)
-    # ONE unresolved beat, and NOTHING ELSE wrong: the film's ends do bracket
-    # the run, so the only reason coverage can fail is the missing beat. The
-    # first version of this test used a chain that also failed the bracket
-    # check, so removing the every-beat requirement left it passing for a
-    # DIFFERENT reason -- the aggregate-verdict masking this repo has been
-    # bitten by before, and the mutation battery is what surfaced it.
-    ok_rows = _rows([('P0', 0, 10, 0, 'b1.kicad_pcb'),
-                     ('R1', 100, 10, 0, 'b2.kicad_pcb')])
-    ok_marks = [('s1', '/w/b1.kicad_pcb', 0, 4), ('s2', '/w/b2.kicad_pcb', 4, 8)]
-    ok_mt = {'/w/b1.kicad_pcb': 0.0, '/w/b2.kicad_pcb': 105.0}
-    ok = ct.RunClock(ct.anchor_steps(ok_marks, ok_rows, mtimes=ok_mt),
-                     ct.totals(ok_rows), 8)
-    want(ok.covered,
-         'the control -- the same ledger with every beat resolved IS covered, '
-         'so the assertion below can only be about the missing beat',
-         ok.shortfall())
-
-    want(not clock.covered, 'one unresolved beat is enough to withhold it')
-    want(all(clock.at(i).remaining_s is None for i in range(12)),
-         'so no frame carries a remaining figure')
-    want('2 of 3 beats' in clock.shortfall(),
-         'and the shortfall is named in numbers', clock.shortfall())
-    joined = ' '.join(clock.lines(1))
-    want('remaining' not in joined,
-         'the overlay does not mention a figure it cannot derive', joined)
+    want(clock.unmapped() == ['s3'],
+         'the unmapped beat is named', clock.unmapped())
+    want(clock.at(1).elapsed_s is not None,
+         'and the beats that DID map still read normally -- one hole no longer '
+         'silences the whole film', clock.at(1).elapsed_s)
+    want(clock.at(9).elapsed_s is None,
+         'while the hole itself carries no number', clock.at(9).elapsed_s)
+    want(any('not in the ledger' in ln for ln in clock.lines(9)),
+         'and says why', clock.lines(9))
 
 
 def test_the_frame_names_its_basis_and_never_says_eta():
@@ -358,19 +404,29 @@ def test_the_png_block_is_facts_and_carries_no_prediction():
     m = clock.meta(5)
     for k in ('krt:frame', 'krt:frames', 'krt:clock_basis', 'krt:ledger_rows',
               'krt:elapsed_s', 'krt:run_total_s', 'krt:tool_s',
-              'krt:outside_s', 'krt:t_epoch', 'krt:stage', 'krt:step'):
+              'krt:outside_s', 'krt:t_epoch', 'krt:stage', 'krt:step',
+              'krt:utc', 'krt:run_started_utc', 'krt:step_wall_s'):
         want(k in m, 'the block carries %s' % k, sorted(m))
     want(m['krt:run_total_s'] == round(tot.run_s, 1),
          'and the total matches the ledger', m['krt:run_total_s'])
     bad = [k for k in m if any(w in k.lower()
                                for w in ('eta', 'progress', 'estimate',
-                                         'forecast', 'predict'))]
+                                         'forecast', 'predict', 'remaining'))]
     want(not bad,
-         'and no eta or progress key -- a percentage invites being read as a '
-         'prediction, and is derivable from two fields already here', bad)
-    want(m.get('krt:remaining_basis') == 'exact-post-hoc',
-         'the remaining figure declares what kind of number it is',
-         m.get('krt:remaining_basis'))
+         'and no eta, progress or remaining key -- a percentage and a countdown '
+         'both invite being read as forecasts, and everything they would say is '
+         'derivable from elapsed and the total', bad)
+    # A frame is placeable in time with NO other input: the two UTC stamps and
+    # the elapsed figure must be mutually consistent on their own.
+    import calendar
+    import time as _t
+    started = calendar.timegm(_t.strptime(m['krt:run_started_utc'],
+                                          '%Y-%m-%dT%H:%M:%SZ'))
+    at = calendar.timegm(_t.strptime(m['krt:utc'], '%Y-%m-%dT%H:%M:%SZ'))
+    want(abs((at - started) - float(m['krt:elapsed_s'])) <= 1.0,
+         'krt:utc - krt:run_started_utc == krt:elapsed_s, checkable from the '
+         'PNG alone with no ledger present',
+         (at - started, m['krt:elapsed_s']))
 
 
 def test_the_png_block_omits_what_it_cannot_know():
@@ -380,8 +436,11 @@ def test_the_png_block_omits_what_it_cannot_know():
                                         mtimes={'/w/none.kicad_pcb': None}),
                         ct.totals(rows), 4)
     m = clock.meta(1)
-    want('krt:remaining_s' not in m, 'no remaining key without coverage',
-         sorted(m))
+    want('krt:remaining_s' not in m,
+         'no remaining key at all -- the countdown was removed, see the '
+         'RunClock docstring', sorted(m))
+    want('krt:utc' not in m,
+         'and no UTC instant for a beat that has none', sorted(m))
     want('krt:elapsed_s' not in m,
          'and no elapsed key for a beat that is not in the ledger', sorted(m))
     want(m['krt:clock_basis'] == 'none',
@@ -475,9 +534,11 @@ TESTS_TO_RUN = [
     test_the_instant_is_monotone_across_the_chain_and_says_when_it_was_fixed,
     test_a_step_with_no_row_at_all_gets_no_number,
     test_a_seed_board_older_than_the_run_clamps_to_the_run_start,
-    test_a_remaining_figure_is_exact_or_absent,
-    test_the_countdown_never_goes_up,
-    test_no_remaining_figure_when_the_ledger_falls_short,
+    test_the_clock_counts_up_and_never_counts_down,
+    test_every_frame_carries_an_absolute_utc_instant,
+    test_utc_iso_is_utc_and_not_local,
+    test_a_step_reports_what_its_own_command_cost,
+    test_an_unmapped_beat_is_named_rather_than_gated,
     test_the_frame_names_its_basis_and_never_says_eta,
     test_an_interpolated_reading_admits_it,
     test_the_overlay_never_changes_the_frame_size,

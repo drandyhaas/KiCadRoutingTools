@@ -192,20 +192,38 @@ ROWS = [
      "            t, basis = min(r['t_start'] for r in rows), 'pre-run'",
      "            pass",
      (T_CLOCK,), 'KILLED'),
-    ('coverage-stops-requiring-every-beat', 't',
-     "        if not self.anchors or len(self.resolved) != len(self.anchors):\n"
-     "            return False",
-     "        if not self.anchors:\n            return False",
+    # The countdown's four rows are gone with the countdown itself (a `covered`
+    # predicate, its shortfall message and an exact-or-absent branch in both the
+    # overlay and the metadata). These replace them, over the UTC stamp and the
+    # per-step cost that took its place.
+    ('utc_iso-follows-the-local-zone', 't',
+     "    return (datetime.datetime.fromtimestamp(float(epoch),\n"
+     "                                            datetime.timezone.utc)\n"
+     "            .strftime('%Y-%m-%dT%H:%M:%SZ'))",
+     "    return (datetime.datetime.fromtimestamp(float(epoch))\n"
+     "            .strftime('%Y-%m-%dT%H:%M:%SZ'))",
      (T_CLOCK,), 'KILLED'),
-    ('a-remaining-figure-is-always-offered', 't',
-     "        if not self.covered:\n            return None\n"
-     "        return max(0.0, self.tot.t1 - inst)",
-     "        return max(0.0, self.tot.t1 - inst)",
+    ('the-frame-stops-carrying-a-utc-instant', 't',
+     "        if r.instant is not None:\n"
+     "            m['krt:utc'] = utc_iso(r.instant)",
+     "        if False:\n"
+     "            m['krt:utc'] = utc_iso(r.instant)",
      (T_CLOCK,), 'KILLED'),
-    ('the-remaining-line-loses-its-qualifier', 't',
-     "            out.append('remaining  %s  (exact, post-hoc: the run is over; this '\n"
-     "                       'is a recorded total)' % fmt_hms(r.remaining_s))",
-     "            out.append('remaining  %s' % fmt_hms(r.remaining_s))",
+    ('the-overlay-stops-drawing-the-instant', 't',
+     "        if r.instant is not None:\n"
+     "            out.append('at  %s' % utc_iso(r.instant))",
+     "        if False:\n"
+     "            out.append('at  %s' % utc_iso(r.instant))",
+     (T_CLOCK,), 'KILLED'),
+    ('a-step-stops-reporting-what-it-cost', 't',
+     "                if a.wall_s is not None:\n"
+     "                    m['krt:step_wall_s'] = round(a.wall_s, 3)",
+     "                if False:\n"
+     "                    m['krt:step_wall_s'] = round(a.wall_s, 3)",
+     (T_CLOCK,), 'KILLED'),
+    ('the-run-start-utc-is-dropped', 't',
+     "            m['krt:run_started_utc'] = utc_iso(t.t0)",
+     "            pass",
      (T_CLOCK,), 'KILLED'),
     ('an-interpolated-reading-stops-admitting-it', 't',
      "        interp = frac not in (0.0,)",
@@ -309,11 +327,14 @@ ROWS = [
      "        head = blob.replace('\\n', ' ')[-160:] if blob else ''",
      (T_PANEL, T_ISO), 'SURVIVED'),   # a one-line stderr reads the same
 
-    ('the-png-block-keeps-remaining-without-coverage', 't',
-     "        if r.remaining_s is not None:\n"
-     "            m['krt:remaining_s'] = round(r.remaining_s, 1)",
-     "        if True:\n"
-     "            m['krt:remaining_s'] = round(r.remaining_s or 0.0, 1)",
+    ('a-countdown-comes-back-into-the-png-block', 't',
+     "        if r.instant is not None:\n"
+     "            m['krt:utc'] = utc_iso(r.instant)\n"
+     "            m['krt:t_epoch'] = round(r.instant, 3)",
+     "        if r.instant is not None:\n"
+     "            m['krt:utc'] = utc_iso(r.instant)\n"
+     "            m['krt:t_epoch'] = round(r.instant, 3)\n"
+     "            m['krt:remaining_s'] = 1.0",
      (T_CLOCK,), 'KILLED'),
 ]
 

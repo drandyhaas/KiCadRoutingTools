@@ -261,12 +261,13 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
                     cmd_timing.stamp_run_clock(fr, clock.lines(i))
                 frame_meta = [clock.meta(i) for i in range(len(frames))]
                 if not quiet:
-                    n_res = len(clock.resolved)
-                    print('make_movie: run clock from %s (%d beats mapped'
-                          '%s)' % (os.path.relpath(ledger, os.path.dirname(
-                              os.path.abspath(ledger))), n_res,
-                              '' if clock.covered else
-                              ', no countdown: ' + clock.shortfall()),
+                    unmapped = clock.unmapped()
+                    print('make_movie: run clock from %s (%d of %d beats '
+                          'mapped%s)'
+                          % (os.path.basename(ledger), len(clock.resolved),
+                             len(clock.anchors),
+                             '' if not unmapped
+                             else '; no instant for ' + ', '.join(unmapped[:3])),
                           file=sys.stderr)
         except Exception as exc:                                # noqa: BLE001
             # A clock is decoration; it may never take the movie down.
