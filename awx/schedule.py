@@ -82,53 +82,45 @@ class Schedule:
             # lane pays a via at each end that does not
             return ((1.0 if tl.get(nm, 'F.Cu') == L else 0.0)
                     + (1.0 if dl.get(nm, 'F.Cu') == L else 0.0))
-        # TWO PAGES. The F-page is the largest crossing-free set (the
-        # LIS of the launch -> target permutation, preferring teeth
-        # already on F); the B-page is the largest crossing-free set of
-        # the REST (preferring teeth on B). A page lane keeps its layer
-        # through the whole schedule region, so an F-page lane and a
-        # B-page lane cross for FREE -- no layer rule, no via, no room
-        # -- which is how the human routes a corridor (every net on one
-        # layer end to end, two vias, both escapes). What is left are
-        # the SWIMMERS: they take the other layer from whichever page
-        # lane they cross and pay a via at each change. Measured with
-        # Greene's count, 21-23 of K28's 27 nets fit two pages; the
-        # single-page floor made 13 of them dive.
-        # the LIS weighted by the ends' layers
-        # ends' layers
-        keep = lis_keep_weighted(ranks,
-                                 [on(nm, 'F.Cu') for nm in self.launch])
+        # TWO PAGES, BY TOOTH LAYER. A page lane keeps its layer through
+        # the whole schedule region, so an F-page lane and a B-page lane
+        # cross for FREE -- no layer rule, no via, no room -- which is how
+        # the human routes a corridor (every net on one layer end to end,
+        # two vias, both escapes). A lane on the page of its own tooth
+        # layer launches with no via; on a berth of that layer it lands
+        # with none. So each page is seeded by the largest crossing-free
+        # set among the nets BORN on it (the LIS of their launch -> target
+        # ranks, preferring berths on that layer too), the rest fill
+        # whichever page they do not cross (their own layer first, worst
+        # crossers first), and what fits neither page SWIMS: it takes the
+        # other layer from whichever page lane it crosses and pays a via
+        # at each change. With every tooth on F this is the old rule
+        # exactly (F page = the LIS of all, B page = the crossing-free
+        # rescue of the rest); with escapes laid BY PAGE -- which the
+        # plan-following fanout now does -- a B-born keeper no longer
+        # pays two vias to ride F.
         self.page = {nm: None for nm in self.launch}
-        for i in keep:
-            self.page[self.launch[i]] = 'F.Cu'
-        rest = [nm for i, nm in enumerate(self.launch)
-                if i not in keep]
-        if len(rest) >= 2:
-            # the B page RESCUES THE WORST CROSSERS first (measured
-            # 2026-08-31 against a length-first LIS page: ties at
-            # every K below 28, beats it at K28 50/0 vs 56/0)
-            # the B-page RESCUES THE WORST CROSSERS first
-            # -- the human's constant-layer SWE idiom. On
-            # an all-F-escape fanout this measured WORSE
-            # (K11 10/11 -> 7/11: it demotes the mutually-
-            # increasing risers to swimmers against a
-            # saturated F layer); with escapes BY PAGE
-            # (step 3) it is the arm to re-try, hence a
-            # knob rather than a default.
-            inv = {nm: sum(1 for om in self.launch
-                           if om != nm and self.inverted(nm, om))
-                   for nm in rest}
-            page_b: List[str] = []
-            for nm in sorted(rest,
-                             key=lambda n: (-inv[n],
-                                            -on(n, 'B.Cu'))):
-                if all(not self.inverted(nm, om)
-                       for om in page_b):
-                    page_b.append(nm)
-            for nm in page_b:
-                self.page[nm] = 'B.Cu'
-        elif rest:
-            self.page[rest[0]] = 'B.Cu'
+        for L in ('F.Cu', 'B.Cu'):
+            born = [i for i, nm in enumerate(self.launch)
+                    if self.tl[nm] == L]
+            if not born:
+                continue
+            sub = lis_keep_weighted([ranks[i] for i in born],
+                                    [on(self.launch[i], L) - 1.0 for i in born])
+            for k in sub:
+                self.page[self.launch[born[k]]] = L
+        rest = [nm for nm in self.launch if self.page[nm] is None]
+        inv = {nm: sum(1 for om in self.launch
+                       if om != nm and self.inverted(nm, om))
+               for nm in rest}
+        for nm in sorted(rest, key=lambda n: -inv[n]):
+            own = self.tl[nm]
+            for L in (own, 'B.Cu' if own == 'F.Cu' else 'F.Cu'):
+                members = [om for om in self.launch if self.page[om] == L]
+                if all(not self.inverted(nm, om) for om in members):
+                    self.page[nm] = L
+                    break
+        keep = {i for i, nm in enumerate(self.launch) if self.page[nm] == 'F.Cu'}
         self.b_page = [nm for nm in self.launch if self.page[nm] == 'B.Cu']
         self.swimmers = [nm for nm in self.launch if self.page[nm] is None]
         self.divers = {self.launch[i] for i in range(len(self.launch))

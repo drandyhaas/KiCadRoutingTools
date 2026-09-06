@@ -181,6 +181,58 @@ python py_router/bga_fanout.py board.kicad_pcb -c U1 -o out.kicad_pcb \
     --escape-method underpad --via-size 0.35 --track-width 0.12 --clearance 0.1
 ```
 
+## Planned moves: following a caller's plan (full-move hints)
+
+`generate_bga_fanout(..., escape_dir_hints=...)` takes, per pad (keyed by
+board-frame pad position), either a bare face (`'left'`, `'right'`, `'up'`,
+`'down'`) or a FULL planned move:
+
+```python
+{'face': 'down', 'exit': (x, y), 'layer': 'B.Cu',
+ 'kind': 'surface' | 'via_in_pad' | 'dogbone', 'site': (x, y) or None}
+```
+
+`exit` is a board point on the array's boundary line; only its coordinate
+along the face is used (the gap). A rotated part's hints are transformed
+into the routing frame with its pads (`rotate_frame.forward_transform`).
+The channel engine reads the face of either form. The UNDER-PAD engine
+(`escape_method='underpad'`; `'auto'` lets the channel engine take the
+face first) follows a full move in its plan-follow phase, which lays the
+planned balls to the most of their moves that can be achieved OVERALL:
+
+* planned balls leave the generic phases; a `via_in_pad` ball's centre
+  and a `dogbone` ball's asked site are reserved before any track is laid
+  (the site validated exactly as the engine's own dog-bone chooser does:
+  an inter-ball gap, clear of every registered copper and reservation,
+  with a clear pad-to-site stub), the engine's own gap chosen when the
+  asked one is not legal;
+* every ball is routed to its EXACT move deepest-first: the A* takes a
+  goal cell, the boundary cell at the asked gap, and may leave the window
+  nowhere else; a `surface` ball on the top layer with no via, a
+  `via_in_pad` ball diving at its pad to the asked layer, a `dogbone` ball
+  running from its reserved site on the asked layer;
+* a ball whose exact move is blocked NEGOTIATES: its blockers among the
+  same call's committed escapes are found by routing the move on a
+  snapshot of the occupancy taken before any commit, ripped, the ball
+  laid exactly, the blockers re-laid, and the new state kept only if the
+  score (escaped balls, then exact, then face+layer, then face, then
+  fewer vias) rises -- at most 3 blockers per ball, 16 tries per call;
+* what is still short degrades along the least damaging dimension: the
+  nearest free gaps first (up to 6 pitches along the face, both ways),
+  then the other layer/kind, then any face;
+* the outcome is printed per ball (`Plan-follow: ... exact N, face+layer
+  N, ...`, one line per ball that lost a dimension, the negotiation
+  ledger) and returned in `pcb_data._fanout_plan_report` as
+  `{net: {'asked', 'face', 'gap', 'layer', 'kind', 'got', 'level'}}`.
+
+Balls with a bare-face hint, or none, run the unchanged phases. Two
+engine facts a planner must respect, both measured: a via cannot sit in
+a diagonal gap of a 0.65 mm pitch array unless it is small enough (0.45
+fails by 5 um at 0.1 clearance; 0.25/0.15 fits), and a partial re-fan of
+an already-fanned array must use the under-pad engine -- the channel
+engine assigns channels without treating the unmoved nets' existing
+stubs as occupants and lays new escapes over them.
+
 ## After fanout: optimize decoupling-cap placement (issue #130)
 
 A fanout drops vias near the ball field. Where a foreign-net via lands under a

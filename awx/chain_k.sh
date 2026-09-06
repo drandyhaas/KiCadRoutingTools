@@ -35,7 +35,7 @@ for K in "$@"; do
   NETS=$(python3 coherent_nets.py "$K")
   python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
     --board="$BASE" > "${TAG}_fo_k${K}.log" 2>&1
-  grep -E "^plan:|obeyed|^wrote" "${TAG}_fo_k${K}.log" | sed 's/^/  /'
+  grep -E "^plan|^wrote|^  round|^  kept|^  destination|source realize:|audit:|ORDER|plan model total" "${TAG}_fo_k${K}.log" | sed 's/^/  /'
   if [ ! -f "${TAG}_fo_k${K}.kicad_pcb" ]; then
     echo "  NO FANOUT BOARD"; continue
   fi
