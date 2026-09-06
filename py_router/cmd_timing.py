@@ -549,15 +549,16 @@ def anchor_steps(marks, rows, mtimes=None):
                 t, stage = r0['t_end'], r0.get('label')
                 basis = 'argv' if clean else 'argv?'
         if t is None and mt is not None and rows:
+            # No `elif mt < t0: pre-run` here. That branch used to exist and
+            # became UNREACHABLE when the pre-run test moved above the argv
+            # fallback: it fires on exactly `mt < t0`, so nothing could ever
+            # reach a second copy. The mutation battery is what found it --
+            # deleting the live branch left the dead one answering, so the row
+            # survived and pointed straight at the duplicate.
             t0 = min(r['t_start'] for r in rows)
             t1 = max(r['t_end'] for r in rows)
             if t0 <= mt <= t1:
                 t, basis = mt, 'mtime-loose'
-            elif mt < t0:
-                # The seed board, written before the run started. Clamping to
-                # t0 is honest -- the film opens at the run's beginning -- and
-                # the basis says the instant is the run's start, not the file's.
-                t, basis = t0, 'pre-run'
         out.append(Anchor(label, board, first, last, t, stage, basis))
 
     # Monotone clamp in MARK order. The movie's step order is the chain and is
@@ -605,19 +606,30 @@ class RunClock(object):
         self.covered = self._covered()
 
     def _covered(self):
-        """Does the ledger demonstrably span the whole film?
+        """Is every beat of the film placed on the run's clock?
 
-        All of: at least two rows with a real span; EVERY mark resolved; and the
-        film's first and last anchors bracketing the run's own first and last
-        wrapped commands. Anything less and no remaining figure is offered.
+        Two conditions: the ledger has a real span (at least two rows), and
+        EVERY mark resolved to an instant. That second one is the whole guard --
+        an unresolved beat would have to be guessed, and a countdown built on a
+        guess is the thing this must never ship.
+
+        It does NOT require the film to reach the run's last instant, and an
+        earlier version that did was wrong twice over. It could almost never
+        fire: a board is written BEFORE the command that wrote it exits, so the
+        last anchor is always a few seconds short of t1 -- a two-command test
+        ledger failed it by 5 s. And the requirement bought nothing, because
+        `t1 - instant` is honest wherever the film ends: it is the time from
+        this frame to the last command the run recorded. On run 24 the film
+        stops nine minutes before the run does, and the final frame reading
+        "remaining 0:08:50" is not a defect -- it is the true statement that the
+        run was not over when the last board was written.
         """
         t = self.tot
         if not t or not t.n or t.run_s is None or t.run_s <= 0 or t.n < 2:
             return False
         if not self.anchors or len(self.resolved) != len(self.anchors):
             return False
-        return (self.resolved[0].t <= t.t0 + 1e-6
-                and self.resolved[-1].t >= t.t1 - 1e-6 - (t.run_s * 0.0))
+        return True
 
     def shortfall(self):
         """Why `covered` is False, in words, or '' when it is True."""
@@ -626,11 +638,8 @@ class RunClock(object):
         t = self.tot
         if not t or t.run_s is None or t.n < 2:
             return 'the ledger has no usable span'
-        missing = len(self.anchors) - len(self.resolved)
-        if missing:
-            return ('ledger covers %d of %d beats'
-                    % (len(self.resolved), len(self.anchors)))
-        return 'the film does not span the whole run'
+        return ('ledger covers %d of %d beats'
+                % (len(self.resolved), len(self.anchors)))
 
     def at(self, i):
         """The ``Reading`` for frame ``i``."""
@@ -692,7 +701,12 @@ class RunClock(object):
         total = fmt_hms(t.run_s) if t and t.run_s is not None else '--'
         out = ['RUN CLOCK  +%s%s of %s'
                % (fmt_hms(r.elapsed_s), ' ~' if r.interpolated else '', total)]
-        stage = r.stage or 'unlabelled'
+        # A `pre-run` beat has no stage BECAUSE no wrapped command produced it
+        # -- it is the board the run started from. Saying "unlabelled" there
+        # reads as a defect in the ledger rather than as the fact it is.
+        stage = r.stage or ('the board the run started from'
+                            if (r.basis or '').startswith('pre-run')
+                            else 'unlabelled')
         out.append('stage  %s' % stage)
         how = 'interpolated within %s' % stage if r.interpolated else \
             'mapped by %s' % (r.basis or 'nothing')

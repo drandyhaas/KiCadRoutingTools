@@ -202,6 +202,19 @@ def test_a_remaining_figure_is_exact_or_absent():
             return
     want(True, 'every frame: elapsed + remaining is EXACTLY the run span, so '
                'the figure is a subtraction of two recorded facts')
+    # And the LINE must carry the qualifier. Dropping the parenthetical
+    # survived the battery -- nothing read the wording, so a bare countdown
+    # could have shipped, which is the one presentation this feature is not
+    # allowed to have.
+    rem_lines = [ln for ln in clock.lines(3) if ln.startswith('remaining')]
+    want(len(rem_lines) == 1, 'there is a remaining line', clock.lines(3))
+    want('exact' in rem_lines[0] and 'post-hoc' in rem_lines[0],
+         'and it says what kind of number it is, in the same string as the '
+         'number, so an edit cannot drop the qualifier and keep the figure',
+         rem_lines[0])
+    want('recorded total' in rem_lines[0],
+         'naming the run as finished rather than implying a projection',
+         rem_lines[0])
 
 
 def test_the_countdown_never_goes_up():
@@ -222,6 +235,23 @@ def test_no_remaining_figure_when_the_ledger_falls_short():
           '/w/missing.kicad_pcb': None}
     clock = ct.RunClock(ct.anchor_steps(marks, rows, mtimes=mt),
                         ct.totals(rows), 12)
+    # ONE unresolved beat, and NOTHING ELSE wrong: the film's ends do bracket
+    # the run, so the only reason coverage can fail is the missing beat. The
+    # first version of this test used a chain that also failed the bracket
+    # check, so removing the every-beat requirement left it passing for a
+    # DIFFERENT reason -- the aggregate-verdict masking this repo has been
+    # bitten by before, and the mutation battery is what surfaced it.
+    ok_rows = _rows([('P0', 0, 10, 0, 'b1.kicad_pcb'),
+                     ('R1', 100, 10, 0, 'b2.kicad_pcb')])
+    ok_marks = [('s1', '/w/b1.kicad_pcb', 0, 4), ('s2', '/w/b2.kicad_pcb', 4, 8)]
+    ok_mt = {'/w/b1.kicad_pcb': 0.0, '/w/b2.kicad_pcb': 105.0}
+    ok = ct.RunClock(ct.anchor_steps(ok_marks, ok_rows, mtimes=ok_mt),
+                     ct.totals(ok_rows), 8)
+    want(ok.covered,
+         'the control -- the same ledger with every beat resolved IS covered, '
+         'so the assertion below can only be about the missing beat',
+         ok.shortfall())
+
     want(not clock.covered, 'one unresolved beat is enough to withhold it')
     want(all(clock.at(i).remaining_s is None for i in range(12)),
          'so no frame carries a remaining figure')
@@ -281,18 +311,32 @@ def test_the_overlay_never_changes_the_frame_size():
 def test_a_long_overlay_wraps_instead_of_running_off_the_frame():
     """The defect a mock-up caught before any of this was written: one line of
     clock text overflowed a 700 px frame, and PIL clips in silence."""
-    frame = Image.new('RGB', (200, 150), (10, 10, 10))
     long_lines = ['RUN CLOCK  +0:51:23 of 1:17:39',
                   'basis  cmd_timing.jsonl - 153 wrapped commands, mapped by '
                   'mtime inside a wrapped command window']
-    ct.stamp_run_clock(frame, long_lines)
-    px = frame.load()
-    # The black box must be taller than a single line: if the long line had
-    # been clipped instead of wrapped, the box would be one line high.
-    dark_rows = sum(1 for y in range(150) if px[7, y] == (0, 0, 0))
-    want(dark_rows > 20,
-         'the box grew to hold the wrapped text rather than clipping it',
-         dark_rows)
+    # COMPARE against the same text as short lines. A bare "the box is more
+    # than 20 rows tall" survived the mutation battery, because two unwrapped
+    # lines already clear that. The claim is that the long text occupies MORE
+    # vertical space than it would if each line stayed on one row -- which is
+    # exactly what wrapping means and what clipping would not do.
+    tall = Image.new('RGB', (200, 150), (10, 10, 10))
+    ct.stamp_run_clock(tall, long_lines)
+    short = Image.new('RGB', (200, 150), (10, 10, 10))
+    ct.stamp_run_clock(short, ['RUN CLOCK', 'basis  x'])
+
+    def box_h(img):
+        b = ImageChops.difference(img, Image.new('RGB', (200, 150),
+                                                 (10, 10, 10))).getbbox()
+        return 0 if b is None else b[3] - b[1]
+
+    want(box_h(tall) > box_h(short) + 4,
+         'the long text takes MORE rows than the same number of short lines, '
+         'i.e. it wrapped instead of being clipped at the frame edge',
+         (box_h(tall), box_h(short)))
+    # And nothing may be drawn outside the frame or lost off the right edge.
+    b = ImageChops.difference(tall, Image.new('RGB', (200, 150),
+                                              (10, 10, 10))).getbbox()
+    want(b[2] <= 200 and b[3] <= 150, 'and stays inside the frame', b)
 
 
 def test_the_overlay_draws_bottom_left_and_leaves_the_top_alone():

@@ -606,6 +606,14 @@ def test_the_step_table_carries_every_cell_the_mandate_names():
     both survived."""
     rows = [_row('R3-route', 100.0, 23.002, code=4, iso='2026-08-20T12:03:09')]
     md = ct.report_markdown(rows, 'x')
+    # The HEADER too, not only the row. Dropping `exit` from the header while
+    # the rows still emitted it survived the mutation battery: a table whose
+    # header and body disagree is worse than one missing a column, because the
+    # reader silently mis-reads every value after the gap.
+    hdr = [ln for ln in md.splitlines() if ln.startswith('| # |')]
+    want(len(hdr) == 1, 'there is one step-table header', hdr)
+    for col in ('label', 'started', 'wall s', 'exit'):
+        want(col in hdr[0], 'the header names the %r column' % col, hdr[0])
     line = [ln for ln in md.splitlines() if ln.startswith('| 1 |')]
     want(len(line) == 1, 'there is one numbered step row', line)
     cells = [c.strip() for c in line[0].strip('|').split('|')]
