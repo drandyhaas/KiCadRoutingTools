@@ -466,6 +466,61 @@ def apply_rule(doc):
     return out
 
 
+#: POST-HOC, and labelled so, because it was reasoned AFTER the numbers were
+#: visible and is therefore not part of what `PREREGISTRATION` notarised.
+#:
+#: F1 rejects a currency on a one-face basis at a THRESHOLD (far/near >= 0.9),
+#: and on this corpus it fires for `courtyard` (flat_hierarchy 1.000) and not
+#: for `tht` (worst 0.5866). But the mechanism F1 is a proxy for is not a
+#: threshold at all, it is structural: under a one-face policy `charged` is
+#: `sum(per_side)`, which is defined as EACH PART EXACTLY ONCE -- the demand on
+#: the single face the fab populates. A through-hole part's leads come out on
+#: the face nobody populates, so they compete with nothing there. ANY far-face
+#: charge entering that sum is the same area counted twice, `tht` included.
+#:
+#: So the implementation charges the far face into `busiest` ONLY, which is
+#: strictly more conservative than the rule selected. `one_face_charged_once`
+#: is the check that says so in numbers rather than in prose: it is True
+#: exactly when a currency leaves the one-face sum equal to `part_area_mm2`.
+#: Recording it here rather than editing the pre-registration is the point --
+#: a threshold moved after seeing the answers is how a measurement stops
+#: meaning anything.
+POST_HOC = {
+    'finding': ('no far-face charge belongs in the one-face SUM; the far face '
+                'is charged into `busiest` only'),
+    'why': ('sum(per_side) is each part exactly once, the demand on the one '
+            'populated face. Leads on the unpopulated face compete with '
+            'nothing, so any far charge there is the same area twice.'),
+    'generalises': ('F1, which is a threshold on the same mechanism and fires '
+                    'only for `courtyard` on this corpus'),
+    'status': ('POST-HOC -- reasoned after the numbers were visible, NOT part '
+               'of PREREGISTRATION, and it only makes the change more '
+               'conservative than the rule required'),
+}
+
+
+def one_face_charged_once(rows):
+    """Per currency: does the one-face sum stay `part_area_mm2` (each part once)?
+
+    True only for `none`. This is the POST_HOC finding as a measurement.
+    """
+    out = {}
+    for c in CURRENCIES:
+        offenders = []
+        for name, d in rows:
+            arm = d['arms'].get('one_face_observed')
+            if not arm:
+                continue
+            once = arm['none']['charged_area_mm2']
+            got = arm[c]['charged_area_mm2']
+            if abs(got - once) > 0.011:
+                offenders.append([name, once, got])
+        out[c] = {'charged_once': not offenders,
+                  'boards_double_charged': sorted(offenders,
+                                                  key=lambda r: r[1] - r[2])}
+    return out
+
+
 def headline(rows):
     flips, moves, double = {}, {}, {}
     for basis in BASES:
@@ -602,6 +657,15 @@ def table_headline(doc, rows):
             dd = hl['double'].get('%s.%s' % (basis, c), [])[:3]
             if dd:
                 print('    %-28s %s' % ('%s.%s' % (basis, c), dd))
+    ph = doc['post_hoc']['one_face_charged_once']
+    print('\n  POST-HOC (not pre-registered): the one-face sum is each '
+          'part ONCE only under:')
+    print('    %s' % [c for c in CURRENCIES if ph[c]['charged_once']])
+    for c in CURRENCIES:
+        bad = ph[c]['boards_double_charged']
+        if bad:
+            print('    %-10s double-charges %d board(s), worst %s'
+                  % (c, len(bad), bad[0]))
     nr = hl['robustness']['not_robust']
     print('\n  robustness: %s' % ('ROBUST' if not nr else 'NOT ROBUST'))
     for r in nr:
@@ -683,12 +747,57 @@ def build(paths):
         'boards': {n: d for n, d in rows},
     }
     doc['headline'] = headline(rows)
+    doc['post_hoc'] = dict(POST_HOC)
+    doc['post_hoc']['one_face_charged_once'] = one_face_charged_once(rows)
     doc['verdict'] = apply_rule(doc)
     return doc, rows, failed
 
 
 DIFF_KEYS = ('utilisation', 'fits_by_area', 'charged_area_mm2',
              'far_charge_mm2', 'binding_side')
+
+#: What a COMMITTED run keeps per (board, basis, currency). The full in-process
+#: record carries fourteen fields per arm and the eight-field control row for
+#: every board; dumping all of it is 126 KB of numbers the gate re-derives in
+#: 17 seconds anyway, and this repo has already had one 276 KB regenerable
+#: table asked back out of a PR. So the artifact keeps the cells the verdict
+#: actually rests on, and `--out-full` still exists for a debugging dump.
+KEEP_PER_ARM = ('utilisation', 'fits_by_area', 'charged_area_mm2',
+                'far_charge_mm2', 'far_over_near', 'binding_side')
+KEEP_PER_BOARD = ('census_sides', 'parts_charged', 'tht_obstructing',
+                  'through_hole_plated', 'declared_face',
+                  'declared_is_hypothetical', 'usable_area_mm2',
+                  'containers_excluded', 'courtyard_sides_drawn',
+                  'courtyard_sides_differ')
+
+
+def compact(doc):
+    """The committed shape: the deciding cells, not the whole record."""
+    out = {k: doc[k] for k in ('engine_sha', 'preregistration', 'basis',
+                               'confound', 'headline', 'post_hoc',
+                               'verdict')}
+    out['control'] = {
+        'nc1_rows': sum(1 for b in doc['boards'].values()
+                        for r in b['control'] if 'mismatches' in r),
+        'nc1_fields_per_row': len(NC1_FIELDS),
+        'nc1_mismatches': [m for b in doc['boards'].values()
+                           for r in b['control']
+                           for m in r.get('mismatches', ())],
+        'nc2_boards': doc['control']['nc2_boards'],
+        'nc2_mismatches': doc['control']['nc2_mismatches'],
+    }
+    boards = {}
+    for name, d in doc['boards'].items():
+        rec = {k: d[k] for k in KEEP_PER_BOARD}
+        rec['pad_bearing_B'] = d['pad_bearing'].get('B', 0)
+        rec['arms'] = {
+            basis: (None if d['arms'].get(basis) is None else
+                    {c: {k: d['arms'][basis][c][k] for k in KEEP_PER_ARM}
+                     for c in CURRENCIES})
+            for basis in BASES}
+        boards[name] = rec
+    out['boards'] = boards
+    return out
 
 
 def _diff(before, after):
@@ -735,7 +844,9 @@ def main():
     ap.add_argument('--table', default='control,census,charge,headline,verdict',
                     help='comma-separated: %s' % ', '.join(TABLES))
     ap.add_argument('--boards', nargs='*', help='basenames to restrict to')
-    ap.add_argument('--out', help='write the figures as json')
+    ap.add_argument('--out', help='write the committed figures as json')
+    ap.add_argument('--out-full', help='write the UNCOMPACTED record (a '
+                                       'debugging dump, not for committing)')
     ap.add_argument('--diff', nargs=2, metavar=('BEFORE', 'AFTER'))
     args = ap.parse_args()
 
@@ -784,8 +895,12 @@ def main():
 
     if args.out:
         with open(args.out, 'w', encoding='utf-8') as f:
-            json.dump(doc, f, indent=1, sort_keys=True)
+            json.dump(compact(doc), f, indent=1, sort_keys=True)
         print('\nwrote %s' % args.out)
+    if args.out_full:
+        with open(args.out_full, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=1, sort_keys=True)
+        print('wrote %s (uncompacted)' % args.out_full)
     return 0
 
 

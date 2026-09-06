@@ -1,0 +1,2785 @@
+{
+ "basis": {
+  "board_edge_clearance": 0.5,
+  "board_edge_clearance_sensitivity": 0.55,
+  "clearance": 0.2,
+  "corpus": "run_utils.corpus_boards() -- the git-TRACKED set",
+  "n_boards": 22
+ },
+ "boards": {
+  "cap_chain": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 51.57,
+      "far_charge_mm2": 47.05,
+      "far_over_near": 0.9123,
+      "fits_by_area": true,
+      "utilisation": 0.1086
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 51.57,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1086
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 51.57,
+      "far_charge_mm2": 16.87,
+      "far_over_near": 0.3271,
+      "fits_by_area": true,
+      "utilisation": 0.1086
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 98.62,
+      "far_charge_mm2": 47.05,
+      "far_over_near": 0.9123,
+      "fits_by_area": true,
+      "utilisation": 0.2076
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 51.57,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1086
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 68.45,
+      "far_charge_mm2": 16.87,
+      "far_over_near": 0.3271,
+      "fits_by_area": true,
+      "utilisation": 0.1441
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 98.62,
+      "far_charge_mm2": 47.05,
+      "far_over_near": 0.9123,
+      "fits_by_area": true,
+      "utilisation": 0.2076
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 51.57,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1086
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 68.45,
+      "far_charge_mm2": 16.87,
+      "far_over_near": 0.3271,
+      "fits_by_area": true,
+      "utilisation": 0.1441
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 4,
+   "through_hole_plated": 2,
+   "tht_obstructing": 2,
+   "usable_area_mm2": 475.0
+  },
+  "esp_prog": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 215.46,
+      "far_charge_mm2": 100.21,
+      "far_over_near": 0.4651,
+      "fits_by_area": true,
+      "utilisation": 0.519
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 215.46,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.519
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 215.46,
+      "far_charge_mm2": 93.76,
+      "far_over_near": 0.4352,
+      "fits_by_area": true,
+      "utilisation": 0.519
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 315.68,
+      "far_charge_mm2": 100.21,
+      "far_over_near": 0.4651,
+      "fits_by_area": true,
+      "utilisation": 0.7604
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 215.46,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.519
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 309.23,
+      "far_charge_mm2": 93.76,
+      "far_over_near": 0.4352,
+      "fits_by_area": true,
+      "utilisation": 0.7449
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 315.68,
+      "far_charge_mm2": 100.21,
+      "far_over_near": 0.4651,
+      "fits_by_area": true,
+      "utilisation": 0.7604
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 215.46,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.519
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 309.23,
+      "far_charge_mm2": 93.76,
+      "far_over_near": 0.4352,
+      "fits_by_area": true,
+      "utilisation": 0.7449
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 18,
+   "through_hole_plated": 3,
+   "tht_obstructing": 3,
+   "usable_area_mm2": 415.12
+  },
+  "flat_hierarchy": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 5927.41,
+      "far_charge_mm2": 5927.41,
+      "far_over_near": 1.0,
+      "fits_by_area": true,
+      "utilisation": 0.3801
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 5927.41,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.3801
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 5927.41,
+      "far_charge_mm2": 3476.99,
+      "far_over_near": 0.5866,
+      "fits_by_area": true,
+      "utilisation": 0.3801
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 11854.82,
+      "far_charge_mm2": 5927.41,
+      "far_over_near": 1.0,
+      "fits_by_area": true,
+      "utilisation": 0.7602
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 5927.41,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.3801
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 9404.4,
+      "far_charge_mm2": 3476.99,
+      "far_over_near": 0.5866,
+      "fits_by_area": true,
+      "utilisation": 0.6031
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 11854.82,
+      "far_charge_mm2": 5927.41,
+      "far_over_near": 1.0,
+      "fits_by_area": true,
+      "utilisation": 0.7602
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 5927.41,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.3801
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 9404.4,
+      "far_charge_mm2": 3476.99,
+      "far_over_near": 0.5866,
+      "fits_by_area": true,
+      "utilisation": 0.6031
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 64,
+   "through_hole_plated": 58,
+   "tht_obstructing": 64,
+   "usable_area_mm2": 15593.5
+  },
+  "glasgow_revC": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3047.11,
+      "far_charge_mm2": 1887.28,
+      "far_over_near": 0.5654,
+      "fits_by_area": true,
+      "utilisation": 0.8036
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3047.11,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.8036
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3047.11,
+      "far_charge_mm2": 642.04,
+      "far_over_near": 0.1923,
+      "fits_by_area": true,
+      "utilisation": 0.8036
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 5225.47,
+      "far_charge_mm2": 1887.28,
+      "far_over_near": 0.5654,
+      "fits_by_area": false,
+      "utilisation": 1.3781
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3338.2,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.8804
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3980.24,
+      "far_charge_mm2": 642.04,
+      "far_over_near": 0.1923,
+      "fits_by_area": false,
+      "utilisation": 1.0497
+     }
+    },
+    "one_face_observed": null
+   },
+   "census_sides": "both",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": true,
+   "pad_bearing_B": 92,
+   "parts_charged": 264,
+   "through_hole_plated": 17,
+   "tht_obstructing": 18,
+   "usable_area_mm2": 3791.77
+  },
+  "haasoscope_pro_max_test": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 8,
+   "through_hole_plated": 0,
+   "tht_obstructing": 0,
+   "usable_area_mm2": 6111.61
+  },
+  "interf_u_unrouted": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 5307.93,
+      "far_over_near": 0.878,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 3336.86,
+      "far_over_near": 0.5519,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 11353.71,
+      "far_charge_mm2": 5307.93,
+      "far_over_near": 0.878,
+      "fits_by_area": true,
+      "utilisation": 0.9244
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 9382.64,
+      "far_charge_mm2": 3336.86,
+      "far_over_near": 0.5519,
+      "fits_by_area": true,
+      "utilisation": 0.7639
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 11353.71,
+      "far_charge_mm2": 5307.93,
+      "far_over_near": 0.878,
+      "fits_by_area": true,
+      "utilisation": 0.9244
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 9382.64,
+      "far_charge_mm2": 3336.86,
+      "far_over_near": 0.5519,
+      "fits_by_area": true,
+      "utilisation": 0.7639
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 1,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 24,
+   "through_hole_plated": 23,
+   "tht_obstructing": 23,
+   "usable_area_mm2": 12282.36
+  },
+  "interf_u_unrouted_placed": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 5307.93,
+      "far_over_near": 0.878,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 3336.86,
+      "far_over_near": 0.5519,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 11353.71,
+      "far_charge_mm2": 5307.93,
+      "far_over_near": 0.878,
+      "fits_by_area": true,
+      "utilisation": 0.9244
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 9382.64,
+      "far_charge_mm2": 3336.86,
+      "far_over_near": 0.5519,
+      "fits_by_area": true,
+      "utilisation": 0.7639
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 11353.71,
+      "far_charge_mm2": 5307.93,
+      "far_over_near": 0.878,
+      "fits_by_area": true,
+      "utilisation": 0.9244
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6045.77,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.4922
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 9382.64,
+      "far_charge_mm2": 3336.86,
+      "far_over_near": 0.5519,
+      "fits_by_area": true,
+      "utilisation": 0.7639
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 1,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 24,
+   "through_hole_plated": 23,
+   "tht_obstructing": 23,
+   "usable_area_mm2": 12282.36
+  },
+  "kit-dev-coldfire-xilinx_5213": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 7771.44,
+      "far_charge_mm2": 5473.34,
+      "far_over_near": 0.6946,
+      "fits_by_area": true,
+      "utilisation": 0.5491
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 7771.44,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5491
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 7771.44,
+      "far_charge_mm2": 2054.17,
+      "far_over_near": 0.2607,
+      "fits_by_area": true,
+      "utilisation": 0.5491
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 13353.65,
+      "far_charge_mm2": 5473.34,
+      "far_over_near": 0.6946,
+      "fits_by_area": true,
+      "utilisation": 0.9436
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 7880.31,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5568
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 9934.48,
+      "far_charge_mm2": 2054.17,
+      "far_over_near": 0.2607,
+      "fits_by_area": true,
+      "utilisation": 0.702
+     }
+    },
+    "one_face_observed": null
+   },
+   "census_sides": "both",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": true,
+   "pad_bearing_B": 14,
+   "parts_charged": 160,
+   "through_hole_plated": 41,
+   "tht_obstructing": 41,
+   "usable_area_mm2": 14152.05
+  },
+  "lvds_converter_dualclk": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 160.97,
+      "far_over_near": 0.3915,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 74.78,
+      "far_over_near": 0.1819,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 572.1,
+      "far_charge_mm2": 160.97,
+      "far_over_near": 0.3915,
+      "fits_by_area": true,
+      "utilisation": 0.3434
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 485.92,
+      "far_charge_mm2": 74.78,
+      "far_over_near": 0.1819,
+      "fits_by_area": true,
+      "utilisation": 0.2917
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 572.1,
+      "far_charge_mm2": 160.97,
+      "far_over_near": 0.3915,
+      "fits_by_area": true,
+      "utilisation": 0.3434
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 485.92,
+      "far_charge_mm2": 74.78,
+      "far_over_near": 0.1819,
+      "fits_by_area": true,
+      "utilisation": 0.2917
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 13,
+   "through_hole_plated": 2,
+   "tht_obstructing": 2,
+   "usable_area_mm2": 1666.0
+  },
+  "lvds_converter_dualclk_gnd": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 160.97,
+      "far_over_near": 0.3915,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 74.78,
+      "far_over_near": 0.1819,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 572.1,
+      "far_charge_mm2": 160.97,
+      "far_over_near": 0.3915,
+      "fits_by_area": true,
+      "utilisation": 0.3434
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 485.92,
+      "far_charge_mm2": 74.78,
+      "far_over_near": 0.1819,
+      "fits_by_area": true,
+      "utilisation": 0.2917
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 572.1,
+      "far_charge_mm2": 160.97,
+      "far_over_near": 0.3915,
+      "fits_by_area": true,
+      "utilisation": 0.3434
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 411.13,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.2468
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 485.92,
+      "far_charge_mm2": 74.78,
+      "far_over_near": 0.1819,
+      "fits_by_area": true,
+      "utilisation": 0.2917
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 13,
+   "through_hole_plated": 2,
+   "tht_obstructing": 2,
+   "usable_area_mm2": 1666.0
+  },
+  "orangecrab_ext_pll": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 999.94,
+      "far_charge_mm2": 385.35,
+      "far_over_near": 0.2825,
+      "fits_by_area": true,
+      "utilisation": 0.9186
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 999.94,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.9186
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 999.94,
+      "far_charge_mm2": 245.11,
+      "far_over_near": 0.1797,
+      "fits_by_area": true,
+      "utilisation": 0.9186
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1749.46,
+      "far_charge_mm2": 385.35,
+      "far_over_near": 0.2825,
+      "fits_by_area": false,
+      "utilisation": 1.6071
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1364.11,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": false,
+      "utilisation": 1.2531
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1609.22,
+      "far_charge_mm2": 245.11,
+      "far_over_near": 0.1797,
+      "fits_by_area": false,
+      "utilisation": 1.4783
+     }
+    },
+    "one_face_observed": null
+   },
+   "census_sides": "both",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "B",
+   "declared_is_hypothetical": true,
+   "pad_bearing_B": 83,
+   "parts_charged": 164,
+   "through_hole_plated": 6,
+   "tht_obstructing": 8,
+   "usable_area_mm2": 1088.58
+  },
+  "qfn_csi_underpad_diff": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 113.05,
+      "far_charge_mm2": 42.49,
+      "far_over_near": 0.3758,
+      "fits_by_area": true,
+      "utilisation": 0.1385
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 113.05,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1385
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 113.05,
+      "far_charge_mm2": 18.09,
+      "far_over_near": 0.16,
+      "fits_by_area": true,
+      "utilisation": 0.1385
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 155.53,
+      "far_charge_mm2": 42.49,
+      "far_over_near": 0.3758,
+      "fits_by_area": true,
+      "utilisation": 0.1906
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 113.05,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1385
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 131.13,
+      "far_charge_mm2": 18.09,
+      "far_over_near": 0.16,
+      "fits_by_area": true,
+      "utilisation": 0.1607
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 155.53,
+      "far_charge_mm2": 42.49,
+      "far_over_near": 0.3758,
+      "fits_by_area": true,
+      "utilisation": 0.1906
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 113.05,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1385
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 131.13,
+      "far_charge_mm2": 18.09,
+      "far_over_near": 0.16,
+      "fits_by_area": true,
+      "utilisation": 0.1607
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 2,
+   "through_hole_plated": 1,
+   "tht_obstructing": 1,
+   "usable_area_mm2": 816.0
+  },
+  "qfn_diffpair_escape": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 1,
+   "through_hole_plated": 0,
+   "tht_obstructing": 0,
+   "usable_area_mm2": 361.0
+  },
+  "qfn_interior_pads": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 1,
+   "through_hole_plated": 0,
+   "tht_obstructing": 0,
+   "usable_area_mm2": 361.0
+  },
+  "qfn_underpad_coupling": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 41.73,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1156
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 1,
+   "through_hole_plated": 0,
+   "tht_obstructing": 0,
+   "usable_area_mm2": 361.0
+  },
+  "routed_output": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1168.6,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.1912
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 8,
+   "through_hole_plated": 0,
+   "tht_obstructing": 0,
+   "usable_area_mm2": 6111.61
+  },
+  "rp2350_fpga_eensy_prePlane": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 393.58,
+      "far_charge_mm2": 205.08,
+      "far_over_near": 0.4171,
+      "fits_by_area": true,
+      "utilisation": 0.6737
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 363.34,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.622
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 383.55,
+      "far_charge_mm2": 98.83,
+      "far_over_near": 0.201,
+      "fits_by_area": true,
+      "utilisation": 0.6566
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 696.74,
+      "far_charge_mm2": 205.08,
+      "far_over_near": 0.4171,
+      "fits_by_area": false,
+      "utilisation": 1.1927
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 491.66,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.8416
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 590.49,
+      "far_charge_mm2": 98.83,
+      "far_over_near": 0.201,
+      "fits_by_area": false,
+      "utilisation": 1.0108
+     }
+    },
+    "one_face_observed": null
+   },
+   "census_sides": "both",
+   "containers_excluded": [
+    "U8"
+   ],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": true,
+   "pad_bearing_B": 4,
+   "parts_charged": 60,
+   "through_hole_plated": 3,
+   "tht_obstructing": 3,
+   "usable_area_mm2": 584.18
+  },
+  "sonde_u": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2230.95,
+      "far_charge_mm2": 1218.8,
+      "far_over_near": 0.4309,
+      "fits_by_area": true,
+      "utilisation": 0.6661
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2230.95,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.6661
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2230.95,
+      "far_charge_mm2": 769.08,
+      "far_over_near": 0.2719,
+      "fits_by_area": true,
+      "utilisation": 0.6661
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 4047.34,
+      "far_charge_mm2": 1218.8,
+      "far_over_near": 0.4309,
+      "fits_by_area": false,
+      "utilisation": 1.2085
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2828.55,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.8446
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3597.63,
+      "far_charge_mm2": 769.08,
+      "far_over_near": 0.2719,
+      "fits_by_area": false,
+      "utilisation": 1.0742
+     }
+    },
+    "one_face_observed": null
+   },
+   "census_sides": "both",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": true,
+   "pad_bearing_B": 1,
+   "parts_charged": 25,
+   "through_hole_plated": 23,
+   "tht_obstructing": 23,
+   "usable_area_mm2": 3349.09
+  },
+  "splitflap_driver": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2936.52,
+      "far_charge_mm2": 1857.42,
+      "far_over_near": 0.6325,
+      "fits_by_area": true,
+      "utilisation": 0.5053
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2936.52,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5053
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2936.52,
+      "far_charge_mm2": 558.34,
+      "far_over_near": 0.1901,
+      "fits_by_area": true,
+      "utilisation": 0.5053
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 4793.93,
+      "far_charge_mm2": 1857.42,
+      "far_over_near": 0.6325,
+      "fits_by_area": true,
+      "utilisation": 0.825
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2936.52,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5053
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3494.86,
+      "far_charge_mm2": 558.34,
+      "far_over_near": 0.1901,
+      "fits_by_area": true,
+      "utilisation": 0.6014
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 4793.93,
+      "far_charge_mm2": 1857.42,
+      "far_over_near": 0.6325,
+      "fits_by_area": true,
+      "utilisation": 0.825
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2936.52,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5053
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 3494.86,
+      "far_charge_mm2": 558.34,
+      "far_over_near": 0.1901,
+      "fits_by_area": true,
+      "utilisation": 0.6014
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 65,
+   "through_hole_plated": 22,
+   "tht_obstructing": 24,
+   "usable_area_mm2": 5811.1
+  },
+  "tigard": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1407.62,
+      "far_charge_mm2": 792.85,
+      "far_over_near": 0.5558,
+      "fits_by_area": true,
+      "utilisation": 0.6952
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1407.62,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.6952
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1407.62,
+      "far_charge_mm2": 353.33,
+      "far_over_near": 0.2477,
+      "fits_by_area": true,
+      "utilisation": 0.6952
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 2219.37,
+      "far_charge_mm2": 792.85,
+      "far_over_near": 0.5558,
+      "fits_by_area": false,
+      "utilisation": 1.0961
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1426.52,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.7045
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 1779.85,
+      "far_charge_mm2": 353.33,
+      "far_over_near": 0.2477,
+      "fits_by_area": true,
+      "utilisation": 0.879
+     }
+    },
+    "one_face_observed": null
+   },
+   "census_sides": "both",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": true,
+   "pad_bearing_B": 2,
+   "parts_charged": 89,
+   "through_hole_plated": 8,
+   "tht_obstructing": 12,
+   "usable_area_mm2": 2024.79
+  },
+  "ulx3s": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "B.Cu",
+      "charged_area_mm2": 4226.53,
+      "far_charge_mm2": 2209.87,
+      "far_over_near": 0.3569,
+      "fits_by_area": true,
+      "utilisation": 0.9128
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 4175.64,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.9018
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 4175.64,
+      "far_charge_mm2": 819.34,
+      "far_over_near": 0.1323,
+      "fits_by_area": true,
+      "utilisation": 0.9018
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "B.Cu",
+      "charged_area_mm2": 8402.17,
+      "far_charge_mm2": 2209.87,
+      "far_over_near": 0.3569,
+      "fits_by_area": false,
+      "utilisation": 1.8146
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 6192.3,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": false,
+      "utilisation": 1.3373
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 7011.64,
+      "far_charge_mm2": 819.34,
+      "far_over_near": 0.1323,
+      "fits_by_area": false,
+      "utilisation": 1.5143
+     }
+    },
+    "one_face_observed": null
+   },
+   "census_sides": "both",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "B",
+   "declared_is_hypothetical": true,
+   "pad_bearing_B": 163,
+   "parts_charged": 226,
+   "through_hole_plated": 11,
+   "tht_obstructing": 12,
+   "usable_area_mm2": 4630.4
+  },
+  "watchy": {
+   "arms": {
+    "busiest": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 739.8,
+      "far_charge_mm2": 169.87,
+      "far_over_near": 0.2296,
+      "fits_by_area": true,
+      "utilisation": 0.5018
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 739.8,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5018
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 739.8,
+      "far_charge_mm2": 48.71,
+      "far_over_near": 0.0658,
+      "fits_by_area": true,
+      "utilisation": 0.5018
+     }
+    },
+    "one_face_declared": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 909.67,
+      "far_charge_mm2": 169.87,
+      "far_over_near": 0.2296,
+      "fits_by_area": true,
+      "utilisation": 0.617
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 739.8,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5018
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 788.51,
+      "far_charge_mm2": 48.71,
+      "far_over_near": 0.0658,
+      "fits_by_area": true,
+      "utilisation": 0.5348
+     }
+    },
+    "one_face_observed": {
+     "courtyard": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 909.67,
+      "far_charge_mm2": 169.87,
+      "far_over_near": 0.2296,
+      "fits_by_area": true,
+      "utilisation": 0.617
+     },
+     "none": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 739.8,
+      "far_charge_mm2": 0.0,
+      "far_over_near": 0.0,
+      "fits_by_area": true,
+      "utilisation": 0.5018
+     },
+     "tht": {
+      "binding_side": "F.Cu",
+      "charged_area_mm2": 788.51,
+      "far_charge_mm2": 48.71,
+      "far_over_near": 0.0658,
+      "fits_by_area": true,
+      "utilisation": 0.5348
+     }
+    }
+   },
+   "census_sides": "F",
+   "containers_excluded": [],
+   "courtyard_sides_differ": 0,
+   "courtyard_sides_drawn": 0,
+   "declared_face": "F",
+   "declared_is_hypothetical": false,
+   "pad_bearing_B": 0,
+   "parts_charged": 84,
+   "through_hole_plated": 1,
+   "tht_obstructing": 5,
+   "usable_area_mm2": 1474.31
+  }
+ },
+ "confound": {
+  "courtyard_sides_differ": 0,
+  "courtyard_sides_drawn": 2
+ },
+ "control": {
+  "nc1_fields_per_row": 8,
+  "nc1_mismatches": [],
+  "nc1_rows": 37,
+  "nc2_boards": [
+   "haasoscope_pro_max_test",
+   "qfn_diffpair_escape",
+   "qfn_interior_pads",
+   "qfn_underpad_coupling",
+   "routed_output"
+  ],
+  "nc2_mismatches": []
+ },
+ "engine_sha": "b58d5924f3644576634d29600d53502f16ab0d9a",
+ "headline": {
+  "double": {
+   "busiest.courtyard": [
+    [
+     "flat_hierarchy",
+     1.0
+    ],
+    [
+     "cap_chain",
+     0.9123
+    ],
+    [
+     "interf_u_unrouted",
+     0.878
+    ],
+    [
+     "interf_u_unrouted_placed",
+     0.878
+    ],
+    [
+     "kit-dev-coldfire-xilinx_5213",
+     0.6946
+    ],
+    [
+     "splitflap_driver",
+     0.6325
+    ],
+    [
+     "glasgow_revC",
+     0.5654
+    ],
+    [
+     "tigard",
+     0.5558
+    ],
+    [
+     "esp_prog",
+     0.4651
+    ],
+    [
+     "sonde_u",
+     0.4309
+    ],
+    [
+     "rp2350_fpga_eensy_prePlane",
+     0.4171
+    ],
+    [
+     "lvds_converter_dualclk",
+     0.3915
+    ],
+    [
+     "lvds_converter_dualclk_gnd",
+     0.3915
+    ],
+    [
+     "qfn_csi_underpad_diff",
+     0.3758
+    ],
+    [
+     "ulx3s",
+     0.3569
+    ],
+    [
+     "orangecrab_ext_pll",
+     0.2825
+    ],
+    [
+     "watchy",
+     0.2296
+    ]
+   ],
+   "busiest.tht": [
+    [
+     "flat_hierarchy",
+     0.5866
+    ],
+    [
+     "interf_u_unrouted",
+     0.5519
+    ],
+    [
+     "interf_u_unrouted_placed",
+     0.5519
+    ],
+    [
+     "esp_prog",
+     0.4352
+    ],
+    [
+     "cap_chain",
+     0.3271
+    ],
+    [
+     "sonde_u",
+     0.2719
+    ],
+    [
+     "kit-dev-coldfire-xilinx_5213",
+     0.2607
+    ],
+    [
+     "tigard",
+     0.2477
+    ],
+    [
+     "rp2350_fpga_eensy_prePlane",
+     0.201
+    ],
+    [
+     "glasgow_revC",
+     0.1923
+    ],
+    [
+     "splitflap_driver",
+     0.1901
+    ],
+    [
+     "lvds_converter_dualclk",
+     0.1819
+    ],
+    [
+     "lvds_converter_dualclk_gnd",
+     0.1819
+    ],
+    [
+     "orangecrab_ext_pll",
+     0.1797
+    ],
+    [
+     "qfn_csi_underpad_diff",
+     0.16
+    ],
+    [
+     "ulx3s",
+     0.1323
+    ],
+    [
+     "watchy",
+     0.0658
+    ]
+   ],
+   "one_face_declared.courtyard": [
+    [
+     "flat_hierarchy",
+     1.0
+    ],
+    [
+     "cap_chain",
+     0.9123
+    ],
+    [
+     "interf_u_unrouted",
+     0.878
+    ],
+    [
+     "interf_u_unrouted_placed",
+     0.878
+    ],
+    [
+     "kit-dev-coldfire-xilinx_5213",
+     0.6946
+    ],
+    [
+     "splitflap_driver",
+     0.6325
+    ],
+    [
+     "glasgow_revC",
+     0.5654
+    ],
+    [
+     "tigard",
+     0.5558
+    ],
+    [
+     "esp_prog",
+     0.4651
+    ],
+    [
+     "sonde_u",
+     0.4309
+    ],
+    [
+     "rp2350_fpga_eensy_prePlane",
+     0.4171
+    ],
+    [
+     "lvds_converter_dualclk",
+     0.3915
+    ],
+    [
+     "lvds_converter_dualclk_gnd",
+     0.3915
+    ],
+    [
+     "qfn_csi_underpad_diff",
+     0.3758
+    ],
+    [
+     "ulx3s",
+     0.3569
+    ],
+    [
+     "orangecrab_ext_pll",
+     0.2825
+    ],
+    [
+     "watchy",
+     0.2296
+    ]
+   ],
+   "one_face_declared.tht": [
+    [
+     "flat_hierarchy",
+     0.5866
+    ],
+    [
+     "interf_u_unrouted",
+     0.5519
+    ],
+    [
+     "interf_u_unrouted_placed",
+     0.5519
+    ],
+    [
+     "esp_prog",
+     0.4352
+    ],
+    [
+     "cap_chain",
+     0.3271
+    ],
+    [
+     "sonde_u",
+     0.2719
+    ],
+    [
+     "kit-dev-coldfire-xilinx_5213",
+     0.2607
+    ],
+    [
+     "tigard",
+     0.2477
+    ],
+    [
+     "rp2350_fpga_eensy_prePlane",
+     0.201
+    ],
+    [
+     "glasgow_revC",
+     0.1923
+    ],
+    [
+     "splitflap_driver",
+     0.1901
+    ],
+    [
+     "lvds_converter_dualclk",
+     0.1819
+    ],
+    [
+     "lvds_converter_dualclk_gnd",
+     0.1819
+    ],
+    [
+     "orangecrab_ext_pll",
+     0.1797
+    ],
+    [
+     "qfn_csi_underpad_diff",
+     0.16
+    ],
+    [
+     "ulx3s",
+     0.1323
+    ],
+    [
+     "watchy",
+     0.0658
+    ]
+   ],
+   "one_face_observed.courtyard": [
+    [
+     "flat_hierarchy",
+     1.0
+    ],
+    [
+     "cap_chain",
+     0.9123
+    ],
+    [
+     "interf_u_unrouted",
+     0.878
+    ],
+    [
+     "interf_u_unrouted_placed",
+     0.878
+    ],
+    [
+     "splitflap_driver",
+     0.6325
+    ],
+    [
+     "esp_prog",
+     0.4651
+    ],
+    [
+     "lvds_converter_dualclk",
+     0.3915
+    ],
+    [
+     "lvds_converter_dualclk_gnd",
+     0.3915
+    ],
+    [
+     "qfn_csi_underpad_diff",
+     0.3758
+    ],
+    [
+     "watchy",
+     0.2296
+    ]
+   ],
+   "one_face_observed.tht": [
+    [
+     "flat_hierarchy",
+     0.5866
+    ],
+    [
+     "interf_u_unrouted",
+     0.5519
+    ],
+    [
+     "interf_u_unrouted_placed",
+     0.5519
+    ],
+    [
+     "esp_prog",
+     0.4352
+    ],
+    [
+     "cap_chain",
+     0.3271
+    ],
+    [
+     "splitflap_driver",
+     0.1901
+    ],
+    [
+     "lvds_converter_dualclk",
+     0.1819
+    ],
+    [
+     "lvds_converter_dualclk_gnd",
+     0.1819
+    ],
+    [
+     "qfn_csi_underpad_diff",
+     0.16
+    ],
+    [
+     "watchy",
+     0.0658
+    ]
+   ]
+  },
+  "flips": {
+   "busiest.courtyard": [],
+   "busiest.tht": [],
+   "one_face_declared.courtyard": [
+    [
+     "glasgow_revC",
+     0.8804,
+     1.3781,
+     3791.77
+    ],
+    [
+     "rp2350_fpga_eensy_prePlane",
+     0.8416,
+     1.1927,
+     584.18
+    ],
+    [
+     "sonde_u",
+     0.8446,
+     1.2085,
+     3349.09
+    ],
+    [
+     "tigard",
+     0.7045,
+     1.0961,
+     2024.79
+    ]
+   ],
+   "one_face_declared.tht": [
+    [
+     "glasgow_revC",
+     0.8804,
+     1.0497,
+     3791.77
+    ],
+    [
+     "rp2350_fpga_eensy_prePlane",
+     0.8416,
+     1.0108,
+     584.18
+    ],
+    [
+     "sonde_u",
+     0.8446,
+     1.0742,
+     3349.09
+    ]
+   ],
+   "one_face_observed.courtyard": [],
+   "one_face_observed.tht": []
+  },
+  "moves": {
+   "busiest.courtyard": {
+    "boards": [
+     [
+      "rp2350_fpga_eensy_prePlane",
+      0.0517
+     ],
+     [
+      "ulx3s",
+      0.011
+     ]
+    ],
+    "max": 0.0517,
+    "median": 0.0314,
+    "n": 2
+   },
+   "busiest.tht": {
+    "boards": [
+     [
+      "rp2350_fpga_eensy_prePlane",
+      0.0346
+     ]
+    ],
+    "max": 0.0346,
+    "median": 0.0346,
+    "n": 1
+   },
+   "one_face_declared.courtyard": {
+    "boards": [
+     [
+      "glasgow_revC",
+      0.4977
+     ],
+     [
+      "ulx3s",
+      0.4773
+     ],
+     [
+      "interf_u_unrouted",
+      0.4322
+     ],
+     [
+      "interf_u_unrouted_placed",
+      0.4322
+     ],
+     [
+      "tigard",
+      0.3916
+     ],
+     [
+      "kit-dev-coldfire-xilinx_5213",
+      0.3868
+     ],
+     [
+      "flat_hierarchy",
+      0.3801
+     ],
+     [
+      "sonde_u",
+      0.3639
+     ],
+     [
+      "orangecrab_ext_pll",
+      0.354
+     ],
+     [
+      "rp2350_fpga_eensy_prePlane",
+      0.3511
+     ],
+     [
+      "splitflap_driver",
+      0.3197
+     ],
+     [
+      "esp_prog",
+      0.2414
+     ],
+     [
+      "watchy",
+      0.1152
+     ],
+     [
+      "cap_chain",
+      0.099
+     ],
+     [
+      "lvds_converter_dualclk",
+      0.0966
+     ],
+     [
+      "lvds_converter_dualclk_gnd",
+      0.0966
+     ],
+     [
+      "qfn_csi_underpad_diff",
+      0.0521
+     ]
+    ],
+    "max": 0.4977,
+    "median": 0.354,
+    "n": 17
+   },
+   "one_face_declared.tht": {
+    "boards": [
+     [
+      "interf_u_unrouted",
+      0.2717
+     ],
+     [
+      "interf_u_unrouted_placed",
+      0.2717
+     ],
+     [
+      "sonde_u",
+      0.2296
+     ],
+     [
+      "esp_prog",
+      0.2259
+     ],
+     [
+      "orangecrab_ext_pll",
+      0.2252
+     ],
+     [
+      "flat_hierarchy",
+      0.223
+     ],
+     [
+      "ulx3s",
+      0.177
+     ],
+     [
+      "tigard",
+      0.1745
+     ],
+     [
+      "glasgow_revC",
+      0.1693
+     ],
+     [
+      "rp2350_fpga_eensy_prePlane",
+      0.1692
+     ],
+     [
+      "kit-dev-coldfire-xilinx_5213",
+      0.1452
+     ],
+     [
+      "splitflap_driver",
+      0.0961
+     ],
+     [
+      "lvds_converter_dualclk",
+      0.0449
+     ],
+     [
+      "lvds_converter_dualclk_gnd",
+      0.0449
+     ],
+     [
+      "cap_chain",
+      0.0355
+     ],
+     [
+      "watchy",
+      0.033
+     ],
+     [
+      "qfn_csi_underpad_diff",
+      0.0222
+     ]
+    ],
+    "max": 0.2717,
+    "median": 0.1693,
+    "n": 17
+   },
+   "one_face_observed.courtyard": {
+    "boards": [
+     [
+      "interf_u_unrouted",
+      0.4322
+     ],
+     [
+      "interf_u_unrouted_placed",
+      0.4322
+     ],
+     [
+      "flat_hierarchy",
+      0.3801
+     ],
+     [
+      "splitflap_driver",
+      0.3197
+     ],
+     [
+      "esp_prog",
+      0.2414
+     ],
+     [
+      "watchy",
+      0.1152
+     ],
+     [
+      "cap_chain",
+      0.099
+     ],
+     [
+      "lvds_converter_dualclk",
+      0.0966
+     ],
+     [
+      "lvds_converter_dualclk_gnd",
+      0.0966
+     ],
+     [
+      "qfn_csi_underpad_diff",
+      0.0521
+     ]
+    ],
+    "max": 0.4322,
+    "median": 0.1783,
+    "n": 10
+   },
+   "one_face_observed.tht": {
+    "boards": [
+     [
+      "interf_u_unrouted",
+      0.2717
+     ],
+     [
+      "interf_u_unrouted_placed",
+      0.2717
+     ],
+     [
+      "esp_prog",
+      0.2259
+     ],
+     [
+      "flat_hierarchy",
+      0.223
+     ],
+     [
+      "splitflap_driver",
+      0.0961
+     ],
+     [
+      "lvds_converter_dualclk",
+      0.0449
+     ],
+     [
+      "lvds_converter_dualclk_gnd",
+      0.0449
+     ],
+     [
+      "cap_chain",
+      0.0355
+     ],
+     [
+      "watchy",
+      0.033
+     ],
+     [
+      "qfn_csi_underpad_diff",
+      0.0222
+     ]
+    ],
+    "max": 0.2717,
+    "median": 0.0705,
+    "n": 10
+   }
+  },
+  "robustness": {
+   "not_robust": [],
+   "unmeasured": [
+    "per-board clearance from a sibling .kicad_pro (#441): most tracked boards carry none"
+   ]
+  }
+ },
+ "post_hoc": {
+  "finding": "no far-face charge belongs in the one-face SUM; the far face is charged into `busiest` only",
+  "generalises": "F1, which is a threshold on the same mechanism and fires only for `courtyard` on this corpus",
+  "one_face_charged_once": {
+   "courtyard": {
+    "boards_double_charged": [
+     [
+      "flat_hierarchy",
+      5927.41,
+      11854.82
+     ],
+     [
+      "interf_u_unrouted",
+      6045.77,
+      11353.71
+     ],
+     [
+      "interf_u_unrouted_placed",
+      6045.77,
+      11353.71
+     ],
+     [
+      "splitflap_driver",
+      2936.52,
+      4793.93
+     ],
+     [
+      "watchy",
+      739.8,
+      909.67
+     ],
+     [
+      "lvds_converter_dualclk",
+      411.13,
+      572.1
+     ],
+     [
+      "lvds_converter_dualclk_gnd",
+      411.13,
+      572.1
+     ],
+     [
+      "esp_prog",
+      215.46,
+      315.68
+     ],
+     [
+      "cap_chain",
+      51.57,
+      98.62
+     ],
+     [
+      "qfn_csi_underpad_diff",
+      113.05,
+      155.53
+     ]
+    ],
+    "charged_once": false
+   },
+   "none": {
+    "boards_double_charged": [],
+    "charged_once": true
+   },
+   "tht": {
+    "boards_double_charged": [
+     [
+      "flat_hierarchy",
+      5927.41,
+      9404.4
+     ],
+     [
+      "interf_u_unrouted",
+      6045.77,
+      9382.64
+     ],
+     [
+      "interf_u_unrouted_placed",
+      6045.77,
+      9382.64
+     ],
+     [
+      "splitflap_driver",
+      2936.52,
+      3494.86
+     ],
+     [
+      "esp_prog",
+      215.46,
+      309.23
+     ],
+     [
+      "lvds_converter_dualclk",
+      411.13,
+      485.92
+     ],
+     [
+      "lvds_converter_dualclk_gnd",
+      411.13,
+      485.92
+     ],
+     [
+      "watchy",
+      739.8,
+      788.51
+     ],
+     [
+      "qfn_csi_underpad_diff",
+      113.05,
+      131.13
+     ],
+     [
+      "cap_chain",
+      51.57,
+      68.45
+     ]
+    ],
+    "charged_once": false
+   }
+  },
+  "status": "POST-HOC -- reasoned after the numbers were visible, NOT part of PREREGISTRATION, and it only makes the change more conservative than the rule required",
+  "why": "sum(per_side) is each part exactly once, the demand on the one populated face. Leads on the unpopulated face compete with nothing, so any far charge there is the same area twice."
+ },
+ "preregistration": {
+  "F1_DOUBLE_MAX": 0.9,
+  "F1_WITNESS": "flat_hierarchy",
+  "F1_WITNESS_PREDICTION": 1.0,
+  "MOVE_EPS": 0.005,
+  "NC2_BOARDS": [
+   "haasoscope_pro_max_test",
+   "qfn_diffpair_escape",
+   "qfn_interior_pads",
+   "qfn_underpad_coupling",
+   "routed_output"
+  ],
+  "assembly_predicate": "legality.assembly_census (pad_is_plated_through)",
+  "bases": [
+   "busiest",
+   "one_face_observed",
+   "one_face_declared"
+  ],
+  "basis_population": {
+   "busiest": "every tracked board; charged = max(per_side)",
+   "one_face_declared": "every tracked board, declaring the census face where there is one and the majority pad-bearing face otherwise; REPORTED ONLY, never read by the rule -- on a two-sided board it is a counterfactual",
+   "one_face_observed": "boards whose assembly_census['sides'] is 'F' or 'B'; charged = sum(per_side)"
+  },
+  "currencies": [
+   "none",
+   "tht",
+   "courtyard"
+  ],
+  "decision_bases": [
+   "busiest",
+   "one_face_observed"
+  ],
+  "default_currency": "tht",
+  "default_reason": "legality.rect_on is the only place in the tree where the far-face rect is DECIDED rather than sidestepped, and it answers tht_rect. check_pockets.courtyard_cover is not a competing decision: it answers a per-window COVER question where summing never arises. grow_board giving a third answer is a second answer to a settled question.",
+  "obstruction_predicate": "legality.footprint_has_through_pads (drill > 0)",
+  "question": "which rect does a through-hole part present on the FAR face when grow_board charges part area: the whole courtyard, the drilled-pad rect, or nothing",
+  "rules": [
+   "STEP 0  if NC1 or NC2 fails on any row, the sweep decides NOTHING.",
+   "STEP 0b if courtyard_sides_differ > 0, the `courtyard` arm is confounded by the both-sides union grow_board reads and must be split into union/own-side before it may be selected.",
+   "STEP 1  F1: on a one-face basis, a currency with far_over_near >= F1_DOUBLE_MAX on any board is REJECTED for that basis.",
+   "STEP 2  F2: a currency with 0 flips and 0 moves on every decision basis is INDISTINGUISHABLE from `none` on this corpus.",
+   "STEP 3  per decision basis, among currencies neither rejected nor inert: `tht` is selected on default_reason. `courtyard` displaces it only if it survives F1 on that basis AND flips strictly more boards. If only `none` survives, that basis keeps `none` and the not_modelled disclosure becomes basis-specific.",
+   "STEP 4  if the robustness arm reports NOT ROBUST, a selection may not be taken from flips; it falls back to default_currency on default_reason alone, and the verdict says so."
+  ]
+ },
+ "verdict": {
+  "bound_by": {
+   "busiest": "default_reason (legality.rect_on)",
+   "one_face_observed": "default_reason (legality.rect_on)"
+  },
+  "f1_rejected": {
+   "busiest": [],
+   "one_face_observed": [
+    "courtyard"
+   ]
+  },
+  "f2_inert": [],
+  "selected": {
+   "busiest": "tht",
+   "one_face_observed": "tht"
+  },
+  "why": []
+ }
+}
