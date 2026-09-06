@@ -340,6 +340,40 @@ def _emit_summary_min(gate_report: Optional[dict] = None,
         print(f"  WARNING: could not emit JSON_SUMMARY_MIN: {_e}")
 
 
+def _write_summary_min_file(json_out: Optional[str], status: str) -> None:
+    """Write the --json-out file for a run that legitimately did nothing.
+
+    The console contract above ("exactly one JSON_SUMMARY_MIN per outermost
+    run") has a file twin: a caller that asked for --json-out reads the FILE,
+    and an early return that prints the tally but skips the write leaves that
+    caller unable to tell "nothing to do" from a crash. That is not
+    hypothetical: a wrapper staging an already-routed board got "All nets are
+    already fully connected", exit 0, and no file - and refused the run as
+    unaccounted, three times over, on two different boards.
+
+    The document carries the same empty tally the console line prints, the
+    `status` naming WHY it is empty, and the env-knob echo the normal
+    end-of-run summary carries. Deliberately NO min_clearance_used: a run
+    that routed nothing applied no clearance, and inventing a number here
+    would defeat a reader's floor check.
+    """
+    if not json_out:
+        return
+    try:
+        from route_summary import write_summary_file
+        document = {'successful': 0, 'failed': 0, 'status': status}
+        try:
+            import env_knobs as _ek653
+            document['env_knobs'] = _ek653.active_env_knobs()
+        except Exception:                                       # noqa: BLE001
+            pass
+        write_summary_file(json_out, document)
+        print(f"  route summary written to {json_out}")
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  WARNING: could not write --json-out {json_out}: "
+              f"{type(_e).__name__}: {_e}")
+
+
 def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
                           protect_unfinished, keep_input_copper, skip_routing):
     """Sweep pad-less copper islands off the FINAL board (#659).
@@ -1332,6 +1366,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("No valid nets to route!")
         if final_reconcile:
             _emit_summary_min(status='no_valid_nets')
+        _write_summary_min_file(json_out, 'no_valid_nets')
         if return_results:
             return 0, 0, 0.0, _empty_results_data()
         _write_passthrough_output(input_file, output_file)
@@ -1440,6 +1475,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("All nets are already fully connected - nothing to route!")
         if final_reconcile:
             _emit_summary_min(status='already_connected')
+        _write_summary_min_file(json_out, 'already_connected')
         # The sweep runs HERE too (#659). The fragment gate diverts a net whose
         # extra fragments are all pad-less to this sweep instead of the router,
         # so a step whose WHOLE scope is diverted lands on this early return --
