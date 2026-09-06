@@ -42,7 +42,7 @@ the other layer closed wherever the schedule requires one -- and the
 lanes not yet routed are stamped as virtual copper on the layers they
 may occupy, so the router places the dive and surface vias where they
 fit and never where a later lane must pass. A refused lane feeds back
-to the schedule (launch pitch, lead and spacer columns) and the
+to the schedule (launch pitch) and the
 corridor reruns; what is still refused is reported and left open.
 
 WHERE CORRIDORS MEET. Two corridors never overlap along their length
@@ -510,7 +510,7 @@ class Corridor:
         self.leg_layer = {}        # side exiter -> the layer of its exit leg
         self.join_leg_s = {}       # joiner -> s of its join leg (after jog)
         self.exit_leg_s = {}       # side exiter -> s of its exit leg
-        self.sched_cur = None      # the Schedule plan_columns last ran
+        self.sched_cur = None      # the Schedule the last attempt ran
 
     # ------------------------------------------------------------ geometry
     def build_spine(self):
@@ -870,110 +870,20 @@ class Corridor:
 
     # ------------------------------------------------------------ lanes
 
-    def lay_lanes(self, cols, sched=None):
+    def lay_lanes(self, sched=None):
         """From a schedule: column positions, required-layer intervals,
         the diver windows, and every lane's (s, o) polyline. `sched`
-        (default: the one plan_columns last ran) gives the pages."""
+        (default: the one the last attempt ran) gives the pages."""
         sp = self.spine
         M = self.members
         sched = sched or self.sched_cur
-        two = getattr(sched, 'two_page', False)
-        n = len(cols)
         L_avail = self.L_free - RESERVE
-        u, need = [], 0.0
         # the layout is stretched (or squeezed) to the free length, as
         # the uniform layout was: with one page every column is a
         # constrained one at W_GATE and this is exactly (k + 1) W
-        scale = L_avail / need if need > 0 else 1.0
-        if getattr(sched, 'two_page', False) and u and scale > 1.0:
-            # surplus length is WATERFILLED over the gaps: every pitch
-            # is raised to a common level T (never lowered -- the gated
-            # pitches and via-room gaps are minima) with sum = L_avail,
-            # so the layout is as close to UNIFORM as the constraints
-            # allow. Proportional stretch kept the W_XING columns tiny
-            # relative to the gated ones, and an equal ADD left them at
-            # 0.1 when the need approached the room (K11: 15 columns in
-            # 4.95 mm, W=0.096, six lanes refused against the escape
-            # field's maze -- where the single-page braid lays the same
-            # count at ~0.33 uniform and routes). Compression below
-            # uniform appears only at a K that genuinely lacks room.
-            gaps_p = [b - a for a, b in zip([0.0] + u, u)] + [W_GATE]
-            lo_, hi_ = 0.0, L_avail
-            for _ in range(50):
-                T = (lo_ + hi_) / 2
-                if sum(max(p, T) for p in gaps_p) > L_avail:
-                    hi_ = T
-                else:
-                    lo_ = T
-            T = lo_
-            filled = [max(p, T) for p in gaps_p[:-1]]
-            u = []
-            acc = 0.0
-            for p in filled:
-                acc += p
-                u.append(acc)
-        else:
-            u = [x * scale for x in u]
-        pitches = [b - a for a, b in zip([0.0] + u, u)]
-        self.W = min(pitches) if pitches else L_avail
-        self.layout_need = need
-        self.all_cols = list(cols)
-        # slot midpoints: before the first column, between columns,
-        # after the last
-        s_m = [self.s_of_u(u[0] / 2 if u else L_avail / 2)]
-        for k in range(1, n):
-            s_m.append(self.s_of_u((u[k - 1] + u[k]) / 2))
-        if n:
-            s_m.append(self.s_of_u((u[-1] + L_avail) / 2))
-        # REQUIRED layers. A page lane is on its page over the whole
-        # schedule region (from a via's room past s0, so a tooth on the
-        # other layer can dive), which is what makes an F-page / B-page
-        # crossing free. At a constrained column (a swimmer in it) the
-        # two lanes are required on the layers pair_layers gives, over
-        # HW_COL either side of the column -- and NOT the whole column:
-        # a swimmer on F at k and on B at k+2 must change layer between
-        # the two, and a requirement that spans each whole column leaves
-        # it no cell to put the via in.
+        self.W = L_avail
+        self.layout_need = 0.0
         req = {nm: [] for nm in M}
-        for k, col in enumerate(cols):
-            pitch = min(u[k] - (u[k - 1] if k else 0.0),
-                        (u[k + 1] if k + 1 < n else L_avail) - u[k])
-            hw = 0.4 * pitch + 0.05
-            if getattr(sched, 'two_page', False):
-                # a W_XING column still needs a threadable crossing
-                # window: outside the req interval the crossed lane's
-                # virtual copper may hold BOTH layers, and a slot
-                # narrower than a track and two clearances is a wall
-                # (K4 SDQ14 -- an F-page lane that never vias -- stuck
-                # against SDQ11's F virtual either side of a 0.07
-                # half-width crossing). Same-layer overlaps of the
-                # widened intervals are harmless; different-layer ones
-                # cannot happen, the change columns stand 2 HW_COL +
-                # VIA_ROOM apart by the layout
-                hw = max(hw, HW_COL)
-            a, b = self.s_of_u(u[k] - hw), self.s_of_u(u[k] + hw)
-            for (d, p) in col:
-                # a free crossing: each lane on its page there (the
-                # router keeps a layer between requirements on its own)
-                Ld, Lp = sched.col_layers(k, d, p) if sched else ('B.Cu', 'F.Cu')
-                req[d].append((a, b, Ld))
-                req[p].append((a, b, Lp))
-        # EXIT LEGS THAT CROSS LANES. In a side-exit block the lanes
-        # leave one by one, and every leg crosses the lanes still
-        # present between it and its stub. The rule is the block's, not
-        # the leg's: ALL its legs are on one layer -- the stubs' (a leg
-        # ending on its stub's layer costs no via there) -- and a lane
-        # is on the OTHER layer from the first leg that crosses it until
-        # its own corner, where it turns onto its leg with a via. The
-        # per-leg choice this replaces (a layer per leg by the majority
-        # of the lanes it crossed) let two legs 0.4 mm apart disagree,
-        # and put a rule on the leg's OWNER too: a lane crossed at s and
-        # exiting at s + 0.4 was required on B until s + 0.25 and on F
-        # from s + 0.15 (K19 SCAS, SWE -- closed on both layers, refused
-        # before the router saw them). The owner needs no rule: the
-        # crossed lanes' copper, real or virtual, is on the other layer
-        # under its leg, so the leg goes where it can, and its via sits
-        # at the corner, a whole pitch from the previous leg.
         trank = {nm: i for i, nm in enumerate(self.target)}
         py = self.py
         self.exit_leg_s = {}
@@ -1012,153 +922,138 @@ class Corridor:
                         leg_cross.setdefault(nm, []).append(om)
         self.crossings = crossings
         leg_req_min = {}
-        if two:
-            # TWO-PAGE LEG ECONOMICS. A leg crossing a lane on the
-            # OTHER layer is free -- the block-wide layer rule priced
-            # every crossing as a forced dive (2 vias per crossed
-            # lane), which is exactly the SA7-class 4-via overspend
-            # (t7 K28: the human pays 2). Each leg picks the layer
-            # that minimises what is actually paid: 2 per crossed
-            # PAGE lane on its own layer, 1 if it differs from its
-            # lane's page (the corner via), 1 if it differs from the
-            # stub's layer. A crossed page lane dives only under a
-            # SAME-layer leg; a swimmer adapts per leg. Overlapping
-            # opposite-layer intervals from adjacent disagreeing legs
-            # are dropped in pairs (the K19 lesson: both layers
-            # closed refuses the lane before the router sees it); the
-            # obstacle map adjudicates there.
-            for nm in self.exit_block:
-                own = sched.page.get(nm) if sched else None
-                pgs = [sched.page.get(om) if sched else None
-                       for om in leg_cross.get(nm, ())]
-                cost = {}
-                for L in ('F.Cu', 'B.Cu'):
-                    c = 2 * sum(1 for p in pgs if p == L)
-                    if own is not None and own != L:
-                        c += 1
-                    if self.ctx.dest_layer[nm] != L:
-                        c += 1
-                    cost[L] = c
-                self.leg_layer[nm] = min(('F.Cu', 'B.Cu'),
-                                         key=lambda L: cost[L])
-            ivs = {}
-            for om, hits in cross_by.items():
-                own_p = sched.page.get(om) if sched else None
-                for (s_l, owner) in hits:
-                    Lg = self.leg_layer[owner]
-                    a = s_l - LEG_REQ
-                    b = s_l + LEG_REQ
-                    if om in self.exit_block:
-                        b = min(b, self.exit_leg_s[om] - 0.03)
-                    else:
-                        b = min(b, self.se[om][0] - 0.03)
-                    if b <= a:
-                        continue
-                    if own_p is not None and own_p != Lg:
-                        continue
-                    other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
-                    ivs.setdefault(om, []).append((a, b, other))
-            for om, vv in ivs.items():
-                kept_iv = [iv for iv in vv
-                           if not any(o[2] != iv[2] and iv[0] < o[1]
-                                      and o[0] < iv[1]
-                                      for o in vv if o is not iv)]
-                if kept_iv:
-                    own_p = sched.page.get(om) if sched else None
-                    dives = [a for (a, _b, L) in kept_iv if L != own_p]
-                    if dives:
-                        # only a CONFLICTING (dive) stretch cuts the
-                        # page req short; a stay-on-page stretch is the
-                        # page req continued
-                        leg_req_min[om] = min(dives)
-                    req[om].extend(kept_iv)
-        else:
-            for om, legs_s in crossings.items():
-                leg_L = self.leg_layer.get(om) or next(iter(self.leg_layer.values()))
-                other = 'B.Cu' if leg_L == 'F.Cu' else 'F.Cu'
-                a = min(legs_s) - LEG_REQ
-                b = max(legs_s) + LEG_REQ
+        # TWO-PAGE LEG ECONOMICS. A leg crossing a lane on the
+        # OTHER layer is free -- the block-wide layer rule priced
+        # every crossing as a forced dive (2 vias per crossed
+        # lane), which is exactly the SA7-class 4-via overspend
+        # (t7 K28: the human pays 2). Each leg picks the layer
+        # that minimises what is actually paid: 2 per crossed
+        # PAGE lane on its own layer, 1 if it differs from its
+        # lane's page (the corner via), 1 if it differs from the
+        # stub's layer. A crossed page lane dives only under a
+        # SAME-layer leg; a swimmer adapts per leg. Overlapping
+        # opposite-layer intervals from adjacent disagreeing legs
+        # are dropped in pairs (the K19 lesson: both layers
+        # closed refuses the lane before the router sees it); the
+        # obstacle map adjudicates there.
+        for nm in self.exit_block:
+            own = sched.page.get(nm) if sched else None
+            pgs = [sched.page.get(om) if sched else None
+                   for om in leg_cross.get(nm, ())]
+            cost = {}
+            for L in ('F.Cu', 'B.Cu'):
+                c = 2 * sum(1 for p in pgs if p == L)
+                if own is not None and own != L:
+                    c += 1
+                if self.ctx.dest_layer[nm] != L:
+                    c += 1
+                cost[L] = c
+            self.leg_layer[nm] = min(('F.Cu', 'B.Cu'),
+                                     key=lambda L: cost[L])
+        ivs = {}
+        for om, hits in cross_by.items():
+            own_p = sched.page.get(om) if sched else None
+            for (s_l, owner) in hits:
+                Lg = self.leg_layer[owner]
+                a = s_l - LEG_REQ
+                b = s_l + LEG_REQ
                 if om in self.exit_block:
-                    # ...but never past its own corner: the via goes there
                     b = min(b, self.exit_leg_s[om] - 0.03)
                 else:
                     b = min(b, self.se[om][0] - 0.03)
-                if b > a:
-                    req[om].append((a, b, other))
-        if two:
-            # RIBBON page rules. A page lane is required on its page
-            # over the whole schedule region -- from just past its
-            # birth via (0.45 for the via and its clearances when the
-            # tooth is on the other layer) to just before its landing
-            # via -- which is what makes every crossing with it free
-            # for a lane on the other layer. The req stops short of an
-            # exit corner and of any exit leg that crosses the lane
-            # (those stretches carry their own rules above).
-            tlr, dlr = self.ctx.tooth_layer, self.ctx.dest_layer
-            line = {}
-            for nm in M:
-                s_a = (self.join_leg_s[nm] if nm in self.join_block
-                       else max(self.s0, self.st[nm][0]))
-                line[nm] = (s_a, self.launch_o[nm], self.s1, py[trank[nm]])
-
-            def _o_at(ln, s):
-                s_a, o_a, s_b, o_b = ln
-                t = (s - s_a) / max(s_b - s_a, 1e-9)
-                return o_a + t * (o_b - o_a)
-
-            def _cross_s(a_, b_):
-                lo_s = max(line[a_][0], line[b_][0])
-                hi_s = min(line[a_][2], line[b_][2])
-                if hi_s <= lo_s:
-                    return None
-                d0 = _o_at(line[a_], lo_s) - _o_at(line[b_], lo_s)
-                d1 = _o_at(line[a_], hi_s) - _o_at(line[b_], hi_s)
-                if d0 == d1:
-                    return None
-                x = lo_s + (hi_s - lo_s) * d0 / (d0 - d1)
-                return x if lo_s <= x <= hi_s else None
-            for nm in M:
-                pg = sched.page.get(nm)
-                if not pg:
+                if b <= a:
                     continue
-                # the page req must COVER the lane's first and last
-                # geometric crossings: a B-page riser that crosses its
-                # neighbour inside the birth stretch left that stretch
-                # stamped on BOTH layers exactly across the crossing
-                # and sealed the neighbour in (K11 SDQ13, 276 cells).
-                # The birth/landing via moves out toward the launch or
-                # exit run when a crossing comes that early.
-                xs_ = [x for om in M if om != nm and sched.inverted(nm, om)
-                       and (x := _cross_s(nm, om)) is not None]
-                a = self.s0 + (0.05 if tlr[nm] == pg else 0.45)
-                if tlr[nm] != pg and xs_:
-                    a = min(a, max(self.s0 + 0.02, min(xs_) - HW_COL))
-                b = self.s1 - (0.05 if dlr[nm] == pg else 0.45)
-                if dlr[nm] != pg and xs_:
-                    b = max(b, min(self.s1 - 0.02, max(xs_) + HW_COL))
-                if nm in self.exit_block:
-                    b = min(b, self.exit_leg_s[nm] - 0.35)
-                if nm in leg_req_min:
-                    # the page req stops only at a CONFLICTING leg's
-                    # dive stretch -- a free (other-layer) crossing no
-                    # longer cuts it short
-                    b = min(b, leg_req_min[nm] - 0.03)
-                if b > a:
-                    req[nm].append((a, b, pg))
-            # SWIMMER x SWIMMER needs no assigned crossing: swimmers
-            # route LAST, one at a time, against each other's REAL
-            # copper -- an unrouted swimmer stamps no mid-corridor
-            # virtual at all (see virtual_of), because a fixed pair of
-            # layers at a fixed line intersection just recreated the
-            # rigidity the ribbon removes (K28: 3/27, every swimmer
-            # refused against the others' both-layer virtual walls).
-            # (RESERVED HOPS -- planned via sites at each swimmer's
-            # run boundaries, stamped as virtual vias for the pages to
-            # clear -- were tried and measured WORSE: the hop midpoint
-            # lands between page lines under a lane pitch apart, so
-            # the reservation walls the PAGES instead: K11 10/11 ->
-            # 5/11. The swimmer's real bottleneck on this fanout is
-            # the F layer saturated by all-F escapes; step 3.)
+                if own_p is not None and own_p != Lg:
+                    continue
+                other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
+                ivs.setdefault(om, []).append((a, b, other))
+        for om, vv in ivs.items():
+            kept_iv = [iv for iv in vv
+                       if not any(o[2] != iv[2] and iv[0] < o[1]
+                                  and o[0] < iv[1]
+                                  for o in vv if o is not iv)]
+            if kept_iv:
+                own_p = sched.page.get(om) if sched else None
+                dives = [a for (a, _b, L) in kept_iv if L != own_p]
+                if dives:
+                    # only a CONFLICTING (dive) stretch cuts the
+                    # page req short; a stay-on-page stretch is the
+                    # page req continued
+                    leg_req_min[om] = min(dives)
+                req[om].extend(kept_iv)
+        # RIBBON page rules. A page lane is required on its page
+        # over the whole schedule region -- from just past its
+        # birth via (0.45 for the via and its clearances when the
+        # tooth is on the other layer) to just before its landing
+        # via -- which is what makes every crossing with it free
+        # for a lane on the other layer. The req stops short of an
+        # exit corner and of any exit leg that crosses the lane
+        # (those stretches carry their own rules above).
+        tlr, dlr = self.ctx.tooth_layer, self.ctx.dest_layer
+        line = {}
+        for nm in M:
+            s_a = (self.join_leg_s[nm] if nm in self.join_block
+                   else max(self.s0, self.st[nm][0]))
+            line[nm] = (s_a, self.launch_o[nm], self.s1, py[trank[nm]])
+
+        def _o_at(ln, s):
+            s_a, o_a, s_b, o_b = ln
+            t = (s - s_a) / max(s_b - s_a, 1e-9)
+            return o_a + t * (o_b - o_a)
+
+        def _cross_s(a_, b_):
+            lo_s = max(line[a_][0], line[b_][0])
+            hi_s = min(line[a_][2], line[b_][2])
+            if hi_s <= lo_s:
+                return None
+            d0 = _o_at(line[a_], lo_s) - _o_at(line[b_], lo_s)
+            d1 = _o_at(line[a_], hi_s) - _o_at(line[b_], hi_s)
+            if d0 == d1:
+                return None
+            x = lo_s + (hi_s - lo_s) * d0 / (d0 - d1)
+            return x if lo_s <= x <= hi_s else None
+        for nm in M:
+            pg = sched.page.get(nm)
+            if not pg:
+                continue
+            # the page req must COVER the lane's first and last
+            # geometric crossings: a B-page riser that crosses its
+            # neighbour inside the birth stretch left that stretch
+            # stamped on BOTH layers exactly across the crossing
+            # and sealed the neighbour in (K11 SDQ13, 276 cells).
+            # The birth/landing via moves out toward the launch or
+            # exit run when a crossing comes that early.
+            xs_ = [x for om in M if om != nm and sched.inverted(nm, om)
+                   and (x := _cross_s(nm, om)) is not None]
+            a = self.s0 + (0.05 if tlr[nm] == pg else 0.45)
+            if tlr[nm] != pg and xs_:
+                a = min(a, max(self.s0 + 0.02, min(xs_) - HW_COL))
+            b = self.s1 - (0.05 if dlr[nm] == pg else 0.45)
+            if dlr[nm] != pg and xs_:
+                b = max(b, min(self.s1 - 0.02, max(xs_) + HW_COL))
+            if nm in self.exit_block:
+                b = min(b, self.exit_leg_s[nm] - 0.35)
+            if nm in leg_req_min:
+                # the page req stops only at a CONFLICTING leg's
+                # dive stretch -- a free (other-layer) crossing no
+                # longer cuts it short
+                b = min(b, leg_req_min[nm] - 0.03)
+            if b > a:
+                req[nm].append((a, b, pg))
+        # SWIMMER x SWIMMER needs no assigned crossing: swimmers
+        # route LAST, one at a time, against each other's REAL
+        # copper -- an unrouted swimmer stamps no mid-corridor
+        # virtual at all (see virtual_of), because a fixed pair of
+        # layers at a fixed line intersection just recreated the
+        # rigidity the ribbon removes (K28: 3/27, every swimmer
+        # refused against the others' both-layer virtual walls).
+        # (RESERVED HOPS -- planned via sites at each swimmer's
+        # run boundaries, stamped as virtual vias for the pages to
+        # clear -- were tried and measured WORSE: the hop midpoint
+        # lands between page lines under a lane pitch apart, so
+        # the reservation walls the PAGES instead: K11 10/11 ->
+        # 5/11. The swimmer's real bottleneck on this fanout is
+        # the F layer saturated by all-F escapes; step 3.)
         # POSSIBLE back-layer intervals: a diver may be on B only from
         # after the last foreign pass before its first own swap until
         # before the first foreign crossing after its last -- it must be
@@ -1169,7 +1064,7 @@ class Corridor:
         bwin = {}
         for nm in M:
             wins = [(self.s1 - 0.1, 1e9)]
-            if two and sched.page.get(nm) is None:
+            if sched.page.get(nm) is None:
                 # a ribbon swimmer may weave anywhere: the page lanes'
                 # copper and its own assigned crossings are the law
                 wins.append((-1e9, 1e9))
@@ -1197,15 +1092,7 @@ class Corridor:
         # lane centrelines in (s, o): tooth (or its join leg's end), the
         # column midpoints in the order the schedule gives, the target
         # slot at s1, then the tail (head-on) or the run to the exit leg
-        orders = [list(self.launch)]
-        Ly, py = self.Ly, self.py
-        u_first = u[0] if u else L_avail
-
-        def morph_t(s):
-            return max(0.0, (self.u_of(s) - u_first) / max(self.L_free - u_first, 1e-9))
-
-        def slot(t, i):
-            return (1 - t) * Ly[i] + t * py[i]
+        py = self.py
         self.mid, self.legs, self.jogs = {}, {}, {}
         for nm in M:
             s_t, o_t = self.st[nm]
@@ -1220,13 +1107,9 @@ class Corridor:
                 pts = [(s_l, self.join_block[nm])]
             else:
                 pts = [(s_t, o_t)]
-            if two:
-                # RIBBON: hold the launch offset at the region start,
-                # then run STRAIGHT to the target slot at s1
-                pts.append((self.s_of_u(0.0), self.launch_o[nm]))
-            else:
-                for k in range(n + 1):
-                    pts.append((s_m[k], slot(morph_t(s_m[k]), orders[k].index(nm))))
+            # RIBBON: hold the launch offset at the region start,
+            # then run STRAIGHT to the target slot at s1
+            pts.append((self.s_of_u(0.0), self.launch_o[nm]))
             pts.append((self.s1, py[trank[nm]]))
             if nm in self.exit_block:
                 s_l = self.exit_leg_s[nm]
@@ -1288,72 +1171,71 @@ class Corridor:
         # spots ride virtual_vias_of, so every lane routed while the
         # owner is still unrouted keeps clear of them.
         self.hops = {}
-        if getattr(sched, 'two_page', False):
-            two_obs = {L: self.ctx.obs_but(M[0], M, L)
-                       for L in ('F.Cu', 'B.Cu')}
-            pad_r = (VIA_SIZE - TRACK) / 2
+        two_obs = {L: self.ctx.obs_but(M[0], M, L)
+                   for L in ('F.Cu', 'B.Cu')}
+        pad_r = (VIA_SIZE - TRACK) / 2
 
-            def line_o(om, s):
-                ms_ = self.mid[om]
-                if not (ms_[0][0] - 1e-9 <= s <= ms_[-1][0] + 1e-9):
-                    return None
-                return float(np.interp(s, [p[0] for p in ms_],
-                                       [p[1] for p in ms_]))
+        def line_o(om, s):
+            ms_ = self.mid[om]
+            if not (ms_[0][0] - 1e-9 <= s <= ms_[-1][0] + 1e-9):
+                return None
+            return float(np.interp(s, [p[0] for p in ms_],
+                                   [p[1] for p in ms_]))
 
-            for nm in M:
-                if sched.page.get(nm) is not None:
+        for nm in M:
+            if sched.page.get(nm) is not None:
+                continue
+            # the swimmer's crossings with PAGE lanes, each forcing
+            # the layer opposite the page it crosses
+            want = []
+            for om in M:
+                P = sched.page.get(om)
+                if om == nm or P is None or not sched.inverted(nm, om):
                     continue
-                # the swimmer's crossings with PAGE lanes, each forcing
-                # the layer opposite the page it crosses
-                want = []
-                for om in M:
-                    P = sched.page.get(om)
-                    if om == nm or P is None or not sched.inverted(nm, om):
-                        continue
-                    lo_s = max(self.mid[nm][0][0], self.mid[om][0][0])
-                    hi_s = min(self.mid[nm][-1][0], self.mid[om][-1][0])
-                    if hi_s - lo_s < 0.1:
-                        continue
-                    S = np.arange(lo_s, hi_s, 0.05)
-                    d = np.array([line_o(nm, s) - line_o(om, s) for s in S])
-                    for i in np.where(np.sign(d[:-1]) != np.sign(d[1:]))[0]:
-                        want.append((float(S[i]),
-                                     'B.Cu' if P == 'F.Cu' else 'F.Cu'))
-                if not want:
+                lo_s = max(self.mid[nm][0][0], self.mid[om][0][0])
+                hi_s = min(self.mid[nm][-1][0], self.mid[om][-1][0])
+                if hi_s - lo_s < 0.1:
                     continue
-                want.sort()
-                seq = ([(self.mid[nm][0][0], self.ctx.tooth_layer[nm])]
-                       + want
-                       + [(self.mid[nm][-1][0], self.ctx.dest_layer[nm])])
-                spots = []
-                for (s_a, L_a), (s_b, L_b) in zip(seq, seq[1:]):
-                    if L_a == L_b or s_b - s_a < 0.1:
+                S = np.arange(lo_s, hi_s, 0.05)
+                d = np.array([line_o(nm, s) - line_o(om, s) for s in S])
+                for i in np.where(np.sign(d[:-1]) != np.sign(d[1:]))[0]:
+                    want.append((float(S[i]),
+                                 'B.Cu' if P == 'F.Cu' else 'F.Cu'))
+            if not want:
+                continue
+            want.sort()
+            seq = ([(self.mid[nm][0][0], self.ctx.tooth_layer[nm])]
+                   + want
+                   + [(self.mid[nm][-1][0], self.ctx.dest_layer[nm])])
+            spots = []
+            for (s_a, L_a), (s_b, L_b) in zip(seq, seq[1:]):
+                if L_a == L_b or s_b - s_a < 0.1:
+                    continue
+                got = None
+                mid_s = (s_a + s_b) / 2
+                for ds in sorted(np.arange(s_a + 0.05, s_b - 0.049, 0.05),
+                                 key=lambda v: abs(v - mid_s)):
+                    o0 = line_o(nm, ds)
+                    if o0 is None:
                         continue
-                    got = None
-                    mid_s = (s_a + s_b) / 2
-                    for ds in sorted(np.arange(s_a + 0.05, s_b - 0.049, 0.05),
-                                     key=lambda v: abs(v - mid_s)):
-                        o0 = line_o(nm, ds)
-                        if o0 is None:
+                    for do in (0.0, .15, -.15, .3, -.3, .45, -.45,
+                               .6, -.6, .9, -.9, 1.2, -1.2):
+                        xy = sp.xy(ds, o0 + do)
+                        if any(two_obs[L].point_violation(xy, pad=pad_r)
+                               is not None for L in ('F.Cu', 'B.Cu')):
                             continue
-                        for do in (0.0, .15, -.15, .3, -.3, .45, -.45,
-                                   .6, -.6, .9, -.9, 1.2, -1.2):
-                            xy = sp.xy(ds, o0 + do)
-                            if any(two_obs[L].point_violation(xy, pad=pad_r)
-                                   is not None for L in ('F.Cu', 'B.Cu')):
-                                continue
-                            if any(om != nm and (oo := line_o(om, ds))
-                                   is not None and abs(o0 + do - oo) < 0.30
-                                   for om in M):
-                                continue
-                            got = xy
-                            break
-                        if got:
-                            break
+                        if any(om != nm and (oo := line_o(om, ds))
+                               is not None and abs(o0 + do - oo) < 0.30
+                               for om in M):
+                            continue
+                        got = xy
+                        break
                     if got:
-                        spots.append(got)
-                if spots:
-                    self.hops[nm] = spots
+                        break
+                if got:
+                    spots.append(got)
+            if spots:
+                self.hops[nm] = spots
 
     def allowed(self, nm, s, L):
         if any(xa <= s <= xb and RL != L for (xa, xb, RL) in self.req.get(nm, ())):
@@ -1453,8 +1335,7 @@ class Corridor:
             okL = (np.ones(S.shape, dtype=bool) if open_layers
                    else self.allowed_vec(nm, S, L))
             sc = getattr(self, 'sched_cur', None)
-            if (sc is not None and getattr(sc, 'two_page', False)
-                    and sc.page.get(nm) is None):
+            if sc is not None and sc.page.get(nm) is None:
                 # a ribbon SWIMMER weaves through the page lattice: the
                 # neighbour-pinch band is wrong for it -- its same-layer
                 # neighbours are the very lanes it crosses, and they
@@ -1483,7 +1364,7 @@ class Corridor:
                 hi1 = np.where(nxt < BIG / 2, (nxt + o_nm1) / 2 - HALF_SEP, BIG)
                 lo = np.interp(S, sg, lo1)
                 hi = np.interp(S, sg, hi1)
-                if sc is not None and getattr(sc, 'two_page', False):
+                if sc is not None:
                     # a RIBBON page lane may dodge locally: the
                     # neighbours' virtual/real copper is the law, the
                     # pinch only a guide (PAGE_TUBE)
@@ -1502,8 +1383,7 @@ class Corridor:
             # steep diagonal, and the +-0.03 tube around it holds no
             # connected cell path, so the floor grows with the local
             # slope of the lane's own centreline.)
-            if getattr(self, 'sched_cur', None) is not None \
-                    and getattr(self.sched_cur, 'two_page', False):
+            if getattr(self, 'sched_cur', None) is not None:
                 dms = np.maximum(np.diff(ms), 1e-9)
                 sl = np.abs(np.diff(mo)) / dms
                 seg_i = np.clip(np.searchsorted(ms, S, side='right') - 1,
@@ -1536,7 +1416,7 @@ class Corridor:
         promise."""
         sp = self.spine
         sc = getattr(self, 'sched_cur', None)
-        two = sc is not None and getattr(sc, 'two_page', False)
+        two = sc is not None
         segs = []
         for om in unrouted:
             # a ribbon SWIMMER's mid-corridor line is not a promise
@@ -1654,8 +1534,7 @@ class Corridor:
         # the A* explored 12k cells and never saw the via diamonds a
         # lane's width away (K11 SDQ15)
         sc = getattr(self, 'sched_cur', None)
-        swim = (sc is not None and getattr(sc, 'two_page', False)
-                and sc.page.get(nm) is None)
+        swim = sc is not None and sc.page.get(nm) is None
         margin = SWIM_TUBE + 0.4 if swim else 0.6
         # FREE SWIMMERS (#622): route the whole swimmer class the way
         # the last call routes refusals -- no band, wide window --
@@ -1705,13 +1584,6 @@ class Corridor:
         return segs_all, vias_all
 
 
-    def plan_columns(self, sched, gaps, lead):
-        """The schedule's columns. On the two-page ribbon every crossing
-        is either between pages (free) or a swimmer's (routed free), so
-        there are no swap columns to lay out."""
-        self.sched_cur = sched
-        return [], 'last'
-
     def run(self, plan_only=False):
         ctx, log = self.ctx, self.log
         M = self.members
@@ -1743,59 +1615,43 @@ class Corridor:
             # planned lanes too (cross_reserve reads lane_xy)
             self.sched_cur = sched
             try:
-                cols, _gate = self.plan_columns(
-                    sched, {d: 1 for d in sched.divers},
-                    {d: 0 for d in sched.divers})
-                self.lay_lanes(cols)
+                self.sched_cur = sched
+                self.lay_lanes()
             except Exception as e:
                 self.log(f'  plan-only lanes not laid ({e})')
             return
-        gaps = {d: 1 for d in sched.divers}
-        lead = {d: 0 for d in sched.divers}
         boost = {}                # ribbon: refused lanes route earlier
         prev_refused = None
-        best = None
         for attempt in range(6):
             self.offsets(ly_floor)
             sched = Schedule(self.launch, self.target, ctx.tooth_layer,
                              dest_layer=ctx.dest_layer)
-            cols, gate = self.plan_columns(sched, gaps, lead)
-            self.lay_lanes(cols)
+            self.sched_cur = sched
+            self.lay_lanes()
             log(f'  attempt {attempt}: need {self.layout_need:.2f} of '
                 f'{self.L_free - RESERVE:.2f} mm, W={self.W:.3f}, launch pitch >= '
                 f'{ly_floor:.2f}; pages F {len(M) - len(sched.divers)} / B '
                 f'{len(sched.b_page)} / swimmers {len(sched.swimmers)}'
-                + (f', gate {gate}' if gate != 'last' else '')
                 + (f', {len(self.crossings)} lane(s) crossed by exit legs'
-                   if self.crossings else '')
-                + (f', gaps {dict((d, g) for d, g in gaps.items() if g > 1)}'
-                   if any(g > 1 for g in gaps.values()) else '')
-                + (f', lead {dict((d, g) for d, g in lead.items() if g)}'
-                   if any(lead.values()) else ''))
-            if attempt == 0:
-                log(f'    {cols}')
+                   if self.crossings else ''))
             ctx.pcb.segments = list(ctx.base_segments)
             ctx.pcb.vias = list(ctx.base_vias)
             self.out_segs, self.out_vias = {}, {}
             ctx.landed -= set(M)
             divers = set(sched.divers)
-            if sched.two_page:
-                # RIBBON order: the rigid lanes first -- the pages, in
-                # target order (a page diagonal cannot dodge anything)
-                # -- then the swimmers, largest displacement first,
-                # each weaving through the REAL copper laid so far. A
-                # REFUSED lane is boosted to the front of its class on
-                # the next attempt (the greedy that boxed it routes
-                # after it instead); the best attempt is kept as ever
-                sw_ = [nm for nm in M if sched.page.get(nm) is None]
-                ti = {nm: i for i, nm in enumerate(self.target)}
-                order = (sorted((nm for nm in self.target if nm not in sw_),
-                                key=lambda nm: (-boost.get(nm, 0), ti[nm]))
-                         + sorted(sw_, key=lambda nm: (-boost.get(nm, 0), -abs(
-                             self.launch_o[nm] - self.target_o[nm]))))
-            else:
-                order = list(sched.priority) + \
-                    [nm for nm in self.target if nm not in divers]
+            # RIBBON order: the rigid lanes first -- the pages, in
+            # target order (a page diagonal cannot dodge anything)
+            # -- then the swimmers, largest displacement first,
+            # each weaving through the REAL copper laid so far. A
+            # REFUSED lane is boosted to the front of its class on
+            # the next attempt (the greedy that boxed it routes
+            # after it instead); the best attempt is kept as ever
+            sw_ = [nm for nm in M if sched.page.get(nm) is None]
+            ti = {nm: i for i, nm in enumerate(self.target)}
+            order = (sorted((nm for nm in self.target if nm not in sw_),
+                            key=lambda nm: (-boost.get(nm, 0), ti[nm]))
+                     + sorted(sw_, key=lambda nm: (-boost.get(nm, 0), -abs(
+                         self.launch_o[nm] - self.target_o[nm]))))
             routed = set()
             self.refused = []
             failed_rescues = 0
@@ -1803,7 +1659,7 @@ class Corridor:
                 unrouted = [om for om in M if om != nm and om not in routed]
                 res = self.route_lane(nm, self.virtual_of(unrouted),
                                       self.virtual_vias_of(unrouted))
-                if res is None and sched.two_page and failed_rescues < 3:
+                if res is None and failed_rescues < 3:
                     # BUDGET ESCALATION (two-page only). A refused lane
                     # whose plan is feasible usually died at the SEARCH
                     # budget, not at a wall: K19 SODT1's band flood
@@ -1867,30 +1723,21 @@ class Corridor:
                 self.out_vias[nm] = vias_o
             nv = sum(len(v) for v in self.out_vias.values())
             log(f'    lanes: {len(routed)}/{len(M)} routed, {nv} via(s)')
-            # keep the BEST attempt, not the last: the feedback is a
-            # guess, and a later attempt can lose lanes an earlier one
-            # had (the 45-degree bench: 9/11 at attempt 1, 7/11 at the
-            # last, and 7/11 was what got written)
-            if best is None or (len(self.refused), nv) < (len(best[0]), best[1]):
-                best = (list(self.refused), nv, ly_floor, cols,
-                        dict(self.out_segs), dict(self.out_vias),
-                        list(ctx.pcb.segments), list(ctx.pcb.vias), sched)
             if not self.refused:
                 break
-            if sched.two_page:
-                # attempts converge fast on the ribbon: once the
-                # refused set repeats with the launch pitch maxed and
-                # the boost already applied, later attempts are
-                # identical -- and each one re-runs tens of thousands
-                # of exhausted A* iterations per refusal (K28: 378k
-                # per attempt)
-                if attempt >= 2 and self.refused == prev_refused \
-                        and ly_floor >= 0.40 - 1e-9:
-                    log('    attempts converged; stopping early')
-                    break
-                prev_refused = list(self.refused)
-                for nm in self.refused:
-                    boost[nm] = boost.get(nm, 0) + 1
+            # attempts converge fast on the ribbon: once the
+            # refused set repeats with the launch pitch maxed and
+            # the boost already applied, later attempts are
+            # identical -- and each one re-runs tens of thousands
+            # of exhausted A* iterations per refusal (K28: 378k
+            # per attempt)
+            if attempt >= 2 and self.refused == prev_refused \
+                    and ly_floor >= 0.40 - 1e-9:
+                log('    attempts converged; stopping early')
+                break
+            prev_refused = list(self.refused)
+            for nm in self.refused:
+                boost[nm] = boost.get(nm, 0) + 1
             # FEEDBACK. Room across first -- the launch pitch is the
             # cheap dimension, every lane gets it, and a via beside a
             # neighbour is what usually fails. Then room along for a
@@ -1900,7 +1747,7 @@ class Corridor:
             if ly_floor < 0.40 - 1e-9:
                 ly_floor = min(0.40, ly_floor + 0.03)
                 continue
-        if self.refused and getattr(sched, 'two_page', False):
+        if self.refused:
             # LAST CALL -- the corridor's own router, off the lattice.
             # Every routed lane is real copper by now, and what
             # refused a ribbon swimmer was its BAND -- the tube around
@@ -1947,125 +1794,124 @@ class Corridor:
                 self.refused = still
             finally:
                 ctx.cfg = cfg0
-        if getattr(sched, 'two_page', False):
-            # ECONOMY RE-LAY (#622 K28 flank): the human trades LENGTH
-            # for vias -- the 4-via flank-joiners (SA8/SBA1/SDQ0/SRAS
-            # at K28) ride constant-B around the field in the human
-            # original at 2 vias each, +24% copper. Fanout-side tooth
-            # moves measured a dead end (0831 e1/e2: SDQ0 4->2 but ANY
-            # source perturbation flips SA4 open). So the trade is
-            # taken HERE, post-hoc, where it cannot break completion:
-            # rip one heavy lane, re-route it band-free against every
-            # other lane's REAL copper (rip-assist's bookkeeping),
-            # keep only a strictly-cheaper lane, restore exactly
-            # otherwise. Widest rung drops the window so the flank
-            # detour is inside the search.
-            import copy as _copy
-            cfg0 = ctx.cfg
-            big2 = _copy.copy(cfg0)
-            big2.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
-            ctx.cfg = big2
-            try:
-                # ECON_MIN_VIAS: the cheapest lane worth trying to
-                # re-lay. 3 exempted every 2-via lane, and the K28
-                # ledger says that is where the waste lives (SA0/SA4/
-                # SODT1 dive once each where the cover model rides
-                # free -- the last call keeps the FIRST route found at
-                # the smallest margin, never asking whether a wider
-                # window holds a cheaper one; this pass is the asker).
-                econ_min = 3
+        # ECONOMY RE-LAY (#622 K28 flank): the human trades LENGTH
+        # for vias -- the 4-via flank-joiners (SA8/SBA1/SDQ0/SRAS
+        # at K28) ride constant-B around the field in the human
+        # original at 2 vias each, +24% copper. Fanout-side tooth
+        # moves measured a dead end (0831 e1/e2: SDQ0 4->2 but ANY
+        # source perturbation flips SA4 open). So the trade is
+        # taken HERE, post-hoc, where it cannot break completion:
+        # rip one heavy lane, re-route it band-free against every
+        # other lane's REAL copper (rip-assist's bookkeeping),
+        # keep only a strictly-cheaper lane, restore exactly
+        # otherwise. Widest rung drops the window so the flank
+        # detour is inside the search.
+        import copy as _copy
+        cfg0 = ctx.cfg
+        big2 = _copy.copy(cfg0)
+        big2.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
+        ctx.cfg = big2
+        try:
+            # ECON_MIN_VIAS: the cheapest lane worth trying to
+            # re-lay. 3 exempted every 2-via lane, and the K28
+            # ledger says that is where the waste lives (SA0/SA4/
+            # SODT1 dive once each where the cover model rides
+            # free -- the last call keeps the FIRST route found at
+            # the smallest margin, never asking whether a wider
+            # window holds a cheaper one; this pass is the asker).
+            econ_min = 3
 
-                def lane_mm(nm):
-                    return sum(math.hypot(s.end_x - s.start_x,
-                                          s.end_y - s.start_y)
-                               for s in self.out_segs.get(nm) or ())
+            def lane_mm(nm):
+                return sum(math.hypot(s.end_x - s.start_x,
+                                      s.end_y - s.start_y)
+                           for s in self.out_segs.get(nm) or ())
 
-                def airline(nm):
-                    t_, u_ = self.teeth[nm], self.stubs[nm]
-                    return math.hypot(t_[0] - u_[0], t_[1] - u_[1])
+            def airline(nm):
+                t_, u_ = self.teeth[nm], self.stubs[nm]
+                return math.hypot(t_[0] - u_[0], t_[1] - u_[1])
 
-                # candidates: via-heavy lanes AND long ones (the
-                # berth overshoot lives here: primary lanes keep the
-                # TIP discipline so attachment stays order-independent
-                # -- early-join as a primary default let early lanes
-                # park in the berth-approach channel and starved the
-                # late ones (K32 open either way, live or deferred
-                # trim) -- so the economy is harvested HERE, post-
-                # completion, where it cannot cost a lane)
-                heavy = sorted(
-                    (nm for nm in self.members
-                     if len(self.out_vias.get(nm) or ()) >= econ_min
-                     or (self.out_segs.get(nm)
-                         and lane_mm(nm) - airline(nm) > 3.0)),
-                    key=lambda nm: -len(self.out_vias.get(nm) or ()))
-                for nm in heavy:
-                    nid, _ = ctx.byname[nm]
-                    ids_s = {id(s) for s in self.out_segs[nm]}
-                    ids_v = {id(v) for v in self.out_vias[nm]}
-                    seg0 = list(ctx.pcb.segments)
-                    via0 = list(ctx.pcb.vias)
-                    ctx.pcb.segments = [s for s in seg0
-                                        if id(s) not in ids_s]
-                    ctx.pcb.vias = [v for v in via0
-                                    if id(v) not in ids_v]
-                    res = None
-                    for mg, wp in ((2.5, self.lane_xy[nm]),
-                                   (4.0, self.lane_xy[nm]),
-                                   (6.0, None)):
-                        r_ = cn.connect(ctx.pcb, nid, self.teeth[nm],
-                                        ctx.tooth_layer[nm],
-                                        self.stubs[nm],
-                                        ctx.dest_layer[nm], ctx.cfg,
-                                        band=None, margin=mg,
-                                        window_pts=wp,
-                                        b_alts=ctx.dest_alts.get(nm))
-                        # keep FEWER vias, or equal vias and clearly
-                        # shorter copper (the overshoot harvest)
-                        nv0 = len(self.out_vias[nm])
-                        if r_ is not None and (
-                                len(r_[1]) < nv0
-                                or (len(r_[1]) == nv0
-                                    and sum(math.hypot(
-                                        s.end_x - s.start_x,
-                                        s.end_y - s.start_y)
-                                        for s in r_[0])
-                                    < lane_mm(nm) - 0.5)):
-                            res = r_
-                            break
-                    if res is None:
-                        ctx.pcb.segments = seg0
-                        ctx.pcb.vias = via0
-                        continue
-                    segs_o, vias_o = res
-                    ctx.pcb.segments.extend(segs_o)
-                    ctx.pcb.vias.extend(vias_o)
-                    if not net_walks(ctx.pcb, nid, ctx.byname[nm][1]):
-                        ctx.pcb.segments = seg0
-                        ctx.pcb.vias = via0
-                        log(f'    econ re-lay: {nm} REJECTED '
-                            '(net would disconnect)')
-                        continue
-                    if lane_crosses_foreign(ctx.pcb, nid,
-                                            res[0]):
-                        ctx.pcb.segments = seg0
-                        ctx.pcb.vias = via0
-                        log(f'    econ re-lay: {nm} REJECTED '
-                            '(path crosses foreign copper -- '
-                            'engine-window bug, reproducer kept)')
-                        continue
-                    hit = via_hits_foreign(ctx.pcb, nid, vias_o)
-                    if hit:
-                        ctx.pcb.segments = seg0
-                        ctx.pcb.vias = via0
-                        log(f'    econ re-lay: {nm} REJECTED '
-                            f'({hit})')
-                        continue
-                    log(f'    econ re-lay: {nm} '
-                        f'{len(self.out_vias[nm])} -> {len(vias_o)} '
-                        'via(s)')
-                    self.out_segs[nm], self.out_vias[nm] = segs_o, vias_o
-            finally:
-                ctx.cfg = cfg0
+            # candidates: via-heavy lanes AND long ones (the
+            # berth overshoot lives here: primary lanes keep the
+            # TIP discipline so attachment stays order-independent
+            # -- early-join as a primary default let early lanes
+            # park in the berth-approach channel and starved the
+            # late ones (K32 open either way, live or deferred
+            # trim) -- so the economy is harvested HERE, post-
+            # completion, where it cannot cost a lane)
+            heavy = sorted(
+                (nm for nm in self.members
+                 if len(self.out_vias.get(nm) or ()) >= econ_min
+                 or (self.out_segs.get(nm)
+                     and lane_mm(nm) - airline(nm) > 3.0)),
+                key=lambda nm: -len(self.out_vias.get(nm) or ()))
+            for nm in heavy:
+                nid, _ = ctx.byname[nm]
+                ids_s = {id(s) for s in self.out_segs[nm]}
+                ids_v = {id(v) for v in self.out_vias[nm]}
+                seg0 = list(ctx.pcb.segments)
+                via0 = list(ctx.pcb.vias)
+                ctx.pcb.segments = [s for s in seg0
+                                    if id(s) not in ids_s]
+                ctx.pcb.vias = [v for v in via0
+                                if id(v) not in ids_v]
+                res = None
+                for mg, wp in ((2.5, self.lane_xy[nm]),
+                               (4.0, self.lane_xy[nm]),
+                               (6.0, None)):
+                    r_ = cn.connect(ctx.pcb, nid, self.teeth[nm],
+                                    ctx.tooth_layer[nm],
+                                    self.stubs[nm],
+                                    ctx.dest_layer[nm], ctx.cfg,
+                                    band=None, margin=mg,
+                                    window_pts=wp,
+                                    b_alts=ctx.dest_alts.get(nm))
+                    # keep FEWER vias, or equal vias and clearly
+                    # shorter copper (the overshoot harvest)
+                    nv0 = len(self.out_vias[nm])
+                    if r_ is not None and (
+                            len(r_[1]) < nv0
+                            or (len(r_[1]) == nv0
+                                and sum(math.hypot(
+                                    s.end_x - s.start_x,
+                                    s.end_y - s.start_y)
+                                    for s in r_[0])
+                                < lane_mm(nm) - 0.5)):
+                        res = r_
+                        break
+                if res is None:
+                    ctx.pcb.segments = seg0
+                    ctx.pcb.vias = via0
+                    continue
+                segs_o, vias_o = res
+                ctx.pcb.segments.extend(segs_o)
+                ctx.pcb.vias.extend(vias_o)
+                if not net_walks(ctx.pcb, nid, ctx.byname[nm][1]):
+                    ctx.pcb.segments = seg0
+                    ctx.pcb.vias = via0
+                    log(f'    econ re-lay: {nm} REJECTED '
+                        '(net would disconnect)')
+                    continue
+                if lane_crosses_foreign(ctx.pcb, nid,
+                                        res[0]):
+                    ctx.pcb.segments = seg0
+                    ctx.pcb.vias = via0
+                    log(f'    econ re-lay: {nm} REJECTED '
+                        '(path crosses foreign copper -- '
+                        'engine-window bug, reproducer kept)')
+                    continue
+                hit = via_hits_foreign(ctx.pcb, nid, vias_o)
+                if hit:
+                    ctx.pcb.segments = seg0
+                    ctx.pcb.vias = via0
+                    log(f'    econ re-lay: {nm} REJECTED '
+                        f'({hit})')
+                    continue
+                log(f'    econ re-lay: {nm} '
+                    f'{len(self.out_vias[nm])} -> {len(vias_o)} '
+                    'via(s)')
+                self.out_segs[nm], self.out_vias[nm] = segs_o, vias_o
+        finally:
+            ctx.cfg = cfg0
         self.finish()
 
     def connect_ladder(self, nm, virt, virt_vias, stage, b_alts=None,
