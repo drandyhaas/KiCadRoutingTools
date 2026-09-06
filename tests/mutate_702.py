@@ -43,10 +43,15 @@ start reports nothing at all.
 THE MEASURED TABLE IS IN THE HEADER OF `test_702_quench_intent_gate.py`, FROM
 THE RUN -- never predicted here and never edited afterwards to match.
 
-RE-RUN at 939fec4f, after #877 re-anchored eight of these rows: **22 rows, 18
-killed, 4 survived, 0 broken, 1 disagreeing.** Before it, the same 22 rows were
+RE-RUN at e59e8cf9, after #877 re-anchored eight of these rows: **22 rows, 19
+killed, 3 survived, 0 broken, 1 disagreeing.** Before it, the same 22 rows were
 14 usable and 8 BROKEN -- 8 of this battery's rows had asserted nothing since
 `c7bef8d9`, which is the worst case #877 measured.
+
+(An intermediate run at 939fec4f read 18 killed / 4 survived / 3 disagreeing.
+That is not this table: two rows were still wrong at that commit -- the keepout
+row's first re-anchor was inert, and the active-flag row had not been re-graded
+-- and both are described below. The number above is the shipped table's.)
 
 Two things that run found, both recorded rather than tidied away:
 
@@ -59,10 +64,12 @@ Two things that run found, both recorded rather than tidied away:
     is the one disagreement left, and it is NOT from #877's work: the row, its
     target (`floorplan.py`) and its witness are byte-identical to
     upstream/main, so its verdict is deterministic and predates this branch.
-    It was invisible because the battery already exited non-zero on the eight
-    BROKEN rows, so nobody read past them. Left standing as a real finding
-    about this gate's coverage, to be fixed on its own terms rather than
-    folded into an anchor pass.
+    It is a COVERAGE REGRESSION, not a wrong expectation -- the table in
+    `test_702_quench_intent_gate.py` records this row as KILLED when it was
+    last measured, so the gate went quiet in between. It was invisible because
+    the battery already exited non-zero on the eight BROKEN rows, so nobody
+    read past them. Left standing as a real finding, to be fixed on its own
+    terms rather than folded into an anchor pass.
 """
 from __future__ import annotations
 

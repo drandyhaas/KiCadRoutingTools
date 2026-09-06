@@ -60,6 +60,34 @@ Distinctions a plain `count(old) != 1` does not draw:
     python3 tests/mutation_anchors.py               # census over every battery
     python3 tests/mutation_anchors.py --verbose     # every anchor, one a line
     python3 tests/mutation_anchors.py --battery mutate_702.py
+
+MEASURED at 0aff32c0, before the re-anchoring pass: 37 batteries, 831 anchors,
+**29 stale, 3 ambiguous, 0 unresolved**, across 9 batteries. After it: 0, 0, 0.
+
+An anchor matching exactly once does NOT establish that the row still means
+what its name says -- this branch's own `mutate_702` keepout row proved that,
+matching cleanly while mutating nothing. So every battery whose rows changed
+was RUN, not merely re-censused:
+
+    battery            rows  killed  survived  broken  disagreeing
+    mutate_702           22      19         3       0            1
+    mutate_703           29      27         2       0            0
+    mutate_554           30      26         4       0            0
+    mutate_730           28      25         3       0            0
+    mutate_747           22      20         2       0            0
+    mutate_768           31      31         0       0            0
+    mutate_799           22      18         4       0            0
+    mutate_829           23      22         1       0            0
+    mutate_834_835       22      18         4       0            0
+    -----------------------------------------------------------------
+    total               229     206        23       0            1
+
+Every survivor is a declared, expected one. The single disagreement is
+`mutate_702`'s `the-crossed-claim-check-never-fires`, which is byte-identical
+to upstream/main and predates this work -- disclosed at that row rather than
+re-graded. Each run also left the tree byte-identical, checked with BOTH `git
+status --porcelain` and `git diff --stat`, because a pure CRLF flip shows in
+the first and not the second.
 """
 import argparse
 import ast

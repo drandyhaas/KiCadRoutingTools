@@ -21,26 +21,46 @@ mutations in `tests/mutate_702.py` are killed only by a `by_site` assertion.
 MEASURED MUTATION TABLE, from `python3 tests/mutate_702.py`. The edits are in
 that file; these are the verdicts, recorded FROM THE RUN and not predicted:
 
-    22 rows: 19 killed, 3 survived, 0 broken, 0 disagreeing with expectation
+RE-MEASURED after #877 re-anchored eight of the rows, which had been asserting
+nothing since `c7bef8d9`:
 
-    the two survivors, recorded rather than deleted:
+    22 rows: 19 killed, 3 survived, 0 broken, 1 disagreeing with expectation
+
+The totals are unchanged from the previous recording; the MEMBERSHIP is not,
+and both moves are findings rather than noise.
+
+    the survivors, recorded rather than deleted:
       the-gate-is-built-even-with-no-intent      building an empty spec on a
                                                 board that declares nothing is
                                                 indistinguishable from not
                                                 building one -- every lookup
                                                 misses and `intent_ok` returns
-                                                on `if not spec`.
-      the-active-flag-ignores-whether-anything-bound
-                                                same reason, one level up: the
-                                                flag only guards work that is
-                                                already a no-op on an empty
-                                                spec. Kept as a detector for
-                                                the day the guard means more.
+                                                on `if not spec`. (#877
+                                                re-pointed this row at
+                                                `build_zone_spec`'s early-out,
+                                                which is where that claim now
+                                                lives.)
       the-swallow-test-ignores-the-tolerance    no arm builds a zone whose
                                                 tolerance band reaches outside
                                                 its keep-out; the row is here
                                                 so the guard exists the day one
                                                 does.
+      the-crossed-claim-check-never-fires       EXPECTS KILLED. See below.
+
+    the-active-flag-ignores-whether-anything-bound now KILLS, and was recorded
+    above as a survivor "kept as a detector for the day the guard means more".
+    That day arrived: this file has since grown two arms asserting the FLAG
+    rather than its consequences, and the mutation fails both. Re-graded in
+    `mutate_702.py`.
+
+    the-crossed-claim-check-never-fires is the one DISAGREEMENT, and it is a
+    coverage regression in THIS FILE, not in #877's work: the row, its target
+    (`floorplan.py`) and this gate are all byte-identical to the commit the
+    branch forked from, and the table above records it as KILLED when it was
+    last measured. It went quiet in between, and nobody could see it because
+    the battery was already exiting non-zero on the eight BROKEN rows. Left
+    standing as a real finding, to be fixed on its own terms rather than folded
+    into an anchor pass.
 
 Three rows exist because a mutation caught THIS FILE, not the engine:
 `the-incumbent-is-read-at-the-SEED-pose` survived until arm C was written at
