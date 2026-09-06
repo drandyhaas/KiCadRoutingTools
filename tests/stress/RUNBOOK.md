@@ -1315,3 +1315,24 @@ python3 -X utf8 tests/stress/tee_cmd.py --workdir wk/run12/tigard \
 
 Wait on `logs/<label>.done`, which appears exactly when the child exits and
 holds its exit code. Nothing else is a completion signal.
+
+**Reading it back is a script, not a watch subagent.** The end-of-run timing
+audit — the step table, the stage subtotals, tool time vs total run time with
+the difference reported as "time outside the tools", and the three longest steps
+— is deterministic, so run it:
+
+```bash
+python3 -X utf8 py_router/cmd_timing.py wk/run12/tigard          # markdown
+python3 -X utf8 py_router/cmd_timing.py wk/run12/tigard --json   # the same, as data
+```
+
+It reproduces run 24's hand-written audit to the digit and cannot get the sums
+wrong, which a subagent doing arithmetic over 153 JSONL rows at the end of a run
+demonstrably can: that audit's "16 of its 81 steps are the Pclose placement
+close-out" is 21. The same reader drives the movie's run-clock overlay, so the
+number in the report and the number in the frame come from one place.
+
+Labels bucket by PREFIX (`staging`, `fence`/`close` → close-out, then `P`/`L`/
+`R`/`V`), case-sensitively. A run that labels its steps by another convention
+lands in `other` and the report says so at the top rather than leaving an
+unexplained zero.

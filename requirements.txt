@@ -6,3 +6,17 @@ scipy>=1.7.0
 
 # Geometry operations
 shapely>=1.8.0
+
+# Rasterization: board stills, review sheets, the routing movie and the film.
+# A HARD requirement, not an optional one -- py_router/route_render.py and
+# py_tools/render_placement.py import it at MODULE SCOPE with no fallback, so a
+# fresh clone that followed the README could not render anything. The floor is
+# 9.2 because route_render.load_font calls ImageFont.load_default(size=), which
+# arrived there; it carries a fallback for older builds, but the declared floor
+# should be the version at which the intended path works.
+Pillow>=9.2.0
+
+# NOT listed, deliberately: imageio and imageio-ffmpeg. They are needed only to
+# write .mp4, they are imported inside a function, and their absence is AUDIBLE
+# -- animate_route prints "mp4 unavailable (...); falling back to GIF" and
+# writes a sibling .gif. For mp4:  pip install imageio imageio-ffmpeg
