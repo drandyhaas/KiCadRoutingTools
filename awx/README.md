@@ -220,14 +220,19 @@ the target for any exact planner). The records K28 34v / K35 60v /
 K41 79v / K51 117v were set on `fb_t2q_base` and are not like-for-like
 with this bench.
 
-### Only in the `bus622-take3` worktree, uncommitted (2026-09-06)
+### Not preserved anywhere (2026-09-06)
 
-`awx/dogbone_berths.py` -- dog-bone berths at the ball for a named set
-of nets: a via in the diagonal gap, a 45-degree stub, and either a
-short back-layer leg or a RIDE routed by `connect()` to the face or the
-source-facing edge, the side chosen by a two-subsequence cover of the
-launch order. Its braid-side companions there (rivers keyed on the
-axis flank or the stub position, `_end_dir` stopping at a same-net via,
-a B-berth river coloured B) are working-tree edits to `braid.py`. Both
-measured and lost at K41 (the braid's schedule still sees one ribbon
-order), and neither is committed anywhere.
+The last session's `awx/dogbone_berths.py` -- dog-bone berths at the
+ball for a named set of nets: a via in the diagonal gap, a 45-degree
+stub, and either a short back-layer leg or a RIDE routed by `connect()`
+to the face or the source-facing edge, the side chosen by a
+two-subsequence cover of the launch order -- and its braid-side
+companions (rivers keyed on the axis flank or the stub position,
+`_end_dir` stopping at a same-net via, a B-berth river coloured B) were
+working-tree edits in the old worktree that were never committed, and
+were gone from that tree when it was removed. Both measured and lost at
+K41 (the braid's schedule still sees one ribbon order), so nothing to
+revive; the design is recorded in the session notes. The old worktree's
+record boards (the `*_final` and `*rec*` outputs of the take3/take4
+ladders, 165 MB) were copied to
+`~/Documents/kicad_stress_test/bus622_take4_records/` before removal.
