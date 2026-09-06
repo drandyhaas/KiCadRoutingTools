@@ -4,7 +4,12 @@
 'F' or 'B' from a layer name is a one-line collapse, which is exactly why the
 tree grew eight independent spellings of it. `legality.side_of_layer` is the
 rule and `legality.footprint_side` is it applied to an object; every site whose
-input really is a footprint layer now calls one of them.
+input is a LAYER NAME now calls one of them. Not all of them are footprint
+layers -- `_seg_side` takes a track segment's and `label_side` a silkscreen
+label's -- which is exactly why the shared primitive is `side_of_layer(layer)`
+and `footprint_side(fp)` is the thin wrapper, rather than the other way round.
+It also means the corpus arm below, which feeds only FOOTPRINT layers, does not
+exercise those two callers' inputs.
 
 This file holds two things that fail for different reasons:
 
