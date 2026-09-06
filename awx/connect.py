@@ -195,14 +195,6 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     if not result or result.get('failed'):
         return None
     if _result_escapes_window(result, window, cfg):
-        if False:
-            segs = result.get('new_segments') or []
-            xs = [v for s in segs for v in (s.start_x, s.end_x)]
-            ys = [v for s in segs for v in (s.start_y, s.end_y)]
-            print(f'  connect net {net_id}: route escaped the window '
-                  f'[{x0:.2f},{y0:.2f}]-[{x1:.2f},{y1:.2f}]: copper spans '
-                  f'x [{min(xs):.2f},{max(xs):.2f}] y [{min(ys):.2f},{max(ys):.2f}]'
-                  if segs else '  (no segments)')
         return None
     return list(result.get('new_segments') or []), \
         list(result.get('new_vias') or [])
