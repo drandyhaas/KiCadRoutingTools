@@ -2222,6 +2222,7 @@ class Corridor:
         # copper, its bookkeeping and its plan geometry, so the last
         # call re-lays that attempt's refusals in that attempt's world.
         best = None
+        stale = 0
         for attempt in range(6):
             sched = plan_at(ly_floor)
             log(f'  attempt {attempt}: need {self.layout_need:.2f} of '
@@ -2332,11 +2333,27 @@ class Corridor:
             # the boost already applied, later attempts are
             # identical -- and each one re-runs tens of thousands
             # of exhausted A* iterations per refusal (K28: 378k
-            # per attempt)
-            if attempt >= 2 and self.refused == prev_refused \
-                    and ly_floor >= 0.40 - 1e-9:
-                log('    attempts converged; stopping early')
-                break
+            # per attempt). A refused set that ALTERNATES between
+            # two lanes at the maxed pitch (K35: SA4 / SCKE1 with the
+            # far-face exits, 2026-09-07) never repeats and ran all
+            # six attempts, each a full re-route, for a best attempt
+            # that was attempt 0 -- so an attempt that does not beat
+            # the best attempt's routed count is STALE, and two stale
+            # attempts in a row end the loop as well. The best attempt
+            # is kept either way.
+            if ly_floor >= 0.40 - 1e-9 and attempt >= 2:
+                if self.refused == prev_refused:
+                    log('    attempts converged; stopping early')
+                    break
+                if best is not None and len(routed) <= best['key'][0] \
+                        and best['attempt'] != attempt:
+                    stale += 1
+                else:
+                    stale = 0
+                if stale >= 2:
+                    log(f'    attempts stale; stopping early (best is attempt '
+                        f'{best["attempt"]}, {best["key"][0]}/{len(M)} routed)')
+                    break
             prev_refused = list(self.refused)
             for nm in self.refused:
                 boost[nm] = boost.get(nm, 0) + 1
