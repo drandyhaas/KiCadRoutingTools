@@ -146,6 +146,14 @@ def main():
 
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
                            pcb_file=args.board)
+    # #897: a waiver naming a ref this board does not have excuses nothing, and
+    # said nothing. Report it where the author will see it -- an unresolved
+    # waiver is a rename or a deletion, and the pair it was written for is back
+    # in the census under whatever class label it now gets.
+    for _p in (g.get('waivers_unresolved') or ()):
+        print(f"  WARNING: overlap_waivers pair {_p[0]}<->{_p[1]} names a "
+              f"reference this board does not have -- it waives nothing",
+              file=sys.stderr)
     leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board)
     # #697: name any pair graded ABOVE `clearance` and what raised it, or the
     # echo below reports a count the announced floor cannot explain.

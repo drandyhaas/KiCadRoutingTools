@@ -1024,7 +1024,10 @@ class BodyOverlapPair(NamedTuple):
     area_mm2: float      # intersection area on the worst shared side
     side: str            # the shared side it occurs on ('F'/'B'; worst side)
     waived: bool
-    waiver: str          # 'mount_hole_class' | 'intent_declared' | ''
+    # In `_waiver_for`'s own precedence order. 'intent_declared' is FIRST and
+    # outranks every class label (#897); '' means not waived at all.
+    waiver: str          # 'intent_declared' | 'container_class' |
+    #                      'marker_class' | 'edge_class' | ''
     # Run-7 filed a report saying this channel false-positives on SAME-NET
     # contact, because DRC exempts it. Re-measured: the disputed pair really
     # was same-net (a 0402's whole pad, 0.83mm2, inside a connector pad on the
@@ -1276,7 +1279,24 @@ def grade_body_overlap(pcb_data, clearance: float,
     bb = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
     _containers = container_refs(pcb_data, _graded)
 
+    _waivers_hit = set()
+
     def _waiver_for(a: str, b: str) -> str:
+        # AUTHORED FIRST (#897). An operator naming a pair in the intent's
+        # `overlap_waivers` outranks every class label -- which is what the
+        # consumers already assume: `_blocking_waived` returns True for
+        # 'intent_declared' BEFORE it tests locked-ness, and `_GATE_EXEMPT`
+        # lists it. Testing it LAST meant a pair the intent explicitly waives
+        # never read 'intent_declared' whenever either part was a marker, an
+        # edge part or a container -- which is exactly the kind of pair anyone
+        # waives. Run 25: a fiducial inside USB1's pad box, both poses
+        # mechanical, both locked, waived in intent.json, carried the banner
+        # `BLOCKING, past the floors (1)` on every review sheet of the run
+        # while check_assembly --baseline called the same pair baseline's own.
+        _pair = frozenset((a, b))
+        if _pair in waiver_sets:
+            _waivers_hit.add(_pair)
+            return 'intent_declared'
         if a in _containers or b in _containers:
             return 'container_class'
         ca, cb = _class_of(a), _class_of(b)
@@ -1284,8 +1304,6 @@ def grade_body_overlap(pcb_data, clearance: float,
             return 'marker_class'
         if ca in _EDGE or cb in _EDGE:
             return 'edge_class'
-        if frozenset((a, b)) in waiver_sets:
-            return 'intent_declared'
         return ''
 
     pairs: List[BodyOverlapPair] = []
@@ -1640,7 +1658,22 @@ def grade_body_overlap(pcb_data, clearance: float,
             # likes better, and a waiver class chosen for unlocked parts does
             # not apply. Measured on a wrong-basin placement: fires there,
             # silent on the truth board and on every healthy corpus board.
-            'locked_contact_pairs': [p for p in pairs if p.locked_ref]}
+            'locked_contact_pairs': [p for p in pairs if p.locked_ref],
+            # #897: a declared waiver that resolves to nothing is otherwise
+            # SILENT -- the author believes a pair is excused and the grader
+            # has never heard of it. Two populations, kept apart because they
+            # mean different things: `waivers_unresolved` names a ref the board
+            # does not have (a rename or a deletion -- the stale one), while
+            # `waivers_unused` is a pair that exists and simply never overlapped
+            # (harmless today, and the thing to check first if a waiver stops
+            # working). Reported, never enforced: an unused waiver is not an
+            # error, and this function grades a board rather than an intent.
+            'waivers_unresolved': sorted(
+                sorted(p) for p in waiver_sets
+                if any(r not in fps for r in p)),
+            'waivers_unused': sorted(
+                sorted(p) for p in waiver_sets
+                if p not in _waivers_hit and all(r in fps for r in p))}
 
 
 # --- pad + drill legality layer ----------------------------------------------

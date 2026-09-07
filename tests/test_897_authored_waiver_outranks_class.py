@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""#897: an AUTHORED overlap waiver outranks every part-class label.
+
+`legality._waiver_for` tested `waiver_sets` -- the intent's `overlap_waivers` --
+LAST, after the container / marker / edge class labels. So a pair the intent
+explicitly waives never read `intent_declared` whenever either part was a
+marker, an edge part or a container, which is exactly the kind of pair anyone
+waives.
+
+The label is not cosmetic. `_blocking_waived` returns True for
+`intent_declared` BEFORE it tests locked-ness, and `_GATE_EXEMPT` lists it, so
+an authored waiver is *designed* to be the strongest label -- while
+`marker_class` is honoured only for a fiducial or a testpoint, `edge_class`
+only when the overlap actually reaches the outline, and NO class label survives
+a KiCad-locked part. Reading the classes first therefore voided real waivers.
+
+Run 25: a fiducial inside USB1's pad box, both poses mechanical, both locked,
+waived in intent.json. Every review sheet of the run carried
+`BLOCKING, past the floors (1): Ref*~2<->USB1`, `render_placement --json-out`
+listed it under `b_courtyard_blocking_pairs` on every lap, and check_assembly
+--baseline called the same pair baseline's own. Two instruments, two answers,
+one waived pair.
+
+WHY NO EXISTING TEST SAW IT. `tests/test_run6_body_overlap.py:171` waives two
+generic parts -- the fall-through branch, where the reorder changes nothing --
+and every arm in `tests/test_run23_courtyard_channel.py:122-163` runs
+check_assembly with NO --intent, so `waiver_sets` is empty in all of them. No
+test anywhere built a pair that is both class-labelled and authored-waived.
+"""
+import os
+import sys
+import tempfile
+
+RUN_ALL_FAST_OK = True
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
+sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+
+from kicad_parser import parse_kicad_pcb                      # noqa: E402
+from placement.legality import grade_body_overlap             # noqa: E402
+from placement.part_class import classify_part                # noqa: E402
+
+# H1 is NPTH-only -> part_class 'mount_hole', which is in _MARKER but NOT in
+# _MARKER_NONPHYSICAL, so `marker_class` does NOT waive its blocking -- that is
+# what makes this fixture discriminate. A testpoint would be waived either way.
+BOARD = (
+    '(kicad_pcb (version 20221018) (generator pcbnew)\n'
+    '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+    '  (net 0 "") (net 1 "VCC")\n'
+    '  (gr_rect (start 0 0) (end 30 30) (stroke (width 0.1) (type default))'
+    ' (layer "Edge.Cuts"))\n'
+    '  (footprint "MountingHole:MountingHole_2.2mm" (layer "F.Cu") (at 10 10)'
+    '{lockA}\n'
+    '    (property "Reference" "H1" (at 0 0) (layer "F.SilkS"))\n'
+    '    (fp_rect (start -1.6 -1.6) (end 1.6 1.6) (stroke (width 0.05)'
+    ' (type default)) (layer "F.CrtYd"))\n'
+    '    (pad "" np_thru_hole circle (at 0 0) (size 2.2 2.2) (drill 2.2)'
+    ' (layers "F&B.Cu" "*.Mask")))\n'
+    '  (footprint "t:B" (layer "F.Cu") (at 11.2 10){lockB}\n'
+    '    (property "Reference" "CB" (at 0 0) (layer "F.SilkS"))\n'
+    '    (fp_rect (start -1.6 -1.6) (end 1.6 1.6) (stroke (width 0.05)'
+    ' (type default)) (layer "F.CrtYd"))\n'
+    '    (pad "1" smd rect (at 1.0 0) (size 0.6 0.6) (layers "F.Cu")'
+    ' (net 1 "VCC")))\n'
+    ')\n')
+
+fails = []
+
+
+def check(label, ok, detail=''):
+    print(f"  {'PASS' if ok else 'FAIL'}  {label}"
+          + (f"   [{detail}]" if not ok and detail != '' else ''))
+    if not ok:
+        fails.append(label)
+
+
+def _board(locked=False):
+    lock = ' (locked yes)' if locked else ''
+    text = BOARD.format(lockA=lock, lockB=lock)
+    path = os.path.join(tempfile.mkdtemp(), 'b.kicad_pcb')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    return path
+
+
+def _grade(path, **kw):
+    return grade_body_overlap(parse_kicad_pcb(path), 0.09, pcb_file=path, **kw)
+
+
+def _pair_of(g, kind='courtyard'):
+    return next((p for p in g['pairs'] if p.kind == kind), None)
+
+
+def test_the_fixture_is_on_the_branch():
+    """Without this, every assertion below could pass on a board that simply
+    has no overlapping pair, or whose H1 is not a marker after all."""
+    print('\n-- 0. the fixture really builds a class-labelled overlap --')
+    path = _board()
+    pcb = parse_kicad_pcb(path)
+    cls = classify_part(pcb.footprints['H1'], 'H1').name
+    check("H1 classifies as 'mount_hole'", cls == 'mount_hole', cls)
+    g = _grade(path)
+    p = _pair_of(g)
+    check('the two courtyards overlap', p is not None)
+    check('and with no waiver the pair reads a CLASS label',
+          p is not None and p.waiver == 'marker_class',
+          p.waiver if p else None)
+    check('and it IS courtyard-blocking without a waiver',
+          g['courtyard_blocking'] == 1, g['courtyard_blocking'])
+
+
+def test_an_authored_waiver_wins_over_the_class_label():
+    print('\n-- 1. the same pair, named in overlap_waivers --')
+    path = _board()
+    g = _grade(path, intent_waivers=[('H1', 'CB')])
+    p = _pair_of(g)
+    check("reads 'intent_declared', not 'marker_class'",
+          p is not None and p.waiver == 'intent_declared',
+          p.waiver if p else None)
+    # The CONSEQUENCE. `marker_class` is honoured only for a fiducial or a
+    # testpoint, so a mount hole's pair stayed blocking despite the waiver.
+    check('and it is no longer courtyard-blocking',
+          g['courtyard_blocking'] == 0, g['courtyard_blocking'])
+
+
+def test_an_authored_waiver_survives_a_locked_part():
+    """No CLASS label blesses contact with a KiCad-locked part, deliberately.
+    An authored one does -- `_blocking_waived` returns True for
+    'intent_declared' before it looks at locked_refs. This is the run-25 shape:
+    both poses mechanical, both locked, waived, and blocking on every lap."""
+    print('\n-- 2. both parts KiCad-locked --')
+    path = _board(locked=True)
+    g0 = _grade(path)
+    check('locked + class label alone is still blocking (unchanged)',
+          g0['courtyard_blocking'] == 1, g0['courtyard_blocking'])
+    g1 = _grade(path, intent_waivers=[('H1', 'CB')])
+    check('the authored waiver is honoured on a locked pair',
+          g1['courtyard_blocking'] == 0, g1['courtyard_blocking'])
+
+
+def test_a_waiver_naming_a_missing_ref_is_reported():
+    print('\n-- 3. a waiver that resolves to nothing --')
+    path = _board()
+    g = _grade(path, intent_waivers=[('H1', 'CB'), ('H1', 'GONE9')])
+    check('the unresolvable pair is named',
+          [['GONE9', 'H1']] == g.get('waivers_unresolved'),
+          g.get('waivers_unresolved'))
+    check('the resolvable one is NOT reported as unresolved',
+          all('CB' not in p for p in (g.get('waivers_unresolved') or [])))
+    check('and it is not reported as unused either -- it did waive a pair',
+          g.get('waivers_unused') == [], g.get('waivers_unused'))
+
+
+def test_an_unused_waiver_is_kept_apart_from_a_stale_one():
+    """A pair that exists but never overlapped is harmless; a ref the board
+    does not have is a rename or a deletion. Two populations, two keys."""
+    print('\n-- 4. a waiver on a real pair that does not overlap --')
+    path = _board()
+    g = _grade(path, intent_waivers=[('H1', 'CB'), ('CB', 'H1')])
+    check('no unresolved waivers', g.get('waivers_unresolved') == [],
+          g.get('waivers_unresolved'))
+    # ('CB','H1') is the same frozenset as ('H1','CB'), so the set holds one.
+    check('the pair is counted once and used', g.get('waivers_unused') == [],
+          g.get('waivers_unused'))
+
+
+def main():
+    test_the_fixture_is_on_the_branch()
+    test_an_authored_waiver_wins_over_the_class_label()
+    test_an_authored_waiver_survives_a_locked_part()
+    test_a_waiver_naming_a_missing_ref_is_reported()
+    test_an_unused_waiver_is_kept_apart_from_a_stale_one()
+    print()
+    if fails:
+        print(f"FAIL: {len(fails)} check(s) failed: {fails}")
+        return 1
+    print('PASS: an authored overlap waiver outranks the part-class labels, '
+          'and a waiver that resolves to nothing is named (#897)')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
