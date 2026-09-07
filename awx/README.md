@@ -545,6 +545,44 @@ harmless and one fixed:
   fanned out unplanned every time (`plan from X: 40 of 41 nets; SA9 read
   off the board`).
 
+### A second array pair: `make_bench.py`, and the ladder beside its board (2026-09-07)
+
+Every rule above is measured on one bench. `make_bench.py BOARD SRC DST
+OUT [--two-layer]` now prepares an article from any board the way the
+first one was prepared: the inner copper layers and the zones on them
+removed (`--two-layer`: the braid is a two-page router, and the corpus
+holds no 2-layer BGA-to-BGA DDR pair), the pair's two-pad nets found,
+SRC fanned out for them with the chain's own destination engine call
+(`fanout_from_plan.fanout_once`: the production engine, F/B, the
+braid's track / clearance / via, foreign parts immovable, no plane
+drop; a refused net is left out of the ladder), the project stamped
+with the chain's floor (`fix_project_for_output`; a stock 0.2 mm class
+graded a clean 0.1 mm fanout as 959 phantom violations), the article
+DRC-gated, and the ladder written beside it from the plan's own river
+detection (`plan_state` -> detect_buses on taut paths; whole rivers,
+largest first, singletons last). `coherent_nets.py` reads `<board
+stem>.ladder.txt` beside a bench board when there is one, else the
+bench's `k_ladder_coherent.txt`; `chain_k.sh` passes `BASE` through
+(`--board=`), `fanout_from_plan.main` passes its base, and the parser's
+board warnings go to stderr (they were on the stdout a chain captures as
+the net list, and the braid received them as net names).
+
+The second article: the corpus's `zynq_ad9364` (Zynq CLG400, 0.8 mm,
+U1 -> DDR3 BGA-96, U2; 46 two-pad nets, 44 with a tooth -- A14 and ODT
+refused), six rivers of 11/9/8/6/6/4 nets:
+
+    python3 make_bench.py .../zynq_ad9364.kicad_pcb U1 U2 tmp/bench2/zynq.kicad_pcb --two-layer
+    BASE=tmp/bench2/zynq.kicad_pcb DEST=U2 bash chain_k.sh z 11 20 28
+
+Its first hour: K11 0 open 24v 30 s, K20 0 open 32v 51 s, K28 0 open
+55v 0 DRC 136 s -- complete, but **17 of 28 in-band** where the first
+bench has 28 of 28: the in-band execution is what the leg rules learned
+on one board, and that gap is the next thing to probe there. It also
+found the braid routing to the config's default hole-to-hole (0.2 mm)
+on a board whose project declares 0.25, one drill-to-drill graze at
+K28: `setup` now reads the board's `min_hole_to_hole` and tightens to it
+(tighten-only, so the first bench at 0.127 routes as before).
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`
