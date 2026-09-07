@@ -70,6 +70,10 @@ KNOWN_MODULES = (
     # no .md file anywhere -- an instrument nobody can discover produces no
     # findings.
     'check_channels.py', 'check_capacity.py',
+    # #891. The per-part context sheet a model reasons from -- body and
+    # its source, pads by board face, pin-order agreement, partners. An
+    # instrument nobody can discover produces no findings.
+    'board_context.py',
 )
 
 # Scripts whose flag set a consumer may want to pin.

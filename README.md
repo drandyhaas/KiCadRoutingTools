@@ -666,6 +666,7 @@ KiCadRoutingTools/
 │   │   ├── parser.py             # Courtyard boundary extraction
 │   │   ├── writer.py             # Footprint position modification
 │   │   ├── groups.py             # Group-move support
+│   │   ├── body.py               # THE footprint body model (#896)
 │   │   ├── legality.py           # Placement legality checks
 │   │   └── utility.py            # Shared placement utilities
 │   └── ...                       # plus the rest of the engine modules — see Module Overview below

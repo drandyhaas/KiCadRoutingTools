@@ -88,18 +88,32 @@ def _escape_pads(part, nets, toward_xy, pose=None) -> Dict[int, Tuple[float, flo
 
 def pair_metrics(state, ref_a: str, ref_b: str,
                  pose_a: Optional[Tuple[float, float, float]] = None,
-                 pose_b: Optional[Tuple[float, float, float]] = None
-                 ) -> Optional[Dict]:
+                 pose_b: Optional[Tuple[float, float, float]] = None,
+                 only_nets=None) -> Optional[Dict]:
     """{'inversions', 'lis', 'nets'} for one part pair, or None when they share
     fewer than 2 scoring nets (one net cannot be out of order).
 
     ``pose_a`` / ``pose_b`` override the live poses -- this is what makes the
     delta cheap: nothing on the state is mutated or rebuilt.
+
+    ``only_nets`` (net ids) narrows the question to a SUBSET of the shared
+    nets; None, the default, keeps the whole-interface question every existing
+    caller asks. It exists because the two questions have different answers,
+    and #891 is about the narrow one: on esp_prog U1 and USB1 share three nets
+    and their overall order AGREES, while the two forming the USB differential
+    pair are CROSSED -- USB1 pad 2 = /D_N sits north of pad 3 = /D_P, and U1
+    pad 6 = /D_P sits north of pad 7 = /D_N. That parity cannot be fixed by
+    rotating either part; only a mirror or a via hop flips it. Reporting the
+    interface number alone hides the fact behind a third net, which is exactly
+    how run 25 shipped without seeing it.
     """
     pa, pb = state.parts.get(ref_a), state.parts.get(ref_b)
     if pa is None or pb is None:
         return None
     shared = sorted(set(pa.nets) & set(pb.nets) & set(state.net_refs))
+    if only_nets is not None:
+        keep = set(only_nets)
+        shared = [n for n in shared if n in keep]
     if len(shared) < 2:
         return None
     ax, ay = (pose_a[0], pose_a[1]) if pose_a is not None else (pa.x, pa.y)
@@ -122,7 +136,24 @@ def pair_metrics(state, ref_a: str, ref_b: str,
                                         nid)))}
     seq = [rank_b[nid] for nid in order_a]
     lis = _lis_length(seq)
-    return {'inversions': _merge_count(seq), 'lis': lis, 'nets': len(common)}
+    # #891. How many of the projections TIE, on either side. Both sorts above
+    # fall back to the net id when two pads land on the same coordinate along
+    # the channel axis, which is deterministic but arbitrary: it invents an
+    # order the geometry does not have. Measured on the tracked esp_prog, U1's
+    # /D_P and /D_N sit at the SAME y while the channel to USB1 runs along x,
+    # so both project to one point and the pair reported `inversions 0` --
+    # "AGREES" -- for a question that has no answer at this pose.
+    #
+    # Reported rather than resolved: the count is additive, every existing
+    # consumer of `inversions` / `lis` is unaffected, and a reader that cares
+    # about a two-net pair (where one tie makes the whole verdict meaningless)
+    # can say UNDETERMINED instead of inheriting the tie-break's opinion.
+    def _ties(esc):
+        proj = sorted(round(esc[nid][0] * vx + esc[nid][1] * vy, 6)
+                      for nid in common)
+        return sum(1 for i in range(1, len(proj)) if proj[i] == proj[i - 1])
+    return {'inversions': _merge_count(seq), 'lis': lis, 'nets': len(common),
+            'ties': _ties(ea) + _ties(eb)}
 
 
 def pair_inversions(state) -> Dict[Tuple[str, str], Dict]:

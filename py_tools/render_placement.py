@@ -246,6 +246,8 @@ def legality_findings(model) -> Dict[str, object]:
            'courtyard_overlap_pairs_refs': [],
            'courtyard_blocking_pairs_refs': [],
            'courtyard_overlap_mm2': 0.0,
+           'body_seam': None,
+           'body_sources': {},
            'cross_side_stacks': [],
            # None = the census ran. A string = it could NOT be built, and the
            # sheet/gate say NOT MEASURED rather than reporting "blocking: none"
@@ -408,6 +410,22 @@ def legality_findings(model) -> Dict[str, object]:
             # either list above.
             out['courtyard_overlap_mm2'] = round(sum(
                 q.area_mm2 for q in _g['pairs'] if q.kind == 'courtyard'), 4)
+            # #896. The tightest DRAWN-body seam, signed, with the geometry it
+            # rests on. The courtyard numbers above only ever speak about
+            # pairs that already OVERLAP, so a board a hair from a collision
+            # said nothing; run 25 shipped at 0.183mm (header plastic to an
+            # 0402 body) and no instrument produced that number. The source
+            # mix rides along because a seam between two silk markings is a
+            # weaker claim than one between two drawn .Fab bodies.
+            out['body_seam'] = _g.get('body_seam')
+            out['body_sources'] = dict(_g.get('body_sources') or {})
+            # Hang it on the model too: `draw_courtyards` needs it per ref and
+            # is called from seven places that have no business learning a new
+            # parameter -- the same reason #897 put `intent_waivers` here.
+            try:
+                model.body_sources = out['body_sources']
+            except Exception:                                # noqa: BLE001
+                pass
             # run-23 (ulx3s review): FRONT<->BACK stacks. Panels draw both
             # faces' outlines with only a ghost tint, so a battery holder
             # behind the buttons (BAT1/B4: 68.7mm2 of XY overlap, ZERO
@@ -758,7 +776,23 @@ def draw_courtyards(d, r, model, refs, *, side=None, color=None, dim=False,
         if ref in locked:
             col = C_LOCKED
         box = _rect_pts(r, rect)
-        d.rectangle(box, outline=col, width=_w(r, width_mm))
+        # #896. A body the model took from SILK is drawn DASHED, so a reviewer
+        # can see at a glance which outlines rest on a silkscreen marking
+        # rather than on drawn geometry -- the difference between the two is
+        # what made esp_prog's SOT89 look 5.2mm wide when the part is 4.5mm,
+        # and it is why a silk body never gates. A dash rather than a colour
+        # because the four colours here already carry side and lock state.
+        _src = (getattr(model, 'body_sources', None) or {}).get(ref)
+        _wpx = _w(r, width_mm)
+        if _src == 'silk':
+            _on, _off = max(3, _wpx * 4), max(3, _wpx * 3)
+            corners = [(box[0], box[1]), (box[2], box[1]),
+                       (box[2], box[3]), (box[0], box[3])]
+            for _i in range(4):
+                _dash(d, corners[_i], corners[(_i + 1) % 4], _on, _off,
+                      col, _wpx)
+        else:
+            d.rectangle(box, outline=col, width=_wpx)
         if ref in locked:      # hatch so "locked" reads without a legend
             d.line([box[0], box[1], box[2], box[3]], fill=col, width=_w(r, 0.06))
 
@@ -1132,6 +1166,27 @@ def write_review_sheet(path, panel_paths, fnd, conn_facts) -> None:
             + (f"  |  BLOCKING, past the floors ({len(cb)}): " + '  |  '.join(
                 f"{a}<->{b} {m}mm2/depth {dp}mm" for a, b, m, dp in cb)
                if cb else "  |  blocking, past the floors: none"))
+    # #896. The tightest seam, ALWAYS, because "how close is the closest thing
+    # on this board" is the first question a reviewer asks and the strip above
+    # can only answer it for pairs that already collide. Signed: negative is
+    # an overlap. The sources are printed because a seam measured against a
+    # silk marking is a weaker claim than one against a drawn body.
+    _seam = fnd.get('body_seam')
+    if _seam:
+        _mix = {}
+        for _v in (fnd.get('body_sources') or {}).values():
+            _mix[_v] = _mix.get(_v, 0) + 1
+        lines.append(
+            f"tightest body seam: {_seam['mm']:+.3f}mm  "
+            f"{_seam['ref_a']}<->{_seam['ref_b']} "
+            f"({_seam['source_a']}/{_seam['source_b']})"
+            f"  |  bodies from " + ', '.join(f"{_mix[k]} {k}" for k in
+                                             sorted(_mix))
+            + ("  |  below 0.3mm is a hand-assembly finding"
+               if _seam['mm'] < 0.3 else ""))
+    else:
+        lines.append("tightest body seam: NOT MEASURED -- fewer than two "
+                     "parts on this board draw a body")
     if conn_facts:
         chunk = []
         for ref, _cls, edge, dist, interior in conn_facts:
@@ -1209,6 +1264,11 @@ def draw_legend(d, r, spec) -> None:
                 (C_COURT_OVL, 'solid', 'courtyard interpenetration'),
                 (C_HOLE, 'ring', 'NPTH keepout'),
                 (C_LOCKED, 'hatch', 'KiCad-locked (never moved)')]
+        # #896. Only when the board actually has one -- a legend row for a
+        # mark nothing on the panel carries teaches the reader to look for
+        # something that is not there.
+        if 'silk' in (getattr(spec.model, 'body_sources', None) or {}).values():
+            rows.append((C_COURT_F, 'dashed', 'body from SILK (never gates)'))
         if spec.moves:
             rows.append((C_ARROW, 'arrow', 'moved since --before'))
         if spec.hot_nets:
@@ -2340,6 +2400,13 @@ def main(argv=None):
             'b_courtyard_blocking_pairs':
                 fnd['courtyard_blocking_pairs_refs'],
             'b_courtyard_overlap_mm2': fnd['courtyard_overlap_mm2'],
+            #   b_body_seam -- #896: the tightest DRAWN-body seam on the
+            #     board, signed (negative = overlap), with the geometry each
+            #     side rests on. None when fewer than two parts draw a body.
+            #   b_body_sources -- which rung answered per part, so a reader
+            #     can see a board graded on silk rather than on drawn bodies.
+            'b_body_seam': fnd.get('body_seam'),
+            'b_body_sources': fnd.get('body_sources') or {},
             # None when the census ran. --gate reads it: a render that
             # could not build the census must not report "blocking: none".
             'b_courtyard_census_error': fnd['courtyard_census_error'],

@@ -43,6 +43,13 @@ _FP_ELEMENT_GAP = r'(?:(?!\(fp_|\(pad\b|\(layers?\b)[\s\S])*?'
 
 _CRTYD_LAYER = r'\(layer\s+"([FB])\.CrtYd"\)'
 _FAB_LAYER = r'\(layer\s+"([FB])\.Fab"\)'
+# #896. The LAST resort before the pad bbox, and the only drawn geometry a
+# hand-rolled library may carry at all: on esp_prog (OLIMEX) not one of 21
+# footprints draws a courtyard and six -- CON1, CON2, U1, U2, Q1, Q2 -- draw no
+# .Fab either, so silk is their only body. Read through the same
+# `_courtyard_points_by_side`, so `_FP_ELEMENT_GAP` protects it too; a
+# hand-written silk regex is exactly how #456 item 3 comes back.
+_SILK_LAYER = r'\(layer\s+"([FB])\.SilkS"\)'
 _NUM = r'([\d.eE+-]+)'
 
 
@@ -190,6 +197,31 @@ def extract_fab_sides(pcb_file: str) -> Dict[str, Dict[str, Bbox]]:
         if '.Fab"' not in fp_text:
             continue
         by_side = _courtyard_points_by_side(fp_text, _FAB_LAYER)
+        if by_side:
+            result[ref] = {side: _bbox(pts) for side, pts in by_side.items()}
+    return result
+
+
+def extract_silk_sides(pcb_file: str) -> Dict[str, Dict[str, Bbox]]:
+    """Per-side F/B.SilkS bboxes -- `extract_fab_sides`'s sibling (#896).
+
+    THIS IS NOT A BODY ON ITS OWN, and callers must not treat it as one. On a
+    stock KiCad footprint silk is a pair of clipped side ticks that bracket the
+    pads on one axis and are cut away on the other: measured on esp_prog, all 10
+    footprints drawing both fab and silk have a silk bbox NARROWER than the fab
+    body along the pad axis (Y1: 0.508mm against a 3.200mm body) and WIDER
+    across it. There is no offset that reconciles the two -- the sign of the
+    error differs per axis -- which is why `placement.body` unions this with the
+    pad bbox rather than substituting it, and why nothing here applies an
+    expansion. `placement.body.body_geometry` is the only intended consumer.
+    """
+    with open(pcb_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    result: Dict[str, Dict[str, Bbox]] = {}
+    for ref, fp_text in _footprint_blocks(content):
+        if '.SilkS"' not in fp_text:
+            continue
+        by_side = _courtyard_points_by_side(fp_text, _SILK_LAYER)
         if by_side:
             result[ref] = {side: _bbox(pts) for side, pts in by_side.items()}
     return result

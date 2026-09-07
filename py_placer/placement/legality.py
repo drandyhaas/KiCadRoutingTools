@@ -941,6 +941,13 @@ class GradedPart(NamedTuple):
     # artifact. A pad-bbox fallback (pads exist, courtyard missing) stays
     # False: those bounds are real copper.
     synthetic: bool = False
+    # #896. WHICH drawn geometry `rect` came from -- one of
+    # `body.SOURCES`. Carried here because `graded_parts_from_file` used to
+    # drop `LocalBounds.from_courtyard` on the floor, and every downstream
+    # consumer reads GradedPart, not LocalBounds: a pair reported against a
+    # pad bbox and a pair reported against a drawn housing are different
+    # claims, and a reader could not tell them apart.
+    source: str = ''
 
     @property
     def sides(self) -> frozenset:
@@ -1163,49 +1170,84 @@ class LocalBounds(NamedTuple):
     # geometry may differ in EITHER direction, which is why it is recorded
     # per part rather than assumed away.
     from_courtyard: bool
+    # #896. The rung of `body.body_geometry`'s ladder that answered:
+    # 'courtyard' | 'fab' | 'silk' | 'pad_bbox' | 'none'. `from_courtyard`
+    # above is kept as a FIELD rather than becoming a property derived from
+    # this -- a NamedTuple cannot carry both under one name, and removing it
+    # would change `_fields`, the arity and `_asdict()` ordering that
+    # floorplan's `measured` dict and tests/mutate_799.py both read.
+    source: str = ''
+    # #896. Silk was drawn but did not survive the ladder: either the
+    # footprint has no pads (a logo) or its silk bbox lies inside the pad
+    # bbox (a pin-1 tick), so the union IS the pad bbox. A disclosure, not
+    # an error -- a fragment must not be LABELLED a body.
+    silk_rejected: bool = False
 
 
 def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
                       ) -> Dict[str, LocalBounds]:
     """THE local-bounds chain, once: `{ref: LocalBounds}`.
 
-    Same geometry rules as the quench state (#456: one definition of legal):
-    courtyard for the part's own side via the text parser, pad-bbox fallback
-    when the footprint draws none, drilled-pad box on the far side. Needs the
-    board FILE for courtyards (the text parser reads it); falls back to
-    `pcb_data.source_path`, then to pad bboxes everywhere.
+    The geometry decision itself lives in `placement.body` (#896) and this is
+    its pose-independent half plus the drilled-pad box: courtyard, else the
+    drawn .Fab body, else silk unioned with the pad bbox, else the pad bbox --
+    with `source` naming which rung answered. Before #896 this ladder went
+    straight from courtyard to the pad bbox, so on a library drawing no
+    courtyard every consumer of this function graded pad boxes and no
+    instrument could see a connector housing at all.
+
+    Needs the board FILE for the drawn geometry (neither parse path carries
+    footprint graphics on `Footprint`); falls back to `pcb_data.source_path`,
+    then to pad bboxes everywhere.
+
+    NOT the quench's ladder. `quench._Part.__init__` keeps its own
+    courtyard-or-pad-bbox bounds deliberately (see `body.py`): adopting the
+    model there changes which poses `pose_ok` admits and therefore the basin
+    the anneal lands in, which is a search change needing its own A/B, not a
+    ride-along on a reporting one.
 
     A ref is ABSENT when even the pad fallback raised -- the same parts
     `graded_parts_from_file` skips, so both consumers see one universe.
     """
-    from placement.parser import courtyard_for_side, extract_courtyard_sides
+    from placement.body import (SOURCE_COURTYARD, SOURCE_NONE, board_bodies)
     from placement.utility import compute_footprint_bbox_local
 
-    path = pcb_file or getattr(pcb_data, 'source_path', None)
-    sides: Dict[str, Dict] = {}
-    if path:
-        try:
-            sides = extract_courtyard_sides(path)
-        except Exception:
-            sides = {}
+    bodies = board_bodies(pcb_data, pcb_file)
     out: Dict[str, LocalBounds] = {}
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         own = footprint_side(fp)
-        local = None
-        synthetic = False
-        from_courtyard = False
-        if sides.get(ref):
-            local = courtyard_for_side(sides[ref], own)
-            from_courtyard = local is not None
+        geom = bodies.get(ref)
+        # OCCUPANCY, not the bare body. Every consumer of this chain asks an
+        # occupancy question -- does this part's extent intrude here -- and the
+        # rect must therefore never SHRINK: measured over the 22 corpus boards,
+        # taking the drawn body bare removed three real run-23 courtyard
+        # findings on ulx3s and two on esp_prog, because a .Fab body is
+        # routinely narrower than the pads it sits between (ulx3s AUDIO1
+        # 194.5 -> 115.6 mm2, 0.59x; U3/U4/U5 TSOT-25 0.55x). The BODY rect is
+        # what the assembly seam and the body-source disclosure report, and
+        # they read `placement.body` directly.
+        local = geom.occupancy_local if geom is not None else None
+        source = geom.source if geom is not None else ''
+        silk_rejected = bool(geom.silk_rejected) if geom is not None else False
         if local is None:
+            # SOURCE_NONE, or no readable board file at all: the +/-0.5mm
+            # fiction, which `synthetic` marks so it can never gate.
             try:
                 local = compute_footprint_bbox_local(fp)
-                # No courtyard AND no pads: the +/-0.5mm fiction, not geometry.
-                synthetic = not (fp.pads or ())
+                source = source or SOURCE_NONE
             except Exception:
                 local = None
         if local is None:
             continue
+        # #896. `synthetic` means "not geometry anyone drew", and that is now
+        # SOURCE_NONE -- not "has no pads". A pad-less footprint that draws a
+        # real .Fab body is a real body: watchy's REF** is a 1.54" e-paper
+        # display, 31.8 x 37.3mm on a 33.8 x 46mm board, which graded as the
+        # +/-0.5mm fiction and therefore could never gate anything, while parts
+        # genuinely sit under it. The silk rung already refuses pad-less
+        # footprints (a logo is decoration, not a part), so this admits drawn
+        # bodies without admitting silk graphics.
+        synthetic = source == SOURCE_NONE
         tht_local = None
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
@@ -1214,7 +1256,8 @@ def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
                                tht_local=(tuple(tht_local)
                                           if tht_local is not None else None),
                                has_tht=has_tht, synthetic=synthetic,
-                               from_courtyard=from_courtyard)
+                               from_courtyard=(source == SOURCE_COURTYARD),
+                               source=source, silk_rejected=silk_rejected)
     return out
 
 
@@ -1238,7 +1281,7 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
             tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
         out.append(GradedPart(ref=ref, side=lb.side, rect=rect,
                               tht_rect=tht, has_tht=lb.has_tht,
-                              synthetic=lb.synthetic))
+                              synthetic=lb.synthetic, source=lb.source))
     return out
 
 
@@ -1322,37 +1365,73 @@ def grade_body_overlap(pcb_data, clearance: float,
             return 'edge_class'
         return ''
 
+    from placement.body import SOURCE_SILK as _BODY_SILK_NAME
+
     pairs: List[BodyOverlapPair] = []
-    # Refs the fab channel could not judge (no .Fab geometry). A board with no
+    # Refs the DRAWN-BODY channel could not judge: no .Fab outline and no
+    # usable silk either (#896 widened this from ".Fab only"). A board with no
     # readable source path leaves this empty AND judges nothing -- both are
     # reported rather than silently conflated with "clean".
     fab_unjudged: set = set()
+    # #896. Per-ref `drawn_source` for every judged part, so the caller can
+    # report "body from silk" instead of "no body" and can say which claims
+    # rest on a housing outline rather than a fab outline.
+    body_sources: Dict[str, str] = {}
+    # #896. Refs whose body came from SILK. Silk is the least trustworthy rung
+    # and it NEVER gates -- see the exclusion below, which is structural rather
+    # than a measured coincidence.
+    silk_sourced: set = set()
+    # #896. Seam inputs: every judged part's DRAWN body in board coordinates.
+    seam_parts: list = []
 
     # -- courtyard channel (advisory + the run-23 blocking policy below) ------
     for p in body_overlap_pairs(_graded):
         waiver = _waiver_for(p.a, p.b)
         pairs.append(p._replace(waived=bool(waiver), waiver=waiver))
 
-    # -- fab BODY channel (advisory) ------------------------------------------
+    # -- DRAWN BODY channel (advisory) ----------------------------------------
+    # Reads `placement.body`'s drawn-body ladder rather than calling
+    # extract_fab_sides itself: this loop WAS the second implementation of
+    # "what is this part's body" (#896), and its .Fab-only ladder is why six
+    # esp_prog parts -- the connector housings, the SSOP and the SOT89 -- were
+    # unjudged on a board where silk is the only body drawn.
     path = pcb_file or getattr(pcb_data, 'source_path', None)
     if path:
+        from placement.body import (SOURCE_NONE as _BODY_NONE,
+                                    SOURCE_SILK as _BODY_SILK, board_bodies)
         try:
-            from placement.parser import extract_fab_sides
-            fab = extract_fab_sides(path)
-        except Exception:
-            fab = {}
+            _bodies = board_bodies(pcb_data, path)
+        except Exception:                                    # noqa: BLE001
+            _bodies = {}
         fab_parts = []
         for ref, fp in sorted(fps.items()):
-            sides = fab.get(ref)
-            if not sides:
+            geom = _bodies.get(ref)
+            lb = geom.drawn_local if geom is not None else None
+            if lb is None:
                 fab_unjudged.add(ref)
                 continue
+            body_sources[ref] = (geom.drawn_source if geom is not None
+                                 else _BODY_NONE)
+            if body_sources[ref] == _BODY_SILK:
+                silk_sourced.add(ref)
             own = footprint_side(fp)
-            lb = sides.get(own) or next(iter(sides.values()))
             rot = fp.rotation or 0.0
             x0, y0, x1, y1 = rotate_local_bounds(*lb, rot)
-            fab_parts.append((ref, own,
-                              (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)))
+            _rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
+            fab_parts.append((ref, own, _rect))
+            # #896 seam input. The drilled-pad box rides along so the seam
+            # obeys the same shared-side rule the graders use: a B-side part
+            # and an F-side part have no seam at all unless a barrel makes
+            # them share a face.
+            _has_tht = footprint_has_through_pads(fp)
+            _tht = None
+            if _has_tht:
+                _t = through_pad_bounds_local(fp)
+                if _t is not None:
+                    tx0, ty0, tx1, ty1 = rotate_local_bounds(*_t, rot)
+                    _tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
+            seam_parts.append((ref, sides_occupied(own, _has_tht), own,
+                               _rect, _tht, body_sources[ref]))
         for i, (ra, sa, rca) in enumerate(fab_parts):
             for rb, sb, rcb in fab_parts[i + 1:]:
                 if sa != sb:
@@ -1504,8 +1583,33 @@ def grade_body_overlap(pcb_data, clearance: float,
     #
     # Corpus effect, measured: ZERO boards gate on this.
     _GATE_EXEMPT = ('marker_class', 'container_class', 'intent_declared')
+    # #896. A SILK-sourced body never gates, structurally -- not because a
+    # census happened to come out clean. Silk is the last rung and the least
+    # trustworthy: it is whatever the library drew on the silkscreen, and on a
+    # hand-rolled library that is routinely an assembly outline rather than a
+    # body. Measured on the shipped esp_prog: U2's OLIMEX SOT89 draws four
+    # corner brackets at +/-2.5mm plus a pin-1 dot, a 5.2 x 5.2mm square
+    # centred on an origin the pads are not centred on -- and R1, which clears
+    # U2's real body by 2.1mm, read as 89% CONTAINED inside it and gated the
+    # board NOT BUILDABLE. The pairs are still reported, with their source, in
+    # `pairs` / `advisory` and `body_sources`; what they may not do is decide.
+    # Scoped PER CHANNEL, because the two channels grade different rects: the
+    # containment/drawn-body channel reads `drawn_source`, the courtyard
+    # channel reads the occupancy source on `GradedPart`. A part can carry a
+    # real courtyard AND a silk drawn body at once, and suppressing its
+    # COURTYARD pair for that reason threw away findings silk had nothing to
+    # do with -- measured, glasgow_revC's J1<->TP13, J1<->TP15, J3<->TP1 and
+    # orangecrab's J5<->J6, all pre-existing.
+    _silk_occupancy = {g.ref for g in _graded if g.source == _BODY_SILK_NAME}
+
+    def _silk_drawn_pair(p) -> bool:
+        return p.a in silk_sourced or p.b in silk_sourced
+
+    def _silk_occupancy_pair(p) -> bool:
+        return p.a in _silk_occupancy or p.b in _silk_occupancy
     containment_blocking = [p for p in contained
-                            if p.waiver not in _GATE_EXEMPT]
+                            if p.waiver not in _GATE_EXEMPT
+                            and not _silk_drawn_pair(p)]
     # Courtyard BLOCKING (run-23): the subset of courtyard pairs that gates.
     # Both floors must trip -- area >= COURTYARD_BLOCKING_MIN_MM2 and depth
     # >= COURTYARD_BLOCKING_MIN_DEPTH_MM -- so by-design slivers a healthy
@@ -1601,7 +1705,12 @@ def grade_body_overlap(pcb_data, clearance: float,
         and (p.area_mm2 >= COURTYARD_BLOCKING_MIN_MM2
              or (p.contained_frac or 0.0) >= COURTYARD_BLOCKING_MIN_FRAC)
         and p.depth_mm >= COURTYARD_BLOCKING_MIN_DEPTH_MM
-        and p.a not in _synthetic_refs and p.b not in _synthetic_refs]
+        and p.a not in _synthetic_refs and p.b not in _synthetic_refs
+        # #896, same rule as containment above: a silk-sourced body reports,
+        # it does not gate.
+        and not _silk_occupancy_pair(p)]
+    from placement.body import tightest_body_seam as _tbs
+    _seam = _tbs(seam_parts)
     return {'blocking': len(blocking),
             'advisory': len(advisory),
             'waived': sum(1 for p in pairs if p.waived),
@@ -1657,6 +1766,18 @@ def grade_body_overlap(pcb_data, clearance: float,
             # let a reader judge.
             'fab_unjudged': len(fab_unjudged),
             'fab_unjudged_refs': sorted(fab_unjudged),
+            # #896. Which drawn geometry each judged part's body came from,
+            # so a reader can tell a housing outline from a fab outline
+            # rather than being told only that something was judged.
+            'body_sources': dict(body_sources),
+            # #896. The tightest DRAWN-body seam on the board, signed
+            # (negative = overlap). `body_overlap_pairs` reports a depth only
+            # for pairs that already overlap, so a board one micron from a
+            # collision reported nothing; run 25's final layout sat at
+            # 0.183mm, header plastic to an 0402 body, and no instrument in
+            # the chain produced that number. None when fewer than two parts
+            # draw a body.
+            'body_seam': (_seam._asdict() if _seam is not None else None),
             # Run-23 courtyard blocking channel -- see the selection above.
             # NOTE these pairs also remain in `advisory`/`advisory_pairs`
             # (that count's meaning is unchanged for its existing consumers);

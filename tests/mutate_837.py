@@ -45,7 +45,14 @@ FLOOR = os.path.join(_ROOT, 'py_placer', 'placement', 'floorplan.py')
 OPTS = os.path.join(_ROOT, 'py_placer', 'placement', 'options.py')
 CA = os.path.join(_ROOT, 'py_tools', 'check_assembly.py')
 CC = os.path.join(_ROOT, 'py_tools', 'check_capacity.py')
-TARGETS = {'le': LEG, 'fp': FLOOR, 'op': OPTS, 'ca': CA, 'cc': CC}
+#: #896. The body model. Its rows land here rather than in a battery of their
+#: own because they are witnessed by the same assembly gates as everything
+#: above -- `grade_body_overlap` reads the model and `check_assembly` prints
+#: it -- and a second runner would be a second copy of the contract stated in
+#: this file's docstring.
+BODY = os.path.join(_ROOT, 'py_placer', 'placement', 'body.py')
+TARGETS = {'le': LEG, 'fp': FLOOR, 'op': OPTS, 'ca': CA, 'cc': CC,
+           'bo': BODY}
 
 CEN = os.path.join(_TESTS, 'test_837_assembly_sides.py')
 CAP = os.path.join(_TESTS, 'test_capacity_options.py')
@@ -58,7 +65,13 @@ CLI = os.path.join(_TESTS, 'test_549_floorplan_cli.py')
 #: cannot.
 FFC = os.path.join(_TESTS, 'test_878_far_face_currency.py')
 
-BASELINE = (CEN, CAP, SCH, CLI, FFC)
+#: #896. The body-model witness: the run-25 acceptance numbers with their
+#: source pair, both silk refusals, and two corpus-wide monotonicity claims.
+#: In BASELINE because a battery whose witness is already red scores every row
+#: KILLED and exits 0.
+BOD = os.path.join(_TESTS, 'test_896_body_model.py')
+
+BASELINE = (CEN, CAP, SCH, CLI, FFC, BOD)
 
 ROWS = [
     # ------------------------------------------------- the census's two rules
@@ -110,6 +123,70 @@ ROWS = [
      "            zero_pad[side].append(ref)\n",
      "            zero_pad[side].append(ref) if side == 'B' else None\n",
      (CEN,), 'KILLED'),
+
+    # ------------------------------------------------------ #896 body model
+    # The silk rung itself. Without it the six esp_prog parts that draw no
+    # .Fab -- the connector housings, the SSOP, the SOT89 -- have no body at
+    # all, which is the state the issue was filed about.
+    ('the-silk-rung-does-not-exist', 'bo',
+     "    elif silk is not None:\n        if pads is None:",
+     "    elif False:\n        if pads is None:",
+     (BOD,), 'KILLED'),
+
+    # Rule 1. Silk is a pair of clipped side ticks, not an outline, so taken
+    # bare it SHRINKS parts. Neither the acceptance numbers nor the occupancy
+    # arm can see that -- CON1/CON2/U2's silk already contains their pad
+    # field, and occupancy unions with the pads again regardless -- so only
+    # `test_a_silk_body_is_never_smaller_than_its_pads` watches it. That arm
+    # exists BECAUSE this row SURVIVED the first run of this battery.
+    ('the-silk-rung-does-not-union-with-the-pads', 'bo',
+     "            body = _union(silk, pads)",
+     "            body = silk",
+     (BOD,), 'KILLED'),
+
+    # Rule 2. Allowing a pad-less footprint a silk body put 5 corpus pairs
+    # above the run-23 blocking floors, and all five were logos.
+    ('a-pad-less-footprint-may-claim-a-silk-body', 'bo',
+     "        if pads is None:\n            # Rule 2:",
+     "        if False:\n            # Rule 2:",
+     (BOD,), 'KILLED'),
+
+    # The tick-mark test, inverted: it would accept exactly the fragments it
+    # exists to refuse and refuse the outlines it exists to accept.
+    ('the-tick-mark-test-is-inverted', 'bo',
+     "            if _contained(silk, pads):",
+     "            if not _contained(silk, pads):",
+     (BOD,), 'KILLED'),
+
+    # The two ladders re-merged. A courtyard is a body PLUS an assembly margin
+    # plus any shell overhang, and run-6 calibrated the courtyard channel and
+    # the fab channel apart for exactly that reason. esp_prog cannot witness
+    # this at all (no part on it draws a courtyard), which is why the witness
+    # sweeps the corpus for parts drawing both.
+    ('the-courtyard-joins-the-drawn-ladder', 'bo',
+     "    if fab is not None:\n        drawn_local, drawn_source = fab, SOURCE_FAB",
+     "    _c0 = _for_side(courtyard_sides, side)\n"
+     "    if _c0 is not None:\n"
+     "        drawn_local, drawn_source = _c0, SOURCE_COURTYARD\n"
+     "    elif fab is not None:\n"
+     "        drawn_local, drawn_source = fab, SOURCE_FAB",
+     (BOD,), 'KILLED'),
+
+    # Occupancy stops being monotone. Unmutated, this line is what keeps three
+    # ulx3s and two esp_prog run-23 findings alive: a .Fab body is routinely
+    # narrower than the pads it sits between (ulx3s AUDIO1 0.59x).
+    ('occupancy-stops-unioning-with-the-pads', 'bo',
+     "    occupancy = (body_local if pads is None else _union(body_local, pads))",
+     "    occupancy = body_local",
+     (BOD,), 'KILLED'),
+
+    # A silk body must never GATE. esp_prog's R1 clears U2's real body by
+    # 2.1mm and reads 89% contained inside U2's silk square, which without
+    # this exclusion gates the board NOT BUILDABLE.
+    ('a-silk-body-may-gate-containment', 'le',
+     "                            and not _silk_drawn_pair(p)]",
+     "                            ]",
+     (BOD,), 'KILLED'),
 
     # ------------------------------------------------------------- the rule
     # `ctx.sev` hard-defaults to ERROR. Nothing in the engine can move a part
