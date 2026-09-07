@@ -3383,6 +3383,13 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
         continue
     if _selfgraze_fallback is not None:
         print(_selfgraze_fallback[1] + "  [least self-graze; no clean layer]")
+        # #906: mark the COMPROMISE. This is not a rejection -- the copper is
+        # kept, deliberately, because a self-grazing coupled middle beats no
+        # middle at all -- but it ships P/N below clearance, so it is NOT the
+        # invariant #521 protects. Protecting it would make the chain step
+        # whose job is to fix it skip the pair instead. Disclosure only: no
+        # routing code branches on this key.
+        _selfgraze_fallback[2]['selfgraze'] = _selfgraze_fallback[0]
         return _selfgraze_fallback[2]
     if _hyb_rej:
         from collections import Counter

@@ -133,8 +133,13 @@ def test_a_token_with_a_reason_is_accepted_both_ways():
                     '4 (this half): the pair is parity-fixed', *LENSES)
         check('token stored alone', e.get('stop_condition') == '4',
               e.get('stop_condition'))
-        check('reason stored apart',
-              e.get('stop_reason') == 'the pair is parity-fixed',
+        # LOSSLESS. The first cut partitioned the reason again on its own first
+        # ':' and kept only the tail, so "(this half)" -- the clause that says
+        # WHICH half closed, which is the distinction this issue exists to make
+        # machine-readable -- was deleted, and the assertion here pinned the
+        # loss as correct.
+        check('the reason is stored WHOLE, aside included',
+              e.get('stop_reason') == '(this half): the pair is parity-fixed',
               e.get('stop_reason'))
     with tempfile.TemporaryDirectory() as td:
         e = _accept(td, '--final', '--stop-condition',
@@ -143,6 +148,62 @@ def test_a_token_with_a_reason_is_accepted_both_ways():
               e.get('stop_condition') == '4', e.get('stop_condition'))
         check('and its reason survives',
               e.get('stop_reason') == 'measured unfixable', e.get('stop_reason'))
+
+
+def test_the_reason_survives_every_shape_verbatim():
+    """A unit sweep, because the round-trip arms above only sample two shapes
+    and the truncation bug hid in the ones they did not."""
+    print('\n-- 5b. split_stop_condition, shape by shape --')
+    sys.path.insert(0, os.path.join(ROOT, 'py_placer'))
+    from converge import split_stop_condition as _split
+    for raw, want in (
+            ('DONE-EXHAUSTED', ('DONE-EXHAUSTED', '')),
+            ('4', ('4', '')),
+            ('4: the pair is parity-fixed', ('4', 'the pair is parity-fixed')),
+            ('4 (this half): the pair is parity-fixed',
+             ('4', '(this half): the pair is parity-fixed')),
+            ('3: plateau: five laps, no new copper',
+             ('3', 'plateau: five laps, no new copper')),
+            ('STUCK (routing half): nothing left',
+             ('STUCK', '(routing half): nothing left')),
+            ('2 budget spent: 100 rows', ('2', 'budget spent: 100 rows')),
+            ('4\tmeasured unfixable', ('4', 'measured unfixable')),
+            ('plateau: 3 iterations', (None, 'plateau: 3 iterations'))):
+        got = _split(raw)
+        check(f'{raw!r} -> {want}', got == want, got)
+
+
+def test_a_stop_reason_is_kept_on_a_non_final_row():
+    """A new flag that silently does nothing on most rows is worse than no
+    flag. The first cut stored both keys only inside `if a.final:`."""
+    print('\n-- 5c. --stop-condition / --stop-reason without --final --')
+    with tempfile.TemporaryDirectory() as td:
+        e = _accept(td, '--lever', 'a lap', '--stop-condition',
+                    '3: five laps, no new copper')
+        check('the token is recorded', e.get('stop_condition') == '3',
+              e.get('stop_condition'))
+        check('and so is the reason',
+              e.get('stop_reason') == 'five laps, no new copper',
+              e.get('stop_reason'))
+
+
+def test_the_kind_flag_does_not_bypass_the_contradiction():
+    """`--kind systemic --final` used to skip the whole run-closing contract:
+    the DONE-EXHAUSTED-beside-a-FAIL refusal sat inside a `kind == 'completion'`
+    gate. That is this issue's own shape -- one record, two rules, depending on
+    something orthogonal -- one line below the fix."""
+    print('\n-- 6b. --kind must not be a bypass --')
+    for kind in ('systemic', 'placement', 'classification'):
+        with tempfile.TemporaryDirectory() as td:
+            run_utils.check(
+                _argv(td, '--kind', kind, '--final', '--stop-condition',
+                      'DONE-EXHAUSTED: everything passed', *FAIL_LENSES),
+                refuse='contradiction', code=2)
+    # ...and an ordinary (non-final) lap carrying a FAIL lens is still fine:
+    # the checks are about --final, not about having a failing lens.
+    with tempfile.TemporaryDirectory() as td:
+        _accept(td, '--lever', 'a rejected lap', '--rejected', *FAIL_LENSES)
+        check('a non-final lap with a FAIL lens still records', True)
 
 
 def test_the_fail_lens_refusals_still_hold():
@@ -191,6 +252,9 @@ def main():
     test_a_mangled_lever_warns_but_records()
     test_the_stop_token_is_checked_with_every_lens_passing()
     test_a_token_with_a_reason_is_accepted_both_ways()
+    test_the_reason_survives_every_shape_verbatim()
+    test_a_stop_reason_is_kept_on_a_non_final_row()
+    test_the_kind_flag_does_not_bypass_the_contradiction()
     test_the_fail_lens_refusals_still_hold()
     test_a_reason_given_twice_and_differently_is_refused()
     test_scope_refs_takes_a_list()

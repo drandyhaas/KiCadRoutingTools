@@ -63,6 +63,15 @@ BOARD = (
     ' (type default)) (layer "F.CrtYd"))\n'
     '    (pad "1" smd rect (at 1.0 0) (size 0.6 0.6) (layers "F.Cu")'
     ' (net 1 "VCC")))\n'
+    # R9 sits far away and touches nothing. It exists so a declared waiver can
+    # be UNUSED without being unresolved -- the two populations are only
+    # distinguishable when a real, non-overlapping pair is available.
+    '  (footprint "t:R" (layer "F.Cu") (at 24 24)\n'
+    '    (property "Reference" "R9" (at 0 0) (layer "F.SilkS"))\n'
+    '    (fp_rect (start -1 -0.6) (end 1 0.6) (stroke (width 0.05)'
+    ' (type default)) (layer "F.CrtYd"))\n'
+    '    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu")'
+    ' (net 1 "VCC")))\n'
     ')\n')
 
 fails = []
@@ -146,23 +155,92 @@ def test_a_waiver_naming_a_missing_ref_is_reported():
     check('the unresolvable pair is named',
           [['GONE9', 'H1']] == g.get('waivers_unresolved'),
           g.get('waivers_unresolved'))
-    check('the resolvable one is NOT reported as unresolved',
-          all('CB' not in p for p in (g.get('waivers_unresolved') or [])))
-    check('and it is not reported as unused either -- it did waive a pair',
-          g.get('waivers_unused') == [], g.get('waivers_unused'))
+    check('the pair that DID waive something is in neither population',
+          g.get('waivers_unused') == []
+          and not any('CB' in p for p in (g.get('waivers_unresolved') or [])),
+          (g.get('waivers_unused'), g.get('waivers_unresolved')))
 
 
 def test_an_unused_waiver_is_kept_apart_from_a_stale_one():
-    """A pair that exists but never overlapped is harmless; a ref the board
-    does not have is a rename or a deletion. Two populations, two keys."""
-    print('\n-- 4. a waiver on a real pair that does not overlap --')
+    """Two populations, two keys: a ref the board does not have is a rename or
+    a deletion; a pair that exists and matched no waivable overlap is harmless.
+
+    THE POSITIVE CASE IS THE POINT. The first cut of this arm waived H1/CB --
+    which DOES overlap -- twice under two spellings, so `waivers_unused` was
+    asserted `[]` and nothing ever put anything in it: replacing the whole
+    expression with a constant `[]` passed all 13 checks.
+    """
+    print('\n-- 4. a real pair with no waivable overlap --')
     path = _board()
-    g = _grade(path, intent_waivers=[('H1', 'CB'), ('CB', 'H1')])
-    check('no unresolved waivers', g.get('waivers_unresolved') == [],
+    g = _grade(path, intent_waivers=[('H1', 'CB'), ('CB', 'R9')])
+    check('the non-overlapping declared pair is named unused',
+          g.get('waivers_unused') == [['CB', 'R9']], g.get('waivers_unused'))
+    check('...and R9 is really ON the board, so this is not an unresolved pair '
+          'wearing the wrong label',
+          g.get('waivers_unresolved') == [], g.get('waivers_unresolved'))
+    # ('CB','H1') is the same frozenset as ('H1','CB'): one entry, and used.
+    g2 = _grade(path, intent_waivers=[('H1', 'CB'), ('CB', 'H1')])
+    check('a pair declared twice under two spellings counts once, and is used',
+          g2.get('waivers_unused') == [], g2.get('waivers_unused'))
+
+
+def test_a_degenerate_pair_does_not_break_the_instrument():
+    """`load_intent` checks the pair's LENGTH, not its distinctness, so
+    `["U1","U1"]` -- a rename typo -- reaches the grader. It collapses to a
+    one-element frozenset, and a consumer formatting `a <-> b` from it died
+    with an IndexError: a mistyped intent turned check_assembly into a broken
+    tool, exit 1, which a caller reads as "the tool is broken" and not "your
+    intent is wrong"."""
+    print('\n-- 5. a waiver naming the same ref twice --')
+    from placement.legality import format_waiver_warnings
+    path = _board()
+    g = _grade(path, intent_waivers=[('CB', 'CB'), ('ZZ', 'ZZ')])
+    rows = (g.get('waivers_unresolved') or []) + (g.get('waivers_unused') or [])
+    check('every reported row has exactly two refs',
+          rows and all(len(r) == 2 for r in rows), rows)
+    check('the off-board one is reported unresolved',
+          ['ZZ', 'ZZ'] in (g.get('waivers_unresolved') or []),
           g.get('waivers_unresolved'))
-    # ('CB','H1') is the same frozenset as ('H1','CB'), so the set holds one.
-    check('the pair is counted once and used', g.get('waivers_unused') == [],
-          g.get('waivers_unused'))
+    try:
+        lines = format_waiver_warnings(g)
+        ok = any('ZZ' in ln for ln in lines)
+    except Exception as exc:                                   # noqa: BLE001
+        ok, lines = False, repr(exc)
+    check('and the shared formatter renders it instead of raising', ok, lines)
+
+
+def test_the_render_can_see_a_waiver_at_all():
+    """THE SYMPTOM THE ISSUE DESCRIBES, which fixing `_waiver_for` alone does
+    not cure: run 25's banner was on the REVIEW SHEET, and
+    `render_placement.legality_findings` graded waiver-blind -- it passed no
+    `intent_waivers` and the tool had no --intent flag. So the sheet and --gate
+    went on calling a waived pair blocking however the precedence was ordered.
+
+    In-process on purpose: the mechanism is `model.intent_waivers`, and driving
+    it here keeps this file fast. The flag that sets it is checked against the
+    real parser rather than assumed.
+    """
+    print('\n-- 6. the renderer honours an intent --')
+    sys.path.insert(0, os.path.join(ROOT, 'py_tools'))
+    import render_placement as RP
+    from kicad_parser import parse_kicad_pcb as _parse
+    path = _board()
+
+    def _blocking(waivers):
+        m = RP.PlacementModel(_parse(path), path, exact=True,
+                              quench_kwargs={'clearance': 0.09,
+                                             'ignore_net_ids': set()})
+        m.intent_waivers = waivers
+        return RP.legality_findings(m).get('courtyard_blocking_pairs_refs') or []
+
+    blind = _blocking(())
+    check('waiver-blind, the render calls the pair blocking (the run-25 banner)',
+          any({'H1', 'CB'} <= set(r[:2]) for r in blind), blind)
+    seeing = _blocking((('H1', 'CB'),))
+    check('given the intent, it does not', seeing == [], seeing)
+    check('--intent is a real flag on the real parser',
+          any('--intent' in (a.option_strings or [])
+              for a in RP.build_parser()._actions))
 
 
 def main():
@@ -171,6 +249,8 @@ def main():
     test_an_authored_waiver_survives_a_locked_part()
     test_a_waiver_naming_a_missing_ref_is_reported()
     test_an_unused_waiver_is_kept_apart_from_a_stale_one()
+    test_a_degenerate_pair_does_not_break_the_instrument()
+    test_the_render_can_see_a_waiver_at_all()
     print()
     if fails:
         print(f"FAIL: {len(fails)} check(s) failed: {fails}")

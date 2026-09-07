@@ -324,11 +324,20 @@ STOP_TOKENS = ('1', '2', '3', '4', 'DONE-EXHAUSTED', 'STUCK', 'BUDGET')
 #: mangled net name from a net that does not exist (CLAUDE.md). Row 31 of run 25
 #: holds exactly this in its `lever_argv`; `replay` of it would grade impedance
 #: on two nets that do not exist and return null, i.e. a vacuous pass.
-#: Unanchored ON PURPOSE, used two ways: `.match` for an --argv TOKEN, where
-#: the rewrite is always at position 0, and `.search` for --lever PROSE, where
-#: it is not -- and where splitting the prose on whitespace cannot find it
-#: either, because the rewritten path itself contains a space ("Program Files").
-_MANGLED_RE = re.compile(r'[A-Za-z]:[/\\]Program Files[/\\]Git[/\\]')
+#: `.search`, never `.match`, on BOTH argv tokens and lever prose. The rewrite
+#: is at position 0 of a bare token but NOT of `--impedance-nets=/D_P`, which
+#: MSYS rewrites in place; and prose cannot be split on whitespace to find it
+#: because the rewritten path itself contains a space ("Program Files").
+#:
+#: WHAT THIS DOES NOT CATCH, so its silence is not read as a clean bill: the
+#: MSYS root is the install directory, and this knows the three common ones.
+#: A portable Git, an unusual install path, or a rewrite whose root is none of
+#: these is NOT detected -- the guard is a detector for the shape that has
+#: actually bitten this repo, not a proof of absence. The reliable defence
+#: remains `export MSYS2_ARG_CONV_EXCL='*'` before any command carrying net
+#: names (CLAUDE.md).
+_MANGLED_RE = re.compile(
+    r'[A-Za-z]:[/\\](?:Program Files(?: \(x86\))?[/\\]Git|msys64|msys32)[/\\]')
 
 _MSYS_REMEDY = ("export MSYS2_ARG_CONV_EXCL='*' before the command, and pass "
                 "Windows-style paths (C:/Users/...) in the same command since "
@@ -348,16 +357,21 @@ def split_stop_condition(value):
     raw = (value or '').strip()
     if not raw:
         return None, ''
-    head, _, tail = raw.partition(' ')
-    token = head.rstrip(':')
+    # `split(None, 1)` and not `partition(' ')`: a tab between the token and its
+    # reason is not a parse error.
+    parts = raw.split(None, 1)
+    token = parts[0].rstrip(':')
     if token not in STOP_TOKENS:
         return None, raw
-    reason = tail.strip()
-    # `4 (this half): reason` -- the aside belongs to the reason, not the token.
-    if reason.startswith('(') or head.endswith(':'):
-        _, _, after = reason.partition(':')
-        reason = (after or reason).strip()
-    return token, reason.lstrip(':').strip()
+    # EVERYTHING after the token is the reason, verbatim. The first cut
+    # partitioned it again on its own first ':' and kept only the tail, which
+    # deleted exactly the informative half: `4 (this half): ...` lost the aside
+    # that distinguishes the routing half's close from the orchestrator's,
+    # `3: plateau: five laps` lost "plateau", and stop condition 4 -- defined as
+    # "a finding about the requirement, with the measurement that proves it" --
+    # lost the finding and kept the measurement. The ledger is the terminal
+    # record; it does not get to silently drop half a sentence.
+    return token, (parts[1].strip() if len(parts) > 1 else '')
 
 
 def score_component(score, key):
@@ -725,7 +739,7 @@ def cmd_record(a):
         # name three tokens later sailed through -- and `replay` re-executes the
         # stored list verbatim, so the row grades nets that do not exist and
         # returns null: a vacuous pass nothing reports.
-        _bad = [t for t in a.argv if _MANGLED_RE.match(str(t))]
+        _bad = [t for t in a.argv if _MANGLED_RE.search(str(t))]
         if _bad:
             print(f"record: --argv contains {len(_bad)} token(s) rewritten by "
                   f"MSYS2 -- {', '.join(repr(t) for t in _bad[:3])}"
@@ -855,10 +869,39 @@ def cmd_record(a):
               "written.", file=sys.stderr)
         return 2
     _stop_reason = (a.stop_reason or '').strip() or _stop_reason
-    # A run-closing record must carry the routed-board lenses. `blocking == 0`
-    # and "every lens passes" are two different claims and the second had no
-    # mechanism at all -- verifier-prompts.md states the conjunct and nothing
-    # computed it, so a close-out could be written with no lens ever dispatched.
+    # #901: these two are about --final, NOT about which half it closes.
+    # They sat inside the `kind == 'completion'` gate below, so
+    # `--kind systemic --final --stop-condition DONE-EXHAUSTED --lens
+    # VERDICT=FAIL:...` was accepted -- a one-word bypass of the entire
+    # run-closing contradiction check, in the same shape ("one record, two
+    # rules, depending on something orthogonal") this issue is about. The
+    # THREE-LENS requirement stays completion-only: that one really is about
+    # the routed board.
+    _failed = [v for v in (a.lens or []) if v.strip().startswith('VERDICT=FAIL')]
+    # The extracted TOKEN, so `4 (this half): <reason>` is judged as a 4.
+    _sc = _stop_token or ''
+    if a.final and _failed and _sc == 'DONE-EXHAUSTED':
+        print(f"record: {len(_failed)} lens FAILED under --stop-condition "
+              f"DONE-EXHAUSTED. Done-and-measured-done IS the every-lens-"
+              f"passes claim, so a FAIL beside it is the contradiction "
+              f"L5's cross-check exists to refuse. Record STUCK or BUDGET "
+              f"(or fix the board and re-dispatch the lens), never a done "
+              f"a lens denies. Nothing was written.", file=sys.stderr)
+        return 2
+    if a.final and _failed and _sc not in FAIL_COMPATIBLE_STOPS:
+        print(f"record: {len(_failed)} lens FAILED, so this run did not "
+              f"finish clean -- --stop-condition must be 2 (budget spent), "
+              f"4 (measured-unfixable and said so), or the loop verdict "
+              f"naming the same thing (STUCK, BUDGET), not "
+              f"{a.stop_condition!r}. A FAIL means `blocking` was not "
+              f"really zero. Nothing was written.", file=sys.stderr)
+        return 2
+
+    # A run-closing COMPLETION record must carry the routed-board lenses.
+    # `blocking == 0` and "every lens passes" are two different claims and the
+    # second had no mechanism at all -- verifier-prompts.md states the conjunct
+    # and nothing computed it, so a close-out could be written with no lens ever
+    # dispatched. This one IS completion-only: it is about the routed board.
     if a.final and a.kind == 'completion':
         _seen = set()
         for v in (a.lens or []):
@@ -875,10 +918,7 @@ def cmd_record(a):
                   f"VERDICT= line as --lens. `blocking == 0` is not `every "
                   f"lens passes`. Nothing was written.", file=sys.stderr)
             return 2
-        _failed = [v for v in (a.lens or []) if v.strip().startswith('VERDICT=FAIL')]
-        # The extracted TOKEN, so `4 (this half): <reason>` is judged as a 4
-        # (#901). Both refusals below are unchanged in what they refuse.
-        _sc = _stop_token or ''
+
         # TWO STOP VOCABULARIES ARE OF RECORD, and both must be acceptable as
         # printed: the routing half closes on the NUMBERS of convergence.md §3,
         # and the outer loop's L5 interpolates the verdict NAMES this tool's
@@ -886,22 +926,6 @@ def cmd_record(a):
         # here for exactly that gap -- a FAIL lens is the NORMAL case on the
         # STUCK/BUDGET paths. DONE-EXHAUSTED is the exception: done-and-
         # measured-done IS the all-lenses-pass claim.
-        if _failed and _sc == 'DONE-EXHAUSTED':
-            print(f"record: {len(_failed)} lens FAILED under --stop-condition "
-                  f"DONE-EXHAUSTED. Done-and-measured-done IS the every-lens-"
-                  f"passes claim, so a FAIL beside it is the contradiction "
-                  f"L5's cross-check exists to refuse. Record STUCK or BUDGET "
-                  f"(or fix the board and re-dispatch the lens), never a done "
-                  f"a lens denies. Nothing was written.", file=sys.stderr)
-            return 2
-        if _failed and _sc not in FAIL_COMPATIBLE_STOPS:
-            print(f"record: {len(_failed)} lens FAILED, so this run did not "
-                  f"finish clean -- --stop-condition must be 2 (budget spent), "
-                  f"4 (measured-unfixable and said so), or the loop verdict "
-                  f"naming the same thing (STUCK, BUDGET), not "
-                  f"{a.stop_condition!r}. A FAIL means `blocking` was not "
-                  f"really zero. Nothing was written.", file=sys.stderr)
-            return 2
     store = BoardStore(a.store or os.path.join(os.path.dirname(a.ledger), 'boards'))
     sha = store.put(a.board)
     # Run-3 B4: three ledger entries shipped carrying a PRIOR board's score
@@ -1083,12 +1107,16 @@ def cmd_record(a):
               "no trigger.", file=sys.stderr)
     if a.final:
         entry['final'] = True
-        # The TOKEN alone, so a reader (and `verdict`, and the film) can match
-        # it against the vocabulary instead of parsing prose (#901). The reason
-        # keeps its own key -- absent, not empty, when there is none.
+    # The TOKEN alone, so a reader (and `verdict`, and the film) can match it
+    # against the vocabulary instead of parsing prose (#901). The reason keeps
+    # its own key -- absent, not empty, when there is none. Recorded on ANY row
+    # that carries one, not only a --final row: the first cut stored both keys
+    # inside `if a.final:`, so `--stop-reason` on an ordinary lap was accepted,
+    # validated, and silently dropped -- a flag that does nothing.
+    if _stop_token:
         entry['stop_condition'] = _stop_token
-        if _stop_reason:
-            entry['stop_reason'] = _stop_reason
+    if _stop_reason:
+        entry['stop_reason'] = _stop_reason
     if a.exhausted:
         entry['exhausted'] = {'half': a.exhausted,
                               'reason': a.exhausted_reason.strip()}

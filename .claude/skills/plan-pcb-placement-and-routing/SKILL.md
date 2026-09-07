@@ -918,9 +918,19 @@ argv failure the next paragraph exists to stop.
 `record` now enforces both.** An `--argv` whose first token is neither an
 existing file nor on PATH is refused (exit 2, nothing written): run 7's
 endgame recorded `["python3","-X","utf8","dummy"]`, which `replay` can never
-run — a placeholder argv turns the ledger back into prose. The run-closing
-entry takes `--final --stop-condition '<which of 9.5 fired>'`; `--final`
-without a stop condition is refused the same way. And **before quoting a
+run — a placeholder argv turns the ledger back into prose. **Every other argv
+token is checked too**: an MSYS2-rewritten net name
+(`C:/Program Files/Git/D_P`, what Git Bash does to `/D_P` without
+`MSYS2_ARG_CONV_EXCL`) is refused, because `replay` would grade nets that do
+not exist and return a vacuous pass.
+
+The run-closing entry takes `--final --stop-condition '<which of 9.5 fired>'`.
+**That is a TOKEN, and it is checked on every record that carries one**, not
+only when a lens failed: `1 | 2 | 3 | 4 | DONE-EXHAUSTED | STUCK | BUDGET`.
+Write the reason after it — `--stop-condition "3: five laps, no new copper"` —
+or in `--stop-reason`; the token and the prose land in separate ledger keys and
+nothing is truncated. Prose alone (`"plateau: 3 iterations"`) is refused.
+`--final` without a stop condition is refused the same way. And **before quoting a
 headline in the lever text, diff it against the SAME entry's score payload**:
 run 7's final entry said "SWD closed, 5 opens" while its own score listed
 SWDIO among 6 unrouted — the prose shipped into the report and the correction
@@ -990,6 +1000,11 @@ additionally walks the WHOLE ledger for checks 3 and 4 (monotone t-stamps
 end to end; the final entry's stop condition quoted against its score).
 
 #### 9.5 — Stop conditions. Only these four. Say which one fired, every time.
+
+They have TOKENS, and `converge.py record --stop-condition` takes the token:
+`1`, `2`, `3`, `4` for the four below, plus the loop verdicts `DONE-EXHAUSTED`,
+`STUCK` and `BUDGET` that `verdict` prints. The sentence explaining WHY goes
+after the token or in `--stop-reason`, never instead of it.
 
 1. **`blocking == 0`, the repo's own spec checker passes, and every verifier lens
    passes** → done. All three are required. `board_score` exits **0** at

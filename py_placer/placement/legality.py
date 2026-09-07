@@ -1281,6 +1281,18 @@ def grade_body_overlap(pcb_data, clearance: float,
 
     _waivers_hit = set()
 
+    def _waiver_row(pair):
+        """A declared pair as a LIST OF TWO refs, whatever it was authored as.
+
+        `waiver_sets` holds frozensets, so `["U1","U1"]` -- a rename typo, and
+        `floorplan.load_intent` accepts it because it checks the raw list's
+        LENGTH and not its distinctness -- collapses to one element. Every
+        consumer formats these as `a <-> b`; one crashed on the ragged row with
+        an IndexError, turning a mistyped intent into a broken instrument.
+        """
+        refs = sorted(pair)
+        return refs if len(refs) == 2 else [refs[0], refs[0]]
+
     def _waiver_for(a: str, b: str) -> str:
         # AUTHORED FIRST (#897). An operator naming a pair in the intent's
         # `overlap_waivers` outranks every class label -- which is what the
@@ -1293,10 +1305,14 @@ def grade_body_overlap(pcb_data, clearance: float,
         # mechanical, both locked, waived in intent.json, carried the banner
         # `BLOCKING, past the floors (1)` on every review sheet of the run
         # while check_assembly --baseline called the same pair baseline's own.
-        _pair = frozenset((a, b))
-        if _pair in waiver_sets:
-            _waivers_hit.add(_pair)
-            return 'intent_declared'
+        # `waiver_sets` is empty on every caller but check_assembly --intent and
+        # place_reconstruct --intent, and this runs per PAIR per grade -- so do
+        # not build a frozenset for boards that declared no waivers at all.
+        if waiver_sets:
+            _pair = frozenset((a, b))
+            if _pair in waiver_sets:
+                _waivers_hit.add(_pair)
+                return 'intent_declared'
         if a in _containers or b in _containers:
             return 'container_class'
         ca, cb = _class_of(a), _class_of(b)
@@ -1664,15 +1680,24 @@ def grade_body_overlap(pcb_data, clearance: float,
             # has never heard of it. Two populations, kept apart because they
             # mean different things: `waivers_unresolved` names a ref the board
             # does not have (a rename or a deletion -- the stale one), while
-            # `waivers_unused` is a pair that exists and simply never overlapped
-            # (harmless today, and the thing to check first if a waiver stops
-            # working). Reported, never enforced: an unused waiver is not an
-            # error, and this function grades a board rather than an intent.
+            # `waivers_unused` is a pair that exists and that no WAIVABLE
+            # overlap was found for. Note the second is not quite "never
+            # overlapped": the pad-intersection channel is never waivable by
+            # design and does not consult `_waiver_for` at all, so a pair whose
+            # only contact is pad copper lands here too. Reported, never
+            # enforced: an unused waiver is not an error, and this function
+            # grades a board rather than an intent.
+            #
+            # Each entry is a LIST OF TWO refs. `waiver_sets` holds frozensets,
+            # so a degenerate authored pair (`["U1","U1"]` -- a rename typo, and
+            # `load_intent` accepts it: it checks length, not distinctness)
+            # collapses to one element. Pad it back out rather than emitting a
+            # ragged row: a consumer formatting `a <-> b` crashed on it.
             'waivers_unresolved': sorted(
-                sorted(p) for p in waiver_sets
+                _waiver_row(p) for p in waiver_sets
                 if any(r not in fps for r in p)),
             'waivers_unused': sorted(
-                sorted(p) for p in waiver_sets
+                _waiver_row(p) for p in waiver_sets
                 if p not in _waivers_hit and all(r in fps for r in p))}
 
 
@@ -3096,6 +3121,35 @@ class LegalityContext:
         if ext is None:
             return 0.0
         return self.gate.rect_outside_amount(ext, exact=exact, edges=edges)
+
+
+def format_waiver_warnings(grade, limit: int = 6):
+    """Lines naming declared waivers that resolved to nothing (#897).
+
+    ONE spelling, beside the measure, because every consumer that passes
+    `intent_waivers` needs to say the same thing and the first cut said it in
+    `check_assembly` only -- so `place_reconstruct --intent`, which takes the
+    same waivers, still swallowed a stale one silently.
+
+    `waivers_unresolved` names a ref the board does not have: a rename or a
+    deletion, and the pair it was written for is back in the census under
+    whatever class label it now gets. `waivers_unused` is quieter -- the refs
+    exist and no waivable overlap was found for them -- so it is reported only
+    as a note, and only when there is one.
+    """
+    out = []
+    for _p in (grade.get('waivers_unresolved') or ())[:limit]:
+        out.append(f"WARNING: overlap_waivers pair {_p[0]}<->{_p[1]} names a "
+                   f"reference this board does not have -- it waives nothing")
+    _unused = grade.get('waivers_unused') or ()
+    if _unused:
+        out.append("note: %d declared waiver(s) matched no waivable overlap "
+                   "(%s) -- harmless, and the first thing to check if a waiver "
+                   "stopped working. A pad-on-pad contact is never waivable, so "
+                   "such a pair lands here too."
+                   % (len(_unused),
+                      ', '.join(f"{a}<->{b}" for a, b in _unused[:limit])))
+    return out
 
 
 def format_required_clause(report, limit: int = 6) -> str:

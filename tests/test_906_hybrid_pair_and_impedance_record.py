@@ -19,14 +19,27 @@ writing.
    pair. After a hand `persist_protected_nets`: 14 spans / 8 nets, pair intact.
    The #521 mechanism worked; its recording gate is what failed.
 
-2. A `net_impedance` spec was recorded even when no stackup made it computable.
-   With no stackup `layer_widths` stays empty, the config never receives
-   `layer_widths`/`impedance_target`, and the pair routes at the plain track
-   width -- so the record described copper that was never drawn, the reapply
-   branch (stackup-gated) could never use it, and `check_impedance` auto-reads
-   it and grades those nets against an impedance the router never attempted.
-   `route.py` carried the identical asymmetry for single-ended nets; both are
-   gated here.
+2. A `net_impedance` spec was recorded as if achieved even when no width was
+   ever solved -- the router falls back to the plain track width, so the record
+   described copper that was never drawn and `check_impedance` auto-reads it and
+   grades those nets against an impedance the router never attempted.
+   `route.py` carried the identical asymmetry for single-ended nets.
+
+   THE OBVIOUS FIX IS WRONG, and the first cut of this file shipped it. The
+   issue proposes gating the record on the board having a stackup, like the
+   reapply branch. That is a PROXY: a stackup listing copper with no adjacent
+   dielectric solves nothing, every layer falls back, and the spec is recorded
+   anyway -- measured on a board whose only edit was deleting one dielectric
+   line. It also breaks the workflow the record exists for ("route now, add the
+   stackup, re-run without --impedance and let it recompute"), which the very
+   paragraph of docs/length-matching.md it edits still promises, and it silently
+   changed shipped copper: route.py's smoothing skip-list reads the same in-run
+   note, so not recording let the #536 pass rewrite those nets.
+
+   So: the DECLARATION is always recorded, and carries `applied`. False means no
+   layer width was solved. `check_impedance` skips an unapplied declaration; the
+   reapply branch still finds it. `hollow` below is the stackup-present,
+   unsolvable case the proxy gets wrong.
 
 ARM B IS THE SLOW ONE and it is the only one that proves the hybrid path is
 really taken. It asserts "HYBRID" in the router's own output BEFORE asserting
@@ -79,23 +92,48 @@ class _PCB:
 #    Without this, arm 1 is a test of a dict this file invented.
 # --------------------------------------------------------------------------
 def test_the_real_hybrid_result_carries_no_is_diff_pair():
+    """Scoped honestly: this walks EVERY py_router module, not one file, and it
+    finds dict LITERALS plus `x['hybrid_escape'] = ...` stores, because a
+    producer written the second way would otherwise pass unseen.
+
+    It deliberately does NOT claim anything about the callers' rejecting paths
+    -- an earlier draft captioned "nor a failed key" as "it is never built for
+    a failure", which is a statement about call sites the walk never inspects,
+    and it was vacuous: a success-path literal has no `failed` key by
+    construction. The accepted-COMPROMISE path that claim would have had to
+    cover is the self-graze fallback, and it is arm 1b below that covers it.
+    """
     print('\n-- 0. the producer, read from the source --')
-    src = open(os.path.join(ROOT, 'py_router', 'diff_pair_routing.py'),
-               encoding='utf-8').read()
-    found = []
-    for node in ast.walk(ast.parse(src)):
-        if not isinstance(node, ast.Dict):
+    found, stores = [], []
+    for root, _dirs, names in os.walk(os.path.join(ROOT, 'py_router')):
+        if '__pycache__' in root:
             continue
-        keys = [k.value for k in node.keys
-                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
-        if 'hybrid_escape' in keys:
-            found.append(keys)
-    check('exactly one dict literal carries hybrid_escape', len(found) == 1,
+        for name in names:
+            if not name.endswith('.py'):
+                continue
+            path = os.path.join(root, name)
+            tree = ast.parse(open(path, encoding='utf-8').read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Dict):
+                    keys = [k.value for k in node.keys
+                            if isinstance(k, ast.Constant)
+                            and isinstance(k.value, str)]
+                    if 'hybrid_escape' in keys:
+                        found.append((name, keys))
+                elif (isinstance(node, ast.Subscript)
+                      and isinstance(node.slice, ast.Constant)
+                      and node.slice.value == 'hybrid_escape'
+                      and isinstance(getattr(node, 'ctx', None), ast.Store)):
+                    stores.append(name)
+    check('the walk found the producer at all (non-vacuity)', bool(found),
           found)
-    check('and it carries NO is_diff_pair -- so the shape test could not see it',
-          found and 'is_diff_pair' not in found[0], found)
-    check('nor a failed key (it is never built for a failure)',
-          found and 'failed' not in found[0], found)
+    check('exactly one dict literal in the whole engine carries hybrid_escape',
+          len(found) == 1, found)
+    check('and nothing assigns the key separately',
+          stores == [], stores)
+    check('the literal carries NO is_diff_pair -- so the shape test in the '
+          '#521 loop could not see it',
+          found and 'is_diff_pair' not in found[0][1], found)
 
 
 def test_protection_candidates_admits_the_hybrid():
@@ -119,6 +157,18 @@ def test_protection_candidates_admits_the_hybrid():
           protection_candidates({1: None, 2: {}}, pcb) == {})
     check('a net id the board does not have is not',
           protection_candidates({99: hybrid}, pcb) == {})
+    # 1b. The accepted COMPROMISE, which is not a failure and so has no
+    # `failed` key: the self-graze fallback keeps the least-bad candidate when
+    # no layer couples cleanly, and ships P/N copper BELOW clearance.
+    # Protecting it would make the chain step whose job is to fix that skip the
+    # pair. The producer marks it; this asserts the marker is honoured AND that
+    # the marker is really what the producer writes.
+    check('a self-grazing hybrid is NOT protected',
+          protection_candidates({1: dict(hybrid, selfgraze=3)}, pcb) == {})
+    prod = open(os.path.join(ROOT, 'py_router', 'diff_pair_routing.py'),
+                encoding='utf-8').read()
+    check("and the producer really writes that marker on the fallback path",
+          "['selfgraze'] = _selfgraze_fallback[0]" in prod)
 
 
 # --------------------------------------------------------------------------
@@ -173,73 +223,104 @@ def test_a_hybrid_pair_is_recorded_in_the_project():
 # --------------------------------------------------------------------------
 # 3. The impedance record, both fronts.
 # --------------------------------------------------------------------------
-def _synth(td, name, stackup=True):
+def _synth(td, name, stackup='full'):
+    """`full` solves; `none` has no stackup block; `hollow` KEEPS the block but
+    deletes its dielectric line -- copper with nothing between it, which the
+    model cannot solve. `hollow` is the case a stackup-PRESENCE gate calls
+    computable and gets wrong."""
     p = os.path.join(td, name + '.kicad_pcb')
     write_synth_board(p)
-    if not stackup:
-        txt = open(p, encoding='utf-8').read()
+    txt = open(p, encoding='utf-8').read()
+    if stackup == 'none':
         i = txt.index('\t\t(stackup')
         j = txt.index('\t\t)\n', i) + len('\t\t)\n')
-        open(p, 'w', encoding='utf-8').write(txt[:i] + txt[j:])
-        check('the stackup was really removed', '(stackup' not in
-              open(p, encoding='utf-8').read())
+        txt = txt[:i] + txt[j:]
+        open(p, 'w', encoding='utf-8').write(txt)
+        check(f'[{name}] the stackup block was really removed',
+              '(stackup' not in txt)
+    elif stackup == 'hollow':
+        lines = [l for l in txt.split('\n') if '"dielectric 1"' not in l]
+        txt = '\n'.join(lines)
+        open(p, 'w', encoding='utf-8').write(txt)
+        check(f'[{name}] the block survives but its dielectric is gone',
+              '(stackup' in txt and 'dielectric 1' not in txt)
     return p
 
 
-def test_no_impedance_record_without_a_stackup():
-    print('\n-- 3. --impedance on a board with no stackup --')
-    with tempfile.TemporaryDirectory() as td:
-        src = _synth(td, 'nostack', stackup=False)
-        out = os.path.join(td, 'r.kicad_pcb')
-        txt = _run(['py_router/route_diff.py', src, '--nets', 'DP_A_P',
-                    'DP_A_N', '--impedance', '90', '--output', out])
-        check('the router said the board has no stackup',
-              'No stackup' in txt, txt[-300:])
-        specs = read_impedance_specs(pro_path_for_board(out)) \
-            if os.path.isfile(pro_path_for_board(out)) else {}
-        check('no net_impedance spec was recorded', specs == {}, specs)
-        check('and it said why', 'not recording' in txt, txt[-300:])
+def _specs_of(out):
+    pro = pro_path_for_board(out)
+    # A missing project also reads {}, so an arm asserting "no spec" must prove
+    # the project EXISTS -- otherwise a crashed route satisfies it for free.
+    return (os.path.isfile(pro), read_impedance_specs(pro) if os.path.isfile(pro) else {})
 
-    print('\n-- 4. control: the same call WITH a stackup still records --')
+
+def test_an_unsolvable_impedance_is_recorded_as_not_applied():
+    print('\n-- 3. --impedance where no width can be solved --')
+    for label, kind, tool, nets, ohms in (
+            ('no stackup at all', 'none', 'route_diff.py', ['DP_A_P', 'DP_A_N'], '90'),
+            ('a stackup with no dielectric', 'hollow', 'route_diff.py',
+             ['DP_A_P', 'DP_A_N'], '90'),
+            ('route.py, no stackup', 'none', 'route.py', ['SE1'], '50'),
+            ('route.py, hollow stackup', 'hollow', 'route.py', ['SE1'], '50')):
+        with tempfile.TemporaryDirectory() as td:
+            src = _synth(td, kind + tool[:5], stackup=kind)
+            out = os.path.join(td, 'r.kicad_pcb')
+            txt = _run(['py_router/' + tool, src, '--nets', *nets,
+                        '--impedance', ohms, '--output', out])
+            exists, specs = _specs_of(out)
+            check(f'[{label}] the project was written (the arm is not vacuous)',
+                  exists)
+            check(f'[{label}] the declaration is KEPT -- a later step with a '
+                  f'usable stackup must be able to recompute it',
+                  all(float(s.get('ohms', 0)) == float(ohms)
+                      for s in specs.values()) and specs, specs)
+            check(f'[{label}] and it is recorded as NOT applied',
+                  specs and all(s.get('applied') is False
+                                for s in specs.values()), specs)
+            check(f'[{label}] and the run said so', 'NOT APPLIED' in txt,
+                  txt[-400:])
+
+
+def test_check_impedance_does_not_grade_an_unapplied_declaration():
+    print('\n-- 4. the consumer the record misled --')
     with tempfile.TemporaryDirectory() as td:
-        src = _synth(td, 'stack', stackup=True)
+        src = _synth(td, 'hollow_audit', stackup='hollow')
         out = os.path.join(td, 'r.kicad_pcb')
         _run(['py_router/route_diff.py', src, '--nets', 'DP_A_P', 'DP_A_N',
               '--impedance', '90', '--output', out])
-        specs = read_impedance_specs(pro_path_for_board(out)) \
-            if os.path.isfile(pro_path_for_board(out)) else {}
-        check('the spec IS recorded when it was computable',
-              any(float(s.get('ohms', 0)) == 90 for s in specs.values()), specs)
+        txt = _run(['py_tools/check_impedance.py', out])
+        check('check_impedance skips it and says so',
+              'NOT APPLIED' in txt and 'skipped' in txt, txt[-500:])
+        check('and it grades ZERO declarations from that project',
+              'Auto-read 0 net impedance' in txt, txt[-500:])
 
 
-def test_the_single_ended_twin_is_gated_too():
-    print('\n-- 5. route.py --impedance, the same asymmetry --')
-    with tempfile.TemporaryDirectory() as td:
-        src = _synth(td, 'nostack_se', stackup=False)
-        out = os.path.join(td, 'r.kicad_pcb')
-        txt = _run(['py_router/route.py', src, '--nets', 'SE1',
-                    '--impedance', '50', '--output', out])
-        specs = read_impedance_specs(pro_path_for_board(out)) \
-            if os.path.isfile(pro_path_for_board(out)) else {}
-        check('no net_impedance spec on a stackup-less board', specs == {},
-              specs)
-        check('and it said why', 'not recording' in txt, txt[-400:])
-    with tempfile.TemporaryDirectory() as td:
-        src = _synth(td, 'stack_se', stackup=True)
-        out = os.path.join(td, 'r.kicad_pcb')
-        _run(['py_router/route.py', src, '--nets', 'SE1', '--impedance', '50',
-              '--output', out])
-        specs = read_impedance_specs(pro_path_for_board(out)) \
-            if os.path.isfile(pro_path_for_board(out)) else {}
-        check('control: it IS recorded with a stackup',
-              any(float(s.get('ohms', 0)) == 50 for s in specs.values()), specs)
+def test_a_solvable_board_still_records_applied():
+    print('\n-- 5. control: a stackup that really solves --')
+    for tool, nets, ohms in (('route_diff.py', ['DP_A_P', 'DP_A_N'], 90),
+                             ('route.py', ['SE1'], 50)):
+        with tempfile.TemporaryDirectory() as td:
+            src = _synth(td, 'ok' + tool[:5], stackup='full')
+            out = os.path.join(td, 'r.kicad_pcb')
+            txt = _run(['py_router/' + tool, src, '--nets', *nets,
+                        '--impedance', str(ohms), '--output', out])
+            _, specs = _specs_of(out)
+            check(f'[{tool}] the spec is recorded',
+                  any(float(s.get('ohms', 0)) == ohms for s in specs.values()),
+                  specs)
+            check(f'[{tool}] and marked APPLIED',
+                  specs and all(s.get('applied') is True
+                                for s in specs.values()), specs)
+            check(f'[{tool}] the run did NOT claim it was unapplied',
+                  'NOT APPLIED' not in txt)
 
 
 def main():
     test_the_real_hybrid_result_carries_no_is_diff_pair()
     test_protection_candidates_admits_the_hybrid()
-    test_no_impedance_record_without_a_stackup()
-    test_the_single_ended_twin_is_gated_too()
+    test_an_unsolvable_impedance_is_recorded_as_not_applied()
+    test_check_impedance_does_not_grade_an_unapplied_declaration()
+    test_a_solvable_board_still_records_applied()
     test_a_hybrid_pair_is_recorded_in_the_project()
     print()
     if fails:

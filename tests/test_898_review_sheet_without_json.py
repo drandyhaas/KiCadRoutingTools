@@ -106,19 +106,79 @@ def test_json_out_is_unchanged():
               'JSON_SUMMARY:' in r.stdout)
 
 
-def test_a_sheet_that_cannot_be_composed_does_not_exit_0():
-    """The second silent door: --view leaves no full-board AFTER panel, so the
-    compose raises. Before #898 that was caught, logged, and returned 0."""
-    print('\n-- 5. --review-sheet under --view (no full-board panel) --')
+def test_quiet_still_silences_the_narrative():
+    """The hoist regressed --quiet. `_quiet = args.quiet and args.json_out` is
+    the run-24 rule for the stdout JSON ECHO ("data is never silenced into
+    nowhere"); the narrative was inside the flag block and so was silent for a
+    quiet caller by accident. Hoisting it and reusing that rule took `--quiet`
+    alone from 3 lines of stdout to 26 -- defeating blind-first for exactly the
+    callers who asked for silence."""
+    print('\n-- 4b. --quiet on its own --')
+    with tempfile.TemporaryDirectory() as td:
+        r = _run('--quiet', '-o', os.path.join(td, 'r.png'))
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        check('the narrative is suppressed', 'DECLUTTER' not in r.stdout,
+              f'{len(lines)} stdout line(s)')
+        check('and stdout is short', len(lines) <= 6, f'{len(lines)} lines')
+    with tempfile.TemporaryDirectory() as td:
+        r = _run('-o', os.path.join(td, 'r.png'))
+        check('control: without --quiet it still prints',
+              'DECLUTTER' in r.stdout)
+
+
+def test_a_crop_still_gets_a_sheet():
+    """--view leaves no full-board AFTER panel, so the strict panel filter
+    found nothing and the compose raised. The first cut of #898 turned that
+    into exit 2 -- which breaks this tool's own stated contract, 'SEEING an
+    unplaced or broken board is this tool's job', at exactly the first boundary
+    the blind-first step is prescribed at: a pile, which also sets a view.
+    Compose what was written instead."""
+    print('\n-- 5. --review-sheet under --view --')
     with tempfile.TemporaryDirectory() as td:
         sheet = os.path.join(td, 'sheet.png')
         r = _run('--review-sheet', sheet, '--view', '10,10,40,40',
                  '-o', os.path.join(td, 'r.png'))
+        check('a sheet IS written from the crop',
+              os.path.isfile(sheet) and os.path.getsize(sheet) > 0)
+        check('exit 0', r.returncode == 0, f'exit {r.returncode}')
+        check('and it says the panels are not the full board',
+              'no full-board AFTER panel' in r.stdout, r.stdout[-300:])
+
+
+def test_a_sheet_that_really_cannot_be_written_exits_2():
+    """The refusal must survive, or the silent no-op returns by another door --
+    and it must quote the REAL cause. The compose is wrapped in a bare
+    `except Exception`, so an unwritable path is at least as likely as the
+    missing-panel case; the first cut asserted the missing-panel cause for
+    both and sent the reader after the wrong thing."""
+    print('\n-- 6. --review-sheet to a path that cannot be written --')
+    with tempfile.TemporaryDirectory() as td:
+        sheet = os.path.join(td, 'no_such_dir', 'sheet.png')
+        r = _run('--review-sheet', sheet, '-o', os.path.join(td, 'r.png'))
         check('no sheet was written', not os.path.isfile(sheet))
-        check('and the run did NOT exit 0', r.returncode != 0,
+        check('and the run did NOT exit 0', r.returncode == 2,
               f'exit {r.returncode}')
-        check('it says which flag asked for what it could not give',
-              '--review-sheet' in r.stderr, r.stderr[-300:])
+        check('it names the flag', '--review-sheet' in r.stderr,
+              r.stderr[-300:])
+        check('and quotes the real cause, not a guessed one',
+              'No such file or directory' in r.stderr
+              or 'cannot find the path' in r.stderr.lower(), r.stderr[-300:])
+
+
+def test_the_refusal_is_not_hidden_by_a_failing_gate():
+    """--gate returns 4 further down. Reporting the sheet failure after it
+    meant the message never printed and the exit code said 'checklist failed'
+    for a run whose sheet was missing."""
+    print('\n-- 7. --review-sheet + --gate, both failing --')
+    with tempfile.TemporaryDirectory() as td:
+        sheet = os.path.join(td, 'no_such_dir', 'sheet.png')
+        r = _run('--review-sheet', sheet, '--gate', '--quiet',
+                 '-o', os.path.join(td, 'r.png'))
+        check('the sheet failure is reported',
+              '--review-sheet' in r.stderr and 'no sheet was written' in r.stderr,
+              r.stderr[-400:])
+        check('and it is the exit code the caller sees', r.returncode == 2,
+              f'exit {r.returncode}')
 
 
 def main():
@@ -126,7 +186,10 @@ def main():
     test_gate_alone_returns_a_verdict()
     test_a_bare_run_still_emits_no_json()
     test_json_out_is_unchanged()
-    test_a_sheet_that_cannot_be_composed_does_not_exit_0()
+    test_quiet_still_silences_the_narrative()
+    test_a_crop_still_gets_a_sheet()
+    test_a_sheet_that_really_cannot_be_written_exits_2()
+    test_the_refusal_is_not_hidden_by_a_failing_gate()
     print()
     if fails:
         print(f"FAIL: {len(fails)} check(s) failed: {fails}")

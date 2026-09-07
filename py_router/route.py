@@ -1015,6 +1015,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         track_width, track_width_from_class,
         len(getattr(pcb_data.board_info, 'copper_layers', None) or []))
     impedance_width_clamped: Dict[str, List[float]] = {}
+    _imp_unsolved: List[str] = []       # #906: layers the model could not solve
     layer_widths = {}
     coplanar_layer_widths = {}
     coplanar_net_ids = set()
@@ -1048,7 +1049,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 min_width=imp_width_floor,
                 coplanar_gap=coplanar_gap if _cop_all else 0.0,
                 floor_desc=imp_floor_desc,
-                clamp_report=impedance_width_clamped
+                clamp_report=impedance_width_clamped,
+                unsolved_report=_imp_unsolved
             )
             print_impedance_routing_plan(pcb_data, layers, impedance, is_differential=False,
                                         min_width=imp_width_floor,
@@ -1085,23 +1087,31 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # to this call's default width.
     net_layer_widths_map: Dict[int, Dict[str, float]] = {}
     _targets = resolve_net_ids(pcb_data, net_names) if net_names else []
-    if impedance is not None and pcb_data.board_info.stackup:
+    if impedance is not None:
+        # #906, the single-ended twin -- see route_diff for the reasoning. The
+        # DECLARATION is always recorded (it is what makes a later recompute
+        # possible, and it is why ohms are stored rather than widths); what
+        # varies is whether a width was actually SOLVED and applied. "Has a
+        # stackup" is a proxy that measured wrong: a stackup with no dielectric
+        # entry solves nothing and every layer falls back to the plain track
+        # width, with a spec recorded as if it had been achieved.
+        _applied = bool(layer_widths) and len(_imp_unsolved) < len(layer_widths)
+        if not _applied:
+            print(f"  NOTE: recording the {impedance} ohm declaration as NOT "
+                  f"APPLIED -- no layer width was solved"
+                  + (" (this board has no stackup)"
+                     if not pcb_data.board_info.stackup else
+                     f" (unsolved layers: {', '.join(_imp_unsolved)})")
+                  + ", so these nets routed at the plain track width. "
+                    "check_impedance will not grade against it (#906).")
         from protected_nets import note_impedance_specs
         note_impedance_specs({
             _nm: {'ohms': impedance, 'differential': False,
                   'coplanar_gap': (coplanar_gap if (coplanar_gap and coplanar_gap > 0
                                    and (not coplanar_nets or _nid in coplanar_net_ids))
-                                   else 0.0)}
+                                   else 0.0),
+                  'applied': _applied}
             for _nm, _nid in _targets})
-    elif impedance is not None:
-        # #906, the single-ended twin. No stackup -> no width was computed and
-        # none applied, so the spec would describe copper that was never drawn,
-        # and the reapply branch below (stackup-gated) can never use it.
-        # check_impedance auto-reads this record and would grade these nets
-        # against an impedance the router never attempted.
-        print(f"  NOTE: not recording a {impedance} ohm impedance spec -- this "
-              f"board has no stackup, so no width was computed or applied and "
-              f"the record would describe copper that was never drawn (#906)")
     elif pcb_data.board_info.stackup:
         from protected_nets import read_impedance_for_pcb_data
         _stored = read_impedance_for_pcb_data(pcb_data, input_file)

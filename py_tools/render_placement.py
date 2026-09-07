@@ -349,11 +349,16 @@ def legality_findings(model) -> Dict[str, object]:
     #
     # SAME FUNCTION, NOT THE SAME CENSUS as check_assembly's. Two differences,
     # named here rather than glossed:
-    #   * check_assembly passes `intent_waivers` (check_assembly.py, its
-    #     --intent path); this renderer reads no intent, so an operator-waived
-    #     pair is UNWAIVED here and will appear in the advisory list and can
-    #     reach the gate below. A render is not a substitute for the assembly
-    #     grade on a board carrying waivers.
+    #   * WAIVERS reach this census only when the caller passes --intent (#897).
+    #     Without it an operator-waived pair is UNWAIVED here: it appears in the
+    #     advisory list, in `b_courtyard_blocking_pairs`, on the REVIEW SHEET's
+    #     facts strip, and it can fail --gate. That is how run 25's waived,
+    #     locked, mechanical fiducial<->USB1 pair carried `BLOCKING, past the
+    #     floors (1)` on every review sheet while check_assembly --intent
+    #     called the same pair baseline's own -- two instruments, two answers,
+    #     one waived pair. Fixing `_waiver_for`'s precedence alone did not cure
+    #     that symptom, because the symptom is on the instrument that never
+    #     asked. Pass the same --intent you pass check_assembly.
     #   * `moved_parts` below (the gate's currency) compares poses for refs
     #     present in BOTH boards only, and ignores a layer flip;
     #     check_assembly's moved set also counts refs absent from the baseline
@@ -371,7 +376,14 @@ def legality_findings(model) -> Dict[str, object]:
             _clr = (getattr(state, 'clearance', None)
                     or (model.floor_knobs.get('clearance') or {}).get('value')
                     or defaults.CLEARANCE)
+            # #897: the waivers ride on the MODEL rather than through this
+            # signature, because `legality_findings` is memoised per model and
+            # every one of its seven call sites would otherwise have to learn
+            # to pass them -- six of which have no business knowing about an
+            # intent. `main` sets it once, before the first panel is drawn.
             _g = grade_body_overlap(pcb, _clr,
+                                    intent_waivers=getattr(
+                                        model, 'intent_waivers', ()),
                                     pcb_file=getattr(model, 'pcb_file', None))
             # UNWAIVED courtyard pairs only -- the advisory population. It is
             # NOT a superset of the blocking list below (a waiver-voided pair
@@ -1731,6 +1743,14 @@ Examples:
                         'command the review gates prescribe (run 24, A-1). '
                         'Without --json-out the summary line still prints -- '
                         'data is never silenced into nowhere.')
+    p.add_argument('--intent', metavar='PATH',
+                   help='a floorplan-intent JSON, for its `overlap_waivers` '
+                        '(#897). Without it this renderer grades WAIVER-BLIND: '
+                        'an operator-waived pair shows as an advisory pair, in '
+                        'b_courtyard_blocking_pairs, on the review sheet, and '
+                        'can fail --gate, while check_assembly --intent calls '
+                        'the same pair waived. Pass the file you pass '
+                        'check_assembly.')
     p.add_argument('--review-sheet', metavar='PATH', default=None,
                    help='run-23: ALSO write ONE composite image built for the '
                         'boundary review -- F and B side by side (with the '
@@ -1877,6 +1897,22 @@ def main(argv=None):
     model = PlacementModel(pcb, args.board, exact=True,
                            quench_kwargs={'clearance': args.clearance,
                                           'ignore_net_ids': ignore_ids})
+
+    # #897: authored overlap waivers, BEFORE the first legality_findings call
+    # (which is memoised, and which draw_legality makes while rendering the
+    # first panel). Without this the review sheet and --gate call an
+    # operator-waived pair blocking while check_assembly --intent, holding the
+    # same file, calls it waived.
+    if args.intent:
+        try:
+            from placement.floorplan import load_intent
+            from placement.legality import format_waiver_warnings
+            model.intent_waivers = load_intent(args.intent).waiver_pairs()
+        except Exception as exc:                                # noqa: BLE001
+            print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
+            return 2
+        for _line in format_waiver_warnings(legality_findings(model)):
+            print("  " + _line, file=sys.stderr)
 
     # WHICH FLOOR, and WHERE FROM -- the same disclosure board_score makes with
     # floors.source. Four renders in the measured run omitted --clearance and
@@ -2325,6 +2361,20 @@ def main(argv=None):
         _after_ids = {id(s) for s in _after_specs}
         _full = [w for s, w in zip(panels, written)
                  if id(s) in _after_ids and s.view is None][:2]
+        if not _full:
+            # #898: FALL BACK rather than refuse. Under --view / --zoom-group
+            # there is no full-board AFTER panel, and an UNPLACED board sets a
+            # view too -- so the strict filter left nothing to compose and the
+            # sheet failed. Refusing there would break this tool's stated
+            # contract ("SEEING an unplaced or broken board is this tool's
+            # job") for exactly the first boundary the blind-first step is
+            # prescribed at: a pile. Compose the crop instead and say so.
+            _full = [w for s, w in zip(panels, written)
+                     if id(s) in _after_ids][:2] or written[:2]
+            if _full and not args.quiet:
+                print("  review sheet: no full-board AFTER panel (--view / "
+                      "--zoom-group / unplaced board) -- composing the panels "
+                      "that were written")
         try:
             write_review_sheet(args.review_sheet, _full, fnd,
                                connector_edge_facts(model))
@@ -2336,18 +2386,39 @@ def main(argv=None):
             doc['review_sheet'] = None
             _sheet_failed = str(exc)
             print(f"  review sheet FAILED: {exc}", file=sys.stderr)
+    # #898: a REQUESTED sheet that was not written must not exit 0 -- that is
+    # the whole defect, and the flag block was only one of its two doors. This
+    # is reported HERE, before --gate can return 4 and hide it, and it quotes
+    # the exception rather than asserting a cause: the compose is wrapped in a
+    # bare `except Exception`, so the failure is as likely to be an unwritable
+    # output directory as the missing-panel case, and naming one cause for both
+    # sends the reader after the wrong thing. Exit 2 is this tool's existing
+    # "you asked for something the arguments cannot give" code. The panels are
+    # still written and the render still stands.
+    if _sheet_failed:
+        print(f"error: --review-sheet {args.review_sheet} was requested and no "
+              f"sheet was written: {_sheet_failed}", file=sys.stderr)
+        return 2
     _quiet = bool(args.quiet and args.json_out)
+    # #898: the NARRATIVE obeys --quiet on its own. `_quiet` above is the
+    # run-24 rule for the stdout JSON ECHO -- "data is never silenced into
+    # nowhere", i.e. only suppress the echo when the keys are going to a FILE.
+    # That rule has nothing to say about prose, and reusing it here regressed
+    # --quiet: with the block hoisted, `--quiet` alone went from 3 lines of
+    # stdout to 26, defeating the blind-first ordering for exactly the callers
+    # who had asked for silence.
+    _quiet_text = bool(args.quiet)
     if not args.no_describe:
         _txt, _dj = describe(model, legality_findings(model), moves, args,
                              [p['path'] for p in doc['panels']])
         doc['describe'] = _dj
-        if not _quiet:
+        if not _quiet_text:
             print()
             print(_txt)
         if before_model is not None:
             _ptxt, _pj = describe_pair(before_model, model, args)
             doc['pair'] = _pj
-            if not _quiet:
+            if not _quiet_text:
                 print(_ptxt)
     if args.json_out:
         with open(args.json_out, 'w', encoding='utf-8') as f:
@@ -2455,19 +2526,6 @@ def main(argv=None):
               + (f" ({_xs} front<->back stack(s), opposite faces, not "
                  f"conflicts)" if _xs else ""),
               file=sys.stderr)
-    # #898: a requested sheet that was not written must not exit 0. The old
-    # code returned 0 with no file for TWO distinct reasons -- the flag block
-    # above (fixed by the hoist) and this compose failure (--view /
-    # --zoom-group / an unplaced board leave no full-board AFTER panel). Fixing
-    # only the first would have let the silent no-op back in through the second
-    # door. Exit 2, this tool's existing "you asked for something it cannot
-    # give" code; the panels are still written and the render still stands.
-    if _sheet_failed:
-        print(f"error: --review-sheet {args.review_sheet} was requested and no "
-              f"sheet was written ({_sheet_failed}). The full-board AFTER panel "
-              f"the sheet composes does not exist under --view / --zoom-group, "
-              f"or the board is unplaced.", file=sys.stderr)
-        return 2
     return 0
 
 
