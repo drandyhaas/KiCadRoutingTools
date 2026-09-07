@@ -447,6 +447,75 @@ quadrant; nothing reads this board's names or coordinates -- but all of
 it is measured on ONE bench (fb_t2q_fresh), so a second array pair is the
 next confirmation before any of it is treated as a default elsewhere.
 
+### Refusals at last call: the blocker-directed rip (2026-09-07)
+
+A lane still refused at last call, when every other lane is real copper,
+is boxed by lanes routed before it -- the sequential loss, an earlier
+lane having taken the one channel a later one needs -- and no wider
+window answers that. K41's SBA2 (a swimmer, tooth and stub both on B)
+was refused only at the kept attempt: SCKE1's B run had crossed its
+approach a millimetre before the stub, and at last call SA1 and SA2
+closed the B corridor at s 10 while SA9 and SBA0 walled F at the tooth.
+
+`connect(report=)` now hands a refusal's blocked FRONTIER back -- the
+cells the A* tried to expand into and found blocked, the window it
+searched, the config -- and `Corridor.rip_for` attributes it to the
+lanes of this run with the production router's own blocking analysis
+(`blocking_analysis.analyze_frontier_blocking`, the one route.py's rip
+ladder uses). The frontier ranks lanes by EXPOSURE (the perimeter of the
+reachable pocket), not by whether ripping them opens anything, so a
+MIN-CUT PROBE measures it: one more search with every lane of this run
+PRICED instead of blocked (`connect(soft=)`, the take4 mechanism, ported:
+the clearance footprint of each lane stamped as a per-cell cost through
+`set_layer_proximity_batch`) finds the path that crosses the fewest of
+them, and the lanes that path conflicts with, in path order, are the cut
+set -- jointly sufficient by construction. The rip ladder is that set's
+prefixes, then the most exposed lanes singly: each trial rips its
+victims, routes the refused lane against the rest through its ladder,
+re-lays each victim against the new lane through ITS ladder (band first,
+so a page lane stays on its page when it can), and a victim that cannot
+be re-laid NEGOTIATES one level down with the placed lane protected (the
+PathFinder move, in the braid's own vocabulary). The state is kept only
+when the refused lane and every victim route; otherwise every piece of
+copper goes back exactly. Static copper is never a victim: a lane whose
+probe finds no path even with every lane priced is walled by stubs, pads
+or other nets, says so and stays open -- a fanout matter.
+
+Measured on K41's SBA2 (chain, one fanout, byte-identical fanout
+boards; K15 14v / K28 38v / K35 0 open 54v identical, no last-call
+refusal to rip):
+
+- exposure order alone: SA8 (766 of 20000 frontier cells) ripped, SBA2
+  routed at 6 vias -- a ride south round the bundle and up the
+  destination's west face -- SA8 re-laid at 4 then 0 in the economy
+  re-lay: **1 open 78v -> 0 open 84v**, the rip 1.4 s;
+- the min-cut probe: SBA2's straight B lane, 0 vias, crosses SCKE1, SA1,
+  SA2, SDQ6, SA3, SCKE0; ripping SCKE1 routes SBA2 at 4 but SCKE1 is lost,
+  the pairs likewise lose SA1 -- so the cut set alone is not enough;
+- the cut set with one level of negotiation: SCKE1 ripped, SBA2 at 4
+  vias, SCKE1 refused and negotiated in turn by ripping SA8 (SCKE1 2
+  vias, SA8 2 then 0): **0 open 82v, 0 DRC**, the rip 21 s. The first
+  complete K41 on this chain (human 70v).
+
+Time (the chain alone on the machine): K15 15 s, K28 28 s, K35 76 s,
+K41 155 s (was 130; fanout 69 of it) -- most of the braid's extra time
+is not the rip (18 s on its log lines) but the economy re-lay, which now
+has heavier lanes to try at three widening windows each.
+
+K51 on the same chain: the plan named 44 of 48 routable nets (SA9, SDQ7,
+SA2, SZQ read off the board), the 47-net corridor routed 31 in-band and
+16 at the last call, six of them by the rip (SA4, SCKE1, SA11, SBA1,
+SDQ3, SA14; up to three victims, two levels), and the braid then crashed
+on the singleton corridor SZQ: `corridor.build_spine` had no initial
+polyline for a corridor whose launch and arrival flows bend by more than
+30 degrees, because the mean-path relaxation that used to fill it was
+pruned from this chain as never reached at K28. The middle is now the
+chord between the two end zones in both branches (identical for a
+straight corridor). Re-run: **K51 (48 routable nets) 0 open, 0 DRC, 141
+vias, 339 s** (fanout 4.5 min, braid 3.2 min; 24 rips landed a lane) --
+the first complete K51 on this chain, against the human's 85 vias: the
+vias are where the work is now, not completion.
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`
