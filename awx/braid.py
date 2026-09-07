@@ -79,6 +79,8 @@ LPITCH = 0.35                  # pitch of a side-join / side-exit block
 BLOCK_GAP = 0.45               # a block starts this far beyond what it clears
 HALF_SEP = (TRACK + 0.1) / 2   # two lanes at their band edges clear
 LEG_W = 0.5                    # half-width in s of a join / exit leg's band
+ISLAND_VETO = 100              # an islanded layer is priced out of a leg's
+                               # economics (see place_and_decide)
 LEG_REQ = 0.35                 # half-width in s of the stretch a lane
                                # CROSSED by an exit leg must spend on the
                                # other layer. It is what keeps that lane's
@@ -804,6 +806,7 @@ class Corridor:
         own = self.st[nm] if at_tooth else self.se[nm]
         own_L = (self.ctx.tooth_layer if at_tooth else self.ctx.dest_layer)[nm]
         ends = []
+        ends_L = []          # ...those on the jog's own layer
         for om in self.members:
             if om == nm:
                 continue
@@ -813,6 +816,8 @@ class Corridor:
                         and abs(p[1] - own[1]) < 0.05):
                     continue
                 ends.append(p)
+                if L == own_L:
+                    ends_L.append(p)
         lo_, hi_ = min(oa, ob), max(oa, ob)
 
         # a foreign FREE END is in a leg's way when the leg would run
@@ -839,12 +844,29 @@ class Corridor:
             return n
         def bad(s):
             return avoid is not None and avoid(nm, s)
+
+        def jogged(s):
+            # the jog from a moved leg back to its free end runs along
+            # that end's own row, and may not run over another member's
+            # free end there: a leg pushed 3.3 mm past a passive cluster
+            # (K41 SCKE1) jogged along the stub row on F straight over
+            # two neighbours' stub ends, and both were refused at the
+            # stub; the K35 cascade began with a 0.35 jog that ended
+            # 0.05 mm short of the next stub.
+            # A jog runs on the free end's own layer (virtual_of), so
+            # only the ends on THAT layer are in its way: a K41 join
+            # jog on F refused the pitch over a B tooth and took the
+            # other side, onto SBA0's F tooth instead.
+            lo_s, hi_s = min(s, own[0]) - 0.1, max(s, own[0]) + 0.1
+            return any(lo_s < p[0] < hi_s and abs(p[1] - own[1]) < LEG_O + 0.05
+                       for p in ends_L)
         if not clash(s_l) and not bad(s_l):
             return s_l
         best = None
         cands = (s_l + LPITCH, s_l - LPITCH, s_l + 2 * LPITCH, s_l - 2 * LPITCH)
         # ...and, off an island, the first s past either of its edges
         cands = cands + tuple(sorted(extra, key=lambda v: abs(v - s_l)))
+        cands = tuple(c for c in cands if not jogged(c))
         for cand in cands:
             if bad(cand):
                 continue
@@ -859,7 +881,8 @@ class Corridor:
                 n = clash(cand)
                 if best is None or n < best[0]:
                     best = (n, cand)
-        return best[1]
+        # no candidate whose jog is clear: the leg stays where it is
+        return best[1] if best is not None else s_l
 
     def pair_floor(self, a, b, base, sched, at_launch):
         """The offset pitch two adjacent slots need. Clearance is
@@ -1042,170 +1065,6 @@ class Corridor:
         req = {nm: [] for nm in M}
         trank = {nm: i for i, nm in enumerate(self.target)}
         py = self.py
-        def place_and_decide(avoid=None, pre=None):
-            """Exit legs placed (each a pitch off another leg or a
-            free end in its way, and -- on the second pass -- off any
-            static island on its layer), the lanes each leg crosses,
-            and every leg's layer decided along s."""
-            self.exit_leg_s = {}
-            placed = []
-            for nm in sorted(self.exit_block, key=lambda n: (self.se[n][0], abs(self.exit_block[n]))):
-                s_e, o_e = self.se[nm]
-                o_l = py[trank[nm]]
-                s_base, avoid_nm = s_e, avoid
-                if nm in self.far_exit:
-                    s_base = max(s_e, self.s_leg_min)
-                    floor = self.s_leg_min
-
-                    def avoid_nm(n, s, _a=avoid, _f=floor):
-                        return s < _f - 1e-9 or (_a is not None and _a(n, s))
-                s_l = self._leg_s(nm, s_base, o_l, o_e, False, placed, avoid_nm,
-                                  extra_cands.get(nm, ()) if avoid else ())
-                self.exit_leg_s[nm] = s_l
-                placed.append((s_l, min(o_l, o_e), max(o_l, o_e)))
-            self.leg_layer = {}
-            crossings = {}                       # crossed lane -> [leg s]
-            cross_by = {}                        # crossed lane -> [(s, owner)]
-            leg_cross = {}                       # leg owner -> [crossed lanes]
-            for sg in (-1, 1):
-                xs = [nm for nm in self.exit_block if self.exit_side.get(nm) == sg]
-                if not xs:
-                    continue
-                n_b = sum(1 for nm in xs if self.ctx.dest_layer[nm] == 'B.Cu')
-                leg_L = 'B.Cu' if 2 * n_b > len(xs) else 'F.Cu'
-                for nm in xs:
-                    self.leg_layer[nm] = leg_L
-                    s_l = self.exit_leg_s[nm]
-                    o_l, o_e = self.exit_block[nm], self.se[nm][1]
-                    lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
-                    for om in M:
-                        if om == nm:
-                            continue
-                        if om in self.exit_block:
-                            o_m, s_end = self.exit_block[om], self.exit_leg_s[om]
-                        else:
-                            o_m, s_end = self.target_o[om], self.se[om][0]
-                        if s_end > s_l + 0.05 and lo_ < o_m < hi_:
-                            crossings.setdefault(om, []).append(s_l)
-                            cross_by.setdefault(om, []).append((s_l, nm))
-                            leg_cross.setdefault(nm, []).append(om)
-            self.crossings = crossings
-            leg_req_min = {}
-            # TWO-PAGE LEG ECONOMICS, decided ALONG s. A leg crossing a
-            # lane on the OTHER layer is free -- the block-wide layer rule
-            # priced every crossing as a forced dive (2 vias per crossed
-            # lane), which is exactly the SA7-class 4-via overspend (t7
-            # K28: the human pays 2). Each leg picks the layer that
-            # minimises what is actually paid: a dive for every crossed
-            # lane that is on that layer THERE (its return charged only if
-            # its berth is on that layer too), a corner via where the leg
-            # differs from the layer its own lane is on there, a via where
-            # it differs from the stub's. "There" is the point: a lane is
-            # crossed only by legs EARLIER than its own (it ends at its
-            # leg), so with the legs decided in ascending s every stretch
-            # the earlier legs imposed -- on this lane and on the lanes it
-            # crosses -- is known when a leg chooses. Judged by pages alone
-            # (2026-09-06) K28's SA9 was sent under two F legs, back up to F
-            # for its own leg and down again into its B berth: three
-            # changes where the router found one, and the plan counted
-            # zero. A crossed page lane dives only under a SAME-layer leg;
-            # a swimmer adapts per leg. Overlapping opposite-layer
-            # intervals from adjacent disagreeing legs are dropped in pairs
-            # (the K19 lesson: both layers closed refuses the lane before
-            # the router sees it); the obstacle map adjudicates there.
-            ivs = {nm: list((pre or {}).get(nm, ())) for nm in M}
-
-            def cur_layer(om, s):
-                """The layer the plan has lane `om` on at s: its last
-                required stretch starting before s (appended in s order),
-                else its page (None for a swimmer)."""
-                before = [iv for iv in ivs[om] if iv[0] < s]
-                return before[-1][2] if before else (sched.page.get(om) if sched else None)
-
-            for nm in sorted(self.exit_block, key=lambda n: self.exit_leg_s[n]):
-                s_l = self.exit_leg_s[nm]
-                own = cur_layer(nm, s_l)
-                crossed = leg_cross.get(nm, ())
-                cost = {}
-                for L in ('F.Cu', 'B.Cu'):
-                    c = 0
-                    for om in crossed:
-                        if cur_layer(om, s_l) == L:
-                            c += 1 + (1 if self.ctx.dest_layer[om] == L else 0)
-                    if own is not None and own != L:
-                        c += 1
-                    if self.ctx.dest_layer[nm] != L:
-                        c += 1
-                    cost[L] = c
-                Lg = min(('F.Cu', 'B.Cu'), key=lambda L: cost[L])
-                self.leg_layer[nm] = Lg
-                other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
-                a = s_l - LEG_REQ
-                for om in crossed:
-                    b = s_l + LEG_REQ
-                    if om in self.exit_block:
-                        b = min(b, self.exit_leg_s[om] - 0.03)
-                    else:
-                        b = min(b, self.se[om][0] - 0.03)
-                    if b <= a:
-                        continue
-                    # a lane already on the other layer there gets the
-                    # stretch all the same (the band closes the leg's layer
-                    # under it), at no change
-                    ivs[om].append((a, b, other))
-            return ivs, leg_req_min
-
-        # EARLY DIVE (#622 K35): a lane whose tail crosses a static
-        # island on the layer it is on, and which owes a change to the
-        # other layer anyway (its berth is there, or its page already
-        # is), takes that change BEFORE the island instead of after it
-        # -- no via the plan did not already count, and no bend. The
-        # plan looped SRST/SA0/SA15 3 mm round a six-part passive
-        # cluster on F at K35 while the router, refused, laid SA0
-        # straight under it on B, the layer of its berth.
-        pre = {}
-        tl_, dl_ = self.ctx.tooth_layer, self.ctx.dest_layer
-        for L_ in ('F.Cu', 'B.Cu'):
-            other_ = 'B.Cu' if L_ == 'F.Cu' else 'F.Cu'
-            for (s_lo, s_hi, o_lo, o_hi, what) in self.static_islands().get(L_, ()):
-                if s_lo < self.s1 - 0.1:
-                    continue
-                for nm in M:
-                    pg = sched.page.get(nm) if sched else None
-                    if pg is None:
-                        continue
-                    s_e, o_e = self.se[nm]
-                    if s_e <= s_lo + 0.05:
-                        continue
-                    o_t = py[trank[nm]]
-                    # the tail run's offset over the island (a block lane
-                    # runs at its slot; a head-on tail slides to its stub)
-                    if nm in self.exit_block:
-                        o_here = o_t
-                    else:
-                        t0 = max(0.0, min(1.0, (s_lo - self.s1) / max(s_e - self.s1, 1e-9)))
-                        t1 = max(0.0, min(1.0, (s_hi - self.s1) / max(s_e - self.s1, 1e-9)))
-                        o_a, o_b = o_t + t0 * (o_e - o_t), o_t + t1 * (o_e - o_t)
-                        o_here = (o_a + o_b) / 2
-                        if not (min(o_a, o_b) < o_hi and max(o_a, o_b) > o_lo):
-                            continue
-                    if not (o_lo < o_here < o_hi):
-                        continue
-                    if pg == other_:
-                        a_, b_ = self.s1 + 0.05, min(s_e - 0.05, s_hi + 0.3)
-                    elif dl_[nm] == other_:
-                        a_, b_ = max(self.s1 + 0.05, s_lo - 0.3), s_e - 0.05
-                    else:
-                        continue
-                    if b_ > a_ and not any(abs(x[0] - a_) < 1e-6 for x in pre.get(nm, ())):
-                        pre.setdefault(nm, []).append((a_, b_, other_))
-                        self.log(f'  early dive: {nm} on {other_[0]} over {what} (s {a_:.1f}..{b_:.1f})')
-        extra_cands = {}
-        ivs, leg_req_min = place_and_decide(pre=pre)
-        # a leg over a static island on its own layer (K28 SDQ0's leg
-        # at s 20.6 on F, through C12's second pad) is re-placed a
-        # pitch off the island, and the crossings and layers decided
-        # again from the moved legs
         islands_ = self.static_islands()
 
         def leg_on_island(nm, s_, L):
@@ -1273,6 +1132,202 @@ class Corridor:
                     return None
             return o_sp
 
+
+        def place_and_decide(avoid=None, pre=None):
+            """Exit legs placed (each a pitch off another leg or a
+            free end in its way, and -- on the second pass -- off any
+            static island on its layer), the lanes each leg crosses,
+            and every leg's layer decided along s."""
+            self.exit_leg_s = {}
+            placed = []
+            placed_by = {}
+            for nm in sorted(self.exit_block, key=lambda n: (self.se[n][0], abs(self.exit_block[n]))):
+                s_e, o_e = self.se[nm]
+                o_l = py[trank[nm]]
+                s_base, avoid_nm = s_e, avoid
+                if nm in self.far_exit:
+                    s_base = max(s_e, self.s_leg_min)
+                    floor = self.s_leg_min
+
+                    def avoid_nm(n, s, _a=avoid, _f=floor):
+                        return s < _f - 1e-9 or (_a is not None and _a(n, s))
+                s_l = self._leg_s(nm, s_base, o_l, o_e, False, placed, avoid_nm,
+                                  extra_cands.get(nm, ()) if avoid else ())
+                self.exit_leg_s[nm] = s_l
+                placed.append((s_l, min(o_l, o_e), max(o_l, o_e)))
+                placed_by[nm] = placed[-1]
+            self.leg_layer = {}
+            crossings = {}                       # crossed lane -> [leg s]
+            cross_by = {}                        # crossed lane -> [(s, owner)]
+            leg_cross = {}                       # leg owner -> [crossed lanes]
+            for sg in (-1, 1):
+                xs = [nm for nm in self.exit_block if self.exit_side.get(nm) == sg]
+                if not xs:
+                    continue
+                n_b = sum(1 for nm in xs if self.ctx.dest_layer[nm] == 'B.Cu')
+                leg_L = 'B.Cu' if 2 * n_b > len(xs) else 'F.Cu'
+                for nm in xs:
+                    self.leg_layer[nm] = leg_L
+                    s_l = self.exit_leg_s[nm]
+                    o_l, o_e = self.exit_block[nm], self.se[nm][1]
+                    lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
+                    for om in M:
+                        if om == nm:
+                            continue
+                        if om in self.exit_block:
+                            o_m, s_end = self.exit_block[om], self.exit_leg_s[om]
+                        else:
+                            o_m, s_end = self.target_o[om], self.se[om][0]
+                        if s_end > s_l + 0.05 and lo_ < o_m < hi_:
+                            crossings.setdefault(om, []).append(s_l)
+                            cross_by.setdefault(om, []).append((s_l, nm))
+                            leg_cross.setdefault(nm, []).append(om)
+            self.crossings = crossings
+            leg_req_min = {}
+            # TWO-PAGE LEG ECONOMICS, decided ALONG s. A leg crossing a
+            # lane on the OTHER layer is free -- the block-wide layer rule
+            # priced every crossing as a forced dive (2 vias per crossed
+            # lane), which is exactly the SA7-class 4-via overspend (t7
+            # K28: the human pays 2). Each leg picks the layer that
+            # minimises what is actually paid: a dive for every crossed
+            # lane that is on that layer THERE (its return charged only if
+            # its berth is on that layer too), a corner via where the leg
+            # differs from the layer its own lane is on there, a via where
+            # it differs from the stub's. "There" is the point: a lane is
+            # crossed only by legs EARLIER than its own (it ends at its
+            # leg), so with the legs decided in ascending s every stretch
+            # the earlier legs imposed -- on this lane and on the lanes it
+            # crosses -- is known when a leg chooses. Judged by pages alone
+            # (2026-09-06) K28's SA9 was sent under two F legs, back up to F
+            # for its own leg and down again into its B berth: three
+            # changes where the router found one, and the plan counted
+            # zero. A crossed page lane dives only under a SAME-layer leg;
+            # a swimmer adapts per leg. Overlapping opposite-layer
+            # intervals from adjacent disagreeing legs are dropped in pairs
+            # (the K19 lesson: both layers closed refuses the lane before
+            # the router sees it); the obstacle map adjudicates there.
+            ivs = {nm: list((pre or {}).get(nm, ())) for nm in M}
+
+            def cur_layer(om, s):
+                """The layer the plan has lane `om` on at s: its last
+                required stretch starting before s (appended in s order),
+                else its page (None for a swimmer)."""
+                before = [iv for iv in ivs[om] if iv[0] < s]
+                return before[-1][2] if before else (sched.page.get(om) if sched else None)
+
+            def move_cost(nm, s_l, L):
+                """What leaving an island on L by a move along the stub
+                row costs, in vias: a pitch of jog is worth a via, an
+                illegal jog (over a neighbour's free end, or none to be
+                had) the full veto. A leg's layer is then the cheaper
+                of the flip and the move: SDQ2 (K35) hops 0.3 mm off
+                C12 on its own layer for less than a via, SA15 (K41)
+                takes B for one where every F move jogs over a stub."""
+                o_l, o_e = py[trank[nm]], self.se[nm][1]
+                others = [v for k, v in placed_by.items() if k != nm]
+                floor = self.s_leg_min if nm in self.far_exit else None
+                s_m = self._leg_s(
+                    nm, s_l, o_l, o_e, False, others,
+                    lambda n, s: leg_on_island(n, s, L)
+                    or (floor is not None and s < floor - 1e-9),
+                    island_edges(nm, s_l, L))
+                if abs(s_m - s_l) < 1e-9 or leg_on_island(nm, s_m, L):
+                    return ISLAND_VETO
+                return min(ISLAND_VETO, abs(s_m - s_l) / LPITCH)
+
+            for nm in sorted(self.exit_block, key=lambda n: self.exit_leg_s[n]):
+                s_l = self.exit_leg_s[nm]
+                own = cur_layer(nm, s_l)
+                crossed = leg_cross.get(nm, ())
+                cost = {}
+                for L in ('F.Cu', 'B.Cu'):
+                    c = 0
+                    for om in crossed:
+                        if cur_layer(om, s_l) == L:
+                            c += 1 + (1 if self.ctx.dest_layer[om] == L else 0)
+                    if own is not None and own != L:
+                        c += 1
+                    if self.ctx.dest_layer[nm] != L:
+                        c += 1
+                    if leg_on_island(nm, s_l, L) and leg_split_at(nm, s_l, L) is None:
+                        # a static island under the leg on this layer and
+                        # no via to take early: the flip to the other
+                        # layer competes with the move along the row (K41:
+                        # three legs moved off an F-only passive cluster
+                        # to one s, 3.3 mm from their stubs, where a B leg
+                        # crosses nothing)
+                        c += move_cost(nm, s_l, L)
+                    cost[L] = c
+                Lg = min(('F.Cu', 'B.Cu'), key=lambda L: cost[L])
+                self.leg_layer[nm] = Lg
+                other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
+                a = s_l - LEG_REQ
+                for om in crossed:
+                    b = s_l + LEG_REQ
+                    if om in self.exit_block:
+                        b = min(b, self.exit_leg_s[om] - 0.03)
+                    else:
+                        b = min(b, self.se[om][0] - 0.03)
+                    if b <= a:
+                        continue
+                    # a lane already on the other layer there gets the
+                    # stretch all the same (the band closes the leg's layer
+                    # under it), at no change
+                    ivs[om].append((a, b, other))
+            return ivs, leg_req_min
+
+        # EARLY DIVE (#622 K35): a lane whose tail crosses a static
+        # island on the layer it is on, and which owes a change to the
+        # other layer anyway (its berth is there, or its page already
+        # is), takes that change BEFORE the island instead of after it
+        # -- no via the plan did not already count, and no bend. The
+        # plan looped SRST/SA0/SA15 3 mm round a six-part passive
+        # cluster on F at K35 while the router, refused, laid SA0
+        # straight under it on B, the layer of its berth.
+        pre = {}
+        tl_, dl_ = self.ctx.tooth_layer, self.ctx.dest_layer
+        for L_ in ('F.Cu', 'B.Cu'):
+            other_ = 'B.Cu' if L_ == 'F.Cu' else 'F.Cu'
+            for (s_lo, s_hi, o_lo, o_hi, what) in islands_.get(L_, ()):
+                if s_lo < self.s1 - 0.1:
+                    continue
+                for nm in M:
+                    pg = sched.page.get(nm) if sched else None
+                    if pg is None:
+                        continue
+                    s_e, o_e = self.se[nm]
+                    if s_e <= s_lo + 0.05:
+                        continue
+                    o_t = py[trank[nm]]
+                    # the tail run's offset over the island (a block lane
+                    # runs at its slot; a head-on tail slides to its stub)
+                    if nm in self.exit_block:
+                        o_here = o_t
+                    else:
+                        t0 = max(0.0, min(1.0, (s_lo - self.s1) / max(s_e - self.s1, 1e-9)))
+                        t1 = max(0.0, min(1.0, (s_hi - self.s1) / max(s_e - self.s1, 1e-9)))
+                        o_a, o_b = o_t + t0 * (o_e - o_t), o_t + t1 * (o_e - o_t)
+                        o_here = (o_a + o_b) / 2
+                        if not (min(o_a, o_b) < o_hi and max(o_a, o_b) > o_lo):
+                            continue
+                    if not (o_lo < o_here < o_hi):
+                        continue
+                    if pg == other_:
+                        a_, b_ = self.s1 + 0.05, min(s_e - 0.05, s_hi + 0.3)
+                    elif dl_[nm] == other_:
+                        a_, b_ = max(self.s1 + 0.05, s_lo - 0.3), s_e - 0.05
+                    else:
+                        continue
+                    if b_ > a_ and not any(abs(x[0] - a_) < 1e-6 for x in pre.get(nm, ())):
+                        pre.setdefault(nm, []).append((a_, b_, other_))
+                        self.log(f'  early dive: {nm} on {other_[0]} over {what} (s {a_:.1f}..{b_:.1f})')
+        extra_cands = {}
+        ivs, leg_req_min = place_and_decide(pre=pre)
+        # a leg over a static island on BOTH layers (neither a clear
+        # other layer nor a via to take early; K28 SDQ0's leg at s 20.6
+        # on F, through C12's second pad) is re-placed a pitch off the
+        # island, and the crossings and layers decided again from the
+        # moved legs
         layer0 = dict(self.leg_layer)
         bad_legs = [nm for nm in self.exit_block
                     if leg_on_island(nm, self.exit_leg_s[nm], layer0[nm])
