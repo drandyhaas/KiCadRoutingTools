@@ -197,10 +197,20 @@ together" is already `{"ref": "Q1", "near": "Q2"}`, so nothing is lost.
 **Identity is the ordered `(ref, near)` pair.** A duplicate is refused for the
 reason a duplicate `interfaces[].ref` is: two limits on one relation, with no
 rule for which wins, and the rule charges both. The *reversed* pair is refused
-too — but only when **neither** row names `pads`, because only then are the two
-provably the same number charged twice. With `pads` on either side the claim is
-genuinely asymmetric (*for each of my declared pads, some pad of yours is close
-enough*), so both rows are kept.
+too — but only when neither row names a `pads` list **for its own subject**,
+because only then are the two provably the same symmetric number charged twice.
+A subject pad list is what turns the existential minimum into *for each of my
+pads, some pad of yours is close enough*, so with one on each side the two rows
+are different claims and both are kept.
+
+**A claim is reported as `proximity[<row>:<ref>~<near>]`.** The row index is
+there because a reference may legally contain `~` — `disambiguate_references`
+produces `TP4~2` for a duplicated refdes, and `esp_prog` parses `Ref*~2` — so
+without it a row `A~B` near `C` and a row `A` near `B~C` share one id, and one
+of two declared "I do not know"s vanishes into a set union. Use
+`design_brief.proximity_claim_id()` rather than spelling it by hand: the same
+string is a contract between the compiler, the grade's clause coverage, and a
+waiver an author types.
 
 ### Two "unknown"s that go opposite ways, and why
 
@@ -209,9 +219,9 @@ This key is where the three-state contract above does its most visible work.
 - **`max_mm: "unknown"` is accepted**, and compiles to **no intent row**. "As
   short as possible" is a real thing for a spec to say: the author has declared
   the *relation* and not the *number*. It is reported as
-  `proximity[Y1~U1].max_mm` under `brief_unknown` and never appears in
-  `declared` — a limit nobody stated cannot be graded, and inventing one is the
-  guess this channel exists to refuse.
+  `proximity[0:Y1~U1].max_mm` in `brief_unknown_keys` (`brief_unknown` is the
+  count) and never appears in `declared` — a limit nobody stated cannot be
+  graded, and inventing one is the guess this channel exists to refuse.
 - **`basis: "unknown"` is refused**, alone among the enums here, because
   `basis` **has a default**. Declaring it unknown would compile to that default
   while the report says nobody knows — two different documents. Omit the key to
