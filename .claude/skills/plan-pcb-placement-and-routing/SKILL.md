@@ -153,7 +153,10 @@ connectors — while every key read clean. Its orchestrator viewed ONE image in
 4.7 hours, after the failure. So LOOK at each boundary (the placement close,
 the hand-off, after the first route lap, the final close), and look
 BLIND-FIRST: build the sheet with `render_placement.py --review-sheet
-<PATH>`, VIEW it, write your observations — connectors versus edges with
+<PATH> --json-out <PATH>.json --quiet` — the two extra flags are what keep the
+step blind, since `--quiet` suppresses the narrative and the JSON echo only
+when the keys are going to a FILE instead of your stdout. VIEW it, write your
+observations — connectors versus edges with
 distances, density pockets versus empty regions, anything wrong that no key
 names — **before reading any checklist key**, then write a reconciliation
 paragraph dispositioning each observation against a named number. Ordering is
