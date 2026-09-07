@@ -583,6 +583,79 @@ on a board whose project declares 0.25, one drill-to-drill graze at
 K28: `setup` now reads the board's `min_hole_to_hole` and tightens to it
 (tighten-only, so the first bench at 0.127 routes as before).
 
+### The pose gate: rotations and faces (2026-09-07)
+
+Take4's rotation gate is back (`rotate_board.py`, a whole-board rotation
+that walks the s-expression by depth -- a footprint's nested coordinates
+are local and ride along -- and self-verifies every pad, segment and
+via against the transform), and widened to the FACES: `make_bench.py
+--src-side B` / `--dst-side B` put an array on the other face through
+the placement writer's mirror (the #714 path), and every part its pads
+then collide with (the decoupling caps under a BGA sit on the far face)
+goes over with it until the article is pad-clean; `--rotate DEG`
+rotates the finished article. A fanned bench can be the input: the
+pair's copper is stripped first, so the source is fanned out in its
+final pose. `pose_gate.sh BOARD SRC DST K...` builds FF (the control),
+BF, FB, BB, R90, R180, R270 into `tmp/gate/`, puts ONE ladder beside
+every pose (`LADDER=`, else FF's own) so the K prefixes name the same
+nets everywhere, runs the chain on each, and prints the table.
+
+A rotation is an isometry: a grade that changes there is a stage leaning
+on the board's axes. A side switch is a different article, so its grade
+may differ -- but the chain must complete it, and nothing may assume a
+tooth is on F. First reading, the bench (`fb_t2q_fresh`, its own copper)
+rotated 90 degrees: K15 0 open 12 vias against 14, K28 0 open 36
+against 38, 0 DRC both. The PLAN is invariant -- the same predicted
+vias (16, 38) and the same judged cost (40.99, 95.86) in both frames --
+and the difference is one lane each (SA9 at K15 2 -> 0, SA4 at K28 4 ->
+2), a swimmer the grid router laid cheaper in the rotated frame: the
+A* lattice is the stage that leans on the axes, not the braid's rules.
+
+The gate on the origin board (`allwinner_h3_ddr3` unrouted, the human's
+passive poses, a fresh source fanout per article, the bench's ladder;
+`LADDER=k_ladder_coherent.txt bash pose_gate.sh tmp/gate/h3.kicad_pcb
+U1 DU1 15 28`), open / DRC / vias / in-band:
+
+| pose | K15 | K28 |
+|------|-----|-----|
+| FF (control) | 0 / 0 / 16 / 13 of 15 | 0 / 0 / 38 / 22 of 28 |
+| BF, source on the back | 0 / 0 / 21 / 14 | 0 / 0 / 46 / 23 |
+| FB, destination on the back | 0 / 0 / 21 / 11 | **1 open** / 0 / 47 / 21 |
+| BB, both on the back | 0 / 0 / 24 / 13 | 0 / 0 / 44 / 25 |
+| R90, the FF article rotated | 0 / 0 / 14 / 13 | 0 / 0 / 38 / 22 |
+| R180 | 0 / 0 / 16 / 13 | 0 / 0 / 38 / 22 |
+| R270 | 0 / 0 / 14 / 13 | 0 / 0 / 38 / 22 |
+
+Three readings. Every back-side article completes (the one open, SA0
+with the destination on the back at K28, is a rip whose victim SDQ14
+lost its own victim one level down -- the re-berth TODO below), so
+nothing in the chain assumes a tooth on F; a back-born tooth reaching
+a front berth or a dog-bone costs about a via per lane, which is what
+the +5..+9 vias are. The rotations are exact at K28 in all four frames
+and exact at 180 degrees at K15, and two vias cheaper at 90 and 270:
+the octilinear lattice's relation to the lanes is what a quarter turn
+changes and a half turn keeps, so the residual is the router's grid,
+not a rule. And a FRESH fanout on a rotated board is not invariant at
+all (the first run of the gate, `tmp/gate/h3_gate1_*`: K28 38 / 42 /
+54 / 38 vias across the four frames, R180 at 28 of 28 in-band) --
+`bga_fanout`'s escape order leans on the axes, which is why
+`make_bench.py` rotates after the fanout and why the fanout's own
+sensitivity is a finding for the engine, not for this chain.
+
+### TODO for future sessions (2026-09-07)
+
+1. **A re-berth AND a re-fan move for trapped stubs.** The rip now says
+   "walled by static copper -- a fanout matter" and stops. The answer
+   take4's negotiator had (`negotiate_stubs`, `relay_net.py --ref`) was
+   to re-berth: rip the berth and fan the ball out again in another
+   move. Do the same for the TEETH: a re-fan of the source escape for a
+   trapped stub, at either end, judged by the chain.
+2. **Try the packing** (take4's `pack_lanes` / `relax_attract`, the
+   follow-the-neighbour force pulling each lane to `pitch` from the
+   nearest packed lane on its layer). It made visibly tidier rivers at
+   K28 for the same grade, and packed rivers leave more room for the
+   swimmers and their vias.
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`

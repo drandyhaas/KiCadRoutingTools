@@ -2,6 +2,7 @@
 """make_bench.py -- a bench article for the K-bus chain from any board.
 
     python3 make_bench.py BOARD.kicad_pcb SRC DST OUT.kicad_pcb [--two-layer]
+                          [--src-side F|B] [--dst-side F|B] [--rotate DEG]
 
 The chain (`chain_k.sh`, BASE / DEST) needs three things a corpus board
 does not carry: a SOURCE array already fanned out for the pair's nets
@@ -32,6 +33,16 @@ prepared, so a second array pair is one command away:
    `coherent_nets.py` reads it beside the board.
 
 Then: `BASE=OUT.kicad_pcb DEST=DST bash chain_k.sh TAG K ...`.
+
+THE POSE GATE (`pose_gate.sh`): nothing in the chain may lean on the
+board's axes or on which face an array sits. `--src-side` / `--dst-side`
+put an array on the other face (the placement writer's mirror, the
+#714 path), and every part its pads then collide with -- the decoupling
+caps under a BGA sit on the far side -- goes to the other face with it,
+until the article is pad-clean; `--rotate DEG` rotates the whole board
+(rotate_board.py, an isometry that self-verifies). Copper already
+attached to the pair's nets on the input (a fanned bench) is stripped
+first, so the source is always fanned out in its final pose.
 """
 import contextlib
 import os
@@ -50,6 +61,10 @@ from bga_fanout import generate_bga_fanout  # noqa: E402
 from fix_kicad_drc_settings import fix_project_for_output  # noqa: E402
 import braid as te  # noqa: E402
 import fanout_from_plan as fp  # noqa: E402
+sys.path.insert(0, os.path.join(HERE, '..', 'py_placer'))
+from placement.writer import write_placed_output  # noqa: E402
+
+PAD_PAIR = re.compile(r'Pad:\S+ \((\S+)\.\S+\) <-> Pad:\S+ \((\S+)\.\S+\)')
 
 
 def two_layer(txt):
@@ -110,6 +125,68 @@ def fanout_source(board, out, src, names):
     return len(tracks), len(vias_add), sorted(set(failed))
 
 
+def strip_pair_copper(txt, pcb, names):
+    """A fanned bench as input: the pair's segments and vias go, so the
+    source is fanned out again in its final pose."""
+    ids = {i for i, n in pcb.nets.items() if n.name in names}
+    n0 = len(txt)
+    txt = te.strip_net_items(txt, 'segment', ids, names)
+    txt = te.strip_net_items(txt, 'via', ids, names)
+    return txt, n0 - len(txt)
+
+
+def side_of(fp_):
+    return 'B' if fp_.layer.startswith('B') else 'F'
+
+
+def flip_parts(board, refs, log=print):
+    """Mirror `refs` to their other face in place (position and final
+    angle kept), through the placement writer."""
+    with contextlib.redirect_stdout(sys.stderr):
+        pcb = parse_kicad_pcb(board)
+        pl = [{'reference': r, 'new_x': pcb.footprints[r].x, 'new_y': pcb.footprints[r].y,
+               'new_rotation': pcb.footprints[r].rotation,
+               'new_side': 'F' if side_of(pcb.footprints[r]) == 'B' else 'B'}
+              for r in refs]
+        tmp = board + '.flip'
+        write_placed_output(board, tmp, pl)
+    os.replace(tmp, board)
+
+
+def pad_partners(board, ref):
+    """Other parts whose PADS collide with `ref`'s pads (check_drc)."""
+    r = subprocess.run([sys.executable,
+                        os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
+                        board, '--clearance', '0.1', '--clearance-margin', '0.1'],
+                       capture_output=True, text=True)
+    out = set()
+    for a, b in PAD_PAIR.findall(r.stdout + r.stderr):
+        if ref in (a, b):
+            out.add(b if a == ref else a)
+    return sorted(out)
+
+
+def put_on_side(board, ref, side, log=print):
+    """`ref` on face `side`; the parts its pads then collide with follow
+    it to the other face (the caps under an array), until pad-clean."""
+    with contextlib.redirect_stdout(sys.stderr):
+        pcb = parse_kicad_pcb(board)
+    if side_of(pcb.footprints[ref]) == side:
+        log(f'  {ref} already on {side}')
+        return
+    flip_parts(board, [ref])
+    moved = [ref]
+    for _round in range(4):
+        hits = [r for r in pad_partners(board, ref) if r != ref]
+        if not hits:
+            break
+        flip_parts(board, hits)
+        moved += hits
+    else:
+        log(f'  {ref}: still colliding after 4 rounds: {hits}')
+    log(f'  {ref} -> {side}: flipped {moved}')
+
+
 def drc_verdict(board):
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
@@ -156,12 +233,21 @@ def write_ladder(board, names, log=print):
 
 
 def main(argv=None):
-    a = [x for x in (argv or sys.argv[1:]) if not x.startswith('--')]
-    flags = {x for x in (argv or sys.argv[1:]) if x.startswith('--')}
-    if len(a) != 4:
-        print(__doc__)
-        return 2
-    board, src, dst, out = a
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('board')
+    ap.add_argument('src')
+    ap.add_argument('dst')
+    ap.add_argument('out')
+    ap.add_argument('--two-layer', action='store_true')
+    ap.add_argument('--src-side', choices=('F', 'B'))
+    ap.add_argument('--dst-side', choices=('F', 'B'))
+    ap.add_argument('--rotate', type=float)
+    a = ap.parse_args(argv)
+    board, src, dst, out = a.board, a.src, a.dst, a.out
+    src_side, dst_side, rotate = a.src_side, a.dst_side, a.rotate
+    flags = {'--two-layer'} if a.two_layer else set()
     if not out.endswith('.kicad_pcb'):
         out += '.kicad_pcb'
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -171,19 +257,31 @@ def main(argv=None):
     if '--two-layer' in flags:
         txt, n_l, n_z = two_layer(txt)
         print(f'two-layer: {n_l} inner layer(s) and {n_z} zone(s) on them removed')
-    with open(base, 'w', encoding='utf-8') as f:
-        f.write(txt)
-    fp.copy_pro(board, base)
     with contextlib.redirect_stdout(sys.stderr):
-        pcb = parse_kicad_pcb(base)
-    print(f'{os.path.basename(base)}: copper layers {pcb.board_info.copper_layers}, '
-          f'{len(pcb.footprints)} parts')
+        pcb = parse_kicad_pcb(board)
     for r in (src, dst):
         if r not in pcb.footprints:
             print(f'no footprint {r} on the board', file=sys.stderr)
             return 2
     names = pair_nets(pcb, src, dst)
     print(f'{len(names)} two-pad nets between {src} and {dst}')
+    txt, n_cut = strip_pair_copper(txt, pcb, names)
+    if n_cut:
+        print(f'stripped the pair nets\' existing copper ({n_cut} chars)')
+    with open(base, 'w', encoding='utf-8') as f:
+        f.write(txt)
+    fp.copy_pro(board, base)
+    for ref, side in ((src, src_side), (dst, dst_side)):
+        if side:
+            if side not in ('F', 'B'):
+                print(f'side must be F or B, not {side}', file=sys.stderr)
+                return 2
+            put_on_side(base, ref, side)
+    with contextlib.redirect_stdout(sys.stderr):
+        pcb = parse_kicad_pcb(base)
+    print(f'{os.path.basename(base)}: copper layers {pcb.board_info.copper_layers}, '
+          f'{len(pcb.footprints)} parts; {src} on {side_of(pcb.footprints[src])}, '
+          f'{dst} on {side_of(pcb.footprints[dst])}')
     with contextlib.redirect_stdout(sys.stderr):
         n_t, n_v, failed = fanout_source(base, out, src, names)
     print(f'{src} fanned out: {n_t} tracks, {n_v} vias'
@@ -192,6 +290,20 @@ def main(argv=None):
         fix_project_for_output(out, clearance=0.1, track_width=0.1,
                                via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                                verbose=False)
+    if rotate:
+        # AFTER the fanout, copper included: the rotation is then an
+        # isometry of the article the chain sees (plan + braid), and the
+        # engine's own rotation sensitivity (bga_fanout's escape order
+        # is not invariant -- measured: a fresh fanout on the rotated
+        # board moved eight nets' vias at K15) is kept out of the gate
+        rot = out[:-len('.kicad_pcb')] + '.rot.kicad_pcb'
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'rotate_board.py'),
+                            out, rot, str(float(rotate))], capture_output=True, text=True)
+        print('  ' + (r.stdout + r.stderr).strip().splitlines()[-1])
+        if r.returncode:
+            return 2
+        fp.copy_pro(out, rot)
+        os.replace(rot, out)
     n_drc = drc_verdict(out)
     print(f'{os.path.basename(out)}: {"DRC clean" if n_drc == 0 else f"{n_drc} DRC violation(s)"}'
           ' at the chain\'s floor (0.1)')
