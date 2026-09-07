@@ -58,7 +58,14 @@ LEVER_REGISTRY = (
     # Staging tools author poses BY DESIGN -- that is what staging is.
     # `perturb.py` is a LIBRARY with no __main__; it is reached through
     # stage_blind, whose declaration covers it by the innermost-wins rule.
-    'perturb.py', 'stage_blind.py',
+    #
+    # `stage_unaided.py` was MISSING here while its own __main__ carried the
+    # comment "In LEVER_REGISTRY, so it must DECLARE" -- the file asserted a
+    # membership this tuple did not grant. That was harmless only while
+    # NOTHING armed a regime (#903): now that both stagers arm their own work
+    # dir, a RESTAGE declares `stage_unaided.py`, and without this entry the
+    # stager is refused by the guard it installed one line earlier.
+    'perturb.py', 'stage_blind.py', 'stage_unaided.py',
 )
 
 # Registered but NOT pose writers. `beautify_labels.py` moves reference-

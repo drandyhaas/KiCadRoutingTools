@@ -382,6 +382,20 @@ def main(src, workdir, truthdir, kinds=None):
           % (sanitized.get('carried'), len(sanitized.get('sanitized_keys')
                                            or ()), sanitized.get('dropped_prl')))
 
+    # ARM THE REGIME (#903), once the board is final -- the redraw loop has
+    # ended and the infeasible-dose refusal has already raised, so `out` is
+    # the board this run will be graded on.
+    #
+    # NO EXTRAS, and the asymmetry with stage_unaided's `mechanical=` is
+    # deliberate: `sanitized` NAMES the withheld strings, and kind/dose/seed
+    # ARE the fence. Both belong in the truth dir, which is where `draw.json`
+    # below already puts them. A manifest lives inside the work dir, so
+    # anything passed here is inside the fence.
+    from placement.provenance import REGIME_NAME, start_regime
+    start_regime(workdir, out)
+    print(f'  regime armed: {os.path.join(workdir, REGIME_NAME)} -- an '
+          f'undeclared pose write in this dir now RAISES')
+
     with open(os.path.join(truthdir, 'draw.json'), 'w', encoding='utf-8') as f:
         json.dump({'kind': kind, 'dose_mm': dose, 'seed': seed,
                    'dose_mm_applied': rec.get('dose_mm_applied'),

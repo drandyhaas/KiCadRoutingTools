@@ -224,6 +224,16 @@ def stage(src, out_board, truth_dir=None, mechanical_out=None):
     board unplaced (`duplicate_fraction >= 0.5` AND `distinct_positions <=
     max(3, 0.1n)`), which is what makes the placement tools accept it as a
     from-scratch task rather than refusing it as a damaged placement.
+
+    SIDE EFFECT, and the point of #903: this ARMS the unaided provenance
+    regime over the work dir as its last act. From here a pose write through
+    `placement.writer` either carries a registered lever or RAISES, and every
+    one that lands is recorded in `.pose-provenance.jsonl`. It is done here
+    rather than in `main()` because arming must be a property of STAGING, not
+    of which entry point you happened to use -- "it works if you call it
+    right" was already true of `start_regime` and was useless: nothing in
+    production called it, so `provenance_audit` answered UNPROVEN on every
+    real run.
     """
     from kicad_parser import parse_kicad_pcb
     from placement.writer import write_placed_output
@@ -247,6 +257,16 @@ def stage(src, out_board, truth_dir=None, mechanical_out=None):
         else:
             placements.append({'reference': ref, 'new_x': cx, 'new_y': cy,
                                'new_rotation': 0.0})
+    # Read BEFORE the staging write, or the count includes this call's own
+    # row: under an already-armed dir `write_placed_output` records one, and
+    # "restaged over 1 row" would then be true of a dir nothing had restaged.
+    from placement.provenance import (LEDGER_NAME, read_ledger, regime_for,
+                                      start_regime)
+    _wd = os.path.dirname(os.path.abspath(out_board))
+    _prior = len(read_ledger(_wd)) if os.path.isfile(
+        os.path.join(_wd, LEDGER_NAME)) else 0
+    _outer = regime_for(out_board)
+
     write_placed_output(src, out_board, placements)
     copy_siblings(src, out_board)
     project = sanitize_staged_project(
@@ -269,6 +289,33 @@ def stage(src, out_board, truth_dir=None, mechanical_out=None):
                                           'mechanical.json')
     with open(mech, 'w', encoding='utf-8') as f:
         json.dump(doc, f, indent=1, sort_keys=True)
+
+    # ARM THE REGIME (#903), last, once the work dir is finished.
+    # `start_regime` hashes the board, so it cannot precede
+    # `write_placed_output`; putting it after `mechanical.json` also makes the
+    # manifest a statement about a COMPLETE work dir rather than one about
+    # whichever helpers happen not to rewrite the board today. Before the
+    # truth block, so `<truth>/stage.json`'s `staged_sha256` provably names
+    # the same bytes.
+    #
+    # The work dir is derived from the BOARD, not from a caller's `workdir`
+    # argument: `regime_for` walks up from the file being written, so the
+    # regime has to govern the directory the board actually lives in.
+    #
+    # `restaged_over_rows` discloses that an APPENDED ledger outlives the
+    # overwritten manifest: those older rows still populate `claimed`, so a
+    # previous run's claim can cover a ref this one wrote, and an undisclosed
+    # count is the only thing that would make that invisible.
+    start_regime(_wd, out_board, mechanical=os.path.abspath(mech),
+                 restaged_over_rows=_prior)
+    if _outer is not None and os.path.abspath(_outer) != _wd:
+        # SAY IT, do not refuse. This dir sits under an already-armed one, so
+        # the pose write above was governed by the OUTER regime and its ledger
+        # row landed there. Unfixable by ordering -- the manifest cannot exist
+        # before the board it hashes.
+        print(f"stage_unaided: NOTE this work dir is nested inside an armed "
+              f"regime at {_outer}; the staging write was recorded in ITS "
+              f"ledger, not this one", file=sys.stderr)
 
     if truth_dir:
         os.makedirs(truth_dir, exist_ok=True)
@@ -336,8 +383,16 @@ def main(argv=None):
     if a.truthdir:
         print(f"  truth in {a.truthdir} (a sibling; nothing in the work dir "
               f"names the source)")
+    # The regime is a CHANGE to what this dir permits, so it is disclosed the
+    # way every other staging decision is. Naming the file matters: it is what
+    # `provenance_audit --workdir` opens, and its absence was #903.
+    from placement.provenance import REGIME_NAME
+    _regime = os.path.join(a.workdir, REGIME_NAME)
+    print(f"  regime armed: {_regime} -- an undeclared pose write in this dir "
+          f"now RAISES, and every declared one is recorded in "
+          f"{os.path.join(a.workdir, '.pose-provenance.jsonl')}")
     print("JSON_SUMMARY: " + json.dumps(
-        {'board': out, 'exempt': len(doc['refs']),
+        {'board': out, 'exempt': len(doc['refs']), 'regime': _regime,
          'mechanical': os.path.join(a.workdir, 'mechanical.json')},
         sort_keys=True))
     return 0
