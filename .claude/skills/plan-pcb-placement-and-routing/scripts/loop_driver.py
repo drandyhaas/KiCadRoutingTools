@@ -3293,13 +3293,17 @@ def _self_test():
     # L5 is the ONE delegation that must not be a fork, in EITHER mode: its
     # prompt ends "Re-derive every number yourself. Do not trust the report.",
     # and a fork is handed the parent's whole transcript including that
-    # report. Asserted as a POSITIVE -- L5 has no delegation branch at all, so
-    # "--no-delegate suppresses it" would be a false claim.
-    for _m in ('fork', 'fresh'):
-        _l5 = STAGES['L5'](_args(base + ['--delegate-mode', _m,
-                                         '--score', 'x.json']))
-        want('agent="fork"' not in _l5,
-             f'the end-to-end verifier is never a fork ({_m} mode)')
+    # report. The RUNTIME assertion lives in the terminal-L5 block far below,
+    # where a fixture exists that actually reaches the verifier prompt --
+    # `agent="fork" not in <error>` is true of every refusal, so asserting it
+    # here would have been a tautology (it was, until a test caught it).
+    # What belongs here is the MECHANISM: l5 must not consult `_agent` at all,
+    # so no flag can reconnect it.
+    import inspect as _insp
+    want('_agent(' not in _insp.getsource(l5),
+         'the end-to-end verifier never consults the agent-type flag')
+    want('_agent(' in _insp.getsource(l1) and '_agent(' in _insp.getsource(l2),
+         '...while both halves do, so that check discriminates')
     # The hand-off is NAMED in the text the orchestrator reads.
     want('place_prompt.txt' in deleg and 'place_return.md' in deleg,
          'L1 names both halves of the hand-off on disk')
@@ -3586,6 +3590,21 @@ def _self_test():
             '--routing-close', closed('c_done.json')]))
         want('DONE-EXHAUSTED' in out and 'make_film' in out,
              'a plateaued solved board closes out, with the film')
+        # #890, ON THE OUTPUT THAT ACTUALLY CARRIES THE PROMPT. Every other
+        # L5 fixture in this self-test refuses, and `agent="fork" not in
+        # <error>` is true of a refusal -- so this is the only place the
+        # claim can be made honestly. Both halves of it: the tag IS `claude`,
+        # and it is not `fork`, in both --delegate-mode arms.
+        want('<subagent_prompt' in out, 'the terminal close-out does dispatch '
+                                        'a verifier, so the next check is '
+                                        'about a prompt that exists')
+        for _m in ('fork', 'fresh'):
+            _t = STAGES['L5'](_args(done_args + [
+                '--routing-close', closed(f'c_ag_{_m}.json'),
+                '--delegate-mode', _m]))
+            want('agent="claude"' in _t and 'agent="fork"' not in _t,
+                 f'the end-to-end verifier is spawned FRESH, never forked '
+                 f'({_m} mode)')
 
         # THE AGREEMENT CHECK, both directions. Asserting only the refusal
         # would pass for a gate that refused everything.
