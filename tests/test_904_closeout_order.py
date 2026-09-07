@@ -153,6 +153,109 @@ def test_the_printed_command_refuses_to_invent_paths():
     print("  PASS: no verdict paths, no printed command")
 
 
+def test_the_continue_header_says_which_of_the_two_it_is():
+    """"Still improving" and "NOT ANSWERABLE" call for opposite actions.
+
+    The header asserted the first about every half that was not flat, so a half
+    that had recorded `--exhausted placement` three times was told, in the
+    headline, that it was getting better. converge publishes the per-half `why`
+    and has since it was written; nothing here read it.
+    """
+    import json
+    import tempfile
+    td = tempfile.mkdtemp()
+    lp = os.path.join(td, 'l.jsonl')
+    # placement: 5 laps, two of them accepted with no score -> unanswerable.
+    # routing: nothing at all -> too-few-laps. Neither is improving.
+    rows = ([{'kind': 'placement', 'accepted': True,
+              'score': {'blocking': 1, 'quality': {}}}] * 3
+            + [{'kind': 'placement', 'accepted': True, 'score': None}] * 2)
+    with open(lp, 'w', encoding='utf-8') as fh:
+        for i, r in enumerate(rows):
+            fh.write(json.dumps(dict(r, iteration=i)) + '\n')
+    sp = os.path.join(td, 's.json')
+    with open(sp, 'w', encoding='utf-8') as fh:
+        json.dump({'schema': 1, 'kind': 'board-score', 'blocking': 1,
+                   'quality': {}}, fh)
+    out = L.STAGES['L5'](L._args(['--board', __file__, '--ledger', lp,
+                                  '--score', sp]))
+    head = out.splitlines()[1]
+    assert 'NOT ANSWERABLE' in head, head
+    # The correct header QUOTES the phrase as the thing it is not, so match the
+    # assertion form -- a half NAMED as improving -- rather than the words.
+    for half in ('placement', 'routing'):
+        assert f'{half} is still improving' not in head, (
+            'the headline asserted improvement about a half whose plateau is '
+            'simply unanswerable: ' + head)
+    print("  PASS: the CONTINUE headline reads the per-half `why`")
+
+
+def test_the_freeze_row_is_recorded_as_systemic():
+    """A freeze turns no lap, and as a placement row it retracted the
+    declaration before it."""
+    import json
+    import tempfile
+    td = tempfile.mkdtemp()
+    # L2 refuses a board that is not in the ledger BY CONTENT, so record one.
+    from board_store import sha256_file
+    bd = os.path.join(td, 'placed.kicad_pcb')
+    with open(bd, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb)')
+    lp = os.path.join(td, 'l.jsonl')
+    with open(lp, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'iteration': 0, 'kind': 'placement',
+                             'accepted': True,
+                             'result_sha': sha256_file(bd)}) + '\n')
+    rp = os.path.join(td, 'p.json')
+    with open(rp, 'w', encoding='utf-8') as fh:
+        json.dump({'blocking': 0, 'oob_pad_count': 0, 'buildable': True,
+                   'verdict': 'buildable (blocking 0)', 'locked_contacts': 0,
+                   'pad_conflicts': 0, 'hole_conflicts': 0, 'clearance': 0.2,
+                   'new_advisory_pairs': [], 'advisory_pairs': 0}, fh)
+    out = L.STAGES['L2'](L._args(
+        ['--board', bd, '--ledger', lp, '--placement-report', rp]))
+    i = out.find('L2 freeze')
+    assert i > 0, out[:300]
+    cmd = out[max(0, i - 400):i]
+    assert '--kind systemic' in cmd, (
+        'the freeze row is prescribed as a placement lap again: it then enters '
+        "the placement half's window carrying no score AND retracts the "
+        '--exhausted declaration before it.\n' + cmd)
+    assert '--kind placement \\' not in cmd, cmd
+    print("  PASS: L2 prescribes the freeze as --kind systemic")
+
+
+def test_the_stage_text_is_on_disk_after_every_invocation():
+    """`out_sha` proves two invocations emitted the same thing and nothing
+    else. The refusal a run was given had to be recoverable from a tee."""
+    import contextlib
+    import hashlib
+    import io as _io
+    import json
+    import tempfile
+    td = tempfile.mkdtemp()
+    lp = os.path.join(td, 'l.jsonl')
+    open(lp, 'w').close()
+    buf = _io.StringIO()
+    for _ in range(2):
+        with contextlib.redirect_stdout(buf):
+            L.main(['--stage', 'L1', '--board', 'b.kicad_pcb', '--ledger', lp])
+    with open(os.path.join(td, 'loop_driver.log'), encoding='utf-8') as fh:
+        rows = [json.loads(line) for line in fh]
+    assert len(rows) == 2, rows
+    assert [r['out_file'] for r in rows] == [
+        'logs/loop_driver_L1_1.log', 'logs/loop_driver_L1_2.log'], rows
+    for r in rows:
+        with open(os.path.join(td, r['out_file']), encoding='utf-8') as fh:
+            txt = fh.read()
+        assert txt.strip(), 'the archive is EMPTY -- a file that proves nothing'
+        assert txt.startswith('<stage_instructions'), txt[:80]
+        assert hashlib.sha256(txt.encode('utf-8')).hexdigest()[:16] == \
+            r['out_sha'], 'the archived text is not the text the row hashed'
+        assert len(txt.splitlines()) == r['out_lines'], r
+    print("  PASS: the emitted text is archived, and it is the text hashed")
+
+
 def _cross(rows, verdict_files=(), accept=(), close_verdict='DONE',
            name='DONE-EXHAUSTED'):
     """Drive `_cross_check` on a fixture ledger; return its refusal or None."""
