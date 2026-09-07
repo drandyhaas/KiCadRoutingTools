@@ -83,7 +83,19 @@ def test_acceptance_numbers():
         path = fixture(lap)
         pcb = _pcb(path)
         bodies = _bodies(path)
-        ga, gb = bodies[ra], bodies[rb]
+        ga, gb = bodies.get(ra), bodies.get(rb)
+        # Named refusals rather than a KeyError/TypeError. A mutation battery
+        # over this module killed three rows by TRACEBACK, and a traceback is
+        # the same non-zero exit a satisfied assertion gives -- it says the
+        # gate reacted, not that it saw the thing it names.
+        if ga is None or gb is None:
+            check(f'{lap} {ra}<->{rb}: both parts are in the body model',
+                  False, f'{ra}={ga is not None} {rb}={gb is not None}')
+            continue
+        if ga.drawn_local is None or gb.drawn_local is None:
+            check(f'{lap} {ra}<->{rb}: both parts have a DRAWN body', False,
+                  f'{ra} drawn={ga.drawn_source} {rb} drawn={gb.drawn_source}')
+            continue
         rect_a = _board_rect(pcb.footprints[ra], ga.drawn_local)
         rect_b = _board_rect(pcb.footprints[rb], gb.drawn_local)
         got = round(rect_gap(rect_a, rect_b), 4)
@@ -136,10 +148,17 @@ def test_no_offset_is_applied_to_silk():
 
     def grown(ref, by):
         g = bodies[ref]
+        if g.drawn_local is None:
+            return None
         x0, y0, x1, y1 = g.drawn_local
         return _board_rect(pcb.footprints[ref],
                            (x0 - by, y0 - by, x1 + by, y1 + by))
-    got = round(rect_gap(grown(ra, 0.2), grown(rb, 0.2)), 4)
+    _a, _b = grown(ra, 0.2), grown(rb, 0.2)
+    if _a is None or _b is None:
+        check('both parts have a drawn body to expand', False,
+              f'{ra}/{rb} drawn bodies missing')
+        return
+    got = round(rect_gap(_a, _b), 4)
     check('a 0.2mm silk expansion would break the issue\'s own numbers',
           abs(got - (want - 0.4)) < 1e-6,
           f'expanded gap {got:+.4f}, unexpanded {want:+.4f}')
@@ -157,7 +176,10 @@ def test_silk_is_refused_where_it_is_not_a_body():
     bodies = _bodies(path)
     pcb = _pcb(path)
     for ref in ('Q1', 'Q2'):
-        g = bodies[ref]
+        g = bodies.get(ref)
+        if g is None:
+            check(f'{ref} is in the body model', False, 'absent')
+            continue
         check(f'{ref} silk refused as a tick mark',
               g.silk_rejected and g.drawn_source == 'none'
               and g.source == 'pad_bbox',
@@ -167,7 +189,10 @@ def test_silk_is_refused_where_it_is_not_a_body():
     check('the board carries pad-less blocks to refuse', len(padless) >= 3,
           f'{len(padless)} found')
     for ref in padless:
-        g = bodies[ref]
+        g = bodies.get(ref)
+        if g is None:
+            check(f'{ref} is in the body model', False, 'absent')
+            continue
         check(f'{ref} (pad-less) claims no silk body',
               g.drawn_source != 'silk', f'drawn={g.drawn_source}')
 
@@ -206,6 +231,119 @@ def test_occupancy_never_shrinks_below_the_pads():
           shrunk == [], f'{len(shrunk)}: {shrunk[:5]}')
 
 
+def test_a_silk_body_is_never_smaller_than_its_pads():
+    """Rule 1, asserted where it can FAIL.
+
+    Added because a mutation battery removed the union from the silk rung and
+    every other arm here still passed: the acceptance numbers cannot see it
+    (CON1/CON2/U2's silk already contains their pad field, so the union is a
+    no-op there) and the occupancy arm cannot see it either (occupancy unions
+    with the pads again at the end regardless). The union's whole job is to
+    stop `drawn_local` -- the rect the BODY channel grades -- from being
+    narrower than the copper it sits on, and only this arm watches that.
+    """
+    from placement.utility import compute_footprint_bbox_local
+    import run_utils
+    boards = run_utils.corpus_boards()
+    checked, shrunk = 0, []
+    for b in boards:
+        pcb = _pcb(b)
+        for ref, g in _bodies(b).items():
+            if g.drawn_source != 'silk' or g.drawn_local is None:
+                continue
+            fp = pcb.footprints.get(ref)
+            if fp is None or not (fp.pads or ()):
+                continue
+            pads = compute_footprint_bbox_local(fp)
+            checked += 1
+            d = g.drawn_local
+            if (d[0] > pads[0] + 1e-9 or d[1] > pads[1] + 1e-9
+                    or d[2] < pads[2] - 1e-9 or d[3] < pads[3] - 1e-9):
+                shrunk.append((os.path.basename(b), ref))
+    # Non-vacuity: this arm is worthless if no part on the corpus takes the
+    # silk rung at all, which is exactly what a future ladder change could
+    # cause without anyone noticing.
+    check('some corpus part takes the silk rung', checked > 0,
+          f'{checked} silk-sourced parts')
+    check('no silk body is narrower than its own pads', shrunk == [],
+          f'{len(shrunk)}: {shrunk[:5]}')
+
+
+def test_the_courtyard_is_not_on_the_drawn_ladder():
+    """A courtyard is a body PLUS an assembly margin plus any shell overhang.
+
+    Run-6 calibrated the courtyard channel and the fab channel apart for that
+    reason -- the courtyard ships frac-1.0 containment on four healthy boards
+    -- so putting the courtyard on the drawn ladder would quietly re-merge
+    them. esp_prog cannot see this (no part on it draws a courtyard at all),
+    which is why the arm sweeps the corpus for parts that draw BOTH.
+    """
+    from placement.parser import extract_courtyard_sides, extract_fab_sides
+    import run_utils
+    both, wrong = 0, []
+    for b in run_utils.corpus_boards():
+        crt, fab = extract_courtyard_sides(b), extract_fab_sides(b)
+        bodies = _bodies(b)
+        for ref in set(crt) & set(fab):
+            g = bodies.get(ref)
+            if g is None:
+                continue
+            both += 1
+            if g.drawn_source != 'fab':
+                wrong.append((os.path.basename(b), ref, g.drawn_source))
+            if g.source != 'courtyard':
+                wrong.append((os.path.basename(b), ref,
+                              f'occupancy={g.source}'))
+    check('the corpus has parts drawing both a courtyard and a fab body',
+          both > 100, f'{both} parts')
+    check('such a part reads fab as its DRAWN body and courtyard as its '
+          'occupancy', wrong == [], f'{len(wrong)}: {wrong[:5]}')
+
+
+def test_a_silk_body_never_gates():
+    """The rule with the most consequences in #896, asserted both ways.
+
+    Added because a mutation row that DELETED the exclusion survived every
+    other arm here: the model was right, the disclosure was right, and nothing
+    watched the one decision that can turn a board NOT BUILDABLE.
+
+    Both directions matter, and the positive control is the half that is easy
+    to leave out. esp_prog's R1 clears U2's real body by 2.1mm and reads 89%
+    CONTAINED inside U2's silk square -- four corner brackets 5.2mm apart
+    around a 4.5mm part -- so the pair MUST be in the disclosed census and
+    MUST NOT be in the gating one. An arm checking only the gating side would
+    pass just as well on a build that had stopped producing the pair at all.
+    """
+    from placement.legality import grade_body_overlap
+    import run_utils
+
+    path = os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')
+    g = grade_body_overlap(_pcb(path), 0.15, pcb_file=path)
+    disclosed = {(q.a, q.b) for q in g['pairs'] if q.contained}
+    check('esp_prog DISCLOSES R1<->U2 as contained (the positive control -- '
+          'without it the arm below passes vacuously)',
+          ('R1', 'U2') in disclosed, f'contained pairs: {sorted(disclosed)}')
+    gating = {(q.a, q.b) for q in g['containment_blocking_pairs']}
+    check('esp_prog does not GATE on R1<->U2', ('R1', 'U2') not in gating,
+          f'gating pairs: {sorted(gating)}')
+
+    offenders = []
+    for b in run_utils.corpus_boards():
+        gg = grade_body_overlap(_pcb(b), 0.15, pcb_file=b)
+        silk_drawn = {r for r, s in (gg.get('body_sources') or {}).items()
+                      if s == 'silk'}
+        silk_occ = {r for r, x in _bodies(b).items() if x.source == 'silk'}
+        for q in gg['containment_blocking_pairs']:
+            if q.a in silk_drawn or q.b in silk_drawn:
+                offenders.append((os.path.basename(b), 'containment',
+                                  q.a, q.b))
+        for q in gg['courtyard_blocking_pairs']:
+            if q.a in silk_occ or q.b in silk_occ:
+                offenders.append((os.path.basename(b), 'courtyard', q.a, q.b))
+    check('no corpus board gates on a silk-sourced body', offenders == [],
+          f'{len(offenders)}: {offenders[:5]}')
+
+
 def test_seam_is_signed_and_named():
     """A seam and a collision are ONE number, and it says what it rests on."""
     from placement.legality import grade_body_overlap
@@ -226,6 +364,9 @@ TESTS = [test_acceptance_numbers, test_the_channel_reports_them,
          test_no_offset_is_applied_to_silk,
          test_silk_is_refused_where_it_is_not_a_body,
          test_occupancy_never_shrinks_below_the_pads,
+         test_a_silk_body_is_never_smaller_than_its_pads,
+         test_the_courtyard_is_not_on_the_drawn_ladder,
+         test_a_silk_body_never_gates,
          test_seam_is_signed_and_named]
 
 
