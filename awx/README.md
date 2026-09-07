@@ -1,34 +1,53 @@
 # awx -- the K-bus chain (#622): one plan, a fanout that follows it, a braid
 
-The tool set for routing a fanned-out bus between two BGAs (the
-`fb_t2q_fresh` bench: an FPGA `U1` and a DDR3 `DU1`, the coherent
-K-ladder), where the PLAN decides both ends of every net, the FANOUT lays
-exactly the plan's moves (and tells the plan what it could not), and the
-braid routes the lanes:
+The tool set for routing a fanned-out bus between two BGAs, where the
+PLAN decides both ends of every net, the FANOUT lays exactly the plan's
+moves (and tells the plan what it could not), the BRAID routes the lanes
+in a corridor of pages, and a refused lane is negotiated rather than
+left open:
 
-    bash chain_k.sh TAG 4 8 15 28   # -> tmp/TAG_k<K>.kicad_pcb, graded
+    bash chain_k.sh TAG 15 28 41           # -> tmp/TAG_k<K>.kicad_pcb, graded
+    python3 make_bench.py BOARD SRC DST OUT # another array pair, any board
+    bash pose_gate.sh BOARD SRC DST 15 28   # the same pair in every pose
 
-Results on the bench (2026-09-06), against the previous chain on the same
-engine (a face-hinted `auto` fanout, the bench's own source teeth):
+## Where it stands (2026-09-07)
 
-| K  | previous vias | this chain | in-band at attempt 0 | plan's own prediction | human |
-|----|---------------|------------|----------------------|-----------------------|-------|
-| 4  | 4             | 4          |                      | 4                     | --    |
-| 8  | 8             | 6          |                      | 6                     | --    |
-| 15 | 22            | 14         | 15 / 15              | 14, per net           | 22    |
-| 28 | 38, 0 open    | 38         | 28 / 28              | 36 (the swimmer SA4 at 4) | 46 |
-| 35 | 56            | 62         | 27 / 32 + 0 / 3      | 59                    | 58    |
-| 41 | 9 open, 92    | 8 open, 84 | 30 / 37 + 0 / 4      | 90 (18 swimmers)      | 70    |
+The bench (`fb_t2q_fresh`: an H3 BGA `U1` to a DDR3 `DU1`, the coherent
+K-ladder), one fanout per K, byte-deterministic, 0 DRC at the routed 0.1
+mm floor everywhere:
 
-All complete and DRC-clean at the routed 0.1 mm floor (K15 ~20 s, K28
-~70 s, K35 ~170 s with a warm taut memo; the plan loop is most of it).
-The plan's prediction is exact per net at K15; at K28 every page lane is
-laid on its prediction at the first attempt and the residual is one
-swimmer; at K35 the total meets the prediction while ten swimmers pay
-2..4 each (see the via model and the walls below). Every board the chain writes
--- each realized source board, the fanout board, the braided board --
-is DRC-gated at 0.1 with the quantization margin, and the fanout boards
-are clean with the margin off as well.
+| K  | open | vias | in-band | chain | human vias |
+|----|------|------|---------|-------|------------|
+| 15 | 0 | 14  | 15 / 15 | 15 s  | 22 |
+| 28 | 0 | 38  | 28 / 28 | 28 s  | 46 |
+| 35 | 0 | 54  | 34 / 35 | 76 s  | 58 |
+| 41 | 0 | 82  | 40 / 41 | 155 s | 70 |
+| 51 | 0 | 141 | 31 / 47 | 339 s | 85 |
+
+K41 and K51 complete for the first time today (the blocker-directed rip
+at the last call); the work is now vias, not completion. "In-band" is
+the lanes the braid routed inside their planned bands; the rest were
+re-laid at the last call.
+
+![K41 on the bench: one corridor of 41 lanes, both pages, the rides round the destination](img/k41_corridor.png)
+
+*K41: the corridor from `U1` (left) to `DU1` (right) -- front lanes red,
+back lanes blue, every lane in its band, the far-face exits riding round
+the destination's east face.*
+
+A second array pair (the corpus's `zynq_ad9364` made two-layer, `U1` ->
+`U2`, 44 nets; `make_bench.py`): K11 0 open 24 vias, K20 0 open 32,
+K28 0 open 55, 0 DRC -- complete, but 17 of 28 in-band where the bench
+has 28 of 28. The pose gate (`pose_gate.sh`: both arrays on the back,
+either one, the board rotated) completes every pose; the rotations are
+exact isometries of the plan and the braid's rules, the residual being
+the router's octilinear lattice; and the board TURNED OVER
+(`mirror_board.py`) exposed the chain's own front call-out, the layer
+the taut paths relax against -- fixed to the layer the teeth are born
+on, which took the mirror from 50 to 48 vias at K28 and left the bench
+identical; the front still plans 38, and the rest of the gap is the
+destination selector breaking exact ties by menu and face order, the
+next call-out to make canonical (the pose gate section below).
 
 ## The chain
 
@@ -55,8 +74,9 @@ are clean with the margin off as well.
    * FEEDBACK: a move the engine did not lay exactly leaves that net's
      menu (`banned`, keyed by `source_realize.move_sig`) and the round
      re-plans; the destination is its own select -> fan out -> audit ->
-     ban -> re-select loop that ends only at "every berth laid as
-     planned". The engine is the authority on what is possible.
+     ban -> re-select loop that ends at "every berth laid as planned"
+     or, when it never converges (K41), ships its LAST pass with that
+     pass's own sidecar. The engine is the authority on what is possible.
    * What the plan is JUDGED on (`plan_ends.judged_cost`): the vias its
      own model implies -- per net a dive if the corridor cannot keep it
      on its tooth layer, a via where the delivered layer is not the berth
@@ -84,16 +104,119 @@ are clean with the margin off as well.
    fits neither swims), and every lane routed by the real router inside
    its band (`connect.py`, `topo_strings.py`), the lanes not yet routed
    stamped as virtual copper. Up to six attempts widen the launch pitch
-   and route refused lanes earlier; refused lanes then get a wider last
-   call, and lanes with three or more vias an economy re-lay that is
-   kept only when strictly cheaper. What is still refused is reported
-   and left open. The output is smoothed (the repo's octolinear pass)
-   and written with an Eco overlay of the planned lanes.
+   and route refused lanes earlier, the best attempt is kept; refused
+   lanes then get a wider last call, and a lane still refused there a
+   BLOCKER-DIRECTED RIP (the router's blocked frontier attributed to
+   this run's lanes, a min-cut probe naming the cut set, victims re-laid
+   or negotiated one level down); lanes with three or more vias get an
+   economy re-lay kept only when strictly cheaper. What is still refused
+   is reported and left open. The output is smoothed (the repo's
+   octolinear pass) and written with an Eco overlay of the planned lanes.
+5. `make_bench.py`, `rotate_board.py`, `mirror_board.py`, `pose_gate.sh`
+   -- an article from any board (a two-layer version, the source fanned
+   out the chain's way, the floor stamped, the ladder beside it), its
+   rotations and its mirror, and the gate that runs the chain in every
+   pose (below).
 4. `grade_k.py BOARD NETS` -- connectivity scoped to the run's nets,
    whole-board DRC at the routed floor, the via census
    (`via_census.py`).
 
-No environment variables, no options beyond BASE / DEST (the inputs).
+No environment variables, no options beyond BASE / DEST / LADDER (the
+inputs: the board, the destination reference, the ladder beside it).
+
+## The ingredients, in pictures
+
+![K28 on the bench](img/k28_corridor.png)
+
+*K28: two pages. A front lane and a back lane cross for free; a page
+lane keeps its layer through the schedule region and pays a via only
+where its tooth or berth is on the other layer. 38 vias for 28 nets.*
+
+![The east face at K41](img/k41_east_face.png)
+
+*Far-face exits: a berth on the destination's far face is a side exit
+of the main corridor whose leg lies beyond the array and whose jog runs
+back along the stub's own line -- not a corridor of its own through the
+ball field.*
+
+![SBA2 after the rip at K41](img/k41_rip_sba2.png)
+
+*The blocker-directed rip: SBA2 (the highlighted lane) was refused at the
+last call, boxed by lanes routed before it. Its blocked frontier named
+the lanes on it, the min-cut probe found the cheapest crossing set,
+SCKE1 was ripped, SBA2 routed, SCKE1 refused and negotiated in turn by
+ripping SA8 -- every lane routed, K41 complete.*
+
+![K51 on the bench](img/k51_corridor.png)
+
+*K51: 48 routable nets, complete at 141 vias (human 85). Twenty-four rips
+landed a lane; the vias are the work now.*
+
+![The second array pair at K28](img/zynq_k28.png)
+
+*The zynq article (`make_bench.py --two-layer`): the corridor runs north
+from the Zynq to the DDR3, berths on three faces. Complete at 55 vias;
+17 of 28 in-band, the gap a second board shows.*
+
+![The bench turned over](img/gate_mirror_article.png)
+
+*The mirror article: the fanned bench flipped through its plane -- every
+part on the other face, every stub on the other layer, y mirrored,
+self-verified -- so the chain's own front call-outs show without the
+fanout engine's.*
+
+![The bench rotated 30 degrees, K15](img/gate_r30_k15.png)
+
+*A 30-degree rotation: complete, but 33 vias and 6 of 15 in-band -- the
+plan's faces are compass directions and the router's lattice is
+octilinear, so a non-orthogonal pose is outside both models today.*
+
+## Benches and gates
+
+    python3 make_bench.py BOARD SRC DST OUT.kicad_pcb [--two-layer]
+                          [--src-side F|B] [--dst-side F|B] [--rotate DEG]
+    python3 rotate_board.py IN OUT DEG      # the whole board, self-verified
+    python3 mirror_board.py IN OUT          # the board turned over, self-verified
+    [POSES="R90 R30"] [GATE=name] [LADDER=file] bash pose_gate.sh BOARD SRC DST K...
+
+`make_bench.py` prepares an article the way the bench was prepared:
+inner layers out (`--two-layer`), the pair's two-pad nets, SRC fanned
+out with the chain's own destination engine call, the project stamped
+with the chain's floor, DRC-gated, the ladder beside it from the plan's
+river detection; `--src-side` / `--dst-side` mirror an array to the
+other face (the caps under it following), `--rotate` turns the finished
+article. `pose_gate.sh` runs the chain over FF / BF / FB / BB / R90 /
+R180 / R270 (or any `R<deg>`) with one ladder beside every pose and
+prints open / DRC / vias / in-band / seconds per pose and K.
+
+## TODO for future sessions
+
+1. **A re-berth AND a re-fan move for trapped stubs.** The rip stops at
+   "walled by static copper -- a fanout matter". Take4's negotiator
+   answered that by re-berthing (`negotiate_stubs`, `relay_net.py
+   --ref`): rip the berth and fan the ball out again in another move.
+   Do the same for the TEETH -- a re-fan of the source escape for a
+   trapped stub, at either end, judged by the chain.
+2. **Try the packing** (take4's `pack_lanes` / `relax_attract`: a
+   follow-the-neighbour force pulling each lane to `pitch` from the
+   nearest packed lane on its layer). Tidier rivers for the same grade
+   at K28, and packed rivers leave room for the swimmers and their vias.
+3. **A better routing order.** Lanes are laid sequentially -- pages in
+   target order, then swimmers largest displacement first, refused
+   lanes boosted next attempt -- and every refusal the rip repairs is a
+   sequential loss. Take4's order model (`plan_order.BraidOrder`, the
+   braid's own rules as the plan's cost) and its rip assist are the
+   references; candidates are most-constrained-first, the min-cut
+   probe's crossing counts as the order, and the negotiator's history.
+4. **Better spines.** The spine is the straight chord between the two
+   end zones (two corners when the flows bend). Take4 relaxed the
+   members' mean taut path against ramped obstacles (`mean_path`,
+   `relax_path`, `resample`), so a corridor bent only where something
+   was in the way; it was pruned here as never reached at K28, and its
+   absence crashed K51's singleton corridor until the chord took both
+   branches. A corridor that must bend round a part needs it back.
+
+## The mechanisms, dated
 
 ## What this adds to `py_router` (and nothing else)
 
@@ -642,19 +765,42 @@ all (the first run of the gate, `tmp/gate/h3_gate1_*`: K28 38 / 42 /
 `make_bench.py` rotates after the fanout and why the fanout's own
 sensitivity is a finding for the engine, not for this chain.
 
-### TODO for future sessions (2026-09-07)
+**The board turned over.** Both arrays on the back should grade like
+both on the front -- a reflection through the board's plane is an
+isometry too -- and the gate's BB pose (24 / 44 vias) is nowhere near
+FF (16 / 38). The fresh back-side fanout is one reason (611 tracks and
+6 vias for the same balls the front fans out in 502 and 8, four teeth
+on the far side), so `mirror_board.py` turns the FANNED front article
+over instead -- every part to the other face through the placement
+writer, y mirrored, every layer swapped, self-verified -- and the chain
+on that mirror measures its own front call-outs alone: K15 16 vias (=
+FF), **K28 50 against 38**. Every literal `F.Cu` in the chain was then
+read (`grep`): the schedule seeds its pages symmetrically by tooth layer
+and `divers` only feeds a log line; the braid breaks two exact ties to
+F (an exit block's shared leg layer on an even split, a leg's layer at
+equal cost) and filters back-side required stretches near s1 only; and
+the taut paths, the spine and the plan's pad-clear test relaxed against
+FRONT copper by name. That last one is fixed -- the layer the majority of
+teeth are born on (`braid.bundle_layer_of`), identical on the bench by
+construction -- and moved the mirror to 48. What remains is the PLAN:
+the front chooses 17 berths on its down face where the mirror should
+choose 17 on its up face and chooses 9 up, 12 down, with the predicted
+vias 55 against 37; the mirrored geometry ties every cost exactly, so
+the selector's tie-breaks -- the menu's gap order and the face
+iteration order in `select_moves` -- decide, and they are not
+mirror-invariant. Making those ties canonical (a geometric key, not a
+list order) is the next step; the two braid tie-breaks are the step
+after.
 
-1. **A re-berth AND a re-fan move for trapped stubs.** The rip now says
-   "walled by static copper -- a fanout matter" and stops. The answer
-   take4's negotiator had (`negotiate_stubs`, `relay_net.py --ref`) was
-   to re-berth: rip the berth and fan the ball out again in another
-   move. Do the same for the TEETH: a re-fan of the source escape for a
-   trapped stub, at either end, judged by the chain.
-2. **Try the packing** (take4's `pack_lanes` / `relax_attract`, the
-   follow-the-neighbour force pulling each lane to `pitch` from the
-   nearest packed lane on its layer). It made visibly tidier rivers at
-   K28 for the same grade, and packed rivers leave more room for the
-   swimmers and their vias.
+**Non-orthogonal rotations.** 30 degrees: K15 complete at 33 vias, 6 of
+15 in-band; K28 0 open but 15 DRC, 95 vias, 12 of 28 in-band, 661 s.
+The plan's faces are compass directions (`DIRS`), the audit measures a
+gap ALONG a face by x or y, and the router's lattice is octilinear, so a
+pose off the axes is outside both models today; that it completes at
+all is the braid's ladder. 45 degrees is the octilinear-friendly angle:
+K15 complete at 20 vias, 11 of 15 in-band; at K28 the plan stage itself
+fails (`endpoints`: a realized tooth's free stub end not found on the
+rotated copper), so the pose is refused before the braid.
 
 ## History: what `bus622-take4` still has
 

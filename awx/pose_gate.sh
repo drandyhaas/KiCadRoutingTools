@@ -28,7 +28,7 @@ opts_of() {
   case "$1" in
     FF) echo "";; BF) echo "--src-side B";; FB) echo "--dst-side B";;
     BB) echo "--src-side B --dst-side B";;
-    R90) echo "--rotate 90";; R180) echo "--rotate 180";; R270) echo "--rotate 270";;
+    R*) echo "--rotate ${1#R}";;
   esac
 }
 for P in $POSES; do
