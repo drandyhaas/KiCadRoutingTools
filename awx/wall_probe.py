@@ -378,6 +378,19 @@ def analyze(window, cfg, obstacles, kw, cc, routed, label):
             sb = cc.spine.project_pt((sg.end_x, sg.end_y))
             print(f'     {o:6s} {sg.layer[0]} ({sg.start_x:.3f},{sg.start_y:.3f})->({sg.end_x:.3f},{sg.end_y:.3f})'
                   f'  s {sa[0]:.2f}..{sb[0]:.2f} o {sa[1]:.3f}..{sb[1]:.3f}  d={d:.3f}')
+    print('  virtual pieces within 0.6 mm of the STUB (and real copper of other nets):')
+    for sg, o in sorted(vsegs, key=lambda t: t[1]):
+        d = seg_dist(stub[0], stub[1], sg.start_x, sg.start_y, sg.end_x, sg.end_y)
+        if d < 0.6:
+            sa = cc.spine.project_pt((sg.start_x, sg.start_y))
+            sb = cc.spine.project_pt((sg.end_x, sg.end_y))
+            print(f'     {o:6s} {sg.layer[0]} ({sg.start_x:.3f},{sg.start_y:.3f})->({sg.end_x:.3f},{sg.end_y:.3f})'
+                  f'  s {sa[0]:.2f}..{sb[0]:.2f} o {sa[1]:.3f}..{sb[1]:.3f}  d={d:.3f}')
+    for sg in rsegs:
+        d = seg_dist(stub[0], stub[1], sg.start_x, sg.start_y, sg.end_x, sg.end_y)
+        if d < 0.3:
+            print(f'     real {id2name.get(sg.net_id, sg.net_id)} {sg.layer[0]} ({sg.start_x:.3f},{sg.start_y:.3f})->({sg.end_x:.3f},{sg.end_y:.3f}) d={d:.3f}')
+    print(f'  stub (s,o) = {tuple(round(v, 3) for v in cc.se[NET])}; exit leg s = {cc.exit_leg_s.get(NET)}, leg layer {cc.leg_layer.get(NET)}, legs {cc.legs.get(NET)}, jogs {cc.jogs.get(NET)}')
     for o in sorted(set(o for _, o in vsegs)):
         if o in cc.members and o != NET:
             print(f'     {o:6s} page {sc.page.get(o)} tooth {ctx.tooth_layer[o][0]} req {[(round(a,2), round(b,2), L[0]) for a,b,L in sorted(cc.req.get(o, ()))]}'
