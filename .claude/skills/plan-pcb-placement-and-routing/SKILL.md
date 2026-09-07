@@ -228,10 +228,18 @@ written out of turn.
 1. **The board** — the final `.kicad_pcb` WITH its sibling `.kicad_pro` (the DRC
    floor rides in the project; a board without it is ungradeable, #441). State
    its sha256 and which chain step produced it.
-2. **The movie** — `python3 -X utf8 make_movie.py <work-dir>` over the chain
-   boards. `place_route_loop` makes one by default; a hand-driven chain does
-   NOT, so build it explicitly. `KICAD_ROUTE_TRACE=1` (the default) gives the
-   fine per-copper rip/restore animation.
+2. **The movie** — over the chain boards. `place_route_loop` makes one by
+   default; a hand-driven chain does NOT, so build it explicitly:
+
+   ```bash
+   python3 -X utf8 py_router/make_movie.py <work-dir> -o routing.mp4
+   ```
+
+   `KICAD_ROUTE_TRACE=1` (the default) gives the fine per-copper rip/restore
+   animation. Optional, off by default, both costing real time:
+   `--panels xray+iso` stacks a 3D isometric render under the board view (needs
+   `kicad-cli`, ~2-4 s per render), and a run wrapped in `tee_cmd.py` gets a
+   run-clock overlay read from its `cmd_timing.jsonl`.
 3. **The verifiers' verdicts, on disk** — one file per routed-board lens
    (`verdict_connectivity.txt`, `verdict_drc.txt`, `verdict_spec.txt`) and one
    for the close-out boundary verification (`verdict_record.txt`), each holding

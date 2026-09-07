@@ -1206,6 +1206,24 @@ are still WHOLE-BOARD, and the caption says so.
 `iterations`. Do **not** judge a placement by how much moved: "lots moved, looks
 broken" and "barely moved, looks safe" are both wrong.
 
+### Step 0d2: the movie, for the same reason as the still
+
+The review sheet above shows the placement you ENDED with. The movie shows how
+it got there — which round moved what, and which attempts were tried and thrown
+away — and it is the only artifact that answers "why is this part here?".
+
+Build it explicitly. `place_route_loop` makes one by default, but a hand-driven
+repair chain does **not**, and this is exactly the artifact that gets skipped
+under time pressure:
+
+```bash
+python3 -X utf8 py_tools/make_film.py --from-loop-dir <work-dir> -o placement.mp4
+```
+
+`make_film` rather than `make_movie` here because a placement step changes no
+copper: the film splices the REJECTED attempts in and badges them `TRIED`, so a
+round that was screened out is visible instead of absent.
+
 ### Step 0e: declare the floorplan, so it can be checked
 
 A placement judged only by `crossings` and `hpwl` is judged by two numbers that

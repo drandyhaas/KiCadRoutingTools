@@ -6,6 +6,10 @@ Verifies that:
 2. The Rust library is available
 3. The Rust library version matches Cargo.toml
 
+Rendering is a SEPARATE gate (`check_render_dependencies`, #887): Pillow is not
+needed to route, and requiring it here stops a machine that can route from
+routing. See that function for what it cost when the two were merged.
+
 If version mismatch is detected, automatically rebuilds using build_router.py.
 
 These checks RAISE `StartupCheckError` rather than calling sys.exit (#457 item 3).
@@ -55,6 +59,11 @@ def check_python_dependencies():
     except ImportError:
         missing.append('shapely')
 
+    _raise_if_missing(missing)
+
+
+def _raise_if_missing(missing):
+    """Raise the actionable install message for a list of distribution names."""
     if missing:
         lines = ["ERROR: Missing required Python libraries:"]
         lines += [f"  - {lib}" for lib in missing]
@@ -62,6 +71,37 @@ def check_python_dependencies():
                   f"  pip install {' '.join(missing)}",
                   f"  (or pip3 install {' '.join(missing)})"]
         raise StartupCheckError("\n".join(lines))
+
+
+def check_render_dependencies():
+    """Check the libraries the RASTER path needs. Raises StartupCheckError.
+
+    Pillow only (#887). `route_render.py` and `render_placement.py` import it at
+    MODULE SCOPE with no fallback, so every board still, review sheet and movie
+    needs it -- yet it was declared in neither requirements.txt nor these checks,
+    and a fresh clone learned that from a runtime ImportError string rather than
+    from the check that exists to say so up front.
+
+    SEPARATE from `check_python_dependencies`, which is the ROUTING gate, and
+    that separation is the whole point. Pillow was briefly added to that gate
+    instead, which made `route.py`, `route_diff.py`, `route_planes.py` and
+    `repair_planes.py` refuse to start without it -- on a machine that can route
+    perfectly well, because route.py imports `route_render` lazily and only
+    under `--preview-png`. The cost was not hypothetical: the Modal corpus image
+    (`tests/stress/modal_sweep/modal_app.py`, `_PY_PINS`) installs numpy, scipy
+    and shapely and NOT Pillow, so every cloud A/B replay would have exited 1 on
+    every board -- taking out the instrument that grades routing changes.
+
+    Call it from the render entry points, which is where the requirement is
+    real: at module scope in the two files that import PIL with no fallback,
+    placed BEFORE that import so the message a user gets is this one.
+    """
+    missing = []
+    try:
+        from PIL import Image, ImageDraw, ImageFont     # noqa: F401
+    except ImportError:
+        missing.append('Pillow')
+    _raise_if_missing(missing)
 
 
 def get_cargo_version():

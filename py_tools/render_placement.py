@@ -36,6 +36,14 @@ import os
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
+# The raster gate, placed BEFORE the import it guards (#887): a missing Pillow
+# gets the actionable install message instead of a bare ImportError string.
+# Deliberately NOT `check_python_dependencies` -- that one gates the routing
+# CLIs, and routing does not need Pillow. See startup_checks for what merging
+# the two cost.
+from startup_checks import check_render_dependencies
+check_render_dependencies()
+
 from PIL import ImageDraw
 
 import routing_defaults as defaults
