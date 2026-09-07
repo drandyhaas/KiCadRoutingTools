@@ -153,6 +153,39 @@ def test_end_to_end_file_equals_merged_stdout():
     print("  PASS: --json-out == merged(stdout) on a real run")
 
 
+def test_a_nothing_to_do_run_still_writes_the_file():
+    """The early returns' file twin of the JSON_SUMMARY_MIN contract.
+
+    "All nets are already fully connected" printed the console tally and
+    wrote NO --json-out file, so a file reader could not tell the routine
+    nothing-to-do state from a crash -- and external wrappers refused the
+    run as unaccounted, which locked every already-routed board out of a
+    re-record. The file carries the same empty tally, the status naming
+    why it is empty, the env-knob echo, and deliberately NO
+    min_clearance_used: a run that routed nothing applied no clearance,
+    and inventing one would defeat a reader's floor check.
+    """
+    import route
+    with tempfile.TemporaryDirectory() as td:
+        js = os.path.join(td, 'summary.json')
+        route._write_summary_min_file(js, 'already_connected')
+        doc = json.load(open(js, encoding='utf-8'))
+        assert doc['status'] == 'already_connected'
+        assert doc['successful'] == 0 and doc['failed'] == 0
+        assert 'min_clearance_used' not in doc, (
+            "a run that routed nothing must not claim an applied clearance")
+        assert isinstance(doc.get('env_knobs'), dict), (
+            "the no-op file still states its environment")
+    # No --json-out requested: a no-op, never a crash.
+    route._write_summary_min_file(None, 'already_connected')
+    # And both early returns actually call it.
+    src = inspect.getsource(route.batch_route)
+    assert src.count('_write_summary_min_file(json_out') >= 2, (
+        "the no_valid_nets and already_connected early returns must both "
+        "write the file they print")
+    print("  PASS: a nothing-to-do run is accounted in the file too")
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:
