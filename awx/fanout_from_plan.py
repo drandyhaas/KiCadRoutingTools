@@ -111,8 +111,6 @@ def plan_state(pcb, names, banned=frozenset()):
             continue
         smenu[nm] = [m for m in menu(p, sgrid, byname[nm][0], own_only=True)
                      if (nm, sr.move_sig(m)) not in banned]
-    paths = db.taut_paths(names, ends, lambda nm: obs(byname[nm][0], 'F.Cu'))
-    buses = db.cluster(names, paths)
     tooth0 = {}
     tooth_vias = {}
     for nm in names:
@@ -129,9 +127,19 @@ def plan_state(pcb, names, banned=frozenset()):
         tooth_vias[nm] = (sum(1 for v in pcb.vias if v.net_id == nid
                               and math.hypot(v.x - p.global_x, v.y - p.global_y) < 6.0)
                           if p is not None else 0)
+    # the layer the taut paths relax against: the one most teeth are
+    # born on, not F -- the board turned over (mirror_board.py, every
+    # tooth on B) planned 55 vias for 28 nets where the front planned 37,
+    # because its taut strings dodged the caps that had come to F and
+    # ignored the arrays' own side; the bench (every tooth on F) is
+    # unchanged by construction
+    bundle_layer = te.bundle_layer_of(tooth0)
+    paths = db.taut_paths(names, ends, lambda nm: obs(byname[nm][0], bundle_layer))
+    buses = db.cluster(names, paths)
     return {'byname': byname, 'dmenu': dmenu, 'smenu': smenu, 'launch': launch,
             'tooth0': tooth0, 'tooth_vias': tooth_vias, 'src_pad': src_pad,
             'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,
+            'bundle_layer': bundle_layer,
             'dgrid': dgrid, 'buses': buses, 'obs': obs, 'pcb': pcb,
             'pads_of': {ref: [(p.global_x, p.global_y) for p in fp.pads]
                         for ref, fp in pcb.footprints.items()}}
@@ -150,7 +158,7 @@ def planned_buses(st, choice):
     names = [n for n in choice]
     ends = {nm: (st['launch'][nm], choice[nm].exit_pt, st['dref']) for nm in names}
     paths = db.taut_paths(names, ends,
-                          lambda nm: st['obs'](st['byname'][nm][0], 'F.Cu'))
+                          lambda nm: st['obs'](st['byname'][nm][0], st['bundle_layer']))
     pcb_pads = {}
 
     def centre_of(ref):
@@ -172,7 +180,7 @@ def planned_buses(st, choice):
             self.P = [p0, p1]
             self.d = [d, d]
     nid0 = st['byname'][names[0]][0]
-    pad_clear = lambda p, q: st['obs'](nid0, 'F.Cu').seg_clear(p, q)
+    pad_clear = lambda p, q: st['obs'](nid0, st['bundle_layer']).seg_clear(p, q)
     return cr.cluster_corridors(
         names, paths, {nm: st['launch'][nm] for nm in names},
         {nm: choice[nm].exit_pt for nm in names}, pad_clear, D=6.0,

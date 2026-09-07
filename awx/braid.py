@@ -565,6 +565,14 @@ def _end_dir(pcb, nid, pt, pads):
     return (v[0] / h, v[1] / h) if h > 1e-6 else (1.0, 0.0)
 
 
+def bundle_layer_of(tooth_layer):
+    """The layer most teeth are born on -- what the taut paths and the
+    spine relax against. It used to be F by name; a board turned over
+    (every tooth on B) then dodged the wrong layer's copper."""
+    n_b = sum(1 for L in tooth_layer.values() if L == 'B.Cu')
+    return 'B.Cu' if 2 * n_b > len(tooth_layer) else 'F.Cu'
+
+
 def _relax_pitch(vals, floor):
     """Push a sorted list of offsets apart to at least `floor` (one
     value, or one per adjacent pair), symmetrically."""
@@ -3243,6 +3251,7 @@ def setup(board, names, dest, log, plan=None):
     ctx.dest_layer = {nm: (plan['dest_layer'][nm] if nm in planned else
                            _layer_at(pcb, byname[nm][0], ends[nm][1], 'F.Cu'))
                       for nm in names}
+    bundle_layer = bundle_layer_of(ctx.tooth_layer)
     # the DEST STUB CHAIN per net: the stub polyline walked from the
     # tip (the free end the braid targets) back toward the pad, on
     # the tip's layer, stopping at any junction, same-net via or pad.
@@ -3382,7 +3391,7 @@ def setup(board, names, dest, log, plan=None):
     _missing = [nm for nm in names if nm not in _cached]
     if _missing:
         fresh = db.taut_paths(_missing, ends,
-                              lambda nm: obs_for(nm, 'F.Cu'))
+                              lambda nm: obs_for(nm, bundle_layer))
         ctx.paths.update(fresh)
         if _tc_key is not None:
             _cached.update({nm: [list(p) for p in fresh[nm]]
@@ -3396,7 +3405,7 @@ def setup(board, names, dest, log, plan=None):
     pad_obs = array_pad_obstacles(pcb, set(ctx.src_ref.values())
                                   | {ends[nm][2] for nm in names})
     ctx.pad_obs = pad_obs
-    ctx.spine_obs = build_obstacles(pcb, -1, kids, 'F.Cu')
+    ctx.spine_obs = build_obstacles(pcb, -1, kids, bundle_layer)
 
     def spine_of(members, extra=None, log=None, H=None, relax=True,
                  base_obs=None):
