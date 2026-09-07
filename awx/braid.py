@@ -2147,19 +2147,38 @@ class Corridor:
             return
         boost = {}                # ribbon: refused lanes route earlier
         prev_refused = None
-        for attempt in range(6):
-            self.offsets(ly_floor)
-            sched = Schedule(self.launch, self.target, ctx.tooth_layer,
-                             dest_layer=ctx.dest_layer)
+
+        def plan_at(ly):
+            """The corridor's plan at launch pitch `ly`: offsets, the
+            schedule, the required intervals and the lanes."""
+            self.offsets(ly)
+            sc_ = Schedule(self.launch, self.target, ctx.tooth_layer,
+                           dest_layer=ctx.dest_layer)
             if SLOPE_PITCH:
-                self.offsets(ly_floor, sched=sched)
+                self.offsets(ly, sched=sc_)
                 self.reserve_intervals()
-                sched = Schedule(self.launch, self.target, ctx.tooth_layer,
-                                 dest_layer=ctx.dest_layer)
+                sc_ = Schedule(self.launch, self.target, ctx.tooth_layer,
+                               dest_layer=ctx.dest_layer)
             else:
                 self.reserve_intervals()
-            self.sched_cur = sched
+            self.sched_cur = sc_
             self.lay_lanes()
+            return sc_
+        # THE BEST ATTEMPT IS KEPT, not the last (#622 K35). The
+        # feedback between attempts -- a wider launch pitch, refused
+        # lanes boosted to the front -- is a heuristic for the refused
+        # lanes and a change of world for every other: at K35 attempt
+        # 0 routed 27/32 in 33 vias with every swimmer at 2, and the
+        # attempts after it (pitch 0.38, 0.40) 25/32 and 26/32 in 40,
+        # five swimmers weaving for 4 each; at K41 attempt 4 routed 30
+        # of 37 and attempt 5, the one that shipped, 29. Each attempt
+        # is a full re-route from the base copper, so the one with the
+        # most lanes routed (fewest vias on a tie) is restored -- its
+        # copper, its bookkeeping and its plan geometry, so the last
+        # call re-lays that attempt's refusals in that attempt's world.
+        best = None
+        for attempt in range(6):
+            sched = plan_at(ly_floor)
             log(f'  attempt {attempt}: need {self.layout_need:.2f} of '
                 f'{self.L_free - RESERVE:.2f} mm, W={self.W:.3f}, launch pitch >= '
                 f'{ly_floor:.2f}; pages F {len(M) - len(sched.divers)} / B '
@@ -2255,6 +2274,12 @@ class Corridor:
                 self.out_vias[nm] = vias_o
             nv = sum(len(v) for v in self.out_vias.values())
             log(f'    lanes: {len(routed)}/{len(M)} routed, {nv} via(s)')
+            key = (len(routed), -nv)
+            if best is None or key > best['key']:
+                best = dict(key=key, attempt=attempt, ly=ly_floor,
+                            segs=list(ctx.pcb.segments), vias=list(ctx.pcb.vias),
+                            out_segs=dict(self.out_segs), out_vias=dict(self.out_vias),
+                            refused=list(self.refused), landed=set(ctx.landed))
             if not self.refused:
                 break
             # attempts converge fast on the ribbon: once the
@@ -2279,6 +2304,20 @@ class Corridor:
             if ly_floor < 0.40 - 1e-9:
                 ly_floor = min(0.40, ly_floor + 0.03)
                 continue
+        if best is not None and best['attempt'] != attempt:
+            log(f'    kept attempt {best["attempt"]} ({best["key"][0]}/{len(M)} '
+                f'routed, {-best["key"][1]} via(s), launch pitch >= '
+                f'{best["ly"]:.2f}) over attempt {attempt} '
+                f'({len(routed)}/{len(M)}, {nv})')
+            if abs(best['ly'] - ly_floor) > 1e-9:
+                sched = plan_at(best['ly'])
+            ctx.pcb.segments = list(best['segs'])
+            ctx.pcb.vias = list(best['vias'])
+            self.out_segs = dict(best['out_segs'])
+            self.out_vias = dict(best['out_vias'])
+            self.refused = list(best['refused'])
+            ctx.landed -= set(M)
+            ctx.landed |= best['landed']
         if self.refused:
             # LAST CALL -- the corridor's own router, off the lattice.
             # Every routed lane is real copper by now, and what
