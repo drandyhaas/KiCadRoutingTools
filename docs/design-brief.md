@@ -32,10 +32,10 @@ OFF arm, without which there is no way to measure what declaring changed.
 
 ## It is a compiler, not a second constraint system
 
-Everything a brief declares becomes an ordinary `edge_connectors[]` or
-`keepouts[]` entry that the existing rules already grade and the existing seat
-search already honours. The compiler adds **no** intent key: provenance rides
-in `source: "brief"` and `context`, both of which
+Everything a brief declares becomes an intent entry that the existing rules
+already grade and the existing seat search already honours — ordinarily an
+`edge_connectors[]` or a `keepouts[]` one. Provenance rides in
+`source: "brief"` and `context`, both of which
 [the intent schema](floorplan-intent.md) already accepts.
 
 | brief | becomes | provenance |
@@ -43,8 +43,34 @@ in `source: "brief"` and `context`, both of which
 | `interfaces[]` with an `edge` | an `edge_connectors[]` entry — `edge`, `overhang_mm`, `center_on_edge` / `along_edge_band`, and `class: "edge_receptacle"` when `user_facing` is true | `source: "brief"` |
 | `interfaces[]` with `edge: "unknown"` | an entry with **no** `edge` key | `source: "brief"`, a `note` naming the unknown |
 | `keepouts[]` | `keepouts[]`, verbatim; `kind` and `why` move into `context` | `context.source` |
+| `proximity[]` | `proximity[]`, one row per member of a list `ref`; `why` and `requirement` move into `context` | `source: "brief"`, `context.proximity_note` |
 | `fixed[]` | `context.brief.fixed` — carried, never asserted (see below) | — |
 | `product`, `unknown[]`, `mount_mode`, `cable_entry` | `context` | — |
+
+### The one key the compiler adds, and why that is the rule rather than an exception
+
+Until [#902](https://github.com/drandyhaas/KiCadRoutingTools/issues/902) this
+section said the compiler adds **no** intent key. It adds exactly one now,
+`proximity[]`, and the principle is unchanged — because the principle was never
+"never add a key". It is **never declare what nothing grades**, and this key
+arrives in the same change as the rule that grades it, `rule_proximity`.
+
+It needed a key of its own because no existing entry means *these two named
+parts, this far apart*:
+
+- `decaps.max_distance_mm` is **one board-wide budget over a derived
+  population**, not a claim about a named pair — and its partner election is
+  exactly what #902 is about. A decap is syntactic (`ref` starts with `C`,
+  bridges two nets) and the IC it is tethered to must carry ≥ 4 copper pads, so
+  a 3-pad SOT-89 regulator can never be a tether target *at any radius*.
+  Measured on the board that motivated the issue, the election gives
+  `C1 → USB1 2.03 mm` and `C3 → U1 1.83 mm`: the regulator's own bulk caps,
+  graded against a USB socket and a bridge IC.
+- A **keep-out is an exclusion, not an attraction.** Compiling "beside" into
+  "not inside" grades the opposite claim.
+
+So the honest choice was a key that arrives with a rule, rather than a spelling
+that quietly graded something else.
 
 A board that carries no brief costs nothing: discovery returns the empty value
 and every code path is the one that existed before. `--no-brief` on a board that
@@ -80,6 +106,15 @@ it.
   "keepouts": [
     { "name": "battery", "rect": [4, 20, 26, 44], "sides": ["B"],
       "allow": ["BT1"], "kind": "enclosure_rib", "why": "CR2032 holder" }
+  ],
+
+  "proximity": [
+    { "ref": "Y1", "near": "U1",              // ref may be a LIST: ["C1","C3"]
+      "max_mm": 2.0,                          // or "unknown" -- see below
+      "basis": "pad_edge",                    // "pad_edge" | "body"
+      "pads": { "Y1": ["1","2"], "U1": ["9","10"] },   // optional; STRINGS
+      "requirement": "PROG-CLK01",
+      "why": "the crystal loop sets the oscillator's stability" }
   ],
 
   "fixed":   [ { "ref": "MH1", "why": "M2.5 enclosure boss" } ],
@@ -136,6 +171,80 @@ nothing here declares design intent.
 `brief_unknown_keys`, `brief_absent` and `brief_drift`, so all of this is
 machine-visible rather than prose.
 
+## `proximity[]`: the constraint the netlist implies and nothing measures (#902)
+
+A 3 mm crystal loop and a 30 mm one have **identical connectivity**. Every
+instrument in this toolchain reads the board, and the board cannot tell them
+apart, so "Y1 beside U1, as short as possible" was ungradable until this key
+existed. One row is one claim is one limit:
+
+| key | | |
+|---|---|---|
+| `ref` | required | a reference, or a **list** of them |
+| `near` | required | the part the subject(s) must stay close to |
+| `max_mm` | required | a positive distance, **or `"unknown"`** |
+| `basis` | optional, default `pad_edge` | `pad_edge` or `body` |
+| `pads` | optional, or `"unknown"` | `{"REF": ["1", "2"]}` — pad numbers as **strings** |
+| `requirement`, `why`, `note`, `context` | optional | carried into the compiled entry's `context` |
+
+**A list `ref` is sugar and is expanded at compile time.**
+`{"ref": ["C1","C3"], "near": "U2", "max_mm": 2.0}` becomes two intent rows.
+It does *not* mean "every pair within the list": a three-part list would then
+be three claims sharing one number, and a violation could not say which pair
+the limit was about — `Violation.ref` holds exactly one reference. "Q1 and Q2
+together" is already `{"ref": "Q1", "near": "Q2"}`, so nothing is lost.
+
+**Identity is the ordered `(ref, near)` pair.** A duplicate is refused for the
+reason a duplicate `interfaces[].ref` is: two limits on one relation, with no
+rule for which wins, and the rule charges both. The *reversed* pair is refused
+too — but only when **neither** row names `pads`, because only then are the two
+provably the same number charged twice. With `pads` on either side the claim is
+genuinely asymmetric (*for each of my declared pads, some pad of yours is close
+enough*), so both rows are kept.
+
+### Two "unknown"s that go opposite ways, and why
+
+This key is where the three-state contract above does its most visible work.
+
+- **`max_mm: "unknown"` is accepted**, and compiles to **no intent row**. "As
+  short as possible" is a real thing for a spec to say: the author has declared
+  the *relation* and not the *number*. It is reported as
+  `proximity[Y1~U1].max_mm` under `brief_unknown` and never appears in
+  `declared` — a limit nobody stated cannot be graded, and inventing one is the
+  guess this channel exists to refuse.
+- **`basis: "unknown"` is refused**, alone among the enums here, because
+  `basis` **has a default**. Declaring it unknown would compile to that default
+  while the report says nobody knows — two different documents. Omit the key to
+  take the default, or name the one you mean.
+- **`pads: "unknown"`** is accepted and sits between the two: the row still
+  grades, part to part, and the reader is told the pin-level claim was not
+  stated rather than left to infer it from an absent key.
+
+### `basis` is `pad_edge` or `body` — and `"courtyard"` is refused by name
+
+`pad_edge` measures pad copper to pad copper (`legality.pad_rect` +
+`rect_gap`), which is the currency `decap_pin_distance` already uses. `body`
+measures the drawn bodies through
+[#896](https://github.com/drandyhaas/KiCadRoutingTools/issues/896)'s one body
+model, and it exists because two parts a brief wants "together" may share no
+net at all — an auto-reset transistor pair has no pad pair to measure.
+
+`basis: "courtyard"` is refused *with the measurement that decided it*: since
+#896, `placement.body` is a **ladder** — courtyard, then fab, then silk ∪ pads,
+then the pad bbox — and it answers with whichever rung the library drew. On the
+board this rule was written for, **0 of 21 footprints draw a courtyard** (10
+answer from fab, 4 from silk, 4 from the pad bbox), so a claim spelled
+`courtyard` would grade nothing there at all. The rung that actually answered
+is reported per finding, so the number is never read without knowing what it
+rests on.
+
+### Pad numbers are strings, and that refusal is load-bearing
+
+`Pad.pad_number` is a string on both parse paths. A JSON `1` would match no
+pad, resolve an empty pad set, measure nothing and grade **clean** — a refusal
+that reads as a pass, in the one direction nobody checks. So an integer pad
+number is refused at load, naming exactly that consequence.
+
 ## Declared outranks inferred — and the evidence survives
 
 On `--emit-intent`, a brief entry overwrites the emitter's guess **per key**,
@@ -177,17 +286,33 @@ carry. The intent is what is graded -- re-run --emit-intent to fold them in:
 
 ## What it deliberately cannot say
 
-Three keys are refused **by name, with the reason**, rather than as merely
-unknown — an author who wrote one believes it is being honoured:
+Four top-level keys are refused **by name, with the reason**, rather than as
+merely unknown — an author who wrote one believes it is being honoured:
 
 - **`envelope` / `outline`** — the board outline is READ from the board, never
   authored. A part outside it is a finding about the *part*. Nothing in this
   toolchain writes `Edge.Cuts`.
+- **`board_size`** — the same fact one step earlier: board size is a mechanical
+  decision this toolchain does not make.
 - **`height`** — nothing in the placement stack measures z. There is no height
   in `legality.GradedPart` and none in the parser, so a declared limit would
   grade **nothing**, which is worse than not declaring it: it is exactly the
   "constraint the author believes they set and the grader never checks" failure
   the strict key sets exist to prevent.
+
+Two more are refused inside a `proximity[]` row, for the same reason — each is
+a spelling an author reaches for first, so the message carries the correction
+rather than only the refusal:
+
+- **`min_mm`** — a *minimum* separation is the clearance channel's claim
+  (`legality`, and `check_drc` pad-to-pad), in a different currency and behind
+  a different gate. A second minimum here would let one board pass one and fail
+  the other with no rule for which wins. The key is `max_mm`: how far apart
+  these parts may be, not how close.
+- **`max_distance_mm`** — that is the `decaps` spelling, and it means cap
+  *centroid* to the IC pad-bbox inflated 0.5 mm, clamped to 0 inside. Two
+  spellings for two currencies, so a reader cannot mistake one number for the
+  other.
 
 A **duplicate `ref`** is refused too. Two rows for one part is two claims with
 no rule for which wins, and the three consumers disagree about it in three
@@ -223,6 +348,13 @@ HARD/SOFT as a severity axis. Each is expressible today only as an `unknown[]`
 entry or a `context` note. HARD/SOFT in particular needs a precedence decision
 against the intent's existing per-rule `severity` and `connector_affinity`'s
 forced WARN, and that is a decision to take deliberately rather than in passing.
+
+`proximity[]` came off this list in #902, but only its part-to-part form. Its
+unresolvable relatives stay deferred and are named here rather than discovered
+later: proximity to a **net's** centroid rather than to a part, proximity to a
+board FEATURE (an edge, a mounting hole, a keep-out) rather than to a part, and
+a per-side or per-layer qualifier. Each needs an anchor the current rule has no
+way to resolve.
 
 ## The sibling travels with the board
 
