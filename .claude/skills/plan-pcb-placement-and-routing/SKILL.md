@@ -96,12 +96,17 @@ form of the default and changes nothing. A board that cannot be read still
 delegates; the size was never the decision, so failing to measure it changes
 only what can be said about it.
 
-Spawn the teammate with an agent type that **has the Agent tool** — `claude` or
-`general-purpose`, never `Explore` or `Plan`, whose definitions exclude it. Each
-half dispatches its own verification subagents at its close-out, and a half that
-cannot spawn cannot verify itself. (The older wording here said a subagent
-cannot spawn a subagent. That is false in this harness and has been retired; the
-constraint is the agent *type*.)
+Spawn the teammate with an agent type that **has the Agent tool** — `fork`,
+`claude` or `general-purpose`, never `Explore` or `Plan`, whose definitions
+exclude it. Each half dispatches its own verification subagents at its
+close-out, and a half that cannot spawn cannot verify itself. (The older
+wording here said a subagent cannot spawn a subagent. That is false in this
+harness and has been retired; the constraint is the agent *type*.)
+
+**The driver names the type in the tag it emits, so copy the tag verbatim.**
+`loop_driver.py` chooses `fork` and `--delegate-mode fresh` chooses `claude`;
+the reasoning is the paragraph below, and it is now a decision the tool takes
+rather than one left to whoever copies the prompt (#890).
 
 **A half's own verifiers are its own gate. The RUN-CLOSING verdict is dispatched
 once, by this loop, on the board it is about to ship — the same board is not
@@ -123,8 +128,24 @@ the per-turn cost. Fork when the parent holds facts the half cannot re-derive
 from the files named in its brief; use a fresh agent when everything it needs is
 one of those files; and say in the report which you chose.
 
+**The END-TO-END VERIFIER is never a fork, in either mode.** Its prompt ends
+"Re-derive every number yourself. Do not trust the report", and
+`references/verifier-prompts.md` hands each lens only its slice — a fork is
+the largest slice there is, the parent's entire transcript including the report
+it is told to distrust. It is also the cheap-reader agent that most wants a
+smaller model, and a fork runs on the parent's and ignores a `model` override.
+This is the one delegation where a fresh agent is the point rather than the
+fallback.
+
 State crosses the boundary on DISK, in the converge ledger, never in a head.
 That is what makes a re-entry able to say what was already tried.
+
+The HAND-OFF itself is on disk too (#890). The driver writes what it emitted
+to `<workdir>/<half>_prompt.txt` as it emits it — so the file's mtime dates
+the delegation, the same property the watcher prompts have — and the prompt
+asks you to save what came back to `<workdir>/<half>_return.md`. Before this,
+the prompt a half was given and the prose it returned existed nowhere after
+the run, and a watcher had to reconstruct both from the transcript.
 
 ## The sequence
 

@@ -108,6 +108,29 @@ def audit(workdir, delivered=None):
         return UNPROVEN, {'verdict': 'UNPROVEN',
                           'reason': f'the staged board named by the manifest '
                                     f'is not readable: {staged!r}'}
+    # ...AND IS THE BOARD THE MANIFEST DESCRIBES. `staged_sha256` was written
+    # and read by nobody, so "readable" was the whole check -- and the whole
+    # audit is a comparison AGAINST this file, so a stale one silently moves
+    # the baseline and every verdict computed from it is about the wrong
+    # question.
+    #
+    # Reachable without anyone acting in bad faith: `stage()` writes the board
+    # first and arms last, and the steps between (sibling copy, project
+    # sanitise, mechanical.json) can raise OSError, which the CLI turns into
+    # exit 2 AFTER the board has already been replaced. Measured: staging a
+    # different source into a dir whose `mechanical.json` could not be written
+    # left the old manifest describing bytes that were no longer there, and
+    # nothing reported it.
+    _sha = regime.get('staged_sha256')
+    if _sha and _sha != PV.sha256_file(staged):
+        return UNPROVEN, {'verdict': 'UNPROVEN', 'staged': staged,
+                          'reason': f'the manifest describes a DIFFERENT '
+                                    f'board than the one at {staged}: it '
+                                    f'records {_sha[:16]}..., the file hashes '
+                                    f'{PV.sha256_file(staged)[:16]}.... The '
+                                    f'baseline every verdict here is measured '
+                                    f'against is stale, so nothing can be '
+                                    f'concluded -- re-stage the work dir'}
 
     if delivered is None:
         # Newest .kicad_pcb, EXCLUDING intermediates. The chain routinely
@@ -132,9 +155,26 @@ def audit(workdir, delivered=None):
         # says the guess has to be narrow now that a mis-pick is an
         # affirmative accusation. mtime remains the fallback for a work dir
         # whose ledger names no board that is still present.
+        # A STAGING row is never a delivered board -- it is a baseline, the
+        # same thing `staged` already is, and the exclusion above says so for
+        # this dir's own staged board.
+        #
+        # Without this a NESTED staging launders a violation into CLEAN. A
+        # stage into `<workdir>/inner` writes its board before its own
+        # manifest exists, so `regime_for` binds that write to the OUTER
+        # regime and appends a row whose `path` points into `inner`. Being
+        # the newest row it became the outer dir's "delivered board", and the
+        # real one was never audited: measured, a hand-edited delivered board
+        # went from `UNAIDED VIOLATION, 8 poses not where their lever put
+        # them` (exit 4) to `CLEAN` (exit 0) purely by staging a
+        # sub-experiment underneath it. The nested stage still prints its
+        # stderr NOTE; a note hours earlier is not a defence against the
+        # audit reading the wrong file.
         by_ledger = None
         for r in reversed(PV.read_ledger(workdir)):
             p = r.get('path')
+            if r.get('lever') in PV.FENCE_SENSITIVE_LEVERS:
+                continue
             if p and os.path.isfile(p) \
                     and os.path.abspath(p) != os.path.abspath(staged):
                 by_ledger = p

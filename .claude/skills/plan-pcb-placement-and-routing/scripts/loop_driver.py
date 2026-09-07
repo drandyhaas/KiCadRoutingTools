@@ -497,6 +497,20 @@ _ARTIFACTS = ('placed.kicad_pcb', 'assembly_close.json',
               # durable copy "named for the lens" since run 23; this is that
               # name.
               #
+              # The hand-off (#890): what the driver EMITTED and what came
+              # back. Registered here so `_paths` gives them the same `_c<n>`
+              # cycle suffix as every other handback -- cycle 2's prompt must
+              # not overwrite cycle 1's, whose mtime is what dates the
+              # delegation. Inserted BEFORE the verdict tail on purpose:
+              # `tests/mutate_904.py`'s `verdict-artifacts-unregistered` row
+              # anchors on that tail including its closing paren, and
+              # appending here would report it STALE.
+              # No `verify_return.md`: L5's return is already the four verdict
+              # files below, which the close-out reads by path and sha256. A
+              # fifth name for the same thing would be a second answer.
+              'place_prompt.txt', 'place_return.md',
+              'route_prompt.txt', 'route_return.md',
+              'verify_prompt.txt',
               # `verdict_record.txt` is NOT a lens. The close-out boundary
               # verification answers `VERDICT=...:check=<1-5>`, a grammar
               # `_LENS_RE` refuses on purpose, so it is cited in the report and
@@ -737,6 +751,68 @@ def _log_invocation(a, stage, out, code):
         return None
 
 
+#: The stage that emits each hand-off prompt, so `_write_prompt` can name the
+#: file without re-deriving the mapping at three call sites.
+_PROMPT_FILE = {'L1': 'place_prompt.txt', 'L2': 'route_prompt.txt',
+                'L5': 'verify_prompt.txt'}
+
+
+def _prompt_body(text):
+    """What is between the <subagent_prompt> tags, or '' if there is none.
+
+    '' is the answer for every INLINE arm (`--no-delegate`) and for every
+    refusal, which is what keeps the escape hatch byte-clean: no tag, no file.
+    """
+    if '<subagent_prompt' not in (text or ''):
+        return ''
+    after = text.split('<subagent_prompt', 1)[1]
+    if '>' not in after or '</subagent_prompt>' not in after:
+        return ''
+    return after.split('>', 1)[1].split('</subagent_prompt>', 1)[0].strip()
+
+
+def _write_prompt(a, stage, out):
+    """Archive the hand-off prompt this stage emitted, beside the ledger.
+
+    #890. The prompt the teammate was given and the prose it returned existed
+    NOWHERE after a run: the ai_workflow watcher had to reconstruct both from
+    the transcript. The driver writes the half it knows -- what it emitted --
+    and the prompt text asks the orchestrator for the other half.
+
+    Written by the DRIVER, at emission, rather than left as an instruction,
+    for the reason the RUNBOOK gives for watcher prompts: the file's mtime is
+    the arming evidence, and an orchestrator-written copy carries the
+    orchestrator's clock instead. An instruction to save something is also
+    exactly what a run skips.
+
+    `_log_invocation`'s contract, copied exactly, and for its reasons: never
+    `makedirs` (a work dir must not appear because someone asked for text),
+    never raise, stderr only so stdout stays byte-identical. Overwrite rather
+    than increment -- `logs/loop_driver_<stage>_<n>.log` already keeps every
+    emission verbatim, so nothing is lost, and a re-emission IS a re-arming
+    whose new mtime is the correct one.
+    """
+    name = _PROMPT_FILE.get(stage)
+    body = _prompt_body(out)
+    if not name or not body:
+        return None
+    try:
+        d = os.path.dirname(getattr(a, 'ledger', '') or '') or '.'
+        if not os.path.isdir(d):
+            print(f'loop_driver NOTE: no hand-off prompt written -- {d} does '
+                  f'not exist, so this delegation is UNRECORDED. Create the '
+                  f'ledger directory (or pass --ledger inside it) and the '
+                  f'driver archives what it handed over.', file=sys.stderr)
+            return None
+        _n, P = _paths(a, starting=(stage == 'L1'))
+        p = P[name]
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write(body + '\n')
+        return p
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 #: Never open anything but the board you were given. A delegated half is a fresh
 #: agent with Read and Glob, and on the perturbed corpus the control board and
 #: the pose record sit one directory above the subject. The fence has always
@@ -751,7 +827,13 @@ run, and nothing downstream can detect that it happened.
 Use the repo's engine tools for every board mutation. If you write ANY script
 that computes or writes poses or copper, disclose it in your next message and
 name it in every ledger lap it feeds -- a disclosed hand-assist is a finding;
-an undisclosed one silently invalidates the run.'''
+an undisclosed one silently invalidates the run.
+In a work dir staged by stage_unaided.py or stage_blind.py this is ENFORCED
+for poses rather than only asked: a pose write through the repo's writer with
+no registered lever RAISES and writes nothing. Disclosure is still the rule --
+the refusal covers the POSE FUNNEL, not copper, not `(locked yes)` stamps and
+not a script that edits `(at ...)` as raw text, which the provenance audit
+catches afterwards by comparing the BOARD rather than the log.'''
 
 
 def _board_size(board):
@@ -822,10 +904,61 @@ def _delegation(a, half='placement'):
                   f'threshold ({size}). --no-delegate runs it here instead')
 
 
+def _agent(a):
+    """The agent TYPE for a delegated HALF -- `fork` unless asked otherwise.
+
+    SKILL.md already carries the doctrine ("the agent TYPE is a cost decision,
+    so make it rather than default it... Fork when the parent holds facts the
+    half cannot re-derive"); this makes the driver take it instead of leaving
+    it to whoever copies the tag. Every agent type except `fork` starts with an
+    EMPTY context, so the half never saw the user's brief, the board analysis,
+    the before-render or the measured facts -- and rebuilt them. Measured on an
+    18-part board: 17 read-only probe scripts, ~950 lines, an hour, for facts
+    the loop already held (#890).
+
+    A fork still carries the Agent tool, so each half's own close-out verifier
+    still spawns, and it does not weaken the delegation boundary: that boundary
+    is about what crosses BACK -- the parent reads a document, never a message
+    -- and a fork changes only what crosses forward.
+
+    Two costs, and both point the same way for the END-TO-END VERIFIER, which
+    is why `l5` does not call this. A fork inherits the parent's already-formed
+    CONCLUSIONS, not just its facts, and it runs on the parent's model so it
+    cannot be put on a smaller one.
+    """
+    return 'claude' if getattr(a, 'delegate_mode', 'fork') == 'fresh' else 'fork'
+
+
+def _context(a, work):
+    """Artifacts a delegated half should READ before deriving anything.
+
+    Existence-gated, every one of them: a half told to open a file that is not
+    there goes looking for it, which is the behaviour FENCE_CLAUSE exists to
+    prevent. The one unconditional line is a COMMAND rather than a path --
+    `board_brief.py` is the product path that assembles "what a placement
+    author needs to read", so a half that was handed no sheet can make one
+    instead of writing its own probes.
+
+    Returns '' or a newline-led block, so an empty context costs zero lines.
+    """
+    stem = os.path.splitext(a.board)[0] if a.board else ''
+    rows = [f'  context: python3 -X utf8 py_tools/board_brief.py {a.board} '
+            f'--json {work}/brief.json']
+    for label, path in (('brief', f'{stem}.design-brief.json'),
+                        ('project', f'{stem}.kicad_pro'),
+                        ('sheet', f'{work}/context.md'),
+                        ('fixed', f'{work}/mechanical.json'),
+                        ('before', f'{work}/before.json')):
+        if path and os.path.isfile(path):
+            rows.append(f'  {label}: {path}')
+    return '\n' + '\n'.join(rows)
+
+
 def l1(a):
     """Place. Delegated by default; --no-delegate is the escape hatch."""
     delegate, why = _delegation(a)
     work = _work(a)
+    _ag, _ctx = _agent(a), _context(a, _work(a))
     cyc, P = _paths(a, starting=True)
     _placed, _asm = P['placed.kicad_pcb'], P['assembly_close.json']
     _rend, _refs = P['place_close_render.json'], P['freeze_refs.json']
@@ -840,17 +973,16 @@ def l1(a):
         return f'''<stage_instructions stage="L1" name="place (delegated)" of="5">
 DELEGATING: {why}.{_cycnote}{_clash}
 
-Delegate the placement half to a TEAMMATE spawned with an agent type that HAS
-the Agent tool -- `claude` or `general-purpose`, never `Explore` or `Plan`,
-whose definitions exclude it. The placement skill dispatches its own
-verification subagent at its close-out, and a half that cannot spawn cannot
-verify itself. Give it the prompt below verbatim.
+Delegate the placement half to a TEAMMATE of the agent type named in the tag
+below -- it HAS the Agent tool, which the half's own close-out verifier needs
+(SKILL.md "Delegating a half" has the fork-vs-fresh reasoning). Give it the
+prompt verbatim.
 
-<subagent_prompt agent="claude" description="place {os.path.basename(a.board)}">
+<subagent_prompt agent="{_ag}" description="place {os.path.basename(a.board)}">
 Drive the placement half of this board to its close-out, and do not route.
 
   board:  {a.board}
-  ledger: {a.ledger}
+  ledger: {a.ledger}{_ctx}
 
 Use /plan-pcb-placement. Ask its driver for one stage at a time:
   python3 -X utf8 .claude/skills/plan-pcb-placement/scripts/placement_driver.py \\
@@ -894,6 +1026,11 @@ Return, and return ONLY:
 Do not summarise the process, and do not retype the numbers -- the gate
 re-reads them from the files.
 </subagent_prompt>
+
+The prompt above is on disk at {P['place_prompt.txt']} (written when this
+stage was emitted, so its mtime dates the hand-off). SAVE WHAT COMES BACK to
+{P['place_return.md']}: the return is the only thing that crosses the
+boundary, and today it survives nowhere.
 
 When it returns, continue here with --stage L2 on the paths named above.
 
@@ -1214,6 +1351,7 @@ def l2(a):
     # placement lap to record and never will. "I could not check" must not
     # become "you failed", or the legitimate path stops working.
     delegate, why = _delegation(a, half='routing')
+    _ag, _ctx = _agent(a), _context(a, _work(a))
     cyc, P = _paths(a)
     _frozen, _routed = P['frozen.kicad_pcb'], P['routed.kicad_pcb']
     _refs, _score, _log = P['freeze_refs.json'], P['score.json'], P['route.log']
@@ -1277,21 +1415,20 @@ Freeze BEFORE you hand it over -- the locks are a decision from the placement
 half, and a teammate that receives an unfrozen board cannot know which poses
 were deliberate.
 
-Then delegate the routing half to a TEAMMATE, for the same reason L1 does: use
-an agent type that HAS the Agent tool (`claude` or `general-purpose`, never
-`Explore` or `Plan`), because the routing skill fans out three verification
-subagents at close-out and a half that cannot spawn cannot verify itself. This
-half also produces the most output of anything in the loop -- a route log on a
-board this size runs to thousands of lines -- so it is the one most worth
-keeping out of this context.
+Then delegate the routing half to a TEAMMATE of the agent type named in the
+tag below, for the same reason L1 does: it HAS the Agent tool, and the routing
+skill fans out three verification subagents at close-out. This half produces
+the most output of anything in the loop -- a route log here runs to thousands
+of lines -- and a fork does not change that: context is inherited inward, its
+output still does not come back.
 
-<subagent_prompt agent="claude" description="route {os.path.basename(a.board)}">
+<subagent_prompt agent="{_ag}" description="route {os.path.basename(a.board)}">
 Route this board to its close-out. The placement is FROZEN: do not move a
 footprint, and if you conclude one must move, stop and say so rather than
 moving it.
 
   board:  {_frozen}
-  ledger: {a.ledger}
+  ledger: {a.ledger}{_ctx}
 
 Route by FOLLOWING THE ROUTING SKILL, so the routing loop's rules are the
 only ones in front of you:
@@ -1394,6 +1531,9 @@ authoritative-last, the MERGED tally in <1KB (#686). The big JSON_SUMMARY lines
 are several kB each, several per log, with scope semantics the log itself warns
 about; they are forensics, not your read.
 </subagent_prompt>
+
+The prompt above is on disk at {P['route_prompt.txt']}; SAVE THE RETURN to
+{P['route_return.md']}.
 
 When it returns, continue here with the paths it named. Do not retype its
 numbers -- the gates re-read them from disk.
@@ -1851,6 +1991,16 @@ def final_record_command(ledger, board, score, name, verdicts):
 
 def l5(a):
     """Close out -- but only if the loop is actually finished.
+
+    ITS VERIFIER IS NEVER A FORK, in either `--delegate-mode`, and that is why
+    this stage does not call `_agent`. #890 asked for all three delegations to
+    be forked; this is the one that must not be. `verifier-prompts.md:3-5`
+    hands each lens "only its slice", and the prompt below ends "Re-derive
+    every number yourself. Do not trust the report." A fork is the largest
+    slice there is -- the parent's entire transcript, including the report it
+    is told to distrust -- so forking here would contradict the stage's whole
+    purpose. It is also the cheap-reader agent #905 wants on a smaller model,
+    and a fork runs on the parent's and ignores a `model` override.
 
     This stage used to print a checklist and end, which made it the place a run
     stopped rather than the place a run was MEASURED to be over. Reaching
@@ -2589,6 +2739,19 @@ def _args(argv=None):
                     help='explicit form of the default (both halves go to a '
                          'teammate). Accepted so existing invocations keep '
                          'working; it changes nothing on its own')
+    ap.add_argument('--delegate-mode', choices=('fork', 'fresh'),
+                    default='fork',
+                    help='WHICH agent type a delegated half gets, where '
+                         '--no-delegate answers whether it is delegated at '
+                         'all. `fork` (the default) inherits this '
+                         'conversation, so the half does not rebuild the '
+                         'brief, the analysis and the render it was never '
+                         'given -- measured on an 18-part board as 17 probe '
+                         'scripts and ~950 lines. `fresh` spawns an empty '
+                         '`claude` instead: cheaper per turn on a board whose '
+                         'orchestrator context is already large, and the arm '
+                         'to use when the half must decide independently. The '
+                         'end-to-end verifier is never a fork either way')
     ap.add_argument('--accept-residue', nargs='*', action='extend',
                     metavar='CHECK', default=None,
                     help='proceed to routing with a NAMED, measured-unfixable '
@@ -2783,6 +2946,9 @@ def main(argv=None):
     # and on stdout NOTHING changes -- existing callers tee exactly what they
     # teed before.
     _log_invocation(a, a.stage, out, code)
+    # AFTER the log row, not before: a stage that dies mid-write would
+    # otherwise lose the row that says it ran at all.
+    _write_prompt(a, a.stage, out)
     print(out)
     return code
 
@@ -2796,6 +2962,7 @@ def _self_test():
         if not cond:
             bad.append(label)
 
+    _CAP = 90
     base = ['--board', 'b.kicad_pcb']
     for key in sorted(STAGES):
         out = STAGES[key](_args(base + ['--score', 'x.json',
@@ -2803,10 +2970,24 @@ def _self_test():
                                         '--shape', 'placement']))
         want(out.startswith(('<stage_instructions', '<error>')),
              f'{key} emits a tagged block')
-        # 74, not 70: run-19 A2 grew FENCE_CLAUSE by four lines (the
-        # hand-script disclosure duty). L1 sits exactly AT the cap, as it
-        # did at 70 -- any further growth is a deliberate decision, here.
-        want(len(out.splitlines()) <= 74, f'{key} stays under 74 lines')
+        # 90, not 74, in two deliberate steps. #890 gave the hand-off its two
+        # paths and the prompt the context artifacts a fresh agent would
+        # otherwise re-derive (measured on an 18-part board: 17 probe scripts,
+        # ~950 lines), paying three lines back by moving the agent-type
+        # doctrine to SKILL.md where four of its five lines already lived:
+        # 74 -> 84. Then #903 grew FENCE_CLAUSE by six, because its premise
+        # ("nothing downstream can detect that it happened") became FALSE for
+        # poses in a staged work dir and the clause now says what is enforced
+        # and what is still only asked: 84 -> 90. Run-19 A2 grew the same
+        # clause by four for the hand-script disclosure duty; 70 was the
+        # number before that. Any further growth is a deliberate decision,
+        # here.
+        #
+        # 84 IS THE MAXIMUM, not this fixture's number. `--board b.kicad_pcb`
+        # names no artifact that exists, so every existence-gated context row
+        # is absent and it measures the CHEAPEST case -- the one #890 makes
+        # cheapest. The populated arm below is what makes the cap real.
+        want(len(out.splitlines()) <= _CAP, f'{key} stays under {_CAP} lines')
 
     want(STAGES['L2'](_args(base)).startswith('<error>'),
          'routing refuses to start without a placement close-out')
@@ -3102,6 +3283,67 @@ def _self_test():
     want('cannot spawn one' not in deleg,
          'the retired claim that a subagent cannot spawn is gone')
 
+    # #890. The agent TYPE is emitted, not left to whoever copies the tag. A
+    # fork inherits this conversation; run 25's fresh half spent its first
+    # hour writing 17 read-only probe scripts (~950 lines) for facts the loop
+    # already held, and it still carries the Agent tool its own close-out
+    # verifier needs.
+    want('<subagent_prompt agent="fork"' in deleg,
+         'the delegated half is a FORK by default, so it inherits the context')
+    _fresh = STAGES['L1'](_args(base + ['--delegate', '--delegate-mode',
+                                        'fresh']))
+    want('<subagent_prompt agent="fresh"' not in _fresh
+         and '<subagent_prompt agent="claude"' in _fresh,
+         '--delegate-mode fresh emits `claude`, a real agent type')
+    want('TEAMMATE' in _fresh and 'Agent tool' in _fresh,
+         '...and the fresh arm still names the agent-type constraint')
+    for _m in ('fork', 'fresh'):
+        want('<subagent_prompt' not in STAGES['L1'](
+                 _args(base + ['--delegate-mode', _m, '--no-delegate'])),
+             f'--no-delegate still suppresses the prompt in {_m} mode')
+    # L5 is the ONE delegation that must not be a fork, in EITHER mode: its
+    # prompt ends "Re-derive every number yourself. Do not trust the report.",
+    # and a fork is handed the parent's whole transcript including that
+    # report. The RUNTIME assertion lives in the terminal-L5 block far below,
+    # where a fixture exists that actually reaches the verifier prompt --
+    # `agent="fork" not in <error>` is true of every refusal, so asserting it
+    # here would have been a tautology (it was, until a test caught it).
+    # What belongs here is the MECHANISM: l5 must not consult `_agent` at all,
+    # so no flag can reconnect it.
+    import inspect as _insp
+    want('_agent(' not in _insp.getsource(l5),
+         'the end-to-end verifier never consults the agent-type flag')
+    want('_agent(' in _insp.getsource(l1) and '_agent(' in _insp.getsource(l2),
+         '...while both halves do, so that check discriminates')
+    # The hand-off is NAMED in the text the orchestrator reads.
+    want('place_prompt.txt' in deleg and 'place_return.md' in deleg,
+         'L1 names both halves of the hand-off on disk')
+
+    # THE CAP'S POPULATED ARM. The `base` fixture above names no artifact that
+    # exists, so it measures the cheapest L1 there is. This one exists.
+    import tempfile as _tfc
+    with _tfc.TemporaryDirectory() as _tc:
+        _b = os.path.join(_tc, 'b.kicad_pcb')
+        _wkc = os.path.join(_tc, 'wk')
+        os.makedirs(_wkc)
+        for _f in (_b, os.path.join(_tc, 'b.kicad_pro'),
+                   os.path.join(_tc, 'b.design-brief.json'),
+                   os.path.join(_wkc, 'context.md'),
+                   os.path.join(_wkc, 'mechanical.json'),
+                   os.path.join(_wkc, 'before.json')):
+            open(_f, 'w', encoding='utf-8').write('{}')
+        _full = STAGES['L1'](_args(['--board', _b, '--ledger',
+                                    os.path.join(_wkc, 'ledger.jsonl')]))
+        _n = len(_full.splitlines())
+        want(_n <= _CAP, f'L1 with EVERY context artifact present is {_n} '
+                         f'lines, at or under the cap of {_CAP}')
+        want(_n > len(deleg.splitlines()),
+             'and the populated arm really is the bigger one, so the cap is '
+             'measured against the maximum rather than the minimum')
+        for _name in ('design-brief', 'kicad_pro', 'context.md',
+                      'mechanical.json', 'before.json'):
+            want(_name in _full, f'the prompt names {_name} when it exists')
+
     # DELEGATION IS THE DEFAULT, at every size. Run 14 measured 191 parts and
     # 150 nets, ran both halves inline under the old thresholds, and the
     # routing half then classified its own failure and acted on it without the
@@ -3359,6 +3601,21 @@ def _self_test():
             '--routing-close', closed('c_done.json')]))
         want('DONE-EXHAUSTED' in out and 'make_film' in out,
              'a plateaued solved board closes out, with the film')
+        # #890, ON THE OUTPUT THAT ACTUALLY CARRIES THE PROMPT. Every other
+        # L5 fixture in this self-test refuses, and `agent="fork" not in
+        # <error>` is true of a refusal -- so this is the only place the
+        # claim can be made honestly. Both halves of it: the tag IS `claude`,
+        # and it is not `fork`, in both --delegate-mode arms.
+        want('<subagent_prompt' in out, 'the terminal close-out does dispatch '
+                                        'a verifier, so the next check is '
+                                        'about a prompt that exists')
+        for _m in ('fork', 'fresh'):
+            _t = STAGES['L5'](_args(done_args + [
+                '--routing-close', closed(f'c_ag_{_m}.json'),
+                '--delegate-mode', _m]))
+            want('agent="claude"' in _t and 'agent="fork"' not in _t,
+                 f'the end-to-end verifier is spawned FRESH, never forked '
+                 f'({_m} mode)')
 
         # THE AGREEMENT CHECK, both directions. Asserting only the refusal
         # would pass for a gate that refused everything.

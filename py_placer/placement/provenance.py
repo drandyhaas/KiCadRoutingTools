@@ -58,7 +58,14 @@ LEVER_REGISTRY = (
     # Staging tools author poses BY DESIGN -- that is what staging is.
     # `perturb.py` is a LIBRARY with no __main__; it is reached through
     # stage_blind, whose declaration covers it by the innermost-wins rule.
-    'perturb.py', 'stage_blind.py',
+    #
+    # `stage_unaided.py` was MISSING here while its own __main__ carried the
+    # comment "In LEVER_REGISTRY, so it must DECLARE" -- the file asserted a
+    # membership this tuple did not grant. That was harmless only while
+    # NOTHING armed a regime (#903): now that both stagers arm their own work
+    # dir, a RESTAGE declares `stage_unaided.py`, and without this entry the
+    # stager is refused by the guard it installed one line earlier.
+    'perturb.py', 'stage_blind.py', 'stage_unaided.py',
 )
 
 # Registered but NOT pose writers. `beautify_labels.py` moves reference-
@@ -68,6 +75,24 @@ LEVER_REGISTRY = (
 # Named rather than silently omitted, because "why is it missing" is a
 # question someone will ask.
 NOT_POSE_WRITERS = ('beautify_labels.py',)
+
+#: Levers whose ledger row must carry NO inputs and NO poses.
+#:
+#: The ledger lives in the WORK DIR, which is inside the fence. That was
+#: harmless while nothing armed a regime; since #903 both stagers do, and a
+#: re-stage records itself. Measured on splitflap_driver, the unredacted row
+#: held all three things the fence exists to keep out: `lever_argv` naming
+#: `kicad_files/splitflap_driver.kicad_pcb` AND the truth directory,
+#: `refs_moved` naming the perturbed block exactly (J19, U1..U9), and 65
+#: `poses_written` of which 56 were the CONTROL pose to six decimals. A run
+#: that read its own ledger could reconstruct the answer key, and
+#: `fence_audit` could not see it because `.jsonl` was not a scanned
+#: extension.
+#:
+#: `perturb.py` is here for the innermost-wins case where it declares itself.
+#: What survives redaction is what the watcher actually reads -- the lever
+#: name -- so the restage counter is unaffected.
+FENCE_SENSITIVE_LEVERS = ('stage_blind.py', 'stage_unaided.py', 'perturb.py')
 
 _active: List[Dict] = []
 
@@ -285,6 +310,23 @@ def record_write(input_file: str, output_file: str,
            'poses_written': _written,
            'sides_written': _sides,
            'refs_moved': sorted(r for r in moved if r)}
+    if lever['lever'] in FENCE_SENSITIVE_LEVERS:
+        # A STAGING row states that a staging happened and nothing else. Its
+        # argv names the source board and the truth dir, its `refs_moved` is
+        # the perturbed block by name, and its poses are the control's -- all
+        # of it inside the fence, in a file the run can read (see
+        # FENCE_SENSITIVE_LEVERS). `parent_sha256` goes too: a hash is not a
+        # path, but it turns "which board is this?" into a test the run can
+        # run against every candidate on disk.
+        #
+        # Dropping the pose keys is not a loss to the audit, it is more
+        # correct: the staged board is the BASELINE the audit compares
+        # against, never a claim about a delivered one.
+        row = {'t': row['t'], 'schema': SCHEMA, 'path': row['path'],
+               'lever': row['lever'], 'declared': True,
+               'caller': row['caller'],
+               'redacted': 'staging row: argv, parent hash and poses withheld '
+                           '-- this ledger is inside the fence'}
     if pending:
         row['_root'] = root
         _PENDING[os.path.abspath(output_file)] = row
