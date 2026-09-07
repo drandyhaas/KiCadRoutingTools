@@ -194,13 +194,19 @@ def braid_plan_of(st, choice, board, achieved=None):
             'tooth_dir': {}, 'stub_dir': {}}
     for nm, m in choice.items():
         nid, net = st['byname'][nm]
-        exit_pt = (achieved[nm]['tooth'] if achieved and nm in achieved
-                   else m.exit_pt)
+        # the sidecar describes the BOARD it sits beside: once the fanout
+        # has laid a berth, its laid end, layer and face -- not the asked
+        # ones. K41's destination passes never converge, and a sidecar
+        # written from the asked layers named 22 berths on the wrong
+        # layer; the braid then routed to stub ends with no copper there.
+        got = achieved[nm] if achieved and nm in achieved else None
+        exit_pt = got['tooth'] if got else m.exit_pt
         plan['ends'][nm] = [list(st['launch'][nm]), list(exit_pt)]
         plan['tooth_layer'][nm] = st['tooth0'][nm]
-        plan['dest_layer'][nm] = m.layer
+        plan['dest_layer'][nm] = got['layer'] if got else m.layer
         plan['tooth_dir'][nm] = list(te._end_dir(pcb, nid, st['launch'][nm], net.pads))
-        plan['stub_dir'][nm] = list(DIRS[m.direction])
+        plan['stub_dir'][nm] = list(DIRS[(got['direction'] if got and got.get('direction') in DIRS
+                                          else m.direction)])
     return plan
 
 

@@ -2869,10 +2869,24 @@ def setup(board, names, dest, log, plan=None):
             try:
                 with open(_pj, encoding='utf-8') as _f:
                     plan = _json_pl.load(_f)
-                if not all(nm in plan.get('ends', {}) for nm in names):
-                    log(f'plan sidecar {os.path.basename(_pj)} does not name every '
-                        f'net of this run -- ignored')
+                named = [nm for nm in names if nm in plan.get('ends', {})]
+                if not named:
+                    log(f'plan sidecar {os.path.basename(_pj)} names none of '
+                        f'this run\'s nets -- ignored')
                     plan = None
+                elif len(named) < len(names):
+                    # a PARTIAL plan is still the plan for the nets it
+                    # names: the fanout's selector can leave a net
+                    # unplaced (K41's SA9, its menu banned away) and fan
+                    # it out unplanned, and the judge that chose that
+                    # fanout applied the plan to the other 40 -- so the
+                    # braid must too, or it runs on a different world
+                    # than the one the plan was judged in (measured at
+                    # K41: every net read off copper, the spine 0.07 mm
+                    # off the judged one, three legs moved to one s)
+                    miss = [nm for nm in names if nm not in plan.get('ends', {})]
+                    log(f'plan from {os.path.basename(_pj)}: {len(named)} of '
+                        f'{len(names)} nets; {", ".join(miss)} read off the board')
                 else:
                     log(f'plan from {os.path.basename(_pj)}: ends, layers and '
                         f'escape directions as the plan decided them')
