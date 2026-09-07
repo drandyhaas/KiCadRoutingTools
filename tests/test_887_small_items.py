@@ -9,7 +9,8 @@ together because they share one shape: something DECLARED that nothing reads.
      placement-only or routing-only run had no instruction to produce the
      artifact the combined skill calls mandatory.
   3. Pillow was a hard module-scope import declared in neither
-     `requirements.txt` nor `startup_checks`.
+     `requirements.txt` nor `startup_checks` -- and then, briefly, declared in
+     the WRONG one: the routing gate, which does not need it.
 
 Note the shape of these gates. A substring check would pass on all three
 TODAY-AND-BEFORE-THE-FIX, because in every case the string was already present
@@ -21,6 +22,7 @@ of a word.
 import ast
 import os
 import re
+import subprocess
 import sys
 
 RUN_ALL_FAST_OK = True
@@ -246,13 +248,77 @@ def test_the_requirements_file_declares_pillow():
          'function-scope, optional, and its absence is audible')
 
 
-def test_startup_checks_looks_for_pillow_too():
-    """requirements.txt is documentation; startup_checks is what a user hits."""
-    src = open(os.path.join(ROOT, 'py_router', 'startup_checks.py'),
+#: Blocks PIL for the child only, by refusing it at the import hook rather than
+#: by uninstalling anything -- so this runs on a machine that HAS Pillow, which
+#: is the machine anyone will run it on.
+_NO_PIL = (
+    "import builtins, sys\n"
+    "_real = builtins.__import__\n"
+    "def _blocked(name, *a, **k):\n"
+    "    if name == 'PIL' or name.startswith('PIL.'):\n"
+    "        raise ImportError(\"No module named 'PIL'\")\n"
+    "    return _real(name, *a, **k)\n"
+    "builtins.__import__ = _blocked\n"
+)
+
+
+def test_startup_checks_reports_pillow_from_the_RENDER_gate():
+    """requirements.txt is documentation; startup_checks is what a user hits.
+
+    Behavioural, not a substring: the first cut of this gate asserted only that
+    `missing.append('Pillow')` appeared SOMEWHERE in startup_checks.py, which is
+    true whichever function the line sits in -- so it could not see the defect
+    that actually shipped, Pillow being probed by the ROUTING gate.
+    """
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8', '-c', _NO_PIL + (
+            "import startup_checks as S\n"
+            "try:\n"
+            "    S.check_python_dependencies(); print('ROUTING-OK')\n"
+            "except S.StartupCheckError as e: print('ROUTING-REFUSED', e)\n"
+            "try:\n"
+            "    S.check_render_dependencies(); print('RENDER-OK')\n"
+            "except S.StartupCheckError as e:\n"
+            "    print('RENDER-REFUSED', 'Pillow' in str(e))\n")],
+        cwd=os.path.join(ROOT, 'py_router'), capture_output=True, text=True)
+    out = r.stdout
+    want('RENDER-REFUSED True' in out,
+         'the RENDER gate reports Pillow by name, so a fresh clone gets the '
+         'actionable message rather than a runtime ImportError string', out)
+    want('ROUTING-OK' in out,
+         'and the ROUTING gate does NOT -- routing needs no Pillow, and '
+         'probing it there made route.py/route_diff.py/route_planes.py/'
+         'repair_planes.py refuse to start on the Modal corpus image, whose '
+         '_PY_PINS install numpy/scipy/shapely and not Pillow', out)
+
+
+def test_the_render_gate_is_called_before_the_import_it_guards():
+    """A gate defined and never called is the shape this whole file is about.
+
+    Both files import PIL at module scope with no fallback, so the call has to
+    come FIRST or the bare ImportError wins the race and the message never
+    prints.
+    """
+    for rel in (('py_router', 'route_render.py'),
+                ('py_tools', 'render_placement.py')):
+        src = open(os.path.join(ROOT, *rel), encoding='utf-8').read()
+        call = src.find('check_render_dependencies()')
+        pil = src.find('from PIL import')
+        want(call != -1 and pil != -1 and call < pil,
+             '%s calls the render gate before importing PIL' % rel[-1],
+             'call=%d pil=%d' % (call, pil))
+
+
+def test_the_gui_dep_check_mirrors_the_routing_gate_and_no_more():
+    """The GUI re-implements `check_python_dependencies` BY HAND (CLAUDE.md's
+    Class-2 drift). Mirroring it means the same list -- including not carrying
+    an entry the CLI gate does not have, which would refuse a routing dialog on
+    a board it can route."""
+    src = open(os.path.join(ROOT, 'kicad_routing_plugin', 'swig_gui.py'),
                encoding='utf-8').read()
-    want("missing.append('Pillow')" in src,
-         'startup_checks reports Pillow by name, so a fresh clone gets the '
-         'actionable message rather than a runtime ImportError string')
+    want("missing.append('Pillow')" not in src,
+         'the GUI routing dialog does not block on Pillow either (its only '
+         'raster consumer, the movie recorder, is off by default)')
 
 
 TESTS_TO_RUN = [
@@ -264,7 +330,9 @@ TESTS_TO_RUN = [
     test_the_runbook_names_the_audit_tool_not_a_subagent,
     test_every_module_scope_third_party_import_is_declared,
     test_the_requirements_file_declares_pillow,
-    test_startup_checks_looks_for_pillow_too,
+    test_startup_checks_reports_pillow_from_the_RENDER_gate,
+    test_the_render_gate_is_called_before_the_import_it_guards,
+    test_the_gui_dep_check_mirrors_the_routing_gate_and_no_more,
 ]
 
 
