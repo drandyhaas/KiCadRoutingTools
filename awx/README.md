@@ -11,18 +11,21 @@ braid routes the lanes:
 Results on the bench (2026-09-06), against the previous chain on the same
 engine (a face-hinted `auto` fanout, the bench's own source teeth):
 
-| K  | previous vias | this chain | plan's own prediction | fanout vs plan | human |
-|----|---------------|------------|-----------------------|----------------|-------|
-| 4  | 4             | 4          | 4                     | 100 %, per net | --    |
-| 8  | 8             | 6          | 6                     | 100 %          | --    |
-| 15 | 22            | 14         | 14, per net           | 100 %          | 22    |
-| 28 | 38, 0 open    | 40         | 36                    | 100 %          | 46    |
+| K  | previous vias | this chain | in-band at attempt 0 | plan's own prediction | human |
+|----|---------------|------------|----------------------|-----------------------|-------|
+| 4  | 4             | 4          |                      | 4                     | --    |
+| 8  | 8             | 6          |                      | 6                     | --    |
+| 15 | 22            | 14         | 15 / 15              | 14, per net           | 22    |
+| 28 | 38, 0 open    | 38         | 28 / 28              | 36 (the swimmer SA4 at 4) | 46 |
+| 35 | 56            | 58         | 26 / 32 + 0 / 3      | 59                    | 58    |
+| 41 | 9 open, 92    | 8 open, 98 | 29 / 37 + 0 / 4      | 90 (18 swimmers)      | 70    |
 
 All complete and DRC-clean at the routed 0.1 mm floor (K15 ~20 s, K28
-~75 s with a warm taut memo, 189 s cold; the plan loop is most of it).
-The plan's prediction is exact per net at K15; at K28 the residual is
-two lanes refused in-band and re-laid with a dive at last call, and a
-swimmer at 4 (see the via model below). Every board the chain writes
+~70 s, K35 ~170 s with a warm taut memo; the plan loop is most of it).
+The plan's prediction is exact per net at K15; at K28 every page lane is
+laid on its prediction at the first attempt and the residual is one
+swimmer; at K35 the total meets the prediction while ten swimmers pay
+2..4 each (see the via model and the walls below). Every board the chain writes
 -- each realized source board, the fanout board, the braided board --
 is DRC-gated at 0.1 with the quantization margin, and the fanout boards
 are clean with the margin off as well.
@@ -184,6 +187,56 @@ symmetric launch pitch with a longer fan-in, re-running the best
 attempt, the dodge tube kept out of the fan-in, wider virtual copper,
 exit-corner via reservations set in along the leg) and none was a net
 gain: each moved vias by two to four between lanes. They are not here.
+
+### The walls, named cell by cell (2026-09-06 evening)
+
+Every in-band refusal at K28 was traced with `tmp/wall_probe.py` (the
+router intercepted at the lane's first call; the pocket flood-filled
+from the tooth and its wall attributed by clearance zone to an owner --
+a virtual lane by net, a reserve piece, real copper, a via, a hop, a
+pad, the band; a channel profile along the planned polyline; the
+farthest s reached in the whole window). Six lanes were refused at
+HEAD and each had a name: a B-page lane's 1.5 mm reserve stamp on F
+past its own B requirement (SDQ9 over SDQ10, SDQ11 over SDQ8), the
+swimmer SA4's reserved diagonal over SDQ7, SDQ14's dive via beside
+SDQM0's tooth, and the pads of C5 -- a front-side 0402 inside the
+corridor, through which three lanes were planned straight while the
+page rule closed the other layer exactly there. What was built from
+that, each keyed on geometry read off the board:
+
+- `cross_reserve` no longer stamps the corridor being routed (its own
+  lanes are stamped by `virtual_of`, which follows the layer rules), and
+  a reservation is clipped round every other net's free end.
+- STATIC ISLANDS: every pad of a part that is not one of the arrays,
+  projected on the spine and inflated by a track's clearance, merged
+  when less than 0.1 mm apart, from s0 to the farthest stub
+  (`static_islands`). `deflect_islands` bends the lanes on the island's
+  layer round it -- the side by the smaller corner deflection, nearest
+  lane at the edge, the rest outward at their own gap, other islands on
+  that side stepped over -- into the (s, o) polylines the bands, the
+  virtual copper and the windows read; in the tail the exit comb bends
+  outward, a lane with no room to return before its leg stays bent to
+  the leg and the leg starts there, and a leg over an island on its own
+  layer is re-placed off it (`place_and_decide` run twice). The via
+  model does not change: a lane bent on its own layer changes no layer.
+- The birth and landing via at the slot (a via costs the same anywhere
+  on a stretch, and the forward search leaves the tooth layer only when
+  forced -- so a 0.45 mm stretch put the via at its far end, where the
+  neighbours had converged).
+- The slot pitch scaled by the secant of the lane's angle to the spine
+  (`pair_floor`): clearance is perpendicular to a lane, a slot pitch is
+  measured across the spine, and at 45 degrees 0.35 mm is 0.25 mm of
+  room; a slot where a lane changes layer gets a via's room. The launch
+  relax is symmetric and the fan-in grows with the largest shift, so no
+  fan-in is steeper than 45 degrees (checked on paper first,
+  `tmp/pitch_check.py`).
+- A swimmer's reserved hop keeps a 2-D distance from every lane's
+  polyline, not from its offset at one s.
+
+The remaining walls are the swimmers (ten at K35, three at 4 vias) and,
+at K35, the north exit block sitting on a six-part passive cluster,
+where a 3 mm bend is the plan's answer and an underpass would be the
+better one; both are open.
 
 Speed: a taut path depends only on its two ends and the static copper it
 relaxes against, and the loop asked for the same ones at every judgment
