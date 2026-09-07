@@ -155,9 +155,18 @@ Fields that carry weight:
   existed.
 - **`lever` + `lever_argv`** — `lever` is the one-line intent; `lever_argv` is
   the reproducible command (`replay` refuses prose-only entries, exit 4).
-  Anything the schema has no field for — the verdict list, a stop-condition
-  claim — goes **into the `--lever` text by name** so `status`/the report can
-  quote it; do not invent fields the reader will never see.
+  Anything the schema has no field for — the verdict list, say — goes **into
+  the `--lever` text by name** so `status`/the report can quote it; do not
+  invent fields the reader will never see.
+- **`stop_condition` + `stop_reason`** (#901) — the stop condition now HAS a
+  field of its own, and it is a TOKEN: `1 | 2 | 3 | 4 | DONE-EXHAUSTED | STUCK
+  | BUDGET`, checked on every `record` that carries one, not only when a lens
+  failed. Write the reason after it (`--stop-condition "3: five laps, no new
+  copper"`) or in `--stop-reason`; either way the token and the prose land in
+  separate keys. It was moved out of `--lever` because the token has to be
+  machine-checkable: with all lenses passing, ANY string used to be accepted,
+  so run 25 recorded ~500 characters of prose as a stop condition in one place
+  while an identically shaped `4 (this half): …` was refused in another.
 - **`kind`** — `systemic` marks iterations spent on the instrument (grader
   fixes, reconciliation); `status` warns when at least half the budget went
   there.

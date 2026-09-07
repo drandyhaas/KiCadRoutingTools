@@ -171,20 +171,31 @@ def test_record_final_requires_stop_condition():
         # `blocking == 0` and "every lens passes" are two different claims and
         # only the first ever had a number, so a close-out could be written
         # with no lens dispatched at all.
+        # #901: the stop condition is a TOKEN and is checked on EVERY record,
+        # not only when a lens failed. This arm used to pass the bare prose
+        # 'plateau: 3 iterations, no new copper' and assert it round-tripped
+        # into the row -- i.e. it pinned the bug. The plateau IS stop condition
+        # 3 (convergence.md S3), and the prose is now its reason.
+        STOP = '3: plateau, 3 iterations, no new copper'
+        r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
+                 '--stop-condition', STOP])
+        assert r.returncode == 2 and 'routed-board lenses' in r.stderr, r.stderr
+        assert not os.path.exists(led), "nothing may be written on refusal"
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
                  '--stop-condition', 'plateau: 3 iterations, no new copper'])
-        assert r.returncode == 2 and 'routed-board lenses' in r.stderr, r.stderr
+        assert r.returncode == 2 and 'stop condition' in r.stderr, r.stderr
         assert not os.path.exists(led), "nothing may be written on refusal"
         lenses = ['--lens', 'VERDICT=PASS:lens=connectivity',
                   '--lens', 'VERDICT=PASS:lens=drc',
                   '--lens', 'VERDICT=PASS:lens=spec']
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
-                 '--stop-condition', 'plateau: 3 iterations, no new copper']
-                + lenses)
+                 '--stop-condition', STOP] + lenses)
         assert r.returncode == 0, r.stderr
         e = json.loads(r.stdout)
         assert e.get('final') is True
-        assert e.get('stop_condition', '').startswith('plateau')
+        assert e.get('stop_condition') == '3', e.get('stop_condition')
+        assert e.get('stop_reason') == 'plateau, 3 iterations, no new copper', \
+            e.get('stop_reason')
         assert len(e.get('lenses') or []) == 3, e.get('lenses')
     print("  PASS: --final without --stop-condition is refused; with it, recorded")
 

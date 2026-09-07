@@ -11,6 +11,13 @@ removed the old --no-clamp-netclasses flag: the standalone fixer always clamps
 it is always DRC-safe). To PRESERVE a class spec in full, route with route.py
 and OMIT --clearance -- the router then honors each class and the writeback
 keeps it. The .kicad_pcb is never touched.
+
+WHAT THIS FILE DOES NOT COVER, despite its name: the VALUE a class is clamped
+TO. Its board (kicad_files/qfn_underpad_coupling.kicad_pcb) carries no pad
+clearance override, so the routed floor and the capped rule floor are the same
+number here and the file cannot tell them apart. It was green throughout the
+period every class on an override board was being clamped to a 2 mil library
+value. That is tests/test_900_class_clearance_not_capped.py.
 """
 import json
 import os

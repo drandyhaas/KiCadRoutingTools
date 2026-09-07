@@ -115,6 +115,56 @@ from grid_router import GridObstacleMap, GridRouter
 _NO_PAIRS_MATCHED = False
 
 
+def protection_candidates(routed_results, pcb_data):
+    """{net name -> 'diff-pair'} for every pair member this run really routed.
+
+    #521 protects coupled-pair copper because a later chain step cannot
+    reproduce it -- P/N geometry, gap, polarity. #906 is which results count.
+
+    `is_diff_pair` OR `hybrid_escape`. The DIRECT HYBRID escape returns a
+    five-key dict that deliberately carries no `is_diff_pair`, because that key
+    means "a COUPLED constructor committed this" and `diff_pair_custody` reads
+    it to decide whether a 'partial' pair kept a coupled trunk -- stamping it on
+    the hybrid would move that verdict. But the hybrid IS a routed pair: a
+    coupled middle plus point-to-point terminal legs, admitted only when both
+    members connect terminal to terminal, and its geometry is exactly the
+    invariant #521 exists to protect. Reading the key here instead of stamping
+    it there keeps custody's meaning intact.
+
+    THREE entry points feed that bare dict back, not one: the first-pass last
+    resort, the reroute casualty, and `_maybe_swap_to_hybrid`, which RETURNS it
+    in place of a route that already succeeded COUPLED -- so a pair routed
+    coupled could lose its stamp to the #215 swap and go unprotected as well.
+
+    `hybrid_escape` has exactly one producer and it is never built for a
+    failure (every rejecting path returns None), so the `failed` test below
+    keeps its meaning and no single-ended fallback can enter here.
+
+    THAT IS NOT ENOUGH, and saying only that was this fix's first cut. The
+    hybrid has one accepted-COMPROMISE path as well: the self-graze fallback,
+    which keeps the least-bad candidate when no layer couples cleanly and
+    therefore ships P/N copper BELOW clearance. It is not a rejection, so no
+    `failed` key appears -- and protecting it would make the very chain step
+    whose job is to fix those violations skip the pair. It carries `selfgraze`
+    and is excluded here.
+
+    Measured (run 25, /D_P /D_N): no "Protected nets ... recorded" line at all,
+    then the next lap registered 2 unprotected pre-existing nets as rip
+    candidates and smoothing collapsed 16 spans / 10 nets including the pair.
+    After a hand `persist_protected_nets` call: 14 spans / 8 nets, pair intact.
+    """
+    out = {}
+    for _nid, _res in (routed_results or {}).items():
+        if not _res or _res.get('failed') or _res.get('selfgraze'):
+            continue
+        if not (_res.get('is_diff_pair') or _res.get('hybrid_escape')):
+            continue
+        _net = (pcb_data.nets or {}).get(_nid)
+        if _net and _net.name:
+            out[_net.name] = 'diff-pair'
+    return out
+
+
 def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 # #530: cap every auto-read net class at this clearance (the
@@ -398,6 +448,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         len(getattr(pcb_data.board_info, 'copper_layers', None) or []))
     impedance_width_clamped = {}
     layer_widths = {}
+    _imp_unsolved = []          # #906: layers the model could not solve
     if impedance is None and coplanar_gap:
         # See route.py: the gap only selects the impedance model (#486).
         print("WARNING: --coplanar-gap given without --impedance; it only "
@@ -420,7 +471,8 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 min_width=imp_width_floor,
                 coplanar_gap=coplanar_gap,
                 floor_desc=imp_floor_desc,
-                clamp_report=impedance_width_clamped
+                clamp_report=impedance_width_clamped,
+                unsolved_report=_imp_unsolved
             )
             print_impedance_routing_plan(pcb_data, layers, impedance,
                                         spacing=diff_pair_gap, is_differential=True,
@@ -435,11 +487,37 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # are not expressible here; mixed specs warn and skip.
     _targets = resolve_net_ids(pcb_data, net_names) if net_names else []
     if impedance is not None:
+        # #906: the DECLARATION is always recorded -- that is what makes the
+        # "route now, add the stackup in Board Setup, re-run without
+        # --impedance and let it recompute" workflow work, and it is why the
+        # record stores ohms rather than widths. What varies is whether it was
+        # APPLIED. `applied` is False when no width was actually solved, which
+        # is NOT the same question as "the board has a stackup": a stackup
+        # listing copper with no adjacent dielectric, or with names that do not
+        # match the routed layers, solves nothing and every layer silently
+        # falls back to the plain track width. Gating on stackup PRESENCE was
+        # this fix's first cut and it still recorded a kept promise for copper
+        # routed at the fallback -- measured on a board whose only edit was
+        # deleting the dielectric line.
+        #
+        # check_impedance skips an unapplied declaration rather than grading
+        # nets against an impedance the router never attempted; the reapply
+        # branch below still finds it, which is the point.
+        _applied = bool(layer_widths) and len(_imp_unsolved) < len(layer_widths)
+        if not _applied:
+            print(f"  NOTE: recording the {impedance} ohm declaration as NOT "
+                  f"APPLIED -- no layer width was solved"
+                  + (" (this board has no stackup)"
+                     if not pcb_data.board_info.stackup else
+                     f" (unsolved layers: {', '.join(_imp_unsolved)})")
+                  + ", so the pair routed at the plain track width. "
+                    "check_impedance will not grade against it (#906).")
         from protected_nets import note_impedance_specs
         note_impedance_specs({
             _nm: {'ohms': impedance, 'differential': True,
                   'pair_gap': diff_pair_gap,
-                  'coplanar_gap': coplanar_gap or 0.0}
+                  'coplanar_gap': coplanar_gap or 0.0,
+                  'applied': _applied}
             for _nm, _nid in _targets})
     elif pcb_data.board_info.stackup and _targets:
         from protected_nets import read_impedance_for_pcb_data
@@ -1334,12 +1412,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # AI-plan executor inherit the noting; the writeback next to the DRC-floor
     # persistence records it in the sibling .kicad_pro.
     from protected_nets import note_protection_candidates
-    _prot = {}
-    for _nid, _res in routed_results.items():
-        if _res and _res.get('is_diff_pair') and not _res.get('failed'):
-            _net = pcb_data.nets.get(_nid)
-            if _net and _net.name:
-                _prot[_net.name] = 'diff-pair'
+    _prot = protection_candidates(routed_results, pcb_data)
     if _prot:
         note_protection_candidates(_prot)
 

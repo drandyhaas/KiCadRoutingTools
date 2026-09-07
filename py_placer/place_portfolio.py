@@ -252,9 +252,27 @@ def _replay_argv(args, index):
             del argv[i:i + 2]
     if '--no-render' not in argv:
         argv.append('--no-render')
-    return ([sys.executable, '-X', 'utf8',
-             os.path.join(ROOT, 'py_placer', 'place_portfolio.py')]
-            + argv + ['--only', str(index)])
+    out = ([sys.executable, '-X', 'utf8',
+            os.path.join(ROOT, 'py_placer', 'place_portfolio.py')]
+           + argv + ['--only', str(index)])
+    # #901: this writer appends rows to the ledger DIRECTLY, never through
+    # `converge.py record`, so none of record's guards apply to it -- including
+    # the one that refuses an MSYS2-rewritten net name. This run's own argv is
+    # copied verbatim, so a portfolio launched from Git Bash without
+    # MSYS2_ARG_CONV_EXCL records exactly the unreplayable row that guard
+    # exists to refuse. Warn rather than refuse: the placement work is already
+    # done and discarding it would be worse than a flagged row.
+    try:
+        from converge import _MANGLED_RE, _MSYS_REMEDY
+        _bad = [t for t in out if _MANGLED_RE.search(str(t))]
+        if _bad:
+            print(f"WARNING: this ledger row's lever_argv carries "
+                  f"{len(_bad)} MSYS2-rewritten token(s) "
+                  f"({', '.join(repr(t) for t in _bad[:2])}) and will NOT "
+                  f"replay. {_MSYS_REMEDY}.", file=sys.stderr)
+    except Exception:                                          # noqa: BLE001
+        pass
+    return out
 
 
 def _affected_nets(pcb_data, cands, ignore_ids):
