@@ -349,11 +349,16 @@ def legality_findings(model) -> Dict[str, object]:
     #
     # SAME FUNCTION, NOT THE SAME CENSUS as check_assembly's. Two differences,
     # named here rather than glossed:
-    #   * check_assembly passes `intent_waivers` (check_assembly.py, its
-    #     --intent path); this renderer reads no intent, so an operator-waived
-    #     pair is UNWAIVED here and will appear in the advisory list and can
-    #     reach the gate below. A render is not a substitute for the assembly
-    #     grade on a board carrying waivers.
+    #   * WAIVERS reach this census only when the caller passes --intent (#897).
+    #     Without it an operator-waived pair is UNWAIVED here: it appears in the
+    #     advisory list, in `b_courtyard_blocking_pairs`, on the REVIEW SHEET's
+    #     facts strip, and it can fail --gate. That is how run 25's waived,
+    #     locked, mechanical fiducial<->USB1 pair carried `BLOCKING, past the
+    #     floors (1)` on every review sheet while check_assembly --intent
+    #     called the same pair baseline's own -- two instruments, two answers,
+    #     one waived pair. Fixing `_waiver_for`'s precedence alone did not cure
+    #     that symptom, because the symptom is on the instrument that never
+    #     asked. Pass the same --intent you pass check_assembly.
     #   * `moved_parts` below (the gate's currency) compares poses for refs
     #     present in BOTH boards only, and ignores a layer flip;
     #     check_assembly's moved set also counts refs absent from the baseline
@@ -371,7 +376,14 @@ def legality_findings(model) -> Dict[str, object]:
             _clr = (getattr(state, 'clearance', None)
                     or (model.floor_knobs.get('clearance') or {}).get('value')
                     or defaults.CLEARANCE)
+            # #897: the waivers ride on the MODEL rather than through this
+            # signature, because `legality_findings` is memoised per model and
+            # every one of its seven call sites would otherwise have to learn
+            # to pass them -- six of which have no business knowing about an
+            # intent. `main` sets it once, before the first panel is drawn.
             _g = grade_body_overlap(pcb, _clr,
+                                    intent_waivers=getattr(
+                                        model, 'intent_waivers', ()),
                                     pcb_file=getattr(model, 'pcb_file', None))
             # UNWAIVED courtyard pairs only -- the advisory population. It is
             # NOT a superset of the blocking list below (a waiver-voided pair
@@ -1731,6 +1743,14 @@ Examples:
                         'command the review gates prescribe (run 24, A-1). '
                         'Without --json-out the summary line still prints -- '
                         'data is never silenced into nowhere.')
+    p.add_argument('--intent', metavar='PATH',
+                   help='a floorplan-intent JSON, for its `overlap_waivers` '
+                        '(#897). Without it this renderer grades WAIVER-BLIND: '
+                        'an operator-waived pair shows as an advisory pair, in '
+                        'b_courtyard_blocking_pairs, on the review sheet, and '
+                        'can fail --gate, while check_assembly --intent calls '
+                        'the same pair waived. Pass the file you pass '
+                        'check_assembly.')
     p.add_argument('--review-sheet', metavar='PATH', default=None,
                    help='run-23: ALSO write ONE composite image built for the '
                         'boundary review -- F and B side by side (with the '
@@ -1877,6 +1897,22 @@ def main(argv=None):
     model = PlacementModel(pcb, args.board, exact=True,
                            quench_kwargs={'clearance': args.clearance,
                                           'ignore_net_ids': ignore_ids})
+
+    # #897: authored overlap waivers, BEFORE the first legality_findings call
+    # (which is memoised, and which draw_legality makes while rendering the
+    # first panel). Without this the review sheet and --gate call an
+    # operator-waived pair blocking while check_assembly --intent, holding the
+    # same file, calls it waived.
+    if args.intent:
+        try:
+            from placement.floorplan import load_intent
+            from placement.legality import format_waiver_warnings
+            model.intent_waivers = load_intent(args.intent).waiver_pairs()
+        except Exception as exc:                                # noqa: BLE001
+            print(f"cannot load intent {args.intent}: {exc}", file=sys.stderr)
+            return 2
+        for _line in format_waiver_warnings(legality_findings(model)):
+            print("  " + _line, file=sys.stderr)
 
     # WHICH FLOOR, and WHERE FROM -- the same disclosure board_score makes with
     # floors.source. Four renders in the measured run omitted --clearance and
@@ -2172,276 +2208,324 @@ def main(argv=None):
         if not args.quiet:
             print(f"  wrote {path}  ({img.size[0]}x{img.size[1]})")
 
-    if args.json or args.json_out:
-        fnd = legality_findings(model)
-        doc = {
-            'panels': [{'label': s.label, 'side': s.side, 'view': s.view,
-                        'path': w} for s, w in zip(panels, written)],
-            'moved': len(moves),
-            # moved_refs makes a wrong --before self-evident, and it is what
-            # audits the two pixel-invisible move classes (sub-5px arrows are
-            # dropped; a rotation-only ghost draws exactly atop the part).
-            'moved_refs': [{'reference': m['reference'],
-                            'dist': round(m['dist'], 4)} for m in moves],
-            'failed_nets': sorted(failed), 'blocker_nets': sorted(blockers),
-            # The defects this render was ASKED to show, and what it managed
-            # to show them at. `shortfall_px` is the honesty figure: it tells
-            # a picture OF the defect from a picture of its neighbourhood
-            # without opening the png. Both keys are READ, not merely
-            # written: --gate below compares `defects` against
-            # `defect_panels` and checks each panel's shortfall against
-            # `min_px`. (An earlier comment here credited loop_driver's
-            # `_guard_route_render` with reading them. It does not -- it
-            # checks instrument.board, checklist, summary_json and
-            # moved_refs, and nothing about defects.)
-            'defects': [{'kind': dx.get('kind'), 'net': dx.get('net'),
-                         'refs': dx.get('refs'), 'pads': dx.get('pads'),
-                         'at': dx.get('at'),
-                         'short_mm': (dx.get('measure') or {}).get('short_mm'),
-                         'source': dx.get('_source')} for dx in _defects],
-            'defect_panels': [
-                {'label': sp.label, 'view': sp.view,
-                 'px_per_mm': (round(args.size / (sp.view[2] - sp.view[0]), 2)
-                               if sp.view and sp.view[2] > sp.view[0] else None),
-                 'shortfall_px': (round(
-                     ((sp.defects[0].get('measure') or {}).get('short_mm') or 0)
-                     * args.size / (sp.view[2] - sp.view[0]), 2)
-                     if sp.view and sp.view[2] > sp.view[0] and sp.defects
-                     else None),
-                 'min_px': DEFECT_MIN_PX}
-                for sp in _defect_panels],
-            'metrics': dict(model.metrics),
-            # The instrument block (run-4 G2): two renders of the SAME board
-            # differing only in --ignore-nets read 632 vs 412 crossings in
-            # run 3, and neither JSON said which was which. A before/after
-            # series is provably same-instrument only if the instrument
-            # settings ride in the document.
-            'instrument': {
-                'board': os.path.abspath(args.board),
-                'before': os.path.abspath(args.before) if args.before else None,
-                'summary_json': (os.path.abspath(args.summary_json)
-                                 if args.summary_json else None),
-                # Mirrors summary_json, so a gate can assert a defect render
-                # was made from a record the same way _guard_route_render
-                # already asserts a focus render was made from a route log.
-                'defect_json': [os.path.abspath(x)
-                                for x in (getattr(args, 'defect_json', None)
-                                          or [])],
-                'defect_notes': _dnotes,
-                # `clearance` used to record args.clearance, i.e. None on
-                # every run that did not pass the flag -- so the document
-                # named no clearance at all for the runs most likely to be
-                # graded at the wrong one. It is now the EFFECTIVE value,
-                # with what was requested and where it came from beside it.
-                'clearance': model.floor_knobs.get(
-                    'clearance', {}).get('value'),
-                'clearance_requested': args.clearance,
-                'floors': model.floor_knobs,
-                'ignore_nets': sorted(args.ignore_nets or []),
-                'ratsnest_nets': sorted(args.ratsnest_nets or []),
-                # DECLARED vs MATCHED. Without these there was no field in
-                # this document where "61 requested, 51 matched" could
-                # appear, so a net list that silently missed had to be
-                # checked by hand, outside the tool -- and was not.
-                'net_lists': net_lists,
-                'size': args.size, 'supersample': args.supersample,
-            },
-            # Mandate 8's four questions, quotable (run-4 G5). Channels are
-            # labelled; see legality_findings.
-            'checklist': {
-                'a_off_outline': {
-                    'pad_copper': fnd['oob_refs_pad_copper'],
-                    'courtyard': fnd['oob_refs_courtyard']},
-                # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
-                # the PAD-CLEARANCE channel, and a reader auditing overlap
-                # with b_overlap_pairs=[] concluded there was none while two
-                # parts sat stacked (the shipped C14-on-R14). The clearance
-                # channel now lives under its true name; b_body_overlap_pairs
-                # reports what the old name promised.
-                'b_pad_clearance_pairs': fnd['pad_conflict_pairs_refs'],
-                'b_body_overlap_pairs': fnd['body_overlap_pairs_refs'],
-                # run-23 key honesty, same lesson again: b_body_overlap_pairs
-                # is PAD intersections (see the run-6 note above), so a reader
-                # auditing "overlap" against it concluded there was none while
-                # J4 stood 0.90mm inside U6's courtyard. The courtyard channel
-                # now has its own keys, [a, b, area_mm2, depth_mm] rows -- and
-                # each one NAMES ITS POPULATION, because the three are not
-                # nested and the first name here ('overlap') implied they
-                # were. Measured on run 23's board: 26.98mm2 over all pairs,
-                # 5 advisory, 10 blocking, and 6 of the blocking absent from
-                # the advisory list.
-                #
-                #   b_courtyard_advisory_pairs -- UNWAIVED courtyard pairs.
-                #   b_courtyard_blocking_pairs -- past the
-                #     legality.COURTYARD_BLOCKING_* floors, synthetic refs
-                #     excluded. NOT a subset of the advisory list: a
-                #     waiver-VOIDED pair (dead edge waiver, locked member)
-                #     blocks while staying labelled waived.
-                #   b_courtyard_overlap_mm2 -- area over EVERY courtyard
-                #     pair, waived included; not the sum of either list.
-                #
-                # This render reads no --intent, so operator waivers do not
-                # reach it: on a board carrying them, check_assembly is the
-                # authority and these keys are its unwaived-by-construction
-                # shadow.
-                'b_courtyard_advisory_pairs':
-                    fnd['courtyard_overlap_pairs_refs'],
-                'b_courtyard_blocking_pairs':
-                    fnd['courtyard_blocking_pairs_refs'],
-                'b_courtyard_overlap_mm2': fnd['courtyard_overlap_mm2'],
-                # None when the census ran. --gate reads it: a render that
-                # could not build the census must not report "blocking: none".
-                'b_courtyard_census_error': fnd['courtyard_census_error'],
-                # FRONT<->BACK stacks: XY overlap with NO shared face --
-                # deliberate on real boards (ulx3s: the battery holder
-                # behind the buttons), never a conflict, listed so a reader
-                # of the render does not mistake them for one. Never gates;
-                # --gate DISCLOSES the count on its verdict line, so the
-                # reviewer's eye is pre-answered by the same output that
-                # gives the verdict rather than only by the sheet.
-                'b_cross_side_stacks': fnd['cross_side_stacks'],
-                'c_hole_conflicts': fnd['hole_conflict_pairs_refs'],
-                'c_locked_refs': fnd['locked_refs'],
-                'd_moved': {'moved': len(moves),
-                            'expected': args.expect_moved,
-                            'match': (None if args.expect_moved is None
-                                      else len(moves) == args.expect_moved)},
-            },
-            'unplaced': state.unplaced, 'no_outline': model.no_outline,
-        }
-        if args.review_sheet:
-            # The AFTER panels, by IDENTITY. `view is None` alone selects the
-            # BEFORE pair under --pair (they are first in the list and share
-            # the property), which is how the sheet came to compose the before
-            # board under the after facts strip.
-            _after_ids = {id(s) for s in _after_specs}
+    # #898: everything from here down used to sit inside `if args.json or
+    # args.json_out:`, so `--review-sheet PATH` alone wrote the panels, wrote NO
+    # sheet, printed nothing and exited 0 -- and the shipped skill text
+    # prescribes exactly that form. `--gate` alone was silent the same way,
+    # which is worse: the flag that decides pass/fail returned 0 with no
+    # verdict. `fnd` is memoised on the model and `doc` is dict assembly with no
+    # I/O, so building both unconditionally costs nothing; the JSON EMISSIONS
+    # below stay gated on the flags that asked for them.
+    fnd = legality_findings(model)
+    doc = {
+        'panels': [{'label': s.label, 'side': s.side, 'view': s.view,
+                    'path': w} for s, w in zip(panels, written)],
+        'moved': len(moves),
+        # moved_refs makes a wrong --before self-evident, and it is what
+        # audits the two pixel-invisible move classes (sub-5px arrows are
+        # dropped; a rotation-only ghost draws exactly atop the part).
+        'moved_refs': [{'reference': m['reference'],
+                        'dist': round(m['dist'], 4)} for m in moves],
+        'failed_nets': sorted(failed), 'blocker_nets': sorted(blockers),
+        # The defects this render was ASKED to show, and what it managed
+        # to show them at. `shortfall_px` is the honesty figure: it tells
+        # a picture OF the defect from a picture of its neighbourhood
+        # without opening the png. Both keys are READ, not merely
+        # written: --gate below compares `defects` against
+        # `defect_panels` and checks each panel's shortfall against
+        # `min_px`. (An earlier comment here credited loop_driver's
+        # `_guard_route_render` with reading them. It does not -- it
+        # checks instrument.board, checklist, summary_json and
+        # moved_refs, and nothing about defects.)
+        'defects': [{'kind': dx.get('kind'), 'net': dx.get('net'),
+                     'refs': dx.get('refs'), 'pads': dx.get('pads'),
+                     'at': dx.get('at'),
+                     'short_mm': (dx.get('measure') or {}).get('short_mm'),
+                     'source': dx.get('_source')} for dx in _defects],
+        'defect_panels': [
+            {'label': sp.label, 'view': sp.view,
+             'px_per_mm': (round(args.size / (sp.view[2] - sp.view[0]), 2)
+                           if sp.view and sp.view[2] > sp.view[0] else None),
+             'shortfall_px': (round(
+                 ((sp.defects[0].get('measure') or {}).get('short_mm') or 0)
+                 * args.size / (sp.view[2] - sp.view[0]), 2)
+                 if sp.view and sp.view[2] > sp.view[0] and sp.defects
+                 else None),
+             'min_px': DEFECT_MIN_PX}
+            for sp in _defect_panels],
+        'metrics': dict(model.metrics),
+        # The instrument block (run-4 G2): two renders of the SAME board
+        # differing only in --ignore-nets read 632 vs 412 crossings in
+        # run 3, and neither JSON said which was which. A before/after
+        # series is provably same-instrument only if the instrument
+        # settings ride in the document.
+        'instrument': {
+            'board': os.path.abspath(args.board),
+            'before': os.path.abspath(args.before) if args.before else None,
+            'summary_json': (os.path.abspath(args.summary_json)
+                             if args.summary_json else None),
+            # Mirrors summary_json, so a gate can assert a defect render
+            # was made from a record the same way _guard_route_render
+            # already asserts a focus render was made from a route log.
+            'defect_json': [os.path.abspath(x)
+                            for x in (getattr(args, 'defect_json', None)
+                                      or [])],
+            'defect_notes': _dnotes,
+            # `clearance` used to record args.clearance, i.e. None on
+            # every run that did not pass the flag -- so the document
+            # named no clearance at all for the runs most likely to be
+            # graded at the wrong one. It is now the EFFECTIVE value,
+            # with what was requested and where it came from beside it.
+            'clearance': model.floor_knobs.get(
+                'clearance', {}).get('value'),
+            'clearance_requested': args.clearance,
+            'floors': model.floor_knobs,
+            'ignore_nets': sorted(args.ignore_nets or []),
+            'ratsnest_nets': sorted(args.ratsnest_nets or []),
+            # DECLARED vs MATCHED. Without these there was no field in
+            # this document where "61 requested, 51 matched" could
+            # appear, so a net list that silently missed had to be
+            # checked by hand, outside the tool -- and was not.
+            'net_lists': net_lists,
+            'size': args.size, 'supersample': args.supersample,
+        },
+        # Mandate 8's four questions, quotable (run-4 G5). Channels are
+        # labelled; see legality_findings.
+        'checklist': {
+            'a_off_outline': {
+                'pad_copper': fnd['oob_refs_pad_copper'],
+                'courtyard': fnd['oob_refs_courtyard']},
+            # run-6 key honesty: the old 'b_overlap_pairs' NAME carried
+            # the PAD-CLEARANCE channel, and a reader auditing overlap
+            # with b_overlap_pairs=[] concluded there was none while two
+            # parts sat stacked (the shipped C14-on-R14). The clearance
+            # channel now lives under its true name; b_body_overlap_pairs
+            # reports what the old name promised.
+            'b_pad_clearance_pairs': fnd['pad_conflict_pairs_refs'],
+            'b_body_overlap_pairs': fnd['body_overlap_pairs_refs'],
+            # run-23 key honesty, same lesson again: b_body_overlap_pairs
+            # is PAD intersections (see the run-6 note above), so a reader
+            # auditing "overlap" against it concluded there was none while
+            # J4 stood 0.90mm inside U6's courtyard. The courtyard channel
+            # now has its own keys, [a, b, area_mm2, depth_mm] rows -- and
+            # each one NAMES ITS POPULATION, because the three are not
+            # nested and the first name here ('overlap') implied they
+            # were. Measured on run 23's board: 26.98mm2 over all pairs,
+            # 5 advisory, 10 blocking, and 6 of the blocking absent from
+            # the advisory list.
+            #
+            #   b_courtyard_advisory_pairs -- UNWAIVED courtyard pairs.
+            #   b_courtyard_blocking_pairs -- past the
+            #     legality.COURTYARD_BLOCKING_* floors, synthetic refs
+            #     excluded. NOT a subset of the advisory list: a
+            #     waiver-VOIDED pair (dead edge waiver, locked member)
+            #     blocks while staying labelled waived.
+            #   b_courtyard_overlap_mm2 -- area over EVERY courtyard
+            #     pair, waived included; not the sum of either list.
+            #
+            # This render reads no --intent, so operator waivers do not
+            # reach it: on a board carrying them, check_assembly is the
+            # authority and these keys are its unwaived-by-construction
+            # shadow.
+            'b_courtyard_advisory_pairs':
+                fnd['courtyard_overlap_pairs_refs'],
+            'b_courtyard_blocking_pairs':
+                fnd['courtyard_blocking_pairs_refs'],
+            'b_courtyard_overlap_mm2': fnd['courtyard_overlap_mm2'],
+            # None when the census ran. --gate reads it: a render that
+            # could not build the census must not report "blocking: none".
+            'b_courtyard_census_error': fnd['courtyard_census_error'],
+            # FRONT<->BACK stacks: XY overlap with NO shared face --
+            # deliberate on real boards (ulx3s: the battery holder
+            # behind the buttons), never a conflict, listed so a reader
+            # of the render does not mistake them for one. Never gates;
+            # --gate DISCLOSES the count on its verdict line, so the
+            # reviewer's eye is pre-answered by the same output that
+            # gives the verdict rather than only by the sheet.
+            'b_cross_side_stacks': fnd['cross_side_stacks'],
+            'c_hole_conflicts': fnd['hole_conflict_pairs_refs'],
+            'c_locked_refs': fnd['locked_refs'],
+            'd_moved': {'moved': len(moves),
+                        'expected': args.expect_moved,
+                        'match': (None if args.expect_moved is None
+                                  else len(moves) == args.expect_moved)},
+        },
+        'unplaced': state.unplaced, 'no_outline': model.no_outline,
+    }
+    _sheet_failed = ''
+    if args.review_sheet:
+        # The AFTER panels, by IDENTITY. `view is None` alone selects the
+        # BEFORE pair under --pair (they are first in the list and share
+        # the property), which is how the sheet came to compose the before
+        # board under the after facts strip.
+        _after_ids = {id(s) for s in _after_specs}
+        _full = [w for s, w in zip(panels, written)
+                 if id(s) in _after_ids and s.view is None][:2]
+        if not _full:
+            # #898: FALL BACK rather than refuse. Under --view / --zoom-group
+            # there is no full-board AFTER panel, and an UNPLACED board sets a
+            # view too -- so the strict filter left nothing to compose and the
+            # sheet failed. Refusing there would break this tool's stated
+            # contract ("SEEING an unplaced or broken board is this tool's
+            # job") for exactly the first boundary the blind-first step is
+            # prescribed at: a pile. Compose the crop instead and say so.
             _full = [w for s, w in zip(panels, written)
-                     if id(s) in _after_ids and s.view is None][:2]
-            try:
-                write_review_sheet(args.review_sheet, _full, fnd,
-                                   connector_edge_facts(model))
-                doc['review_sheet'] = args.review_sheet
-                print(f"  review sheet -> {args.review_sheet}")
-            except Exception as exc:                            # noqa: BLE001
-                # The sheet is an aid, never the render's own gate -- but a
-                # silent miss would read as "no sheet requested".
-                doc['review_sheet'] = None
-                print(f"  review sheet FAILED: {exc}", file=sys.stderr)
-        _quiet = bool(args.quiet and args.json_out)
-        if not args.no_describe:
-            _txt, _dj = describe(model, legality_findings(model), moves, args,
-                                 [p['path'] for p in doc['panels']])
-            doc['describe'] = _dj
-            if not _quiet:
-                print()
-                print(_txt)
-            if before_model is not None:
-                _ptxt, _pj = describe_pair(before_model, model, args)
-                doc['pair'] = _pj
-                if not _quiet:
-                    print(_ptxt)
-        if args.json_out:
-            with open(args.json_out, 'w', encoding='utf-8') as f:
-                json.dump(doc, f, indent=2, sort_keys=True, default=str)
-        if not _quiet:
-            print("JSON_SUMMARY: " + json.dumps(doc, sort_keys=True,
-                                                default=str))
-        if args.gate:
-            # Opt-in verdict. The default stays 0 on purpose -- SEEING an
-            # unplaced or broken board is this tool's job, and a renderer that
-            # refuses to render one is useless. But the checklist could report
-            # off-board parts, body stacks and hole conflicts while the tool
-            # exited 0, so a caller who wanted a verdict had to re-implement the
-            # reading. --gate makes the picture's own findings decide.
-            _fail = {
-                'a_off_outline.pad_copper':
-                    len(doc['checklist']['a_off_outline']['pad_copper']),
-                'a_off_outline.courtyard':
-                    len(doc['checklist']['a_off_outline']['courtyard']),
-                'b_pad_clearance_pairs':
-                    len(doc['checklist']['b_pad_clearance_pairs']),
-                'b_body_overlap_pairs':
-                    len(doc['checklist']['b_body_overlap_pairs']),
-                'c_hole_conflicts':
-                    len(doc['checklist']['c_hole_conflicts']),
-            }
-            # A census that could not be built is a FAILED gate, not a clean
-            # one: every courtyard key sits at its empty default and the
-            # verdict would otherwise read "a/b/c clear" about a board
-            # nothing measured.
-            if doc['checklist']['b_courtyard_census_error']:
-                _fail['b_courtyard_census_error'] = (
-                    doc['checklist']['b_courtyard_census_error'])
-            # run-23: courtyard blocking gates MOVED-relative -- healthy
-            # boards ship by-design interpenetrations (measured: 5 of 34
-            # corpus boards), so the census gates only where --before shows a
-            # member moved. Without --before the census stays report-only in
-            # the checklist.
-            #
-            # The guard is `args.before`, which is where `moves` comes from.
-            # It used to be `before_model is not None`, i.e. --pair, and
-            # --pair is a SECOND MODEL for the before panels -- a different
-            # question. Measured: `--before --gate` on tigard_placed never
-            # produced this key at all, and adding --pair to the same command
-            # produced b_courtyard_blocking_pairs(moved)=9. The whole block
-            # was deletable without a red test.
-            #
-            # This is NOT check_assembly's gate, and must not be read as it:
-            # `moves` here is position/rotation over refs in both boards (see
-            # moved_parts), while check_assembly also counts added, removed
-            # and side-flipped refs; and this renderer reads no --intent, so
-            # an operator-waived pair is unwaived here. Where they disagree,
-            # check_assembly is the authority.
-            if args.before:
-                _mv = {m['reference'] for m in moves}
-                _cb = [row for row in
-                       doc['checklist']['b_courtyard_blocking_pairs']
-                       if row[0] in _mv or row[1] in _mv]
-                _fail['b_courtyard_blocking_pairs(moved)'] = len(_cb)
-            # THE DEFECT RECORDS, read rather than merely written. A gate on
-            # a render made from --defect-json is asking "does this picture
-            # show the finding", and there are three ways it does not:
-            # a record refused or doubted by the reader (defect_notes -- a
-            # board_sha mismatch, an unknown schema version, an unreadable
-            # file), a defect that produced no panel (no `at` coordinate),
-            # and a panel whose shortfall came out under DEFECT_MIN_PX
-            # despite the crop (the caption's INVISIBLE AT THIS SCALE, as a
-            # number nobody has to parse out of a label).
-            if getattr(args, 'defect_json', None):
-                if _dnotes:
-                    _fail['defect_records(refused or unproven)'] = '; '.join(
-                        _dnotes)[:300]
-                _missing = len(doc['defects']) - len(doc['defect_panels'])
-                if _missing > 0:
-                    _fail['defects(no panel)'] = _missing
-                _blind = [p for p in doc['defect_panels']
-                          if p.get('shortfall_px')
-                          and p['shortfall_px'] < p['min_px'] - 0.5]
-                if _blind:
-                    _fail['defect_panels(below min_px)'] = len(_blind)
-            _hit = {k: v for k, v in _fail.items() if v}
-            _moved = doc['checklist']['d_moved']
-            if _moved.get('match') is False:
-                _hit['d_moved'] = (f"moved {_moved.get('moved')} != expected "
-                                   f"{_moved.get('expected')}")
-            if _hit:
-                _xs = len(doc['checklist']['b_cross_side_stacks'])
-                print("GATE: FAIL -- " + '; '.join(f'{k}={v}'
-                                                   for k, v in _hit.items())
-                      + (f" [{_xs} front<->back stack(s) also present -- "
-                         f"opposite faces, NOT conflicts]" if _xs else ""),
-                      file=sys.stderr)
-                return 4
-            # The cross-side stacks ride on BOTH verdicts: they look like
-            # collisions in the panels and are not, so the line that says
-            # "clear" must say how many of them the reader is about to see.
+                     if id(s) in _after_ids][:2] or written[:2]
+            if _full and not args.quiet:
+                print("  review sheet: no full-board AFTER panel (--view / "
+                      "--zoom-group / unplaced board) -- composing the panels "
+                      "that were written")
+        try:
+            write_review_sheet(args.review_sheet, _full, fnd,
+                               connector_edge_facts(model))
+            doc['review_sheet'] = args.review_sheet
+            print(f"  review sheet -> {args.review_sheet}")
+        except Exception as exc:                            # noqa: BLE001
+            # The sheet is an aid, never the render's own gate -- but a
+            # silent miss would read as "no sheet requested".
+            doc['review_sheet'] = None
+            _sheet_failed = str(exc)
+            print(f"  review sheet FAILED: {exc}", file=sys.stderr)
+    # #898: a REQUESTED sheet that was not written must not exit 0 -- that is
+    # the whole defect, and the flag block was only one of its two doors. This
+    # is reported HERE, before --gate can return 4 and hide it, and it quotes
+    # the exception rather than asserting a cause: the compose is wrapped in a
+    # bare `except Exception`, so the failure is as likely to be an unwritable
+    # output directory as the missing-panel case, and naming one cause for both
+    # sends the reader after the wrong thing. Exit 2 is this tool's existing
+    # "you asked for something the arguments cannot give" code. The panels are
+    # still written and the render still stands.
+    if _sheet_failed:
+        print(f"error: --review-sheet {args.review_sheet} was requested and no "
+              f"sheet was written: {_sheet_failed}", file=sys.stderr)
+        return 2
+    _quiet = bool(args.quiet and args.json_out)
+    # #898: the NARRATIVE obeys --quiet on its own. `_quiet` above is the
+    # run-24 rule for the stdout JSON ECHO -- "data is never silenced into
+    # nowhere", i.e. only suppress the echo when the keys are going to a FILE.
+    # That rule has nothing to say about prose, and reusing it here regressed
+    # --quiet: with the block hoisted, `--quiet` alone went from 3 lines of
+    # stdout to 26, defeating the blind-first ordering for exactly the callers
+    # who had asked for silence.
+    _quiet_text = bool(args.quiet)
+    if not args.no_describe:
+        _txt, _dj = describe(model, legality_findings(model), moves, args,
+                             [p['path'] for p in doc['panels']])
+        doc['describe'] = _dj
+        if not _quiet_text:
+            print()
+            print(_txt)
+        if before_model is not None:
+            _ptxt, _pj = describe_pair(before_model, model, args)
+            doc['pair'] = _pj
+            if not _quiet_text:
+                print(_ptxt)
+    if args.json_out:
+        with open(args.json_out, 'w', encoding='utf-8') as f:
+            json.dump(doc, f, indent=2, sort_keys=True, default=str)
+    # `doc` is now built on EVERY run (#898) -- it is dict assembly, no I/O, and
+    # --gate cannot read its checklist without it. Only the two EMISSIONS stay
+    # gated on the flags that asked for them, so a run that asked for neither
+    # prints no JSON, exactly as before.
+    if (args.json or args.json_out) and not _quiet:
+        print("JSON_SUMMARY: " + json.dumps(doc, sort_keys=True,
+                                            default=str))
+    if args.gate:
+        # Opt-in verdict. The default stays 0 on purpose -- SEEING an
+        # unplaced or broken board is this tool's job, and a renderer that
+        # refuses to render one is useless. But the checklist could report
+        # off-board parts, body stacks and hole conflicts while the tool
+        # exited 0, so a caller who wanted a verdict had to re-implement the
+        # reading. --gate makes the picture's own findings decide.
+        _fail = {
+            'a_off_outline.pad_copper':
+                len(doc['checklist']['a_off_outline']['pad_copper']),
+            'a_off_outline.courtyard':
+                len(doc['checklist']['a_off_outline']['courtyard']),
+            'b_pad_clearance_pairs':
+                len(doc['checklist']['b_pad_clearance_pairs']),
+            'b_body_overlap_pairs':
+                len(doc['checklist']['b_body_overlap_pairs']),
+            'c_hole_conflicts':
+                len(doc['checklist']['c_hole_conflicts']),
+        }
+        # A census that could not be built is a FAILED gate, not a clean
+        # one: every courtyard key sits at its empty default and the
+        # verdict would otherwise read "a/b/c clear" about a board
+        # nothing measured.
+        if doc['checklist']['b_courtyard_census_error']:
+            _fail['b_courtyard_census_error'] = (
+                doc['checklist']['b_courtyard_census_error'])
+        # run-23: courtyard blocking gates MOVED-relative -- healthy
+        # boards ship by-design interpenetrations (measured: 5 of 34
+        # corpus boards), so the census gates only where --before shows a
+        # member moved. Without --before the census stays report-only in
+        # the checklist.
+        #
+        # The guard is `args.before`, which is where `moves` comes from.
+        # It used to be `before_model is not None`, i.e. --pair, and
+        # --pair is a SECOND MODEL for the before panels -- a different
+        # question. Measured: `--before --gate` on tigard_placed never
+        # produced this key at all, and adding --pair to the same command
+        # produced b_courtyard_blocking_pairs(moved)=9. The whole block
+        # was deletable without a red test.
+        #
+        # This is NOT check_assembly's gate, and must not be read as it:
+        # `moves` here is position/rotation over refs in both boards (see
+        # moved_parts), while check_assembly also counts added, removed
+        # and side-flipped refs; and this renderer reads no --intent, so
+        # an operator-waived pair is unwaived here. Where they disagree,
+        # check_assembly is the authority.
+        if args.before:
+            _mv = {m['reference'] for m in moves}
+            _cb = [row for row in
+                   doc['checklist']['b_courtyard_blocking_pairs']
+                   if row[0] in _mv or row[1] in _mv]
+            _fail['b_courtyard_blocking_pairs(moved)'] = len(_cb)
+        # THE DEFECT RECORDS, read rather than merely written. A gate on
+        # a render made from --defect-json is asking "does this picture
+        # show the finding", and there are three ways it does not:
+        # a record refused or doubted by the reader (defect_notes -- a
+        # board_sha mismatch, an unknown schema version, an unreadable
+        # file), a defect that produced no panel (no `at` coordinate),
+        # and a panel whose shortfall came out under DEFECT_MIN_PX
+        # despite the crop (the caption's INVISIBLE AT THIS SCALE, as a
+        # number nobody has to parse out of a label).
+        if getattr(args, 'defect_json', None):
+            if _dnotes:
+                _fail['defect_records(refused or unproven)'] = '; '.join(
+                    _dnotes)[:300]
+            _missing = len(doc['defects']) - len(doc['defect_panels'])
+            if _missing > 0:
+                _fail['defects(no panel)'] = _missing
+            _blind = [p for p in doc['defect_panels']
+                      if p.get('shortfall_px')
+                      and p['shortfall_px'] < p['min_px'] - 0.5]
+            if _blind:
+                _fail['defect_panels(below min_px)'] = len(_blind)
+        _hit = {k: v for k, v in _fail.items() if v}
+        _moved = doc['checklist']['d_moved']
+        if _moved.get('match') is False:
+            _hit['d_moved'] = (f"moved {_moved.get('moved')} != expected "
+                               f"{_moved.get('expected')}")
+        if _hit:
             _xs = len(doc['checklist']['b_cross_side_stacks'])
-            print("GATE: PASS -- checklist a/b/c clear"
-                  + ("" if _moved.get('match') is None
-                     else f", moved {_moved.get('moved')} as expected")
-                  + (f" ({_xs} front<->back stack(s), opposite faces, not "
-                     f"conflicts)" if _xs else ""),
+            print("GATE: FAIL -- " + '; '.join(f'{k}={v}'
+                                               for k, v in _hit.items())
+                  + (f" [{_xs} front<->back stack(s) also present -- "
+                     f"opposite faces, NOT conflicts]" if _xs else ""),
                   file=sys.stderr)
+            return 4
+        # The cross-side stacks ride on BOTH verdicts: they look like
+        # collisions in the panels and are not, so the line that says
+        # "clear" must say how many of them the reader is about to see.
+        _xs = len(doc['checklist']['b_cross_side_stacks'])
+        print("GATE: PASS -- checklist a/b/c clear"
+              + ("" if _moved.get('match') is None
+                 else f", moved {_moved.get('moved')} as expected")
+              + (f" ({_xs} front<->back stack(s), opposite faces, not "
+                 f"conflicts)" if _xs else ""),
+              file=sys.stderr)
     return 0
 
 

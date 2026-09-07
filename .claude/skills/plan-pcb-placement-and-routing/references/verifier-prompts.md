@@ -16,9 +16,19 @@ is the delivery channel and the driver asks for it that way, but a reply is a
 notification and notifications get lost: run 23's connectivity and drc lens
 verdicts never reached the parent — it waited on them, was nudged, and had to
 re-derive both lenses inline, which the copy on disk would have made
-unnecessary. Put it beside the round's other artifacts, named for the lens. A
-verdict you cannot produce afterwards is a finding about the verifier, not a
-reason to assume PASS.
+unnecessary. A verdict you cannot produce afterwards is a finding about the
+verifier, not a reason to assume PASS.
+
+**The name is `verdict_<lens>.txt`, beside the ledger** — `verdict_spec.txt`,
+`verdict_drc.txt`, `verdict_connectivity.txt`, and `verdict_record.txt` for the
+9.4b boundary verification. "Beside the round's other artifacts, named for the
+lens" was the whole instruction for two runs, and an unnamed file is a file
+nothing reads: one run invented `verify/VERDICT.txt`, and the close-out that
+was meant to quote it retyped the line from a reply instead. The loop driver
+prints these paths, cycle-suffixed, from the ledger's own directory; the
+close-out reads them with `converge.py record --lens-file`, which stores each
+file's path and sha256 in the row. One file per lens, the `VERDICT=` line
+FIRST in it and nothing above.
 
 `evidence=` must point into the round's own files — `wk/place.log#JSON_SUMMARY.
 crossings_after`, `wk/intent.json#/violations/3`, `wk/view/board_F.png@112.4,63.1`.
@@ -153,10 +163,14 @@ VERDICT=FAIL:lens=drc;finding=8 vias below the 0.6 mm spec on B.Cu;
   evidence=wk/score.json#/components/undersized/by_type/via-size;route=Step 2
 ```
 
-1. **Record the verdict with `converge.py record --lens`**, passing the
-   `VERDICT=` line verbatim — as the verifier returned it, or from its copy on
-   disk, never as one you remember — (repeatable; stored raw as
-   `entry["lenses"]`). It
+1. **Record the verdict with `converge.py record --lens-file`**, passing the
+   PATH of the file the verifier wrote — never a line you retyped from a reply,
+   and on a `--final` row never a bare `--lens` at all, which converge refuses
+   for connectivity, drc and spec. The row then stores that file's path and
+   sha256 (`entry["lens_source"]`, parallel to `entry["lenses"]`), so it says
+   which artifact it is quoting. A line pasted from a reply is a claim about
+   the run; a line read from the verifier's file is a claim about a file.
+   `--lens` remains for laps, whose lenses are working notes. It
    refuses at write time anything that is not a `VERDICT=(PASS|FAIL):lens=…`
    line, so a malformed verdict stays visible instead of being normalised into
    something that reads like a pass — and `--final` refuses without all three
@@ -231,7 +245,8 @@ Prompt skeleton (fill the <>):
 > FAIL); [4] every number in the claim traces to a field in an artifact
 > you hold; failing nets must be NAMED, not counted. Reply with exactly
 > one line: VERDICT=PASS or
-> VERDICT=FAIL:check=<1-4>;finding=<one line>;evidence=<path#pointer>.
+> VERDICT=FAIL:check=<1-5>;finding=<one line>;evidence=<path#pointer>,
+> written to `verdict_record.txt` beside the ledger before you answer.
 > Report the single most damning finding.
 
 Rules of engagement, mirrored from 9.4b:

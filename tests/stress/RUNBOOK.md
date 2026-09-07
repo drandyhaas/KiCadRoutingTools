@@ -1336,3 +1336,35 @@ Labels bucket by PREFIX (`staging`, `fence`/`close` → close-out, then `P`/`L`/
 `R`/`V`), case-sensitively. A run that labels its steps by another convention
 lands in `other` and the report says so at the top rather than leaving an
 unexplained zero.
+
+### Agent watchers: prompts at the start, one agent at the end
+
+`run_watch.py` is a shell and costs nothing to leave running. An AGENT watcher
+is not: each spawn pays a fixed preamble — system prompt, CLAUDE.md, memory
+index, skill listing — before it does anything. One measured run spawned three
+watchers twice over, the first time only to arm a file monitor the background
+shell above already provides, and the six spawns plus their reports came to
+about 1.3 M tokens.
+
+Split what arming actually PROTECTS from what it costs:
+
+1. **At the start, write each watcher's prompt to `<workdir>/watch/`** —
+   `<name>_prompt.md`, one per lens. That file's mtime IS the arming evidence,
+   and it is what pre-registration protects: a brief written after the outcome
+   is a brief tailored to it. The boundary verification's contemporaneity check
+   reads exactly this kind of timestamp, so the prompts are checkable by an
+   instrument that already exists.
+2. **Spawn at the end, once, as ONE agent with one section per brief.** Three
+   agents re-reading the same logs derive the same numbers three times and bind
+   to nothing; one agent with three headed sections produces three verdicts from
+   one preamble and one read.
+3. **Override the model.** Reading a report and a JSONL and reporting
+   discrepancies is not the task the largest model exists for; set the Agent
+   tool's `model` field to a smaller one for that spawn. It is one field.
+4. **Feed it the DERIVED files first and the raw logs on demand**: `REPORT.md`,
+   `cmd_timing.jsonl` and `ledger.jsonl` are the run in three files. Hand it the
+   hundreds of `logs/*.log` only when a section names one. A watcher that starts
+   from raw logs re-derives what the ledger already states.
+
+A watcher that finds nothing is a result. A watcher that ran out of window
+before it reported is not.

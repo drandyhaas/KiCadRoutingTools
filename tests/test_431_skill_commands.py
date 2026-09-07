@@ -97,6 +97,12 @@ SOURCES = [
     'docs/claude-skills.md',
     'py_placer/placement/README.md',
     'README.md',
+    # The stress RUNBOOK is prose a run is told to follow, with live command
+    # blocks in it (`run_watch.py`, `tee_cmd.py`, the audits), and it was in NO
+    # text-invariant gate's source list: not this one, not test_doc_flag_liveness,
+    # not test_803. Doctrine that lands only there ships unpinned, which is how
+    # the watcher protocol went two runs without one.
+    'tests/stress/RUNBOOK.md',
 ]
 
 # Tools are DISCOVERED from what the sources actually invoke, never listed by

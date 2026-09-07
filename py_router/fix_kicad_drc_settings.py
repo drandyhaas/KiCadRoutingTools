@@ -21,7 +21,14 @@ This script rewrites the sibling ``.kicad_pro`` so KiCad's enforced
 **Board Setup -> Constraints / Net Classes** match the per-object minima the
 board actually uses:
 
-  * copper **clearance** (``min_clearance`` + Default net-class clearance)
+  * copper **clearance** -- TWO quantities, not one (#900). ``min_clearance``
+    is an absolute floor and is capped at the smallest copper-pad clearance
+    override (#530), because KiCad floors an override there; the routing
+    steps' entry point ``fix_project_for_output`` (and its live-board twin)
+    caps it at the smallest ``.kicad_dru`` layer rule as well (#498), which
+    this module's own ``main()`` has never done. The Default net-class
+    **clearance** carries the requirement the board was routed to and is
+    capped by neither.
   * **hole-to-hole** clearance (``min_hole_to_hole``)
   * **hole/copper** clearance (``min_hole_clearance``)
   * **copper-to-edge** clearance (``min_copper_edge_clearance``)
@@ -112,6 +119,50 @@ LAST_PROJECT_WRITES = []
 # ``rules.min_*``, and a draw default is not a floor.
 _NETCLASS_WRITABLE_FIELDS = frozenset({"clearance"})
 _NONDEFAULT_CLAMP_FIELDS = _NETCLASS_WRITABLE_FIELDS  # historical name, same set
+
+# The KiCad rule names `compute_targets` may emit (#900). The project writeback
+# loops over `targets` and used to write EVERY key straight into
+# `board.design_settings.rules`, so the moment the dict carries anything that is
+# not a rule -- `class_clearance` -- it lands in the shipped project as a rule
+# KiCad has never heard of, invisibly: `list_nets.read_design_rules` reads a
+# fixed field tuple, `FAB_FLOOR_KEYS` is another, and no test enumerates the
+# rules key set. An ALLOW-list rather than a skip-list, because that is what
+# makes the next non-rule key inert BY CONSTRUCTION instead of by someone
+# remembering -- and it is the shape `apply_targets_to_board` already has by
+# accident (it looks each key up in its rule->attribute map and skips a miss).
+# The cost is the other direction: a newly added rule must be registered here
+# or it is silently not written. `tests/test_900_class_clearance_not_capped.py`
+# re-derives this set from `compute_targets` -- BY SOURCE, walking every
+# `targets["..."] =` assignment, not only the keys one call happens to emit. An
+# earlier draft derived it from a single CALL, which is blind to any key gated
+# on a `minima` entry that call does not supply -- the shape
+# `min_via_annular_width` already has. (That draft's call did pass that
+# particular entry; the point is that the next key of the same shape would have
+# depended on somebody remembering to.)
+_RULE_KEYS = frozenset({
+    "min_clearance", "min_hole_clearance", "min_hole_to_hole",
+    "min_copper_edge_clearance", "min_track_width", "min_connection",
+    "min_via_diameter", "min_through_hole_diameter", "min_via_drill",
+    "min_via_annular_width",
+})
+
+
+def _class_clearance(targets):
+    """The NET-CLASS clearance from a ``compute_targets`` result (mm or None).
+
+    The routed value, never the capped rule floor. ``rules.min_clearance`` is
+    capped at the smallest pad clearance override (#530) and at the smallest
+    ``.kicad_dru`` layer rule (#498) because KiCad floors those there; the net
+    classes carry the requirement the board was actually routed to and must not
+    inherit either cap (#900).
+
+    Falls back to ``min_clearance`` so a hand-built target dict still works --
+    ``gui_utils.update_live_drc_floors`` and the GUI fanout tab both call
+    ``clamp_nondefault_netclasses_on_board`` with ``{'min_clearance': ceiling}``,
+    which is already the uncapped value they mean.
+    """
+    t = targets or {}
+    return t.get("class_clearance", t.get("min_clearance"))
 
 # A complete KiCad "Default" net class. KiCad only honours a net class it
 # considers well-formed; a sparse {name, clearance, ...} stub is silently
@@ -598,16 +649,30 @@ def compute_targets(clearance=None, hole_clearance=None, hole_to_hole=None,
     """Map KiCad rule keys -> target floor (mm) from the routing parameters.
     Each value, when given, becomes a floor; sizes fall back to the board's
     smallest such object (``minima`` from :func:`scan_board_minima`) when the
-    param is None. Keys absent from the result => leave that rule alone."""
+    param is None. Keys absent from the result => leave that rule alone.
+
+    One key is NOT a rule: ``class_clearance`` (#900), the net-class clearance,
+    which is the routed value and never carries the ``min_clearance`` caps.
+    ``_RULE_KEYS`` is what keeps it out of the project's rule map; read it with
+    :func:`_class_clearance`."""
     minima = minima or {}
     targets = {}
     if clearance is not None:
         targets["min_clearance"] = clearance
+        # The NET-CLASS clearance, deliberately a SEPARATE key from the rule
+        # floor and never capped (#900). They are different quantities: the
+        # rule is an absolute floor KiCad applies underneath everything, the
+        # class is the clearance requirement the board was routed to. Read it
+        # through _class_clearance(), never by reaching for "min_clearance".
+        targets["class_clearance"] = clearance
         # #530: never above the smallest pad clearance override the router
         # honoured -- KiCad floors an override at min_clearance (measured), so
         # a higher floor would flag copper routed correctly at the override.
         # rules.min_clearance is only a floor; the class clearances carry the
-        # real requirement, so this costs nothing.
+        # real requirement, so this costs nothing -- TRUE ONLY BECAUSE the cap
+        # stops here. Until #900 it reached the Default class as well, so one
+        # part carrying a 2 mil library override turned a requested 0.15 into
+        # a 0.0508 mm board (run 25, esp_prog: C1/C3/Q1/Q2/U2 from OLIMEX).
         _ovr = minima.get("min_pad_clearance_override")
         if _ovr is not None and _ovr > 0 and clearance > _ovr:
             targets["min_clearance"] = round(float(_ovr), 6)
@@ -751,6 +816,8 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     changes = []
 
     for key, target in targets.items():
+        if key not in _RULE_KEYS:
+            continue          # #900: class_clearance is not a KiCad rule name
         if target is None:
             continue
         target = round(float(target), 6)
@@ -787,15 +854,26 @@ def apply_targets_to_project(proj: dict, targets: dict, sev_plan: dict,
     # routing step: lowering them was the #842 ratchet. ``diff_pair_gap`` /
     # ``diff_pair_width`` are still accepted for signature compatibility and
     # ignored.
-    nc_map = {"clearance": targets.get("min_clearance")}
+    # The ROUTED clearance, not the capped rule floor (#900): see
+    # _class_clearance. Reading "min_clearance" here is what turned a requested
+    # 0.15 into a 0.0508 board on any part carrying a 2 mil pad override.
+    nc_map = {"clearance": _class_clearance(targets)}
     net_settings = proj.setdefault("net_settings", {})
     net_settings.setdefault("meta", {"version": 0})  # KiCad needs this to read classes
     classes = net_settings.setdefault("classes", [])
     default_cls = next((c for c in classes if c.get("name") == "Default"), None)
     if default_cls is None and any(v is not None for v in nc_map.values()):
         default_cls = dict(_DEFAULT_NETCLASS)
+        # Born at the ROUTED clearance, not at the template's stock 0.2 then
+        # lowered (#900). Nothing is being loosened away here -- the project
+        # had no class at all -- and the only-lower loop below cannot RAISE the
+        # template value, so a board routed at 0.3 used to be handed a 0.2
+        # class it violates everywhere.
+        if nc_map.get("clearance") is not None:
+            default_cls["clearance"] = round(float(nc_map["clearance"]), 6)
         classes.insert(0, default_cls)
-        changes.append("net_class[Default]: created (project had none)")
+        changes.append(f"net_class[Default]: created (project had none), "
+                       f"clearance {default_cls['clearance']} mm")
     if default_cls is not None:
         for field, target in nc_map.items():
             if target is None:
@@ -1144,6 +1222,10 @@ def fix_project_for_output(output_pcb: str, input_pcb=None, *, clearance=None,
     # KiCad's rules.min_clearance is an ABSOLUTE floor that outranks custom
     # rules -- cap the recorded floor at the smallest rule value, or the ruled
     # layers re-manufacture phantom violations on copper routed at the rule.
+    # RULE-ONLY, deliberately: `class_clearance` is left alone (#900). A dru
+    # rule REPLACES the pair clearance on ITS layer and already outranks the
+    # class, so lowering the class to a B.Cu rule's value would weaken grading
+    # on every layer the rule does not cover, for no DRC benefit.
     try:
         from kicad_dru import min_rule_clearance
         _dru_min = min_rule_clearance(output_pcb)
@@ -1233,8 +1315,12 @@ def clamp_nondefault_netclasses_on_board(board, targets, *, diff_pair_gap=None,
     #768's GIVEN branch and not the writeback half -- a Wide-class pair priced at
     min(0.4, 0.2) and then graded by KiCad at the still-0.4 class.
 
-    ``targets`` is the same dict `compute_targets` returns; only
-    ``min_clearance`` is read. WHY ONLY CLEARANCE: parity with
+    ``targets`` is the same dict `compute_targets` returns; only the CLASS
+    clearance is read -- ``class_clearance``, falling back to ``min_clearance``
+    for the hand-built ``{'min_clearance': ceiling}`` dicts `gui_utils` and the
+    fanout tab pass (see :func:`_class_clearance`). It must NOT be the capped
+    rule floor: a class clamped to one part's 2 mil pad override declares every
+    pair in that class legal at 0.05 mm (#900). WHY ONLY CLEARANCE: parity with
     `apply_targets_to_project`'s `_NONDEFAULT_CLAMP_FIELDS` -- clearance is the
     one field KiCad enforces PER CLASS, so it is the only one whose stale value
     manufactures violations. SetTrackWidth / SetViaDiameter / SetViaDrill are
@@ -1272,7 +1358,7 @@ def clamp_nondefault_netclasses_on_board(board, targets, *, diff_pair_gap=None,
     # Clearance ONLY (parity with _NETCLASS_WRITABLE_FIELDS). The diff-pair
     # gap/width kwargs are accepted for signature compatibility and ignored:
     # they are draw defaults, and lowering them was the #842 ratchet.
-    nd_map = {"SetClearance": (targets or {}).get("min_clearance")}
+    nd_map = {"SetClearance": _class_clearance(targets)}    # routed, not capped (#900)
     if not any(v is not None for v in nd_map.values()):
         return changes
     other = {}
@@ -1364,7 +1450,8 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
 
     # #498 parity with fix_project_for_output: cap min_clearance at the
     # smallest .kicad_dru layer rule (an absolute board floor above a relaxing
-    # rule re-manufactures phantom violations on that rule's layer).
+    # rule re-manufactures phantom violations on that rule's layer). RULE-ONLY:
+    # `class_clearance` is untouched here too (#900).
     try:
         from kicad_dru import min_rule_clearance
         _dru_min = min_rule_clearance(board.GetFileName() or "")
@@ -1423,7 +1510,7 @@ def apply_targets_to_board(board, targets: dict, sev_plan: dict,
     # Default net class CLEARANCE (the one class field KiCad's DRC enforces).
     # Track/via/drill/diff-pair class values are draw defaults and are never
     # lowered (parity with apply_targets_to_project; the #842 ratchet).
-    nc_map = {"SetClearance": targets.get("min_clearance")}
+    nc_map = {"SetClearance": _class_clearance(targets)}    # routed, not capped (#900)
     default_nc = None
     for getter in ("GetDefaultNetclass",):           # KiCad 8+: NET_SETTINGS
         ns = getattr(bds, "m_NetSettings", None)

@@ -146,6 +146,12 @@ def main():
 
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
                            pcb_file=args.board)
+    # #897: a waiver that resolves to nothing excuses nothing, and said nothing.
+    # Formatted by the engine (`format_waiver_warnings`) rather than here, so
+    # place_reconstruct says the same words.
+    from placement.legality import format_waiver_warnings as _waiver_warnings
+    for _line in _waiver_warnings(g):
+        print("  " + _line, file=sys.stderr)
     leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board)
     # #697: name any pair graded ABOVE `clearance` and what raised it, or the
     # echo below reports a count the announced floor cannot explain.

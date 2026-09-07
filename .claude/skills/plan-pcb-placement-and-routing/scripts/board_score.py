@@ -31,7 +31,7 @@ disconnected net with a lower via count::
 
     score = (blocking, quality)
     blocking = (unrouted + broken + drc + undersized + floorplan
-               + impedance + length + net_widths)
+               + assembly + impedance + length + net_widths)
     quality  = (vias, copper_mm, segments)      # only compared once blocking == 0
 
 `blocking` must reach 0 before a board is deliverable. `quality` orders the

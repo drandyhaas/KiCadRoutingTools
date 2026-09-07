@@ -479,7 +479,30 @@ def _cyc_name(name, n):
 _ARTIFACTS = ('placed.kicad_pcb', 'assembly_close.json',
               'place_close_render.json', 'freeze_refs.json',
               'frozen.kicad_pcb', 'routed.kicad_pcb', 'score.json',
-              'route.log', 'routing_close.json', 'handoff.json', 'handoff.png')
+              'route.log', 'routing_close.json', 'handoff.json', 'handoff.png',
+              # The end-to-end verifier's verdicts, one file per lens, and one
+              # for the close-out boundary verification (#904). These are named
+              # HERE rather than in the L5 text for two reasons a fixed
+              # `wk/verify_final/VERDICT.txt` gets wrong: they follow the
+              # ledger's own directory, so a run whose work dir is not `wk`
+              # still puts them where the cheat watcher looks; and they take
+              # the cycle suffix, so cycle 2 cannot overwrite the file whose
+              # sha256 cycle 1's --final row recorded -- which is the D5 defect
+              # arrived at by another road.
+              #
+              # ONE FILE PER LENS, because `--lens-file` reads the first
+              # VERDICT= line of the file it is given: a missing lens then
+              # shows up as a missing file rather than as a missing line
+              # somebody has to notice. verifier-prompts.md has asked for a
+              # durable copy "named for the lens" since run 23; this is that
+              # name.
+              #
+              # `verdict_record.txt` is NOT a lens. The close-out boundary
+              # verification answers `VERDICT=...:check=<1-5>`, a grammar
+              # `_LENS_RE` refuses on purpose, so it is cited in the report and
+              # the --lever and never recorded with --lens-file.
+              'verdict_connectivity.txt', 'verdict_drc.txt',
+              'verdict_spec.txt', 'verdict_record.txt')
 
 
 def _paths(a, starting=False):
@@ -651,6 +674,45 @@ def _log_invocation(a, stage, out, code):
                   f'itself.', file=sys.stderr)
             return None
         p = os.path.join(d, 'loop_driver.log')
+        # ARCHIVE THE TEXT, not only its digest. `out_sha` proves two
+        # invocations emitted the same thing and can prove nothing else: the
+        # refusal a run was given, and the verdict text it acted on, were
+        # recoverable afterwards only if the caller happened to tee them. The
+        # index is the count of rows this stage already has, so a reader goes
+        # from the row carrying the hash to the file carrying the text with no
+        # globbing.
+        #
+        # Its OWN try, inside this one: a failed archive must never suppress
+        # the row that carries `out_sha`, which is what the D5 pin checks.
+        out_file = None
+        try:
+            _logs = os.path.join(d, 'logs')
+            os.makedirs(_logs, exist_ok=True)
+            _n = 1
+            if os.path.isfile(p):
+                with open(p, encoding='utf-8') as _fh:
+                    for _line in _fh:
+                        try:
+                            if json.loads(_line).get('stage') == stage:
+                                _n += 1
+                        except ValueError:
+                            pass
+            for _ in range(1000):
+                _fp = os.path.join(_logs, f'loop_driver_{stage}_{_n}.log')
+                try:
+                    # 'x': never overwrite. The count can repeat if the JSONL
+                    # was truncated or a file was left from an earlier run, and
+                    # silently replacing a stage text is the one thing an
+                    # archive may not do.
+                    with open(_fp, 'x', encoding='utf-8') as _fh:
+                        _fh.write(out or '')
+                    out_file = f'logs/loop_driver_{stage}_{_n}.log'
+                    break
+                except FileExistsError:
+                    _n += 1
+        except Exception as _e:                             # noqa: BLE001
+            print(f'loop_driver NOTE: the stage TEXT went unarchived ({_e}); '
+                  f'only its sha is on file.', file=sys.stderr)
         row = {'t': round(time.time(), 3),
                'iso': time.strftime('%Y-%m-%dT%H:%M:%S'),
                'stage': stage, 'exit': code, 'refused': bool(code == 4),
@@ -662,7 +724,12 @@ def _log_invocation(a, stage, out, code):
                # reader cannot see that from a log that keeps only the stage.
                'out_sha': hashlib.sha256(
                    (out or '').encode('utf-8')).hexdigest()[:16],
-               'out_lines': len((out or '').splitlines())}
+               'out_lines': len((out or '').splitlines()),
+               # Relative to the ledger's directory, which this row already
+               # names, so it still resolves after the work dir moves. `null`
+               # says the text was not archived -- distinct from absent, which
+               # says the row predates the archive.
+               'out_file': out_file}
         with open(p, 'a', encoding='utf-8') as fh:
             fh.write(json.dumps(row, sort_keys=True) + '\n')
         return p
@@ -1179,8 +1246,18 @@ half wrote; do not re-derive it by diffing poses.
   python3 -X utf8 py_router/copy_board.py {a.board} {_frozen}
   ... stamp (locked yes) on the refs that file names ...
   python3 -X utf8 py_placer/converge.py record --ledger {a.ledger} \\
-      --board {_frozen} --kind placement \\
-      --lever "L2 freeze: <n> refs the placement half named as decisions"
+      --board {_frozen} --kind systemic \\
+      --lever "L2 freeze: <n> refs the placement half named as decisions
+               (poses unchanged from the placement close-out; new file,
+               new content hash)"
+
+--kind systemic, NOT placement: a freeze turns no lap of the loop. Recorded as
+a placement row it entered the placement half's plateau window carrying no
+score -- so the half read as UNANSWERABLE -- and, worse, RETRACTED the
+`--exhausted placement` declaration before it, because any later row of a half
+reads as that half going back to work. Measured: a half that had declared
+itself finished three times was told to go round again, and the only way out
+was a fourth declaration that said nothing new.
 
 A later step that moves a decided pose silently undoes the placement work, and
 nothing downstream will report it -- that is why the freeze exists.
@@ -1286,8 +1363,10 @@ were handed is the last thing left to compare against.
 
 Return, and return ONLY:
   1. confirmation that each of the four paths above exists, or WHICH does not;
-  2. the three routed-board VERDICT= lines, verbatim, one per line -- the
-     ledger's own --final refuses without connectivity, drc and spec;
+  2. the PATH of every lens verdict you wrote, and the board sha each one
+     graded. Your lenses are YOUR gate while you loop; this run's --final row
+     is recorded against the board the OUTER loop ships, and a verdict taken
+     on an earlier board is history, not evidence for that row;
   3. SHAPE=<parameter|placement|floorplan>, or `none` if nothing failed;
   4. the failing nets BY NAME, not counted;
   5. anything left UNGRADED, named as unexamined rather than clean.
@@ -1716,22 +1795,57 @@ def _verdict(a):
     return doc.get('verdict'), doc, p.returncode
 
 
-def final_record_command(ledger, board, score, name):
+def final_record_command(ledger, board, score, name, verdicts):
     """The run-closing record, EXACTLY as L5 prints it.
 
     A separate function so a test can EXECUTE the printed command
-    (tests/test_converge.py substitutes the placeholders and runs it). The D1
-    finding: this stage printed a command its own converge refused as written
-    -- no --lens slots at all, and cmd_record's FAIL-lens gate then took only
-    the numeric stop vocabulary, so the STUCK/BUDGET paths (where a FAIL lens
-    is the normal case) were refused on the interpolated verdict name.
+    (tests/test_converge.py runs it). The D1 finding: this stage printed a
+    command its own converge refused as written -- no --lens slots at all, and
+    cmd_record's FAIL-lens gate then took only the numeric stop vocabulary, so
+    the STUCK/BUDGET paths (where a FAIL lens is the normal case) were refused
+    on the interpolated verdict name.
+
+    BY PATH, not by placeholder (#904). The slots used to read `<the spec
+    VERDICT= line, verbatim>`, which asks an executor to retype a line from a
+    reply -- and a retyped line is a claim about the run where the row could
+    carry a claim about a file. `--lens-file` reads the verifier's own file and
+    stores its path and sha256 in the row, so the entry says WHICH artifact it
+    is quoting. converge refuses a bare --lens on a close-out for exactly this
+    reason, so the placeholder form is no longer even accepted.
+
+    `verdicts` is the {lens: path} map from `_paths`; the defaults keep this
+    callable from a test that has no args object.
+
+    NO tee_cmd prefix here, deliberately: the L5 text wraps this command, and
+    the wrapping is prose about instrumentation rather than part of the record.
+    tests/test_converge.py asserts `toks[0] == 'python3'` and
+    `toks[3] == 'py_placer/converge.py'` -- an assertion worth keeping, because
+    it is what catches this command drifting into something converge refuses.
     """
+    # REQUIRED, with no default. A `.get(..., 'wk/verdict_spec.txt')` fallback
+    # would let a caller that forgot the map print paths that are neither in
+    # the ledger's directory nor cycle-suffixed -- the two properties the map
+    # exists for -- and print them SILENTLY, which is worse than a crash. Every
+    # key must be present for the same reason.
+    missing = [k for k in ('verdict_connectivity.txt', 'verdict_drc.txt',
+                           'verdict_spec.txt') if not (verdicts or {}).get(k)]
+    if missing:
+        raise ValueError(
+            f'final_record_command needs the verdict paths from _paths(); '
+            f'missing {missing}. Without them this prints a command whose '
+            f'--lens-file slots point outside the run.')
+    slots = ''.join(f"      --lens-file {verdicts[f'verdict_{lens}.txt']} \\\n"
+                    for lens in ('connectivity', 'drc', 'spec'))
     return (
         f'python3 -X utf8 py_placer/converge.py record --ledger {ledger} --board {board} \\\n'
         f'      --kind completion --final --stop-condition "{name}" \\\n'
-        f"      --lens '<the connectivity VERDICT= line, verbatim>' \\\n"
-        f"      --lens '<the drc VERDICT= line, verbatim>' \\\n"
-        f"      --lens '<the spec VERDICT= line, verbatim>' \\\n"
+        + slots +
+        # A --lever, which this command has never carried. Without one the
+        # close-out row has `lever: null`, and every consumer that renders a
+        # lap -- the film's caption, the GUI's stage label, the watcher's
+        # rejected-lap line -- printed a blank or a literal "?" for the row
+        # that ends the run.
+        f'      --lever "L5 close-out: {name}" \\\n'
         f'      --score-file {score} --argv <the command that produced this board>')
 
 
@@ -1832,14 +1946,32 @@ def l5(a):
         _x = _cross_check(a, name, _peek_close(a))
         if _x:
             return _x
-        halves = ', '.join(doc.get('improving') or ['a half'])
+        # SAY WHICH OF THE TWO IT IS. This line asserted "is still improving"
+        # about every half that was not flat, including one whose plateau was
+        # NOT ANSWERABLE -- so a half that had recorded `--exhausted placement`
+        # three times was told, in the headline, that it was getting better.
+        # converge publishes the per-half `why` and has since it was written;
+        # nothing here read it.
+        _imp = doc.get('improving') or []
+        _una = doc.get('unanswerable') or []
+        if _imp and _una:
+            _head = (f'{", ".join(_imp)} is still improving, and whether '
+                     f'{", ".join(_una)} plateaued is NOT ANSWERABLE')
+        elif _imp:
+            _head = f'{", ".join(_imp)} is still improving'
+        elif _una:
+            _head = (f'whether {", ".join(_una)} plateaued is NOT ANSWERABLE '
+                     f'-- which is not the same as "it is still improving"')
+        else:
+            _head = 'a half has not answered yet'
         return f'''<stage_instructions stage="L5" name="not done yet" of="5">
-The loop is NOT over: {halves} is still improving.
+The loop is NOT over: {_head}.
 
 {why}
 
-Go round again. A board that merely routes is the floor -- keep pulling levers
-until neither half can improve either key.
+Go round again, or make the unanswered half answerable. A board that merely
+routes is the floor -- keep pulling levers until neither half can improve
+either key.
 
   placement still improving -> --stage L1 --board {a.board} --ledger {a.ledger}
   routing still improving   -> the lever is pulled INSIDE the routing half
@@ -1863,13 +1995,20 @@ tell a finished run from a stalled one.
     if _refusal:
         return _refusal
 
-    verdicts = {
+    headline = {
         'DONE-EXHAUSTED': 'the board is done, and measured to be done',
         'STUCK': 'stopping is legitimate; calling this finished is not',
         'BUDGET': 'the budget ended this run, not the board',
     }
+    # NOT named `verdicts`: that is the name `final_record_command` takes for
+    # the {artifact: path} map, and a local shadowing it here would hand the
+    # prose dict over as paths. The parameter is required and every key is
+    # checked, so that now raises rather than degrading -- but the name is
+    # still the trap, so it does not exist.
+    _cyc, P = _paths(a)
+    work = _work(a)
     return f'''<stage_instructions stage="L5" name="close out: {name}" of="5">
-{verdicts.get(name, name)}.
+{headline.get(name, name)}.
 
 {why}
 
@@ -1890,16 +2029,6 @@ loosens, so without the original project there is nothing left to compare to.
 
 Connectivity is orthogonal to DRC: a DRC-clean board can be entirely
 disconnected, because isolated copper has no clearance conflicts.
-
-Close the ledger with the stop condition NAMED and the three routed-board
-lenses ATTACHED -- converge refuses --final without them, deliberately. The
-VERDICT= lines come from the routed-board lens verifiers
-(references/verifier-prompts.md; the routing half dispatches them at its
-close-out) -- paste each line verbatim, FAIL included. A FAIL is compatible
-with STUCK and BUDGET; it is only DONE-EXHAUSTED that no failing lens may
-sit beside.
-
-  {final_record_command(a.ledger, a.board, a.score, name)}
 
 Then render the run. It is the only artifact that shows HOW the board got here,
 and because both halves recorded into one ledger it is ONE film, not two:
@@ -1927,31 +2056,111 @@ numbers in the report. Two reasons they are not optional:
     a single scalar picks one and hides the other, and a report built on the
     flattering one is the failure this stage exists to prevent.
 
-Report, per half, the number and the instrument beside it; say how many times
-the loop turned and why each turn happened; and name anything UNEXAMINED rather
-than reporting it clean. A chain that re-entered placement twice is not a
-failure -- an unexplained one is.
+Now VERIFY, BEFORE the ledger records what this run concluded. The verdict is an
+INPUT to the final entry, not a footnote on it: this ledger is append-only and
+nothing reopens it, so a close-out written first can only be corrected by
+appending a second one -- and a ledger carrying two answers to one question has
+recorded a disagreement, not a verdict.
 
 <subagent_prompt agent="claude" description="verify the finished board">
 Verify this board end to end, independently.
 
   board:  {a.board}
   ledger: {a.ledger}
+  score:  {a.score}
 
 Read .claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md and apply
-its routed-board lenses, then check the PLACEMENT half too: the copper-free
-gate cannot be re-run on a routed board, so verify it from the ledger's
-recorded placement close-out and confirm the poses still match the board.
+its three ROUTED-BOARD lenses -- connectivity, drc, spec -- and then its
+close-out boundary verification: walk the whole ledger for monotone timestamps
+and for claims that trace to artifacts, and check the PLACEMENT half from the
+ledger's recorded placement close-out, confirming the poses still match this
+board. The copper-free gate cannot be re-run on a routed board; the record is
+what is left to check it against.
+
+WRITE ONE FILE PER LENS BEFORE YOU ANSWER, each holding that verifier's
+VERDICT= line as its FIRST line and nothing above it:
+
+  {P['verdict_connectivity.txt']}
+  {P['verdict_drc.txt']}
+  {P['verdict_spec.txt']}
+  {P['verdict_record.txt']}
+
+The reply is the delivery channel; the FILE is what the next command reads, by
+path and by sha256. `spec` is ONE verdict over impedance, floorplan, length and
+net widths -- report all four, and report any of them nothing measured as
+UNGRADED rather than as passing. The fourth file is the boundary verification
+and is NOT a lens: its line spells `check=<1-5>`, converge refuses that as a
+lens verdict on purpose, and it is cited in the report instead.
 
 Re-derive every number yourself. Do not trust the report.
-Answer with a line beginning VERDICT= and nothing above it.
+Answer with those four VERDICT= lines, one per line, and nothing above them.
 </subagent_prompt>
+
+Wait for those files. The command below READS them; it does not take a line you
+retype from the reply, and converge refuses a close-out lens that has no file
+behind it.
+
+Close the ledger with the stop condition NAMED and the three routed-board
+lenses ATTACHED -- converge refuses --final without them, deliberately. Attach
+them BY PATH: --lens-file reads each file's first VERDICT= line and stores that
+file's sha256 in the row, so the entry says which artifact it is quoting and a
+later reader can open the same bytes. A line pasted from a reply is a claim
+about the run; a line read from the file the verifier wrote is a claim about a
+file. A FAIL is compatible with STUCK and BUDGET; it is only DONE-EXHAUSTED
+that no failing lens may sit beside -- and if the verifier above returned one,
+this row records what it returned, not what this stage expected.
+
+Wrap it in tee_cmd. converge prints JSON on stdout in its record, verdict and
+status modes, so it installs no `CMD:` banner and never can -- a banner line
+would corrupt the document its own caller parses. The cheat watcher reads each
+tool's argv off those banners, so an unwrapped converge call is invisible to it,
+and the run-closing record is the call least able to afford being unwitnessed.
+
+  python3 -X utf8 tests/stress/tee_cmd.py --workdir {work} final_record -- \\
+      {final_record_command(a.ledger, a.board, a.score, name, P)}
+
+Then, and only then, write the DONE marker:
+
+  echo done > {work}/DONE
+
+DONE means THE COPPER IS FROZEN, not that the run is over. `run_watch.py cheats`
+blocks on this file, runs the fence and provenance audits when it appears, and
+then exits -- so a marker written early declares a run finished while its own
+auditors have not started, and one written before the row above claims a
+close-out that is not in the ledger. Cite nothing in it that is not already on
+disk.
+
+Report LAST, so the report can carry the two verdicts that only exist after
+DONE: the fence audit's and the provenance audit's, each quoted with its exit
+code. That makes the report the one artifact the cheat watcher cannot audit --
+it has exited by then -- which is exactly why it quotes those two verbatim
+instead of summarising them.
+
+Report, per half, the number and the instrument beside it; say how many times
+the loop turned and why each turn happened; and name anything UNEXAMINED rather
+than reporting it clean. A chain that re-entered placement twice is not a
+failure -- an unexplained one is.
+
+Name every WAIVER this run spent, with the flag, the token and the reason --
+--accept-residue, --accept-unclosed, --accept-congestion,
+--accept-incommensurable, --waive -- or the word `none`. Each of those overrode
+a gate that refused, and a report that does not list them is a report about a
+run that looks cleaner than it was.
+
+Report the run's COST beside its result: one row per agent with its reported
+subagent_tokens and tool uses, and the wall_s total from cmd_timing.jsonl. It is
+transcription, not measurement, and it is the only artifact that tells the next
+run where the window went.
 </stage_instructions>'''
 
 
-#: The four measurements L2 reads out of the placement close-out. It is also
-#: the SHAPE TEST -- these four exist in `check_assembly.py`'s JSON and in no
+#: The five measurements L2 reads out of the placement close-out. It is also
+#: the SHAPE TEST -- these five exist in `check_assembly.py`'s JSON and in no
 #: other report this chain produces -- and the vocabulary of --accept-residue.
+#: (It said "four" while holding five for as long as `oob_pad_count` has been
+#: in it. A waivers line copied from the comment rather than from the tuple
+#: omits `verdict`, which is the one that decides whether the half closed at
+#: all. `tests/test_904_closeout_order.py` now compares the two.)
 L2_CHECKS = ('buildable', 'verdict', 'locked_contacts', 'blocking',
              'oob_pad_count')
 
@@ -1984,7 +2193,8 @@ CLOSE_VERDICTS = ('DONE', 'INCOMPLETE', 'UNSOUND')
 #: ROUTING check -- the run-10 compounding hazard rebuilt across gates instead
 #: of within one. `shape` and `binding` are absent on purpose: a malformed or
 #: mis-bound document is the wrong document, and there is nothing to accept.
-CLOSE_CHECKS = ('instruments', 'fab_floors', 'ungraded', 'agreement')
+CLOSE_CHECKS = ('instruments', 'fab_floors', 'ungraded', 'agreement',
+                'verifier')
 
 
 def _accept_close(a, check: str) -> bool:
@@ -2024,8 +2234,6 @@ def _cross_check(a, name, doc):
         INCOMPLETE or UNSOUND;
       * converge's DONE-EXHAUSTED against a close-out that is not DONE.
     """
-    if _accept_close(a, 'agreement'):
-        return None
     rows = _ledger_rows(getattr(a, 'ledger', None))
     # SUPERSESSION IS PER LENS. The ledger is append-only, so a run that wrote
     # a wrong close-out and then wrote the correction has both on file, and
@@ -2083,6 +2291,52 @@ def _cross_check(a, name, doc):
         pairs.append(('converge verdict',
                       'DONE-EXHAUSTED (blocking == 0, and a plateau)',
                       f'check_complete: {_cv} -- {doc.get("reason", "")}'))
+
+    # A FOURTH pair, opt-in: the verifier's file on disk against the live claim
+    # in the ledger. verifier-prompts.md has required that durable copy since
+    # run 23 and nothing ever opened it, so a row could quote a verdict the
+    # file contradicts -- or quote one the verifier never gave.
+    #
+    # Its own bucket and its own waiver token. Under `agreement` a waiver
+    # granted for a spurious check_complete disagreement would silently waive
+    # this too, which is the compounding hazard --accept-residue and
+    # --accept-unclosed were split apart for.
+    vpairs = []
+    for _p in (getattr(a, 'verifier_verdict', None) or []):
+        try:
+            sys.path.insert(0, ROOT)
+            from converge import lens_name, read_lens_file
+            _line, _no = read_lens_file(_p)
+        except Exception as _e:                             # noqa: BLE001
+            vpairs.append((f'--verifier-verdict {_p}',
+                           f'unreadable: {type(_e).__name__}: {_e}',
+                           'a file you named as evidence must be openable'))
+            continue
+        _ln = lens_name(_line)
+        _fail = _line.strip().startswith('VERDICT=FAIL')
+        if not _ln:
+            vpairs.append((f'--verifier-verdict {_p}', _line,
+                           'not a lens verdict -- a boundary check spells '
+                           '`check=<1-5>` and belongs in the report'))
+            continue
+        if _ln not in live:
+            vpairs.append((
+                f'--verifier-verdict {_p} (line {_no})', _line,
+                f'the ledger: NO --final row says anything about lens '
+                f'{_ln} -- the verifier ran and its verdict never reached '
+                f'the record'))
+            continue
+        _r, _raw = live[_ln]
+        if _fail != _raw.strip().startswith('VERDICT=FAIL'):
+            vpairs.append((
+                f'--verifier-verdict {_p} (line {_no})', _line,
+                f'ledger iteration {_r.get("iteration")} (--final): {_raw}'))
+    # Per-bucket, never one blanket early return.
+    if _accept_close(a, 'agreement'):
+        pairs = []
+    if _accept_close(a, 'verifier'):
+        vpairs = []
+    pairs = pairs + vpairs
     if not pairs:
         return None
     body = '\n\n'.join(f'  {who}\n    claims : {claim}\n    against: {other}'
@@ -2100,8 +2354,10 @@ def _cross_check(a, name, doc):
         f'to compare ONLY on the DONE path, so in the run that shipped a false '
         f'`PASS:lens=connectivity` on 32 unrouted nets it never ran at all.\n\n'
         f'Fix what the close-out names and re-score, re-dispatch the lens that '
-        f'disagrees, or --accept-unclosed agreement and say in the report which '
-        f'instrument you are overriding and why.')
+        f'disagrees, or --accept-unclosed agreement (or `verifier`, for a '
+        f'--verifier-verdict pair -- they are separate tokens so that waiving '
+        f'one does not waive the other) and say in the report which instrument '
+        f'you are overriding and why.')
 
 
 def _close_out(a, name):
@@ -2357,6 +2613,19 @@ def _args(argv=None):
                          'one shared flag would let a waiver granted for '
                          'placement silently waive a routing check. A bare '
                          '--accept-unclosed is refused.')
+    ap.add_argument('--verifier-verdict', action='append', default=None,
+                    metavar='PATH',
+                    help='a file the end-to-end verifier wrote its VERDICT= '
+                         'line to (verdict_<lens>.txt beside the ledger). '
+                         'Repeatable, one per lens. L5 compares each against '
+                         'the LIVE lens claim in the ledger --final row(s) and '
+                         'refuses a disagreement -- including a verdict that '
+                         'never reached the ledger at all, which is what a '
+                         'lost reply looks like. Not required: demanding it '
+                         'would refuse every run recorded before it existed; '
+                         'the L5 text is what makes it habitual. Waived by '
+                         '--accept-unclosed verifier, which is deliberately '
+                         'NOT the `agreement` token.')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--dump-all', action='store_true')
     ap.add_argument('--self-test', action='store_true')
@@ -3561,12 +3830,35 @@ def _self_test():
 
         # ------------------------------------------- run-17 audit fixes (D-series)
         # D1: the run-closing record carries the three lens slots. The full
-        # runs-as-printed pin (substitute placeholders, EXECUTE the command)
-        # lives in tests/test_converge.py; this is the cheap structural half.
-        _frc = final_record_command('l.jsonl', 'b.kicad_pcb', 's.json', 'STUCK')
-        want(_frc.count('--lens') == 3 and 'connectivity' in _frc
-             and 'drc' in _frc and 'spec' in _frc,
-             'D1: the printed --final command carries three --lens slots')
+        # runs-as-printed pin (write the files, EXECUTE the command) lives in
+        # tests/test_converge.py; this is the cheap structural half.
+        #
+        # `--lens-file`, and `'--lens ' not in`, because the obvious pin is
+        # VACUOUS after #904: `'--lens-file'.count('--lens') == 1`, so the old
+        # `_frc.count('--lens') == 3` stays green while measuring nothing --
+        # the exact failure the "do not weaken" heading above these pins is
+        # about. A bare --lens is also now REFUSED by converge on a close-out,
+        # so a printed command carrying one is a command its own tool rejects.
+        _vp = {f'verdict_{k}.txt': f'wk/verdict_{k}.txt'
+               for k in ('connectivity', 'drc', 'spec')}
+        _frc = final_record_command('l.jsonl', 'b.kicad_pcb', 's.json', 'STUCK',
+                                    _vp)
+        want(_frc.count('--lens-file') == 3 and '--lens ' not in _frc
+             and 'connectivity' in _frc and 'drc' in _frc and 'spec' in _frc,
+             'D1: the printed --final command carries three --lens-file slots '
+             'and no bare --lens')
+        want('--lever' in _frc,
+             'D1b: ...and a --lever, so the close-out row is not the one row '
+             'every lap-renderer prints as a blank')
+        try:
+            final_record_command('l.jsonl', 'b.kicad_pcb', 's.json', 'STUCK',
+                                 {})
+            _no_paths = False
+        except ValueError:
+            _no_paths = True
+        want(_no_paths,
+             'D1c: it REFUSES to print a command with no verdict paths, rather '
+             'than falling back to ones outside the run')
 
         # D4: the verdict subprocess must read the SAME ledger the caller
         # named, from any cwd. converge treats a MISSING ledger exactly like

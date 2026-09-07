@@ -938,7 +938,7 @@ def test_every_committed_baseline_is_declared():
 #: Declared with the reason and held in BOTH directions, like `_WK_DEPENDENT`
 #: above: an entry that no longer applies is as much a defect as a missing one,
 #: because a stale exemption is indistinguishable from a gate that still covers
-#: the file. Empty today -- all 37 resolve -- and it exists so that a battery
+#: the file. Empty today -- all 39 resolve -- and it exists so that a battery
 #: written in a shape the resolver has never seen fails LOUDLY here instead of
 #: being counted as "no anchors, nothing to check".
 _UNRESOLVABLE = {}
@@ -946,7 +946,7 @@ _UNRESOLVABLE = {}
 #: Every `tests/mutate_*.py` in the tree, pinned. A resolver that quietly stops
 #: finding batteries would otherwise report a clean sweep over nothing -- the
 #: exact shape of the defect #877 is about, reproduced in its own gate.
-_BATTERY_COUNT = 38
+_BATTERY_COUNT = 40
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

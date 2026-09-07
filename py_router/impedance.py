@@ -1284,7 +1284,8 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
                                          min_width: float = 0.0,
                                          coplanar_gap: float = 0.0,
                                          floor_desc: str = "--track-width; lower it to reach the target",
-                                         clamp_report: Optional[Dict[str, List[float]]] = None) -> Dict[str, float]:
+                                         clamp_report: Optional[Dict[str, List[float]]] = None,
+                                         unsolved_report: Optional[List[str]] = None) -> Dict[str, float]:
     """
     Calculate trace widths for each layer to achieve target impedance.
 
@@ -1312,6 +1313,16 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
             recorded as {layer: [solved_mm, floor_mm]} so the run summary can
             surface the clamp (#610 -- it was loud on a terminal and invisible
             in JSON_SUMMARY).
+        unsolved_report: optional LIST the caller owns; every layer that fell
+            back to ``fallback_width`` because the model could not solve it is
+            appended (#906). The return value alone cannot say this -- a
+            fallback and a genuine solve are the same kind of number, and a
+            solved width may coincide with the fallback -- so a caller deciding
+            whether an impedance was actually ACHIEVED must read this rather
+            than compare widths. "The board has a stackup" is not the same
+            question: a stackup listing copper with no adjacent dielectric, or
+            with names that do not match the routed layers, solves nothing and
+            every layer lands here.
 
     Returns:
         Dict mapping layer name to trace width in mm
@@ -1328,6 +1339,8 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
         if 'error' in result or result.get('calculated_width_mm', 0) <= 0:
             # Use fallback width if calculation fails
             layer_widths[layer_name] = fallback_width
+            if unsolved_report is not None:      # #906
+                unsolved_report.append(layer_name)
         else:
             # Apply scaling factor to match online calculators
             calculated_width = result['calculated_width_mm'] * IMPEDANCE_WIDTH_SCALE
