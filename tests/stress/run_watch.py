@@ -469,6 +469,39 @@ def _use_key(label, flag, tool, toks):
 _ARGV_KEYS = ('lever_argv', 'argv', 'cmdline')
 
 
+def _ledger_stagings(path):
+    """Re-stagings recorded in a pose-provenance ledger (#903).
+
+    A SECOND source for the restage counter, and the sounder one. The `CMD:`
+    counter beside it can only see a staging the operator teed, and neither
+    stager installs `cli_banner` -- the first stage in particular CREATES the
+    work dir, so there is nowhere to tee it to yet (run 25's journal says
+    exactly this). The log counter can therefore see the second staging and
+    not the first, and `stages > 1` never fires.
+
+    A ledger row is the harder evidence: the staging write of an ALREADY-armed
+    dir records itself, so every row here is a re-stage by construction (the
+    first stage arms afterwards and writes none). One row is already a finding.
+    """
+    n = 0
+    try:
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and str(r.get('lever') or '') in (
+                        'stage_unaided.py', 'stage_blind.py'):
+                    n += 1
+    except OSError:
+        return 0
+    return n
+
+
 def _scan_ledger_argv(path, seen, rel):
     """Cheat flags in a ledger row's `lever_argv` -- the second source of truth.
 
@@ -655,6 +688,7 @@ def watch_cheats(workdir, truthdir, done_path, poll):
         #     not install cli_banner ("converge's stdout is a JSON API"), so its
         #     invocations reach us only this way.
         stages = 0
+        led_stages = 0
         unanchored = 0
         for path in _walk(workdir):
             if not path.endswith(('.log', '.txt', '.jsonl')):
@@ -676,7 +710,14 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                         unanchored += 1
                     continue
                 tool, toks = parsed
-                if any(t.endswith('stage_blind.py') for t in toks):
+                # BOTH stagers (#903). This counter matched `stage_blind.py`
+                # alone, which was complete only while `stage_unaided.py`
+                # could not restage at all -- nothing armed a regime, so a
+                # second unaided stage was neither permitted nor meaningful.
+                # It is permitted now, so counting one stager and not the
+                # other is a blind spot this change would otherwise open.
+                if any(t.endswith(('stage_blind.py', 'stage_unaided.py'))
+                       for t in toks):
                     stages += 1
                 for label, flag, why in _cheat_hits(tool, toks):
                     key = _use_key(label, flag, tool, toks)
@@ -688,6 +729,11 @@ def watch_cheats(workdir, truthdir, done_path, poll):
             if path.endswith('.jsonl'):
                 for out in _scan_ledger_argv(path, seen, rel):
                     print(out, flush=True)
+                # A recorded re-stage counts as a staging invocation the log
+                # may never have carried (#903). Counted SEPARATELY so the
+                # report can name which source saw it -- "the log shows 2"
+                # would be false on a dir whose evidence is a ledger row.
+                led_stages += _ledger_stagings(path)
         # Key on the FACT, not the count. The running count was in the key,
         # so every increment was a fresh event: the line promised "counted,
         # not reported individually" and then reported every increment.
@@ -700,11 +746,21 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                   f'0 while a run is clearly using tools, a tool has stopped '
                   f'printing its CMD: banner and this watcher has gone blind.',
                   flush=True)
-        if stages > 1 and ('restage',) not in seen:
+        # Either source is enough, and each counts a different thing: a
+        # teed `CMD:` line is one staging invocation, while a ledger row is
+        # one RE-staging by construction (the first stage arms afterwards and
+        # records nothing). So the thresholds differ, and the report names
+        # which source saw it rather than claiming the log did.
+        if (stages > 1 or led_stages) and ('restage',) not in seen:
             seen.add(('restage',))
-            print(f'RESTAGE the log shows {stages} staging invocations -- a '
-                  f'second draw is a different (possibly easier) damage, and '
-                  f'the run must say which one it reports', flush=True)
+            _src = (f'the log shows {stages} staging invocation(s)'
+                    if stages > 1 else '')
+            _lsrc = (f'a pose-provenance ledger records {led_stages} '
+                     f're-staging(s)' if led_stages else '')
+            print(f'RESTAGE {" and ".join(x for x in (_src, _lsrc) if x)} -- '
+                  f'a second staging is a different subject (a re-drawn, '
+                  f'possibly easier damage, or a re-piled board), and the run '
+                  f'must say which one it reports', flush=True)
 
         # 4. done: run the two audits that check the board rather than the log.
         if os.path.exists(done_path):
@@ -766,6 +822,25 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                     print('PROVENANCE exit 4 -- a pose in the delivered board '
                           'traces to no registered lever, i.e. something '
                           'moved parts that was not the engine', flush=True)
+                if r.returncode == 5:
+                    # NAMED, not graded. Before #903 nothing armed a regime,
+                    # so 5 was the only reachable answer and saying anything
+                    # about it would have been noise. Both stagers arm now, so
+                    # a 5 on a staged work dir has three causes worth telling
+                    # apart -- and it stays exit 0 here, because
+                    # provenance_audit's own docstring makes 5 load-bearing:
+                    # "I cannot prove it" and "I proved it false" must be
+                    # different numbers. Grading it would also fail every
+                    # work dir staged before this change.
+                    print('PROVENANCE exit 5 -- UNPROVEN. Since #903 both '
+                          'stagers ARM the regime, so a dir they staged '
+                          'should not read 5: either this dir was staged by '
+                          'neither, or it was MOVED after staging (the '
+                          'manifest names an absolute path), or no delivered '
+                          'board sits beside the staged one (pass '
+                          '--delivered). Not a violation -- but the claim '
+                          '"the engine placed this board" is unproven, so it '
+                          'may not be made', flush=True)
             except Exception as e:                     # noqa: BLE001
                 print(f'PROVENANCE could not run ({type(e).__name__}: {e})',
                       flush=True)
