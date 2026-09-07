@@ -39,6 +39,7 @@ damaged board, which is how a run gets fenced on paper and open in fact.
 Exit codes: 0 staged, 2 usage/IO, 3 the board cannot be staged (no outline).
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -260,14 +261,27 @@ def stage(src, out_board, truth_dir=None, mechanical_out=None):
     # Read BEFORE the staging write, or the count includes this call's own
     # row: under an already-armed dir `write_placed_output` records one, and
     # "restaged over 1 row" would then be true of a dir nothing had restaged.
-    from placement.provenance import (LEDGER_NAME, read_ledger, regime_for,
-                                      start_regime)
+    from placement import provenance as _PV
     _wd = os.path.dirname(os.path.abspath(out_board))
-    _prior = len(read_ledger(_wd)) if os.path.isfile(
-        os.path.join(_wd, LEDGER_NAME)) else 0
-    _outer = regime_for(out_board)
+    _prior = len(_PV.read_ledger(_wd)) if os.path.isfile(
+        os.path.join(_wd, _PV.LEDGER_NAME)) else 0
+    _outer = _PV.regime_for(out_board)
 
-    write_placed_output(src, out_board, placements)
+    # DECLARE HERE, not only in `__main__`. A re-stage into an already-armed
+    # dir goes through the pose funnel with the regime in force, so the write
+    # needs an active lever -- and a LIBRARY caller of `stage()` has none.
+    # Measured while writing this file's own #903 block: the second
+    # `SU.stage(...)` into an armed dir raised "poses were written with no
+    # registered lever ... caller was stage_unaided.py:270 in stage", i.e. the
+    # stager refused by the guard it installed. Declaring in `__main__` alone
+    # is the same "it works if you call it right" this change exists to end.
+    #
+    # Only when nothing else has declared: the CLI's own declaration carries
+    # `sys.argv`, which is what run_watch reads out of the ledger, and
+    # innermost-wins would replace it with an argv-less one.
+    with (contextlib.nullcontext() if _PV.active_lever() is not None
+          else _PV.declare_lever('stage_unaided.py')):
+        write_placed_output(src, out_board, placements)
     copy_siblings(src, out_board)
     project = sanitize_staged_project(
         out_board, os.path.splitext(os.path.basename(src))[0])
@@ -306,8 +320,8 @@ def stage(src, out_board, truth_dir=None, mechanical_out=None):
     # overwritten manifest: those older rows still populate `claimed`, so a
     # previous run's claim can cover a ref this one wrote, and an undisclosed
     # count is the only thing that would make that invisible.
-    start_regime(_wd, out_board, mechanical=os.path.abspath(mech),
-                 restaged_over_rows=_prior)
+    _PV.start_regime(_wd, out_board, mechanical=os.path.abspath(mech),
+                     restaged_over_rows=_prior)
     if _outer is not None and os.path.abspath(_outer) != _wd:
         # SAY IT, do not refuse. This dir sits under an already-armed one, so
         # the pose write above was governed by the OUTER regime and its ledger

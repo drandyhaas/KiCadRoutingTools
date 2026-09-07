@@ -321,6 +321,103 @@ except PV.UnaidedViolation:
           "the board must not exist -- refusing means not writing")
 
 # --------------------------------------------------------------------------
+# THE STAGER ARMS IT (#903)
+#
+# Everything above proves the instrument works when a caller arms a regime by
+# hand. Nothing in production ever did: `start_regime` had no caller outside
+# this file, so `provenance_audit` answered "this work dir was not staged for
+# an unaided run" on every real run, `record_write` returned None, and the
+# ledger was never written. The gate that refuses an undeclared pose writer
+# was installed and never armed -- run 25's hand rotation reached the board
+# and was reported by a watcher five hours later.
+#
+# This block is the rung above the one at "ARMED, END TO END": not "a CLI runs
+# inside an armed regime" but "the STAGER arms it", which is the half that was
+# missing.
+# --------------------------------------------------------------------------
+import json as _json                                            # noqa: E402
+import stage_unaided as SU                                      # noqa: E402
+
+_d903 = tempfile.mkdtemp()
+_wd903 = os.path.join(_d903, 'wk')
+os.makedirs(_wd903)
+_out903 = os.path.join(_wd903, 'board.kicad_pcb')
+SU.stage(BOARD, _out903, os.path.join(_d903, 'truth'))
+
+check("stage_unaided ARMS the regime -- the manifest exists",
+      os.path.isfile(os.path.join(_wd903, PV.REGIME_NAME)), _wd903)
+check("and regime_for finds it from a board in the work dir",
+      PV.regime_for(_out903) == _wd903, str(PV.regime_for(_out903)))
+
+_m903 = _json.load(open(os.path.join(_wd903, PV.REGIME_NAME), encoding='utf-8'))
+check("the manifest names the STAGED board, not the source",
+      os.path.abspath(_m903['staged_board']) == os.path.abspath(_out903),
+      str(_m903.get('staged_board')))
+# Armed AFTER the board and its siblings are final. `copy_siblings` and
+# `sanitize_staged_project` run between the pose write and this call; if the
+# manifest were written first its hash would name bytes that no longer exist,
+# and NOTHING would report it -- provenance_audit only checks the staged board
+# is readable, never that it is the one the manifest describes.
+check("its hash is the hash of the file ON DISK",
+      _m903['staged_sha256'] == PV.sha256_file(_out903),
+      _m903['staged_sha256'][:16])
+check("a stager is not a whitelist: stage_unaided is IN LEVER_REGISTRY, so a "
+      "RESTAGE is not refused by the guard the stager itself installed",
+      'stage_unaided.py' in PV.LEVER_REGISTRY, str(PV.LEVER_REGISTRY))
+
+# THE POINT. This is run 25's `pose_assist.py rotate` -- a hand script that
+# imports the writer directly. Before #903 it landed.
+_victim903 = os.path.join(_wd903, 'hand.kicad_pcb')
+try:
+    write_placed_output(_out903, _victim903, some_moves(_out903))
+    check("an undeclared pose write into a stage_unaided work dir RAISES",
+          False, "it wrote anyway -- the stager armed nothing")
+except PV.UnaidedViolation as _e903:
+    check("an undeclared pose write into a stage_unaided work dir RAISES",
+          'no registered lever' in str(_e903), str(_e903)[:140])
+    check("...and nothing landed -- refusing means not writing",
+          not os.path.exists(_victim903), _victim903)
+
+# The verdict #903 is about is gone. What remains is an HONEST unproven: this
+# dir holds a staged board and nothing else yet, which is a different
+# statement and a different reason.
+_del903 = os.path.join(_wd903, 'delivered.kicad_pcb')
+_code903, _doc903 = PA.audit(_wd903)
+check("the 'not staged for an unaided run' verdict is GONE",
+      'not staged for an unaided run' not in (_doc903.get('reason') or ''),
+      f"{_code903} {_doc903.get('reason')}")
+
+# ...and a lever writing into the dir the STAGER armed audits CLEAN, with the
+# poses really moved rather than a vacuous zero.
+with PV.declare_lever('place_optimize.py', ['place_optimize.py', _out903]):
+    write_placed_output(_out903, _del903, some_moves(_out903))
+check("the ledger the STAGER armed is what a lever then writes into",
+      os.path.isfile(os.path.join(_wd903, PV.LEDGER_NAME)), _wd903)
+_code903, _doc903 = PA.audit(_wd903, _del903)
+check("a lever run in a stage_unaided work dir audits CLEAN",
+      _code903 == PA.CLEAN, f"{_code903} {_doc903.get('verdict')} "
+      f"{_doc903.get('reason')}")
+check("and it really moved something, so CLEAN is not vacuous",
+      _doc903['moved'] > 0 and _doc903['claimed'] >= _doc903['moved'],
+      f"moved {_doc903['moved']} claimed {_doc903['claimed']}")
+
+# `restaged_over_rows` is read BEFORE the staging write. Under an armed dir
+# that write records a row of its own, so a count taken afterwards would say
+# "restaged over 1 row" about a dir nothing had restaged.
+_pre903 = len(PV.read_ledger(_wd903))
+SU.stage(BOARD, _out903, os.path.join(_d903, 'truth'))
+_m2903 = _json.load(open(os.path.join(_wd903, PV.REGIME_NAME), encoding='utf-8'))
+check("a RESTAGE into an armed dir is permitted, not refused",
+      os.path.isfile(_out903), _out903)
+check("restaged_over_rows counts the rows that PREDATE the restage, never "
+      "the restage's own", _m2903['restaged_over_rows'] == _pre903,
+      f"{_m2903['restaged_over_rows']} vs {_pre903} before")
+check("and the restage records itself under its own lever",
+      any(r.get('lever') == 'stage_unaided.py'
+          for r in PV.read_ledger(_wd903)),
+      str([r.get('lever') for r in PV.read_ledger(_wd903)]))
+
+# --------------------------------------------------------------------------
 # A CLAIM IS ONLY GOOD FOR THE POSE IT CLAIMED
 #
 # `claimed` used to be keyed on the REF. A real run legitimately moves most of

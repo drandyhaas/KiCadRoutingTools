@@ -74,6 +74,7 @@ sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
 
 from kicad_parser import parse_kicad_pcb  # noqa: E402
 import placement.perturb as P  # noqa: E402
+from placement import provenance as _PV  # noqa: E402
 
 #: Fraction of the board's smaller span a single draw may ask for. The low end
 #: has to be material (a 1 mm nudge on an 80 mm board is not a recovery test)
@@ -335,10 +336,18 @@ def main(src, workdir, truthdir, kinds=None):
             # pose for pose -- and `board.perturb.json` (it embeds
             # `original_poses`) beside the damaged board, INSIDE the work dir
             # the run then reads.
-            r = P.perturb(src, out, kind=k, dose_mm=d, seed=s,
-                          write_record=True,
-                          control_out=os.path.join(
-                              truthdir, 'perturbed.control.kicad_pcb'))
+            # DECLARE, for the same reason stage_unaided.stage() does (#903):
+            # a re-stage into an already-armed dir goes through the pose
+            # funnel with the regime in force, and a LIBRARY caller of this
+            # `main()` has no active lever -- only `__main__` declares one.
+            # Only when nothing else has, so the CLI's argv-bearing
+            # declaration is not replaced by an argv-less inner one.
+            with (contextlib.nullcontext() if _PV.active_lever() is not None
+                  else _PV.declare_lever('stage_blind.py')):
+                r = P.perturb(src, out, kind=k, dose_mm=d, seed=s,
+                              write_record=True,
+                              control_out=os.path.join(
+                                  truthdir, 'perturbed.control.kicad_pcb'))
             applied = float(r.get('dose_mm_applied') or 0.0)
             need = max(MIN_MATERIAL_MM, MATERIAL_FRAC * d)
             landed = r.get('status') == 'ok' and applied >= need
@@ -391,9 +400,8 @@ def main(src, workdir, truthdir, kinds=None):
     # ARE the fence. Both belong in the truth dir, which is where `draw.json`
     # below already puts them. A manifest lives inside the work dir, so
     # anything passed here is inside the fence.
-    from placement.provenance import REGIME_NAME, start_regime
-    start_regime(workdir, out)
-    print(f'  regime armed: {os.path.join(workdir, REGIME_NAME)} -- an '
+    _PV.start_regime(workdir, out)
+    print(f'  regime armed: {os.path.join(workdir, _PV.REGIME_NAME)} -- an '
           f'undeclared pose write in this dir now RAISES')
 
     with open(os.path.join(truthdir, 'draw.json'), 'w', encoding='utf-8') as f:
