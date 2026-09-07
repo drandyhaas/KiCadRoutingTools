@@ -22,6 +22,7 @@ No boards and no rendering here beyond a handful of tiny PIL images, so it runs
 in a second on any machine.
 """
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -170,6 +171,52 @@ def test_a_seed_board_older_than_the_run_clamps_to_the_run_start():
     want(anc[0].basis == 'pre-run', 'the basis names the situation', anc[0].basis)
     want(anc[0].t == 1000.0,
          'and the instant is the run start, not the older file time', anc[0].t)
+
+
+def test_the_opening_frame_does_not_borrow_the_first_steps_basis():
+    """Frame 0 is `build_boards`' own `m.snapshot("input")`, before the loop.
+
+    No wrapped command produced it, so it has no stage, and its instant is the
+    run's start. It used to return the FIRST ANCHOR's stage and basis, which
+    made the opening frame announce `stage P0 / mapped by mtime` about a board
+    P0 never wrote and no mtime ever witnessed -- a false provenance on the one
+    frame every viewer sees first. An approximate NUMBER would be fine here; a
+    false BASIS is not, because the basis is the frame's claim about where its
+    number came from.
+    """
+    rows = _rows([('P0', 1000, 10, 0, 'b1.kicad_pcb')])
+    # `first=2`, so frames 0 and 1 precede every mark.
+    marks = [('s1', '/w/b1.kicad_pcb', 2, 6)]
+    anc = ct.anchor_steps(marks, rows, mtimes={'/w/b1.kicad_pcb': 1005.0})
+    clock = ct.RunClock(anc, ct.totals(rows), 6)
+
+    want(anc[0].basis == 'mtime',
+         'the first STEP is still mapped by mtime -- without this the test '
+         'below proves nothing about frame 0', anc[0].basis)
+    r0 = clock.at(0)
+    want(r0.basis == 'run-start',
+         'frame 0 names its own basis rather than the step it precedes',
+         r0.basis)
+    want(r0.basis != anc[0].basis,
+         "and that basis is NOT the first anchor's -- the whole defect",
+         r0.basis)
+    want(r0.stage is None,
+         'with no stage, because no wrapped command produced this frame',
+         r0.stage)
+    want(r0.elapsed_s == 0.0 and r0.instant == 1000.0,
+         'while the instant is still the run start, which is true',
+         (r0.elapsed_s, r0.instant))
+
+    lines = ' | '.join(clock.lines(0))
+    want('the board the run started from' in lines,
+         'and the overlay says so in words rather than "unlabelled", which '
+         'would read as a broken ledger', lines)
+    want('mapped by run-start' in lines, 'the basis line carries it too', lines)
+    want(clock.at(2).basis == 'mtime' and clock.at(2).stage == 'P0',
+         'the first REAL beat is untouched',
+         (clock.at(2).basis, clock.at(2).stage))
+    want('krt:stage' not in clock.meta(0),
+         'and the PNG block omits a stage it does not have', clock.meta(0))
 
 
 # ----------------------------------------------------- counting up, in UTC
@@ -562,13 +609,20 @@ def test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain()
     sys.path.insert(0, os.path.join(ROOT, 'py_router'))
     import make_movie as MM
 
-    src = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
+    # TWO DIFFERENT boards. Copying one board twice produces a chain with no
+    # copper delta and therefore ONE frame -- the opening "input" snapshot,
+    # which belongs to no step. This test then asserted `krt:stage` on that
+    # frame, and it was green only because the opening frame used to BORROW the
+    # first anchor's stage. A chain with real steps is what the assertion below
+    # was always meant to be about.
     wd = os.path.join(tempfile.mkdtemp(), 'run')
     os.makedirs(wd)
     b1 = os.path.join(wd, 'step1.kicad_pcb')
     b2 = os.path.join(wd, 'step2.kicad_pcb')
-    shutil.copy(src, b1)
-    shutil.copy(src, b2)
+    shutil.copy(os.path.join(ROOT, 'kicad_files',
+                             'lvds_converter_dualclk.kicad_pcb'), b1)
+    shutil.copy(os.path.join(ROOT, 'kicad_files',
+                             'routed_output.kicad_pcb'), b2)
     os.utime(b1, (1000.0, 1000.0))
     os.utime(b2, (1200.0, 1200.0))
     import json
@@ -582,8 +636,11 @@ def test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain()
                         quiet=True, png_dir=png_dir)
     want(out and os.path.exists(out), 'the movie is written', out)
     frames = sorted(glob.glob(os.path.join(png_dir, '*.png')))
-    want(frames, 'and PNG frames were dumped', len(frames))
-    text = Image.open(frames[len(frames) // 2]).text
+    want(len(frames) > 1,
+         'the chain produced more than the opening snapshot -- without this '
+         'the stage assertion below is about a frame no step owns',
+         len(frames))
+    text = Image.open(frames[-1]).text
     krt = {k: v for k, v in text.items() if k.startswith('krt:')}
     want(krt, 'the frames carry the krt: timing block -- WITHOUT ASKING, '
               'because a ledger sits beside the chain', sorted(text))
@@ -591,6 +648,11 @@ def test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain()
          'read from that ledger', krt.get('krt:ledger_rows'))
     want('krt:elapsed_s' in krt and 'krt:stage' in krt,
          'with an elapsed and a stage', sorted(krt))
+    first = {k: v for k, v in Image.open(frames[0]).text.items()
+             if k.startswith('krt:')}
+    want('krt:stage' not in first and first.get('krt:clock_basis') == 'run-start',
+         'while the OPENING frame carries no stage and says run-start, '
+         'because no wrapped command produced it', sorted(first))
 
     # And the OFF switch really switches it off.
     png2 = os.path.join(wd, 'frames_off')
@@ -599,6 +661,70 @@ def test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain()
     f2 = sorted(glob.glob(os.path.join(png2, '*.png')))
     off = {k for k in Image.open(f2[len(f2) // 2]).text if k.startswith('krt:')}
     want(not off, 'timing="off" writes no timing block at all', off)
+
+
+def test_a_named_ledger_that_is_missing_is_refused_not_replaced():
+    """`--timing-ledger /typo.jsonl` must NOT quietly use a different ledger.
+
+    The auto-discovery fallback ran whenever the named path was not a file, so
+    a mistyped `--timing-ledger` stamped the movie with whatever ledger
+    happened to sit beside the chain -- another run's clock, drawn into every
+    frame, with numbers that look entirely reasonable and no way for a viewer
+    to tell. The test needs a REAL discoverable ledger present, or the silent
+    fallback would have produced no clock either and passed for free.
+    """
+    import glob
+    import json
+    import shutil
+    sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+    import make_movie as MM
+
+    src = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
+    wd = os.path.join(tempfile.mkdtemp(), 'run')
+    os.makedirs(wd)
+    b1 = os.path.join(wd, 'step1.kicad_pcb')
+    b2 = os.path.join(wd, 'step2.kicad_pcb')
+    shutil.copy(src, b1)
+    shutil.copy(src, b2)
+    os.utime(b1, (1000.0, 1000.0))
+    os.utime(b2, (1200.0, 1200.0))
+    with open(os.path.join(wd, 'cmd_timing.jsonl'), 'w', encoding='utf-8') as f:
+        for r in _rows([('P1-place', 990, 20, 0, 'step1.kicad_pcb'),
+                        ('R1-route', 1190, 20, 0, 'step2.kicad_pcb')]):
+            f.write(json.dumps(r) + '\n')
+
+    # The control: auto-discovery finds that ledger and the clock is drawn.
+    png_ok = os.path.join(wd, 'auto')
+    MM.make_movie([b1, b2], out=os.path.join(wd, 'a.gif'), size=160,
+                  quiet=True, png_dir=png_ok)
+    fa = sorted(glob.glob(os.path.join(png_ok, '*.png')))
+    got = {k for k in Image.open(fa[len(fa) // 2]).text if k.startswith('krt:')}
+    want(got, 'CONTROL: a discoverable ledger IS found, so the silent '
+              'fallback had something to fall back TO', sorted(got))
+
+    missing = os.path.join(wd, 'not_here.jsonl')
+    raised = None
+    try:
+        MM.make_movie([b1, b2], out=os.path.join(wd, 'b.gif'), size=160,
+                      quiet=True, timing=missing)
+    except FileNotFoundError as exc:
+        raised = str(exc)
+    want(raised is not None,
+         'a named ledger that is not there is REFUSED, not replaced by the '
+         'one auto-discovery would have found', raised)
+    want(raised and missing in raised,
+         'and the refusal names the path that was asked for', raised)
+
+    # The CLI turns it into an argparse error rather than a traceback.
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join(ROOT, 'py_router', 'make_movie.py'), b1, b2,
+         '-o', os.path.join(wd, 'c.gif'), '--size', '160', '--quiet',
+         '--timing-ledger', missing],
+        cwd=ROOT, capture_output=True, text=True)
+    want(r.returncode == 2, 'the CLI exits 2', r.returncode)
+    want('no such file' in r.stderr and 'Traceback' not in r.stderr,
+         'with a stated reason and no traceback', r.stderr.strip()[-200:])
 
 
 def test_a_movie_with_no_ledger_beside_it_carries_no_timing_block():
@@ -650,6 +776,8 @@ TESTS_TO_RUN = [
     test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain,
     test_a_movie_with_no_ledger_beside_it_carries_no_timing_block,
     test_clock_for_returns_none_without_a_ledger,
+    test_the_opening_frame_does_not_borrow_the_first_steps_basis,
+    test_a_named_ledger_that_is_missing_is_refused_not_replaced,
 ]
 
 

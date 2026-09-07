@@ -708,11 +708,18 @@ class RunClock(object):
                 k = j
                 break
         if k is None:
-            # Before the first mark: build_boards' own "input" snapshot, which
-            # is the run's beginning.
-            if i < (self.anchors[0].first if self.anchors else 0):
-                a0 = self.anchors[0]
-                return Reading(0.0, a0.stage, a0.basis, t.t0, False)
+            # Before the first mark: `build_boards` opens with its own
+            # `m.snapshot("input")` BEFORE the step loop, so frame 0 is always
+            # here. Its instant is the run's start, and it borrowed the first
+            # anchor's stage and basis until #887's pre-push review -- which
+            # made frame 0 announce, say, `stage R1-pour / mapped by mtime`
+            # about a board R1-pour never touched and mtime never witnessed.
+            # A number is allowed to be approximate here; a BASIS is a claim
+            # about where the number came from, and that one was false. Its own
+            # name, and no stage, because no wrapped command produced this
+            # frame.
+            if i < self.anchors[0].first:
+                return Reading(0.0, None, 'run-start', t.t0, False)
             k = len(self.anchors) - 1
         a = self.anchors[k]
         if a.t is None:
@@ -751,11 +758,15 @@ class RunClock(object):
         total = fmt_hms(t.run_s) if t and t.run_s is not None else '--'
         out = ['RUN CLOCK  +%s%s of %s'
                % (fmt_hms(r.elapsed_s), ' ~' if r.interpolated else '', total)]
-        # A `pre-run` beat has no stage BECAUSE no wrapped command produced it
-        # -- it is the board the run started from. Saying "unlabelled" there
-        # reads as a defect in the ledger rather than as the fact it is.
+        # A `pre-run` or `run-start` beat has no stage BECAUSE no wrapped
+        # command produced it -- it is the board the run started from. Saying
+        # "unlabelled" there reads as a defect in the ledger rather than as the
+        # fact it is. (The two differ in what is known: `pre-run` is a board
+        # whose mtime PREDATES the run, `run-start` is the opening snapshot,
+        # which has no board of its own at all.)
         stage = r.stage or ('the board the run started from'
-                            if (r.basis or '').startswith('pre-run')
+                            if (r.basis or '').startswith(('pre-run',
+                                                           'run-start'))
                             else 'unlabelled')
         out.append('stage  %s' % stage)
         how = 'interpolated within %s' % stage if r.interpolated else \

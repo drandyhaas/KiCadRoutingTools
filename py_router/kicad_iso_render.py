@@ -20,7 +20,7 @@ machine's KiCad. It resolves the binary through ``kicad_oracle.find_kicad_cli``
   872x672; asking 640x480 returned 616x448 -- the same 616x448 for two very
   different boards and across an 8-step yaw sweep, so the delta is deterministic
   per REQUEST, but it is not the request. Every caller must letterbox into a box
-  it chose itself. ``_REQUEST_OVERSCAN`` exists so that letterbox downscales
+  it chose itself. ``REQUEST_OVERSCAN`` exists so that letterbox downscales
   (sharp) rather than upscales (blurry).
 * **Cost is ~2-4 s at ``basic``, and CONTENTION matters more than the board.**
   Across tigard, lvds, ulx3s (225 models) and glasgow_revC (224), 3 reps each,
@@ -63,7 +63,7 @@ ISO_RENDER_HANG_GUARD_S = 120.0
 
 #: Ask for a little more than the box so the letterbox downscales. Renders cost
 #: the same at either size (measured), so this is free sharpness.
-_REQUEST_OVERSCAN = 1.15
+REQUEST_OVERSCAN = 1.15
 
 #: Model-directory variables. Census over the TRACKED boards in kicad_files/:
 #: KICAD6_3DMODEL_DIR 537, KISYS3DMOD 498 (the KiCad 5/6 spelling), KICAD9 84,
@@ -270,7 +270,7 @@ def models_note(models):
 
 def render_iso(board_path, out_png, cli, width, height, rotate=ISO_ROTATE,
                quality='basic', floor=False, perspective=False, zoom=None,
-               timeout=ISO_RENDER_HANG_GUARD_S, define=None):
+               timeout=ISO_RENDER_HANG_GUARD_S):
     """One ``kicad-cli pcb render``. ``(png_path, error)``; error ``''`` on success.
 
     The PNG keeps kicad-cli's default TRANSPARENT background on purpose: the
@@ -281,6 +281,14 @@ def render_iso(board_path, out_png, cli, width, height, rotate=ISO_ROTATE,
     argv is built as a LIST and never a string, and ``shell`` is never true:
     ``--rotate -45,0,45`` has to arrive as one argument, and on Windows a shell
     would be free to reinterpret it.
+
+    There is no ``define=`` emitting ``-D VAR=path``. One existed, unused by
+    every caller and every test, for the 3D-model story below -- and the thing
+    it was written for was MEASURED NOT TO WORK: ``-D KISYS3DMOD=<a real
+    directory>`` did not make tigard's 82 ``.wrl`` references resolve, because
+    a KiCad 10 tree ships ``.step`` and the substitution finds nothing at the
+    substituted path either. Shipping the parameter would have implied a
+    workaround exists.
     """
     if not cli:
         return None, 'no kicad-cli'
@@ -295,8 +303,6 @@ def render_iso(board_path, out_png, cli, width, height, rotate=ISO_ROTATE,
         argv.append('--perspective')
     if zoom:
         argv += ['--zoom', '%g' % zoom]
-    for k, v in sorted((define or {}).items()):
-        argv += ['-D', '%s=%s' % (k, v)]
     argv.append(board_path)
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)

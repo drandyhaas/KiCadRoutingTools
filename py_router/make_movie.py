@@ -237,13 +237,25 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
     _timing_off = (isinstance(timing, str)
                    and timing.strip().lower() in ('off', 'none', '0', ''))
     if not _timing_off:
-        try:
-            import cmd_timing
-            ledger = (timing if (isinstance(timing, str)
-                                 and os.path.isfile(timing))
-                      else cmd_timing.find_ledger(inputs[0]))
-        except Exception:                                       # noqa: BLE001
-            ledger = None
+        if isinstance(timing, str) and timing.strip():
+            # An EXPLICIT ledger. A path that is not there is a typo, and
+            # falling through to auto-discovery would stamp this movie with
+            # ANOTHER RUN's clock -- silently, and plausibly, because the
+            # numbers would look perfectly reasonable. There is no way for a
+            # viewer to tell afterwards. Refuse instead; `main()` catches this
+            # into an argparse error, and the caller who asked for a specific
+            # file learns it was not found rather than getting a clock they
+            # did not ask for.
+            if not os.path.isfile(timing):
+                raise FileNotFoundError(
+                    'timing ledger: no such file: %s' % timing)
+            ledger = timing
+        else:
+            try:
+                import cmd_timing
+                ledger = cmd_timing.find_ledger(inputs[0])
+            except Exception:                                   # noqa: BLE001
+                ledger = None
     marks = [] if (want_iso or ledger) else None
     frames = a.build_boards(steps, final, size, supersample, layer_alpha,
                             rip_hold, chunks, stage=stage, marks=marks)
@@ -414,6 +426,15 @@ def main():
     clock.add_argument('--timing-ledger', dest='timing', metavar='PATH',
                        help='use THIS cmd_timing.jsonl instead of searching')
     args = ap.parse_args()
+
+    # A named ledger that is not there is an argparse error, not a fallback.
+    # `make_movie` refuses it too; this is the spelling that gives the CLI a
+    # clean "error: --timing-ledger: no such file" and exit 2 rather than the
+    # library's exception. `--no-timing` sets the same dest to the sentinel
+    # 'off', so exempt it.
+    if (args.timing and args.timing != 'off'
+            and not os.path.isfile(args.timing)):
+        ap.error('--timing-ledger: no such file: %s' % args.timing)
 
     # UNCONDITIONALLY. Gating this on `args.panels == 'xray+iso'` dropped every
     # --iso-* flag whenever the panel was turned on by KICAD_MOVIE_PANELS

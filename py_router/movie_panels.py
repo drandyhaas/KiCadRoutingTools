@@ -88,9 +88,9 @@ class IsoOpts(object):
     seconds on purpose: a count is deterministic, so the same chain composes the
     same movie on a fast machine and a slow one. (The per-render timeout in
     ``kicad_iso_render`` is a hang guard, a different thing.) At the default 24,
-    a chain costs about 24 x 2.5 s over 4 workers, roughly 15 s, against a
-    single-panel movie of about a second -- which is the trade this feature is,
-    and why it is off by default.
+    a chain costs 6 waves of 4, about 20 s at the measured 1.9-4.2 s per render
+    under that much contention, against a single-panel movie of about a second
+    -- which is the trade this feature is, and why it is off by default.
     """
 
     __slots__ = ('max_renders', 'height_frac', 'yaw0_deg', 'sweep_deg',
@@ -226,6 +226,13 @@ def plan_iso_shots(owner, opts):
                            for j in range(budget)})
         cuts = [segs[j][1] for j in pick]
     else:
+        # Every segment gets its own cut, however short, and MIN_SHOT_FRAMES
+        # deliberately does NOT apply here -- it governs only the SPLITTING
+        # below. A segment is one board's run of frames, so folding a short one
+        # into its neighbour would paste the wrong board's 3D view under those
+        # frames, which is a worse outcome than a render nobody needed. A
+        # 1-frame beat spending a render is the per-step cadence working; the
+        # cost cap is `max_renders`, and it still holds.
         cuts = [s[1] for s in segs]
         # Split the longest current span until the budget is spent. Ties break
         # on the earlier span, so the plan is a pure function of `owner`.
@@ -246,8 +253,17 @@ def plan_iso_shots(owner, opts):
             cuts.sort()
 
     cuts = sorted(set(cuts))
+    # The plan MUST open at frame 0 or `frame_to_shot` hands frame 0 a shot
+    # index of -1, which indexes the LAST shot -- the final board's render
+    # under the movie's opening frame. It holds by construction: `_segments`
+    # always opens at 0, and the over-budget branch always keeps j=0. This was
+    # `if cuts[0] != 0: cuts[0] = 0`, a silent repair of a condition that
+    # cannot arise -- which would have hidden a change in `_segments` instead
+    # of reporting it, and moved the first cut without moving its shot's board.
     if cuts[0] != 0:
-        cuts[0] = 0
+        raise AssertionError(
+            'the iso shot plan must open at frame 0, not %d -- _segments no '
+            'longer starts at the beginning of `owner`' % cuts[0])
     k_total = len(cuts)
     shots = []
     for k, start in enumerate(cuts):
@@ -450,8 +466,8 @@ def compose_two_panel(frames, marks, final_board, opts=None):
 
     shots, frame_to_shot = plan_iso_shots(owner, opts)
     W, _H_top, H_iso, _total = panel_geometry(frames[0].size, opts.height_frac)
-    req_w = int(round(W * kir._REQUEST_OVERSCAN))
-    req_h = int(round(H_iso * kir._REQUEST_OVERSCAN))
+    req_w = int(round(W * kir.REQUEST_OVERSCAN))
+    req_h = int(round(H_iso * kir.REQUEST_OVERSCAN))
 
     # INSIDE the guard, not above it. These two lines used to sit outside the
     # try, so a read-only or full %TEMP% (PermissionError) or a keep_dir naming

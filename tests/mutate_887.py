@@ -43,7 +43,12 @@ ROOT = os.path.dirname(TESTS)
 TIMING = os.path.join(ROOT, 'py_router', 'cmd_timing.py')
 PANELS = os.path.join(ROOT, 'py_router', 'movie_panels.py')
 ISO = os.path.join(ROOT, 'py_router', 'kicad_iso_render.py')
-TARGETS = {'t': TIMING, 'p': PANELS, 'i': ISO}
+#: make_movie is the INTEGRATION, and it is a target because that is where the
+#: two worst defects of this branch lived -- the clock that never ran, and the
+#: named ledger that silently became a different one. Both were invisible to
+#: every row aimed at the three modules above.
+MOVIE = os.path.join(ROOT, 'py_router', 'make_movie.py')
+TARGETS = {'t': TIMING, 'p': PANELS, 'i': ISO, 'm': MOVIE}
 
 T_READER = os.path.join(TESTS, 'test_887_cmd_timing_reader.py')
 T_CLOCK = os.path.join(TESTS, 'test_887_frame_clock.py')
@@ -335,6 +340,30 @@ ROWS = [
      "            m['krt:utc'] = utc_iso(r.instant)\n"
      "            m['krt:t_epoch'] = round(r.instant, 3)\n"
      "            m['krt:remaining_s'] = 1.0",
+     (T_CLOCK,), 'KILLED'),
+    # ---- the pre-push review's two behaviour fixes ------------------------
+    ('the-opening-frame-borrows-the-first-anchors-basis-again', 't',
+     "            if i < self.anchors[0].first:\n"
+     "                return Reading(0.0, None, 'run-start', t.t0, False)",
+     "            if i < self.anchors[0].first:\n"
+     "                a0 = self.anchors[0]\n"
+     "                return Reading(0.0, a0.stage, a0.basis, t.t0, False)",
+     (T_CLOCK,), 'KILLED'),
+    # Restores the ORIGINAL silent fallback verbatim, rather than breaking the
+    # branch: a mutant that raises NameError would be killed for a reason that
+    # has nothing to do with the behaviour under test.
+    ('a-missing-named-ledger-silently-falls-back-again', 'm',
+     "            if not os.path.isfile(timing):\n"
+     "                raise FileNotFoundError(\n"
+     "                    'timing ledger: no such file: %s' % timing)\n"
+     "            ledger = timing",
+     "            if not os.path.isfile(timing):\n"
+     "                try:\n"
+     "                    import cmd_timing\n"
+     "                    timing = cmd_timing.find_ledger(inputs[0])\n"
+     "                except Exception:\n"
+     "                    timing = None\n"
+     "            ledger = timing",
      (T_CLOCK,), 'KILLED'),
 ]
 
