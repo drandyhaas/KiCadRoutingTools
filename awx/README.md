@@ -256,6 +256,28 @@ the run's nets' VIAS while excluding their segments (inconsistent, and it
 changes the memo key on every realized board); excluding them changes
 taut paths and needs an A/B.
 
+### The best attempt is kept, and stale attempts end the loop (2026-09-06/07)
+
+The attempt loop's feedback -- a wider launch pitch, refused lanes
+boosted to the front -- is a heuristic for the refused lanes and a
+change of world for every other lane, and the LAST attempt used to
+ship. At K35 attempt 0 routed 27/32 in 33 vias with every swimmer at
+2 (the router's own world flooded at each swimmer's first call says 2
+is the minimum there); attempt 3, the one that shipped, routed 26/32
+in 40 with five swimmers weaving for 4 each. Each attempt is a full
+re-route from the base copper, so the one with the most lanes routed
+(fewest vias on a tie) is restored -- copper, bookkeeping and plan
+geometry -- before the last call. K35 62 -> 57 vias at 0 open, K41 84
+-> 80 at the same 8 open, K15/K28 unchanged.
+
+The loop used to stop only when the refused SET repeated at the maxed
+pitch; a set alternating between two lanes (K35 with the far-face
+exits: SA4 / SCKE1) never repeats and ran all six attempts for a best
+that was attempt 0. An attempt at the maxed pitch that does not beat
+the best attempt's routed count is stale; two in a row end the loop.
+Copper identical (the best attempt is kept either way); K35 braid 85
+-> 43 s.
+
 ### Far-face exits (2026-09-07)
 
 A net whose berth sits on the destination array's FAR face -- past the
