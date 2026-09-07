@@ -44,6 +44,29 @@ def _cv(args, **kw):
                           errors='replace', cwd=ROOT, **kw)
 
 
+def _lens_files(td, **verdicts):
+    """--lens-file flags for the routed-board lenses, written to `td` (#904).
+
+    A `--final --kind completion` row may not carry a BARE `--lens` for
+    connectivity, drc or spec: a close-out is the terminal record, nothing
+    reopens a ledger, and a line retyped from a reply is a claim about the run
+    where the row could carry a claim about a file. So every close-out arm in
+    this file writes the verdict where the verifier is already required to
+    write it (references/verifier-prompts.md) and passes the path.
+
+    Defaults to a clean PASS for all three; name a lens to override, e.g.
+    `_lens_files(td, drc='VERDICT=FAIL:lens=drc;finding=short;evidence=x')`.
+    """
+    out = []
+    for lens in ('connectivity', 'drc', 'spec'):
+        line = verdicts.get(lens, f'VERDICT=PASS:lens={lens}')
+        p = os.path.join(td, f'verdict_{lens}.txt')
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write(line + '\n')
+        out += ['--lens-file', p]
+    return out
+
+
 # ------------------------------------------------------------ rip invariants
 
 def test_rip_invariants_catch_all_four_traps():
@@ -185,9 +208,7 @@ def test_record_final_requires_stop_condition():
                  '--stop-condition', 'plateau: 3 iterations, no new copper'])
         assert r.returncode == 2 and 'stop condition' in r.stderr, r.stderr
         assert not os.path.exists(led), "nothing may be written on refusal"
-        lenses = ['--lens', 'VERDICT=PASS:lens=connectivity',
-                  '--lens', 'VERDICT=PASS:lens=drc',
-                  '--lens', 'VERDICT=PASS:lens=spec']
+        lenses = _lens_files(td)
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
                  '--stop-condition', STOP] + lenses)
         assert r.returncode == 0, r.stderr
@@ -210,10 +231,9 @@ def test_record_final_wants_the_lens_verdicts():
         assert r.returncode == 2 and 'verbatim' in r.stderr, r.stderr
         assert not os.path.exists(led), "nothing may be written on refusal"
 
-        base = ['record', '--ledger', led, '--board', BOARD, '--final',
-                '--lens', 'VERDICT=PASS:lens=connectivity',
-                '--lens', 'VERDICT=FAIL:lens=drc;finding=short;evidence=x',
-                '--lens', 'VERDICT=PASS:lens=spec']
+        base = (['record', '--ledger', led, '--board', BOARD, '--final']
+                + _lens_files(
+                    td, drc='VERDICT=FAIL:lens=drc;finding=short;evidence=x'))
         r = _cv(base + ['--stop-condition', '1'])
         assert r.returncode == 2 and 'lens FAILED' in r.stderr, r.stderr
         r = _cv(base + ['--stop-condition', '4'])
@@ -243,12 +263,9 @@ def test_record_refuses_a_lens_verdict_its_own_score_contradicts():
         run17 = sc({'blocking': 79, 'quality': {},
                     'blocking_by': {'unrouted': 32, 'broken': 47, 'drc': 0,
                                     'undersized': 0}}, 's.json')
-        final = ['record', '--ledger', led, '--board', BOARD, '--final',
-                 '--kind', 'completion', '--stop-condition', '1',
-                 '--score-file', run17,
-                 '--lens', 'VERDICT=PASS:lens=connectivity',
-                 '--lens', 'VERDICT=PASS:lens=drc',
-                 '--lens', 'VERDICT=PASS:lens=spec']
+        final = (['record', '--ledger', led, '--board', BOARD, '--final',
+                  '--kind', 'completion', '--stop-condition', '1',
+                  '--score-file', run17] + _lens_files(td))
         r = _cv(final)
         assert r.returncode == 2, (r.returncode, r.stdout[:400])
         assert 'CONTRADICTS' in r.stderr, r.stderr
@@ -261,11 +278,10 @@ def test_record_refuses_a_lens_verdict_its_own_score_contradicts():
         # unfixable and said so).
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
                  '--kind', 'completion', '--stop-condition', '4',
-                 '--score-file', run17,
-                 '--lens', 'VERDICT=FAIL:lens=connectivity;finding=32 nets '
-                           'carry no copper;evidence=score.json#/blocking_by',
-                 '--lens', 'VERDICT=PASS:lens=drc',
-                 '--lens', 'VERDICT=PASS:lens=spec'])
+                 '--score-file', run17]
+                + _lens_files(td, connectivity=(
+                    'VERDICT=FAIL:lens=connectivity;finding=32 nets carry no '
+                    'copper;evidence=score.json#/blocking_by')))
         assert r.returncode == 0, r.stderr
 
         # CONSERVATIVE: an UNGRADED component is not a contradiction. This is
@@ -833,27 +849,42 @@ def test_l5_printed_final_command_runs_as_printed():
               {'unrouted': 0, 'broken': 0, 'drc': 3, 'undersized': 0}}
 
     def run_as_printed(name, lens_by_name, score_doc, led):
-        score = os.path.join(os.path.dirname(led), 'score.json')
+        work = os.path.dirname(led)
+        score = os.path.join(work, 'score.json')
         with open(score, 'w', encoding='utf-8') as f:
             json.dump(score_doc, f)
+        # The paths the driver would resolve from --ledger, passed in the same
+        # shape `l5` passes them, so this test executes the command the stage
+        # really prints rather than a reconstruction of it.
+        verdicts = {f'verdict_{lens}.txt':
+                    os.path.join(work, f'verdict_{lens}.txt').replace('\\', '/')
+                    for lens in lens_by_name}
         text = final_record_command(led.replace('\\', '/'),
                                     BOARD.replace('\\', '/'),
-                                    score.replace('\\', '/'), name)
+                                    score.replace('\\', '/'), name,
+                                    verdicts)
         toks = shlex.split(text.replace('\\\n', ' '))
         assert toks[0] == 'python3' and toks[3] == 'py_placer/converge.py', \
             toks[:4]
         toks[0] = sys.executable
-        # The three placeholder slots must be present AND recognisable -- if
-        # the driver's wording drifts, fail here rather than silently testing
-        # a different command than the one printed.
-        subst = {f'<the {lens} VERDICT= line, verbatim>': line
-                 for lens, line in lens_by_name.items()}
+        # The three slots must be present AND be the paths the driver named --
+        # if its wording drifts, fail here rather than silently testing a
+        # different command than the one printed. #904: these are --lens-file
+        # slots now, so the verdict is WRITTEN where the printed command says
+        # the verifier put it, and converge reads it from there.
         hit = 0
         for i, t in enumerate(toks):
-            if t in subst:
-                toks[i] = subst[t]
+            if t == '--lens-file':
+                path = toks[i + 1]
+                lens = os.path.basename(path)[len('verdict_'):-len('.txt')]
+                assert lens in lens_by_name, (lens, path)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(lens_by_name[lens] + '\n')
                 hit += 1
-        assert hit == 3, f'expected 3 lens placeholders, found {hit}: {toks}'
+        assert hit == 3, f'expected 3 --lens-file slots, found {hit}: {toks}'
+        assert '--lens' not in toks, (
+            'a bare --lens on a close-out is refused by converge; the printed '
+            'command must not offer one')
         ia = toks.index('--argv')
         toks = toks[:ia + 1] + [sys.executable, '-c', 'pass']
         return subprocess.run(toks, capture_output=True, text=True,

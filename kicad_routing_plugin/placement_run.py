@@ -318,6 +318,36 @@ _ARTIFACT_STAGES = (
 )
 
 
+def _row_label(row):
+    """What a ledger row DID, in one line. `converge.row_label` is the AUTHORITY.
+
+    The import is guarded the same way `SIBLING_EXTS` above is, and for the same
+    reason: this module runs inside KiCad's plugin loader, which does not put
+    py_placer on sys.path. The fallback below is a copy, and a copy is a thing
+    that drifts -- `tests/test_904_lens_file_binding.py` compares the two on the
+    same rows so it cannot drift silently.
+
+    What it fixes: `ledger_row.get("lever") or "?"` ended the ladder at the
+    first field, so an `--exhausted` declaration -- which has `lever: null` by
+    construction, its whole content being the reason a person wrote -- rendered
+    in the GUI as `lap 31: systemic/?`.
+    """
+    try:
+        from converge import row_label
+        return row_label(row)
+    except Exception:                                      # noqa: BLE001
+        lever = str(row.get("lever") or "").strip()
+        if lever:
+            return lever
+        dec = row.get("exhausted")
+        if isinstance(dec, dict) and str(dec.get("reason") or "").strip():
+            return "declared exhausted: " + str(dec["reason"]).strip()
+        stop = str(row.get("stop_condition") or "").strip()
+        if stop:
+            return "close-out: " + stop
+        return "(no lever recorded)"
+
+
 def derive_stage(transcript_tail, ledger_row, newest_artifact_name):
     """Best human answer to "what is it doing right now".
 
@@ -332,8 +362,7 @@ def derive_stage(transcript_tail, ledger_row, newest_artifact_name):
     if ledger_row:
         lap = ledger_row.get("iteration")
         kind = ledger_row.get("kind") or "?"
-        lever = ledger_row.get("lever") or "?"
-        return f"lap {lap}: {kind}/{lever}"
+        return f"lap {lap}: {kind}/{_row_label(ledger_row)}"
     if newest_artifact_name:
         for rx, fmt in _ARTIFACT_STAGES:
             m = rx.search(newest_artifact_name)
