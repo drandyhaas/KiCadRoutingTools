@@ -362,7 +362,20 @@ def run(tests):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--row')
+    ap.add_argument('--list', action='store_true',
+                    help='name every row and exit. The anchor check has '
+                         'already run by the time this prints -- '
+                         'mutation_anchors.preflight() fires at IMPORT -- so a '
+                         'stale anchor surfaces in a second here instead of '
+                         'partway through the battery.')
     a = ap.parse_args()
+    if a.list:
+        for n, t, _o, _w, _tests, exp in ROWS:
+            print('  %-52s %-20s %s'
+                  % (n, os.path.basename(TARGETS[t]), exp))
+        print('')
+        print('%d row(s)' % len(ROWS))
+        return 0
 
     # A dirty engine tree would be RESTORED to its committed text, silently
     # destroying uncommitted work. Refuse rather than help.
