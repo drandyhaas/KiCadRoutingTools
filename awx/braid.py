@@ -103,6 +103,7 @@ LEG_O = 0.2                    # ...and beyond its two ends in o: a leg
                                # the law there, the band only a guide
 TOL_S = 0.5                    # "at the same s" for head-on classification
 DIST_O = 0.2                   # distinct offsets for head-on classification
+WRAP_REACH = 2.5               # how far past a far-face stub its leg may be placed
 HEAD_RUN = 3.0                 # a head-on stub's straight run-in that must
                                # be clear of static copper (its own row of
                                # balls, when it sits on a flank)
@@ -639,6 +640,17 @@ class Corridor:
                             + 0.3 for t in teeth.values()])
         fwd = max([0.3] + [((t[0] - Pn[0]) * dn[0] + (t[1] - Pn[1]) * dn[1])
                            + 0.3 for t in stubs.values()])
+        # a FAR-FACE stub (past the destination array's last ball along
+        # the spine) is reached by a leg placed beyond the array, so the
+        # frame must run past that leg: project clamps s at the spine's
+        # end, and cells past it would all read as the end
+        s_ball = [((p.global_x - Pn[0]) * dn[0] + (p.global_y - Pn[1]) * dn[1])
+                  for nm in self.members
+                  for p in ctx.pcb.footprints[ctx.ends[nm][2]].pads]
+        far = [((t[0] - Pn[0]) * dn[0] + (t[1] - Pn[1]) * dn[1])
+               for t in stubs.values()]
+        if s_ball and max(far) > max(s_ball) - 1e-6:
+            fwd = max(fwd, max(far) + WRAP_REACH)
         self.spine = spine.extend(back, fwd)
         self.teeth, self.stubs = teeth, stubs
         self.st = {nm: self.spine.project_pt(teeth[nm]) for nm in self.members}
@@ -728,6 +740,29 @@ class Corridor:
                           for nm in self.joiners}
         self.exit_side = {nm: side_of(se[nm][1], ctx.ends[nm][2])
                           for nm in self.siders}
+        # FAR-FACE exits: a side exit whose stub lies beyond the
+        # destination array's last ball along the spine. Its leg cannot
+        # cross the ball field at the stub's own s; it is placed past the
+        # array's end (s_leg_min) and the lane -- the outermost of its
+        # block, by the target order -- arrives round the corner and jogs
+        # back into the stub. The corridor split rule admits such a stub
+        # by the same geometry (corridor.cluster_corridors, wrap_clear).
+        self.far_exit = set()
+        self.s_leg_min = None
+        if self.siders:
+            refs = {ctx.ends[nm][2] for nm in self.siders}
+            pads = [p for r in refs for p in ctx.pcb.footprints[r].pads]
+            if pads:
+                sb = [sp.project_pt((p.global_x, p.global_y))[0] for p in pads]
+                s_ball = max(sb)
+                r_max = max(max(p.size_x, p.size_y) / 2 for p in pads)
+                self.far_exit = {nm for nm in self.siders
+                                 if se[nm][0] > s_ball - 1e-6}
+                if self.far_exit:
+                    self.s_leg_min = s_ball + r_max + CLEAR + TRACK / 2 + 0.05
+                    self.log(f'  far-face exits: {sorted(self.far_exit)} '
+                             f'(legs at s >= {self.s_leg_min:.2f}, last ball '
+                             f'at s {s_ball:.2f})')
 
     def _clear_block(self, base, sg, s_from, s_to, nm, step=0.1, tries=15):
         """Push a block's innermost lane outward until its run along
@@ -1016,7 +1051,14 @@ class Corridor:
             for nm in sorted(self.exit_block, key=lambda n: (self.se[n][0], abs(self.exit_block[n]))):
                 s_e, o_e = self.se[nm]
                 o_l = py[trank[nm]]
-                s_l = self._leg_s(nm, s_e, o_l, o_e, False, placed, avoid,
+                s_base, avoid_nm = s_e, avoid
+                if nm in self.far_exit:
+                    s_base = max(s_e, self.s_leg_min)
+                    floor = self.s_leg_min
+
+                    def avoid_nm(n, s, _a=avoid, _f=floor):
+                        return s < _f - 1e-9 or (_a is not None and _a(n, s))
+                s_l = self._leg_s(nm, s_base, o_l, o_e, False, placed, avoid_nm,
                                   extra_cands.get(nm, ()) if avoid else ())
                 self.exit_leg_s[nm] = s_l
                 placed.append((s_l, min(o_l, o_e), max(o_l, o_e)))
@@ -1568,8 +1610,11 @@ class Corridor:
 
     def _s_end(self):
         """Where the corridor's lanes end along the spine: the farthest
-        stub (a lane's tail runs that far)."""
-        return max(v[0] for v in self.se.values()) + 0.5
+        stub (a lane's tail runs that far), or a far-face exit's leg."""
+        end = max(v[0] for v in self.se.values()) + 0.5
+        if getattr(self, 'far_exit', None):
+            end = max(end, self.s_leg_min + WRAP_REACH)
+        return end
 
     def _layer_at(self, nm, s):
         """The layer the plan has page lane `nm` on at s (its layer

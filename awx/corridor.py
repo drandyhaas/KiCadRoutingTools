@@ -201,6 +201,39 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
                     return True
             return False
 
+        def wrap_clear(end, d, centre):
+            """A stub on the array's FAR face. Its lane cannot run back
+            along the spine into the pad field, but it can arrive from
+            BEYOND the array: the bundle's outermost lane continues past
+            the far face and a leg turns in along that face to the stub
+            -- the human's homotopy for K35's SA9/SA13/SA8 (corridor 0's
+            outermost lanes round DU1's east corner), which a corridor
+            of their own, spined straight through the main bundle,
+            could only plan as fiction (all three refused in-band every
+            attempt, re-laid at last call; K41: three of the eight open
+            nets). Reachable when a short run FORWARD from the stub
+            (away from the array, a pitch to a block's width) is clear
+            and so is a leg from there, out across the array's width on
+            the side the stub is on (either side when it is centred)."""
+            if centre is None:
+                return False
+            nx, ny = end[0] - centre[0], end[1] - centre[1]
+            along = nx * d[0] + ny * d[1]
+            nx, ny = nx - along * d[0], ny - along * d[1]
+            h = math.hypot(nx, ny)
+            sides = [(nx / h, ny / h), (-nx / h, -ny / h)] if h > 1e-9 \
+                else [(-d[1], d[0]), (d[1], -d[0])]
+            for k in range(1, 4):
+                off = 0.35 * k
+                e2 = (end[0] + off * d[0], end[1] + off * d[1])
+                if not pad_clear(end, e2):
+                    continue
+                for (ox, oy) in sides:
+                    f2 = (e2[0] + 2 * D * ox, e2[1] + 2 * D * oy)
+                    if pad_clear(e2, f2):
+                        return True
+            return False
+
         for nm in grp:
             # how far past the spine's end the stub lies, and how far
             # behind its start the tooth lies, along the spine; a member
@@ -214,7 +247,8 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
             if t_e > 1.0:
                 back_pt = (stubs[nm][0] - t_e * dn[0], stubs[nm][1] - t_e * dn[1])
                 ok = run_clear(stubs[nm], back_pt, dn,
-                               (centres or {}).get(nm))
+                               (centres or {}).get(nm)) \
+                    or wrap_clear(stubs[nm], dn, (centres or {}).get(nm))
             if ok and t_0 < -1.0:
                 fwd_pt = (teeth[nm][0] - t_0 * d0[0], teeth[nm][1] - t_0 * d0[1])
                 ok = run_clear(teeth[nm], fwd_pt, d0,

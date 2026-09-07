@@ -256,6 +256,48 @@ the run's nets' VIAS while excluding their segments (inconsistent, and it
 changes the memo key on every realized board); excluding them changes
 taut paths and needs an A/B.
 
+### Far-face exits (2026-09-07)
+
+A net whose berth sits on the destination array's FAR face -- past the
+last ball along the spine, escaping away from the bundle -- used to be
+split into a corridor of its own: the split rule asked whether its lane
+could run from the stub back along the spine to the spine's end, and
+that run goes through the ball field. The corridor it then got was
+spined straight from its teeth to its berths, through the main bundle,
+so every lane it planned was fiction: at K35 SA9/SA13/SA8 were refused
+in-band on every attempt and re-laid at last call round the south and
+east of everything (2 vias each, the human's homotopy and count), while
+the judge priced them 4 each; at K41 that corridor held three of the
+eight open nets.
+
+The copper that ships is an ordinary side exit of the MAIN corridor
+whose leg lies beyond the array: the bundle's outermost lane on that
+side runs past the far face, a leg turns in along it, and the jog runs
+back into the stub tip. So:
+
+- `corridor.cluster_corridors` admits a stub past the spine's end when
+  a short run FORWARD from it (away from the array, a pitch to a block's
+  width) and a leg from there out across the array's side are pad-clear
+  (`wrap_clear`); the old run-back test is tried first.
+- `braid.Corridor.classify` marks a side exit whose stub lies beyond
+  the last ball as `far_exit`, with `s_leg_min` = last ball + its radius
+  + clearance + half a track: its exit leg is placed at or past that
+  (`place_and_decide`, the floor enforced through `_leg_s`'s avoid), the
+  target order already gives it the outermost slot (largest exit s), and
+  the spine's forward extension and the static-island window reach
+  `WRAP_REACH` past it, because `Spine.project` clamps s at the spine's
+  end and an island at the array's corner (K35: C10 on F) is what the
+  leg must clear.
+
+Measured (bench fb_t2q_fresh, 0 DRC, warm taut memo): K15 14v and K28
+38v unchanged, copper identical; K35 ONE corridor of 35, SA9/SA13/SA8
+in-band at attempt 0, 57 -> 55 vias, plan 59 -> 52 predicted (SA13 and
+SA7 0 vias); **K41 8 open -> 1 open (SA4), 80 -> 86 vias**, one corridor
+of 41. Chain times K35 67 s, K41 151 s (fanout 68 + braid 82). The
+first run after any plan change pays the taut memo cold (K41: 342
+recomputations, ~5 minutes) -- a one-time cost, not the mechanism.
+`chain_k.sh` now stamps the fanout and braid stage boundaries.
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`
