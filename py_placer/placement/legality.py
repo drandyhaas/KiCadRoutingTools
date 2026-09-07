@@ -1217,7 +1217,16 @@ def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         own = footprint_side(fp)
         geom = bodies.get(ref)
-        local = geom.body_local if geom is not None else None
+        # OCCUPANCY, not the bare body. Every consumer of this chain asks an
+        # occupancy question -- does this part's extent intrude here -- and the
+        # rect must therefore never SHRINK: measured over the 22 corpus boards,
+        # taking the drawn body bare removed three real run-23 courtyard
+        # findings on ulx3s and two on esp_prog, because a .Fab body is
+        # routinely narrower than the pads it sits between (ulx3s AUDIO1
+        # 194.5 -> 115.6 mm2, 0.59x; U3/U4/U5 TSOT-25 0.55x). The BODY rect is
+        # what the assembly seam and the body-source disclosure report, and
+        # they read `placement.body` directly.
+        local = geom.occupancy_local if geom is not None else None
         source = geom.source if geom is not None else ''
         silk_rejected = bool(geom.silk_rejected) if geom is not None else False
         if local is None:
@@ -1230,7 +1239,15 @@ def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
                 local = None
         if local is None:
             continue
-        synthetic = not (fp.pads or ())
+        # #896. `synthetic` means "not geometry anyone drew", and that is now
+        # SOURCE_NONE -- not "has no pads". A pad-less footprint that draws a
+        # real .Fab body is a real body: watchy's REF** is a 1.54" e-paper
+        # display, 31.8 x 37.3mm on a 33.8 x 46mm board, which graded as the
+        # +/-0.5mm fiction and therefore could never gate anything, while parts
+        # genuinely sit under it. The silk rung already refuses pad-less
+        # footprints (a logo is decoration, not a part), so this admits drawn
+        # bodies without admitting silk graphics.
+        synthetic = source == SOURCE_NONE
         tht_local = None
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
