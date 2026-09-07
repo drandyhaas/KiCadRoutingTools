@@ -182,6 +182,62 @@ def pads_by_face(pcb_data, clearance: float, track_width: float):
 # The sheet
 # ---------------------------------------------------------------------------
 
+def mating_faces(pcb_data, pcb_file: str, clearance: float):
+    """`{ref: {edge, dist_mm, interior, overhang_mm}}` for connector-family
+    parts.
+
+    The edge and distance come from `render_placement.connector_edge_facts`,
+    which is the list the review sheet already prints -- deliberately broader
+    than `part_class`'s gating classes, because run 23 seated four generic
+    connectors mid-board and no instrument said so.
+
+    `overhang_mm` is measured here because that function CLAMPS its distance at
+    zero (`max(0.0, dist)`), which is right for "how far from the edge" and
+    loses the sign for "how far PAST it" -- and a receptacle's overhang is the
+    fact a mating face is about. USB1 on esp_prog overhangs; a header does not.
+    """
+    import render_placement as RP
+    from placement.body import board_bodies
+    from placement.legality import rotate_local_bounds
+    from placement.part_class import INTERIOR_AFFINITY_MM
+    model = RP.PlacementModel(pcb_data, pcb_file,
+                              quench_kwargs={'clearance': clearance})
+    if model.state is None:
+        return {}
+    bounds = getattr(pcb_data.board_info, 'board_bounds', None)
+    if not bounds:
+        return {}
+    bodies = board_bodies(pcb_data, pcb_file)
+    out = {}
+    # WHICH parts are connector-family is `connector_edge_facts`' question and
+    # it keeps it -- a heuristic broader than part_class's gating classes,
+    # because run 23 seated four generic connectors mid-board and nothing said
+    # so. WHERE the part's edge is, this measures from the BODY model rather
+    # than reusing that function's number, because it reads `model.rect` --
+    # the quench's pad-box ladder, which this PR deliberately does not
+    # convert. Reusing it would put two different geometries on one sheet,
+    # which is what #896 exists to stop: measured on esp_prog, USB1's pad box
+    # sits 0.49mm inside the west edge while its drawn .Fab body overhangs it,
+    # and the overhang is the fact a mating face is about.
+    for ref, _cls, _edge, _dist, _interior in RP.connector_edge_facts(model):
+        geom = bodies.get(ref)
+        fp = pcb_data.footprints.get(ref)
+        if geom is None or geom.occupancy_local is None or fp is None:
+            continue
+        x0, y0, x1, y1 = rotate_local_bounds(*geom.occupancy_local,
+                                             fp.rotation or 0.0)
+        rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
+        dists = {'W': rect[0] - bounds[0], 'N': rect[1] - bounds[1],
+                 'E': bounds[2] - rect[2], 'S': bounds[3] - rect[3]}
+        edge, dist = min(dists.items(), key=lambda kv: kv[1])
+        out[ref] = {'edge': edge,
+                    'dist_mm': round(max(0.0, dist), 3),
+                    'interior': bool(dist > INTERIOR_AFFINITY_MM),
+                    'overhang_mm': round(max(0.0, -dist), 3),
+                    'class': _cls, 'basis': geom.source}
+    return out
+
+
 def build_context(pcb_data, pcb_file: str, *, clearance: float,
                   track_width: float, brief=None) -> Dict[str, object]:
     """The whole document, as data. `format_md` renders it."""
@@ -229,6 +285,11 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
         for row in (getattr(brief, 'raw', None) or {}).get('interfaces', []):
             if isinstance(row, dict) and row.get('ref') and row.get('role'):
                 declared_roles[row['ref']] = row['role']
+
+    try:
+        faces_out = mating_faces(pcb_data, pcb_file, clearance)
+    except Exception:                                        # noqa: BLE001
+        faces_out = {}
 
     parts = []
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
@@ -287,6 +348,7 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
             'dnp': bool(getattr(fp, 'dnp', False)),
             'pads_by_face': side_pads,
             'partners': [{'ref': r, 'shared_nets': n} for n, r in partners],
+            'mating': faces_out.get(ref),
             'serves': ({'ref': tethers[ref][0],
                         'distance_mm': round(tethers[ref][1], 3)}
                        if ref in tethers and tethers[ref][0] else None),
@@ -314,6 +376,11 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
                           '(rejects 2-terminal resonators)',
             'role': 'inferred here from footprint / prefix / value; the '
                     'board carries no datasheet or 3D-model field to cite',
+            'mating': 'which parts count as connectors: '
+                      'render_placement.connector_edge_facts. Where the edge '
+                      'is: measured from the placement.body occupancy rect, '
+                      'because that function reads the quench pad-box ladder '
+                      'and would put two geometries on one sheet',
         },
     }
 
@@ -484,6 +551,15 @@ def format_md(doc) -> str:
                      f"`{p['role']['contradicts_inference']}`. The brief "
                      f"wins, and the disagreement is printed rather than "
                      f"resolved silently.")
+        if p.get('mating'):
+            m = p['mating']
+            L.append('')
+            L.append(f"Mating face **{m['edge']}**, {m['dist_mm']}mm from that "
+                     f"edge"
+                     + (f", overhanging it by {m['overhang_mm']}mm"
+                        if m['overhang_mm'] > 0 else '')
+                     + ('  --  INTERIOR for a connector, which a reviewer '
+                        'should explain' if m['interior'] else ''))
         if p['serves']:
             L.append('')
             L.append(f"Serves **{p['serves']['ref']}** "

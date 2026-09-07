@@ -158,6 +158,39 @@ def test_the_pair_scope_attributes_what_the_interface_blends():
               f"pair {pair[0]['inversions']}")
 
 
+def test_the_mating_face_column():
+    """#891 names USB1 explicitly, and the measurement disagrees with half of
+    the claim -- which is worth an arm rather than a quiet omission.
+
+    The issue's acceptance reads "USB1's mating face reads W with overhang >
+    0". The face is W. The overhang is ZERO on both esp_prog boards: USB1's
+    body starts at x 114.000 and the outline's west edge IS 114.000, so the
+    receptacle is flush, not overhanging. Asserted as flush, because a test
+    that quietly relaxed to `>= 0` would let a real overhang regression
+    through, and one that asserted `> 0` would be asserting something the
+    board does not say.
+
+    The number also depends on WHICH rect is measured, which is why this
+    column reads the body model: `connector_edge_facts` measures
+    `model.rect`, the quench's pad-box ladder, and USB1's pad box sits 0.49mm
+    INSIDE the west edge while its drawn body reaches it.
+    """
+    for board, name in ((TRACKED, 'tracked'), (LAP5, 'lap 5')):
+        doc, _ = _doc(board)
+        row = next((p['mating'] for p in doc['parts']
+                    if p['ref'] == 'USB1' and p.get('mating')), None)
+        check(f'{name}: USB1 carries a mating row', row is not None)
+        if row:
+            check(f'{name}: USB1 mates through the W edge',
+                  row['edge'] == 'W', str(row))
+            check(f'{name}: flush, not overhanging (body x0 == outline x0)',
+                  row['overhang_mm'] == 0.0 and row['dist_mm'] == 0.0,
+                  str(row))
+            check(f'{name}: and the row says which geometry it measured',
+                  row.get('basis') in ('courtyard', 'fab', 'silk',
+                                       'pad_bbox'), str(row))
+
+
 def test_every_derived_fact_names_its_source():
     """#711's rule, applied here: no claim without a channel it came from."""
     doc, _ = _doc(TRACKED)
@@ -223,6 +256,7 @@ def test_md_is_a_sheet_a_reader_can_use():
 TESTS = [test_json_is_parseable_from_char_zero,
          test_the_usb_pair_row,
          test_the_pair_scope_attributes_what_the_interface_blends,
+         test_the_mating_face_column,
          test_every_derived_fact_names_its_source,
          test_the_body_column_is_the_896_model,
          test_panels_are_written_and_referenced,
