@@ -291,6 +291,88 @@ def test_the_iso_panel_never_touches_the_xray_panel():
          bad[:5])
 
 
+def _rgba_board(w, h, bw, bh):
+    """A kicad-cli-shaped render: a small opaque board on a big TRANSPARENT
+    canvas, which is exactly what `pcb render` returns."""
+    im = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    im.paste(Image.new('RGBA', (bw, bh), (20, 90, 40, 255)),
+             ((w - bw) // 2, (h - bh) // 2))
+    return im
+
+
+def test_the_transparent_margin_is_cropped_before_the_letterbox():
+    """kicad-cli's margin is most of its canvas, and letterboxing it wastes it.
+
+    Measured: the whole PNG letterboxed into a wide, short panel left the board
+    at about a quarter of the panel width. The obvious workaround, --iso-zoom,
+    is worse -- kicad-cli zooms about the canvas centre and CLIPS what no
+    longer fits, which cost the demo board its top and bottom edges at some yaw
+    angles and not others. Cropping to the alpha box is the honest version:
+    the background really is transparent, so the box is exactly the board.
+    """
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, 'r.png')
+    _rgba_board(600, 400, 200, 140).save(p)
+
+    box = (400, 200)
+    panel, err = mp.iso_panel(box, p, 'cap')
+    want(not err, 'the panel drew', err)
+    strip = max(18, box[1] // 10)
+    body = panel.crop((0, 0, box[0], box[1] - strip))
+    bb = ImageChops.difference(
+        body, Image.new('RGB', body.size, mp._PANEL_BG)).getbbox()
+    want(bb is not None, 'something was drawn', bb)
+    drawn_h = bb[3] - bb[1] if bb else 0
+    # Uncropped, the 600x400 canvas fits the box by height and the board --
+    # 140/400 of it -- would come out about a third of the space available.
+    avail_h = box[1] - strip - 12
+    want(drawn_h > 0.8 * avail_h,
+         'the BOARD fills the panel, so the margin was cropped rather than '
+         'letterboxed along with it', (drawn_h, avail_h))
+    want(bb and bb[0] >= 1 and bb[2] <= body.width - 1 and bb[1] >= 1
+         and bb[3] <= body.height - 1,
+         'and nothing is clipped at an edge', (bb, body.size))
+
+
+def test_one_scale_serves_the_whole_sweep():
+    """Each yaw projects the board differently; the panel must not breathe.
+
+    `panel_scale` takes the SMALLEST fit across every shot, so the widest
+    projection is the one that just fits and no other can clip. Scaling each
+    shot to its own box instead would make the board grow and shrink as it
+    turns -- the very thing the orthographic default exists to avoid.
+    """
+    d = tempfile.mkdtemp()
+    small = os.path.join(d, 'small.png')
+    big = os.path.join(d, 'big.png')
+    _rgba_board(600, 400, 120, 90).save(small)
+    _rgba_board(600, 400, 300, 180).save(big)
+
+    box, strip = (400, 200), 20
+    sc = mp.panel_scale([small, big], box, strip)
+    alone = mp.panel_scale([small], box, strip)
+    want(sc is not None and sc < alone,
+         'the shared scale is the tighter one, set by the WIDEST shot',
+         (sc, alone))
+
+    def drawn(path):
+        panel, _ = mp.iso_panel(box, path, 'c', scale=sc)
+        body = panel.crop((0, 0, box[0], box[1] - max(18, box[1] // 10)))
+        bb = ImageChops.difference(
+            body, Image.new('RGB', body.size, mp._PANEL_BG)).getbbox()
+        return (bb[2] - bb[0], bb[3] - bb[1])
+
+    ws, _hs = drawn(small)
+    wb, hb = drawn(big)
+    # 120 and 300 wide at ONE scale keep their 2.5x ratio. Fitted to the box
+    # individually they would both have come out the same size.
+    want(abs((wb / float(ws)) - 2.5) < 0.15,
+         'the two boards keep their true size ratio, so one scale served both',
+         (ws, wb, wb / float(ws)))
+    want(wb <= box[0] - 16 and hb <= box[1] - 20 - 12,
+         'and the widest shot still fits its box', (wb, hb, box))
+
+
 def test_a_failed_render_keeps_the_box_and_says_so():
     fr, marks, final = _frames()
     saved_r, saved_c, saved_i = kir.render_many, kir.resolve_cli, kir.render_iso
@@ -549,9 +631,9 @@ def test_each_panels_caption_describes_its_own_board():
     grabbed = []
     real_panel = mp.iso_panel
 
-    def spy(box, png, caption, error=''):
+    def spy(box, png, caption, error='', **kw):
         grabbed.append(caption)
-        return real_panel(box, png, caption, error=error)
+        return real_panel(box, png, caption, error=error, **kw)
 
     mp.iso_panel = spy
     try:
@@ -807,6 +889,8 @@ TESTS_TO_RUN = [
     test_the_status_line_distinguishes_every_state,
     test_the_stacked_frame_is_one_constant_even_size,
     test_the_iso_panel_never_touches_the_xray_panel,
+    test_the_transparent_margin_is_cropped_before_the_letterbox,
+    test_one_scale_serves_the_whole_sweep,
     test_a_failed_render_keeps_the_box_and_says_so,
     test_a_render_that_succeeds_but_will_not_decode_is_counted_as_failed,
     test_the_shot_plan_is_capped_and_covers_every_frame,

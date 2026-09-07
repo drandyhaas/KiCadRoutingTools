@@ -61,9 +61,14 @@ ISO_ROTATE = (-45.0, 0.0, 45.0)
 #: ``kicad_oracle.ORACLE_DRC_TIMEOUT``.
 ISO_RENDER_HANG_GUARD_S = 120.0
 
-#: Ask for a little more than the box so the letterbox downscales. Renders cost
-#: the same at either size (measured), so this is free sharpness.
-REQUEST_OVERSCAN = 1.15
+#: Ask for MORE than the box, because the letterbox throws most of it away.
+#: kicad-cli frames the board with a wide margin and the caller crops to the
+#: alpha box (``movie_panels._alpha_crop``), so the pixels that survive are only
+#: the board -- measured around 0.6 of the canvas on each axis. At the old 1.15
+#: that left the cropped board being UPSCALED into the panel, which is the blur
+#: this constant exists to prevent; 1.8 keeps it a downscale. Renders cost
+#: roughly the same at either size (measured), so the margin is close to free.
+REQUEST_OVERSCAN = 1.8
 
 #: Model-directory variables. Census over the TRACKED boards in kicad_files/:
 #: KICAD6_3DMODEL_DIR 537, KISYS3DMOD 498 (the KiCad 5/6 spelling), KICAD9 84,

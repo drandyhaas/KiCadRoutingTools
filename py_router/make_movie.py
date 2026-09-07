@@ -269,8 +269,17 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
             import cmd_timing
             clock = cmd_timing.clock_for(marks, ledger, len(frames))
             if clock is not None:
-                for i, fr in enumerate(frames):
-                    cmd_timing.stamp_run_clock(fr, clock.lines(i))
+                # The band height comes from EVERY frame's text, once, before
+                # any frame is rebuilt: frames carry different numbers of
+                # wrapped lines, and a per-frame band would make the frames
+                # different sizes -- the one thing save_movie cannot take.
+                all_lines = [clock.lines(i) for i in range(len(frames))]
+                band = cmd_timing.clock_band_height(
+                    all_lines, frames[0].width, frames[0].height)
+                # In place, so peak memory stays ~2 frames rather than 2x the
+                # movie: each original is released as its replacement lands.
+                for i, ln in enumerate(all_lines):
+                    frames[i] = cmd_timing.add_clock_band(frames[i], ln, band)
                 frame_meta = [clock.meta(i) for i in range(len(frames))]
                 if not quiet:
                     unmapped = clock.unmapped()

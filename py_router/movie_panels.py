@@ -297,7 +297,65 @@ def panel_geometry(top_size, height_frac):
 # drawing
 # --------------------------------------------------------------------------
 
-def iso_panel(box_wh, png_path, caption, error=''):
+def _alpha_crop(im):
+    """``im`` with kicad-cli's transparent margin removed. Never fails loudly.
+
+    kicad-cli fits the board into its canvas with a generous margin, and the
+    margin is not small: letterboxing the WHOLE png into a wide, short panel
+    left the board occupying about a quarter of the panel width. The obvious
+    workaround -- ``--iso-zoom`` -- is worse than the problem, because kicad-cli
+    zooms about the canvas centre and simply CLIPS whatever no longer fits: at
+    zoom 2.0 the demo board lost its top and bottom edges, and it did so only at
+    some yaw angles, so a sweep produced a board that was whole at 45 degrees
+    and cut at 79.
+
+    Cropping to the alpha box is the honest version of the same wish: the
+    background really is transparent (kicad-cli's default, kept deliberately),
+    so the box is exactly the board and nothing outside it was ever picture.
+
+    An opaque render -- ``--iso-floor`` draws a shadow plane -- has no
+    transparent margin, so the bbox is the whole image and this is a no-op.
+    """
+    try:
+        if im.mode not in ('RGBA', 'LA'):
+            return im
+        bb = im.getchannel('A').getbbox()
+    except Exception:                                           # noqa: BLE001
+        return im
+    if not bb or bb[2] - bb[0] < 2 or bb[3] - bb[1] < 2:
+        return im
+    return im.crop(bb)
+
+
+def panel_scale(png_paths, box_wh, strip):
+    """ONE scale for every shot in the film, or ``None`` if nothing loads.
+
+    Shared rather than per-panel, and that is the point: each yaw projects the
+    board to a different width, so fitting every shot to its own box would make
+    the board grow and shrink as it turns -- the "breathing" the orthographic
+    default exists to avoid. The scale is the SMALLEST fit across all shots, so
+    the widest projection is the one that just fits and no other can clip.
+    """
+    from PIL import Image
+
+    W, H = box_wh
+    aw, ah = max(1, W - 16), max(1, H - strip - 12)
+    best = None
+    for p in png_paths:
+        if not p or not os.path.isfile(p):
+            continue
+        try:
+            with Image.open(p) as im:
+                im.load()
+                c = _alpha_crop(im)
+                sc = min(aw / float(c.width), ah / float(c.height))
+        except Exception:                                       # noqa: BLE001
+            continue
+        best = sc if best is None else min(best, sc)
+    return best
+
+
+def iso_panel(box_wh, png_path, caption, error='', scale=None):
     """``(panel, error)``: a foreign PNG letterboxed into an EXACT box, captioned.
 
     The second return value is what the caller must fold into its failure count.
@@ -329,10 +387,16 @@ def iso_panel(box_wh, png_path, caption, error=''):
         _wrapped_text(d, font, msg, 10, max(8, H // 3), W - 20, (196, 128, 128))
     elif png_path and os.path.isfile(png_path):
         try:
-            im = Image.open(png_path)
+            im = _alpha_crop(Image.open(png_path))
             aw = max(1, W - 16)
             ah = max(1, H - strip - 12)
-            sc = min(aw / float(im.width), ah / float(im.height))
+            # `scale` is the film-wide one from `panel_scale`, so the board
+            # keeps a constant apparent size as it turns. Falling back to this
+            # shot's own fit keeps the function usable on its own (the tests
+            # call it that way), and the min() means a caller cannot hand in a
+            # scale that overflows the box.
+            fit = min(aw / float(im.width), ah / float(im.height))
+            sc = min(scale, fit) if scale else fit
             new = (max(1, int(im.width * sc)), max(1, int(im.height * sc)))
             im = im.resize(new, Image.LANCZOS)
             x, y = (W - im.width) // 2, max(0, (H - strip - im.height) // 2)
@@ -518,6 +582,13 @@ def compose_two_panel(frames, marks, final_board, opts=None):
                 notes[board] = (m, kir.models_note(m))
             return notes[board]
 
+        # ONE scale for the whole film, decided before any panel is drawn, so
+        # the board keeps a constant apparent size as it turns instead of
+        # growing and shrinking with each yaw's projected width.
+        strip = max(18, H_iso // 10)
+        shared = panel_scale([results.get(k, (None, ''))[0]
+                              for k in range(len(shots))], (W, H_iso), strip)
+
         panels, errors = {}, {}
         for k, shot in enumerate(shots):
             png, err = results.get(k, (None, 'not rendered'))
@@ -527,7 +598,8 @@ def compose_two_panel(frames, marks, final_board, opts=None):
                 shot.rotate[2], note)
             # The panel reports back: a PNG that rendered but would not DECODE
             # is a failure the count must see, and it is only discoverable here.
-            panels[k], drawn = iso_panel((W, H_iso), png, cap, error=err)
+            panels[k], drawn = iso_panel((W, H_iso), png, cap, error=err,
+                                         scale=shared)
             errors[k] = err or drawn or ''
         failed = sum(1 for e in errors.values() if e)
         # The report's single models figure is the FILM'S OPENING board, and the

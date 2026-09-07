@@ -34,7 +34,7 @@ ROOT = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
 try:
-    from PIL import Image, ImageChops
+    from PIL import Image, ImageChops, ImageDraw
 except ImportError:
     print('SKIP: Pillow is not installed, so no frame can be stamped')
     sys.exit(77)
@@ -490,19 +490,88 @@ def test_an_interpolated_reading_admits_it():
 
 # ------------------------------------------------------------- the overlay
 
-def test_the_overlay_never_changes_the_frame_size():
-    """The highest-value assertion here, mirroring test_431_placement_movie."""
+def _band_all(frames, clock):
+    lines = [clock.lines(i) for i in range(len(frames))]
+    bh = ct.clock_band_height(lines, frames[0].width, frames[0].height)
+    return [ct.add_clock_band(f, ln, bh) for f, ln in zip(frames, lines)], bh
+
+
+def test_every_banded_frame_is_still_one_size():
+    """The highest-value assertion here, mirroring test_431_placement_movie.
+
+    The clock grows the frame now instead of drawing over it, so the invariant
+    is no longer "the size does not change" but "every frame changes by the
+    SAME amount" -- which is the property `save_movie` actually needs, and the
+    one a per-frame band would break.
+    """
     clock, _ = _full_clock()
     frames = [Image.new('RGB', (240, 180), (10, 10, 10)) for _ in range(12)]
-    before = {f.size for f in frames}
-    for i, f in enumerate(frames):
-        ct.stamp_run_clock(f, clock.lines(i))
-    want({f.size for f in frames} == before,
-         'stamping changes no size', {f.size for f in frames})
-    want(len({f.size for f in frames}) == 1, 'and they are all still one size')
+    out, bh = _band_all(frames, clock)
+    want(bh > 0, 'a band was reserved', bh)
+    want(len({f.size for f in out}) == 1,
+         'and every banded frame is one size', {f.size for f in out})
+    want(out[0].size == (240, 180 + bh),
+         'which is the original plus the band', (out[0].size, bh))
 
 
-def test_a_long_overlay_wraps_instead_of_running_off_the_frame():
+def test_the_clock_never_draws_on_the_board():
+    """THE defect this band replaced, and it shipped in a published image.
+
+    The clock used to be stamped bottom-left ON the frame, mirroring
+    `_label`'s top-left corner. `_label` is one short line; the clock is four,
+    so its black box covered a corner of the X-ray panel including copper --
+    which a reviewer spotted immediately in the first still published for this
+    PR. The board region must now come back byte-identical.
+    """
+    clock, _ = _full_clock()
+    board = Image.new('RGB', (240, 180), (10, 10, 10))
+    d = ImageDraw.Draw(board)
+    # Paint the whole frame, bottom-left corner INCLUDED, so anything drawn
+    # over the board shows up as a difference wherever it lands.
+    for x in range(0, 240, 8):
+        d.line([(x, 0), (x, 180)], fill=(40, 90, 140), width=3)
+    keep = board.copy()
+
+    out, bh = _band_all([board.copy()], clock)
+    got = out[0]
+    want(got.size[1] == 180 + bh, 'the frame grew by the band', got.size)
+    want(ImageChops.difference(got.crop((0, 0, 240, 180)), keep).getbbox()
+         is None,
+         'and the ORIGINAL frame region is byte-identical -- the clock is '
+         'beside the board, never on it')
+    band = got.crop((0, 180, 240, 180 + bh))
+    want(ImageChops.difference(band, Image.new('RGB', band.size,
+                                               (0, 0, 0))).getbbox()
+         is not None,
+         'while the band itself carries the text')
+
+
+def test_the_band_is_sized_for_the_WORST_frame_not_each_one():
+    """A per-frame band is how the frames end up different sizes.
+
+    `clock_band_height` is handed every frame's lines at once for exactly this
+    reason: a step whose stage name wraps needs one more row than its
+    neighbour, and sizing each frame to its own text is the mixed-size defect
+    that `_write_mp4` fails on and the Pillow GIF fallback absorbs by silently
+    resizing every later frame.
+    """
+    short = ['RUN CLOCK  +0:01:00 of 0:10:00']
+    long = ['RUN CLOCK  +0:51:23 of 1:17:39',
+            'basis  cmd_timing.jsonl - 153 wrapped commands, mapped by mtime '
+            'inside a wrapped command window that keeps going for a while']
+    bh = ct.clock_band_height([short, long], 200, 150)
+    only_short = ct.clock_band_height([short], 200, 150)
+    want(bh > only_short,
+         'the movie-wide band is taller than the shortest frame needs',
+         (bh, only_short))
+    a = ct.add_clock_band(Image.new('RGB', (200, 150), (10, 10, 10)), short, bh)
+    b = ct.add_clock_band(Image.new('RGB', (200, 150), (10, 10, 10)), long, bh)
+    want(a.size == b.size,
+         'so a short-text frame and a long-text frame come out the SAME size',
+         (a.size, b.size))
+
+
+def test_a_long_clock_wraps_instead_of_running_off_the_frame():
     """The defect a mock-up caught before any of this was written: one line of
     clock text overflowed a 700 px frame, and PIL clips in silence."""
     long_lines = ['RUN CLOCK  +0:51:23 of 1:17:39',
@@ -513,36 +582,20 @@ def test_a_long_overlay_wraps_instead_of_running_off_the_frame():
     # lines already clear that. The claim is that the long text occupies MORE
     # vertical space than it would if each line stayed on one row -- which is
     # exactly what wrapping means and what clipping would not do.
-    tall = Image.new('RGB', (200, 150), (10, 10, 10))
-    ct.stamp_run_clock(tall, long_lines)
-    short = Image.new('RGB', (200, 150), (10, 10, 10))
-    ct.stamp_run_clock(short, ['RUN CLOCK', 'basis  x'])
-
-    def box_h(img):
-        b = ImageChops.difference(img, Image.new('RGB', (200, 150),
-                                                 (10, 10, 10))).getbbox()
-        return 0 if b is None else b[3] - b[1]
-
-    want(box_h(tall) > box_h(short) + 4,
-         'the long text takes MORE rows than the same number of short lines, '
-         'i.e. it wrapped instead of being clipped at the frame edge',
-         (box_h(tall), box_h(short)))
-    # And nothing may be drawn outside the frame or lost off the right edge.
-    b = ImageChops.difference(tall, Image.new('RGB', (200, 150),
-                                              (10, 10, 10))).getbbox()
-    want(b[2] <= 200 and b[3] <= 150, 'and stays inside the frame', b)
-
-
-def test_the_overlay_draws_bottom_left_and_leaves_the_top_alone():
-    frame = Image.new('RGB', (240, 180), (10, 10, 10))
-    keep = frame.copy()
-    ct.stamp_run_clock(frame, ['RUN CLOCK  +0:01:00 of 0:10:00', 'stage  R1'])
-    box = ImageChops.difference(frame, keep).getbbox()
-    want(box is not None, 'something was drawn', box)
-    want(box[3] > 180 * 0.5,
-         'the clock sits in the BOTTOM half, opposite _label\'s top-left', box)
-    want(box[1] > 180 * 0.25,
-         'and does not reach up into the caption area', box)
+    tall = ct.clock_band_height([long_lines], 200, 150)
+    short = ct.clock_band_height([['RUN CLOCK', 'basis  x']], 200, 150)
+    want(tall > short + 4,
+         'the long text reserves MORE rows than the same number of short '
+         'lines, i.e. it wrapped instead of being clipped at the frame edge',
+         (tall, short))
+    # And every wrapped row must actually be drawn inside the band.
+    img = ct.add_clock_band(Image.new('RGB', (200, 150), (10, 10, 10)),
+                            long_lines, tall)
+    band = img.crop((0, 150, 200, 150 + tall))
+    b = ImageChops.difference(band, Image.new('RGB', band.size,
+                                              (0, 0, 0))).getbbox()
+    want(b is not None and b[2] <= 200 and b[3] <= tall,
+         'and it stays inside the band, nothing lost off the right edge', b)
 
 
 # ---------------------------------------------------------- the PNG metadata
@@ -768,9 +821,10 @@ TESTS_TO_RUN = [
     test_an_unmapped_beat_is_named_rather_than_gated,
     test_the_frame_names_its_basis_and_never_says_eta,
     test_an_interpolated_reading_admits_it,
-    test_the_overlay_never_changes_the_frame_size,
-    test_a_long_overlay_wraps_instead_of_running_off_the_frame,
-    test_the_overlay_draws_bottom_left_and_leaves_the_top_alone,
+    test_every_banded_frame_is_still_one_size,
+    test_the_clock_never_draws_on_the_board,
+    test_the_band_is_sized_for_the_WORST_frame_not_each_one,
+    test_a_long_clock_wraps_instead_of_running_off_the_frame,
     test_the_png_block_is_facts_and_carries_no_prediction,
     test_the_png_block_omits_what_it_cannot_know,
     test_make_movie_actually_draws_the_clock_when_a_ledger_is_beside_the_chain,

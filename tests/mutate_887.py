@@ -239,10 +239,13 @@ ROWS = [
      "                   % (t.n if t else 0, how))",
      "        pass",
      (T_CLOCK,), 'KILLED'),
-    ('the-overlay-stops-wrapping', 't',
-     "            if cur and _w(cand) > avail:\n                wrapped.append(cur)\n"
+    # Re-anchored when the overlay became a band: the wrapping moved out of
+    # stamp_run_clock into the shared _wrap_clock. The --list preflight named
+    # it in one second, which is the whole reason that flag exists.
+    ('the-clock-text-stops-wrapping', 't',
+     "            if cur and measure(cand) > avail:\n                out.append(cur)\n"
      "                cur = word",
-     "            if False:\n                wrapped.append(cur)\n                cur = word",
+     "            if False:\n                out.append(cur)\n                cur = word",
      (T_CLOCK,), 'KILLED'),
     ('the-png-block-gains-a-progress-key', 't',
      "            'krt:ledger_rows': t.n if t else 0,",
@@ -365,6 +368,26 @@ ROWS = [
      "                    timing = None\n"
      "            ledger = timing",
      (T_CLOCK,), 'KILLED'),
+    # ---- the two defects a reviewer saw in the first published image -------
+    ('the-clock-is-drawn-over-the-board-again', 't',
+     "    out = Image.new('RGB', (W, H + int(band_h)), (0, 0, 0))\n"
+     "    out.paste(frame, (0, 0))",
+     "    out = Image.new('RGB', (W, H + int(band_h)), (0, 0, 0))\n"
+     "    out.paste(frame, (0, int(band_h)))",
+     (T_CLOCK,), 'KILLED'),
+    ('the-band-is-sized-per-frame-again', 't',
+     "    worst = max((len(_wrap_clock(ln, avail, measure)) for ln in all_lines\n"
+     "                 if ln), default=0)",
+     "    worst = len(_wrap_clock(all_lines[0], avail, measure))",
+     (T_CLOCK,), 'KILLED'),
+    ('the-render-margin-is-letterboxed-in-again', 'p',
+     "            im = _alpha_crop(Image.open(png_path))",
+     "            im = Image.open(png_path)",
+     (T_PANEL,), 'KILLED'),
+    ('every-shot-is-fitted-to-its-own-box-again', 'p',
+     "            sc = min(scale, fit) if scale else fit",
+     "            sc = fit",
+     (T_PANEL,), 'KILLED'),
 ]
 
 

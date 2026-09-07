@@ -843,64 +843,121 @@ def clock_for(marks, ledger_path, n_frames, mtimes=None):
                     totals(rows), n_frames)
 
 
-def stamp_run_clock(frame, lines):
-    """Draw the run clock BOTTOM-LEFT, in place. Never changes ``frame.size``.
+#: Padding inside the clock band, in pixels.
+_CLOCK_PAD = 6
 
-    In place because every frame handed to ``save_movie`` must be one size:
-    ``animate_route._write_mp4`` raises on a change mid-stream, catches it, and
-    degrades the whole movie to GIF silently.
 
-    Bottom-left mirrors ``route_render.BoardRenderer._label``'s top-left, using
-    the same font helper, black box and text colour, so the two read as one
-    instrument rather than two. PIL is imported HERE, the ``make_film._badge``
-    way, so ``import cmd_timing`` stays free of third-party modules.
-    """
-    if not lines:
-        return frame
-    from PIL import ImageDraw
+def _clock_font(frame_h):
     from route_render import load_font
+    return load_font(max(11, frame_h // 55))
 
-    d = ImageDraw.Draw(frame)
+
+def _wrap_clock(lines, avail, measure):
+    """``lines`` broken on spaces to fit ``avail`` px. Wraps, never clips.
+
+    A one-line clock overflowed a 700 px frame the first time it was drawn, and
+    PIL clips at the edge in silence -- the same trap ``_label`` documents,
+    where a strip ending at a plausible-looking field reads as the whole story.
+    """
+    out = []
+    for ln in lines or ():
+        cur = ''
+        for word in str(ln).split(' '):
+            cand = (cur + ' ' + word) if cur else word
+            if cur and measure(cand) > avail:
+                out.append(cur)
+                cur = word
+            else:
+                cur = cand
+        out.append(cur)
+    return out
+
+
+def clock_band_height(all_lines, width, frame_h):
+    """The band height for a WHOLE movie: one number, from every frame's text.
+
+    It is computed across all frames on purpose. Frames carry different numbers
+    of wrapped lines -- a step whose stage name wraps has one more than its
+    neighbour -- so a per-frame height would make the frames different sizes,
+    which is the one thing `save_movie` cannot take: `_write_mp4` fails and the
+    Pillow GIF fallback silently RESIZES every later frame to the first.
+    """
+    from PIL import Image, ImageDraw
+
+    if not all_lines:
+        return 0
+    probe = ImageDraw.Draw(Image.new('RGB', (8, 8)))
+    font = _clock_font(frame_h)
+
+    def measure(s):
+        try:
+            bb = probe.textbbox((0, 0), s, font=font)
+            return bb[2] - bb[0]
+        except Exception:                                       # noqa: BLE001
+            return 8 * len(s)
+
+    try:
+        bb = probe.textbbox((0, 0), 'Ag', font=font)
+        lh = (bb[3] - bb[1]) + 4
+    except Exception:                                           # noqa: BLE001
+        lh = 16
+    avail = max(60, int(width) - 2 * _CLOCK_PAD - 6)
+    worst = max((len(_wrap_clock(ln, avail, measure)) for ln in all_lines
+                 if ln), default=0)
+    return (lh * worst + 2 * _CLOCK_PAD) if worst else 0
+
+
+def add_clock_band(frame, lines, band_h):
+    """``frame`` with a clock BAND grown underneath it. Returns a NEW image.
+
+    **The band exists instead of an overlay, and that is the whole point.** The
+    clock used to be drawn bottom-left ON the board, mirroring
+    ``BoardRenderer._label``'s top-left corner -- but ``_label`` is one short
+    line and the clock is four, so its black box covered a quarter of the X-ray
+    panel, including copper the movie exists to show. Reviewers of #887 said so
+    about the first published still, and they were right: an instrument that
+    hides the measurement is not an instrument.
+
+    Growing the frame instead means the clock can never occlude anything. Every
+    frame grows by the SAME ``band_h`` -- take it from ``clock_band_height``
+    over the whole movie, never per frame -- so the constant-frame-size
+    invariant holds by construction.
+
+    PIL is imported HERE, the ``make_film._badge`` way, so ``import cmd_timing``
+    stays free of third-party modules.
+    """
+    if not lines or not band_h:
+        return frame
+    from PIL import Image, ImageDraw
+
     W, H = frame.size
-    font = load_font(max(11, H // 55))
-    pad = 6
-    avail = max(60, W - 2 * pad - 6)
+    out = Image.new('RGB', (W, H + int(band_h)), (0, 0, 0))
+    out.paste(frame, (0, 0))
+    d = ImageDraw.Draw(out)
+    font = _clock_font(H)
 
-    def _w(s):
+    def measure(s):
         try:
             bb = d.textbbox((0, 0), s, font=font)
             return bb[2] - bb[0]
         except Exception:                                       # noqa: BLE001
             return 8 * len(s)
 
-    # WRAP, do not clip. A one-line clock overflowed a 700 px frame the first
-    # time it was drawn, and PIL clips at the edge in silence -- the same trap
-    # _label documents, where a strip that ends at a plausible-looking field
-    # reads as the whole story.
-    wrapped = []
-    for ln in lines:
-        cur = ''
-        for word in ln.split(' '):
-            cand = (cur + ' ' + word) if cur else word
-            if cur and _w(cand) > avail:
-                wrapped.append(cur)
-                cur = word
-            else:
-                cur = cand
-        wrapped.append(cur)
     try:
         bb = d.textbbox((0, 0), 'Ag', font=font)
         lh = (bb[3] - bb[1]) + 4
     except Exception:                                           # noqa: BLE001
         lh = 16
-    box_h = lh * len(wrapped) + 6
-    top = H - box_h - pad
-    box_w = max(_w(x) for x in wrapped) if wrapped else 0
-    d.rectangle([pad - 3, top - 3, pad + box_w + 3, H - pad + 3],
-                fill=(0, 0, 0))
-    for i, ln in enumerate(wrapped):
-        d.text((pad, top + i * lh), ln, fill=(240, 240, 240), font=font)
-    return frame
+    avail = max(60, W - 2 * _CLOCK_PAD - 6)
+    for i, ln in enumerate(_wrap_clock(lines, avail, measure)):
+        y = H + _CLOCK_PAD + i * lh
+        if y + lh > H + band_h:
+            # The band was sized for the worst frame in the movie, so this
+            # cannot happen -- but a clipped clock is a wrong clock, not a
+            # cosmetic problem, so it stops rather than drawing off the end.
+            break
+        d.text((_CLOCK_PAD, y), ln, fill=(240, 240, 240), font=font)
+    return out
 
 
 def main(argv=None):
