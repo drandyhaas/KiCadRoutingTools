@@ -142,6 +142,11 @@ HW_COL = 0.15                  # half-width of a constrained column's
                                # one layer)
 VIA_ROOM = 0.30                # room for a via between two required
                                # stretches (0.25 dia + clearances)
+SLOPE_PITCH = True             # slot pitch scaled by the lane's angle to
+                               # the spine (see Corridor.offsets); paper-
+                               # checked before it is switched on
+VIA_NEED = VIA_SIZE / 2 + CLEAR + TRACK / 2 + 0.03   # a via's room to a
+                               # neighbouring track centre, plus a cell
 W_GATE = 0.33                  # narrowest swap column the gated schedule
                                # gets: every clean gated K on the bench
                                # had W >= 0.343 (K21, W=0.322, needed
@@ -164,6 +169,18 @@ def cross_reserve(ctx, nm):
     out = []
     for c in getattr(ctx, 'corridors', ()):
         if c.idx in getattr(ctx, 'corr_done', ()):
+            continue
+        # the corridor routing NOW stamps its own unrouted lanes through
+        # virtual_of, which follows the plan's layer rules (a B-page lane
+        # born on F is F only until its B requirement starts, a
+        # swimmer's mid-line is no promise). Stamping its lanes' ends
+        # here as well, 1.5 mm layer-blind on the END layers, walled the
+        # very lanes those rules free: K28 SDQ9's F birth stamp ran to
+        # s0+1.2 across SDQ10 (SDQ9 required on B from s0+0.3), SDQ11's
+        # across SDQ8, the swimmer SA4's diagonal across SDQ7, SDQ15's
+        # against SDQM0 -- four of the six lanes refused in-band, each
+        # re-laid at last call (wall_probe census, 2026-09-06).
+        if nm in c.members:
             continue
         sc = getattr(c, 'sched_cur', None)
         for om in c.members:
@@ -190,7 +207,37 @@ def cross_reserve(ctx, nm):
                         q = (p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t)
                     out.append((p, q, lay))
                     acc += d
-    return out
+    # a reservation must not cover another net's FREE END: the lane it
+    # predicts will dodge that copper when it is routed, but stamped
+    # over a tooth it seals the tooth's owner in before it starts (K35
+    # SA5: corridor 1's SA9 head over SA5's tooth, a one-cell pocket)
+    ends = [ctx.ends[om][k] for om in ctx.ends for k in (0, 1)]
+    keep_r = TRACK + CLEAR + 0.05
+    clipped = []
+    for (p, q, lay) in out:
+        pieces = [(p, q)]
+        for e in ends:
+            nxt = []
+            for (a_, b_) in pieces:
+                dx, dy = b_[0] - a_[0], b_[1] - a_[1]
+                L2 = dx * dx + dy * dy
+                if L2 < 1e-12:
+                    continue
+                t = max(0.0, min(1.0, ((e[0] - a_[0]) * dx + (e[1] - a_[1]) * dy) / L2))
+                cx, cy = a_[0] + t * dx, a_[1] + t * dy
+                if math.hypot(cx - e[0], cy - e[1]) >= keep_r:
+                    nxt.append((a_, b_))
+                    continue
+                # cut the stretch within keep_r (along the piece) of the end
+                Lp = math.sqrt(L2)
+                t0, t1 = max(0.0, t - keep_r / Lp), min(1.0, t + keep_r / Lp)
+                if t0 > 1e-6:
+                    nxt.append((a_, (a_[0] + t0 * dx, a_[1] + t0 * dy)))
+                if t1 < 1 - 1e-6:
+                    nxt.append(((a_[0] + t1 * dx, a_[1] + t1 * dy), b_))
+            pieces = nxt
+        clipped += [(a_, b_, lay) for (a_, b_) in pieces]
+    return clipped
 
 
 def reserve(ctx, nm):
@@ -483,13 +530,15 @@ def _end_dir(pcb, nid, pt, pads):
 
 
 def _relax_pitch(vals, floor):
-    """Push a sorted list of offsets apart to at least `floor`,
-    symmetrically."""
+    """Push a sorted list of offsets apart to at least `floor` (one
+    value, or one per adjacent pair), symmetrically."""
     py = list(vals)
+    fl = list(floor) if isinstance(floor, (list, tuple)) else [floor] * max(len(py) - 1, 0)
     for _ in range(60):
         moved = False
         for i in range(len(py) - 1):
             g_ = py[i + 1] - py[i]
+            floor = fl[i]
             if g_ < floor - 1e-9:
                 push = (floor - g_) / 2
                 py[i] -= push
@@ -569,6 +618,7 @@ class Corridor:
         M = self.members
         st, se = self.st, self.se
         self.s0 = max(s for s, _o in st.values()) + 0.3
+        self.s0_base = self.s0
 
         # A tooth is BORN IN PLACE unless another member's tooth sits
         # clearly DOWNSTREAM of it at (nearly) its own offset -- its lane
@@ -668,7 +718,7 @@ class Corridor:
                      f'(s {s_from:.1f}..{s_to:.1f})')
         return base
 
-    def _leg_s(self, nm, s_l, oa, ob, at_tooth, placed):
+    def _leg_s(self, nm, s_l, oa, ob, at_tooth, placed, avoid=None, extra=()):
         """Where a leg of `nm` spanning o in [oa, ob] at s_l really runs:
         straight in (s, o) -- unless another member's free end sits in
         its way (two flank teeth in one column, 0.28 mm apart: K19's
@@ -718,28 +768,92 @@ class Corridor:
             n += sum(1 for (ps, plo, phi) in placed
                      if abs(ps - s) < TRACK + 0.1 + 0.02 and plo < hi_ and phi > lo_)
             return n
-        if not clash(s_l):
+        def bad(s):
+            return avoid is not None and avoid(nm, s)
+        if not clash(s_l) and not bad(s_l):
             return s_l
         best = None
-        for cand in (s_l + LPITCH, s_l - LPITCH, s_l + 2 * LPITCH,
-                     s_l - 2 * LPITCH):
+        cands = (s_l + LPITCH, s_l - LPITCH, s_l + 2 * LPITCH, s_l - 2 * LPITCH)
+        # ...and, off an island, the first s past either of its edges
+        cands = cands + tuple(sorted(extra, key=lambda v: abs(v - s_l)))
+        for cand in cands:
+            if bad(cand):
+                continue
             n = clash(cand)
             if not n:
                 return cand
             if best is None or n < best[0]:
                 best = (n, cand)
+        if best is None:
+            # every candidate on an island too: the plain rule
+            for cand in cands:
+                n = clash(cand)
+                if best is None or n < best[0]:
+                    best = (n, cand)
         return best[1]
 
-    def offsets(self, ly_floor):
-        """Launch and target offsets for the current pitch floor."""
+    def pair_floor(self, a, b, base, sched, at_launch):
+        """The offset pitch two adjacent slots need. Clearance is
+        perpendicular to a lane, and a slot pitch is measured across
+        the spine, so a pair of same-page lanes crossing the region at
+        an angle needs the base pitch times the secant of the steeper
+        one's angle (K28: at 45 degrees a 0.35 pitch is 0.25 of copper
+        room, two hundredths over the legal minimum). Between lanes on
+        different pages only a via at the slot needs room -- the lane
+        born (or landing) on the other layer changes layer there -- at
+        a via's clearance, scaled the same way. A swimmer's line is no
+        promise: base."""
+        if sched is None or not SLOPE_PITCH:
+            return base
+        pa, pb = sched.page.get(a), sched.page.get(b)
+        if pa is None or pb is None:
+            return base
+        L = max(self.s1 - self.s0, 1e-6)
+        m = max(abs(self._slope.get(a, 0.0)), abs(self._slope.get(b, 0.0)))
+        sec = math.sqrt(1.0 + m * m)
+        if pa == pb:
+            return base * sec
+        tl, dl = self.ctx.tooth_layer, self.ctx.dest_layer
+        via = any((tl if at_launch else dl)[nm] != sched.page[nm] for nm in (a, b))
+        return max(base, VIA_NEED * sec) if via else base
+
+    def offsets(self, ly_floor, sched=None):
+        """Launch and target offsets for the current pitch floor. With
+        a schedule (a second pass) every adjacent pitch is the pair's
+        own floor (pair_floor); the orders do not change between the
+        passes, so the schedule stands."""
         st, se = self.st, self.se
+        if sched is not None and hasattr(self, 'launch_o'):
+            L = max(self.s1 - self.s0, 1e-6)
+            self._slope = {nm: (self.target_o[nm] - self.launch_o[nm]) / L
+                           for nm in self.members}
+        else:
+            self._slope = {}
         # head-on launches: tooth offsets at the launch pitch floor
         # (pushed one way only, as the trunk always did)
         hl = sorted(self.heads_l, key=lambda nm: st[nm][1])
-        Ly = []
-        for nm in hl:
-            v = st[nm][1]
-            Ly.append(v if not Ly else max(v, Ly[-1] + ly_floor))
+        if sched is not None and SLOPE_PITCH:
+            # second pass: the pair's own floors, relaxed SYMMETRICALLY
+            # (a one-way push piles every widening onto the last lanes
+            # of the comb: K28 SDQ0 +0.39, its fan-in through the stub
+            # beside it), and the fan-in made long enough for the
+            # largest shift -- a slot pushed further across than the
+            # fan-in is long is a diagonal steeper than 45 degrees
+            # through the neighbouring teeth
+            Ly = _relax_pitch([st[nm][1] for nm in hl],
+                              [self.pair_floor(hl[i], hl[i + 1], ly_floor, sched, True)
+                               for i in range(len(hl) - 1)] if hl else ly_floor)
+            shift = max((abs(Ly[i] - st[nm][1]) for i, nm in enumerate(hl)), default=0.0)
+            self.s0 = max(self.s0_base, max(st[nm][0] for nm in hl) + shift) if hl else self.s0_base
+            if abs(self.s0 - self.s0_base) > 1e-9:
+                self.log(f'  fan-in extended {self.s0 - self.s0_base:.2f} mm for a '
+                         f'{shift:.2f} mm launch shift (s0 {self.s0:.2f})')
+        else:
+            self.s0 = self.s0_base
+            Ly = []
+            for nm in hl:
+                v = st[nm][1]
+                Ly.append(v if not Ly else max(v, Ly[-1] + ly_floor))
         launch_o = {nm: Ly[i] for i, nm in enumerate(hl)}
         # joiner blocks, per side: the first joiner takes the lane
         # farthest from the teeth, so no join leg crosses a lane already
@@ -779,7 +893,9 @@ class Corridor:
                 self.join_block[nm] = launch_o[nm]
         # head-on exits: stub offsets at the exit pitch floor
         he = sorted(self.heads_e, key=lambda nm: se[nm][1])
-        py = _relax_pitch([se[nm][1] for nm in he], MINP)
+        py = _relax_pitch([se[nm][1] for nm in he],
+                          [self.pair_floor(he[i], he[i + 1], MINP, sched, False)
+                           for i in range(len(he) - 1)] if he else MINP)
         target_o = {nm: py[i] for i, nm in enumerate(he)}
         # exit blocks, per side. Head-on-launched side exits (ports)
         # take the block's inner positions in exit order (first exiter
@@ -807,8 +923,11 @@ class Corridor:
             base = sg * max(ext + BLOCK_GAP, -LPITCH * (len(xs) - 1) / 2)
             base = self._clear_block(base, sg, self.s1,
                                      max(se[nm][0] for nm in xs), order[0])
+            acc = 0.0
             for k, nm in enumerate(order):
-                target_o[nm] = base + sg * LPITCH * k
+                if k:
+                    acc += self.pair_floor(order[k - 1], nm, LPITCH, sched, False)
+                target_o[nm] = base + sg * acc
                 self.exit_block[nm] = target_o[nm]
         self.launch_o, self.target_o = launch_o, target_o
         self.target = sorted(self.members, key=lambda nm: target_o[nm])
@@ -854,104 +973,147 @@ class Corridor:
         req = {nm: [] for nm in M}
         trank = {nm: i for i, nm in enumerate(self.target)}
         py = self.py
-        self.exit_leg_s = {}
-        placed = []
-        for nm in sorted(self.exit_block, key=lambda n: (self.se[n][0], abs(self.exit_block[n]))):
-            s_e, o_e = self.se[nm]
-            o_l = py[trank[nm]]
-            s_l = self._leg_s(nm, s_e, o_l, o_e, False, placed)
-            self.exit_leg_s[nm] = s_l
-            placed.append((s_l, min(o_l, o_e), max(o_l, o_e)))
-        self.leg_layer = {}
-        crossings = {}                       # crossed lane -> [leg s]
-        cross_by = {}                        # crossed lane -> [(s, owner)]
-        leg_cross = {}                       # leg owner -> [crossed lanes]
-        for sg in (-1, 1):
-            xs = [nm for nm in self.exit_block if self.exit_side.get(nm) == sg]
-            if not xs:
-                continue
-            n_b = sum(1 for nm in xs if self.ctx.dest_layer[nm] == 'B.Cu')
-            leg_L = 'B.Cu' if 2 * n_b > len(xs) else 'F.Cu'
-            for nm in xs:
-                self.leg_layer[nm] = leg_L
-                s_l = self.exit_leg_s[nm]
-                o_l, o_e = self.exit_block[nm], self.se[nm][1]
-                lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
-                for om in M:
-                    if om == nm:
-                        continue
-                    if om in self.exit_block:
-                        o_m, s_end = self.exit_block[om], self.exit_leg_s[om]
-                    else:
-                        o_m, s_end = self.target_o[om], self.se[om][0]
-                    if s_end > s_l + 0.05 and lo_ < o_m < hi_:
-                        crossings.setdefault(om, []).append(s_l)
-                        cross_by.setdefault(om, []).append((s_l, nm))
-                        leg_cross.setdefault(nm, []).append(om)
-        self.crossings = crossings
-        leg_req_min = {}
-        # TWO-PAGE LEG ECONOMICS, decided ALONG s. A leg crossing a
-        # lane on the OTHER layer is free -- the block-wide layer rule
-        # priced every crossing as a forced dive (2 vias per crossed
-        # lane), which is exactly the SA7-class 4-via overspend (t7
-        # K28: the human pays 2). Each leg picks the layer that
-        # minimises what is actually paid: a dive for every crossed
-        # lane that is on that layer THERE (its return charged only if
-        # its berth is on that layer too), a corner via where the leg
-        # differs from the layer its own lane is on there, a via where
-        # it differs from the stub's. "There" is the point: a lane is
-        # crossed only by legs EARLIER than its own (it ends at its
-        # leg), so with the legs decided in ascending s every stretch
-        # the earlier legs imposed -- on this lane and on the lanes it
-        # crosses -- is known when a leg chooses. Judged by pages alone
-        # (2026-09-06) K28's SA9 was sent under two F legs, back up to F
-        # for its own leg and down again into its B berth: three
-        # changes where the router found one, and the plan counted
-        # zero. A crossed page lane dives only under a SAME-layer leg;
-        # a swimmer adapts per leg. Overlapping opposite-layer
-        # intervals from adjacent disagreeing legs are dropped in pairs
-        # (the K19 lesson: both layers closed refuses the lane before
-        # the router sees it); the obstacle map adjudicates there.
-        ivs = {nm: [] for nm in M}
-
-        def cur_layer(om, s):
-            """The layer the plan has lane `om` on at s: its last
-            required stretch starting before s (appended in s order),
-            else its page (None for a swimmer)."""
-            before = [iv for iv in ivs[om] if iv[0] < s]
-            return before[-1][2] if before else (sched.page.get(om) if sched else None)
-
-        for nm in sorted(self.exit_block, key=lambda n: self.exit_leg_s[n]):
-            s_l = self.exit_leg_s[nm]
-            own = cur_layer(nm, s_l)
-            crossed = leg_cross.get(nm, ())
-            cost = {}
-            for L in ('F.Cu', 'B.Cu'):
-                c = 0
-                for om in crossed:
-                    if cur_layer(om, s_l) == L:
-                        c += 1 + (1 if self.ctx.dest_layer[om] == L else 0)
-                if own is not None and own != L:
-                    c += 1
-                if self.ctx.dest_layer[nm] != L:
-                    c += 1
-                cost[L] = c
-            Lg = min(('F.Cu', 'B.Cu'), key=lambda L: cost[L])
-            self.leg_layer[nm] = Lg
-            other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
-            a = s_l - LEG_REQ
-            for om in crossed:
-                b = s_l + LEG_REQ
-                if om in self.exit_block:
-                    b = min(b, self.exit_leg_s[om] - 0.03)
-                else:
-                    b = min(b, self.se[om][0] - 0.03)
-                if b <= a:
+        def place_and_decide(avoid=None):
+            """Exit legs placed (each a pitch off another leg or a
+            free end in its way, and -- on the second pass -- off any
+            static island on its layer), the lanes each leg crosses,
+            and every leg's layer decided along s."""
+            self.exit_leg_s = {}
+            placed = []
+            for nm in sorted(self.exit_block, key=lambda n: (self.se[n][0], abs(self.exit_block[n]))):
+                s_e, o_e = self.se[nm]
+                o_l = py[trank[nm]]
+                s_l = self._leg_s(nm, s_e, o_l, o_e, False, placed, avoid,
+                                  extra_cands.get(nm, ()) if avoid else ())
+                self.exit_leg_s[nm] = s_l
+                placed.append((s_l, min(o_l, o_e), max(o_l, o_e)))
+            self.leg_layer = {}
+            crossings = {}                       # crossed lane -> [leg s]
+            cross_by = {}                        # crossed lane -> [(s, owner)]
+            leg_cross = {}                       # leg owner -> [crossed lanes]
+            for sg in (-1, 1):
+                xs = [nm for nm in self.exit_block if self.exit_side.get(nm) == sg]
+                if not xs:
                     continue
-                # a lane already on the other layer there gets the
-                # stretch all the same (the band closes the leg's layer
-                # under it), at no change
-                ivs[om].append((a, b, other))
+                n_b = sum(1 for nm in xs if self.ctx.dest_layer[nm] == 'B.Cu')
+                leg_L = 'B.Cu' if 2 * n_b > len(xs) else 'F.Cu'
+                for nm in xs:
+                    self.leg_layer[nm] = leg_L
+                    s_l = self.exit_leg_s[nm]
+                    o_l, o_e = self.exit_block[nm], self.se[nm][1]
+                    lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
+                    for om in M:
+                        if om == nm:
+                            continue
+                        if om in self.exit_block:
+                            o_m, s_end = self.exit_block[om], self.exit_leg_s[om]
+                        else:
+                            o_m, s_end = self.target_o[om], self.se[om][0]
+                        if s_end > s_l + 0.05 and lo_ < o_m < hi_:
+                            crossings.setdefault(om, []).append(s_l)
+                            cross_by.setdefault(om, []).append((s_l, nm))
+                            leg_cross.setdefault(nm, []).append(om)
+            self.crossings = crossings
+            leg_req_min = {}
+            # TWO-PAGE LEG ECONOMICS, decided ALONG s. A leg crossing a
+            # lane on the OTHER layer is free -- the block-wide layer rule
+            # priced every crossing as a forced dive (2 vias per crossed
+            # lane), which is exactly the SA7-class 4-via overspend (t7
+            # K28: the human pays 2). Each leg picks the layer that
+            # minimises what is actually paid: a dive for every crossed
+            # lane that is on that layer THERE (its return charged only if
+            # its berth is on that layer too), a corner via where the leg
+            # differs from the layer its own lane is on there, a via where
+            # it differs from the stub's. "There" is the point: a lane is
+            # crossed only by legs EARLIER than its own (it ends at its
+            # leg), so with the legs decided in ascending s every stretch
+            # the earlier legs imposed -- on this lane and on the lanes it
+            # crosses -- is known when a leg chooses. Judged by pages alone
+            # (2026-09-06) K28's SA9 was sent under two F legs, back up to F
+            # for its own leg and down again into its B berth: three
+            # changes where the router found one, and the plan counted
+            # zero. A crossed page lane dives only under a SAME-layer leg;
+            # a swimmer adapts per leg. Overlapping opposite-layer
+            # intervals from adjacent disagreeing legs are dropped in pairs
+            # (the K19 lesson: both layers closed refuses the lane before
+            # the router sees it); the obstacle map adjudicates there.
+            ivs = {nm: [] for nm in M}
+
+            def cur_layer(om, s):
+                """The layer the plan has lane `om` on at s: its last
+                required stretch starting before s (appended in s order),
+                else its page (None for a swimmer)."""
+                before = [iv for iv in ivs[om] if iv[0] < s]
+                return before[-1][2] if before else (sched.page.get(om) if sched else None)
+
+            for nm in sorted(self.exit_block, key=lambda n: self.exit_leg_s[n]):
+                s_l = self.exit_leg_s[nm]
+                own = cur_layer(nm, s_l)
+                crossed = leg_cross.get(nm, ())
+                cost = {}
+                for L in ('F.Cu', 'B.Cu'):
+                    c = 0
+                    for om in crossed:
+                        if cur_layer(om, s_l) == L:
+                            c += 1 + (1 if self.ctx.dest_layer[om] == L else 0)
+                    if own is not None and own != L:
+                        c += 1
+                    if self.ctx.dest_layer[nm] != L:
+                        c += 1
+                    cost[L] = c
+                Lg = min(('F.Cu', 'B.Cu'), key=lambda L: cost[L])
+                self.leg_layer[nm] = Lg
+                other = 'B.Cu' if Lg == 'F.Cu' else 'F.Cu'
+                a = s_l - LEG_REQ
+                for om in crossed:
+                    b = s_l + LEG_REQ
+                    if om in self.exit_block:
+                        b = min(b, self.exit_leg_s[om] - 0.03)
+                    else:
+                        b = min(b, self.se[om][0] - 0.03)
+                    if b <= a:
+                        continue
+                    # a lane already on the other layer there gets the
+                    # stretch all the same (the band closes the leg's layer
+                    # under it), at no change
+                    ivs[om].append((a, b, other))
+            return ivs, leg_req_min
+
+        extra_cands = {}
+        ivs, leg_req_min = place_and_decide()
+        # a leg over a static island on its own layer (K28 SDQ0's leg
+        # at s 20.6 on F, through C12's second pad) is re-placed a
+        # pitch off the island, and the crossings and layers decided
+        # again from the moved legs
+        islands_ = self.static_islands()
+
+        def leg_on_island(nm, s_, L):
+            o_l, o_e = py[trank[nm]], self.se[nm][1]
+            lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
+            return any(bx[0] <= s_ <= bx[1] and bx[2] < hi_ and lo_ < bx[3]
+                       for bx in islands_.get(L, ()))
+
+        def island_edges(nm, s_, L):
+            o_l, o_e = py[trank[nm]], self.se[nm][1]
+            lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
+            out = []
+            for bx in islands_.get(L, ()):
+                if bx[0] <= s_ <= bx[1] and bx[2] < hi_ and lo_ < bx[3]:
+                    out += [bx[0] - 0.05, bx[1] + 0.05]
+            return out
+
+        layer0 = dict(self.leg_layer)
+        bad_legs = [nm for nm in self.exit_block
+                    if leg_on_island(nm, self.exit_leg_s[nm], layer0[nm])]
+        extra_cands = {nm: island_edges(nm, self.exit_leg_s[nm], layer0[nm])
+                       for nm in bad_legs}
+        if bad_legs:
+            was = {nm: self.exit_leg_s[nm] for nm in bad_legs}
+            ivs, leg_req_min = place_and_decide(
+                lambda nm, s_: nm in layer0 and nm in bad_legs
+                and leg_on_island(nm, s_, layer0[nm]))
+            self.log('  legs off islands: ' + ', '.join(
+                f'{nm} s{was[nm]:.1f}->{self.exit_leg_s[nm]:.1f}' for nm in bad_legs))
         for om, vv in ivs.items():
             kept_iv = [iv for iv in vv
                        if not any(o[2] != iv[2] and iv[0] < o[1]
@@ -1010,10 +1172,19 @@ class Corridor:
             # exit run when a crossing comes that early.
             xs_ = [x for om in M if om != nm and sched.inverted(nm, om)
                    and (x := _cross_s(nm, om)) is not None]
-            a = self.s0 + (0.05 if tlr[nm] == pg else 0.45)
+            # the birth via goes AT the launch slot: the lane may stay
+            # on its tooth layer only to just past s0, so the dive
+            # lands where the slots are a full pitch apart. Given 0.45
+            # of room the router dove at the END of it (a via costs the
+            # same anywhere on the stretch, and the forward search
+            # leaves the tooth layer only when forced), where two
+            # converging neighbours had closed to 0.22 mm -- K28 SDQ14's
+            # via sealed SDQM0's channel at attempt 0 (wall_probe,
+            # 2026-09-06); the landing via at s1 likewise.
+            a = self.s0 + 0.05
             if tlr[nm] != pg and xs_:
                 a = min(a, max(self.s0 + 0.02, min(xs_) - HW_COL))
-            b = self.s1 - (0.05 if dlr[nm] == pg else 0.45)
+            b = self.s1 - 0.05
             if dlr[nm] != pg and xs_:
                 b = max(b, min(self.s1 - 0.02, max(xs_) + HW_COL))
             if nm in self.exit_block:
@@ -1115,6 +1286,15 @@ class Corridor:
             self.mid[nm] = clean
             self.legs[nm] = legs
             self.jogs[nm] = jogs
+        # STATIC ISLANDS (#622 K28 C5): a part sitting inside the
+        # corridor is a wall the straight lines ignored, and the page
+        # rule then forbids the one cheap escape (the other layer)
+        # exactly there -- three F lanes planned through C5's pads
+        # were refused in-band every attempt and re-laid at last call,
+        # where the third found every slot round the island taken and
+        # shipped open (wall_probe census, 2026-09-06). The plan bends
+        # the lanes round the island instead: see deflect_islands.
+        self.deflect_islands(sched)
         # board polylines of the plan (Eco, virtual copper, windows)
         self.lane_xy = {}
         self.mid_xy = {}
@@ -1167,6 +1347,20 @@ class Corridor:
             return float(np.interp(s, [p[0] for p in ms_],
                                    [p[1] for p in ms_]))
 
+        def line_dist(om, s, o):
+            """Distance in the (s, o) plane from a point to lane
+            `om`'s polyline, over the pieces within 0.6 mm of s."""
+            best = 1e9
+            ms_ = self.mid[om]
+            for (sa, oa), (sb, ob) in zip(ms_, ms_[1:]):
+                if sb < s - 0.6 or sa > s + 0.6:
+                    continue
+                dx, dy = sb - sa, ob - oa
+                L2 = dx * dx + dy * dy
+                t = 0.0 if L2 < 1e-12 else max(0.0, min(1.0, ((s - sa) * dx + (o - oa) * dy) / L2))
+                best = min(best, math.hypot(s - sa - t * dx, o - oa - t * dy))
+            return best
+
         for nm in M:
             if sched.page.get(nm) is not None:
                 continue
@@ -1209,8 +1403,13 @@ class Corridor:
                         if any(two_obs[L].point_violation(xy, pad=pad_r)
                                is not None for L in ('F.Cu', 'B.Cu')):
                             continue
-                        if any(om != nm and (oo := line_o(om, ds))
-                               is not None and abs(o0 + do - oo) < 0.30
+                        # a lane-pitch clear of every other lane's LINE
+                        # -- the line as a polyline in (s, o), not its
+                        # offset at this s alone: a spot 0.30 beside a
+                        # flat stretch was 0.13 from the same lane's
+                        # 67-degree run-out a tenth of a millimetre on
+                        # (K15 SDQ13 off the C5 island, refused in-band)
+                        if any(om != nm and line_dist(om, ds, o0 + do) < 0.30
                                for om in M):
                             continue
                         got = xy
@@ -1221,6 +1420,253 @@ class Corridor:
                     spots.append(got)
             if spots:
                 self.hops[nm] = spots
+
+    def static_islands(self):
+        """Static copper inside the schedule region, per layer, as (s, o)
+        boxes a track centre on that layer cannot enter: every pad of a
+        footprint that is not one of the run's arrays -- an SMD pad on
+        its own layer, a drilled pad on both -- projected on the spine,
+        inflated by the clearance plus half a track, kept when it lies
+        between s0 and s1 within the corridor's offset span; boxes that
+        overlap on one layer are merged."""
+        ctx, sp = self.ctx, self.spine
+        arrays = ({ctx.src_ref[nm] for nm in self.members}
+                  | {ctx.ends[nm][2] for nm in self.members})
+        grow = CLEAR + TRACK / 2
+        o_all = ([o for (_s, o) in self.st.values()]
+                 + [o for (_s, o) in self.se.values()]
+                 + list(self.launch_o.values()) + list(self.target_o.values()))
+        # the window must hold what a bend can reach, not just the
+        # lanes' own offsets: bent off a six-part cluster at K35, SA0
+        # landed on R3, 0.3 mm outside a +-1 window and so unseen
+        o_lo_c, o_hi_c = min(o_all) - 3.0, max(o_all) + 3.0
+        boxes = {'F.Cu': [], 'B.Cu': []}
+        for ref, fp in ctx.pcb.footprints.items():
+            if ref in arrays:
+                continue
+            for p in fp.pads:
+                drilled = bool(p.drill and p.drill > 0)
+                if p.pad_type == 'np_thru_hole':
+                    hx = hy = (p.drill or 0.0) / 2
+                    layers = ['F.Cu', 'B.Cu']
+                else:
+                    hx, hy = p.size_x / 2, p.size_y / 2
+                    layers = (['F.Cu', 'B.Cu'] if drilled else
+                              [L for L in ('F.Cu', 'B.Cu') if L in p.layers])
+                if not layers or hx <= 0 or hy <= 0:
+                    continue
+                so = [sp.project_pt((p.global_x + dx, p.global_y + dy))
+                      for dx in (-hx, hx) for dy in (-hy, hy)]
+                s_lo = min(v[0] for v in so) - grow
+                s_hi = max(v[0] for v in so) + grow
+                o_lo = min(v[1] for v in so) - grow
+                o_hi = max(v[1] for v in so) + grow
+                if s_hi < self.s0 or s_lo > self._s_end():
+                    continue
+                if o_hi < o_lo_c or o_lo > o_hi_c:
+                    continue
+                for L in layers:
+                    boxes[L].append([s_lo, s_hi, o_lo, o_hi, f'{ref}.{p.pad_number}'])
+        out = {}
+        for L, bx in boxes.items():
+            merged = []
+            # boxes that touch or leave less than a track's room between
+            # them are one island: a 0402's two pads leave a 0.05 mm
+            # strip a track centre could take, and a lane sent into it
+            # is then squeezed by the other pad's pass (K28 C5)
+            gap = 0.10
+            for b in sorted(bx):
+                for m in merged:
+                    if (b[0] <= m[1] + gap and m[0] <= b[1] + gap
+                            and b[2] <= m[3] + gap and m[2] <= b[3] + gap):
+                        m[0], m[1] = min(m[0], b[0]), max(m[1], b[1])
+                        m[2], m[3] = min(m[2], b[2]), max(m[3], b[3])
+                        m[4] = m[4] + '+' + b[4]
+                        break
+                else:
+                    merged.append(list(b))
+            out[L] = [tuple(m) for m in merged]
+        return out
+
+    def _s_end(self):
+        """Where the corridor's lanes end along the spine: the farthest
+        stub (a lane's tail runs that far)."""
+        return max(v[0] for v in self.se.values()) + 0.5
+
+    def _layer_at(self, nm, s):
+        """The layer the plan has page lane `nm` on at s (its layer
+        profile's last run starting at or before s)."""
+        runs = self.layer_profile(nm)
+        L = runs[0][1]
+        for s_r, L_r in runs:
+            if s_r <= s + 1e-9:
+                L = L_r
+        return L
+
+    def deflect_islands(self, sched):
+        """Bend the page lanes round the static islands in the schedule
+        region. For each island on a layer, the lanes on that layer
+        whose line passes through it go round the side that costs the
+        smaller deflection (the island's near corner: a lane entering
+        at the north-west and leaving at the south-east of a box is
+        nearer its north-east corner or its south-west one) -- nearest
+        the island first, at the island's edge, then outward at the
+        pitch -- and the lanes already outside are pushed outward only
+        where a deflected one would come closer than they were. The
+        bend is written into the lane's (s, o) polyline: the island's
+        s-range at the new offset, a run-in and a run-out back on the
+        line, both inside the schedule region so the launch and target
+        slots stand; the bands, the virtual copper and the windows all
+        read the polyline, so they follow. The via model is untouched:
+        a lane bent on its own layer still changes no layer. Swimmers
+        weave and are left alone."""
+        if sched is None:
+            return
+        islands = self.static_islands()
+        M = self.members
+        other = {'F.Cu': 'B.Cu', 'B.Cu': 'F.Cu'}
+
+        def o_at(nm, s):
+            ms_ = self.mid[nm]
+            if not (ms_[0][0] - 1e-9 <= s <= ms_[-1][0] + 1e-9):
+                return None
+            return float(np.interp(s, [q[0] for q in ms_], [q[1] for q in ms_]))
+
+        for L in ('F.Cu', 'B.Cu'):
+            for (s_lo, s_hi, o_lo, o_hi, what) in islands.get(L, ()):
+                # an island past s1 is a TAIL island: the exit comb's
+                # parallel runs and the head-on tails pass it. A block
+                # lane bends OUTWARD there (inward is the berth comb and
+                # every inner leg), a head-on tail by the smaller shift;
+                # the target slot at s1 and the lane's own leg stand.
+                in_tail = s_lo >= self.s1 - 0.1
+                if in_tail:
+                    s_lo = max(s_lo, self.s1 + 0.1)
+                else:
+                    s_lo = max(s_lo, self.s0 + 0.1)
+                    s_hi = min(s_hi, self.s1 - 0.1)
+                if s_hi <= s_lo:
+                    continue
+                s_c = (s_lo + s_hi) / 2
+                on_L = []
+                for nm in M:
+                    if sched.page.get(nm) is None:
+                        continue
+                    if in_tail:
+                        # in the tail a lane's virtual copper is on
+                        # every layer the plan allows it (a B-page lane
+                        # surfaces somewhere before its F leg), so any
+                        # lane allowed on L there is a neighbour the
+                        # bend must carry: bent across an unpushed
+                        # B-page line, K28 SCKE0 and SBA1 walled each
+                        # other
+                        if not self.allowed(nm, s_c, L):
+                            continue
+                    else:
+                        if not self.allowed(nm, s_c, L):
+                            continue
+                        if self.allowed(nm, s_c, other[L]) and sched.page.get(nm) != L:
+                            continue
+                    o = o_at(nm, s_c)
+                    if o is None:
+                        continue
+                    on_L.append((o, nm))
+                def _in(v):
+                    return v is not None and o_lo < v < o_hi
+                inside = [(o, nm) for (o, nm) in on_L
+                          if _in(o) or _in(o_at(nm, s_lo)) or _in(o_at(nm, s_hi))]
+                if not inside:
+                    continue
+                # which side: the smaller of the two corner deflections
+                side_of = {}
+                for (o, nm) in inside:
+                    if in_tail and nm in self.exit_block:
+                        side_of[nm] = self.exit_side[nm]
+                        continue
+                    o_in, o_out = o_at(nm, s_lo), o_at(nm, s_hi)
+                    o_in = o if o_in is None else o_in
+                    o_out = o if o_out is None else o_out
+                    d_n = max(o_in, o_out) - o_lo          # must be <= o_lo throughout
+                    d_s = o_hi - min(o_in, o_out)          # must be >= o_hi throughout
+                    side_of[nm] = -1 if d_n <= d_s else 1
+                # the other islands on this layer across the same s: a
+                # slot that lands on one steps past it (K35 SA0, bent
+                # off a six-part cluster onto R3 just beyond it)
+                others = [bx for bx in islands.get(L, ())
+                          if bx[4] != what and bx[0] <= s_hi and s_lo <= bx[1]]
+
+                def off_islands(v, sg):
+                    for _ in range(8):
+                        hit = [bx for bx in others if bx[2] < v < bx[3]]
+                        if not hit:
+                            return v
+                        v = min(b[2] for b in hit) if sg < 0 else max(b[3] for b in hit)
+                    return v
+                want = {}
+                for sg in (-1, 1):
+                    edge = o_lo if sg < 0 else o_hi
+                    grp = [(o, nm) for (o, nm) in on_L
+                           if (side_of[nm] == sg if nm in side_of
+                               else (o <= edge if sg < 0 else o >= edge))]
+                    grp.sort(key=lambda t: sg * t[0])
+                    prev = None
+                    for (o, nm) in grp:
+                        if prev is None:
+                            lim = edge
+                        else:
+                            lim = prev[1] + sg * min(MINP, abs(o - prev[0]))
+                        new = (min(o, lim) if sg < 0 else max(o, lim))
+                        new = off_islands(new, sg)
+                        if abs(new - o) > 1e-9:
+                            want[nm] = new
+                        prev = (o, new)
+                if not want:
+                    continue
+                for nm, new in want.items():
+                    ms_ = self.mid[nm]
+                    o_in, o_out = o_at(nm, s_lo), o_at(nm, s_hi)
+                    if o_in is None or o_out is None:
+                        continue
+                    d_in = max(0.3, abs(new - o_in))
+                    d_out = max(0.3, abs(new - o_out))
+                    if in_tail:
+                        end = (min(self.exit_leg_s[nm], self.se[nm][0])
+                               if nm in self.exit_block else self.se[nm][0])
+                        s_a = max(self.s1 + 0.05, s_lo - d_in)
+                        s_b = min(end - 0.05, s_hi + d_out)
+                    else:
+                        s_a = max(self.s0 + 0.05, s_lo - d_in)
+                        s_b = min(self.s1 - 0.05, s_hi + d_out)
+                    if s_a >= s_lo:
+                        continue
+                    if s_b <= s_hi and in_tail and nm in self.exit_block \
+                            and self.exit_leg_s[nm] > s_hi and s_hi + 0.05 >= s_lo:
+                        # no room to return before the leg: the lane
+                        # keeps the bent offset to its leg, and the leg
+                        # starts there
+                        s_l = self.exit_leg_s[nm]
+                        o_a = o_at(nm, s_a)
+                        keep = [q for q in ms_ if q[0] < s_a - 1e-9 or q[0] > s_l + 1e-9]
+                        self.mid[nm] = sorted(
+                            keep + [(s_a, o_a), (s_lo, new), (s_l, new)],
+                            key=lambda q: q[0])
+                        s_leg, _oa, ob = self.legs[nm][-1]
+                        self.legs[nm][-1] = (s_leg, new, ob)
+                        continue
+                    if s_b <= s_hi:
+                        continue
+                    o_a, o_b = o_at(nm, s_a), o_at(nm, s_b)
+                    keep = [q for q in ms_ if q[0] < s_a - 1e-9 or q[0] > s_b + 1e-9]
+                    self.mid[nm] = sorted(
+                        keep + [(s_a, o_a), (s_lo, new), (s_hi, new), (s_b, o_b)],
+                        key=lambda q: q[0])
+                self.log(f'  {"tail " if in_tail else ""}island {what} on {L[0]} (s {s_lo:.1f}..{s_hi:.1f}, o '
+                         f'{o_lo:+.2f}..{o_hi:+.2f}): '
+                         + ', '.join(f'{nm} {want[nm]:+.2f}'
+                                     for nm in sorted(want, key=lambda n: want[n]))
+                         + f' ({len(inside)} through it: '
+                         + ', '.join(f'{nm}{"N" if side_of[nm] < 0 else "S"}'
+                                     for _o, nm in sorted(inside)) + ')')
 
     def layer_profile(self, nm):
         """The layers the plan requires of one lane along s, as runs
@@ -1506,7 +1952,7 @@ class Corridor:
         hugging its edge there (K19 SCAS: SA7 0.23 mm off, SWE 0.26)
         leaves no legal via cell when the corner's owner is routed."""
         sp = self.spine
-        out = [sp.xy(self.exit_leg_s[om], self.exit_block[om])
+        out = [sp.xy(self.exit_leg_s[om], self.legs[om][-1][1])
                for om in unrouted if om in self.exit_leg_s]
         # ...plus every unrouted swimmer's RESERVED DIAMONDS (#622
         # reservation pass): the spots its layer changes will need,
@@ -1605,6 +2051,11 @@ class Corridor:
         self.reserve_intervals()
         sched = Schedule(self.launch, self.target, ctx.tooth_layer, log=log,
                          dest_layer=ctx.dest_layer)
+        if SLOPE_PITCH:
+            self.offsets(ly_floor, sched=sched)
+            self.reserve_intervals()
+            sched = Schedule(self.launch, self.target, ctx.tooth_layer,
+                             dest_layer=ctx.dest_layer)
         if plan_only:
             # #622 plan dump: the corridor's PLAN (orders + pages) with
             # no copper -- the fanout-contract emitters read it; the
@@ -1622,6 +2073,13 @@ class Corridor:
             self.offsets(ly_floor)
             sched = Schedule(self.launch, self.target, ctx.tooth_layer,
                              dest_layer=ctx.dest_layer)
+            if SLOPE_PITCH:
+                self.offsets(ly_floor, sched=sched)
+                self.reserve_intervals()
+                sched = Schedule(self.launch, self.target, ctx.tooth_layer,
+                                 dest_layer=ctx.dest_layer)
+            else:
+                self.reserve_intervals()
             self.sched_cur = sched
             self.lay_lanes()
             log(f'  attempt {attempt}: need {self.layout_need:.2f} of '
