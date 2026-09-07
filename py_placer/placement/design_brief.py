@@ -24,10 +24,15 @@ Three design rules, each a decision rather than an omission:
 
   #712 added two intent FIELDS and no key. #902 adds one KEY, `proximity[]`,
   and that is the rule applied rather than an exception to it: the principle is
-  not "never add a key", it is "never declare what nothing grades", and this
-  key arrives in the same change as `floorplan.rule_proximity`, which grades
-  it. It needed a key of its own because no existing entry means *these two
-  named parts, this far apart*. `decaps.max_distance_mm` is one board-wide
+  not "never add a key", it is "never declare what nothing grades". So this
+  module is deliberately only HALF of #902 -- the other half is the rule that
+  grades the compiled rows, in `floorplan`, and a build carrying this key
+  without that rule declares something nothing measures. `tests/
+  test_902_proximity.py` holds a row that reports exactly which of the two
+  states the tree is in, rather than passing either way.
+
+  It needed a key of its own because no existing entry means *these two named
+  parts, this far apart*. `decaps.max_distance_mm` is one board-wide
   budget over a DERIVED population whose partner election cannot reach a 3-pad
   regulator at any radius (#902's own measurement), and a keep-out is an
   exclusion, not an attraction -- compiling into either would have graded a
@@ -133,9 +138,10 @@ _PROXIMITY_KEYS = {'ref', 'near', 'max_mm', 'basis', 'pads', 'requirement',
 #:
 #: This tuple and `floorplan`'s must agree, or the brief accepts a spelling the
 #: intent loader then refuses -- an author would see their own compiled
-#: document rejected. `tests/test_902_proximity.py` asserts the two are equal;
-#: until that test exists this comment is a promise, so it names the file
-#: rather than claiming a gate is already standing.
+#: document rejected. `tests/test_902_proximity.py` compares the two, and while
+#: `floorplan` has no such tuple that row prints PASS (VACUOUS) and says so --
+#: it arms itself when the intent half lands, rather than passing silently in
+#: both states.
 _PROXIMITY_BASES = ('pad_edge', 'body')
 _PROXIMITY_DEFAULT_BASIS = 'pad_edge'
 
@@ -269,11 +275,13 @@ def _band(value, where: str):
 def proximity_claim_id(row: int, ref: str, near: str) -> str:
     """The name one proximity claim is reported under, everywhere (#902).
 
-    PUBLIC and shared, because this string is a contract between three places:
-    `compile_brief`'s `declared` / `unknown` lists, `check_floorplan`'s clause
-    coverage, and the close-out waiver an author types by hand. Three
-    hand-written f-strings would drift, and a waiver that no longer matches its
-    clause turns a working gate into one nobody can clear.
+    PUBLIC and shared because this string is meant to be a contract between
+    more than one reader -- `compile_brief`'s `declared` / `unknown` lists
+    today, and any consumer that later names a claim (a coverage report, a
+    waiver an author types). Hand-written f-strings at each site would drift,
+    and a waiver that no longer matches its clause turns a working gate into
+    one nobody can clear. Only the compiler calls it so far; it is a function
+    rather than a literal so the second caller cannot spell it differently.
 
     It carries the ROW INDEX and not just the two refs, and that is not
     decoration. A reference may legally contain `~`: `disambiguate_references`
@@ -299,10 +307,12 @@ def _proximity_pads(value, where: str, allowed):
 
     It catches ONE SPELLING of that failure and not the failure: `"4"` on a
     2-pad part is a well-typed name matching no pad, and no load-time check can
-    know that without the board. That is `rule_proximity`'s job -- it raises
-    `proximity_unresolved` for a pad name nothing matches -- and the split is
-    deliberate: the loader refuses what is wrong about the DOCUMENT, the rule
-    reports what is wrong about the document AGAINST A BOARD.
+    know that without the board. Catching it is the GRADE's job, and the split
+    is deliberate: the loader refuses what is wrong about the DOCUMENT, and
+    only a rule holding a board can report a name that resolves to nothing on
+    it. Until the grading half lands, a pad name matching nothing is silently
+    unmeasured -- which is why it is named here rather than left for a reader
+    to discover.
     """
     if value is None or value == UNKNOWN:
         return value
@@ -410,7 +420,14 @@ def _proximity_rows(raw: Dict) -> List[Dict[str, object]]:
                 f"guessed")
         limit = r['max_mm']
         if limit != UNKNOWN:
-            fp._number(limit, f"{where}.max_mm", lo=0.0)
+            # `_number` for the TYPE (it refuses a string, a bool and anything
+            # non-numeric), and the magnitude checked here rather than through
+            # its `lo=`. With `lo=0.0` an author writing 0 and an author
+            # writing -1 got two different messages for one mistake -- "expected
+            # a positive distance" and "expected >= 0.0" -- and the bound was
+            # also unreachable-by-test, since the guard below already caught
+            # everything it would have.
+            fp._number(limit, f"{where}.max_mm")
             # FINITE first, and it has to be checked explicitly: `inf` and
             # `nan` both pass a `lo=0.0` bound and a `<= 0.0` guard, because
             # `inf < 0` and `nan <= 0` are both False. `json.load` accepts the
@@ -462,8 +479,8 @@ def _proximity_rows(raw: Dict) -> List[Dict[str, object]]:
                 raise BriefError(
                     f"{where}: duplicate proximity claim for {ref_one} near "
                     f"{near} (already declared at proximity[{seen[key]}]) -- "
-                    f"two limits on one relation, with no rule for which "
-                    f"wins, and the rule charges BOTH")
+                    f"two claims about one relation, with no rule for which "
+                    f"wins, and the grade would charge BOTH")
             seen[key] = i
         # The REVERSED pair, and only when NEITHER row carries an EFFECTIVE pad
         # spec. `rect_gap` is symmetric and both sides are then existential, so
@@ -492,9 +509,9 @@ def _proximity_rows(raw: Dict) -> List[Dict[str, object]]:
                     f"{where}: {ref_one} near {near} is the reverse of "
                     f"proximity[{unpadded[rev]}], and neither row names a "
                     f"`pads` list for its own subject -- so the two are the "
-                    f"same symmetric measurement charged twice, with no rule "
-                    f"for which limit wins. Keep one, or name the pads that "
-                    f"make them different claims")
+                    f"same symmetric measurement declared twice, with no "
+                    f"rule for which claim wins. Keep one, or name the pads "
+                    f"that make them different claims")
             unpadded[(ref_one, near)] = i
 
         row = {'ref': refs if isinstance(ref, (list, tuple)) else refs[0],
@@ -854,6 +871,17 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
                 # told the pin-level claim was not stated rather than left to
                 # infer that from an absent key.
                 unknown.append(f"{claim}.pads")
+            # BEFORE the unknown-limit branch, for the same reason the pads
+            # report is: a ref this board does not have is a TYPO, and a typo
+            # on an "as short as possible" row is exactly as wrong as one on a
+            # row with a number. The first fix moved the pads report above the
+            # `continue` and left this below it, so a misspelled partner on an
+            # unknown-limit row was reported by nothing at all -- the same
+            # defect, one line further down. `interfaces[]` reports an
+            # unmatched ref whatever else the row declares unknown.
+            for who in (ref, near):
+                if refs_known and refset and who not in refset:
+                    unmatched.append(who)
             if r['max_mm'] == UNKNOWN:
                 # DECLARED, and declared UNKNOWN. "Y1 must be beside U1, I do
                 # not know how close" is the issue's own phrase ("as short as
@@ -887,9 +915,6 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
             if r.get('note'):
                 entry['note'] = str(r['note'])
             declared.append(f"{claim}.max_mm")
-            for who in (ref, near):
-                if refs_known and refset and who not in refset:
-                    unmatched.append(who)
             prox.append(entry)
 
     fragment: Dict[str, object] = {}
@@ -1081,8 +1106,8 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
             f"\"These two named parts, this far apart\" is a SPEC fact: the "
             f"board supplies the distance but never the claim, so the emitter "
             f"writes none and these came from the one channel that can state "
-            f"one. `rule_proximity` GRADES them; no search gates on them, so "
-            f"a violation is a finding to act on rather than a pose the "
+            f"one. They are graded from the intent, not by any seat search, "
+            f"so a violation is a finding to act on rather than a pose the "
             f"engine will refuse.")
     out['context'] = ctx
     return out

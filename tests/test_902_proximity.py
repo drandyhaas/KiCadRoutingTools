@@ -7,13 +7,22 @@ ungradable -- and run 25 shipped a board whose brief said exactly that, with
 `rules_run: 6` and every declared clause ungraded.
 
 This file holds the BRIEF half: the vocabulary, its refusals, and the
-three-state contract. The rule that grades the compiled rows is
-`rule_proximity`, and its measurements are tested beside it.
+three-state contract. Grading the compiled rows is the intent half's job, and
+`test_the_basis_vocabulary_matches_the_intent_loader_or_says_it_cannot_yet`
+reports which of the two states this tree is in rather than passing either
+way.
 
-Most of these rows exist because an adversarial verifier found the defect they
-pin. Every one of the shapes under `_REFUSALS` LOADED CLEAN at some point in
-this feature's history, so they are change detectors with a scar, not a
-catalogue of things that were never going to happen.
+FIVE of the twenty-six shapes under `_REFUSALS` actually LOADED CLEAN in this
+feature's first commit -- rows 3, 4 (`inf` and `NaN` limits), 20 (`pads: {}`)
+and 24, 25 (the two spellings of a reversed pair). They are marked `# WAS
+CLEAN` below. The other twenty-one were refused from the start.
+
+That sentence began life as "every one of them loaded clean", which was a
+claim in the feature's own favour that nobody had measured. The number is
+measurable -- run each shape against `git show 7c682f89:...design_brief.py` --
+and measuring it turned 26 into 5. It is written out here because the marked
+rows are the ones with a scar, and a reader deciding which of these to trust
+should not have to take the docstring's word for it.
 
     python3 tests/test_902_proximity.py
 """
@@ -66,11 +75,13 @@ def _rejects(rows, why, **over):
 _REFUSALS = [
     ([{'ref': 'Y1', 'near': 'U1'}], 'needs `max_mm`'),
     ([{'ref': 'Y1', 'near': 'U1', 'max_mm': 0}], 'expected a positive'),
-    ([{'ref': 'Y1', 'near': 'U1', 'max_mm': -1}], 'expected'),
+    ([{'ref': 'Y1', 'near': 'U1', 'max_mm': -1}], 'expected a positive'),
     # inf and nan pass BOTH `_number(lo=0.0)` and a `<= 0.0` guard, and
     # json.load accepts the literals, so this was reachable from a file.
+    # WAS CLEAN at 7c682f89.
     ([{'ref': 'Y1', 'near': 'U1', 'max_mm': float('inf')}],
      'not a finite distance'),
+    # WAS CLEAN at 7c682f89.
     ([{'ref': 'Y1', 'near': 'U1', 'max_mm': float('nan')}],
      'not a finite distance'),
     ([{'ref': 'Y1', 'near': 'Y1', 'max_mm': 2}], '0mm from itself'),
@@ -101,11 +112,14 @@ _REFUSALS = [
      'non-empty list'),
     # An empty dict was a THIRD spelling of "unpadded" the reverse guard did
     # not recognise.
+    # WAS CLEAN at 7c682f89.
     ([{'ref': 'Y1', 'near': 'U1', 'max_mm': 2, 'pads': {}}], 'empty pad spec'),
-    ([{'ref': 'Y1', 'near': 'U1', 'max_mm': 2, 'pads': 7}], 'expected'),
+    ([{'ref': 'Y1', 'near': 'U1', 'max_mm': 2, 'pads': 7}],
+     "expected {'REF': ['1', '2']}"),
     # Two limits on one relation, in both spellings of "the same relation".
     ([{'ref': 'Y1', 'near': 'U1', 'max_mm': 2},
       {'ref': 'Y1', 'near': 'U1', 'max_mm': 3}], 'duplicate proximity'),
+    # WAS CLEAN at 7c682f89 (both of the next two).
     ([{'ref': 'Y1', 'near': 'U1', 'max_mm': 5},
       {'ref': 'U1', 'near': 'Y1', 'max_mm': 9}], 'same symmetric measurement'),
     ([{'ref': 'Y1', 'near': 'U1', 'max_mm': 5, 'pads': 'unknown'},
@@ -309,6 +323,27 @@ def test_an_absent_partner_is_named_once_not_once_per_member():
     print("  PASS: an absent partner named once, not once per list member")
 
 
+def test_an_absent_partner_is_named_even_when_the_limit_is_unknown():
+    """A typo does not become invisible because the limit was not stated.
+
+    The first fix for the "declared unknown was swallowed" defect moved the
+    PADS report above the `continue` and left the UNMATCHED report below it --
+    so a misspelled partner on an "as short as possible" row was reported by
+    nothing at all. The same defect, one line further down, is why this row
+    exists rather than an extra assert on the one above.
+    """
+    for limit in (2.0, 'unknown'):
+        _frag, rep = _compile([{'ref': 'Y1', 'near': 'ZZ9', 'max_mm': limit}],
+                              refs=('Y1', 'U1'))
+        assert rep['unmatched'] == ['ZZ9'], (limit, rep['unmatched'])
+    # And the control: a ref the board HAS is never reported.
+    _frag, rep = _compile([{'ref': 'Y1', 'near': 'U1', 'max_mm': 'unknown'}],
+                          refs=('Y1', 'U1'))
+    assert rep['unmatched'] == [], rep['unmatched']
+    print("  PASS: an absent partner is named with a limit and with an "
+          "unknown one; a present partner is never named")
+
+
 def test_drift_compares_at_the_effective_value_not_at_key_presence():
     """A brief meaning the DEFAULT versus an intent declaring otherwise.
 
@@ -390,6 +425,7 @@ TESTS = [
     test_the_counts_disclose_an_expansion_and_a_drop_that_cancel,
     test_a_brief_with_no_proximity_reports_exactly_what_it_did_before,
     test_an_absent_partner_is_named_once_not_once_per_member,
+    test_an_absent_partner_is_named_even_when_the_limit_is_unknown,
     test_drift_compares_at_the_effective_value_not_at_key_presence,
     test_the_basis_vocabulary_matches_the_intent_loader_or_says_it_cannot_yet,
     test_the_fixture_brief_compiles_to_the_claims_the_issue_names,

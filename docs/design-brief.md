@@ -53,7 +53,9 @@ Until [#902](https://github.com/drandyhaas/KiCadRoutingTools/issues/902) this
 section said the compiler adds **no** intent key. It adds exactly one now,
 `proximity[]`, and the principle is unchanged — because the principle was never
 "never add a key". It is **never declare what nothing grades**, and this key
-arrives in the same change as the rule that grades it, `rule_proximity`.
+is only half of the change: the other half is the rule in `floorplan`
+that grades the compiled rows, and a build carrying this key without
+that rule declares something nothing measures.
 
 It needed a key of its own because no existing entry means *these two named
 parts, this far apart*:
@@ -209,8 +211,8 @@ produces `TP4~2` for a duplicated refdes, and `esp_prog` parses `Ref*~2` — so
 without it a row `A~B` near `C` and a row `A` near `B~C` share one id, and one
 of two declared "I do not know"s vanishes into a set union. Use
 `design_brief.proximity_claim_id()` rather than spelling it by hand: the same
-string is a contract between the compiler, the grade's clause coverage, and a
-waiver an author types.
+string is meant to name a claim for every later reader of one, and hand-written
+f-strings at each site would drift.
 
 ### Two "unknown"s that go opposite ways, and why
 
@@ -242,11 +244,11 @@ net at all — an auto-reset transistor pair has no pad pair to measure.
 `basis: "courtyard"` is refused *with the measurement that decided it*: since
 #896, `placement.body` is a **ladder** — courtyard, then fab, then silk ∪ pads,
 then the pad bbox — and it answers with whichever rung the library drew. On the
-board this rule was written for, **0 of 21 footprints draw a courtyard** (10
-answer from fab, 4 from silk, 4 from the pad bbox), so a claim spelled
-`courtyard` would grade nothing there at all. The rung that actually answered
-is reported per finding, so the number is never read without knowing what it
-rests on.
+board this rule was written for, **0 of 21 footprints draw a courtyard**: 10
+answer from fab, 4 from silk, 4 from the pad bbox and 3 draw nothing at all. So
+a claim spelled `courtyard` would grade nothing there. The rung that actually
+answered is reported beside each number, so it is never read without knowing
+what it rests on.
 
 ### Pad numbers are strings, and that refusal is load-bearing
 
