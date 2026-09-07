@@ -527,8 +527,15 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
         # the two zones overlap: nothing left to relax
         return Spine(simplify([a, b], 0.08))
     obs = RampedObstacles(base_obs, (Ct, Cs), H, extra=extra)
+    # the spine's middle: the chord between the two zones' ends. When
+    # the flows BEND (more than 30 degrees between launch and arrival)
+    # the ends a -> p1 and p2 -> b point different ways and the chord
+    # p1 -> p2 joins them with two corners; the mean-path relaxation
+    # that used to bend this middle round obstacles is not in this
+    # chain (never reached at K28), and without it a bent corridor --
+    # K51's singleton SZQ -- had no polyline at all (UnboundLocalError).
+    init = [p1, p2]
     if straight:
-        init = [p1, p2]
         # a clear straight channel needs no relaxing (and relaxing it
         # against the ramped obstacles can only add wiggles)
         if obs.seg_clear(p1, p2):

@@ -32,7 +32,7 @@ for K in "$@"; do
   # board as this run's. The chain itself is bit-deterministic.
   rm -f "${TAG}_fo_k${K}.kicad_pcb" "${TAG}_fo_k${K}.kicad_pro" \
         "${TAG}_k${K}.kicad_pcb" "${TAG}_k${K}.kicad_pro"
-  NETS=$(python3 coherent_nets.py "$K")
+  NETS=$(python3 coherent_nets.py "$K" --board="$BASE")
   python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
     --board="$BASE" > "${TAG}_fo_k${K}.log" 2>&1
   grep -E "^plan|^wrote|^  round|^  kept|^  destination|source realize:|audit:|ORDER|plan model total" "${TAG}_fo_k${K}.log" | sed 's/^/  /'
