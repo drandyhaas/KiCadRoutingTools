@@ -941,6 +941,13 @@ class GradedPart(NamedTuple):
     # artifact. A pad-bbox fallback (pads exist, courtyard missing) stays
     # False: those bounds are real copper.
     synthetic: bool = False
+    # #896. WHICH drawn geometry `rect` came from -- one of
+    # `body.SOURCES`. Carried here because `graded_parts_from_file` used to
+    # drop `LocalBounds.from_courtyard` on the floor, and every downstream
+    # consumer reads GradedPart, not LocalBounds: a pair reported against a
+    # pad bbox and a pair reported against a drawn housing are different
+    # claims, and a reader could not tell them apart.
+    source: str = ''
 
     @property
     def sides(self) -> frozenset:
@@ -1163,49 +1170,67 @@ class LocalBounds(NamedTuple):
     # geometry may differ in EITHER direction, which is why it is recorded
     # per part rather than assumed away.
     from_courtyard: bool
+    # #896. The rung of `body.body_geometry`'s ladder that answered:
+    # 'courtyard' | 'fab' | 'silk' | 'pad_bbox' | 'none'. `from_courtyard`
+    # above is kept as a FIELD rather than becoming a property derived from
+    # this -- a NamedTuple cannot carry both under one name, and removing it
+    # would change `_fields`, the arity and `_asdict()` ordering that
+    # floorplan's `measured` dict and tests/mutate_799.py both read.
+    source: str = ''
+    # #896. Silk was drawn but did not survive the ladder: either the
+    # footprint has no pads (a logo) or its silk bbox lies inside the pad
+    # bbox (a pin-1 tick), so the union IS the pad bbox. A disclosure, not
+    # an error -- a fragment must not be LABELLED a body.
+    silk_rejected: bool = False
 
 
 def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
                       ) -> Dict[str, LocalBounds]:
     """THE local-bounds chain, once: `{ref: LocalBounds}`.
 
-    Same geometry rules as the quench state (#456: one definition of legal):
-    courtyard for the part's own side via the text parser, pad-bbox fallback
-    when the footprint draws none, drilled-pad box on the far side. Needs the
-    board FILE for courtyards (the text parser reads it); falls back to
-    `pcb_data.source_path`, then to pad bboxes everywhere.
+    The geometry decision itself lives in `placement.body` (#896) and this is
+    its pose-independent half plus the drilled-pad box: courtyard, else the
+    drawn .Fab body, else silk unioned with the pad bbox, else the pad bbox --
+    with `source` naming which rung answered. Before #896 this ladder went
+    straight from courtyard to the pad bbox, so on a library drawing no
+    courtyard every consumer of this function graded pad boxes and no
+    instrument could see a connector housing at all.
+
+    Needs the board FILE for the drawn geometry (neither parse path carries
+    footprint graphics on `Footprint`); falls back to `pcb_data.source_path`,
+    then to pad bboxes everywhere.
+
+    NOT the quench's ladder. `quench._Part.__init__` keeps its own
+    courtyard-or-pad-bbox bounds deliberately (see `body.py`): adopting the
+    model there changes which poses `pose_ok` admits and therefore the basin
+    the anneal lands in, which is a search change needing its own A/B, not a
+    ride-along on a reporting one.
 
     A ref is ABSENT when even the pad fallback raised -- the same parts
     `graded_parts_from_file` skips, so both consumers see one universe.
     """
-    from placement.parser import courtyard_for_side, extract_courtyard_sides
+    from placement.body import (SOURCE_COURTYARD, SOURCE_NONE, board_bodies)
     from placement.utility import compute_footprint_bbox_local
 
-    path = pcb_file or getattr(pcb_data, 'source_path', None)
-    sides: Dict[str, Dict] = {}
-    if path:
-        try:
-            sides = extract_courtyard_sides(path)
-        except Exception:
-            sides = {}
+    bodies = board_bodies(pcb_data, pcb_file)
     out: Dict[str, LocalBounds] = {}
     for ref, fp in sorted((pcb_data.footprints or {}).items()):
         own = footprint_side(fp)
-        local = None
-        synthetic = False
-        from_courtyard = False
-        if sides.get(ref):
-            local = courtyard_for_side(sides[ref], own)
-            from_courtyard = local is not None
+        geom = bodies.get(ref)
+        local = geom.body_local if geom is not None else None
+        source = geom.source if geom is not None else ''
+        silk_rejected = bool(geom.silk_rejected) if geom is not None else False
         if local is None:
+            # SOURCE_NONE, or no readable board file at all: the +/-0.5mm
+            # fiction, which `synthetic` marks so it can never gate.
             try:
                 local = compute_footprint_bbox_local(fp)
-                # No courtyard AND no pads: the +/-0.5mm fiction, not geometry.
-                synthetic = not (fp.pads or ())
+                source = source or SOURCE_NONE
             except Exception:
                 local = None
         if local is None:
             continue
+        synthetic = not (fp.pads or ())
         tht_local = None
         has_tht = footprint_has_through_pads(fp)
         if has_tht:
@@ -1214,7 +1239,8 @@ def part_local_bounds(pcb_data, pcb_file: Optional[str] = None
                                tht_local=(tuple(tht_local)
                                           if tht_local is not None else None),
                                has_tht=has_tht, synthetic=synthetic,
-                               from_courtyard=from_courtyard)
+                               from_courtyard=(source == SOURCE_COURTYARD),
+                               source=source, silk_rejected=silk_rejected)
     return out
 
 
@@ -1238,7 +1264,7 @@ def graded_parts_from_file(pcb_data, pcb_file: Optional[str] = None
             tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
         out.append(GradedPart(ref=ref, side=lb.side, rect=rect,
                               tht_rect=tht, has_tht=lb.has_tht,
-                              synthetic=lb.synthetic))
+                              synthetic=lb.synthetic, source=lb.source))
     return out
 
 
