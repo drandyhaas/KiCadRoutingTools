@@ -247,10 +247,17 @@ def test_rule_keys_is_derived_not_guessed():
     newly added RULE is silently never written -- the cost of an allow-list,
     paid here rather than in a shipped project.
 
-    Derived BY SOURCE, from every `targets["..."] =` assignment in the
-    function. A first draft derived it from one CALL, which is blind to any key
-    gated on a `minima` entry that call does not supply -- the shape
-    `min_via_annular_width` already has, so the hole was one argument wide.
+    Derived BY SOURCE, from every `targets["..."]` subscript in the function.
+    It does NOT filter on Store context, so it can over-collect a read as well
+    as a write -- the safe direction for a guard whose job is to notice a key
+    the allow-list has not heard of.
+
+    A first draft derived it from one CALL instead. That call did happen to
+    supply the `minima` entry `min_via_annular_width` needs, so it was not
+    blind to that key -- but it would have been blind to the NEXT key of that
+    shape, gated on a `minima` entry nobody thought to pass. The hole was one
+    argument wide, and reading the source closes it for every future key rather
+    than for the ones a fixture remembers.
     """
     print('\n-- 7. _RULE_KEYS vs compute_targets --')
     src = open(os.path.join(ROOT, 'py_router', 'fix_kicad_drc_settings.py'),

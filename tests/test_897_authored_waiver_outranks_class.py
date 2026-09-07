@@ -243,6 +243,58 @@ def test_the_render_can_see_a_waiver_at_all():
               for a in RP.build_parser()._actions))
 
 
+def test_the_issues_own_acceptance_criterion():
+    """#897's Fix section states the acceptance test literally: "an intent that
+    waives a marker<->edge pair reads `intent_declared` in the courtyard census
+    and does not appear in `b_courtyard_blocking_pairs`."
+
+    Both halves matter and neither was covered by the arms above. The pair here
+    is marker<->EDGE, not marker<->ordinary -- `edge_class` is the label that is
+    NOT gate-exempt for containment, so it is the harder of the two. And
+    `b_courtyard_blocking_pairs` is the published CHECKLIST key on
+    render_placement's document, not the engine's list: asserting the engine's
+    and calling the criterion met would be checking a different thing with a
+    similar name.
+    """
+    print('\n-- 7. the issue\'s own acceptance criterion, literally --')
+    import json
+    sys.path.insert(0, os.path.join(ROOT, 'py_tools'))   # not via arm 6's insert
+    import render_placement as RP
+    from kicad_parser import parse_kicad_pcb as _parse
+    text = BOARD.format(lockA='', lockB='').replace(
+        '"t:B" (layer "F.Cu")', '"Connector_USB:USB_C_Receptacle" (layer "F.Cu")')
+    path = os.path.join(tempfile.mkdtemp(), 'b.kicad_pcb')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    cls = classify_part(_parse(path).footprints['CB'], 'CB').name
+    check('CB now classifies edge_receptacle (the pair is marker<->edge)',
+          cls == 'edge_receptacle', cls)
+
+    g = _grade(path, intent_waivers=[('H1', 'CB')])
+    p = _pair_of(g)
+    check("it reads 'intent_declared' in the courtyard census",
+          p is not None and p.waiver == 'intent_declared', p.waiver if p else None)
+
+    def _checklist(extra):
+        out = os.path.join(os.path.dirname(path), 'r.json')
+        rc = RP.main([path, '--clearance', '0.09', '--quiet',
+                      '--json-out', out, '-o',
+                      os.path.join(os.path.dirname(path), 'r.png')] + extra)
+        doc = json.load(open(out, encoding='utf-8'))
+        return rc, doc['checklist']['b_courtyard_blocking_pairs']
+
+    intent = os.path.join(os.path.dirname(path), 'i.json')
+    json.dump({'schema': 1, 'kind': 'floorplan-intent',
+               'overlap_waivers': [{'pair': ['H1', 'CB'], 'reason': 'mechanical'}]},
+              open(intent, 'w', encoding='utf-8'))
+    _rc0, blind = _checklist([])
+    check('waiver-blind, it IS in b_courtyard_blocking_pairs (control)',
+          any({'H1', 'CB'} <= set(r[:2]) for r in blind), blind)
+    _rc1, seeing = _checklist(['--intent', intent])
+    check('and given the intent it does NOT appear there',
+          seeing == [], seeing)
+
+
 def main():
     test_the_fixture_is_on_the_branch()
     test_an_authored_waiver_wins_over_the_class_label()
@@ -251,6 +303,7 @@ def main():
     test_an_unused_waiver_is_kept_apart_from_a_stale_one()
     test_a_degenerate_pair_does_not_break_the_instrument()
     test_the_render_can_see_a_waiver_at_all()
+    test_the_issues_own_acceptance_criterion()
     print()
     if fails:
         print(f"FAIL: {len(fails)} check(s) failed: {fails}")

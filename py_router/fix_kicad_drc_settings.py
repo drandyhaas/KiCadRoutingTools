@@ -134,9 +134,11 @@ _NONDEFAULT_CLAMP_FIELDS = _NETCLASS_WRITABLE_FIELDS  # historical name, same se
 # or it is silently not written. `tests/test_900_class_clearance_not_capped.py`
 # re-derives this set from `compute_targets` -- BY SOURCE, walking every
 # `targets["..."] =` assignment, not only the keys one call happens to emit. An
-# earlier draft derived it from a single call, which would have been blind to a
-# key gated on a `minima` entry that call did not supply -- the shape
-# `min_via_annular_width` already has.
+# earlier draft derived it from a single CALL, which is blind to any key gated
+# on a `minima` entry that call does not supply -- the shape
+# `min_via_annular_width` already has. (That draft's call did pass that
+# particular entry; the point is that the next key of the same shape would have
+# depended on somebody remembering to.)
 _RULE_KEYS = frozenset({
     "min_clearance", "min_hole_clearance", "min_hole_to_hole",
     "min_copper_edge_clearance", "min_track_width", "min_connection",
