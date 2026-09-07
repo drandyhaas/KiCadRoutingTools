@@ -382,6 +382,34 @@ Measured (bench fb_t2q_fresh, 0 DRC, chain, one fanout): K15 14v and
 K28 38v identical; **K35 55 -> 50 vias**, 0 open, SA1/SA6 in-band (30 ->
 32 of 35); K41 2 open 89v -> 2 open 88v, 29 -> 30 of 41 in-band.
 
+### Exit legs and static islands: flip or hop, and the jog rule (2026-09-07)
+
+The same pitch move, at K41, pushed SCKE1, SCKE0 and SA15 off the F
+passive cluster to one s, 3.3 mm from their stubs, and their jogs then
+ran along the stub row on F over each other's stub ends: SCKE0 refused at
+its stub every attempt. Two rules replace the move, both keyed on the
+island's place along the leg (the island helpers are built once, above
+`place_and_decide`):
+
+- **Flip or hop, priced** (`move_cost` in `place_and_decide`): an
+  islanded layer that cannot split costs, in the leg's layer economics,
+  the cheaper of the veto (`ISLAND_VETO`) and the move along the row that
+  clears the island, a pitch of jog worth a via -- so SDQ2 (K35) hops
+  0.3 mm off C12 on its own layer for less than a via while SA15 (K41)
+  takes B for one where every F move jogs over a stub. A leg still
+  islanded on the layer it chose is moved as before.
+- **A jog may not run over a free end** (`_leg_s.jogged`): the jog from a
+  moved leg back to its end runs on that end's own layer (`virtual_of`),
+  so a candidate whose jog passes over another member's free end ON THAT
+  LAYER is out; with none left the leg stays. Layer-aware because a K41
+  join jog on F, refused the pitch over a B tooth, took the other side
+  onto SBA0's F tooth instead. Join legs go through the same `_leg_s`.
+
+Measured (chain, one fanout): K15/K28/K35 identical to the split leg
+alone (14 / 38 / 50); **K41 2 open 88v -> 2 open 77v, 30 -> 33 of 41
+in-band**, SCKE1/SCKE0/SA15/SBA1/SDQ6 in-band; the fanout's judge runs
+these rules too and its K41 choice did not move (sidecars byte-identical).
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`
