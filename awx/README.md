@@ -135,9 +135,11 @@ vias, tooth/page mismatch, the arrival through a side-exit leg, the
 berth's vias, a swimmer's dive and surface -- plus the ride round both
 arrays); the fast proxy (`plan_ends.judged_cost`) serves only the source
 refinement's inner loop. The shipped plan is written beside the fanout
-board as `<board>.plan.json` with the ACHIEVED stub ends, and the braid
-reads it (`setup` finds it) and builds its corridors from the identical
-inputs. At every K the braid's orders and pages are the planner's.
+board as `<board>.plan.json` with the ACHIEVED stub ends, layers and
+faces, and the braid reads it (`setup` finds it; a sidecar that names
+only some of the run's nets is the plan for those, the rest read off
+the board) and builds its corridors from the identical inputs. At
+every K the braid's orders and pages are the planner's.
 
 Results (bench, same engine, previous chain -> this one): K4 4 -> 4 vias
 (predicted 4, per net identical), K8 8 -> 6 (predicted 6), K15 22 -> 14
@@ -319,6 +321,41 @@ of 41. Chain times K35 67 s, K41 151 s (fanout 68 + braid 82). The
 first run after any plan change pays the taut memo cold (K41: 342
 recomputations, ~5 minutes) -- a one-time cost, not the mechanism.
 `chain_k.sh` now stamps the fanout and braid stage boundaries.
+
+### The sidecar describes the board it sits beside (2026-09-07)
+
+Two ways the chain's braid ran on a different world than the one the
+fanout's judge had chosen, both at K41 and both silent:
+
+- The fanout's selector can leave a net UNPLACED (K41: SA9, its menu
+  banned away over eight destination passes) and fan it out unplanned,
+  so the sidecar named 40 of 41 nets -- and `braid.setup` discarded the
+  whole plan ("does not name every net of this run -- ignored", line 1
+  of every K41 log) and read every end, layer and direction off copper,
+  while the judge that chose that fanout had applied the plan to the
+  other 40. A partial sidecar is now the plan for the nets it names
+  (`plan from X: 40 of 41 nets; SA9 read off the board`), which is what
+  `setup(plan=)` always did for a plan passed in.
+- `fanout_from_plan.braid_plan_of` wrote the ASKED berth (`m.layer`,
+  `DIRS[m.direction]`) while the board carries the LAID one; at K41 the
+  destination passes never converge and 22 of 41 berth layers (and 5
+  faces) disagreed with the copper. A braid trusting that sidecar
+  routed 15 lanes to a stub end on a layer with no copper there,
+  reported them routed, and shipped them open (measured: 19 of 41).
+  The sidecar now carries the laid layer and face from the `achieved`
+  audit record (`source_realize.measure_tooth`) whenever the fanout
+  has laid the berth. Checked against the copper at K41: no berth
+  point off copper, no layer wrong.
+
+Neither fix touches the judge's inputs: the K15/K28/K35/K41 fanouts and
+their sidecar ends are byte-identical to before. K15/K28/K35 sidecars
+were complete already, so those grades are unchanged; at K41 the braid
+now follows the plan (braid stage 82 -> 59 s) and grades the same opens
+as the copper-read fallback did on the same tree (2 open on the split-
+rule tree, 82 -> 88 vias). A probe that passes the plan dict explicitly
+already applied a partial plan, so until this the K41 probes and the
+chain disagreed (spine 0.07 mm off, different legs): a probe is
+trustworthy only when line 1 of the chain's log says the plan was read.
 
 ## History: what `bus622-take4` still has
 
