@@ -74,6 +74,8 @@ class Obstacles:
     def __init__(self):
         self.discs = []
         self.caps = []
+        self.dnets = []          # net id per disc (None = no net)
+        self.cnets = []          # net id per capsule
         self._grid = {}
         self.cell = 1.0
 
@@ -84,19 +86,105 @@ class Obstacles:
         if sig is None:
             import hashlib
             h = hashlib.sha1()
-            for (x, y, r, n) in self.discs:
+            # a DERIVED model (exclude) hashes its surviving items in
+            # order: the same string a model built without them hashes,
+            # so the persisted taut memo keyed on it keeps hitting
+            xd = getattr(self, '_xd', ())
+            xc = getattr(self, '_xc', ())
+            for i, (x, y, r, n) in enumerate(self.discs):
+                if i in xd:
+                    continue
                 h.update(f'd{x:.4f},{y:.4f},{r:.4f},{n};'.encode())
-            for (a, b, r, n) in self.caps:
+            for i, (a, b, r, n) in enumerate(self.caps):
+                if i in xc:
+                    continue
                 h.update(f'c{a[0]:.4f},{a[1]:.4f},{b[0]:.4f},{b[1]:.4f},{r:.4f},{n};'.encode())
             sig = h.hexdigest()          # stable across processes
             self._sig = sig
         return sig
 
-    def add_disc(self, x, y, r, name):
+    def add_disc(self, x, y, r, name, net=None):
         self.discs.append((x, y, r, name))
+        self.dnets.append(net)
 
-    def add_cap(self, a, b, r, name):
+    def add_cap(self, a, b, r, name, net=None):
         self.caps.append((a, b, r, name))
+        self.cnets.append(net)
+
+    def _cells_of_disc(self, i):
+        x, y, r, _n = self.discs[i]
+        return [(gx, gy)
+                for gx in range(int((x - r - 0.3) / self.cell),
+                                int((x + r + 0.3) / self.cell) + 1)
+                for gy in range(int((y - r - 0.3) / self.cell),
+                                int((y + r + 0.3) / self.cell) + 1)]
+
+    def _cells_of_cap(self, i):
+        a, b, r, _n = self.caps[i]
+        x0, x1 = min(a[0], b[0]) - r - 0.3, max(a[0], b[0]) + r + 0.3
+        y0, y1 = min(a[1], b[1]) - r - 0.3, max(a[1], b[1]) + r + 0.3
+        return [(gx, gy)
+                for gx in range(int(x0 / self.cell), int(x1 / self.cell) + 1)
+                for gy in range(int(y0 / self.cell), int(y1 / self.cell) + 1)]
+
+    def _pack_cell(self, k):
+        dd = tuple((self.discs[i][0], self.discs[i][1], self.discs[i][2])
+                   for i in self._near_d.get(k, ()))
+        cc = []
+        for ci in self._near_c.get(k, ()):
+            (ax, ay), (bx, by), r, _n = self.caps[ci]
+            dx, dy = bx - ax, by - ay
+            cc.append((ax, ay, dx, dy, dx * dx + dy * dy, r))
+        return (dd, tuple(cc))
+
+    def exclude(self, nets):
+        """This model without the items of `nets`, as a DERIVED model
+        that shares the built index and rewrites only the cells those
+        items touch. A plan judges 35 nets against the same board and
+        each net's model differs from the next's by that net's own few
+        pads and vias -- 140 full builds per board, 111 s of a 250 s
+        K35 fanout stage (2026-09-06 profile). The candidate order in
+        every cell is the base's order with the excluded items removed,
+        which is the order a build without them would produce, so
+        point_violation and seg_clear answer bit-identically."""
+        nets = set(nets)
+        out = Obstacles.__new__(Obstacles)
+        out.discs, out.caps = self.discs, self.caps
+        out.dnets, out.cnets = self.dnets, self.cnets
+        out._grid, out._cgrid, out.cell = self._grid, self._cgrid, self.cell
+        out._near_d = dict(self._near_d)
+        out._near_c = dict(self._near_c)
+        out._pack = dict(self._pack)
+        xd = {i for i, n in enumerate(self.dnets) if n is not None and n in nets}
+        xc = {i for i, n in enumerate(self.cnets) if n is not None and n in nets}
+        touched = set()
+        for i in xd:
+            for (gx, gy) in self._cells_of_disc(i):
+                for dx_ in (-1, 0, 1):
+                    for dy_ in (-1, 0, 1):
+                        touched.add((gx + dx_, gy + dy_))
+        for i in xc:
+            for (gx, gy) in self._cells_of_cap(i):
+                for dx_ in (-1, 0, 1):
+                    for dy_ in (-1, 0, 1):
+                        touched.add((gx + dx_, gy + dy_))
+        for k in touched:
+            dd = tuple(i for i in self._near_d.get(k, ()) if i not in xd)
+            cc = tuple(i for i in self._near_c.get(k, ()) if i not in xc)
+            if dd:
+                out._near_d[k] = dd
+            else:
+                out._near_d.pop(k, None)
+            if cc:
+                out._near_c[k] = cc
+            else:
+                out._near_c.pop(k, None)
+            if dd or cc:
+                out._pack[k] = out._pack_cell(k)
+            else:
+                out._pack.pop(k, None)
+        out._xd, out._xc = xd, xc
+        return out
 
     def build(self):
         for i, (x, y, r, _n) in enumerate(self.discs):
@@ -150,15 +238,7 @@ class Obstacles:
         self._pack = {}
         keys = set(self._near_d) | set(self._near_c)
         for k in keys:
-            dd = tuple((self.discs[i][0], self.discs[i][1],
-                        self.discs[i][2])
-                       for i in self._near_d.get(k, ()))
-            cc = []
-            for ci in self._near_c.get(k, ()):
-                (ax, ay), (bx, by), r, _n = self.caps[ci]
-                dx, dy = bx - ax, by - ay
-                cc.append((ax, ay, dx, dy, dx * dx + dy * dy, r))
-            self._pack[k] = (dd, tuple(cc))
+            self._pack[k] = self._pack_cell(k)
 
     def near_discs(self, p):
         return self._near_d.get((int(p[0] / self.cell),

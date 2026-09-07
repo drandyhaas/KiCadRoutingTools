@@ -212,13 +212,31 @@ def cross_reserve(ctx, nm):
     # over a tooth it seals the tooth's owner in before it starts (K35
     # SA5: corridor 1's SA9 head over SA5's tooth, a one-cell pocket)
     ends = [ctx.ends[om][k] for om in ctx.ends for k in (0, 1)]
-    keep_r = TRACK + CLEAR + 0.05
+    return clip_round_ends(out, ends)
+
+
+END_KEEP = TRACK + CLEAR + 0.05    # a virtual stamp keeps this off a free end
+
+
+def clip_round_ends(pieces, ends, keep_r=END_KEEP):
+    """`pieces` [(p, q, layer)] with the stretch within keep_r of any
+    of `ends` cut out. A virtual stamp must not cover another net's
+    FREE END: the lane it predicts will dodge that copper when it is
+    routed, but stamped over a tooth or a stub end it seals the end's
+    owner in before it starts (K35 SA5: corridor 1's SA9 head over
+    SA5's tooth, a one-cell pocket). Applied to the corridor's OWN
+    lanes' stamps it freed K35's SA5/SA6 (exit legs of one stub row
+    each landing a foot 0.05 mm from the next stub end) but cost K41
+    three more open nets (2026-09-06), so it stays a reservation rule."""
     clipped = []
-    for (p, q, lay) in out:
-        pieces = [(p, q)]
-        for e in ends:
+    for (p, q, lay) in pieces:
+        bx0, bx1 = min(p[0], q[0]) - keep_r, max(p[0], q[0]) + keep_r
+        by0, by1 = min(p[1], q[1]) - keep_r, max(p[1], q[1]) + keep_r
+        near = [e for e in ends if bx0 <= e[0] <= bx1 and by0 <= e[1] <= by1]
+        parts = [(p, q)]
+        for e in near:
             nxt = []
-            for (a_, b_) in pieces:
+            for (a_, b_) in parts:
                 dx, dy = b_[0] - a_[0], b_[1] - a_[1]
                 L2 = dx * dx + dy * dy
                 if L2 < 1e-12:
@@ -235,8 +253,8 @@ def cross_reserve(ctx, nm):
                     nxt.append((a_, (a_[0] + t0 * dx, a_[1] + t0 * dy)))
                 if t1 < 1 - 1e-6:
                     nxt.append(((a_[0] + t1 * dx, a_[1] + t1 * dy), b_))
-            pieces = nxt
-        clipped += [(a_, b_, lay) for (a_, b_) in pieces]
+            parts = nxt
+        clipped += [(a_, b_, lay) for (a_, b_) in parts]
     return clipped
 
 
@@ -257,28 +275,44 @@ def build_obstacles(pcb, nid, kids, layer):
     (board file as on disk, net, excluded nets, layer): the plan loop
     parses the same board several times per round and rebuilt the same
     model each time (531 builds at K15)."""
+    # ONE BASE per (board, layer, excluded segment nets), the net's own
+    # model DERIVED from it (Obstacles.exclude): the 35 nets of a plan
+    # differ only by their own pads and vias, and a full build per net
+    # was 111 s of a 250 s K35 fanout stage (2026-09-06 profile). The
+    # base excludes the segments of `kids` as before (own included when
+    # own is among them); the derivation removes the net's own pads,
+    # vias and segments. Same items, same order: bit-identical answers.
+    kids = frozenset(kids)
+    base_kids = kids if (nid in kids and len(kids) > 1) else kids - {nid}
     src = getattr(pcb, 'source_path', None)
-    key = None
+    bkey = dkey = None
     if src and os.path.exists(src):
         st_ = os.stat(src)
-        key = (os.path.abspath(src), st_.st_mtime_ns, st_.st_size, nid,
-               frozenset(kids), layer, len(pcb.segments), len(pcb.vias))
-        hit = _OBS_MEMO.get(key)
+        bkey = (os.path.abspath(src), st_.st_mtime_ns, st_.st_size,
+                base_kids, layer, len(pcb.segments), len(pcb.vias))
+        dkey = bkey + (nid,)
+        hit = _OBS_MEMO.get(dkey)
         if hit is not None:
             return hit
-    obs = _build_obstacles(pcb, nid, kids, layer)
-    if key is not None:
-        _OBS_MEMO[key] = obs
+    base = _OBS_MEMO.get(bkey) if bkey is not None else None
+    if base is None:
+        base = _build_obstacles(pcb, base_kids, layer)
+        if bkey is not None:
+            _OBS_MEMO[bkey] = base
+    obs = base.exclude({nid})
+    if dkey is not None:
+        _OBS_MEMO[dkey] = obs
     return obs
 
 
-def _build_obstacles(pcb, nid, kids, layer):
+def _build_obstacles(pcb, kids, layer):
+    """Every pad on `layer` (drilled: on both), every segment on it
+    whose net is not in `kids`, every via -- each tagged with its net,
+    so a per-net model is a derivation (build_obstacles)."""
     obs = ts.Obstacles()
     m = CLEAR + TRACK / 2
     for ref, fp in pcb.footprints.items():
         for p in fp.pads:
-            if p.net_id == nid:
-                continue
             on_layer = any(L == layer or '*' in L for L in p.layers)
             if p.drill and p.drill > 0:
                 on_layer = True
@@ -291,16 +325,15 @@ def _build_obstacles(pcb, nid, kids, layer):
             else:
                 r0 = math.hypot(p.size_x, p.size_y) / 2
             obs.add_disc(p.global_x, p.global_y, r0 + m,
-                         f'{ref}.{p.pad_number}')
+                         f'{ref}.{p.pad_number}', net=p.net_id)
     for s in pcb.segments:
-        if s.net_id == nid or s.net_id in kids or s.layer != layer:
+        if s.net_id in kids or s.layer != layer:
             continue
         obs.add_cap((s.start_x, s.start_y), (s.end_x, s.end_y),
-                    s.width / 2 + m, f'seg:{s.net_id}')
+                    s.width / 2 + m, f'seg:{s.net_id}', net=s.net_id)
     for v in pcb.vias:
-        if v.net_id == nid:
-            continue
-        obs.add_disc(v.x, v.y, v.size / 2 + m, f'via:{v.net_id}')
+        obs.add_disc(v.x, v.y, v.size / 2 + m, f'via:{v.net_id}',
+                     net=v.net_id)
     obs.build()
     return obs
 

@@ -20,6 +20,8 @@ nets are going the same way?
 from __future__ import annotations
 
 import math
+
+import numpy as np
 from typing import Callable, Dict, List, Sequence, Tuple
 
 import json
@@ -129,18 +131,30 @@ def _resample(pts: List[Pt], step: float = 0.25) -> List[Pt]:
     return out
 
 
-def togetherness(pa: List[Pt], pb: List[Pt], width: float) -> float:
+def togetherness(pa: List[Pt], pb: List[Pt], width: float,
+                 ra=None, rb=None) -> float:
     """Fraction of the SHORTER path's length that runs within `width`
-    of the other. 1.0 = they travel together the whole way."""
-    ra, rb = _resample(pa), _resample(pb)
+    of the other. 1.0 = they travel together the whole way. `ra` / `rb`:
+    the paths already resampled (cluster resamples each net once).
+
+    Vectorised: the squared distances are the same two subtractions,
+    two squares and one sum per pair of points, in the same order, so
+    the per-point minimum and the width test are bit-identical to the
+    scalar loop (cluster measured 4.2 s of a 50 s K35 fanout stage,
+    35M generator steps, 2026-09-06)."""
+    if ra is None:
+        ra = _resample(pa)
+    if rb is None:
+        rb = _resample(pb)
     if not ra or not rb:
         return 0.0
     short, other = (ra, rb) if len(ra) <= len(rb) else (rb, ra)
-    near = 0
-    for p in short:
-        best = min((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 for q in other)
-        if best <= width * width:
-            near += 1
+    S = np.asarray(short, dtype=float)
+    O = np.asarray(other, dtype=float)
+    dx = S[:, None, 0] - O[None, :, 0]
+    dy = S[:, None, 1] - O[None, :, 1]
+    best = (dx * dx + dy * dy).min(axis=1)
+    near = int(np.count_nonzero(best <= width * width))
     return near / float(len(short))
 
 
@@ -159,10 +173,11 @@ def cluster(nets: Sequence[str], paths: Dict[str, List[Pt]],
     `average` requires a net to run with the cluster as a whole, not
     with one member of it, which is what stops the chain."""
     sim = {}
+    rs = {n: _resample(paths[n]) for n in nets}
     for i, a in enumerate(nets):
         for b in nets[i + 1:]:
             sim[(a, b)] = sim[(b, a)] = togetherness(paths[a], paths[b],
-                                                     width)
+                                                     width, rs[a], rs[b])
     clus = [[n] for n in nets]
 
     def link(ca, cb):
