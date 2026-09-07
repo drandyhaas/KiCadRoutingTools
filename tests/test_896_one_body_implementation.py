@@ -97,7 +97,8 @@ _DECLARED = {
     #    here, and the one a follow-up issue owns.
     (os.path.join('py_placer', 'placement', 'quench.py'),
      '_Part.__init__'): (
-        2, 'the SEARCH ladder. Adopting the model here changes which poses '
+        2, 'the SEARCH ladder -- #916 owns it. Adopting the model here '
+        'changes which poses '
         '`seeder.pose_ok` admits -- it reads these baked bounds -- and so the '
         'basin the anneal lands in: a placement-engine change needing its own '
         'A/B, not a ride-along on a reporting one. Measured, it would grow 23 '
