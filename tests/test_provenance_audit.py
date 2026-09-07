@@ -409,8 +409,13 @@ _pre_st903 = len([r for r in PV.read_ledger(_wd903)
                   if r.get('lever') in PV.FENCE_SENSITIVE_LEVERS])
 SU.stage(BOARD, _out903, os.path.join(_d903, 'truth'))
 _m2903 = _json.load(open(os.path.join(_wd903, PV.REGIME_NAME), encoding='utf-8'))
+# NOT `os.path.isfile(_out903)`: that board already existed from the first
+# stage and nothing removes it, so the check was true BEFORE the statement it
+# claimed to test and passed against a restage that wrote nothing at all. The
+# witness that a restage happened is a NEW ledger row.
 check("a RESTAGE into an armed dir is permitted, not refused",
-      os.path.isfile(_out903), _out903)
+      len(PV.read_ledger(_wd903)) > _pre903,
+      f"{len(PV.read_ledger(_wd903))} rows, was {_pre903}")
 check("prior_stagings counts the STAGINGS that predate the restage, never "
       "the restage's own", _m2903['prior_stagings'] == _pre_st903,
       f"{_m2903['prior_stagings']} vs {_pre_st903} before")

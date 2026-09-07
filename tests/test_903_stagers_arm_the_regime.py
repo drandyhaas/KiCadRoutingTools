@@ -116,8 +116,11 @@ try:
         return h.hexdigest()
     ck('and its hash is the hash of the board ON DISK',
        m['staged_sha256'] == _sha(board), m['staged_sha256'][:16])
+    # Derived from BOARD, not hardcoded: renaming the fixture would otherwise
+    # make this guard pass forever without anyone noticing.
+    stem = os.path.splitext(os.path.basename(BOARD))[0].lower()
     ck('the source board is named NOWHERE in the manifest',
-       'splitflap' not in json.dumps(m).lower(), json.dumps(m)[:120])
+       stem not in json.dumps(m).lower(), f'{stem}: {json.dumps(m)[:110]}')
 
     # ----------------------------------------------------------------- 2
     # The verdict this issue is about is GONE, and what replaces it is a
@@ -277,8 +280,14 @@ try:
               refuse='are NOT where the lever')
     ck('a drifted delivered board is an UNAIDED VIOLATION', True)
     inner = os.path.join(wd, 'inner')
-    check(PY + [STAGE_UNAIDED, BOARD, inner, os.path.join(_tmp, 'truth2')],
-          accept=True)
+    rn = check(PY + [STAGE_UNAIDED, BOARD, inner,
+                     os.path.join(_tmp, 'truth2')], accept=True)
+    # The nesting is DISCLOSED, on stderr, at the moment it happens. It
+    # cannot be reordered away -- the manifest cannot exist before the board
+    # it hashes -- so the run is told where the row went instead.
+    ck('a nested stage says its write went to the OUTER ledger',
+       'nested inside an armed regime' in (rn.stderr or ''),
+       (rn.stderr or '')[-160:])
     r = check(PY + [AUDIT, '--workdir', wd], code=4,
               refuse='are NOT where the lever')
     ck('...and a nested stage underneath it does NOT launder it to CLEAN',
@@ -313,13 +322,19 @@ try:
     fm = os.path.join(wd, '.fence-manifest.json')
     evidence(fm, 'the fence creation manifest')
     fj = json.load(open(fm, encoding='utf-8'))
-    # The manifest is a `.json` and IS opened; it becomes no row because it
-    # has no `original_poses`. The ledger is `.jsonl` and is not opened at
-    # all -- deliberately, see the SCANNED_EXT note in fence_audit.py. Either
-    # way neither may be a fence row.
-    ck('neither provenance file is a fence row',
-       not any(REGIME in f or LEDGER in f for f in fj.get('files') or ()),
+    # TWO DIFFERENT CLAIMS, and only one of them is a test. The manifest is a
+    # `.json`, so the scan OPENS it and decides: it becomes no row because it
+    # carries no `original_poses`. That is a real check. The ledger is
+    # `.jsonl`, which SCANNED_EXT deliberately excludes (see the note there),
+    # so "the ledger is not a fence row" is true by construction and
+    # asserting it would be theatre -- what protects the ledger is the
+    # redaction asserted in step 3, not this.
+    ck('the fence OPENS the manifest and makes it no row',
+       REGIME not in (fj.get('files') or ())
+       and any(f.endswith('.kicad_pcb') for f in fj.get('files') or ()),
        str(fj.get('files'))[:140])
+    ck('...over a scan that saw more than one file, so it is not vacuous',
+       len(fj.get('files') or ()) >= 2, str(fj.get('files'))[:140])
     check(PY + [FENCE, '--control', control, '--workdir', wd,
                 '--mode', 'audit'], accept=True)
     ck('fence_audit --mode audit is CLEAN too', True)
@@ -365,12 +380,65 @@ try:
     import run_watch as RW  # noqa: E402
     # RE-DERIVED, not a constant: a hardcoded total silently stops meaning
     # anything the next time a step is added above it, and would have to be
-    # edited rather than consulted.
+    # edited rather than consulted. Restricted to rows naming a board in THIS
+    # dir, which is what the counter promises -- the nested stage in step 5b
+    # put a row here whose board lives one level down.
     want_n = len([r for r in rows(ledger)
-                  if r.get('lever') in ('stage_unaided.py', 'stage_blind.py')])
+                  if r.get('lever') in ('stage_unaided.py', 'stage_blind.py')
+                  and os.path.dirname(os.path.abspath(r.get('path') or ''))
+                  == os.path.abspath(wd)])
     ck('run_watch counts every recorded re-stage in the ledger, and only those',
        RW._ledger_stagings(ledger) == want_n and want_n >= 2,
        f'{RW._ledger_stagings(ledger)} vs {want_n} staging rows')
+    # ...and a NESTED dir's first staging is not one. Its row lands in THIS
+    # ledger because the inner manifest does not exist when its board is
+    # written, so counting it reported a re-stage on a dir staged once.
+    nested = [r for r in rows(ledger)
+              if os.path.dirname(os.path.abspath(r.get('path') or ''))
+              != os.path.abspath(wd)]
+    ck("a nested dir's staging row is present but NOT counted here",
+       nested and RW._ledger_stagings(ledger) < len(
+           [r for r in rows(ledger)
+            if r.get('lever') in ('stage_unaided.py', 'stage_blind.py')]),
+       f'{len(nested)} nested row(s)')
+
+    # THE LOG-SIDE PREDICATE, directly. It was declared an untestable
+    # survivor because neither stager prints a `CMD:` line -- true of the
+    # field, false of the predicate, which is a function.
+    ck('the CMD: matcher names BOTH stagers',
+       RW._is_staging_cmd(['python3', 'tests/stress/stage_unaided.py', 'b'])
+       and RW._is_staging_cmd(['python3', 'tests/stress/stage_blind.py', 'b']),
+       'one of the two stagers is not matched')
+    ck('...and nothing else',
+       not RW._is_staging_cmd(['python3', 'py_placer/place_seed.py', 'b']),
+       'a non-staging command matched')
+
+    # A non-UTF-8 byte must not kill the reader. It used to: UnicodeDecodeError
+    # is a ValueError, `except OSError` did not hold it, and `cheats` died
+    # BEFORE the DONE block -- so the fence and provenance audits never ran and
+    # the watcher's silence read as clean.
+    #
+    # ASSERT THE COUNT, not merely that it did not raise. Two things stop the
+    # crash -- `errors='replace'` and catching ValueError -- and either alone
+    # makes "no exception" true. Only `errors='replace'` also lets the reader
+    # REACH the rows after the bad byte: without it the decode aborts the loop
+    # and the count silently drops to 0 while the watcher still reports
+    # "clean". The good row sits FIRST here and a second one after the junk,
+    # so a reader that stops early is visible.
+    bad = os.path.join(_tmp, 'bad.jsonl')
+    good = json.dumps({'lever': 'stage_blind.py',
+                       'path': os.path.join(_tmp, 'board.kicad_pcb')})
+    with open(bad, 'wb') as fh:
+        fh.write(good.encode('utf-8') + b'\n')
+        fh.write(b'\xff\xfe not utf-8 at all\n')
+        fh.write(good.encode('utf-8') + b'\n')
+    try:
+        _n = RW._ledger_stagings(bad)
+        ck('a non-UTF-8 ledger neither kills the reader nor truncates it',
+           _n == 2, f'counted {_n}, expected 2')
+    except Exception as _e:                                  # noqa: BLE001
+        ck('a non-UTF-8 ledger neither kills the reader nor truncates it',
+           False, f'{type(_e).__name__}: {_e}')
     ck('...which redaction did NOT break -- it reads `lever`, which survives',
        all('lever' in r for r in rows(ledger)), str(sorted(rows(ledger)[0])))
     # BOTH stagers, asserted against a synthetic ledger rather than against a
@@ -379,7 +447,11 @@ try:
     synth = os.path.join(_tmp, 'synth.jsonl')
     with open(synth, 'w', encoding='utf-8') as fh:
         for lev in ('stage_blind.py', 'stage_unaided.py', 'place_seed.py'):
-            fh.write(json.dumps({'lever': lev}) + os.linesep)
+            # `path` in the SAME dir as the ledger -- the counter requires it,
+            # because a nested dir's first staging lands its row here too.
+            fh.write(json.dumps(
+                {'lever': lev,
+                 'path': os.path.join(_tmp, 'board.kicad_pcb')}) + os.linesep)
     ck('...and the matcher names BOTH stagers and nothing else',
        RW._ledger_stagings(synth) == 2, str(RW._ledger_stagings(synth)))
     # ...and DISCRIMINATES: a ledger of ordinary lever rows counts zero, so
@@ -387,12 +459,23 @@ try:
     nostage = os.path.join(_tmp, 'nostage.jsonl')
     with open(nostage, 'w', encoding='utf-8') as fh:
         for lev in ('place_seed.py', 'converge.py', 'route.py'):
-            fh.write(json.dumps({'lever': lev}) + os.linesep)
+            # Same `path` as the synthetic ledger above, so the ONLY
+            # difference between the two is the lever. Without it these rows
+            # would be dropped by the directory filter and this control would
+            # read zero whatever the lever test did.
+            fh.write(json.dumps(
+                {'lever': lev,
+                 'path': os.path.join(_tmp, 'board.kicad_pcb')}) + os.linesep)
     ck('...and a ledger of non-staging levers counts zero',
        RW._ledger_stagings(nostage) == 0, str(RW._ledger_stagings(nostage)))
 finally:
     shutil.rmtree(_tmp, ignore_errors=True)
 
 print(f'\n{passed} passed, {failed} failed')
-print('903 coverage: unaided=yes blind=yes refusal=yes restage=yes fence=yes')
+# DERIVED, not a literal. `mutate_903.py` requires this line on its unmutated
+# pass so that a gate which stopped covering half its arms is reported rather
+# than believed -- and a constant string proves only that the script reached
+# its last line. The COUNT is the evidence, and the battery checks a floor.
+print(f'903 coverage: {passed + failed} rows '
+      f'(unaided, blind, refusal, restage, nesting, stale-manifest, fence)')
 sys.exit(1 if failed else 0)

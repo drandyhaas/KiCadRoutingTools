@@ -1267,6 +1267,25 @@ The declaration of what it withheld is written to `_truth/draw.json` under
 `staged_project`, not into the work dir, because naming the withheld strings
 inside the fence would be the leak itself.
 
+### Staging unaided, in one call
+
+`tests/stress/stage_unaided.py` puts every non-exempt footprint at the board
+centre at ROTATION 0 -- the placement is gone, angle included, which is the
+place-from-scratch task rather than a damaged-placement one:
+
+```bash
+python3 -X utf8 tests/stress/stage_unaided.py     kicad_files/esp_prog.kicad_pcb wk/run25/esp_prog wk/run25/_truth/esp_prog
+python3 -X utf8 tests/stress/fence_audit.py     --control wk/run25/_truth/esp_prog/control.kicad_pcb     --workdir wk/run25/esp_prog --mode create
+```
+
+Mechanical parts keep their true pose and are DECLARED, per ref with a reason,
+in `<workdir>/mechanical.json` -- an input the run may read, and legitimate
+precisely because it is written down. Truth goes to a SIBLING directory, never
+a child. The source is recorded by HASH, not by path.
+
+It also ARMS the unaided regime as its last act (see below), so run it BEFORE
+`fence_audit --mode create`, as above.
+
 ### Auditing that every pose came from the engine
 
 `fence_audit` answers "did the answer key get in". It cannot answer "did a
@@ -1281,9 +1300,25 @@ python3 -X utf8 tests/stress/provenance_audit.py --workdir wk/run12/tigard
 # 5 UNPROVEN  nothing was measured (no regime, or no board)
 ```
 
-Arm it by staging the work dir with `placement.provenance.start_regime`; the
-CLIs in `LEVER_REGISTRY` then record every pose they write to
-`.pose-provenance.jsonl`, and an undeclared write RAISES instead of landing.
+BOTH STAGERS ARM IT. `stage_unaided.py` and `stage_blind.py` write
+`.unaided-manifest.json` into the work dir as their last act. (The library
+call they make is `placement.provenance.start_regime`; while NOTHING in
+production called it, this audit printed UNPROVEN on every real run, the
+ledger was never written, and the gate that refuses an undeclared pose writer
+was installed and never armed -- #903.) The CLIs in `LEVER_REGISTRY` then
+record every pose they write to `.pose-provenance.jsonl`, and an undeclared
+write RAISES instead of landing, before the file exists.
+
+A staging row in that ledger is REDACTED to "a staging happened": the ledger
+lives inside the fence, and an unredacted row named the source board and the
+truth dir in its argv and carried the control's own poses.
+
+`5 UNPROVEN` has three live causes now that a staged dir is armed, and the
+`cheats` watcher names them: the dir was staged by neither stager; it was
+MOVED after staging (the manifest holds an absolute path); or no delivered
+board sits beside the staged one at the top level -- pass `--delivered`. A
+fourth is a manifest whose `staged_sha256` no longer matches the board it
+names, which means the baseline every verdict is measured against is stale.
 
 ### Watching a long run
 
@@ -1301,6 +1336,13 @@ python3 -X utf8 tests/stress/run_watch.py cheats --workdir wk/run12/tigard \
 scope narrowed to the failing nets, a grader floor overridden, a waiver spent)
 and ends when the `DONE` marker appears, running `fence_audit` and
 `provenance_audit` as it goes. Neither budgets on a clock.
+
+`RESTAGE` counts invocations of EITHER stager, from two sources: a teed `CMD:`
+line, and a pose-provenance row. The second is the one that works -- neither
+stager installs `cli_banner`, and the first staging creates the work dir, so
+there is nowhere to tee it to yet. A `PROVENANCE VERDICT: UNPROVEN` on a dir a
+stager armed is itself a finding and `cheats` says so; it still exits 0,
+because "I cannot prove it" and "I proved it false" are different numbers.
 
 `cheats` reads a tool's argv from its `CMD:` banner line. The two skill
 drivers install no banner, so wrap timed invocations in

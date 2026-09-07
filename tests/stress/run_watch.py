@@ -469,6 +469,20 @@ def _use_key(label, flag, tool, toks):
 _ARGV_KEYS = ('lever_argv', 'argv', 'cmdline')
 
 
+def _is_staging_cmd(toks):
+    """Is this `CMD:` argv an invocation of either stager? (#903)
+
+    Extracted rather than left inline for one reason: inline, the only way to
+    exercise it was a whole `cheats` run, so its mutation row was declared a
+    SURVIVOR with "neither stager prints a CMD: line" as the reason. That
+    explains why the counter is unreliable in the FIELD; it does not explain
+    why it cannot be TESTED, and a review showed it is testable in about a
+    second. An exclusion needs evidence like a claim does.
+    """
+    return any(str(t).endswith(('stage_blind.py', 'stage_unaided.py'))
+               for t in toks)
+
+
 def _ledger_stagings(path):
     """Re-stagings recorded in a pose-provenance ledger (#903).
 
@@ -484,8 +498,16 @@ def _ledger_stagings(path):
     first stage arms afterwards and writes none). One row is already a finding.
     """
     n = 0
+    # `errors='replace'`, and ValueError caught alongside OSError, for the
+    # reason every other reader in this file already has them: a
+    # UnicodeDecodeError is a ValueError, not an OSError, so one non-UTF-8
+    # byte anywhere in a `.jsonl` escaped as an uncaught exception and killed
+    # `cheats` BEFORE the DONE block -- so the fence audit and the provenance
+    # audit never ran, and a watcher's silence reads as clean. This was the
+    # only reader here that could die; `_scan_ledger_argv` catches both and
+    # the `CMD:` reader already replaces.
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8', errors='replace') as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -494,10 +516,27 @@ def _ledger_stagings(path):
                     r = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(r, dict) and str(r.get('lever') or '') in (
-                        'stage_unaided.py', 'stage_blind.py'):
-                    n += 1
-    except OSError:
+                if not isinstance(r, dict):
+                    continue
+                if str(r.get('lever') or '') not in ('stage_unaided.py',
+                                                     'stage_blind.py'):
+                    continue
+                # ...AND WROTE INTO THIS DIR. A NESTED work dir's FIRST
+                # staging is governed by the outer regime (its own manifest
+                # does not exist yet), so its row lands in this ledger -- and
+                # counting it reported a re-stage on a dir that was staged
+                # exactly once. Measured: two first-stagings, one nested,
+                # reported "1 re-staging(s)". The docstring's "every row here
+                # is a re-stage by construction" is true only of a dir's OWN
+                # boards, which is what this test says.
+                p = r.get('path')
+                if not p:
+                    continue
+                if os.path.dirname(os.path.abspath(p)) != os.path.abspath(
+                        os.path.dirname(os.path.abspath(path))):
+                    continue
+                n += 1
+    except (OSError, ValueError):
         return 0
     return n
 
@@ -716,8 +755,7 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                 # second unaided stage was neither permitted nor meaningful.
                 # It is permitted now, so counting one stager and not the
                 # other is a blind spot this change would otherwise open.
-                if any(t.endswith(('stage_blind.py', 'stage_unaided.py'))
-                       for t in toks):
+                if _is_staging_cmd(toks):
                     stages += 1
                 for label, flag, why in _cheat_hits(tool, toks):
                     key = _use_key(label, flag, tool, toks)
@@ -834,11 +872,15 @@ def watch_cheats(workdir, truthdir, done_path, poll):
                     # work dir staged before this change.
                     print('PROVENANCE exit 5 -- UNPROVEN. Since #903 both '
                           'stagers ARM the regime, so a dir they staged '
-                          'should not read 5: either this dir was staged by '
-                          'neither, or it was MOVED after staging (the '
-                          'manifest names an absolute path), or no delivered '
-                          'board sits beside the staged one (pass '
-                          '--delivered). Not a violation -- but the claim '
+                          'should not read 5. The reasons, all four: this '
+                          'dir was staged by neither stager; it was MOVED '
+                          'after staging (the manifest holds an absolute '
+                          'path); no delivered board sits beside the staged '
+                          'one (pass --delivered); or NOTHING MOVED -- no '
+                          'ledger and no pose differs from the staged board, '
+                          'which on a finished run is the interesting one. '
+                          'Read the reason line above rather than guessing '
+                          'from this list. Not a violation -- but the claim '
                           '"the engine placed this board" is unproven, so it '
                           'may not be made', flush=True)
             except Exception as e:                     # noqa: BLE001

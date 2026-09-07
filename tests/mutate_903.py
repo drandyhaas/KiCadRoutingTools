@@ -24,7 +24,10 @@ was true of the defect, and every row below is a way of putting the defect
 back that a reader could mistake for a tidy-up: dropping a call, arming the
 wrong dir, hashing the wrong file, reverting one tuple entry.
 
-The first row is the tree as it stood before this PR, exactly.
+Row 1 removes the arming call, which is the DEFECT restated; it is not a
+full revert of the PR (the pre-#903 tree also lacked the registry entry,
+the declaration, stage_blind's arming and the run_watch changes, each of
+which has a row of its own).
 
 BYTECODE. Each row rewrites a file and restores it within the same second,
 and the registry row is nearly size-preserving -- exactly the (mtime, size)
@@ -98,9 +101,11 @@ ROWS = [
      (T_903, T_PROV), 'KILLED'),
 
     # ---- the registry entry, reverted alone -------------------------------
-    # Killed BEHAVIOURALLY, not by a tuple-membership assertion: the restage
-    # declares `stage_unaided.py`, `record_write` refuses a lever the tuple
-    # does not carry, and the stager is refused by the guard it installed.
+    # Killed by BOTH a behavioural gate and a membership one, and the
+    # behavioural half is the one that matters: T_903 restages, `record_write`
+    # refuses a lever the tuple does not carry, and the stager is refused by
+    # the guard it installed one run earlier. (T_PROV also asserts membership
+    # directly, so this row would die even without that.)
     ('the-registry-loses-the-unaided-stager', 'pv',
      "    'perturb.py', 'stage_blind.py', 'stage_unaided.py',\n",
      "    'perturb.py', 'stage_blind.py',\n",
@@ -190,35 +195,75 @@ ROWS = [
      (T_903,), 'KILLED'),
 
     # ---- the watcher gap this PR opened, and closed -----------------------
+    # Was a declared SURVIVOR with "neither stager prints a CMD: line" as the
+    # reason. A review pointed out that this explains why the counter is
+    # unreliable in the FIELD, not why it cannot be TESTED -- and it is, in
+    # about a second, once the predicate is a function instead of an inline
+    # `any(...)`. An exclusion needs evidence like a claim does.
     ('the-restage-counter-forgets-the-unaided-stager', 'rw',
-     "                if any(t.endswith(('stage_blind.py', 'stage_unaided.py'))\n"
-     "                       for t in toks):\n",
-     "                if any(t.endswith('stage_blind.py') for t in toks):\n",
-     (T_903,), 'SURVIVED'),
+     "    return any(str(t).endswith(('stage_blind.py', 'stage_unaided.py'))\n"
+     "               for t in toks)\n",
+     "    return any(str(t).endswith('stage_blind.py') for t in toks)\n",
+     (T_903,), 'KILLED'),
+
+    # The nesting guard the ledger counter needs. A NESTED dir's FIRST
+    # staging lands its row in the OUTER ledger, so without this the outer
+    # dir reports a re-stage it never had -- measured, two first-stagings
+    # reported "1 re-staging(s)".
+    ('the-ledger-counter-counts-a-nested-dirs-first-stage', 'rw',
+     "                if os.path.dirname(os.path.abspath(p)) != os.path.abspath(\n"
+     "                        os.path.dirname(os.path.abspath(path))):\n"
+     "                    continue\n",
+     "",
+     (T_903,), 'KILLED'),
+
+    # A watcher that dies before the DONE block never runs the fence or the
+    # provenance audit, and its silence reads as clean. UnicodeDecodeError is
+    # a ValueError, so `except OSError` did not hold it.
+    # Anchored WITH its preceding line: three readers in this file share the
+    # same `open(..., errors='replace')` text, and `replace(..., 1)` would
+    # have taken whichever came first -- the pre-flight said so, in one
+    # second, before anything ran. Both halves of the guard are reverted
+    # together, because either alone leaves the crash unreachable.
+    ('the-ledger-reader-dies-on-a-non-utf8-byte', 'rw',
+     "    try:\n"
+     "        with open(path, encoding='utf-8', errors='replace') as f:\n"
+     "            for line in f:\n"
+     "                line = line.strip()\n"
+     "                if not line:\n"
+     "                    continue\n"
+     "                try:\n"
+     "                    r = json.loads(line)\n",
+     "    try:\n"
+     "        with open(path, encoding='utf-8') as f:\n"
+     "            for line in f:\n"
+     "                line = line.strip()\n"
+     "                if not line:\n"
+     "                    continue\n"
+     "                try:\n"
+     "                    r = json.loads(line)\n",
+     (T_903,), 'KILLED'),
 
     # The LEDGER counter is the one that works (neither stager prints a
     # `CMD:` line, so the log counter above can miss the first staging
     # entirely). T_903 asserts on it directly, which is why this row dies and
     # the log-counter row above does not.
     ('the-ledger-restage-counter-names-one-stager', 'rw',
-     "                if isinstance(r, dict) and str(r.get('lever') or '') in (\n"
-     "                        'stage_unaided.py', 'stage_blind.py'):\n",
-     "                if isinstance(r, dict) and str(r.get('lever') or '') in (\n"
-     "                        'stage_blind.py',):\n",
+     "                if str(r.get('lever') or '') not in ('stage_unaided.py',\n"
+     "                                                     'stage_blind.py'):\n",
+     "                if str(r.get('lever') or '') not in ('stage_blind.py',):\n",
      (T_903,), 'KILLED'),
 
-    # ---- declared survivors ----------------------------------------------
-    # A REAL hole, recorded rather than dressed up. The nested-regime NOTE is
-    # a stderr disclosure with no consumer: nothing downstream reads it, and
-    # asserting on it would be asserting on a print. The condition it guards
-    # (`regime_for` finding an OUTER dir) is exercised by no committed
-    # fixture, because building one means arming a temp dir's PARENT, which
-    # then governs every other test running under the same temp root. Left as
-    # a disclosure, and named here so "why is this untested" has an answer.
+    # WAS a declared survivor, on the reasoning that building the nested case
+    # means arming a temp dir's PARENT and so contaminating every other test
+    # under the same temp root. That is true of the IN-PROCESS file and false
+    # of `T_903`, which runs subprocesses inside its own `mkdtemp` -- a review
+    # built the fixture in two calls. An exclusion needs evidence like a claim
+    # does, and this one had a reason that did not survive checking.
     ('the-nested-regime-note-is-silenced', 'su',
      "    if _outer is not None and os.path.abspath(_outer) != _wd:\n",
      "    if False:\n",
-     (T_903, T_PROV), 'SURVIVED'),
+     (T_903,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is
@@ -233,10 +278,17 @@ preflight(__file__)
 #: file's header refuses. It is a THIRD outcome, not a kill.
 SKIP_EXIT = 77
 
-#: T_903 prints this when it reached every arm. A gate that ran only its
-#: first three checks would still exit 0 on an unmutated tree and would then
-#: report the later rows KILLED for free.
-COVERAGE = '903 coverage: unaided=yes blind=yes refusal=yes restage=yes'
+#: T_903's end-of-run marker, and the FLOOR its derived row count must clear.
+#:
+#: The marker used to be a constant string, which proved only that the script
+#: reached its last line -- delete half its checks and it still printed. It is
+#: `903 coverage: <N> rows (...)` now, and this floor is what makes the guard
+#: mean something: a gate that quietly stopped running arms is reported rather
+#: than believed, and the later rows do not score KILLED for free.
+#:
+#: Raise it when the gate genuinely grows; that is the point of a pin.
+COVERAGE = '903 coverage:'
+COVERAGE_FLOOR = 30
 
 
 def run(tests, want_coverage=False):
@@ -253,13 +305,30 @@ def run(tests, want_coverage=False):
         r = subprocess.run([sys.executable, '-B', '-X', 'utf8', t],
                            cwd=ROOT, capture_output=True, text=True, env=env,
                            timeout=3600)
+        out = r.stdout or ''
         if r.returncode == SKIP_EXIT:
+            return False, 'SKIP:' + os.path.basename(t)
+        # TWO SKIP SHAPES, not one. `run_all.py`'s contract is exit 77, and
+        # `T_903` honours it -- but `T_PROV` predates that and self-skips a
+        # missing fixture with a `SKIP:` line and exit ZERO. Reading only 77
+        # let a fixtureless `T_PROV` sail through the baseline, which is the
+        # exact "gate that asserted nothing" this function exists to catch.
+        if any(ln.startswith('SKIP:') for ln in out.splitlines()):
             return False, 'SKIP:' + os.path.basename(t)
         if r.returncode != 0:
             return True, os.path.basename(t)
-        if (want_coverage and os.path.basename(t) == os.path.basename(T_903)
-                and COVERAGE not in (r.stdout or '')):
-            return True, 'NO-COVERAGE:' + os.path.basename(t)
+        if want_coverage and os.path.basename(t) == os.path.basename(T_903):
+            line = next((ln for ln in out.splitlines()
+                         if ln.startswith(COVERAGE)), None)
+            if line is None:
+                return True, 'NO-COVERAGE:' + os.path.basename(t)
+            try:
+                rows_run = int(line.split(COVERAGE, 1)[1].split()[0])
+            except (IndexError, ValueError):
+                return True, 'NO-COVERAGE:' + os.path.basename(t)
+            if rows_run < COVERAGE_FLOOR:
+                return True, (f'THIN-COVERAGE:{os.path.basename(t)} ran '
+                              f'{rows_run} rows, floor is {COVERAGE_FLOOR}')
     return False, ''
 
 
