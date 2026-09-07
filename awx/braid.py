@@ -652,8 +652,10 @@ class Corridor:
                   for p in ctx.pcb.footprints[ctx.ends[nm][2]].pads]
         far = [((t[0] - Pn[0]) * dn[0] + (t[1] - Pn[1]) * dn[1])
                for t in stubs.values()]
-        if s_ball and max(far) > max(s_ball) - 1e-6:
-            fwd = max(fwd, max(far) + WRAP_REACH)
+        along_spine = any(ctx.stub_dir[nm][0] * dn[0] + ctx.stub_dir[nm][1] * dn[1] > 0.7
+                          for nm in self.members)
+        if s_ball and (max(far) > max(s_ball) - 1e-6 or along_spine):
+            fwd = max(fwd, max(max(far), max(s_ball)) + WRAP_REACH)
         self.spine = spine.extend(back, fwd)
         self.teeth, self.stubs = teeth, stubs
         self.st = {nm: self.spine.project_pt(teeth[nm]) for nm in self.members}
@@ -761,6 +763,18 @@ class Corridor:
                 r_max = max(max(p.size_x, p.size_y) / 2 for p in pads)
                 self.far_exit = {nm for nm in self.siders
                                  if se[nm][0] > s_ball - 1e-6}
+                # ...and a stub that ESCAPES ALONG THE SPINE (the array's
+                # far face, its end just inside the last ball column): a
+                # leg in o at the stub's own s runs down the face over
+                # the neighbouring stubs of the same column (K41 SA9/
+                # SA13/SA7, 0.25 apart in o, 0.1 apart in s: refused
+                # in-band in every arm, 2-8 vias each at last call). It
+                # is reached the way a far-face stub is: a leg beyond the
+                # array and the jog back along the stub's own line.
+                dn = sp.d[-1]
+                self.far_exit |= {nm for nm in self.siders
+                                  if ctx.stub_dir[nm][0] * dn[0]
+                                  + ctx.stub_dir[nm][1] * dn[1] > 0.7}
                 if self.far_exit:
                     self.s_leg_min = s_ball + r_max + CLEAR + TRACK / 2 + 0.05
                     self.log(f'  far-face exits: {sorted(self.far_exit)} '
@@ -858,30 +872,46 @@ class Corridor:
             # jog on F refused the pitch over a B tooth and took the
             # other side, onto SBA0's F tooth instead.
             lo_s, hi_s = min(s, own[0]) - 0.1, max(s, own[0]) + 0.1
-            return any(lo_s < p[0] < hi_s and abs(p[1] - own[1]) < LEG_O + 0.05
+            return any(lo_s < p[0] < hi_s and abs(p[1] - own[1]) < LEG_O
                        for p in ends_L)
+        def room(s):
+            # the leg's room: its distance to the nearest foreign free
+            # end in its span or leg already placed
+            d = [abs(p[0] - s) for p in ends if lo_ - 0.05 < p[1] < hi_ + 0.05]
+            d += [abs(ps - s) for (ps, plo, phi) in placed if plo < hi_ and phi > lo_]
+            return min(d) if d else 1e9
+
+        def too_close(s):
+            # ...and a leg with less than the legal minimum of it is
+            # not a candidate at all: the min-clash rule took the first
+            # of four equally clashing candidates and put SA8's join
+            # leg 0.007 mm from SA5's tooth (K41), a stamp on both
+            # layers over the tooth -- SA5 refused at its first cell
+            # every attempt
+            return room(s) < TRACK + CLEAR + 0.02
         if not clash(s_l) and not bad(s_l):
             return s_l
         best = None
         cands = (s_l + LPITCH, s_l - LPITCH, s_l + 2 * LPITCH, s_l - 2 * LPITCH)
         # ...and, off an island, the first s past either of its edges
         cands = cands + tuple(sorted(extra, key=lambda v: abs(v - s_l)))
-        cands = tuple(c for c in cands if not jogged(c))
+        cands = tuple(c for c in cands if not jogged(c) and not too_close(c))
         for cand in cands:
             if bad(cand):
                 continue
             n = clash(cand)
             if not n:
                 return cand
-            if best is None or n < best[0]:
+            # fewer clashes first, then the most room
+            if best is None or (n, -room(cand)) < (best[0], -room(best[1])):
                 best = (n, cand)
         if best is None:
             # every candidate on an island too: the plain rule
             for cand in cands:
                 n = clash(cand)
-                if best is None or n < best[0]:
+                if best is None or (n, -room(cand)) < (best[0], -room(best[1])):
                     best = (n, cand)
-        # no candidate whose jog is clear: the leg stays where it is
+        # no legal candidate: the leg stays where it is
         return best[1] if best is not None else s_l
 
     def pair_floor(self, a, b, base, sched, at_launch):
@@ -1141,7 +1171,11 @@ class Corridor:
             self.exit_leg_s = {}
             placed = []
             placed_by = {}
-            for nm in sorted(self.exit_block, key=lambda n: (self.se[n][0], abs(self.exit_block[n]))):
+            def _order(n):
+                if n in self.far_exit:
+                    return (1, abs(self.exit_block[n]), self.se[n][0])
+                return (0, self.se[n][0], abs(self.exit_block[n]))
+            for nm in sorted(self.exit_block, key=_order):
                 s_e, o_e = self.se[nm]
                 o_l = py[trank[nm]]
                 s_base, avoid_nm = s_e, avoid

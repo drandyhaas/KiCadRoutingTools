@@ -410,6 +410,43 @@ alone (14 / 38 / 50); **K41 2 open 88v -> 2 open 77v, 30 -> 33 of 41
 in-band**, SCKE1/SCKE0/SA15/SBA1/SDQ6 in-band; the fanout's judge runs
 these rules too and its K41 choice did not move (sidecars byte-identical).
 
+### The east face, and a leg's room (2026-09-07)
+
+Two walls left at K41 after the rules above, both at a free end:
+
+- **The east face.** SA9, SA13 and SA7 berth on DU1's east face, escaping
+  east -- along the spine -- 0.25 mm apart in o with their ends just
+  inside the last ball column, so they are not `far_exit` by the
+  past-the-last-ball test; a leg in o at each stub's own s runs down the
+  face over the neighbouring stubs (SA9's search reached s 29.82 with its
+  stub enclosed by SA13's leg stamp and SA7's copper). Refused in-band in
+  every arm, they cost 2-8 vias each at last call (SA6 8) -- the largest
+  via pool at K41. A side exit whose berth escape direction lies within
+  45 degrees of the spine's is now a far-face exit (`classify`,
+  `stub_dir . spine dir > 0.7`): its leg goes beyond the array and the
+  jog runs back along the stub's own line, the spine's frame extended
+  for it (`build_spine`); far exits are placed last, innermost lane first,
+  so their legs cross nothing; the jog's o-tolerance is the stamp's own
+  reach (`LEG_O`). SA9/SA13/SA6 2 vias each, SA7 0, all in-band.
+- **A leg's room.** With every candidate clashing, `_leg_s` took the
+  first least-clashing one however close: SA8's join leg 0.007 mm from
+  SA5's tooth, SBA2's on SDQ6's -- a stamp on both layers over the tooth,
+  the net refused at its first cell every attempt. A candidate within the
+  legal minimum (`TRACK + CLEAR`) of a foreign end or a placed leg is no
+  candidate (`too_close`); ties among the least-clashing break by the
+  most room; with none legal the leg stays.
+
+Measured (chain, one fanout; each rule also graded alone: east face
+K41 2 open 86v 38/41, room rule K41 2 open 83v 34/41 with SA4 routed for
+the first time): K15 14v / K28 38v identical; K35 0 open 54v, **34 of 35
+in-band** (only SODT0 refused); **K41 1 open (SBA2) 78v, 40 of 41
+in-band**, 130 s (braid 60 s). Against the committed baseline before this
+day's leg work: K35 55 -> 54, K41 2 open 89v 29/41 -> 1 open 78v 40/41
+(human 70v). Every constant is a design constant or a direction
+quadrant; nothing reads this board's names or coordinates -- but all of
+it is measured on ONE bench (fb_t2q_fresh), so a second array pair is the
+next confirmation before any of it is treated as a default elsewhere.
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`
