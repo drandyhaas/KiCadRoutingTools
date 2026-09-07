@@ -39,12 +39,14 @@ for K in "$@"; do
   if [ ! -f "${TAG}_fo_k${K}.kicad_pcb" ]; then
     echo "  NO FANOUT BOARD"; continue
   fi
+  echo "  fanout stage done $(date +%H:%M:%S)"
   echo -n "  fanout board: "
   python3 ../py_router/check_drc.py "${TAG}_fo_k${K}.kicad_pcb" \
     --clearance 0.1 --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"
   python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
     --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
     > "${TAG}_k${K}.log" 2>&1
+  echo "  braid stage done $(date +%H:%M:%S)"
   if [ -f "${TAG}_k${K}.kicad_pcb" ]; then
     grep -E "WARNING|violations$" "${TAG}_k${K}.log" | sed 's/^/  /'
     python3 grade_k.py "${TAG}_k${K}.kicad_pcb" "$NETS"
