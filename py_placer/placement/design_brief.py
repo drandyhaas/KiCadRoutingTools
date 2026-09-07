@@ -65,6 +65,7 @@ import fnmatch
 import json
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -1113,12 +1114,42 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
     return out
 
 
-def drift(intent_doc: Dict, fragment: Dict) -> List[str]:
+def _drift_clause_id(kind, ref, key, *, near=None, fragment=None):
+    """The clause id a drift line belongs to, or '' when there is none.
+
+    Proximity ids carry the BRIEF ROW, which a compiled fragment entry records
+    in `context.brief_row` -- so the id is recovered from the fragment rather
+    than re-invented, and it matches the one `compile_brief` reported.
+    """
+    if kind == 'interfaces':
+        # `center_on_edge` and `along_edge_band` are two spellings of the one
+        # claim the brief calls `along_edge`, and the report names that.
+        if key in ('center_on_edge', 'along_edge_band'):
+            key = 'along_edge'
+        return f"interfaces[{ref}].{key}"
+    if kind == 'proximity' and fragment is not None:
+        for p in (fragment.get('proximity') or ()):
+            if str(p.get('ref')) == ref and str(p.get('near')) == near:
+                row = (p.get('context') or {}).get('brief_row')
+                if row is not None:
+                    return f"{proximity_claim_id(row, ref, near)}.{key}"
+    return ''
+
+
+def drift_pairs(intent_doc: Dict, fragment: Dict) -> List[Tuple[str, str]]:
     """Brief claims an existing intent does NOT carry.
+
+    `(clause_id, line)` for each divergence -- `drift()` is the line-only
+    view of exactly this list, so the human sentence and the machine-readable
+    clause id can never disagree about what drifted.
 
     For the `--intent` path, where merging would be wrong: the graded document
     must be the file the user pointed at, or every violation cites a claim its
     reader cannot find. So the brief is compiled, diffed, and REPORTED.
+
+    A clause id is EMPTY when the divergence is not about one declared clause
+    -- a keep-out the intent has never heard of, say. Those still drift and
+    still block; they simply have no per-clause row to hang a flag on.
     """
     have = {c['ref']: c for c in (intent_doc.get('edge_connectors') or [])}
     out: List[str] = []
@@ -1126,18 +1157,20 @@ def drift(intent_doc: Dict, fragment: Dict) -> List[str]:
         ref = c['ref']
         cur = have.get(ref)
         if cur is None:
-            out.append(f"{ref}: the brief declares this connector; the intent "
-                       f"has no entry for it")
+            out.append(('', f"{ref}: the brief declares this connector; "
+                            f"the intent has no entry for it"))
             continue
         for key in ('edge', 'center_on_edge', 'along_edge_band', 'overhang_mm'):
             if key in c and cur.get(key) != c[key]:
-                out.append(f"{ref}.{key}: brief says {c[key]!r}, the intent "
-                           f"{'says ' + repr(cur[key]) if key in cur else 'does not declare it'}")
+                out.append((
+                    _drift_clause_id('interfaces', ref, key),
+                    f"{ref}.{key}: brief says {c[key]!r}, the intent "
+                    f"{'says ' + repr(cur[key]) if key in cur else 'does not declare it'}"))
     names = {k.get('name') for k in (intent_doc.get('keepouts') or [])}
     for k in (fragment.get('keepouts') or []):
         if k.get('name') not in names:
-            out.append(f"keepout {k.get('name')!r}: declared by the brief, "
-                       f"absent from the intent")
+            out.append(('', f"keepout {k.get('name')!r}: declared by the "
+                            f"brief, absent from the intent"))
     # #902. Keyed on the ORDERED (ref, near) pair, which is the row's identity
     # in the brief too, so the two halves cannot disagree about what "the same
     # claim" means. The list `ref` was expanded by `compile_brief`, so both
@@ -1148,8 +1181,11 @@ def drift(intent_doc: Dict, fragment: Dict) -> List[str]:
         key = (str(p.get('ref')), str(p.get('near')))
         cur = have_prox.get(key)
         if cur is None:
-            out.append(f"{key[0]} near {key[1]}: the brief declares this "
-                       f"proximity claim; the intent has no row for it")
+            out.append((
+                _drift_clause_id('proximity', key[0], 'max_mm', near=key[1],
+                                 fragment=fragment),
+                f"{key[0]} near {key[1]}: the brief declares this proximity "
+                f"claim; the intent has no row for it"))
             continue
         # Compared at the EFFECTIVE value, not `if field_name in p`. The brief
         # writes `basis` only when it is non-default, so a brief meaning the
@@ -1165,13 +1201,206 @@ def drift(intent_doc: Dict, fragment: Dict) -> List[str]:
             if mine is None and theirs is None:
                 continue
             if mine != theirs:
-                out.append(
+                out.append((
+                    _drift_clause_id('proximity', key[0], 'max_mm',
+                                     near=key[1], fragment=fragment),
                     f"{key[0]}~{key[1]}.{field_name}: brief "
                     + (f"says {mine!r}" if mine is not None
                        else 'declares none')
                     + ', the intent '
                     + (f"says {theirs!r}" if theirs is not None
-                       else 'does not declare it'))
+                       else 'does not declare it')))
+    return out
+
+
+def drift(intent_doc: Dict, fragment: Dict) -> List[str]:
+    """The lines `drift_pairs` produces. The long-standing shape, unchanged."""
+    return [line for _cid, line in drift_pairs(intent_doc, fragment)]
+
+
+def drifted_clause_ids(intent_doc: Dict, fragment: Dict) -> List[str]:
+    """The clause ids `drift_pairs` could attribute. Deduped, sorted."""
+    return sorted({cid for cid, _line in drift_pairs(intent_doc, fragment)
+                   if cid})
+
+
+
+
+# --------------------------------------------------------------------------
+# clause coverage (#902)
+# --------------------------------------------------------------------------
+
+#: Which rule grades a clause of each kind. `product` is graded by nothing and
+#: says so; `fixed` never reaches a rule at all (it is carried into `context`).
+_CLAUSE_RULE = {'interfaces': 'edge_connector',
+                'keepouts': 'keepout',
+                'proximity': 'proximity',
+                'product': None}
+
+#: Interface keys that are CARRIED and graded by nothing, by design. They are
+#: already in `report['not_graded']`; naming them here too keeps the coverage
+#: verdict from depending on a list that exists for a different purpose.
+_CLAUSE_CARRIED = {'mount_mode', 'cable_entry'}
+
+_CLAUSE_RE = re.compile(
+    r'^(?P<kind>interfaces|keepouts|proximity|product)'
+    r'(?:\[(?P<inner>.*)\])?'
+    r'(?:\.(?P<key>[a-z_]+))?$')
+
+
+def parse_clause_id(cid: str) -> Optional[Dict[str, object]]:
+    """`proximity[0:Y1~U1].max_mm` -> its parts, or None if it is not one.
+
+    ONE parser for a format built in seventeen places. That is a real risk --
+    a second implementation of a string format is how two halves drift -- so
+    `tests/test_902_proximity.py` round-trips EVERY id `compile_brief`
+    produces through this function and fails on one it cannot read. An id that
+    stops parsing is then a test failure rather than a clause that silently
+    vanishes from the coverage report.
+
+    Returns `{kind, ref, near, key, row}`; `ref` is the keep-out NAME for a
+    keep-out, and `near`/`row` are set only for a proximity claim.
+    """
+    m = _CLAUSE_RE.match(cid)
+    if m is None:
+        return None
+    kind, inner, key = m.group('kind'), m.group('inner'), m.group('key')
+    out: Dict[str, object] = {'kind': kind, 'ref': inner, 'near': None,
+                              'key': key, 'row': None}
+    if kind == 'product':
+        out['ref'] = None
+        return out
+    if inner is None:
+        return None
+    if kind == 'proximity':
+        # `<row>:<ref>~<near>`. The row index is what makes the id unique when
+        # a reference itself contains `~` (`TP4~2` is a refdes this toolchain
+        # PRODUCES), so it is split off first and the rest is split on the
+        # LAST `~`: a ref may contain one, a `near` that contains one still
+        # leaves the final separator as the boundary only if we split from the
+        # left -- so both are recovered from the fragment instead, and this
+        # parse is used for the row and kind alone when they disagree.
+        row, _, rest = inner.partition(':')
+        if not row.isdigit() or '~' not in rest:
+            return None
+        ref, _, near = rest.partition('~')
+        out.update({'row': int(row), 'ref': ref, 'near': near})
+    return out
+
+
+def _clause_state(rec, intent_doc, rules_run, abstained):
+    """The verdict for ONE declared clause. Five states, kept apart.
+
+    `graded` is the only one that means a rule reached a verdict. Collapsing
+    the other four into "not graded" would rebuild the failure this whole
+    channel exists against one key over: run 25 passed with `rules_run: 6` and
+    every declared clause unmeasured, because a COUNT cannot say WHICH.
+    """
+    kind, ref, near, key = rec['kind'], rec['ref'], rec['near'], rec['key']
+    rule = _CLAUSE_RULE.get(kind)
+    if rule is None or (kind == 'interfaces' and key in _CLAUSE_CARRIED):
+        return 'carried', '', rule
+    if kind == 'interfaces':
+        entry = next((c for c in (intent_doc.get('edge_connectors') or [])
+                      if c.get('ref') == ref), None)
+        if entry is None:
+            return ('uncovered', f"the intent has no edge_connectors entry for "
+                                 f"{ref}", rule)
+        carried = {
+            'edge': 'edge' in entry,
+            'overhang_mm': 'overhang_mm' in entry,
+            'user_facing': entry.get('class') == 'edge_receptacle',
+            'along_edge': ('center_on_edge' in entry
+                           or 'along_edge_band' in entry),
+        }.get(key)
+        if carried is False:
+            return ('uncovered', f"the intent's {ref} entry does not carry "
+                                 f"{key}", rule)
+    elif kind == 'keepouts':
+        if not any(k.get('name') == ref
+                   for k in (intent_doc.get('keepouts') or [])):
+            return ('uncovered', f"the intent carries no keepout named "
+                                 f"{ref!r}", rule)
+    elif kind == 'proximity':
+        if not any(p.get('ref') == ref and p.get('near') == near
+                   for p in (intent_doc.get('proximity') or [])):
+            return ('uncovered', f"the intent carries no proximity claim for "
+                                 f"{ref} near {near}", rule)
+    if rule not in rules_run:
+        return ('uncovered', f"`{rule}` did not run on this grade", rule)
+    prefix = (f"proximity[{ref}~{near}]." if kind == 'proximity'
+              else f"edge_connectors[{ref}]." if kind == 'interfaces' else None)
+    if prefix:
+        for akey, why in sorted((abstained or {}).items()):
+            if akey.startswith(prefix):
+                return 'abstained', why, rule
+    return 'graded', '', rule
+
+
+def clause_coverage(report: Dict, intent_doc: Dict, *,
+                    rules_run: Sequence[str] = (),
+                    abstained: Optional[Dict[str, str]] = None,
+                    drifted_ids: Sequence[str] = ()) -> Dict:
+    """Did a rule reach a verdict on every clause the brief DECLARED? (#902)
+
+    `--require-rules` counts RULES. Run 25 ran six of them, passed, and graded
+    not one clause its brief declared -- the count was satisfied by rules
+    nobody had declared anything for. This counts CLAUSES, which is the thing
+    the author actually wrote.
+
+    PURE: no file IO and no board. The same split `compile_brief` has, and for
+    the same reason -- it is testable against a hand-built intent document.
+    """
+    drift_set = set(drifted_ids or ())
+    clauses = []
+    counts = {'graded': 0, 'abstained': 0, 'uncovered': 0,
+              'not_claimed': 0, 'carried': 0, 'drifted': 0}
+    for cid in list(report.get('declared') or ()):
+        rec = parse_clause_id(cid)
+        if rec is None:
+            continue
+        state, why, rule = _clause_state(rec, intent_doc, tuple(rules_run),
+                                         abstained)
+        row = {'id': cid, 'kind': rec['kind'], 'ref': rec['ref'],
+               'rule': rule, 'state': state, 'why': why,
+               'drifted': cid in drift_set}
+        clauses.append(row)
+        counts[state] += 1
+        if row['drifted']:
+            counts['drifted'] += 1
+    for cid in list(report.get('unknown') or ()):
+        rec = parse_clause_id(cid)
+        if rec is None:
+            # A free-text entry from the brief's own `unknown[]` list, which
+            # names a QUESTION rather than a clause ("mounting_datum"). It is
+            # reported by `brief_unknown_keys` already; it is not a clause and
+            # must not be counted as one.
+            continue
+        clauses.append({'id': cid, 'kind': rec['kind'], 'ref': rec['ref'],
+                        'rule': _CLAUSE_RULE.get(rec['kind']),
+                        'state': 'not_claimed',
+                        'why': 'the brief declares this "unknown"',
+                        'drifted': False})
+        counts['not_claimed'] += 1
+    for cid in list(report.get('not_graded') or ()):
+        rec = parse_clause_id(cid)
+        if rec is None or any(c['id'] == cid for c in clauses):
+            continue
+        clauses.append({'id': cid, 'kind': rec['kind'], 'ref': rec['ref'],
+                        'rule': None, 'state': 'carried',
+                        'why': 'carried into context; nothing grades it',
+                        'drifted': False})
+        counts['carried'] += 1
+    clauses.sort(key=lambda c: c['id'])
+    out = {'schema': 1, 'brief': os.path.basename(report.get('path') or '')
+           or None, 'clauses': clauses}
+    out.update(counts)
+    # COMPLETE means every clause that could reach a verdict did. `carried`
+    # and `not_claimed` never block: one is ungraded by design and the other
+    # is an author saying "I do not know", and punishing an honest unknown is
+    # how a channel teaches people to stop declaring.
+    out['complete'] = (counts['uncovered'] == 0 and counts['abstained'] == 0
+                       and counts['drifted'] == 0)
     return out
 
 

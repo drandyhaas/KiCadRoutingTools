@@ -40,7 +40,6 @@ from placement import design_brief as db          # noqa: E402
 from placement import floorplan as fp             # noqa: E402
 from placement import legality                    # noqa: E402
 
-RUN_ALL_FAST_OK = True
 
 BASE = {'schema': 1, 'kind': 'design-brief', 'units': 'mm'}
 REFS = ('Y1', 'U1', 'U2', 'C1', 'C3', 'Q1', 'Q2')
@@ -645,6 +644,176 @@ def test_severity_is_settable_per_name():
           "an error")
 
 
+# --------------------------------------------------------------------------
+# clause coverage: did a rule reach a verdict on every DECLARED clause?
+# --------------------------------------------------------------------------
+
+
+def _cov(rows=None, intent=None, **kw):
+    """Compile the fixture brief and cover it against `intent`."""
+    with open(FIXTURE_BRIEF, encoding='utf-8') as fh:
+        raw = json.load(fh)
+    if rows is not None:
+        raw = dict(raw, proximity=rows)
+    frag, rep = db.compile_brief(db.brief_from_dict(raw, 'e.design-brief.json'))
+    if intent is None:
+        # `.get`, because a brief whose every limit is "unknown"
+        # compiles to NO proximity key at all -- which is the state
+        # `test_unknown_and_carried_clauses_never_block` is about.
+        intent = {'proximity': frag.get('proximity', [])}
+    kw.setdefault('rules_run', ('proximity',))
+    kw.setdefault('drifted_ids', db.drifted_clause_ids(intent, frag))
+    return frag, rep, db.clause_coverage(rep, intent, **kw)
+
+
+def test_every_clause_id_the_compiler_emits_parses_back():
+    """ONE parser for a format built in seventeen places.
+
+    A second implementation of a string format is how two halves drift, so
+    this round-trips every id `compile_brief` produces. An id that stops
+    parsing becomes a test failure rather than a clause that silently vanishes
+    from the coverage report.
+    """
+    _frag, rep, _c = _cov()
+    ids = list(rep['declared']) + list(rep['unknown']) + list(rep['not_graded'])
+    assert ids, ids
+    for cid in ids:
+        rec = db.parse_clause_id(cid)
+        assert rec is not None, cid
+        assert rec['kind'] in ('interfaces', 'keepouts', 'proximity',
+                               'product'), (cid, rec)
+        if rec['kind'] == 'proximity':
+            assert rec['near'] and rec['row'] is not None, (cid, rec)
+            assert db.proximity_claim_id(rec['row'], rec['ref'],
+                                         rec['near']) in cid, (cid, rec)
+    # ...and a free-text `unknown[]` entry is NOT a clause and must not be
+    # counted as one.
+    assert db.parse_clause_id('mounting_datum') is None
+    print(f"  PASS: {len(ids)} clause id(s) all parse back to their parts, and "
+          f"a free-text unknown is not mistaken for one")
+
+
+def test_a_declared_clause_the_intent_does_not_carry_is_UNCOVERED():
+    """The run-25 shape, and the whole point of the key.
+
+    Six rules ran, the grade passed, and not one clause the brief declared was
+    measured -- because `rules_run` counts RULES and the count was satisfied
+    by rules nobody had declared anything for.
+    """
+    _frag, _rep, cov = _cov(intent={})
+    assert cov['uncovered'] == 4 and cov['graded'] == 0, cov
+    assert cov['complete'] is False
+    for row in cov['clauses']:
+        if row['kind'] == 'proximity':
+            assert row['state'] == 'uncovered', row
+            assert 'no proximity claim' in row['why'], row
+    print(f"  PASS: 4 declared clauses, 0 graded, complete=False")
+
+
+def test_a_rule_that_did_not_run_leaves_its_clauses_uncovered():
+    _frag, _rep, cov = _cov(rules_run=())
+    assert cov['uncovered'] == 4, cov
+    assert all('did not run' in c['why'] for c in cov['clauses']
+               if c['kind'] == 'proximity'), cov['clauses']
+    print("  PASS: the clause names the rule that did not run")
+
+
+def test_an_abstention_is_its_own_state_not_a_pass_and_not_an_absence():
+    """Three outcomes, not two.
+
+    Folding an abstention into `graded` rebuilds the vacuous pass one key
+    over; folding it into `uncovered` makes it unclearable when the board
+    genuinely cannot answer. It gets its own state and carries the reason.
+    """
+    _frag, _rep, cov = _cov(
+        abstained={'proximity[Q1~Q2].basis': 'Q1 draws no body'})
+    assert cov['abstained'] == 1 and cov['graded'] == 3, cov
+    row = next(c for c in cov['clauses'] if c['state'] == 'abstained')
+    assert row['why'] == 'Q1 draws no body', row
+    assert cov['complete'] is False
+    print(f"  PASS: {row['id']} abstained, carrying its reason verbatim")
+
+
+def test_a_graded_clause_can_still_be_DRIFTED():
+    """Coverage answers "did a rule look at this"; drift answers "was the
+    thing graded the thing declared". A brief saying 2mm against an intent
+    saying 9mm is fully graded -- against the wrong requirement.
+    """
+    with open(FIXTURE_BRIEF, encoding='utf-8') as fh:
+        frag, rep = db.compile_brief(db.brief_from_dict(json.load(fh)))
+    intent = {'proximity': [dict(p, max_mm=9.0) if p['ref'] == 'Y1' else p
+                            for p in frag['proximity']]}
+    cov = db.clause_coverage(rep, intent, rules_run=('proximity',),
+                             drifted_ids=db.drifted_clause_ids(intent, frag))
+    row = next(c for c in cov['clauses'] if c['ref'] == 'Y1')
+    assert row['state'] == 'graded' and row['drifted'] is True, row
+    assert cov['complete'] is False, cov
+    print("  PASS: Y1's clause is graded AND drifted -- measured, against the "
+          "wrong number")
+
+
+def test_unknown_and_carried_clauses_never_block():
+    """Declaring honestly must not be punished, or the channel teaches people
+    to stop declaring. `mount_mode` is ungraded by design; a `"unknown"` limit
+    is an author saying so.
+    """
+    _frag, _rep, cov = _cov(rows=[{'ref': 'Y1', 'near': 'U1',
+                                   'max_mm': 'unknown'}])
+    assert cov['not_claimed'] >= 1, cov
+    assert cov['uncovered'] == 0 and cov['abstained'] == 0, cov
+    assert cov['complete'] is True, cov
+    assert cov['carried'] >= 1, cov
+    print(f"  PASS: {cov['not_claimed']} unknown + {cov['carried']} carried "
+          f"clause(s), complete=True -- the gate is clearable")
+
+
+def test_the_cli_refuses_and_names_every_uncovered_clause():
+    """The acceptance #902 asks for, through the real CLI."""
+    import subprocess
+    board = PLACED
+    intent = os.path.join(ROOT, 'wk', 'cov_test_intent.json')
+    os.makedirs(os.path.dirname(intent), exist_ok=True)
+    tool = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
+    emit = subprocess.run([sys.executable, '-X', 'utf8', tool, board,
+                           '--no-brief', '--emit-intent', intent, '-q'],
+                          capture_output=True, text=True)
+    assert emit.returncode == 0, emit.stderr[-800:]
+    r = subprocess.run([sys.executable, '-X', 'utf8', tool, board,
+                        '--brief', FIXTURE_BRIEF, '--intent', intent,
+                        '--require-brief-coverage'],
+                       capture_output=True, text=True)
+    assert r.returncode == 4, (r.returncode, r.stdout[-500:], r.stderr[-500:])
+    assert 'require-brief-coverage' in r.stderr, r.stderr
+    for ref, near in (('Y1', 'U1'), ('C1', 'U2'), ('C3', 'U2'), ('Q1', 'Q2')):
+        assert f"{ref}~{near}" in r.stdout, (ref, near, r.stdout[-900:])
+    # NOT the rule-count refusal: the right gate has to fire, or this passes
+    # for a reason that has nothing to do with clauses.
+    assert 'require-rules' not in r.stderr, r.stderr
+    print("  PASS: the CLI exits 4 naming all four uncovered clauses, on the "
+          "coverage gate rather than the rule count")
+
+
+def test_a_board_with_no_brief_is_untouched():
+    """The control. `counts`, the report line and the JSON must be what they
+    were before this key existed, or every board on the corpus starts
+    reporting zero of a thing nobody mentioned.
+    """
+    import subprocess
+    tool = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
+    intent = os.path.join(ROOT, 'wk', 'cov_nobrief_intent.json')
+    os.makedirs(os.path.dirname(intent), exist_ok=True)
+    board = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
+    subprocess.run([sys.executable, '-X', 'utf8', tool, board, '--no-brief',
+                    '--emit-intent', intent, '-q'], capture_output=True,
+                   text=True, check=True)
+    r = subprocess.run([sys.executable, '-X', 'utf8', tool, board,
+                        '--no-brief', '--intent', intent],
+                       capture_output=True, text=True)
+    assert 'clause coverage' not in r.stdout, r.stdout[-500:]
+    assert 'brief_clauses' not in r.stdout, r.stdout[-500:]
+    print("  PASS: a board with no brief prints no coverage line and carries "
+          "no coverage key")
+
 TESTS = [
     test_every_malformed_shape_is_refused_by_its_reason,
     test_a_whole_key_unknown_is_refused_naming_the_key_not_a_character,
@@ -670,6 +839,14 @@ TESTS = [
     test_a_duplicated_pad_number_is_minimised_over_not_first_hit,
     test_the_rule_is_total_over_its_claims,
     test_severity_is_settable_per_name,
+    test_every_clause_id_the_compiler_emits_parses_back,
+    test_a_declared_clause_the_intent_does_not_carry_is_UNCOVERED,
+    test_a_rule_that_did_not_run_leaves_its_clauses_uncovered,
+    test_an_abstention_is_its_own_state_not_a_pass_and_not_an_absence,
+    test_a_graded_clause_can_still_be_DRIFTED,
+    test_unknown_and_carried_clauses_never_block,
+    test_the_cli_refuses_and_names_every_uncovered_clause,
+    test_a_board_with_no_brief_is_untouched,
 ]
 
 

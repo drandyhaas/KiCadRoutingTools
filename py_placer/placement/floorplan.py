@@ -3205,6 +3205,12 @@ def rule_proximity(ctx) -> Iterator[Violation]:
         basis = claim.get('basis', _PROXIMITY_DEFAULT_BASIS)
         spec = claim.get('pads') or {}
         where = f"proximity[{i}]"
+        # The abstention key is keyed on the CLAIM's identity, not on its row
+        # index, so a consumer reporting per-clause coverage can attribute an
+        # abstention to the clause that caused it. `(ref, near)` is unique --
+        # the loader refuses a duplicate -- and it survives a re-ordered
+        # intent, which an index does not.
+        akey = f"proximity[{ref}~{near}]"
 
         a_fp = ctx.pcb.footprints.get(ref)
         b_fp = ctx.pcb.footprints.get(near)
@@ -3232,7 +3238,7 @@ def rule_proximity(ctx) -> Iterator[Violation]:
                 blind = [r for r, rect in ((ref, a_rect), (near, b_rect))
                          if rect is None]
                 ctx.abstain(
-                    f"{where} ({ref} near {near}).basis",
+                    f"{akey}.basis",
                     f"{' and '.join(blind)} draws no body and has no pads, so "
                     f"placement.body answers source 'none' -- there is no "
                     f"geometry to measure. Name pads and use basis pad_edge, "
@@ -3279,7 +3285,7 @@ def rule_proximity(ctx) -> Iterator[Violation]:
             continue
         if not subject or not partners:
             ctx.abstain(
-                f"{where} ({ref} near {near}).pads",
+                f"{akey}.pads",
                 f"{ref if not subject else near} has no pads at all, so there "
                 f"is nothing to measure pad edge to pad edge. Use basis body, "
                 f"or drop the claim")
@@ -3300,7 +3306,7 @@ def rule_proximity(ctx) -> Iterator[Violation]:
             if got is not None:
                 reaches.append((got[0], pad, got[1], got[2]))
         if not reaches:
-            ctx.abstain(f"{where} ({ref} near {near}).pads",
+            ctx.abstain(f"{akey}.pads",
                         f"no pad of {ref} could be measured against {near}")
             continue
         if not declared:

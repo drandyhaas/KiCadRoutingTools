@@ -109,6 +109,15 @@ def build_parser():
                         'INFERENCE, and a caller that means "check this '
                         'against what was declared" needs to be able to say '
                         'so (#711)')
+    p.add_argument('--require-brief-coverage', action='store_true',
+                   help='exit 4 unless every clause the design brief DECLARED '
+                        'reached a verdict. --require-rules counts RULES, and '
+                        'that is exactly the gap: one run graded six rules, '
+                        'passed, and measured not one clause its brief '
+                        'declared, because the count was satisfied by rules '
+                        'nobody had declared anything for. This counts '
+                        'CLAUSES. A clause the author wrote "unknown", and one '
+                        'this toolchain carries by design, never block (#902)')
     p.add_argument('--json', metavar='PATH',
                    help='write the full findings (every measurement) as JSON')
     p.add_argument('--group-by', default='auto', metavar='SOURCES',
@@ -341,9 +350,45 @@ def main(argv=None):
     if not args.quiet:
         print(format_text(result))
 
+    # #902. Computed on the --intent path only: an --emit-intent run produces
+    # no grade, so there is nothing for a clause to be covered BY, and saying
+    # "covered" there would be a claim about a document nobody graded.
+    coverage = {}
+    if brief_fragment:
+        _graded_doc = intent_doc_for_drift(args.intent)
+        coverage = _db.clause_coverage(
+            brief_report, _graded_doc,
+            rules_run=result.rules_run,
+            abstained=result.budget_abstained,
+            drifted_ids=_db.drifted_clause_ids(_graded_doc, brief_fragment))
+        if not args.quiet and coverage['clauses']:
+            print(f"  brief clause coverage: {coverage['graded']} graded, "
+                  f"{coverage['uncovered']} uncovered, "
+                  f"{coverage['abstained']} abstained, "
+                  f"{coverage['not_claimed']} declared unknown, "
+                  f"{coverage['carried']} carried")
+            for c in coverage['clauses']:
+                if c['state'] not in ('uncovered', 'abstained') \
+                        and not c['drifted']:
+                    continue
+                # The STATE wins the label when there is one. A clause the
+                # intent does not carry at all is both uncovered and drifted,
+                # and calling it DRIFTED buries the more basic fact: nothing
+                # looked at it. `drifted` is only the headline when the clause
+                # WAS graded -- against something the brief does not say.
+                tag = (c['state'].upper() if c['state'] != 'graded'
+                       else 'DRIFTED')
+                print(f"    {tag} {c['id']}"
+                      + (f" -- {c['why']}" if c['why'] else
+                         ' -- graded, but not against what the brief declares')
+                      )
+
     if args.json:
+        doc = to_json(result)
+        if coverage:
+            doc['brief_coverage'] = coverage
         with open(args.json, 'w', encoding='utf-8') as fh:
-            json.dump(to_json(result), fh, indent=1, sort_keys=True)
+            json.dump(doc, fh, indent=1, sort_keys=True)
             fh.write('\n')
         if not args.quiet:
             print(f"  wrote {args.json}")
@@ -355,6 +400,12 @@ def main(argv=None):
     s['brief_absent'] = len(brief_report.get('absent') or ())
     s['brief_unknown_keys'] = sorted(brief_report.get('unknown') or ())
     s['brief_drift'] = len(brief_drift)
+    if coverage:
+        s['brief_clauses'] = len(coverage['clauses'])
+        for _k in ('graded', 'uncovered', 'abstained', 'not_claimed',
+                   'carried', 'drifted'):
+            s[f'brief_clauses_{_k}'] = coverage[_k]
+        s['brief_coverage_complete'] = coverage['complete']
     s['clearance_used'] = knobs['clearance']
     s['edge_clearance_used'] = knobs['board_edge_clearance']
     print("JSON_SUMMARY: " + json.dumps(s, sort_keys=True))
@@ -369,6 +420,37 @@ def main(argv=None):
                 "part's current pose, not a declaration.", file=sys.stderr)
         if not args.exit_zero:
             return VIOLATIONS_EXIT
+    # #902. The CLAUSE gate, beside the RULE gate. They are different claims:
+    # run 25 graded six rules, passed, and measured not one clause its brief
+    # declared -- the count was satisfied by rules nobody had declared
+    # anything for.
+    if args.require_brief_coverage:
+        if not coverage or not coverage['clauses']:
+            print("  FAIL: --require-brief-coverage, but "
+                  + (_brief_absence_reason(args, brief) if not coverage
+                     else "the brief that was found declares no gradable "
+                          "clause")
+                  + ". There is nothing here to have covered, so this cannot "
+                    "be the check you meant.", file=sys.stderr)
+            if not args.exit_zero:
+                return VIOLATIONS_EXIT
+        elif not coverage['complete']:
+            # `drifted` is counted among the GRADED clauses only: a clause the
+            # intent does not carry is already counted as uncovered, and
+            # counting it twice would make the two numbers sum past the
+            # clauses that exist.
+            _graded_drift = sum(1 for c in coverage['clauses']
+                                if c['drifted'] and c['state'] == 'graded')
+            print(f"  FAIL: --require-brief-coverage. Of "
+                  f"{len(coverage['clauses'])} clause(s) the brief declares, "
+                  f"{coverage['uncovered']} reached no rule, "
+                  f"{coverage['abstained']} were abstained on, and "
+                  f"{_graded_drift} were graded against something the brief "
+                  f"does not say. `rules_run` counts RULES; this counts "
+                  f"CLAUSES, and the two can disagree completely.",
+                  file=sys.stderr)
+            if not args.exit_zero:
+                return VIOLATIONS_EXIT
     _ran = s.get('rules_run', 0)
     if args.require_rules and _ran < args.require_rules:
         print(f"  FAIL: --require-rules {args.require_rules}, but {_ran} "
