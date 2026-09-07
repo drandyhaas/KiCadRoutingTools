@@ -827,7 +827,13 @@ run, and nothing downstream can detect that it happened.
 Use the repo's engine tools for every board mutation. If you write ANY script
 that computes or writes poses or copper, disclose it in your next message and
 name it in every ledger lap it feeds -- a disclosed hand-assist is a finding;
-an undisclosed one silently invalidates the run.'''
+an undisclosed one silently invalidates the run.
+In a work dir staged by stage_unaided.py or stage_blind.py this is ENFORCED
+for poses rather than only asked: a pose write through the repo's writer with
+no registered lever RAISES and writes nothing. Disclosure is still the rule --
+the refusal covers the POSE FUNNEL, not copper, not `(locked yes)` stamps and
+not a script that edits `(at ...)` as raw text, which the provenance audit
+catches afterwards by comparing the BOARD rather than the log.'''
 
 
 def _board_size(board):
@@ -2956,7 +2962,7 @@ def _self_test():
         if not cond:
             bad.append(label)
 
-    _CAP = 84
+    _CAP = 90
     base = ['--board', 'b.kicad_pcb']
     for key in sorted(STAGES):
         out = STAGES[key](_args(base + ['--score', 'x.json',
@@ -2964,13 +2970,18 @@ def _self_test():
                                         '--shape', 'placement']))
         want(out.startswith(('<stage_instructions', '<error>')),
              f'{key} emits a tagged block')
-        # 84, not 74: #890 gave the hand-off its two paths and the prompt the
-        # context artifacts a fresh agent would otherwise re-derive (measured
-        # on an 18-part board: 17 probe scripts, ~950 lines), and paid three
-        # lines back by moving the agent-type doctrine to SKILL.md, where four
-        # of its five lines already lived. Run-19 A2 grew FENCE_CLAUSE by four
-        # for the hand-script disclosure duty; 70 was the number before that.
-        # Any further growth is a deliberate decision, here.
+        # 90, not 74, in two deliberate steps. #890 gave the hand-off its two
+        # paths and the prompt the context artifacts a fresh agent would
+        # otherwise re-derive (measured on an 18-part board: 17 probe scripts,
+        # ~950 lines), paying three lines back by moving the agent-type
+        # doctrine to SKILL.md where four of its five lines already lived:
+        # 74 -> 84. Then #903 grew FENCE_CLAUSE by six, because its premise
+        # ("nothing downstream can detect that it happened") became FALSE for
+        # poses in a staged work dir and the clause now says what is enforced
+        # and what is still only asked: 84 -> 90. Run-19 A2 grew the same
+        # clause by four for the hand-script disclosure duty; 70 was the
+        # number before that. Any further growth is a deliberate decision,
+        # here.
         #
         # 84 IS THE MAXIMUM, not this fixture's number. `--board b.kicad_pcb`
         # names no artifact that exists, so every existence-gated context row

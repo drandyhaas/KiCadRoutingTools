@@ -4,6 +4,13 @@ Fan these out **in one response**, each handed only its slice. **Never hand a
 verifier the raw `.kicad_pcb`** — it is 100k+ lines of s-expressions and the
 verifier will skim it and guess.
 
+**And never as a `fork`** (#890). The same rule, applied to the agent type: a
+fork inherits the parent's entire transcript, which is the largest slice there
+is and includes the report these prompts end by telling the verifier not to
+trust. `loop_driver.py` forks the two working halves and pins the end-to-end
+verifier to a fresh `claude` in both `--delegate-mode` arms; that asymmetry is
+deliberate, and it is written here so the next reader does not "fix" it.
+
 Every verifier ends with exactly one line:
 
 ```

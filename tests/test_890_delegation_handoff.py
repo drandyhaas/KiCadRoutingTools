@@ -72,7 +72,6 @@ def tag(text):
 # The type is a FUNCTION OF THE FLAG at both delegated sites. Asserted per
 # mode and per stage rather than "somewhere in the text", so a mode that
 # silently emits the other type cannot pass.
-_l2 = ['--placement-report', os.path.join(_TESTS, 'fixtures_890_l2.json')]
 for mode, want in (('fork', 'fork'), ('fresh', 'claude')):
     out = L.STAGES['L1'](args(['--delegate-mode', mode]))
     ck(f'L1 emits agent="{want}" in --delegate-mode {mode}',
@@ -80,6 +79,24 @@ for mode, want in (('fork', 'fork'), ('fresh', 'claude')):
 ck('...and fork is the DEFAULT, with no flag at all',
    tag(L.STAGES['L1'](args([]))) == 'fork',
    str(tag(L.STAGES['L1'](args([])))))
+
+# L2 READS THE SAME SOURCE, asserted at L2 rather than inferred from L1. A
+# battery row that reverts only L2's tag survives an L1-only test, and the two
+# sites are separate string literals 500 lines apart.
+with tempfile.TemporaryDirectory() as _t2:
+    _rep = os.path.join(_t2, 'placed.json')
+    _bd = os.path.join(_t2, 'b.kicad_pcb')
+    open(_bd, 'w', encoding='utf-8').write('{}')
+    import json as _json  # noqa: E402
+    _json.dump({'board': _bd, 'buildable': True,
+                'verdict': 'buildable (blocking 0)', 'blocking': 0,
+                'locked_contacts': 0, 'oob_pad_count': 0},
+               open(_rep, 'w', encoding='utf-8'))
+    for mode, want in (('fork', 'fork'), ('fresh', 'claude')):
+        out = L.STAGES['L2'](L._args(['--board', _bd, '--delegate-mode', mode,
+                                      '--placement-report', _rep]))
+        ck(f'L2 emits agent="{want}" in --delegate-mode {mode}',
+           tag(out) == want, f'{tag(out)} :: {out[:70]}')
 
 # ---------------------------------------------------------------- 2
 # The verifier is excluded BY CONSTRUCTION. #890's one declined sub-item.
@@ -118,12 +135,30 @@ with tempfile.TemporaryDirectory() as tmp:
     os.makedirs(wk)
     ledger = os.path.join(wk, 'ledger.jsonl')
     open(ledger, 'w', encoding='utf-8').close()
+    # THROUGH `main()`, as a subprocess, because that is where the call site
+    # is. Calling `_write_prompt` directly proves the function works and says
+    # nothing about whether anything invokes it -- a battery row that deletes
+    # the call from `main()` survived an in-process test, which is the same
+    # "it works if you call it right" shape #903 is about.
+    import subprocess as _sp  # noqa: E402
+    _r = _sp.run([sys.executable, '-X', 'utf8',
+                  os.path.join(SCRIPTS, 'loop_driver.py'),
+                  '--stage', 'L1', '--board', 'b.kicad_pcb',
+                  '--ledger', ledger],
+                 cwd=ROOT, capture_output=True, text=True,
+                 encoding='utf-8', errors='replace', timeout=900)
+    ck('the DRIVER (not the helper) writes the L1 hand-off prompt',
+       os.path.isfile(os.path.join(wk, 'place_prompt.txt')),
+       f'rc={_r.returncode} {os.listdir(wk)}')
+    ck('...and stdout still carries the stage, unchanged by the write',
+       '<subagent_prompt' in (_r.stdout or ''), (_r.stdout or '')[:60])
+
     a = args(['--ledger', ledger])
     a.stage = 'L1'
     out = L.STAGES['L1'](a)
     p = L._write_prompt(a, 'L1', out)
-    ck('the driver writes the L1 hand-off prompt beside the ledger',
-       p and os.path.isfile(p), str(p))
+    ck('the helper writes it beside the ledger', p and os.path.isfile(p),
+       str(p))
     body = open(p, encoding='utf-8').read().strip()
     ck('...and it is the PROMPT BODY, byte-identical to what was emitted',
        body == L._prompt_body(out), f'{len(body)} vs {len(L._prompt_body(out))}')
@@ -193,6 +228,6 @@ with tempfile.TemporaryDirectory() as tmp:
        'design-brief' not in ctx and 'before.json' not in ctx, ctx)
 
 print(f'\n{passed} passed, {failed} failed')
-print('890 coverage: agent-type=yes verifier-pinned=yes handoff=yes '
-      'context=yes')
+print(f'890 coverage: {passed + failed} rows (agent-type, L2, verifier-pinned, '
+      f'handoff-via-main, inline, context)')
 sys.exit(1 if failed else 0)
