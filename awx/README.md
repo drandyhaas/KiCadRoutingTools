@@ -17,8 +17,8 @@ engine (a face-hinted `auto` fanout, the bench's own source teeth):
 | 8  | 8             | 6          |                      | 6                     | --    |
 | 15 | 22            | 14         | 15 / 15              | 14, per net           | 22    |
 | 28 | 38, 0 open    | 38         | 28 / 28              | 36 (the swimmer SA4 at 4) | 46 |
-| 35 | 56            | 58         | 26 / 32 + 0 / 3      | 59                    | 58    |
-| 41 | 9 open, 92    | 8 open, 98 | 29 / 37 + 0 / 4      | 90 (18 swimmers)      | 70    |
+| 35 | 56            | 62         | 27 / 32 + 0 / 3      | 59                    | 58    |
+| 41 | 9 open, 92    | 8 open, 84 | 30 / 37 + 0 / 4      | 90 (18 swimmers)      | 70    |
 
 All complete and DRC-clean at the routed 0.1 mm floor (K15 ~20 s, K28
 ~70 s, K35 ~170 s with a warm taut memo; the plan loop is most of it).
@@ -233,10 +233,17 @@ that, each keyed on geometry read off the board:
 - A swimmer's reserved hop keeps a 2-D distance from every lane's
   polyline, not from its offset at one s.
 
-The remaining walls are the swimmers (ten at K35, three at 4 vias) and,
-at K35, the north exit block sitting on a six-part passive cluster,
-where a 3 mm bend is the plan's answer and an underpass would be the
-better one; both are open.
+- EARLY DIVE: a lane whose tail crosses an island on the layer it is on
+  and which owes a change to the other layer anyway (its berth is there,
+  or its page already is) takes that change BEFORE the island -- no via
+  the plan did not already count, and no bend. Seeded into the leg
+  placement so the leg's layer follows. At K35 the plan had looped SRST,
+  SA0 and SA15 3 mm round a six-part passive cluster on F; they now go
+  under it on B in-band. K41: 98 -> 84 vias at the same 8 open; K35 58
+  -> 62, three other swimmers landing at 4.
+
+The remaining walls are the swimmers (ten at K35, eighteen at K41, 2..4
+vias each, and every K41 open is one): the two-page ribbon's capacity.
 
 Speed: a taut path depends only on its two ends and the static copper it
 relaxes against, and the loop asked for the same ones at every judgment
