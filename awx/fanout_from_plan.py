@@ -376,7 +376,7 @@ def main():
     base = next((a.split('=', 1)[1] for a in sys.argv
                  if a.startswith('--board=')),
                 os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb'))
-    names = coherent_nets(K)
+    names = coherent_nets(K, base)
     print('planning (source realized every round)...')
     work = out_path[:-len('.kicad_pcb')] if out_path.endswith('.kicad_pcb') else out_path
     choice, dst_pad, dref, byname, board, realized, banned = plan(base, names, work)
@@ -392,6 +392,7 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
     until every berth is exactly the plan's, or nothing changes. The
     plan's own via model is printed for the plan that ships."""
     st = plan_state(parse_kicad_pcb(board), names, banned)
+    laid_pass = None       # the LAST pass fanned out: (choice, st, achieved, ok)
     for it in range(DST_ITERS):
         faces = [m.direction for m in choice.values()]
         print(f'\nplan (destination pass {it}): {len(choice)} berth escape directions '
@@ -400,14 +401,11 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
               f'{len(realized)} realized round(s), {len(banned)} banned move(s))')
         laid, audit_d, ok = fanout_once(out_path, names, choice, dst_pad, dref,
                                         byname, board)
+        laid_pass = (dict(choice), st, getattr(fanout_once, 'achieved', None), ok)
         misses = [nm for nm in choice if not audit_d.get(nm, {}).get('exact')]
         if not misses:
             print(f'  destination pass {it}: every berth laid as planned')
-            # judged on the WRITTEN fanout board: the same copper the braid
-            # will read, so its taut paths are the memo's (detect_buses)
-            explain_plan(choice, st, names, out_path, out_path,
-                         achieved=getattr(fanout_once, 'achieved', None))
-            return 0 if ok else 1
+            break
         for nm in misses:
             banned.add((nm, sr.move_sig(choice[nm])))
         print(f'  destination pass {it}: {len(misses)} berth(s) not laid as asked '
@@ -420,16 +418,23 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
                                       tooth_layer=st['tooth0'], log=None, pads=pads)
         if not new_choice or new_choice == choice:
             print('  destination: the re-plan changed nothing -- stopping')
-            explain_plan(choice, st, names, out_path, out_path,
-                         achieved=getattr(fanout_once, 'achieved', None))
-            return 0 if ok else 1
+            break
         f, _p, _bp, _pl = judge_by_braid(st, new_choice, board)
         print(f'  destination re-plan: braid-judged {f:.2f}, {len(new_choice)} placed'
               + (f', {len(un)} unplaced' if un else ''))
         choice, dst_pad = new_choice, st['dst_pad']
-    explain_plan(choice, st, names, out_path, out_path,
-                 achieved=getattr(fanout_once, 'achieved', None))
-    return 0
+    # The LAST PASS SHIPS, and its sidecar is its own: the choice that was
+    # fanned out and audited, never the re-plan after it (which is a
+    # choice no board was laid to). Measured over every K41 pass board
+    # (2026-09-07, the braid on each): passes 0..7 graded 6/3/4/5/3/1/1/1
+    # open at 86/108/92/74/81/98/102/78 vias -- the last pass best, and
+    # neither the audit's exact count (pass 5: 38/40 vs 34/40, 1 open at
+    # 98) nor the judge's cost (pass 6 the lowest, 1 open at 102 with 6
+    # DRC) picks a better one. Judged on the WRITTEN fanout board: the
+    # same copper the braid will read, so its taut paths are the memo's.
+    choice_l, st_l, achieved_l, ok_l = laid_pass
+    explain_plan(choice_l, st_l, names, out_path, out_path, achieved=achieved_l)
+    return 0 if ok_l else 1
 
 
 def fanout_once(out_path, names, choice, dst_pad, dref, byname, board):
