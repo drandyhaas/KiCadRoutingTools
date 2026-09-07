@@ -973,7 +973,7 @@ class Corridor:
         req = {nm: [] for nm in M}
         trank = {nm: i for i, nm in enumerate(self.target)}
         py = self.py
-        def place_and_decide(avoid=None):
+        def place_and_decide(avoid=None, pre=None):
             """Exit legs placed (each a pitch off another leg or a
             free end in its way, and -- on the second pass -- off any
             static island on its layer), the lanes each leg crosses,
@@ -1037,7 +1037,7 @@ class Corridor:
             # intervals from adjacent disagreeing legs are dropped in pairs
             # (the K19 lesson: both layers closed refuses the lane before
             # the router sees it); the obstacle map adjudicates there.
-            ivs = {nm: [] for nm in M}
+            ivs = {nm: list((pre or {}).get(nm, ())) for nm in M}
 
             def cur_layer(om, s):
                 """The layer the plan has lane `om` on at s: its last
@@ -1079,8 +1079,53 @@ class Corridor:
                     ivs[om].append((a, b, other))
             return ivs, leg_req_min
 
+        # EARLY DIVE (#622 K35): a lane whose tail crosses a static
+        # island on the layer it is on, and which owes a change to the
+        # other layer anyway (its berth is there, or its page already
+        # is), takes that change BEFORE the island instead of after it
+        # -- no via the plan did not already count, and no bend. The
+        # plan looped SRST/SA0/SA15 3 mm round a six-part passive
+        # cluster on F at K35 while the router, refused, laid SA0
+        # straight under it on B, the layer of its berth.
+        pre = {}
+        tl_, dl_ = self.ctx.tooth_layer, self.ctx.dest_layer
+        for L_ in ('F.Cu', 'B.Cu'):
+            other_ = 'B.Cu' if L_ == 'F.Cu' else 'F.Cu'
+            for (s_lo, s_hi, o_lo, o_hi, what) in self.static_islands().get(L_, ()):
+                if s_lo < self.s1 - 0.1:
+                    continue
+                for nm in M:
+                    pg = sched.page.get(nm) if sched else None
+                    if pg is None:
+                        continue
+                    s_e, o_e = self.se[nm]
+                    if s_e <= s_lo + 0.05:
+                        continue
+                    o_t = py[trank[nm]]
+                    # the tail run's offset over the island (a block lane
+                    # runs at its slot; a head-on tail slides to its stub)
+                    if nm in self.exit_block:
+                        o_here = o_t
+                    else:
+                        t0 = max(0.0, min(1.0, (s_lo - self.s1) / max(s_e - self.s1, 1e-9)))
+                        t1 = max(0.0, min(1.0, (s_hi - self.s1) / max(s_e - self.s1, 1e-9)))
+                        o_a, o_b = o_t + t0 * (o_e - o_t), o_t + t1 * (o_e - o_t)
+                        o_here = (o_a + o_b) / 2
+                        if not (min(o_a, o_b) < o_hi and max(o_a, o_b) > o_lo):
+                            continue
+                    if not (o_lo < o_here < o_hi):
+                        continue
+                    if pg == other_:
+                        a_, b_ = self.s1 + 0.05, min(s_e - 0.05, s_hi + 0.3)
+                    elif dl_[nm] == other_:
+                        a_, b_ = max(self.s1 + 0.05, s_lo - 0.3), s_e - 0.05
+                    else:
+                        continue
+                    if b_ > a_ and not any(abs(x[0] - a_) < 1e-6 for x in pre.get(nm, ())):
+                        pre.setdefault(nm, []).append((a_, b_, other_))
+                        self.log(f'  early dive: {nm} on {other_[0]} over {what} (s {a_:.1f}..{b_:.1f})')
         extra_cands = {}
-        ivs, leg_req_min = place_and_decide()
+        ivs, leg_req_min = place_and_decide(pre=pre)
         # a leg over a static island on its own layer (K28 SDQ0's leg
         # at s 20.6 on F, through C12's second pad) is re-placed a
         # pitch off the island, and the crossings and layers decided
@@ -1111,7 +1156,7 @@ class Corridor:
             was = {nm: self.exit_leg_s[nm] for nm in bad_legs}
             ivs, leg_req_min = place_and_decide(
                 lambda nm, s_: nm in layer0 and nm in bad_legs
-                and leg_on_island(nm, s_, layer0[nm]))
+                and leg_on_island(nm, s_, layer0[nm]), pre=pre)
             self.log('  legs off islands: ' + ', '.join(
                 f'{nm} s{was[nm]:.1f}->{self.exit_leg_s[nm]:.1f}' for nm in bad_legs))
         for om, vv in ivs.items():
