@@ -600,6 +600,7 @@ class Corridor:
         self.leg_layer = {}        # side exiter -> the layer of its exit leg
         self.join_leg_s = {}       # joiner -> s of its join leg (after jog)
         self.exit_leg_s = {}       # side exiter -> s of its exit leg
+        self.leg_split = {}        # side exiter -> o where its leg changes to the stub's layer
         self.sched_cur = None      # the Schedule the last attempt ran
 
     # ------------------------------------------------------------ geometry
@@ -1222,9 +1223,60 @@ class Corridor:
                     out += [bx[0] - 0.05, bx[1] + 0.05]
             return out
 
+        def leg_split_at(nm, s_, L):
+            """A leg on L islanded only at its STUB end, whose stub is
+            on the other layer (so the leg owes a via there anyway): the
+            o where the leg changes to the stub's layer, just past the
+            island with a via's room, else None. The via moves a few
+            tenths along the leg instead of the leg moving a pitch
+            along the stub row: K35's SA12, a B leg to an F stub whose
+            last 0.1 mm lay on C6..C9's inflated box under the bottom
+            ball row, was moved onto SA1's stub end, and every leg of
+            that row then jogged a pitch onto the next stub (stub ends
+            0.4 apart leave no legal foreign foot) -- SA1/SA5/SA6
+            refused at the stub every attempt. The stub-layer run must
+            be island-free and cross no lane, or the leg's pricing is
+            void; then the s move stands."""
+            Ld = self.ctx.dest_layer[nm]
+            if Ld == L:
+                return None
+            o_l, o_e = py[trank[nm]], self.se[nm][1]
+            lo_, hi_ = min(o_l, o_e), max(o_l, o_e)
+            n_ = hi_ - lo_
+            sg = 1.0 if o_l > o_e else -1.0
+
+            def t_span(bx):
+                # the island's reach along the leg, measured from the stub end
+                a_, b_ = max(bx[2], lo_), min(bx[3], hi_)
+                return ((a_ - o_e, b_ - o_e) if sg > 0 else (o_e - b_, o_e - a_))
+            t_split = None
+            for bx in islands_.get(L, ()):
+                if bx[0] <= s_ <= bx[1] and bx[2] < hi_ and lo_ < bx[3]:
+                    _ta, tb = t_span(bx)
+                    t_split = max(t_split or 0.0, tb + VIA_NEED)
+            if t_split is None or t_split > n_ - VIA_NEED:
+                return None
+            for bx in islands_.get(Ld, ()):
+                if bx[0] <= s_ <= bx[1] and bx[2] < hi_ and lo_ < bx[3]:
+                    ta, _tb = t_span(bx)
+                    if ta < t_split + VIA_NEED:
+                        return None
+            o_sp = o_e + sg * t_split
+            for om in M:
+                if om == nm:
+                    continue
+                if om in self.exit_block:
+                    o_m, s_end = self.exit_block[om], self.exit_leg_s[om]
+                else:
+                    o_m, s_end = self.target_o[om], self.se[om][0]
+                if s_end > s_ + 0.05 and min(o_e, o_sp) < o_m < max(o_e, o_sp):
+                    return None
+            return o_sp
+
         layer0 = dict(self.leg_layer)
         bad_legs = [nm for nm in self.exit_block
-                    if leg_on_island(nm, self.exit_leg_s[nm], layer0[nm])]
+                    if leg_on_island(nm, self.exit_leg_s[nm], layer0[nm])
+                    and leg_split_at(nm, self.exit_leg_s[nm], layer0[nm]) is None]
         extra_cands = {nm: island_edges(nm, self.exit_leg_s[nm], layer0[nm])
                        for nm in bad_legs}
         if bad_legs:
@@ -1234,6 +1286,17 @@ class Corridor:
                 and leg_on_island(nm, s_, layer0[nm]), pre=pre)
             self.log('  legs off islands: ' + ', '.join(
                 f'{nm} s{was[nm]:.1f}->{self.exit_leg_s[nm]:.1f}' for nm in bad_legs))
+        self.leg_split = {}
+        for nm in self.exit_block:
+            Lg = self.leg_layer[nm]
+            if leg_on_island(nm, self.exit_leg_s[nm], Lg):
+                o_sp = leg_split_at(nm, self.exit_leg_s[nm], Lg)
+                if o_sp is not None:
+                    self.leg_split[nm] = o_sp
+        if self.leg_split:
+            self.log('  legs split at an island: ' + ', '.join(
+                f'{nm} {self.leg_layer[nm][0]}->{self.ctx.dest_layer[nm][0]} at o{o:+.2f} '
+                f'(stub o{self.se[nm][1]:+.2f})' for nm, o in self.leg_split.items()))
         for om, vv in ivs.items():
             kept_iv = [iv for iv in vv
                        if not any(o[2] != iv[2] and iv[0] < o[1]
@@ -2047,7 +2110,14 @@ class Corridor:
                 # required on
                 is_exit = om in self.exit_block and i == len(self.legs[om]) - 1
                 if is_exit and om in self.leg_layer:
-                    segs.append((a_, b_, self.leg_layer[om]))
+                    o_sp = self.leg_split.get(om)
+                    if o_sp is not None and min(oa, ob) < o_sp < max(oa, ob):
+                        # ...its end past an island on the stub's layer
+                        m_ = sp.xy(s_l, o_sp)
+                        segs.append((a_, m_, self.leg_layer[om]))
+                        segs.append((m_, b_, self.ctx.dest_layer[om]))
+                    else:
+                        segs.append((a_, b_, self.leg_layer[om]))
                     continue
                 for L in ('F.Cu', 'B.Cu'):
                     if self.allowed(om, s_l, L):
@@ -2077,6 +2147,9 @@ class Corridor:
         sp = self.spine
         out = [sp.xy(self.exit_leg_s[om], self.legs[om][-1][1])
                for om in unrouted if om in self.exit_leg_s]
+        # ...and the via a split leg takes early, past an island
+        out += [sp.xy(self.exit_leg_s[om], self.leg_split[om])
+                for om in unrouted if om in self.leg_split and om in self.exit_leg_s]
         # ...plus every unrouted swimmer's RESERVED DIAMONDS (#622
         # reservation pass): the spots its layer changes will need,
         # kept clear of everything routed before it
@@ -2605,6 +2678,8 @@ class Corridor:
                 self.req_xy[nm].append(sp.lane_xy(sub))
             for (s_l, oa, ob) in self.legs.get(nm, ()):
                 self.marks.append(sp.xy(s_l, ob))
+            if nm in self.leg_split:
+                self.marks.append(sp.xy(self.exit_leg_s[nm], self.leg_split[nm]))
             for (p_, q_) in self.jogs.get(nm, ()):
                 self.marks.append(sp.xy(*q_))
         for (_i, s_c, _t) in sp.corners():

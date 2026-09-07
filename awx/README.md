@@ -357,6 +357,31 @@ already applied a partial plan, so until this the K41 probes and the
 chain disagreed (spine 0.07 mm off, different legs): a probe is
 trustworthy only when line 1 of the chain's log says the plan was read.
 
+### Exit legs and static islands: the split leg (2026-09-07)
+
+`_leg_s` moved a leg off a static island by a lane pitch along the stub
+row. At K35 that started a cascade: SA12's B leg to an F stub was
+islanded only in its last 0.1 mm (C6..C9's inflated box under DU1's
+bottom ball row), moved a pitch onto SA1's stub end, and every leg of
+that row then jogged a pitch onto the next stub -- stub ends 0.4 apart
+leave no legal foreign foot -- so SA1/SA5/SA6 were refused at the stub
+on every attempt and re-laid at last call (SA1 through DU1's central gap
+with three vias). The router had laid SA12's leg straight down from its
+own stub all along (F to y 70.75, a via, B under the lanes); the damage
+was the planned leg's VIRTUAL stamp on the neighbours.
+
+A leg whose layer is islanded only at its stub end, with the stub on the
+other layer, now keeps its s and takes the via it owes anyway just past
+the island (a via's room), the last stretch on the stub's layer --
+provided that stretch is island-free and crosses no lane
+(`leg_split_at`, `Corridor.leg_split`). The virtual stamp is split there
+(`virtual_of`), the via reserved (`virtual_vias_of`), a mark drawn. The
+via count the plan implies is unchanged.
+
+Measured (bench fb_t2q_fresh, 0 DRC, chain, one fanout): K15 14v and
+K28 38v identical; **K35 55 -> 50 vias**, 0 open, SA1/SA6 in-band (30 ->
+32 of 35); K41 2 open 89v -> 2 open 88v, 29 -> 30 of 41 in-band.
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`
