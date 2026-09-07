@@ -1085,7 +1085,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # to this call's default width.
     net_layer_widths_map: Dict[int, Dict[str, float]] = {}
     _targets = resolve_net_ids(pcb_data, net_names) if net_names else []
-    if impedance is not None:
+    if impedance is not None and pcb_data.board_info.stackup:
         from protected_nets import note_impedance_specs
         note_impedance_specs({
             _nm: {'ohms': impedance, 'differential': False,
@@ -1093,6 +1093,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                    and (not coplanar_nets or _nid in coplanar_net_ids))
                                    else 0.0)}
             for _nm, _nid in _targets})
+    elif impedance is not None:
+        # #906, the single-ended twin. No stackup -> no width was computed and
+        # none applied, so the spec would describe copper that was never drawn,
+        # and the reapply branch below (stackup-gated) can never use it.
+        # check_impedance auto-reads this record and would grade these nets
+        # against an impedance the router never attempted.
+        print(f"  NOTE: not recording a {impedance} ohm impedance spec -- this "
+              f"board has no stackup, so no width was computed or applied and "
+              f"the record would describe copper that was never drawn (#906)")
     elif pcb_data.board_info.stackup:
         from protected_nets import read_impedance_for_pcb_data
         _stored = read_impedance_for_pcb_data(pcb_data, input_file)
