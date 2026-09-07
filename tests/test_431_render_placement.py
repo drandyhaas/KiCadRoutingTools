@@ -435,8 +435,12 @@ def test_json_out_writes_a_file_with_instrument_and_checklist():
         # cross-side stack census
         # one. Re-stated rather than relaxed to a subset, because a subset
         # check is what would have let the drift through in the first place.
-        assert set(cl) == {'a_off_outline', 'b_pad_clearance_pairs',
+        assert set(cl) == {'a_off_outline',
+                           'b_pad_clearance_pairs',
                            'b_body_overlap_pairs',
+                           # #896: the tightest drawn-body seam and the
+                           # per-part source mix it was measured on.
+                           'b_body_seam', 'b_body_sources',
                            'b_courtyard_advisory_pairs',
                            'b_courtyard_blocking_pairs',
                            'b_courtyard_census_error',

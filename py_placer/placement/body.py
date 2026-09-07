@@ -273,6 +273,51 @@ def board_bodies(pcb_data, pcb_file: Optional[str] = None
     return out
 
 
+class BodySeam(NamedTuple):
+    """The tightest gap between two parts' DRAWN bodies, signed.
+
+    Negative is an overlap, the same convention as `legality.rect_gap`, so a
+    seam and an overlap are one number and a reader never has to reconcile two.
+    `source_a` / `source_b` name the geometry the number rests on, because a
+    seam measured between two silk markings is a much weaker claim than one
+    between two drawn .Fab bodies.
+    """
+    mm: float
+    ref_a: str
+    ref_b: str
+    source_a: str
+    source_b: str
+
+
+def tightest_body_seam(parts) -> Optional[BodySeam]:
+    """The tightest drawn-body seam on a board, or None if fewer than two
+    parts draw a body.
+
+    #896 asks for this on every review sheet, because run 25's final layout had
+    a 0.183mm seam -- header plastic to an 0402 body -- that no instrument in
+    the chain produced: `body_overlap_pairs` reports `depth_mm` only for pairs
+    that already OVERLAP, so a board one micron from a collision reported
+    nothing at all. "How close is the closest thing on this board" is the
+    question a human asks first and the toolchain could not answer.
+
+    `parts` is an iterable of `(ref, sides, side, rect, tht_rect, source)`,
+    already in board coordinates -- the caller owns the pose, this owns the
+    comparison. It calls `legality.pair_min_gap`, so the shared-side rule is
+    the one the graders already use rather than a second copy of it.
+    """
+    from placement.legality import pair_min_gap
+    parts = list(parts)
+    best: Optional[BodySeam] = None
+    for i, (ra, sa, sda, rca, ta, srca) in enumerate(parts):
+        for rb, sb, sdb, rcb, tb, srcb in parts[i + 1:]:
+            g = pair_min_gap(sa, sda, rca, ta, sb, sdb, rcb, tb)
+            if g is None:
+                continue
+            if best is None or g < best.mm:
+                best = BodySeam(round(g, 4), ra, rb, srca, srcb)
+    return best
+
+
 def source_mix(bodies) -> Dict[str, int]:
     """`{source: count}` over `BodyGeometry` records, in ladder order.
 

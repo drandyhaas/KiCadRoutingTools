@@ -1381,6 +1381,8 @@ def grade_body_overlap(pcb_data, clearance: float,
     # and it NEVER gates -- see the exclusion below, which is structural rather
     # than a measured coincidence.
     silk_sourced: set = set()
+    # #896. Seam inputs: every judged part's DRAWN body in board coordinates.
+    seam_parts: list = []
 
     # -- courtyard channel (advisory + the run-23 blocking policy below) ------
     for p in body_overlap_pairs(_graded):
@@ -1415,8 +1417,21 @@ def grade_body_overlap(pcb_data, clearance: float,
             own = footprint_side(fp)
             rot = fp.rotation or 0.0
             x0, y0, x1, y1 = rotate_local_bounds(*lb, rot)
-            fab_parts.append((ref, own,
-                              (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)))
+            _rect = (fp.x + x0, fp.y + y0, fp.x + x1, fp.y + y1)
+            fab_parts.append((ref, own, _rect))
+            # #896 seam input. The drilled-pad box rides along so the seam
+            # obeys the same shared-side rule the graders use: a B-side part
+            # and an F-side part have no seam at all unless a barrel makes
+            # them share a face.
+            _has_tht = footprint_has_through_pads(fp)
+            _tht = None
+            if _has_tht:
+                _t = through_pad_bounds_local(fp)
+                if _t is not None:
+                    tx0, ty0, tx1, ty1 = rotate_local_bounds(*_t, rot)
+                    _tht = (fp.x + tx0, fp.y + ty0, fp.x + tx1, fp.y + ty1)
+            seam_parts.append((ref, sides_occupied(own, _has_tht), own,
+                               _rect, _tht, body_sources[ref]))
         for i, (ra, sa, rca) in enumerate(fab_parts):
             for rb, sb, rcb in fab_parts[i + 1:]:
                 if sa != sb:
@@ -1694,6 +1709,8 @@ def grade_body_overlap(pcb_data, clearance: float,
         # #896, same rule as containment above: a silk-sourced body reports,
         # it does not gate.
         and not _silk_occupancy_pair(p)]
+    from placement.body import tightest_body_seam as _tbs
+    _seam = _tbs(seam_parts)
     return {'blocking': len(blocking),
             'advisory': len(advisory),
             'waived': sum(1 for p in pairs if p.waived),
@@ -1753,6 +1770,14 @@ def grade_body_overlap(pcb_data, clearance: float,
             # so a reader can tell a housing outline from a fab outline
             # rather than being told only that something was judged.
             'body_sources': dict(body_sources),
+            # #896. The tightest DRAWN-body seam on the board, signed
+            # (negative = overlap). `body_overlap_pairs` reports a depth only
+            # for pairs that already overlap, so a board one micron from a
+            # collision reported nothing; run 25's final layout sat at
+            # 0.183mm, header plastic to an 0402 body, and no instrument in
+            # the chain produced that number. None when fewer than two parts
+            # draw a body.
+            'body_seam': (_seam._asdict() if _seam is not None else None),
             # Run-23 courtyard blocking channel -- see the selection above.
             # NOTE these pairs also remain in `advisory`/`advisory_pairs`
             # (that count's meaning is unchanged for its existing consumers);
