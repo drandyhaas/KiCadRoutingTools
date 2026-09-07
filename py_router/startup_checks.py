@@ -55,6 +55,17 @@ def check_python_dependencies():
     except ImportError:
         missing.append('shapely')
 
+    # Check Pillow (#887). route_render.py and render_placement.py import it at
+    # MODULE SCOPE with no fallback, so every board still, review sheet and
+    # movie needs it -- yet it was in neither this list nor requirements.txt. A
+    # fresh clone following the README could render nothing, and learned that
+    # from a runtime ImportError string rather than from this check, which is
+    # the thing that exists to say so up front.
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        missing.append('Pillow')
+
     if missing:
         lines = ["ERROR: Missing required Python libraries:"]
         lines += [f"  - {lib}" for lib in missing]
