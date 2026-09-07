@@ -133,7 +133,7 @@ source, suspect, suspect_reason
 
 | object | keys |
 |---|---|
-| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `assembly`, `context` |
+| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `assembly`, `proximity`, `context` |
 | `envelope` | `rect`, `tolerance_mm` |
 | `defaults` | `zone_tolerance_mm` |
 | `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `note`, `context` |
@@ -144,24 +144,28 @@ source, suspect, suspect_reason
 | `edge_connectors[].along_edge_band` | `from`, `to` |
 | `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm`, `max_pin_distance_mm`, `pin_functions`, `same_side` |
 | `assembly` | `sides` (`"F"`, `"B"` or `"both"`), `why`, `context` |
+| `proximity[]` | `ref`, `near`, `max_mm`, `basis` (`"pad_edge"` or `"body"`), `pads`, `note`, `context`, and the compiler-written `source` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 19 rule names below |
+| `severity` | any of the 21 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `must_lock` | a list of reference globs (no nested keys) |
 
-`severity` keys are checked too. The settable names are the twelve rules —
+`severity` keys are checked too. The settable names are the thirteen rules —
 `envelope`, `zone_containment`, `zone_side`, `assembly_side`, `zone_exclusive`, `keepout`,
 `edge_connector`, `decap_distance`, `decap_ungraded`, `decap_pin_distance`,
-`must_lock`, `legality` — plus the five findings raised outside the rule
-loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
+`proximity`, `must_lock`, `legality` — plus the five findings raised outside
+the rule loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
 `block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
-plus two more that `rule_decap_pin_distance` raises BESIDE its own name —
-`decap_pin_distance_inferred` and `decap_pin_uncovered` (#705). One
-measurement can support several claims, and an author must be able to set
-their severities apart: a pin inferred from a net name and a pin the pad
-declares are not the same evidence. `assembly_side` (#837), `decap_ungraded`,
+plus three more raised BESIDE a rule's own name —
+`decap_pin_distance_inferred` and `decap_pin_uncovered` (#705), and
+`proximity_unresolved` (#902). One measurement can support several claims, and
+an author must be able to set their severities apart: a pin inferred from a net
+name and a pin the pad declares are not the same evidence, and a proximity
+claim naming a part the board does not have is a different finding from one
+whose parts are simply too far apart — a DNP-variant board can demote the first
+without demoting the second. `assembly_side` (#837), `decap_ungraded`,
 `decap_pin_distance_inferred` and `decap_pin_uncovered` default to
 **warn**; all but those and the last of the five default to **error**;
 `keepout_allow_unresolved` defaults to **warn** and is upgraded by writing

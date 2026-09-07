@@ -38,6 +38,7 @@ sys.path.insert(0, ROOT)
 
 from placement import design_brief as db          # noqa: E402
 from placement import floorplan as fp             # noqa: E402
+from placement import legality                    # noqa: E402
 
 RUN_ALL_FAST_OK = True
 
@@ -414,6 +415,236 @@ def test_the_fixture_brief_compiles_to_the_claims_the_issue_names():
           f"3 pad_edge and 1 body")
 
 
+# --------------------------------------------------------------------------
+# the RULE: what the compiled claims measure, on tracked boards
+# --------------------------------------------------------------------------
+
+#: The two boards, and what the SAME brief measures on each. The placed board
+#: is run 25's result; the tracked one is where that run started. The rule is
+#: what makes the difference between them visible at all -- and it needs no
+#: fixture manipulation, because the improvement is real.
+PLACED = os.path.join(ROOT, 'tests', 'fixtures', 'run25',
+                      'esp_prog_placed.kicad_pcb')
+UNPLACED = os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')
+
+FIXTURE_BRIEF = os.path.join(ROOT, 'tests', 'fixtures', '902',
+                             'esp_prog_proximity.design-brief.json')
+
+
+def _graded(board, rows=None):
+    from kicad_parser import parse_kicad_pcb
+    if rows is None:
+        with open(FIXTURE_BRIEF, encoding='utf-8') as fh:
+            frag, _rep = db.compile_brief(db.brief_from_dict(json.load(fh)))
+        rows = frag['proximity']
+    intent = fp.intent_from_dict({'schema': fp.SCHEMA_VERSION, 'kind': fp.KIND,
+                                  'units': 'mm', 'proximity': rows})
+    return fp.grade(intent, parse_kicad_pcb(board), board)
+
+
+def _by_pad(result):
+    return {(v.ref, v.measured.get('pad')): v for v in result.violations
+            if v.rule == 'proximity'}
+
+
+def test_the_acceptance_numbers_the_issue_names():
+    """#902's own measurement, off the pad geometry rather than off prose.
+
+    Asserted on `measured`, never on the message: a message assertion passes
+    when the sentence is right and the number is wrong.
+    """
+    r = _graded(PLACED)
+    assert 'proximity' in r.rules_run, r.rules_run
+    got = _by_pad(r)
+    assert len(got) == 1, sorted(got)
+    v = got[('Y1', '1')]
+    m = v.measured
+    assert m['gap_mm'] == 3.1425, m
+    assert (m['near'], m['near_pad']) == ('U1', '9'), m
+    assert m['paired_by'] == 'net' and m['pads_basis'] == 'declared', m
+    assert m['basis'] == 'pad_edge' and v.expected == {'max_mm': 2.0}, v
+    assert v.severity == fp.ERROR, v.severity
+    print(f"  PASS: one violation on the placed board -- {v.message}")
+
+
+def test_the_same_brief_measures_the_board_the_run_started_from():
+    """The rule is what makes run 25's improvement measurable.
+
+    Three of the claims fail on the board the run started from and one fails
+    on what it shipped. A single-board assertion could not tell "the rule
+    works" from "the rule always fires".
+    """
+    placed, unplaced = _by_pad(_graded(PLACED)), _by_pad(_graded(UNPLACED))
+    assert len(unplaced) == 3, sorted(unplaced)
+    assert unplaced[('Y1', '1')].measured['gap_mm'] == 4.7425
+    assert unplaced[('Y1', '2')].measured['gap_mm'] == 2.522
+    assert unplaced[('C1', '1')].measured['gap_mm'] == 4.4111
+    assert set(placed) < set(unplaced), (sorted(placed), sorted(unplaced))
+    # The pad both boards flag got CLOSER, and that direction is the point.
+    assert (placed[('Y1', '1')].measured['gap_mm']
+            < unplaced[('Y1', '1')].measured['gap_mm'])
+    print("  PASS: 3 violations where the run started, 1 where it ended, and "
+          "the shared pad moved 4.7425 -> 3.1425mm")
+
+
+def test_a_claim_the_board_satisfies_is_a_measured_clean_not_a_skip():
+    """The negative control, and both halves are load-bearing.
+
+    "No violations" and "the rule never ran" must not look the same -- this
+    file's own subject, one level down. So the assertion is that `proximity`
+    IS in `rules_run` AND produced nothing.
+    """
+    r = _graded(PLACED, rows=[{'ref': 'C3', 'near': 'U2', 'max_mm': 2.0,
+                               'pads': {'C3': ['1'], 'U2': ['2', '3']}}])
+    assert 'proximity' in r.rules_run, r.rules_run
+    assert [v for v in r.violations if v.rule == 'proximity'] == []
+    assert 'proximity' not in r.rules_skipped, r.rules_skipped
+    print("  PASS: C3 at 0.29mm against a 2.0mm limit -- graded, and clean")
+
+
+def test_an_intent_declaring_none_does_not_run_the_rule():
+    """The `_wants` trap.
+
+    That function ends in a bare `return True`, so a rule registered without
+    an explicit branch runs on EVERY board and lands in `rules_run` having
+    measured nothing -- the vacuous pass `--require-rules` exists to catch,
+    arriving through the mechanism that implements it.
+    """
+    r = _graded(PLACED, rows=[])
+    assert 'proximity' not in r.rules_run, r.rules_run
+    why = r.rules_skipped['proximity']
+    assert why == 'the intent declares no proximity claims', why
+    print(f"  PASS: not declared -> not run, and the skip says why: {why!r}")
+
+
+def test_both_bases_measure_the_same_pair_differently():
+    """Which is why `basis` has no silent default.
+
+    The same two parts are 3.14mm apart pad to pad and 0.32mm apart body to
+    body. A default would have graded whichever one the tool preferred.
+    """
+    pad_edge = _graded(PLACED, rows=[
+        {'ref': 'Y1', 'near': 'U1', 'max_mm': 0.1,
+         'pads': {'Y1': ['1'], 'U1': ['9']}}])
+    body = _graded(PLACED, rows=[
+        {'ref': 'Y1', 'near': 'U1', 'max_mm': 0.1, 'basis': 'body'}])
+    a = pad_edge.violations[0].measured
+    b = body.violations[0].measured
+    assert a['gap_mm'] == 3.1425 and a['basis'] == 'pad_edge', a
+    assert b['gap_mm'] == 0.32 and b['basis'] == 'body', b
+    # The rung that answered is on the wire, which is the whole reason the
+    # basis is spelled `body` and `courtyard` is refused BY NAME: this board
+    # draws no courtyard at all, so a number under that name would rest on fab
+    # and silk without saying so.
+    assert (b['basis_source'], b['near_basis_source']) == ('fab', 'silk'), b
+    print(f"  PASS: same pair, {a['gap_mm']}mm pad-edge vs {b['gap_mm']}mm "
+          f"body (from {b['basis_source']}/{b['near_basis_source']})")
+
+
+def test_a_body_claim_for_parts_that_share_no_net_is_what_pad_edge_cannot_do():
+    """Q1 and Q2 share no net, so there is no pad pair to measure at all."""
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(PLACED)
+    nets = [{p.net_id for p in pcb.footprints[r].pads if p.net_id > 0}
+            for r in ('Q1', 'Q2')]
+    assert not (nets[0] & nets[1]), nets
+    r = _graded(PLACED, rows=[{'ref': 'Q1', 'near': 'Q2', 'max_mm': 0.1,
+                               'basis': 'body'}])
+    assert r.violations[0].measured['gap_mm'] == 0.295, r.violations[0].measured
+    print("  PASS: a pair sharing no net is measurable only body to body "
+          "(0.295mm) -- the reason the second basis exists")
+
+
+def test_a_name_the_board_does_not_have_is_a_finding_not_silence():
+    """A typo must not grade clean -- `block_unresolved`'s failure one level
+    over. Both spellings: a missing REF, and a pad number a real part lacks.
+    """
+    r = _graded(PLACED, rows=[{'ref': 'U99', 'near': 'U1', 'max_mm': 2.0}])
+    v = [x for x in r.violations if x.rule == 'proximity_unresolved']
+    assert len(v) == 1 and 'U99' in v[0].message, r.violations
+    assert v[0].severity == fp.ERROR, v[0].severity
+
+    # `Y1` has pads 1, 2, 3, 3 -- there is no pad 7.
+    r = _graded(PLACED, rows=[{'ref': 'Y1', 'near': 'U1', 'max_mm': 2.0,
+                               'pads': {'Y1': ['7']}}])
+    v = [x for x in r.violations if x.rule == 'proximity_unresolved']
+    assert len(v) == 1 and "'7'" in v[0].message, r.violations
+    assert v[0].measured['unresolved_ref'] == 'Y1', v[0].measured
+    # ...and it does NOT also emit a distance measured from no pads at all.
+    assert not [x for x in r.violations if x.rule == 'proximity']
+    print("  PASS: a missing ref and a missing pad number are each one named "
+          "finding, and neither produces a distance measured from nothing")
+
+
+def test_a_duplicated_pad_number_is_minimised_over_not_first_hit():
+    """`Y1` carries TWO pads numbered `3` -- a crystal's ground tabs.
+
+    A first-hit lookup would answer from whichever the parser saw first, so
+    the number would depend on file order. Taking every match and minimising
+    cannot.
+    """
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(PLACED)
+    threes = [p for p in pcb.footprints['Y1'].pads if p.pad_number == '3']
+    assert len(threes) == 2, threes
+    u1_8 = [q for q in pcb.footprints['U1'].pads if q.pad_number == '8'][0]
+    gaps = sorted(legality.rect_gap(legality.pad_rect(p),
+                                    legality.pad_rect(u1_8)) for p in threes)
+    assert gaps[0] != gaps[1], gaps
+    r = _graded(PLACED, rows=[{'ref': 'Y1', 'near': 'U1', 'max_mm': 0.01,
+                               'pads': {'Y1': ['3'], 'U1': ['8']}}])
+    got = r.violations[0].measured['gap_mm']
+    assert abs(got - gaps[0]) < 1e-6, (got, gaps)
+    print(f"  PASS: two pads named '3' at {gaps[0]:.3f} and {gaps[1]:.3f}mm -- "
+          f"the rule reports the minimum, not the first")
+
+
+def test_the_rule_is_total_over_its_claims():
+    """Every claim yields a pass, a violation, an unresolved, or an abstention.
+
+    This is the promise `_ARM` was dropped on: a branch falling through
+    without one of the four would put `proximity` in `rules_run` having graded
+    a claim it never measured.
+    """
+    rows = [
+        {'ref': 'Y1', 'near': 'U1', 'max_mm': 99.0},               # pass
+        {'ref': 'C1', 'near': 'U2', 'max_mm': 0.01},               # violation
+        {'ref': 'U99', 'near': 'U1', 'max_mm': 2.0},               # unresolved
+        # A DIFFERENT pair for the second unresolved case: the loader refuses
+        # two claims about one relation, and the first draft of this row
+        # reused Y1~U1 and was refused -- the duplicate guard doing its job on
+        # its own test.
+        {'ref': 'C3', 'near': 'U2', 'max_mm': 2.0,
+         'pads': {'C3': ['9']}},                                   # unresolved
+    ]
+    r = _graded(PLACED, rows=rows)
+    kinds = {v.rule for v in r.violations}
+    assert kinds == {'proximity', 'proximity_unresolved'}, kinds
+    assert len([v for v in r.violations if v.rule == 'proximity']) == 1
+    assert len([v for v in r.violations
+                if v.rule == 'proximity_unresolved']) == 2
+    print("  PASS: 4 claims -> 1 pass, 1 violation, 2 unresolved, "
+          "0 unaccounted for")
+
+
+def test_severity_is_settable_per_name():
+    """A DNP-variant board must be able to demote the RESOLUTION finding
+    without demoting the distance one -- which is why there are two names.
+    """
+    from kicad_parser import parse_kicad_pcb
+    intent = fp.intent_from_dict({
+        'schema': fp.SCHEMA_VERSION, 'kind': fp.KIND, 'units': 'mm',
+        'severity': {'proximity_unresolved': fp.WARN},
+        'proximity': [{'ref': 'U99', 'near': 'U1', 'max_mm': 2.0},
+                      {'ref': 'C1', 'near': 'U2', 'max_mm': 0.01}]})
+    r = fp.grade(intent, parse_kicad_pcb(PLACED), PLACED)
+    by = {v.rule: v.severity for v in r.violations}
+    assert by['proximity_unresolved'] == fp.WARN, by
+    assert by['proximity'] == fp.ERROR, by
+    print("  PASS: proximity_unresolved demoted to warn while proximity stays "
+          "an error")
+
+
 TESTS = [
     test_every_malformed_shape_is_refused_by_its_reason,
     test_a_whole_key_unknown_is_refused_naming_the_key_not_a_character,
@@ -429,6 +660,16 @@ TESTS = [
     test_drift_compares_at_the_effective_value_not_at_key_presence,
     test_the_basis_vocabulary_matches_the_intent_loader_or_says_it_cannot_yet,
     test_the_fixture_brief_compiles_to_the_claims_the_issue_names,
+    test_the_acceptance_numbers_the_issue_names,
+    test_the_same_brief_measures_the_board_the_run_started_from,
+    test_a_claim_the_board_satisfies_is_a_measured_clean_not_a_skip,
+    test_an_intent_declaring_none_does_not_run_the_rule,
+    test_both_bases_measure_the_same_pair_differently,
+    test_a_body_claim_for_parts_that_share_no_net_is_what_pad_edge_cannot_do,
+    test_a_name_the_board_does_not_have_is_a_finding_not_silence,
+    test_a_duplicated_pad_number_is_minimised_over_not_first_hit,
+    test_the_rule_is_total_over_its_claims,
+    test_severity_is_settable_per_name,
 ]
 
 

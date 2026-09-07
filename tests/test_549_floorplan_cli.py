@@ -236,8 +236,8 @@ def test_the_summary_reports_what_did_not_run():
     # would make this arm agree with whatever the module currently says
     # and stop being a change detector. 9 before #794 added
     # `decap_ungraded` and #705 added `decap_pin_distance`; 11 before #837
-    # added `assembly_side`.
-    assert s['rules_skipped'] == 12, s['rules_skipped']
+    # added `assembly_side`; 12 before #902 added `proximity`.
+    assert s['rules_skipped'] == 13, s['rules_skipped']
     print(f"  PASS: an empty intent passes with rules_run=0, "
           f"rules_skipped={s['rules_skipped']} -- visibly vacuous")
 

@@ -32,6 +32,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -60,6 +61,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -88,6 +90,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -115,6 +118,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive",
     "zone_side"
    ],
@@ -142,6 +146,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -167,6 +172,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -194,6 +200,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -221,6 +228,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -247,6 +255,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -275,6 +284,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -304,6 +314,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -330,6 +341,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -358,6 +370,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -386,6 +399,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -414,6 +428,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -442,6 +457,7 @@
     "edge_connector",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -469,6 +485,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -494,6 +511,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -521,6 +539,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -550,6 +569,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
@@ -579,6 +599,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_exclusive"
    ],
    "skipped_withheld": [],
@@ -606,6 +627,7 @@
     "decap_ungraded",
     "keepout",
     "must_lock",
+    "proximity",
     "zone_containment",
     "zone_exclusive",
     "zone_side"
