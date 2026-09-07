@@ -122,6 +122,23 @@ class TestTheClampItself(unittest.TestCase):
         self.assertEqual(len(ch), 1)
         self.assertIn('Wide', ch[0])
 
+    def test_a_REAL_targets_dict_clamps_to_the_class_value_not_the_cap(self):
+        """#900. Every other arm in this file hand-builds a one-key dict, so
+        after #900 they all exercise only the FALLBACK branch of the clamp's
+        target read -- the real `compute_targets` result carries two clearance
+        values and this is the only arm here that hands it one.
+
+        A class clamped to one part's 2 mil pad override would declare every
+        pair in that class legal at 0.05 mm. The pad override is per-pad and
+        resolved per-pair by `design_rules.override_clearance`; it is not a
+        board-wide class value.
+        """
+        from fix_kicad_drc_settings import compute_targets
+        b, _d, o = board_with(0.2, {'Wide': 0.4})
+        clamp_nondefault_netclasses_on_board(b, compute_targets(
+            clearance=0.15, minima={'min_pad_clearance_override': 0.0508}))
+        self.assertEqual(o['Wide'].clearance_mm, 0.15)
+
     def test_the_DEFAULT_class_is_never_touched(self):
         """It is in the enumeration -- skipped by identity AND by name.
 

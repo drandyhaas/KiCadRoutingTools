@@ -234,6 +234,11 @@ Validate routed boards against the *real* spec, with the right checker — most
   the staged kicad-cli grade read the same file, `copy_board`/
   `fix_project_for_output` carry it as a sibling, and the DRC writeback caps
   `min_clearance` at the smallest rule so a relaxing rule isn't floored away.
+  **That cap, and #530's pad-override cap, reach `rules.min_clearance` ONLY
+  (#900)** — the net classes carry the clearance the board was routed to. They
+  used to share one key, so one part with a 2 mil pad override turned a
+  requested `--clearance 0.15` into a 0.0508 board, which the next step then
+  read back as the board's own Default class.
   Grade a ruled board with plain `check_drc.py` (it auto-reads); a hand-rolled
   checker that ignores the dru will manufacture phantom flags on relaxed layers
   and miss real ones on tightened layers.

@@ -92,6 +92,12 @@ check(f"min_track_width still clamped to {ROUTED_TW} (got {out.get('min_track_wi
       out.get("min_track_width") == ROUTED_TW)
 check("web rule never ends up ABOVE the track floor",
       out.get("min_connection") <= out.get("min_track_width") + 1e-9)
+# #900: `compute_targets` also emits `class_clearance`, which is NOT a KiCad
+# rule. This file feeds its result straight into both writebacks, so it is the
+# cheapest place in the suite to notice the day one leaks into the project --
+# every other assertion here reads named keys and would stay green.
+check("no non-rule key reached the project's rules",
+      "class_clearance" not in out)
 
 # --------------------------------------------------------------------------
 # GUI parity. The pcbnew path writes BOARD_DESIGN_SETTINGS fields whose names
