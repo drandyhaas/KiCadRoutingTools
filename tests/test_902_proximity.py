@@ -725,13 +725,25 @@ def test_an_abstention_is_its_own_state_not_a_pass_and_not_an_absence():
     over; folding it into `uncovered` makes it unclearable when the board
     genuinely cannot answer. It gets its own state and carries the reason.
     """
-    _frag, _rep, cov = _cov(
-        abstained={'proximity[Q1~Q2].basis': 'Q1 draws no body'})
+    frag, _rep, _c = _cov()
+    # The key format the RULE writes, derived from the intent row rather than
+    # hardcoded: it carries the row INDEX because a reference may contain `~`,
+    # so a coverage consumer resolves the index against the intent instead of
+    # matching `ref~near` as a string.
+    row_i = next(i for i, p in enumerate(frag['proximity'])
+                 if p['ref'] == 'Q1')
+    akey = f"proximity[{row_i}:Q1~Q2].basis"
+    _f, _r, cov = _cov(abstained={akey: 'Q1 draws no body'})
     assert cov['abstained'] == 1 and cov['graded'] == 3, cov
     row = next(c for c in cov['clauses'] if c['state'] == 'abstained')
     assert row['why'] == 'Q1 draws no body', row
+    assert row['ref'] == 'Q1', row
     assert cov['complete'] is False
-    print(f"  PASS: {row['id']} abstained, carrying its reason verbatim")
+    # A key naming a row that is not this clause must NOT be attributed to it.
+    _f, _r, other = _cov(abstained={'proximity[0:Q1~Q2].basis': 'x'})
+    assert other['abstained'] == 0, other
+    print(f"  PASS: {row['id']} abstained carrying its reason verbatim, and a "
+          f"key naming another row is not attributed to it")
 
 
 def test_a_graded_clause_can_still_be_DRIFTED():
@@ -814,6 +826,204 @@ def test_a_board_with_no_brief_is_untouched():
     print("  PASS: a board with no brief prints no coverage line and carries "
           "no coverage key")
 
+# --------------------------------------------------------------------------
+# the holes a second verifier found: branches nothing reached
+# --------------------------------------------------------------------------
+
+#: A board that DRAWS courtyards, which the esp_prog fixture does not (0 of
+#: 21). Without it nothing here could see the difference between a courtyard
+#: and a drawn body, which is a whole basis' worth of meaning.
+COURTYARD_BOARD = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
+
+
+def test_the_body_basis_measures_the_DRAWN_body_not_the_courtyard():
+    """#896 stores two ladders and says why: "a courtyard is not a body -- it
+    is a body plus an assembly margin plus any shell overhang".
+
+    `body_local` is courtyard-FIRST, so reading it made `basis: "body"`
+    silently measure courtyards on every board that draws them, under-stating
+    each gap by the assembly margin and PASSING claims that should fail --
+    while `basis: "courtyard"` is refused by name on the grounds that boards
+    do not draw them. The esp_prog fixture draws none, so no test on it could
+    ever have seen this; it took a board that does.
+    """
+    from kicad_parser import parse_kicad_pcb
+    from placement import body as body_mod
+    pcb = parse_kicad_pcb(COURTYARD_BOARD)
+    bodies = body_mod.board_bodies(pcb, COURTYARD_BOARD)
+    pair = ('U1', 'Y1')
+    assert all(bodies[r].source == 'courtyard' for r in pair), \
+        {r: bodies[r].source for r in pair}
+    assert all(bodies[r].drawn_source == 'fab' for r in pair), \
+        {r: bodies[r].drawn_source for r in pair}
+
+    def _rect(ref, local):
+        fp_obj = pcb.footprints[ref]
+        x0, y0, x1, y1 = legality.rotate_local_bounds(
+            *local, fp_obj.rotation or 0.0)
+        return (fp_obj.x + x0, fp_obj.y + y0, fp_obj.x + x1, fp_obj.y + y1)
+
+    courtyard_gap = legality.rect_gap(
+        _rect(pair[0], bodies[pair[0]].body_local),
+        _rect(pair[1], bodies[pair[1]].body_local))
+    drawn_gap = legality.rect_gap(
+        _rect(pair[0], bodies[pair[0]].drawn_local),
+        _rect(pair[1], bodies[pair[1]].drawn_local))
+    assert drawn_gap > courtyard_gap + 0.5, (courtyard_gap, drawn_gap)
+
+    intent = fp.intent_from_dict({
+        'schema': fp.SCHEMA_VERSION, 'kind': fp.KIND, 'units': 'mm',
+        'proximity': [{'ref': pair[0], 'near': pair[1], 'max_mm': 2.0,
+                       'basis': 'body'}]})
+    r = fp.grade(intent, pcb, COURTYARD_BOARD)
+    got = r.violations[0].measured
+    assert abs(got['gap_mm'] - drawn_gap) < 1e-6, (got, drawn_gap)
+    assert got['basis_source'] == 'fab', got
+    # ...and the courtyard reading would have PASSED this very claim.
+    assert courtyard_gap <= 2.0 < drawn_gap, (courtyard_gap, drawn_gap)
+    print(f"  PASS: courtyard-first reads {courtyard_gap:.3f}mm and would "
+          f"PASS a 2.0mm claim; the drawn bodies are {drawn_gap:.3f}mm apart "
+          f"and the rule reports that, sourced 'fab'")
+
+
+def test_a_partially_wrong_pad_list_is_not_graded_on_the_survivors():
+    """`pads: {'Y1': ['2', '7']}` used to grade CLEAN on pad 2 while '7'
+    vanished.
+
+    The claim then measured a strictly smaller subject set than it declared --
+    the exact failure the loader cites when it refuses an integer pad number
+    ("would match no pad, measure nothing, and grade clean"), and a
+    falsification of this rule's own invariant, which is quantified over the
+    pads the claim DECLARES.
+    """
+    r = _graded(PLACED, rows=[{'ref': 'Y1', 'near': 'U1', 'max_mm': 2.0,
+                               'pads': {'Y1': ['2', '7']}}])
+    unres = [v for v in r.violations if v.rule == 'proximity_unresolved']
+    assert len(unres) == 1, r.violations
+    assert unres[0].measured['pads'] == ['7'], unres[0].measured
+    assert unres[0].measured['resolved_pads'] == 1, unres[0].measured
+    # ...and NO distance was reported from the pad that did resolve.
+    assert not [v for v in r.violations if v.rule == 'proximity'], r.violations
+
+    # The partner side too.
+    r = _graded(PLACED, rows=[{'ref': 'Y1', 'near': 'U1', 'max_mm': 0.01,
+                               'pads': {'Y1': ['1'], 'U1': ['9', '99']}}])
+    unres = [v for v in r.violations if v.rule == 'proximity_unresolved']
+    assert len(unres) == 1 and unres[0].measured['unresolved_ref'] == 'U1'
+    assert not [v for v in r.violations if v.rule == 'proximity'], r.violations
+    print("  PASS: one bad name in a pad list stops the claim on either side, "
+          "naming the pad that missed and how many resolved")
+
+
+def test_the_minimum_over_partners_is_a_minimum():
+    """The rule's stated INVARIANT, and nothing reached it.
+
+    Every earlier case gave a subject pad exactly ONE candidate partner (net
+    matching reduces the declared arity to one), so `min` and `max` were
+    indistinguishable -- flipping the comparison survived every test. This
+    gives one subject pad SEVERAL partners on the same net and pins the
+    smallest.
+    """
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(PLACED)
+    # USB1 carries six pads numbered '0', all on GND -- six real candidates
+    # for one subject pad, at six different distances.
+    zeros = [p for p in pcb.footprints['USB1'].pads if p.pad_number == '0']
+    assert len(zeros) == 6, len(zeros)
+    u1_8 = [q for q in pcb.footprints['U1'].pads if q.pad_number == '8'][0]
+    gaps = sorted(legality.rect_gap(legality.pad_rect(u1_8),
+                                    legality.pad_rect(p)) for p in zeros)
+    assert gaps[0] < gaps[-1] - 1.0, gaps
+
+    r = _graded(PLACED, rows=[{'ref': 'U1', 'near': 'USB1', 'max_mm': 0.01,
+                               'pads': {'U1': ['8'], 'USB1': ['0']}}])
+    got = [v for v in r.violations if v.rule == 'proximity']
+    assert len(got) == 1, got
+    # Against the ROUNDED minimum: `measured['gap_mm']` is 4dp on the wire,
+    # and comparing it to a raw float at 1e-6 fails for a reason that has
+    # nothing to do with which end of the range the rule took.
+    assert got[0].measured['gap_mm'] == round(gaps[0], 4), \
+        (got[0].measured['gap_mm'], gaps)
+    # ...and NOT the maximum, which is what the flipped comparison produces.
+    assert got[0].measured['gap_mm'] != round(gaps[-1], 4), gaps
+    assert got[0].measured['near_pads'] == 6, got[0].measured
+    print(f"  PASS: one subject pad against six partners {gaps[0]:.3f}.."
+          f"{gaps[-1]:.3f}mm -- the rule reports {gaps[0]:.3f}, the minimum")
+
+
+def test_a_padless_part_abstains_rather_than_passing_silently():
+    """The abstention branches, which nothing reached.
+
+    Both could be deleted with the whole suite green, and a claim naming a
+    padless part then yielded NOTHING while `proximity` stayed in
+    `rules_run` -- the vacuous pass `_ARM` was dropped on.
+    """
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(PLACED)
+    padless = sorted(r for r, f in pcb.footprints.items() if not f.pads)
+    assert padless, 'the fixture has no padless footprint to test with'
+    ref = padless[0]
+
+    r = _graded(PLACED, rows=[{'ref': ref, 'near': 'U1', 'max_mm': 2.0}])
+    assert not r.violations, r.violations
+    assert 'proximity' in r.rules_run, r.rules_run
+    keys = [k for k in r.budget_abstained if k.startswith('proximity[')]
+    assert len(keys) == 1, r.budget_abstained
+    assert 'no pads at all' in r.budget_abstained[keys[0]], r.budget_abstained
+    # An abstention makes the grade INCOMPLETE, which is what stops it being
+    # read as a clean board.
+    assert r.complete is False and r.passed is False
+    print(f"  PASS: a claim naming padless {ref} abstains -- "
+          f"{r.budget_abstained[keys[0]][:60]}...")
+
+
+def test_a_body_claim_for_a_part_with_no_geometry_abstains():
+    """The other abstention branch, on the body basis."""
+    from kicad_parser import parse_kicad_pcb
+    from placement import body as body_mod
+    pcb = parse_kicad_pcb(PLACED)
+    bodies = body_mod.board_bodies(pcb, PLACED)
+    nogeom = sorted(r for r, g in bodies.items()
+                    if g.drawn_local is None and g.body_local is None)
+    if not nogeom:
+        print("  PASS (VACUOUS): every part on this fixture has geometry; the "
+              "source='none' branch has no subject here and is covered by the "
+              "padless case above")
+        return
+    r = _graded(PLACED, rows=[{'ref': nogeom[0], 'near': 'U1', 'max_mm': 2.0,
+                               'basis': 'body'}])
+    keys = [k for k in r.budget_abstained if k.startswith('proximity[')]
+    assert len(keys) == 1, r.budget_abstained
+    assert 'draws no body' in r.budget_abstained[keys[0]]
+    print(f"  PASS: a body claim naming {nogeom[0]} abstains rather than "
+          f"passing")
+
+
+def test_the_intent_loader_refuses_the_reversed_pair_the_brief_refuses():
+    """The hand-written intent is the path the brief compiler never sees.
+
+    Without this the two documents disagreed about the same rows: the brief
+    refused them and the loader accepted them, and the grade then charged one
+    symmetric measurement twice, reporting an identical number under two
+    claims.
+    """
+    base = {'schema': fp.SCHEMA_VERSION, 'kind': fp.KIND, 'units': 'mm'}
+    try:
+        fp.intent_from_dict(dict(base, proximity=[
+            {'ref': 'Y1', 'near': 'U1', 'max_mm': 0.1},
+            {'ref': 'U1', 'near': 'Y1', 'max_mm': 0.1}]))
+        raise AssertionError('NOT REFUSED')
+    except fp.IntentError as exc:
+        assert 'same symmetric measurement' in str(exc), str(exc)
+    # ...and the asymmetric form, with a subject pad list on each side, is
+    # KEPT -- a guard that refuses everything is not a guard.
+    i = fp.intent_from_dict(dict(base, proximity=[
+        {'ref': 'Y1', 'near': 'U1', 'max_mm': 0.1, 'pads': {'Y1': ['1']}},
+        {'ref': 'U1', 'near': 'Y1', 'max_mm': 0.1, 'pads': {'U1': ['9']}}]))
+    assert len(i.proximity) == 2, i.proximity
+    print("  PASS: the loader refuses the symmetric reversed pair and keeps "
+          "the asymmetric one, exactly as the brief does")
+
 TESTS = [
     test_every_malformed_shape_is_refused_by_its_reason,
     test_a_whole_key_unknown_is_refused_naming_the_key_not_a_character,
@@ -847,6 +1057,12 @@ TESTS = [
     test_unknown_and_carried_clauses_never_block,
     test_the_cli_refuses_and_names_every_uncovered_clause,
     test_a_board_with_no_brief_is_untouched,
+    test_the_body_basis_measures_the_DRAWN_body_not_the_courtyard,
+    test_a_partially_wrong_pad_list_is_not_graded_on_the_survivors,
+    test_the_minimum_over_partners_is_a_minimum,
+    test_a_padless_part_abstains_rather_than_passing_silently,
+    test_a_body_claim_for_a_part_with_no_geometry_abstains,
+    test_the_intent_loader_refuses_the_reversed_pair_the_brief_refuses,
 ]
 
 

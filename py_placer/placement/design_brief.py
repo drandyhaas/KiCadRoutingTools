@@ -1328,13 +1328,47 @@ def _clause_state(rec, intent_doc, rules_run, abstained):
                                  f"{ref} near {near}", rule)
     if rule not in rules_run:
         return ('uncovered', f"`{rule}` did not run on this grade", rule)
-    prefix = (f"proximity[{ref}~{near}]." if kind == 'proximity'
-              else f"edge_connectors[{ref}]." if kind == 'interfaces' else None)
-    if prefix:
-        for akey, why in sorted((abstained or {}).items()):
-            if akey.startswith(prefix):
-                return 'abstained', why, rule
+    for akey, why in sorted((abstained or {}).items()):
+        if _abstention_is_about(akey, kind, ref, near, intent_doc):
+            return 'abstained', why, rule
     return 'graded', '', rule
+
+
+_ABSTAIN_PROX_RE = re.compile(r'^proximity\[(?P<row>\d+):')
+
+
+def _abstention_is_about(akey, kind, ref, near, intent_doc) -> bool:
+    """Does this abstention key name THIS clause?
+
+    Resolved through the intent's own ROW for a proximity claim, never by
+    matching `ref~near` as a string: a reference may contain `~`
+    (`disambiguate_references` produces `TP4~2`, and esp_prog parses
+    `Ref*~2`), so a row `A~B` near `C` and a row `A` near `B~C` spell the same
+    thing. The rule writes the row index into the key precisely so this lookup
+    can be exact rather than a prefix guess.
+    """
+    if kind == 'interfaces':
+        return akey.startswith(f"edge_connectors[{ref}].")
+    if kind != 'proximity':
+        return False
+    m = _ABSTAIN_PROX_RE.match(akey)
+    if m is None:
+        return False
+    rows = intent_doc.get('proximity') or []
+    row = int(m.group('row'))
+    if row >= len(rows):
+        return False
+    # BOTH halves must agree, and the negative control is what forced this:
+    # trusting the index alone attributed a key spelled `[0:Q1~Q2]` to
+    # whatever claim happened to sit at row 0. The index disambiguates the
+    # refs (a reference may contain `~`) and the text confirms the index, so a
+    # stale or hand-edited key attributes to nothing rather than to the wrong
+    # clause -- an abstention charged to an innocent claim is worse than one
+    # nobody attributes, because it reads as a finding about that claim.
+    if not akey.startswith(f"proximity[{row}:{ref}~{near}]"):
+        return False
+    return (str(rows[row].get('ref')) == ref
+            and str(rows[row].get('near')) == near)
 
 
 def clause_coverage(report: Dict, intent_doc: Dict, *,
