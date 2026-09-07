@@ -2567,10 +2567,14 @@ class Corridor:
                     # BAND is walled (wc SA0: corridor 2's band under
                     # corridor 1's copper, 5-via detour at 2.0) may
                     # have a short path just outside the first window
+                    rep = {}
                     res = self.connect_ladder(
                         nm, self.virtual_of(others),
                         self.virtual_vias_of(others), 'last_call',
-                        b_alts=ctx.dest_alts.get(nm))
+                        b_alts=ctx.dest_alts.get(nm), report=rep)
+                    if res is None:
+                        # ...and the blocker-directed rip (rip_for)
+                        res = self.rip_for(nm, others, rep)
                     if res is None:
                         info = ctx.refusal_info.setdefault(nm, {})
                         info.update(stage='last_call',
@@ -2710,7 +2714,7 @@ class Corridor:
         self.finish()
 
     def connect_ladder(self, nm, virt, virt_vias, stage, b_alts=None,
-                       nm_ends=None):
+                       nm_ends=None, report=None):
         """A re-lay that keeps to the PLAN: the lane's own band widened
         in steps (slack 0.3, 0.8 in o; then 1.6 with both layers open),
         or -- for a corridor with no frame -- a tube round its taut
@@ -2732,10 +2736,177 @@ class Corridor:
                              band=mk(), margin=mg,
                              virtual=list(virt or []) + reserve(ctx, nm),
                              window_pts=wp, virtual_vias=virt_vias,
-                             b_alts=b_alts)
+                             b_alts=b_alts, report=report)
             if res is not None:
                 ctx.rungs[(stage, label)] += 1
                 return res
+        return None
+
+    def rip_for(self, nm, others, rep, max_victims=3, depth=1, protect=frozenset()):
+        """BLOCKER-DIRECTED RIP at last call (#622 K41 SBA2). A lane
+        still refused when every other lane is real copper is boxed by
+        lanes routed before it -- the sequential loss, an earlier lane
+        having taken the one channel a later one needs -- and no wider
+        window answers that. The refused search's blocked FRONTIER
+        (connect's report) is attributed to nets by the production
+        blocking analysis, the one route.py's own rip ladder uses, which
+        names the lanes of THIS run on it; a MIN-CUT probe (one search
+        with those lanes priced, not blocked -- connect soft=) then
+        finds the path crossing the fewest of them, and the lanes it
+        crosses, in path order, are the cut set. The rip ladder is the
+        cut set's prefixes, then the frontier's most exposed lanes
+        singly: each trial rips its victims, routes the refused lane
+        through its ladder, re-lays each victim against the new lane
+        through ITS ladder (band first, so a page lane stays on its page
+        when it can), and a victim that cannot be re-laid negotiates one
+        level down with the placed lane protected. Kept only when the
+        refused lane AND every victim route (an open closed; vias may
+        move); otherwise every piece of copper is put back exactly.
+        Static copper (stubs, pads, other nets) is never a victim: a
+        lane walled by it is a fanout matter, and says so. Returns the
+        refused lane's copper, not yet in the board, like any ladder."""
+        import time as _time
+        ctx, log = self.ctx, self.log
+        nid, _ = ctx.byname[nm]
+        t0 = _time.perf_counter()
+        blocked = rep.get('blocked') or []
+        if not blocked:
+            log(f'    rip for {nm}: the refusal reported no frontier')
+            return None
+        from blocking_analysis import analyze_frontier_blocking
+        cand = {ctx.byname[om][0]: om for om in self.members
+                if om != nm and om not in protect and self.out_segs.get(om)}
+        infos = analyze_frontier_blocking(
+            blocked, rep['window'], rep['cfg'], {i: None for i in cand},
+            exclude_net_ids={nid}, target_xy=self.stubs[nm],
+            source_xy=self.teeth[nm])
+        named = [(cand[b.net_id], b.blocked_count) for b in infos
+                 if b.net_id in cand]
+        log(f'    rip for {nm}: frontier {len(blocked)} cells; lanes of this '
+            f'run on it: ' + (', '.join(f'{v}({c})' for v, c in named)
+                              if named else 'none -- walled by static copper')
+            + f'  ({_time.perf_counter() - t0:.1f} s)')
+        if not named:
+            return None
+        virt, vv = self.virtual_of(others), self.virtual_vias_of(others)
+        # THE MIN-CUT PROBE: the frontier ranks lanes by EXPOSURE (the
+        # perimeter of the reachable pocket), not by whether ripping
+        # them opens a path. One more search with every lane of this
+        # run PRICED instead of blocked (connect soft=) finds the path
+        # that crosses the fewest of them; the lanes that path conflicts
+        # with, in path order, are the cut set -- jointly sufficient by
+        # construction, so its prefixes are the rip ladder. No path even
+        # then = walled by static copper: nothing to rip.
+        lanes = [(om, self.out_segs[om], self.out_vias[om]) for om, _c in named]
+        ids_s = {id(x) for _, ss, _ in lanes for x in ss}
+        ids_v = {id(x) for _, _, vs in lanes for x in vs}
+        seg0, via0 = list(ctx.pcb.segments), list(ctx.pcb.vias)
+        ctx.pcb.segments = [x for x in seg0 if id(x) not in ids_s]
+        ctx.pcb.vias = [x for x in via0 if id(x) not in ids_v]
+        soft = [((x.start_x, x.start_y), (x.end_x, x.end_y), x.layer, x.width)
+                for _, ss, _ in lanes for x in ss]
+        soft_v = [(x.x, x.y, x.size) for _, _, vs in lanes for x in vs]
+        wp = (getattr(self, 'lane_xy', {}) or {}).get(nm) or [self.teeth[nm], self.stubs[nm]]
+        probe = cn.connect(ctx.pcb, nid, self.teeth[nm], ctx.tooth_layer[nm],
+                           self.stubs[nm], ctx.dest_layer[nm], ctx.cfg,
+                           band=None, margin=6.0,
+                           virtual=list(virt) + reserve(ctx, nm), window_pts=wp,
+                           virtual_vias=vv, b_alts=ctx.dest_alts.get(nm),
+                           soft=soft, soft_vias=soft_v)
+        ctx.pcb.segments, ctx.pcb.vias = seg0, via0
+        if probe is None:
+            log(f'    rip for {nm}: no path even with every lane priced -- '
+                f'walled by static copper  ({_time.perf_counter() - t0:.1f} s)')
+            return None
+        reach = ctx.cfg.clearance + ctx.cfg.track_width
+        cut = []
+        for ps in probe[0]:
+            a, b = (ps.start_x, ps.start_y), (ps.end_x, ps.end_y)
+            for om, ss, vs in lanes:
+                if om in cut:
+                    continue
+                hit = any(x.layer == ps.layer and ts.seg_seg_dist(
+                    a, b, (x.start_x, x.start_y), (x.end_x, x.end_y))
+                    < reach + (x.width - ctx.cfg.track_width) / 2 + 1e-6 for x in ss) \
+                    or any(ts.seg_pt_dist(a, b, (x.x, x.y))
+                           < x.size / 2 + ctx.cfg.clearance + ctx.cfg.track_width / 2 + 1e-6
+                           for x in vs)
+                if hit:
+                    cut.append(om)
+        for pv in probe[1]:
+            for om, ss, vs in lanes:
+                if om in cut:
+                    continue
+                if any(ts.seg_pt_dist((x.start_x, x.start_y), (x.end_x, x.end_y), (pv.x, pv.y))
+                       < pv.size / 2 + ctx.cfg.clearance + x.width / 2 + 1e-6 for x in ss) \
+                        or any(math.hypot(x.x - pv.x, x.y - pv.y)
+                               < (x.size + pv.size) / 2 + ctx.cfg.clearance + 1e-6 for x in vs):
+                    cut.append(om)
+        log(f'    rip for {nm}: min-cut probe {len(probe[1])} via(s) crosses '
+            f'{cut or "nothing (a MISSED search)"}  ({_time.perf_counter() - t0:.1f} s)')
+        if not cut:
+            # the probe found a legal path through nothing: the last
+            # call's search was starved, not walled -- route it
+            trials = [[]]
+        else:
+            victims = cut[:max_victims]
+            trials = [victims[:k] for k in range(1, len(victims) + 1)]
+        # ...then the frontier's most exposed lanes, singly: a cut lane
+        # that cannot be re-laid is no victim, and the lane that holds
+        # the most of the frontier often can be (K41 SBA2: the cut set
+        # SCKE1/SA1/SA2 each lost a victim; SA8, first by exposure,
+        # re-laid at 4 then 0 vias)
+        for v, _c in named[:max_victims]:
+            if [v] not in trials:
+                trials.append([v])
+        for V in trials:
+            seg0, via0 = list(ctx.pcb.segments), list(ctx.pcb.vias)
+            ids_s = {id(x) for v in V for x in self.out_segs[v]}
+            ids_v = {id(x) for v in V for x in self.out_vias[v]}
+            ctx.pcb.segments = [x for x in seg0 if id(x) not in ids_s]
+            ctx.pcb.vias = [x for x in via0 if id(x) not in ids_v]
+            r1 = self.connect_ladder(nm, virt, vv, 'rip',
+                                     b_alts=ctx.dest_alts.get(nm))
+            if r1 is None or lane_crosses_foreign(ctx.pcb, nid, r1[0]):
+                ctx.pcb.segments, ctx.pcb.vias = seg0, via0
+                log(f'    rip {V}: {nm} still refused  '
+                    f'({_time.perf_counter() - t0:.1f} s)')
+                continue
+            ctx.pcb.segments.extend(r1[0])
+            ctx.pcb.vias.extend(r1[1])
+            relaid, lost = {}, None
+            for v in V:
+                vid, _ = ctx.byname[v]
+                rep2 = {}
+                r2 = self.connect_ladder(v, virt, vv, 'rip',
+                                         b_alts=ctx.dest_alts.get(v), report=rep2)
+                if r2 is None and depth > 0:
+                    # the victim negotiates in turn, the lane just placed
+                    # (and its own placer) protected
+                    r2 = self.rip_for(v, others, rep2, max_victims, depth - 1,
+                                      protect | {nm})
+                if r2 is None or lane_crosses_foreign(ctx.pcb, vid, r2[0]):
+                    lost = v
+                    break
+                ctx.pcb.segments.extend(r2[0])
+                ctx.pcb.vias.extend(r2[1])
+                relaid[v] = r2
+            if lost is not None:
+                ctx.pcb.segments, ctx.pcb.vias = seg0, via0
+                log(f'    rip {V}: {nm} routed ({len(r1[1])} via(s)) but '
+                    f'{lost} lost -- put back  ({_time.perf_counter() - t0:.1f} s)')
+                continue
+            log(f'    rip {V}: {nm} routed ({len(r1[1])} via(s)); re-laid '
+                + ', '.join(f'{v} {len(self.out_vias[v])} -> {len(r2[1])} via(s)'
+                            for v, r2 in relaid.items())
+                + f'  ({_time.perf_counter() - t0:.1f} s)')
+            for v, r2 in relaid.items():
+                self.out_segs[v], self.out_vias[v] = r2
+            # the caller appends the routed lane, as after any ladder
+            ids1 = {id(x) for x in r1[0]} | {id(x) for x in r1[1]}
+            ctx.pcb.segments = [x for x in ctx.pcb.segments if id(x) not in ids1]
+            ctx.pcb.vias = [x for x in ctx.pcb.vias if id(x) not in ids1]
+            return r1
         return None
 
 
@@ -3261,8 +3432,18 @@ def setup(board, names, dest, log, plan=None):
     # vias) because the braid's vias are structural (page dive and
     # surface, reserved weaves, legs), so a costlier via only buys
     # worse detours that force more of them.
+    # the board's own hole-to-hole floor when it is tighter than the
+    # config's default (the second bench, zynq_ad9364, declares 0.25 mm
+    # and its K28 shipped one drill-to-drill graze at the default 0.2);
+    # tighten-only, so a board declaring less than the default routes
+    # as before
+    from list_nets import board_constraint
+    h2h = board_constraint(board, 'min_hole_to_hole')
+    kw = {}
+    if h2h and h2h > cn.GridRouteConfig().hole_to_hole_clearance:
+        kw['hole_to_hole_clearance'] = float(h2h)
     ctx.cfg = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
-                             grid_step=0.025)
+                             grid_step=0.025, **kw)
     ctx.base_segments = list(pcb.segments)
     ctx.base_vias = list(pcb.vias)
     # each net's FANOUT copper, as it came: what a rip resets to
