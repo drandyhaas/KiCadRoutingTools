@@ -40,12 +40,34 @@ import run_utils                                              # noqa: E402
 
 CV = os.path.join(ROOT, 'py_placer', 'converge.py')
 BOARD = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
-LENSES = ['--lens', 'VERDICT=PASS:lens=connectivity',
-          '--lens', 'VERDICT=PASS:lens=drc',
-          '--lens', 'VERDICT=PASS:lens=spec']
-FAIL_LENSES = ['--lens', 'VERDICT=PASS:lens=connectivity',
-               '--lens', 'VERDICT=FAIL:lens=drc',
-               '--lens', 'VERDICT=PASS:lens=spec']
+
+
+def lenses(td, **verdicts):
+    """--lens-file flags for the three routed-board lenses, written into `td`.
+
+    These were three module-level `--lens` pairs until #904, which refuses a
+    BARE --lens on a `--final --kind completion` row: a close-out is the
+    terminal record, nothing reopens a ledger, and a line retyped from a reply
+    is a claim about the run where the row could carry a claim about a file.
+    The verdict now goes where verifier-prompts.md already required it to go,
+    and the row records its path and sha256.
+
+    Same helper, same defaults, as tests/test_converge.py::_lens_files.
+    """
+    out = []
+    for lens in ('connectivity', 'drc', 'spec'):
+        line = verdicts.get(lens, f'VERDICT=PASS:lens={lens}')
+        fp = os.path.join(td, f'verdict_{lens}.txt')
+        with open(fp, 'w', encoding='utf-8') as fh:
+            fh.write(line + '\n')
+        out += ['--lens-file', fp]
+    return out
+
+
+def fail_lenses(td):
+    return lenses(td, drc='VERDICT=FAIL:lens=drc')
+
+
 MANGLED = 'C:/Program Files/Git/D_P'
 
 fails = []
@@ -118,7 +140,7 @@ def test_the_stop_token_is_checked_with_every_lens_passing():
         led = os.path.join(td, 'l.jsonl')
         run_utils.check(
             _argv(td, '--final', '--stop-condition',
-                  'plateau: 3 iterations, no new copper') + LENSES,
+                  'plateau: 3 iterations, no new copper') + lenses(td),
             refuse='stop condition', code=2)
         check('nothing was written', not os.path.exists(led))
 
@@ -130,7 +152,7 @@ def test_a_token_with_a_reason_is_accepted_both_ways():
     print('\n-- 5. token + prose, with and without a FAIL lens --')
     with tempfile.TemporaryDirectory() as td:
         e = _accept(td, '--final', '--stop-condition',
-                    '4 (this half): the pair is parity-fixed', *LENSES)
+                    '4 (this half): the pair is parity-fixed', *lenses(td))
         check('token stored alone', e.get('stop_condition') == '4',
               e.get('stop_condition'))
         # LOSSLESS. The first cut partitioned the reason again on its own first
@@ -143,7 +165,7 @@ def test_a_token_with_a_reason_is_accepted_both_ways():
               e.get('stop_reason'))
     with tempfile.TemporaryDirectory() as td:
         e = _accept(td, '--final', '--stop-condition',
-                    '4: measured unfixable', *FAIL_LENSES)
+                    '4: measured unfixable', *fail_lenses(td))
         check('the same shape is accepted beside a FAIL lens',
               e.get('stop_condition') == '4', e.get('stop_condition'))
         check('and its reason survives',
@@ -197,12 +219,12 @@ def test_the_kind_flag_does_not_bypass_the_contradiction():
         with tempfile.TemporaryDirectory() as td:
             run_utils.check(
                 _argv(td, '--kind', kind, '--final', '--stop-condition',
-                      'DONE-EXHAUSTED: everything passed', *FAIL_LENSES),
+                      'DONE-EXHAUSTED: everything passed', *fail_lenses(td)),
                 refuse='contradiction', code=2)
     # ...and an ordinary (non-final) lap carrying a FAIL lens is still fine:
     # the checks are about --final, not about having a failing lens.
     with tempfile.TemporaryDirectory() as td:
-        _accept(td, '--lever', 'a rejected lap', '--rejected', *FAIL_LENSES)
+        _accept(td, '--lever', 'a rejected lap', '--rejected', *fail_lenses(td))
         check('a non-final lap with a FAIL lens still records', True)
 
 
@@ -212,11 +234,11 @@ def test_the_fail_lens_refusals_still_hold():
     with tempfile.TemporaryDirectory() as td:
         run_utils.check(
             _argv(td, '--final', '--stop-condition',
-                  'DONE-EXHAUSTED: everything passed', *FAIL_LENSES),
+                  'DONE-EXHAUSTED: everything passed', *fail_lenses(td)),
             refuse='contradiction', code=2)
     with tempfile.TemporaryDirectory() as td:
         run_utils.check(
-            _argv(td, '--final', '--stop-condition', '1: done', *FAIL_LENSES),
+            _argv(td, '--final', '--stop-condition', '1: done', *fail_lenses(td)),
             refuse='lens FAILED', code=2)
 
 
@@ -225,11 +247,11 @@ def test_a_reason_given_twice_and_differently_is_refused():
     with tempfile.TemporaryDirectory() as td:
         run_utils.check(
             _argv(td, '--final', '--stop-condition', '4: one story',
-                  '--stop-reason', 'a different story', *LENSES),
+                  '--stop-reason', 'a different story', *lenses(td)),
             refuse='given twice', code=2)
     with tempfile.TemporaryDirectory() as td:
         e = _accept(td, '--final', '--stop-condition', '4',
-                    '--stop-reason', 'the only story', *LENSES)
+                    '--stop-reason', 'the only story', *lenses(td))
         check('--stop-reason alone works',
               e.get('stop_reason') == 'the only story', e.get('stop_reason'))
 

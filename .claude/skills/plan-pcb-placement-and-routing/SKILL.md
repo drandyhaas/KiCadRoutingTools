@@ -103,6 +103,26 @@ cannot spawn cannot verify itself. (The older wording here said a subagent
 cannot spawn a subagent. That is false in this harness and has been retired; the
 constraint is the agent *type*.)
 
+**A half's own verifiers are its own gate. The RUN-CLOSING verdict is dispatched
+once, by this loop, on the board it is about to ship — the same board is not
+verified by both halves.** The outer loop used to assert that the routing half
+fanned out the three routed-board lenses at its close-out; the routing skill
+contains no such instruction and never has, so the close-out was quoting a
+verification nobody had been asked to run. And a half closes out on the board it
+finished with: anything after that — a pour, a repair, a placement re-entry —
+leaves its verdicts stale, and a verdict recorded against a board it did not
+read is the defect this loop exists to catch.
+
+**The agent TYPE is a cost decision, so make it rather than default it.** A
+fresh agent starts empty and will rebuild the context it was not given — one
+measured half spent its first hour writing read-only probe scripts for facts
+this loop already held. A fork starts with the parent's whole conversation and
+rebuilds nothing, but carries those tokens into every turn of its own, mostly
+cached, and is a bigger context to reason inside. The fork buys the REBUILD, not
+the per-turn cost. Fork when the parent holds facts the half cannot re-derive
+from the files named in its brief; use a fresh agent when everything it needs is
+one of those files; and say in the report which you chose.
+
 State crosses the boundary on DISK, in the converge ledger, never in a head.
 That is what makes a re-entry able to say what was already tried.
 
@@ -166,11 +186,23 @@ because the keys had already said clean. Observations must carry distances or
 mm² the keys alone cannot produce; that is what separates a review from
 theater.
 
+Watchers are the other half of looking, and they are armed by their PROMPT, not
+by their process: write each one's brief to `<workdir>/watch/<name>_prompt.md`
+before the first tool runs — the mtime is the evidence that the brief was not
+tailored to the outcome — then spawn ONE agent with one section per brief at the
+end, on a smaller model, fed `REPORT.md`, `cmd_timing.jsonl` and `ledger.jsonl`
+first and the raw logs only when a section names one. `tests/stress/RUNBOOK.md`
+has the mechanics; `tests/stress/run_watch.py` is the part that costs nothing to
+leave running and should be started at the beginning.
+
 ## What a run DELIVERS
 
-Four artifacts, every time, in the work dir. A run that produces the board alone
-is not finished — the other three are how anyone else can tell whether the board
-is good, and they are the first thing to get skipped under time pressure.
+Seven artifacts, every time, in the work dir, **AND IN THIS ORDER**. A run that
+produces the board alone is not finished — the rest are how anyone else can tell
+whether the board is good, and they are the first thing to get skipped under
+time pressure. The order is load-bearing, not housekeeping: each of the middle
+three is an input to the next, and two of them stop being evidence if they are
+written out of turn.
 
 1. **The board** — the final `.kicad_pcb` WITH its sibling `.kicad_pro` (the DRC
    floor rides in the project; a board without it is ungradeable, #441). State
@@ -179,8 +211,30 @@ is good, and they are the first thing to get skipped under time pressure.
    boards. `place_route_loop` makes one by default; a hand-driven chain does
    NOT, so build it explicitly. `KICAD_ROUTE_TRACE=1` (the default) gives the
    fine per-copper rip/restore animation.
-3. **The report** — `REPORT.md`, and it compares on TWO axes or it is not a
-   report:
+3. **The verifiers' verdicts, on disk** — one file per routed-board lens
+   (`verdict_connectivity.txt`, `verdict_drc.txt`, `verdict_spec.txt`) and one
+   for the close-out boundary verification (`verdict_record.txt`), each holding
+   that verifier's `VERDICT=` line as its first line, beside the ledger. They
+   are written BEFORE the entry that records them, because that entry records
+   them: `converge.py record --lens-file` reads the line from the file and
+   stores the file's sha256 in the row. A verdict produced after the row that
+   must carry it can only be recorded by appending a second close-out.
+4. **The `--final` ledger entry** — the stop condition, named, with those files
+   attached. It is the LAST row: nothing in this toolchain reopens a ledger, so
+   every measurement it quotes has to exist before it is written, and its
+   verdict must be reproducible from the ledger as it stood the moment before.
+5. **The `DONE` marker** — written LAST of everything a machine waits on, and
+   citing only files that already exist. DONE means the copper is frozen, not
+   that the run is over: `run_watch.py cheats --done` blocks on it, runs the
+   fence and provenance audits when it appears, and then exits, so a marker
+   written early declares a run finished while its own auditors have not
+   started.
+6. **The report** — `REPORT.md`, written AFTER `DONE` so it can carry the two
+   verdicts that only exist by then: the fence audit's and the provenance
+   audit's, each quoted with its exit code. That makes the report the one
+   artifact the cheat watcher cannot audit, which is exactly why it quotes
+   those two verbatim instead of summarising them. And it compares on TWO axes
+   or it is not a report:
    - **against the human**, when a human-routed reference exists:
      `compare_to_original.py --ours <final> --orig <reference> --json` (vias,
      copper length, width spread, layer balance). The human layout is one
@@ -190,11 +244,37 @@ is good, and they are the first thing to get skipped under time pressure.
      with TODAY's graders. Never diff against numbers stored in an old report:
      the graders here drift within days, and a re-grade has moved rows in both
      directions.
+   - **against the run's own waivers**, by name. List every waiver token this
+     run spent, with the command that spent it and its one-line reason:
+     `--accept-residue` (`buildable`, `verdict`, `locked_contacts`, `blocking`,
+     `oob_pad_count`), `--accept-unclosed` (`instruments`, `fab_floors`,
+     `ungraded`, `agreement`, `verifier`), `--accept-congestion <reason>`,
+     `converge.py record --accept-incommensurable <reason>`, and the placement
+     half's `--waive <name>:<reason>`. Write `none` when none were spent. Every
+     one of those names a check that REFUSED and was overridden; an unlisted
+     waiver is a refusal that reached the report as a pass, and a report with no
+     waivers line does not say a run spent none — it says nobody looked.
+   - **against its own cost.** One table: per agent, its reported
+     `subagent_tokens` and tool-use count, plus the wall time and the total from
+     `cmd_timing.jsonl`'s `wall_s`. It is transcription, not measurement, and it
+     is the only artifact that tells the next run where the window went.
    Lead with `blocking`; quality (vias, copper_mm, segments) is the tie-break
    once blocking is 0.
-4. **The journal** — numbered entries, written as you go, each carrying the
+7. **The journal** — numbered entries, written as you go, each carrying the
    measurement behind it and the command that produced it. Batch-writing it
-   afterwards is detectable and has been detected.
+   afterwards is detectable and has been detected. Its last entry is the
+   close-out, written after the report it describes.
+
+**Every `converge.py record` a close-out writes goes through
+`tests/stress/tee_cmd.py`.** converge's `record`, `verdict` and `status` modes
+print JSON on stdout, so converge installs no `CMD:` banner and must not — a
+banner line would corrupt the document its own caller parses. The cheat watcher
+reads each tool's argv off those banners, so an unbannered tool is invisible to
+it unless something else writes its argv down; `tee_cmd` is that something,
+appending one `cmd_timing.jsonl` row per invocation with the argv, the exit code
+and the elapsed time. The close-out record is the call least able to afford
+being the one nobody can replay. Wait on `logs/<label>.done`, never on a log
+line.
 
 ## Blind subjects, and the fence
 
@@ -949,10 +1029,17 @@ per-step timestamps said so), and one `[read:]` tag claiming a pixel read
 that never happened. Both were honest-looking entries a contemporaneous
 check would have bounced in seconds.
 
-**The rule: after every ACCEPTED iteration's ledger entry, and at close-out,
-an independent subagent verifies the entry against its artifacts BEFORE the
-next step may start. A FAIL blocks; remediate (fix the entry, re-read the
-artifact, or re-run the step) and re-verify.**
+**The rule: after every ACCEPTED iteration's ledger entry, and BEFORE the
+run-closing one, an independent subagent verifies against the artifacts, and
+nothing proceeds until it has answered. A FAIL blocks; remediate (fix the entry,
+re-read the artifact, or re-run the step) and re-verify.**
+
+**In-loop it verifies an entry that EXISTS. At close-out it verifies the ledger
+that is about to be closed** — every row except the `--final` one, which does
+not exist yet and whose content is this verifier's own answer. That asymmetry is
+the point: a boundary check that runs after the row it is meant to gate can only
+be recorded by appending a second close-out, and an append-only ledger with two
+close-outs has not recorded a verdict, it has recorded a disagreement.
 
 What the boundary verifier receives — and it must be ONLY this, never the
 raw board (it verifies the RECORD, not the routing):
@@ -996,8 +1083,20 @@ Cadence discipline: REJECTED iterations do not get a boundary verification
 and the verifier is bounded to the slices above — handing it the whole work
 dir invites it to re-litigate routing decisions, which is the convergence
 loop's job, not the record-keeper's. The close-out boundary verification
-additionally walks the WHOLE ledger for checks 3 and 4 (monotone t-stamps
-end to end; the final entry's stop condition quoted against its score).
+additionally walks the WHOLE ledger for checks 3 and 4 — monotone t-stamps end
+to end, and every claim traced to an artifact. "The whole ledger" is every row
+that exists when it runs, which is every row but the `--final` one: it is
+dispatched to DECIDE that row, so it cannot read it. What it checks in that
+row's place is the stop condition the stage just printed against the score that
+stage measured — the same pair, one step earlier, and reproducible afterwards
+because both are on disk.
+
+**It writes its verdict to a file named for its lens, beside the ledger**
+(`verdict_connectivity.txt`, `verdict_drc.txt`, `verdict_spec.txt`, and
+`verdict_record.txt` for this boundary check — `references/verifier-prompts.md`),
+and the `--final` entry attaches those files with `--lens-file` rather than a
+retyped line. A verdict that reaches the row only through somebody's memory of a
+reply is not a second instrument; it is the first one paraphrased.
 
 #### 9.5 — Stop conditions. Only these four. Say which one fired, every time.
 
