@@ -47,7 +47,8 @@ SU = os.path.join(ROOT, 'tests', 'stress', 'stage_unaided.py')
 SB = os.path.join(ROOT, 'tests', 'stress', 'stage_blind.py')
 PV = os.path.join(ROOT, 'py_placer', 'placement', 'provenance.py')
 RW = os.path.join(ROOT, 'tests', 'stress', 'run_watch.py')
-TARGETS = {'su': SU, 'sb': SB, 'pv': PV, 'rw': RW}
+PA = os.path.join(ROOT, 'tests', 'stress', 'provenance_audit.py')
+TARGETS = {'su': SU, 'sb': SB, 'pv': PV, 'rw': RW, 'pa': PA}
 
 T_903 = os.path.join(TESTS, 'test_903_stagers_arm_the_regime.py')
 T_PROV = os.path.join(TESTS, 'test_provenance_audit.py')
@@ -65,12 +66,13 @@ ROWS = [
     # manifest, no ledger, no refusal, UNPROVEN forever.
     ('the-unaided-stager-never-arms', 'su',
      "    _PV.start_regime(_wd, out_board, mechanical=os.path.abspath(mech),\n"
-     "                     restaged_over_rows=_prior)\n",
+     "                     prior_ledger_rows=_prior,\n"
+     "                     prior_stagings=_prior_stagings)\n",
      "",
      (T_903, T_PROV), 'KILLED'),
 
     ('the-blind-stager-never-arms', 'sb',
-     "    _PV.start_regime(workdir, out)\n",
+     "    _PV.start_regime(os.path.dirname(os.path.abspath(out)), out)\n",
      "",
      (T_903,), 'KILLED'),
 
@@ -115,25 +117,77 @@ ROWS = [
      "    write_placed_output(src, out_board, placements)\n",
      (T_PROV,), 'KILLED'),
 
-    # The inverse: declare UNCONDITIONALLY. Innermost-wins then replaces the
-    # CLI's argv-bearing declaration with an argv-less one, and run_watch's
-    # ledger scanner -- which reads `lever_argv` and never `lever` -- goes
-    # blind to every staging invocation. Nothing about the board changes.
-    ('the-inner-declaration-eats-the-cli-argv', 'su',
+    # The inverse: declare UNCONDITIONALLY, which breaks innermost-wins in the
+    # one direction that matters. `declare_lever`'s contract is that "a tool
+    # that shells out to another still attributes to the one doing the
+    # writing" -- an inner declaration that always fires attributes a staging
+    # performed INSIDE another lever's scope to the stager instead of to the
+    # caller, so the ledger names the wrong tool. Nothing about the board
+    # changes, and (since the row is redacted either way) nothing about the
+    # fence does either; only the attribution is wrong.
+    ('the-inner-declaration-overrides-its-caller', 'su',
      "    with (contextlib.nullcontext() if _PV.active_lever() is not None\n"
      "          else _PV.declare_lever('stage_unaided.py')):\n",
      "    with _PV.declare_lever('stage_unaided.py'):\n",
-     (T_903,), 'KILLED'),
+     (T_PROV,), 'KILLED'),
 
     # ---- the disclosure that keeps a restage honest -----------------------
     # Read AFTER the staging write instead of before, so the count includes
     # this call's own row and "restaged over 1 row" becomes true of a dir
     # nothing had restaged. A one-line move that reads as a tidy-up.
-    ('restaged-over-rows-counts-its-own-row', 'su',
-     "    _prior = len(_PV.read_ledger(_wd)) if os.path.isfile(\n"
-     "        os.path.join(_wd, _PV.LEDGER_NAME)) else 0\n",
-     "    _prior = 0\n",
+    ('prior-stagings-counts-its-own-row', 'su',
+     "    _rows = _PV.read_ledger(_wd)\n",
+     "    _rows = []\n",
      (T_903, T_PROV), 'KILLED'),
+
+    # ...and it is a STAGING count, not a row count. An unfiltered total reads
+    # "restaged over 47 rows" on a dir restaged once -- measured, four
+    # place_seed candidate writes made it say 4.
+    ('prior-stagings-counts-every-engine-write-too', 'su',
+     "    _prior_stagings = sum(1 for _r in _rows\n"
+     "                          if _r.get('lever') in _PV.FENCE_SENSITIVE_LEVERS)\n",
+     "    _prior_stagings = len(_rows)\n",
+     (T_903,), 'KILLED'),
+
+    # ---- the fence leak this PR would otherwise have opened ---------------
+    # The ledger lives INSIDE the work dir. Unredacted, a staging row holds
+    # `lever_argv` naming the source board and the truth dir, `refs_moved`
+    # naming the perturbed block, and poses that are the control's -- and
+    # fence_audit cannot see it, because `.jsonl` is not a scanned extension.
+    ('the-staging-row-is-not-redacted', 'pv',
+     "    if lever['lever'] in FENCE_SENSITIVE_LEVERS:\n",
+     "    if False:\n",
+     (T_903,), 'KILLED'),
+
+    # Redacted, but keeping the argv -- the single most valuable field to a
+    # run trying to identify its own source board.
+    ('the-redacted-row-keeps-the-argv', 'pv',
+     "        row = {'t': row['t'], 'schema': SCHEMA, 'path': row['path'],\n"
+     "               'lever': row['lever'], 'declared': True,\n"
+     "               'caller': row['caller'],\n",
+     "        row = {'t': row['t'], 'schema': SCHEMA, 'path': row['path'],\n"
+     "               'lever': row['lever'], 'declared': True,\n"
+     "               'caller': row['caller'],\n"
+     "               'lever_argv': lever['lever_argv'],\n",
+     (T_903,), 'KILLED'),
+
+    # ---- the nested-stage laundering channel ------------------------------
+    # A nested staging row's `path` points into the inner dir and became the
+    # OUTER dir's delivered board, so a drifted board went from VIOLATION to
+    # CLEAN purely by staging a sub-experiment underneath it.
+    ('a-nested-staging-row-can-be-the-delivered-board', 'pa',
+     "            if r.get('lever') in PV.FENCE_SENSITIVE_LEVERS:\n"
+     "                continue\n",
+     "",
+     (T_903,), 'KILLED'),
+
+    # ---- the baseline nobody checked --------------------------------------
+    # `staged_sha256` was written and read by nobody, and the whole audit is a
+    # comparison against that file.
+    ('the-stale-manifest-is-not-detected', 'pa',
+     "    if _sha and _sha != PV.sha256_file(staged):\n",
+     "    if False:\n",
+     (T_903,), 'KILLED'),
 
     # ---- the watcher gap this PR opened, and closed -----------------------
     ('the-restage-counter-forgets-the-unaided-stager', 'rw',

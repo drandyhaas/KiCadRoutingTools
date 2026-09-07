@@ -400,8 +400,14 @@ def main(src, workdir, truthdir, kinds=None):
     # ARE the fence. Both belong in the truth dir, which is where `draw.json`
     # below already puts them. A manifest lives inside the work dir, so
     # anything passed here is inside the fence.
-    _PV.start_regime(workdir, out)
-    print(f'  regime armed: {os.path.join(workdir, _PV.REGIME_NAME)} -- an '
+    # From the BOARD, not from the `workdir` argument, for the reason
+    # stage_unaided gives: `regime_for` walks up from the file being written,
+    # so the regime has to govern the directory the board actually lives in.
+    # They agree today (`out` is built from `workdir` at the top of this
+    # function); deriving it twice from the same place is what keeps them
+    # agreeing after someone changes one of them.
+    _PV.start_regime(os.path.dirname(os.path.abspath(out)), out)
+    print(f'  regime armed: {os.path.join(os.path.dirname(os.path.abspath(out)), _PV.REGIME_NAME)} -- an '
           f'undeclared pose write in this dir now RAISES')
 
     with open(os.path.join(truthdir, 'draw.json'), 'w', encoding='utf-8') as f:

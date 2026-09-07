@@ -142,19 +142,59 @@ try:
        len(lr) == 1, str(len(lr)))
     ck('...under its own lever', lr[0]['lever'] == 'stage_unaided.py',
        lr[0]['lever'])
-    # `lever_argv` is what run_watch's ledger scanner reads. An inner
-    # declaration that replaced the CLI's would silently blind it.
-    ck('...carrying the CLI argv, not an argv-less inner declaration',
-       bool(lr[0].get('lever_argv'))
-       and any('stage_unaided' in str(t) for t in lr[0]['lever_argv']),
-       str(lr[0].get('lever_argv'))[:90])
+    # ...AND THE ROW SAYS NOTHING ELSE. The ledger lives in the work dir,
+    # which is inside the fence. Unredacted, this row held `lever_argv`
+    # naming the SOURCE BOARD and the truth dir, `refs_moved` naming the
+    # perturbed block, and 65 `poses_written` of which 56 were the control
+    # pose -- the answer key, in a file the run can read, which `fence_audit`
+    # cannot see because `.jsonl` is not a scanned extension.
+    ck('a staging row carries no argv, no parent hash and no poses',
+       not {'lever_argv', 'parent_sha256', 'poses_written', 'refs_written',
+            'refs_moved', 'sides_written'} & set(lr[0]),
+       str(sorted(lr[0])))
+    ck('...and says so, rather than looking like a row that never had them',
+       'fence' in (lr[0].get('redacted') or ''), str(lr[0].get('redacted')))
+    blob = open(ledger, encoding='utf-8').read()
+    ck('the ledger names neither the source board nor the truth dir',
+       'splitflap' not in blob and os.path.basename(td) not in blob,
+       blob[:160])
     m2 = json.load(open(manifest, encoding='utf-8'))
-    ck('restaged_over_rows counts rows that PREDATE the restage, not its own',
-       m2['restaged_over_rows'] == 0, str(m2['restaged_over_rows']))
+    ck('prior_stagings counts rows that PREDATE the restage, not its own',
+       m2['prior_stagings'] == 0, str(m2['prior_stagings']))
     check(PY + [STAGE_UNAIDED, BOARD, wd, td], accept=True)
     m3 = json.load(open(manifest, encoding='utf-8'))
     ck('...and rises by one on the next restage',
-       m3['restaged_over_rows'] == 1, str(m3['restaged_over_rows']))
+       m3['prior_stagings'] == 1, str(m3['prior_stagings']))
+    # ...and it is a STAGING count, not a row count. An engine write in the
+    # same dir must not inflate it, or "restaged over 47 rows" is what a dir
+    # restaged once reports.
+    lever = os.path.join(_tmp, 'lever_pose.py')
+    with open(lever, 'w', encoding='utf-8') as fh:
+        fh.write(
+            "import os, sys\n"
+            "ROOT = sys.argv[3]\n"
+            "for p in (os.path.join(ROOT, 'py_router'),\n"
+            "          os.path.join(ROOT, 'py_placer')):\n"
+            "    sys.path.insert(0, p)\n"
+            "from kicad_parser import parse_kicad_pcb\n"
+            "from placement.provenance import declare_lever\n"
+            "from placement.writer import write_placed_output\n"
+            "src, dst = sys.argv[1], sys.argv[2]\n"
+            "pcb = parse_kicad_pcb(src)\n"
+            "refs = sorted(pcb.footprints)[:3]\n"
+            "mv = [{'reference': r, 'new_x': 12.0 + i, 'new_y': 34.0,\n"
+            "       'new_rotation': 0.0} for i, r in enumerate(refs)]\n"
+            "with declare_lever('place_optimize.py', sys.argv):\n"
+            "    print(write_placed_output(src, dst, mv))\n")
+    delivered = os.path.join(wd, 'placed.kicad_pcb')
+    check(PY + [lever, board, delivered, ROOT], accept=True)
+    check(PY + [STAGE_UNAIDED, BOARD, wd, td], accept=True)
+    m4 = json.load(open(manifest, encoding='utf-8'))
+    ck('an ENGINE write does not inflate prior_stagings',
+       m4['prior_stagings'] == 2, str(m4['prior_stagings']))
+    ck('...while prior_ledger_rows does count it, which is the laundering '
+       'number', m4['prior_ledger_rows'] > m4['prior_stagings'],
+       f"rows {m4['prior_ledger_rows']} stagings {m4['prior_stagings']}")
 
     # ----------------------------------------------------------------- 4
     # THE POINT, end to end, with run 25's OWN hand script shape: a script
@@ -187,9 +227,29 @@ try:
 
     # ----------------------------------------------------------------- 5
     # A registered lever in the same dir audits CLEAN. This is M1's exit
-    # criterion: PROVENANCE reads something other than UNPROVEN.
-    lever = os.path.join(_tmp, 'lever_pose.py')
-    with open(lever, 'w', encoding='utf-8') as fh:
+    # criterion: PROVENANCE reads something other than UNPROVEN. The lever
+    # and its delivered board were written in step 3, above.
+    r = check(PY + [AUDIT, '--workdir', wd, '--delivered', delivered],
+              accept=True)
+    ck('a registered lever in a staged work dir audits CLEAN',
+       'VERDICT: CLEAN' in r.stdout, (r.stdout or '').strip()[:120])
+    js = json.loads(r.stdout.split('JSON_SUMMARY: ', 1)[1].splitlines()[0])
+    # Not vacuous: a CLEAN over zero moved poses would pass against a tree
+    # where nothing was ever recorded.
+    ck('...over poses that really moved, so CLEAN is not vacuous',
+       js['moved'] > 0 and js['claimed'] >= js['moved'],
+       f"moved {js['moved']} claimed {js['claimed']}")
+
+    # --------------------------------------------------------------- 5b
+    # A NESTED stage must not launder a violation. The inner board is written
+    # before the inner manifest exists, so `regime_for` binds that write to
+    # the OUTER regime and appends a row whose `path` points into the inner
+    # dir. Being the newest row it used to become the outer dir's "delivered
+    # board" -- so the real one was never audited, and a hand-edited board
+    # went from UNAIDED VIOLATION (exit 4) to CLEAN (exit 0) purely by
+    # staging a sub-experiment underneath it.
+    hand2 = os.path.join(_tmp, 'edit_pose.py')
+    with open(hand2, 'w', encoding='utf-8') as fh:
         fh.write(
             "import os, sys\n"
             "ROOT = sys.argv[3]\n"
@@ -202,22 +262,45 @@ try:
             "src, dst = sys.argv[1], sys.argv[2]\n"
             "pcb = parse_kicad_pcb(src)\n"
             "refs = sorted(pcb.footprints)[:3]\n"
-            "mv = [{'reference': r, 'new_x': 12.0 + i, 'new_y': 34.0,\n"
+            "mv = [{'reference': r, 'new_x': 90.0 + i, 'new_y': 70.0,\n"
             "       'new_rotation': 0.0} for i, r in enumerate(refs)]\n"
             "with declare_lever('place_optimize.py', sys.argv):\n"
             "    print(write_placed_output(src, dst, mv))\n")
-    delivered = os.path.join(wd, 'placed.kicad_pcb')
-    check(PY + [lever, board, delivered, ROOT], accept=True)
-    r = check(PY + [AUDIT, '--workdir', wd, '--delivered', delivered],
-              accept=True)
-    ck('a registered lever in a staged work dir audits CLEAN',
-       'VERDICT: CLEAN' in r.stdout, (r.stdout or '').strip()[:120])
-    js = json.loads(r.stdout.split('JSON_SUMMARY: ', 1)[1].splitlines()[0])
-    # Not vacuous: a CLEAN over zero moved poses would pass against a tree
-    # where nothing was ever recorded.
-    ck('...over poses that really moved, so CLEAN is not vacuous',
-       js['moved'] > 0 and js['claimed'] >= js['moved'],
-       f"moved {js['moved']} claimed {js['claimed']}")
+    # Drift the delivered board AWAY from where its lever claimed to put it.
+    # Written OUTSIDE the work dir -- `regime_for` walks up and finds no
+    # manifest there -- then copied in. The copy leaves no ledger row, which
+    # is what a hand edit of `(at ...)` looks like to the audit.
+    drifted = os.path.join(_tmp, 'drifted.kicad_pcb')
+    check(PY + [hand2, delivered, drifted, ROOT], accept=True)
+    shutil.copyfile(drifted, delivered)
+    r = check(PY + [AUDIT, '--workdir', wd, '--delivered', delivered], code=4,
+              refuse='are NOT where the lever')
+    ck('a drifted delivered board is an UNAIDED VIOLATION', True)
+    inner = os.path.join(wd, 'inner')
+    check(PY + [STAGE_UNAIDED, BOARD, inner, os.path.join(_tmp, 'truth2')],
+          accept=True)
+    r = check(PY + [AUDIT, '--workdir', wd], code=4,
+              refuse='are NOT where the lever')
+    ck('...and a nested stage underneath it does NOT launder it to CLEAN',
+       'inner' not in (r.stdout or ''), (r.stdout or '')[:160])
+
+    # --------------------------------------------------------------- 5c
+    # A manifest that describes a board no longer on disk is UNPROVEN, not a
+    # baseline. `staged_sha256` was written and read by nobody, and the whole
+    # audit is a comparison against this file -- reachable without bad faith,
+    # since `stage()` writes the board first and arms last and the steps
+    # between can raise.
+    stale = os.path.join(_tmp, 'stale')
+    check(PY + [STAGE_UNAIDED, BOARD, stale, os.path.join(_tmp, 't_stale')],
+          accept=True)
+    sm = os.path.join(stale, REGIME)
+    doc = json.load(open(sm, encoding='utf-8'))
+    doc['staged_sha256'] = '0' * 64
+    with open(sm, 'w', encoding='utf-8') as fh:
+        json.dump(doc, fh)
+    check(PY + [AUDIT, '--workdir', stale], code=5,
+          refuse='describes a DIFFERENT board')
+    ck('a manifest whose hash no longer matches the board is UNPROVEN', True)
 
     # ----------------------------------------------------------------- 6
     # The fence is unharmed, in BOTH modes. The manifest is a `.json` inside
@@ -230,6 +313,10 @@ try:
     fm = os.path.join(wd, '.fence-manifest.json')
     evidence(fm, 'the fence creation manifest')
     fj = json.load(open(fm, encoding='utf-8'))
+    # The manifest is a `.json` and IS opened; it becomes no row because it
+    # has no `original_poses`. The ledger is `.jsonl` and is not opened at
+    # all -- deliberately, see the SCANNED_EXT note in fence_audit.py. Either
+    # way neither may be a fence row.
     ck('neither provenance file is a fence row',
        not any(REGIME in f or LEDGER in f for f in fj.get('files') or ()),
        str(fj.get('files'))[:140])
@@ -276,8 +363,16 @@ try:
     # row is the source that works.
     sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
     import run_watch as RW  # noqa: E402
-    ck('run_watch counts a recorded re-stage from the ledger',
-       RW._ledger_stagings(ledger) == 2, str(RW._ledger_stagings(ledger)))
+    # RE-DERIVED, not a constant: a hardcoded total silently stops meaning
+    # anything the next time a step is added above it, and would have to be
+    # edited rather than consulted.
+    want_n = len([r for r in rows(ledger)
+                  if r.get('lever') in ('stage_unaided.py', 'stage_blind.py')])
+    ck('run_watch counts every recorded re-stage in the ledger, and only those',
+       RW._ledger_stagings(ledger) == want_n and want_n >= 2,
+       f'{RW._ledger_stagings(ledger)} vs {want_n} staging rows')
+    ck('...which redaction did NOT break -- it reads `lever`, which survives',
+       all('lever' in r for r in rows(ledger)), str(sorted(rows(ledger)[0])))
     # BOTH stagers, asserted against a synthetic ledger rather than against a
     # blind dir that happens to hold no restage -- "0 restages here" is true
     # of a matcher that names neither.

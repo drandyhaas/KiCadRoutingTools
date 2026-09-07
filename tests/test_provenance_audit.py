@@ -401,21 +401,61 @@ check("and it really moved something, so CLEAN is not vacuous",
       _doc903['moved'] > 0 and _doc903['claimed'] >= _doc903['moved'],
       f"moved {_doc903['moved']} claimed {_doc903['claimed']}")
 
-# `restaged_over_rows` is read BEFORE the staging write. Under an armed dir
+# `prior_stagings` is read BEFORE the staging write. Under an armed dir
 # that write records a row of its own, so a count taken afterwards would say
 # "restaged over 1 row" about a dir nothing had restaged.
 _pre903 = len(PV.read_ledger(_wd903))
+_pre_st903 = len([r for r in PV.read_ledger(_wd903)
+                  if r.get('lever') in PV.FENCE_SENSITIVE_LEVERS])
 SU.stage(BOARD, _out903, os.path.join(_d903, 'truth'))
 _m2903 = _json.load(open(os.path.join(_wd903, PV.REGIME_NAME), encoding='utf-8'))
 check("a RESTAGE into an armed dir is permitted, not refused",
       os.path.isfile(_out903), _out903)
-check("restaged_over_rows counts the rows that PREDATE the restage, never "
-      "the restage's own", _m2903['restaged_over_rows'] == _pre903,
-      f"{_m2903['restaged_over_rows']} vs {_pre903} before")
+check("prior_stagings counts the STAGINGS that predate the restage, never "
+      "the restage's own", _m2903['prior_stagings'] == _pre_st903,
+      f"{_m2903['prior_stagings']} vs {_pre_st903} before")
+# TWO numbers, because one cannot answer both questions: `prior_stagings` is
+# "was this restaged" and must not count the engine's writes, while
+# `prior_ledger_rows` is the laundering number -- rows that survive the
+# overwritten manifest and still populate `claimed`.
+check("...while prior_ledger_rows counts every row, engine writes included",
+      _m2903['prior_ledger_rows'] == _pre903
+      and _m2903['prior_ledger_rows'] > _m2903['prior_stagings'],
+      f"rows {_m2903['prior_ledger_rows']} stagings "
+      f"{_m2903['prior_stagings']} (before: {_pre903})")
 check("and the restage records itself under its own lever",
       any(r.get('lever') == 'stage_unaided.py'
           for r in PV.read_ledger(_wd903)),
       str([r.get('lever') for r in PV.read_ledger(_wd903)]))
+
+# INNERMOST-WINS, in the direction the stager's own declaration could break
+# it. `declare_lever`'s contract is that "a tool that shells out to another
+# still attributes to the one doing the writing" -- so the stager declares
+# only when NOTHING else has. An unconditional inner declaration would
+# attribute a staging performed inside another lever's scope to the stager,
+# and the ledger would name the wrong tool.
+_before903 = len(PV.read_ledger(_wd903))
+with PV.declare_lever('place_route_loop.py', ['place_route_loop.py']):
+    SU.stage(BOARD, _out903, os.path.join(_d903, 'truth'))
+_new903 = PV.read_ledger(_wd903)[_before903:]
+check("a stage inside another lever's scope is attributed to the CALLER",
+      len(_new903) == 1 and _new903[0]['lever'] == 'place_route_loop.py',
+      str([r.get('lever') for r in _new903]))
+
+# A staging row carries NOTHING ELSE. The ledger sits in the work dir, which
+# is inside the fence: unredacted, this row held `lever_argv` naming the
+# source board AND the truth dir, `refs_moved` naming the perturbed block,
+# and poses that on a blind stage are the control's.
+_st903 = [r for r in PV.read_ledger(_wd903)
+          if r.get('lever') == 'stage_unaided.py'][0]
+check("a staging row carries no argv, no parent hash and no poses",
+      not {'lever_argv', 'parent_sha256', 'poses_written', 'refs_written',
+           'refs_moved', 'sides_written'} & set(_st903), str(sorted(_st903)))
+check("...and an ENGINE row still carries them, so redaction is scoped",
+      any(r.get('poses_written') for r in PV.read_ledger(_wd903)
+          if r.get('lever') == 'place_optimize.py'),
+      str([sorted(r) for r in PV.read_ledger(_wd903)
+           if r.get('lever') == 'place_optimize.py'][:1]))
 
 # --------------------------------------------------------------------------
 # A CLAIM IS ONLY GOOD FOR THE POSE IT CLAIMED

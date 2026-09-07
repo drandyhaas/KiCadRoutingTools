@@ -206,6 +206,24 @@ def _json_poses(path):
 #: this scan opened one file and returned CLEAN. A `.kicad_pro` carries no
 #: poses, so it is checked for IDENTITY rather than placement: see
 #: `_names_control`.
+#: `.jsonl` IS DELIBERATELY ABSENT, and this is the reasoning, because the
+#: obvious fix is wrong and someone will try it.
+#:
+#: #903 armed the provenance regime, which puts `.pose-provenance.jsonl` in
+#: the work dir. Its staging rows once carried an argv naming the source board
+#: and the truth dir; that is a real leak and it is fixed AT THE SOURCE, by
+#: `placement.provenance.FENCE_SENSITIVE_LEVERS`, which redacts a staging row
+#: down to "a staging happened".
+#:
+#: Adding `.jsonl` here as well looks like defence in depth and is not. The
+#: ledger's remaining pose content is `poses_written` on ENGINE rows -- the
+#: run's OWN writes, which are also on the boards, which this scan already
+#: reads and which `--mode audit` triages correctly. Fed through this scan
+#: they would be `kind == 'record'` instead, and a record is the FIRST audit
+#: branch and an unconditional leak. So a recovery run that succeeded --
+#: whose poses land ON the control, "one run-7 board did, at d1 = 0.000000",
+#: the case this module's own docstring insists must not be a breach -- would
+#: be reported as a LEAK by its own ledger. Measured while writing #903.
 SCANNED_EXT = ('.kicad_pcb', '.json', '.kicad_pro')
 
 
