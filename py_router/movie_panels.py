@@ -404,7 +404,13 @@ def _report(state, detail='', **kw):
     return r
 
 
-def compose_two_panel(frames, marks, final_board, opts=None, quiet=False):
+def compose_two_panel(frames, marks, final_board, opts=None):
+    # No `quiet` parameter. It was declared here and read by NOTHING,
+    # while make_movie dutifully passed `quiet=quiet` -- so the call site
+    # looked like it was doing something. In a change whose own commit is
+    # titled "three things that were DECLARED and read by nothing", a
+    # fourth would have been quite the finish. This function prints
+    # nothing; its caller owns the one status line.
     """``(frames, report)``. Stack the iso panel under every frame, IN PLACE.
 
     ``frames`` comes back as the SAME list object with each entry replaced by a

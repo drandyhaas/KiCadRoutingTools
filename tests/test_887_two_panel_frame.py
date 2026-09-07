@@ -39,7 +39,12 @@ import movie_panels as mp                                  # noqa: E402
 import kicad_iso_render as kir                             # noqa: E402
 
 BOARD_A = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
-BOARD_B = os.path.join(ROOT, 'kicad_files', 'qfn_fanned_out.kicad_pcb')
+#: A second, DIFFERENT board, so the chain has two beats. Tracked -- the
+#: first choice here was qfn_fanned_out.kicad_pcb, which is GITIGNORED
+#: (.gitignore:44) and generated on demand, so on a fresh clone these files
+#: died on FileNotFoundError before asserting anything. Both boards below
+#: are in `git ls-files`.
+BOARD_B = os.path.join(ROOT, 'kicad_files', 'routed_output.kicad_pcb')
 TIGARD = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
 
 BAD = []
@@ -750,7 +755,7 @@ def test_the_env_knob_turns_the_panel_on_and_a_typo_warns():
     reached = []
     real = mp.compose_two_panel
 
-    def spy(frames, marks, final, opts=None, quiet=False):
+    def spy(frames, marks, final, opts=None):
         reached.append(opts)
         return frames, mp._report('disabled', 'stubbed')
 
@@ -815,9 +820,19 @@ TESTS_TO_RUN = [
 
 
 def main():
+    # Isolated, like every sibling. This file was the ONE that still called
+    # fn() bare -- and a commit message claimed otherwise. It matters most
+    # here: 26 tests, so a first-test failure announced 1 and silently dropped
+    # 25, and tests/mutate_887.py grades this file by exit code, so ~20 rows
+    # would have reported KILLED for an environmental reason.
     for fn in TESTS_TO_RUN:
         print('--- %s' % fn.__name__)
-        fn()
+        try:
+            fn()
+        except Exception as exc:                            # noqa: BLE001
+            import traceback
+            BAD.append('%s RAISED %s' % (fn.__name__, exc))
+            traceback.print_exc()
     if BAD:
         print('\nFAILED: %d' % len(BAD))
         for b in BAD:

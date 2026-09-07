@@ -170,10 +170,28 @@ def test_a_malformed_line_names_its_line_number(tmp=None):
     try:
         ct.load_rows(p)
         want(False, 'a malformed line raises')
-    except SystemExit as e:
+    except ct.LedgerError as e:
         msg = str(e)
         want(':7:' in msg, 'the parse error names the LINE NUMBER', msg)
         want('broken.jsonl' in msg, 'and the file', msg)
+    # A ValueError, NOT a SystemExit, and the type is the whole point: this is a
+    # library function whose other consumer is the movie, where the clock is
+    # decoration that may never take the movie down. SystemExit derives from
+    # BaseException and walked through every `except Exception` guard meant to
+    # contain it -- including place_route_loop's end-of-run movie block, which
+    # would have killed a whole placement run after the routing was done.
+    want(issubclass(ct.LedgerError, ValueError),
+         'LedgerError is a ValueError, so an `except Exception` guard holds it')
+    want(not issubclass(ct.LedgerError, SystemExit),
+         'and is NOT a SystemExit, which would walk straight through one')
+    caught = None
+    try:
+        ct.load_rows(p)
+    except Exception as exc:                                # noqa: BLE001
+        caught = exc
+    want(isinstance(caught, ct.LedgerError),
+         'and a plain `except Exception` really does catch it -- the guard the '
+         'callers actually write', type(caught).__name__ if caught else None)
 
 
 def test_a_missing_ledger_is_empty_not_an_error():

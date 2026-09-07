@@ -47,6 +47,29 @@ import sys
 
 LEDGER_NAME = 'cmd_timing.jsonl'
 
+
+class LedgerError(ValueError):
+    """A ledger line that is not a JSONL row, named by file and line number.
+
+    A ValueError, NOT a SystemExit, and the difference is not cosmetic. This is
+    a LIBRARY function with two consumers: the report CLI, where exiting is
+    right, and the movie, where a clock is decoration that "may never take the
+    movie down" -- its own words at make_movie.py. SystemExit derives from
+    BaseException, so it walked straight through every `except Exception` guard
+    meant to contain it:
+
+      * place_route_loop's end-of-run movie block would have killed the whole
+        PLACEMENT RUN, after the routing was done;
+      * the GUI recorder's worker thread would have died with no log line;
+      * make_movie's CLI, which catches only FileNotFoundError, would have died
+        with a bare message.
+
+    And the triggering input is ordinary, not exotic: tee_cmd APPENDS a row per
+    command, so any run killed mid-write -- run 22 died to a token limit exactly
+    that way -- leaves a truncated last line. `main()` turns this into the exit
+    it always was.
+    """
+
 OTHER = 'other'
 
 #: Bucket rules, first match wins, encoding the footnotes at
@@ -181,9 +204,10 @@ def load_rows(path):
             try:
                 row = json.loads(line)
             except ValueError as e:
-                raise SystemExit('%s:%d: not a JSONL row: %s' % (path, n, e))
+                raise LedgerError('%s:%d: not a JSONL row: %s' % (path, n, e))
             if not isinstance(row, dict):
-                raise SystemExit('%s:%d: not a JSONL row: not an object' % (path, n))
+                raise LedgerError('%s:%d: not a JSONL row: not an object'
+                                  % (path, n))
             row = dict(row)
             row.setdefault('label', 'unlabelled')     # tee_cmd's own default
             for k in ('t_start', 't_end', 'wall_s'):
@@ -881,7 +905,13 @@ def main(argv=None):
         print('cmd_timing: no %s under %s' % (LEDGER_NAME, args.path),
               file=sys.stderr)
         return 2
-    rows = load_rows(ledger)
+    # The CLI is where exiting on a malformed ledger is the right answer; the
+    # library raises so its other consumer, the movie, can keep going.
+    try:
+        rows = load_rows(ledger)
+    except LedgerError as exc:
+        print('cmd_timing: %s' % exc, file=sys.stderr)
+        return 2
     try:
         rel = os.path.relpath(ledger)
     except ValueError:

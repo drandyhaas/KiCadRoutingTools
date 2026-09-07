@@ -209,16 +209,32 @@ def test_the_clock_counts_up_and_never_counts_down():
     want(elapsed[-1] <= tot.run_s + 1e-9,
          'and never exceeds the run it is measuring', (elapsed[-1], tot.run_s))
 
-    joined = ' '.join(clock.lines(3)).lower()
-    for word in ('remaining', 'countdown', 'time left', 'eta'):
-        want(word not in joined,
-             'no frame offers a %r figure' % word, joined)
-    want(clock.lines(3)[0].startswith('RUN CLOCK  +'),
-         'the reading leads with a PLUS, which is what counting up looks like',
-         clock.lines(3)[0])
-    want(' of ' in clock.lines(3)[0],
-         'and carries the total, so the viewer can subtract if they want the '
-         'other number', clock.lines(3)[0])
+    # EVERY frame, not frame 3. Reading one frame missed that frames 0 and
+    # 8-11 are not interpolated while 3 is, so a countdown added under
+    # `if not r.interpolated` would have shipped on 5 of 12 frames with this
+    # test green.
+    for i in range(12):
+        joined = ' '.join(clock.lines(i)).lower()
+        for word in ('remaining', 'countdown', 'time left', 'eta', 'to go'):
+            if word in joined:
+                want(False, 'frame %d offers a %r figure' % (i, word), joined)
+                return
+    want(True, 'no frame of the film offers a remaining/countdown figure')
+
+    for i in (0, 3, 11):
+        head = clock.lines(i)[0]
+        want(head.startswith('RUN CLOCK  +'),
+             'frame %d leads with a PLUS, which is what counting up looks like'
+             % i, head)
+    # The TOTAL, by value. `' of ' in head` passed while the number was
+    # anything at all: swapping run_s for tool_s survived, and on run 24 that
+    # would have drawn "+0:51:23 of 0:04:13".
+    want(clock.lines(3)[0].endswith(' of %s' % ct.fmt_hms(tot.run_s)),
+         'and the total it carries is the RUN span, not some other duration',
+         (clock.lines(3)[0], ct.fmt_hms(tot.run_s)))
+    want(ct.fmt_hms(tot.tool_s) not in clock.lines(3)[0],
+         'and specifically not the tool time, which is 5.4%% of it on run 24',
+         (clock.lines(3)[0], ct.fmt_hms(tot.tool_s)))
 
 
 def test_every_frame_carries_an_absolute_utc_instant():
@@ -244,26 +260,86 @@ def test_every_frame_carries_an_absolute_utc_instant():
     want(clock.meta(5).get('krt:run_started_utc', '').endswith('Z'),
          'and the run start is recorded in UTC too, so elapsed is checkable '
          'from the metadata alone', clock.meta(5).get('krt:run_started_utc'))
+    # krt:t_epoch BY VALUE. Presence-only let it revert to the run start --
+    # the very thing the count-up commit says it changed -- undetected.
+    for i in (0, 5, 11):
+        r = clock.at(i)
+        want(abs(float(clock.meta(i)['krt:t_epoch']) - r.instant) < 1e-3,
+             'frame %d: krt:t_epoch is THIS frame, not the run start' % i,
+             (clock.meta(i)['krt:t_epoch'], r.instant, tot.t0))
+    want(len({clock.meta(i)['krt:t_epoch'] for i in range(12)}) > 1,
+         'and it varies across the film, so a constant cannot satisfy it')
     at_lines = [ln for ln in clock.lines(5) if ln.startswith('at ')]
     want(len(at_lines) == 1 and at_lines[0].endswith('Z'),
          'and the frame DRAWS it', clock.lines(5))
 
 
 def test_utc_iso_is_utc_and_not_local():
+    """HARDCODED literals, because every other formulation is inert on CI.
+
+    The first version of this test compared `utc_iso` against `time.gmtime`,
+    round-tripped through `calendar.timegm`, and checked `utc_iso(0)` -- all
+    three of which a LOCALTIME implementation satisfies when the machine's zone
+    IS UTC, which is the CI default. Measured: dropping `datetime.timezone.utc`
+    from `cmd_timing.utc_iso` was killed in Europe/Amsterdam and SURVIVED, all
+    green, under `TZ=UTC`. Since this is the only UTC check in the branch, the
+    headline claim -- every frame carries an absolute UTC instant -- was
+    untested exactly where it runs.
+
+    A literal at a non-midnight hour cannot be satisfied by a local clock in any
+    zone but UTC, and asserts the format at the same time.
+    """
     want(ct.utc_iso(0) == '1970-01-01T00:00:00Z', 'the epoch is the epoch',
          ct.utc_iso(0))
     want(ct.utc_iso(None) == '', 'None is empty, not a crash')
-    # The point of the function: on a machine that is NOT at UTC, this must not
-    # follow the local zone. Compare against a value computed independently.
-    import calendar
-    import time
-    epoch = 1787220830.761
-    want(ct.utc_iso(epoch)
-         == time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(epoch)),
-         'it is gmtime, not localtime', ct.utc_iso(epoch))
-    want(calendar.timegm(time.strptime(ct.utc_iso(epoch),
-                                       '%Y-%m-%dT%H:%M:%SZ')) == int(epoch),
-         'and it round-trips back to the epoch it came from', ct.utc_iso(epoch))
+    # 1787220830.761 -> 2026-08-20T10:13:50Z. Verified against run 24's own
+    # ledger: its first row's local iso_start is 11:12:09 on a UTC+2 machine,
+    # and this instant's frame reported 10:13:50Z.
+    want(ct.utc_iso(1787220830.761) == '2026-08-20T10:13:50Z',
+         'a known instant formats to its known UTC string -- a hardcoded '
+         'literal, so a localtime implementation fails here in every zone but '
+         'UTC itself', ct.utc_iso(1787220830.761))
+    want(ct.utc_iso(1000000000) == '2001-09-09T01:46:40Z',
+         'and a second one, at a different hour', ct.utc_iso(1000000000))
+    want(ct.utc_iso(1787220830.761).endswith('Z'),
+         'the Z is part of the value, not decoration')
+    # Sub-second input must not shift the second.
+    want(ct.utc_iso(1787220830.999) == '2026-08-20T10:13:50Z',
+         'fractional seconds truncate rather than round up into the next '
+         'second', ct.utc_iso(1787220830.999))
+
+    # STRUCTURE, not output, for the one property output cannot show.
+    #
+    # On a machine whose zone IS UTC -- the CI default -- localtime and gmtime
+    # agree on every input, so NO assertion over this function's return value
+    # can distinguish them. Measured: a `fromtimestamp(epoch)` mutant with the
+    # tzinfo dropped is killed under Europe/Amsterdam and America/Los_Angeles
+    # and SURVIVES under TZ=UTC, and that is not a weak assertion, it is a
+    # logical impossibility. `time.tzset()` would let a test force a zone, but
+    # it does not exist on Windows, which is this repo's primary platform.
+    #
+    # So pin the shape: the conversion must name a UTC frame of reference.
+    import ast
+    src = open(os.path.join(ROOT, 'py_router', 'cmd_timing.py'),
+               encoding='utf-8').read()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == 'utc_iso')
+    # DROP THE DOCSTRING before dumping. utc_iso's docstring explains why it
+    # does not use localtime -- and contains the word, so a dump including it
+    # failed the `'localtime' not in body` check on correct code. Prose that
+    # quotes the thing a check forbids is this repo's own recurring trap.
+    stmts = fn.body[1:] if (fn.body and isinstance(fn.body[0], ast.Expr)
+                            and isinstance(fn.body[0].value, ast.Constant)
+                            and isinstance(fn.body[0].value.value, str)
+                            ) else fn.body
+    body = ' '.join(ast.dump(st) for st in stmts)
+    want('timezone' in body and 'utc' in body,
+         'utc_iso names a UTC frame of reference in its own source -- the only '
+         'check that can fail on a UTC machine, where localtime and gmtime are '
+         'indistinguishable by output', body[:160])
+    want('localtime' not in body,
+         'and never calls localtime, which is what tee_cmd already wrote and '
+         'what this function exists to avoid')
 
 
 def test_a_step_reports_what_its_own_command_cost():
@@ -283,6 +359,20 @@ def test_a_step_reports_what_its_own_command_cost():
          'per step, not one figure for the film',
          clock.meta(1).get('krt:step_wall_s'))
 
+    # And on the ARGV path, which is the one used exactly when mtime is gone --
+    # a copied work dir, or make_film materialising boards from its store. The
+    # mtime branch alone left the argv branch's `wall = r0.get('wall_s')`
+    # deletable with this test green.
+    argv_anchors = ct.anchor_steps(marks, rows,
+                                   mtimes={m[1]: None for m in marks})
+    want([a.basis for a in argv_anchors] == ['argv', 'argv'],
+         'the control really did fall through to argv',
+         [a.basis for a in argv_anchors])
+    argv_clock = ct.RunClock(argv_anchors, ct.totals(rows), 8)
+    want(argv_clock.meta(5).get('krt:step_wall_s') == 42.5,
+         'and the argv path carries the step cost too',
+         argv_clock.meta(5).get('krt:step_wall_s'))
+
 
 def test_an_unmapped_beat_is_named_rather_than_gated():
     """`covered` used to withhold the countdown for the whole film when one
@@ -299,6 +389,17 @@ def test_an_unmapped_beat_is_named_rather_than_gated():
                         ct.totals(rows), 12)
     want(clock.unmapped() == ['s3'],
          'the unmapped beat is named', clock.unmapped())
+    # More than one, so a [:1] truncation cannot pass. make_movie prints
+    # `', '.join(unmapped[:3])`, so the list itself must be complete.
+    many = [('s1', '/w/b1.kicad_pcb', 0, 4)] + [
+        ('gap%d' % i, '/w/gone%d.kicad_pcb' % i, 4 + i, 5 + i)
+        for i in range(4)]
+    mt2 = {'/w/b1.kicad_pcb': 0.0}
+    mt2.update({'/w/gone%d.kicad_pcb' % i: None for i in range(4)})
+    c2 = ct.RunClock(ct.anchor_steps(many, rows, mtimes=mt2),
+                     ct.totals(rows), 8)
+    want(c2.unmapped() == ['gap0', 'gap1', 'gap2', 'gap3'],
+         'and ALL of them are named, not the first', c2.unmapped())
     want(clock.at(1).elapsed_s is not None,
          'and the beats that DID map still read normally -- one hole no longer '
          'silences the whole film', clock.at(1).elapsed_s)

@@ -182,7 +182,7 @@ is good, and they are the first thing to get skipped under time pressure.
    `KICAD_ROUTE_TRACE=1` (the default) gives the fine per-copper rip/restore
    animation. Optional, off by default, both costing real time:
    `--panels xray+iso` stacks a 3D isometric render under the board view (needs
-   `kicad-cli`, ~2-3 s per render), and a run wrapped in `tee_cmd.py` gets a
+   `kicad-cli`, ~2-4 s per render), and a run wrapped in `tee_cmd.py` gets a
    run-clock overlay read from its `cmd_timing.jsonl`.
 3. **The report** — `REPORT.md`, and it compares on TWO axes or it is not a
    report:

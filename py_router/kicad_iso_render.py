@@ -22,11 +22,14 @@ machine's KiCad. It resolves the binary through ``kicad_oracle.find_kicad_cli``
   per REQUEST, but it is not the request. Every caller must letterbox into a box
   it chose itself. ``_REQUEST_OVERSCAN`` exists so that letterbox downscales
   (sharp) rather than upscales (blurry).
-* **Cost is roughly board-independent, ~2-3.4 s.** tigard 2.4 s at 900x700;
-  lvds 2.1 s, ulx3s (225 models) 2.0 s and glasgow_revC (224 models) 3.4 s at
-  640x480. So a render per FRAME is out of the question and a render per chain
-  STEP is affordable -- and eight of them run in 4.4 s over six workers rather
-  than 11.9 s serially.
+* **Cost is ~2-4 s at ``basic``, and CONTENTION matters more than the board.**
+  Across tigard, lvds, ulx3s (225 models) and glasgow_revC (224), 3 reps each,
+  a quiet serial pass ran 1.4-2.7 s and spread under 2x, with glasgow
+  consistently slowest; running four at once -- what ``--iso-jobs 4`` actually
+  does -- ran 1.9-4.2 s. ``--quality high`` is about 3x that, 5.0-7.5 s, which
+  is why ``basic`` is the default. So a render per FRAME is out of the question
+  and a render per chain STEP is affordable -- and eight of them run about 2.4x
+  faster over six workers than serially (measured 24.0 s -> 10.2 s).
 * **Component bodies are board-dependent, and their absence is silent.**
   ``kicad_files/tigard.kicad_pcb`` renders as a BARE BOARD -- pads, mask,
   silkscreen, no parts. Its 84 ``(model ...)`` references are 81
@@ -336,7 +339,7 @@ def render_many(jobs, cli, workers=None, **kw):
     Threads, not processes: the unit of work is a subprocess, so the GIL is
     released and there is nothing to pickle. Capped at 4 because kicad-cli is
     itself multithreaded and oversubscribing past that stopped buying anything
-    (measured: 8 renders in 11.9 s serial, 4.4 s over six workers).
+    (measured: 8 renders, 24.0 s serial vs 10.2 s over six workers, ~2.4x).
 
     Results are keyed, never appended in completion order, so the composed movie
     is identical at any worker count. A test asserts exactly that, and also that
@@ -392,7 +395,9 @@ def main(argv=None):
                          % (','.join('%g' % v for v in ISO_ROTATE)))
     ap.add_argument('--quality', default='basic',
                     choices=('basic', 'high', 'user', 'job_settings'),
-                    help='basic ~2-3 s; high measured ~12.6 s (default: basic)')
+                    help='basic measured 1.4-2.7 s serial and 1.9-4.2 s four '
+                         'at once; high measured 5.0-7.5 s on the same four '
+                         'boards, about 3x (default: basic)')
     ap.add_argument('--floor', action='store_true', help='shadows')
     ap.add_argument('--perspective', action='store_true')
     ap.add_argument('--zoom', type=float, default=None)

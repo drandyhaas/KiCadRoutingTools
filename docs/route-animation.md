@@ -11,7 +11,7 @@ geometry directly with [Pillow](https://python-pillow.org/), so a still is
 
 That is still true of everything below **by default**, and it is the reason this
 subsystem exists. One opt-in feature does need `kicad-cli` — the 3D isometric
-panel (#887) — and it is off unless asked for, costs ~2-3 s per render when it
+panel (#887) — and it is off unless asked for, costs ~2-4 s per render when it
 is, and degrades to the ordinary single-panel movie, at full speed and with a
 stated reason, when the binary is absent. See
 [the 3D isometric panel](#the-3d-isometric-panel-and-the-run-clock-887).
@@ -295,8 +295,8 @@ Measured on KiCad 10.0.0, and each number shapes the design:
 
 | | |
 |---|---|
-| one render, `--quality basic` | **~2–7 s**, machine- and load-dependent. The board matters less than the machine: within one quiet pass the spread across tigard, lvds, ulx3s (225 models) and glasgow_revC (224) is under 2x, with glasgow consistently slowest |
-| `--quality high` | **4.8–6.9 s** at 640×480 with no `--floor`, against 3.3 s for `basic` on the same job. (#887's own table reports 12.6 s, but at 900×700 `--floor`, which is a different question) |
+| one render, `--quality basic` | **1.4–2.7 s** serial on a quiet machine; **1.9–4.2 s** when four run at once, which is what `--iso-jobs 4` actually pays. Load matters more than the board: across tigard, lvds, ulx3s (225 models) and glasgow_revC (224), 3 reps each, one quiet pass spreads under 2x, with glasgow consistently slowest |
+| `--quality high` | **5.0–7.5 s** on the same four boards at 1035×700 — about 3x `basic`, which is why `basic` is the default. (#887's own table reports 12.6 s, but at 900×700 `--floor`, which is a different question) |
 | 8 renders, serial vs 6 workers | **~2.4x**, e.g. 24.0 s vs 10.2 s |
 | a 900×700 request returns | **872×672** |
 | a 640×480 request returns | **616×448** — the same for two very different boards, and across an 8-step yaw sweep |

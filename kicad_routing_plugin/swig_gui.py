@@ -3391,6 +3391,16 @@ class RoutingDialog(wx.Dialog):
                     from shapely.geometry import Polygon
                 except ImportError:
                     missing.append('shapely')
+                # Pillow too (#887). This block re-implements
+                # startup_checks.check_python_dependencies BY HAND, so adding a
+                # requirement there and not here leaves the friendly "install
+                # these with KiCad's pip" dialog skipped and the user staring at
+                # a raw RuntimeError -- exactly the CLI/GUI drift CLAUDE.md
+                # warns about, where the GUI re-implements a layer.
+                try:
+                    import PIL.Image
+                except ImportError:
+                    missing.append('Pillow')
 
                 if missing:
                     msg = f"Missing Python dependencies: {', '.join(missing)}\n\n"

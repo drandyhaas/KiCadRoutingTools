@@ -12,7 +12,9 @@ was measured once and would otherwise be a comment nobody re-checks:
     kicad-cli: at --quality high it is not reproducible against itself;
   * a board whose 3D models do not resolve still renders, and SAYS it is bare.
 """
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,9 +42,40 @@ if not CLI:
           'tests/test_887_two_panel_frame.py carries the regression.' % WHY)
     sys.exit(77)
 
-LVDS = os.path.join(ROOT, 'kicad_files', 'lvds_converter_dualclk.kicad_pcb')
-QFN = os.path.join(ROOT, 'kicad_files', 'qfn_fanned_out.kicad_pcb')
-TIGARD = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
+def _stage(name, into):
+    """Copy `name` plus every sibling sharing its stem into `into`.
+
+    Staging is NOT tidiness: `kicad-cli pcb render` REWRITES the board's
+    sibling `.kicad_prl`. Measured -- one render against
+    kicad_files/routed_output.kicad_pcb changed the md5 of
+    kicad_files/routed_output.kicad_prl, a TRACKED 155-line file, replacing it
+    with a 5-line one. Rendering kicad_files/ in place therefore leaves the
+    working tree dirty, and a later `git add -A` commits the damage; that is
+    exactly what happened once while this file was being written. Boards with
+    no sibling project (lvds, tigard) are unaffected today -- measured, `git
+    status` stays clean -- but they are staged too, so that adding a project
+    to one of them later cannot silently re-open this.
+    """
+    src = os.path.join(ROOT, 'kicad_files', name)
+    stem = os.path.splitext(os.path.basename(src))[0]
+    for sib in os.listdir(os.path.dirname(src)):
+        if os.path.splitext(sib)[0] == stem:
+            shutil.copy2(os.path.join(os.path.dirname(src), sib),
+                         os.path.join(into, sib))
+    return os.path.join(into, os.path.basename(src))
+
+
+_STAGE = tempfile.mkdtemp(prefix='krt887_boards_')
+atexit.register(shutil.rmtree, _STAGE, True)
+
+LVDS = _stage('lvds_converter_dualclk.kicad_pcb', _STAGE)
+#: A second, DIFFERENT board, so the chain has two beats. Tracked -- the
+#: first choice here was qfn_fanned_out.kicad_pcb, which is GITIGNORED
+#: (.gitignore:44) and generated on demand, so on a fresh clone these files
+#: died on FileNotFoundError before asserting anything. Both boards below
+#: are in `git ls-files`.
+QFN = _stage('routed_output.kicad_pcb', _STAGE)
+TIGARD = _stage('tigard.kicad_pcb', _STAGE)
 
 BAD = []
 
@@ -94,8 +127,8 @@ def test_the_two_panel_movie_writes_and_the_encoded_file_holds_one_size():
     seen = {}
     real = mp.compose_two_panel
 
-    def spy(frames, marks, final, opts=None, quiet=False):
-        frames, rep = real(frames, marks, final, opts, quiet=quiet)
+    def spy(frames, marks, final, opts=None):
+        frames, rep = real(frames, marks, final, opts)
         seen['rep'] = rep
         return frames, rep
 

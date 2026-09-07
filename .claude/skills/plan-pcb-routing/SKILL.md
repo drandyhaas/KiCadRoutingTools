@@ -2000,7 +2000,7 @@ without one reveals its board-to-board delta in chunks instead.
 
 Two optional panels, both off by default and both costing real time:
 `--panels xray+iso` stacks a 3D isometric `kicad-cli` render under the board
-view (~2-3 s per render, and it shows the parts and the board turning — copper
+view (~2-4 s per render, and it shows the parts and the board turning — copper
 is under soldermask, so the 3D view shows no routing progress), and a run wrapped
 in `tests/stress/tee_cmd.py` gets a run-clock overlay read from its
 `cmd_timing.jsonl`.

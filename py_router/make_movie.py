@@ -281,7 +281,7 @@ def make_movie(inputs, out=None, size=DEFAULT_SIZE, fps=DEFAULT_FPS,
         # test that monkeypatches movie_panels.compose_two_panel still bites.
         import movie_panels
         frames, report = movie_panels.compose_two_panel(
-            frames, marks, final, iso_opts, quiet=quiet)
+            frames, marks, final, iso_opts)
         # PRINTED EVEN WHEN QUIET. `quiet` silences the ordinary progress
         # chatter, but this line is the only channel that says whether the
         # panel ran, was skipped, or failed -- and the one front end the env
@@ -356,7 +356,7 @@ def main():
     iso = ap.add_argument_group(
         '3D isometric panel (#887)',
         'Stack a kicad-cli 3D render UNDER the X-ray board view. OFF by '
-        'default: a render costs ~2-3 s against a whole movie of about a '
+        'default: a render costs ~2-4 s against a whole movie of about a '
         'second, and this subsystem exists precisely because kicad-cli was '
         'dropped from it (#482). Every flag here is inert under --panels xray.')
     iso.add_argument('--panels', default=None, choices=PANEL_SETS,
@@ -367,7 +367,7 @@ def main():
                           'number of seconds, so the same chain composes the '
                           'same movie on a fast machine and a slow one. '
                           '0 disables the panel even with --panels xray+iso. '
-                          '(default: 24, about 15 s over 4 workers)')
+                          '(default: 24, about 20 s over 4 workers: 6 waves of 4)')
     iso.add_argument('--iso-height-frac', type=float, default=0.62,
                      metavar='F',
                      help='iso panel height as a fraction of the X-ray panel '
@@ -378,8 +378,9 @@ def main():
                           'still, at no extra cost (default: 60)')
     iso.add_argument('--iso-quality', default='basic',
                      choices=('basic', 'high', 'user', 'job_settings'),
-                     help='basic measured ~2-3 s; high measured ~12.6 s '
-                          '(default: basic)')
+                     help='basic measured 1.4-2.7 s serial and 1.9-4.2 s '
+                          'four at once; high measured 5.0-7.5 s on the '
+                          'same four boards, about 3x (default: basic)')
     iso.add_argument('--iso-floor', action='store_true',
                      help='kicad-cli --floor: shadows and post-processing')
     iso.add_argument('--iso-perspective', action='store_true',
