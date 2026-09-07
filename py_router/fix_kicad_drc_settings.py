@@ -23,9 +23,12 @@ board actually uses:
 
   * copper **clearance** -- TWO quantities, not one (#900). ``min_clearance``
     is an absolute floor and is capped at the smallest copper-pad clearance
-    override (#530) and the smallest ``.kicad_dru`` layer rule (#498), because
-    KiCad floors those there. The Default net-class **clearance** carries the
-    requirement the board was routed to and is capped by neither.
+    override (#530), because KiCad floors an override there; the routing
+    steps' entry point ``fix_project_for_output`` (and its live-board twin)
+    caps it at the smallest ``.kicad_dru`` layer rule as well (#498), which
+    this module's own ``main()`` has never done. The Default net-class
+    **clearance** carries the requirement the board was routed to and is
+    capped by neither.
   * **hole-to-hole** clearance (``min_hole_to_hole``)
   * **hole/copper** clearance (``min_hole_clearance``)
   * **copper-to-edge** clearance (``min_copper_edge_clearance``)
@@ -129,7 +132,11 @@ _NONDEFAULT_CLAMP_FIELDS = _NETCLASS_WRITABLE_FIELDS  # historical name, same se
 # accident (it looks each key up in its rule->attribute map and skips a miss).
 # The cost is the other direction: a newly added rule must be registered here
 # or it is silently not written. `tests/test_900_class_clearance_not_capped.py`
-# re-derives this set from `compute_targets` itself so both directions are loud.
+# re-derives this set from `compute_targets` -- BY SOURCE, walking every
+# `targets["..."] =` assignment, not only the keys one call happens to emit. An
+# earlier draft derived it from a single call, which would have been blind to a
+# key gated on a `minima` entry that call did not supply -- the shape
+# `min_via_annular_width` already has.
 _RULE_KEYS = frozenset({
     "min_clearance", "min_hole_clearance", "min_hole_to_hole",
     "min_copper_edge_clearance", "min_track_width", "min_connection",

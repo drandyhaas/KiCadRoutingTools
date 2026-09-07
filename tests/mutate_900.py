@@ -24,12 +24,15 @@ way. MEASURED, because the obvious prediction was wrong both times:
     predicted, and by nothing else. Every arm using a real `compute_targets`
     result is blind to it.
 
-ONE EXPECTED SURVIVOR-BY-INSTRUMENT, named rather than hidden:
-`live-default-class-reverted` mutates `apply_targets_to_board`, which opens with
-`import pcbnew` and cannot be driven wx-free. It is killed here by the test's
-SOURCE guard, not by behaviour -- a weaker instrument, and the reason
-tests/gui_parity/test_900_live_class_clearance.py exists. If that row ever
-starts reporting SURVIVED, the source guard has gone stale, not the fix.
+ONE ROW IS KILLED BY A WEAKER INSTRUMENT HERE, named rather than hidden. This
+battery runs the wx-free test only, and `live-default-class-reverted` mutates
+`apply_targets_to_board`, which opens with `import pcbnew`. So in THIS file that
+row is killed by the test's SOURCE guard, not by behaviour -- and a source guard
+is spelling-sensitive (a revert written `(targets or {}).get("min_clearance")`
+trips only its positive half). Its BEHAVIOUR is graded by
+`tests/gui_parity/test_900_live_class_clearance.py`, which drives a real pcbnew
+board and, with the same mutation applied, fails two arms by name. Run that file
+too when touching this row. There is no expected survivor in this table.
 """
 import os
 import subprocess

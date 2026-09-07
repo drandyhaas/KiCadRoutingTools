@@ -114,7 +114,10 @@ def test_the_fixture_is_on_the_branch():
               near(rules.get('min_clearance'), STOCK)
               and near(classes['Default']['clearance'], STOCK)
               and near(classes['Wide']['clearance'], 0.4))
-        check('OVERRIDE < ROUTED < STOCK (the ordering every arm depends on)',
+        # A guard on this file's own constants, not on product code: it can
+        # only fail if someone edits them, and it is here so that editing them
+        # into a non-discriminating order is loud. Not evidence of anything.
+        check('OVERRIDE < ROUTED < STOCK (this file s own constants)',
               OVERRIDE < ROUTED < STOCK)
 
 
@@ -242,17 +245,35 @@ def test_compute_targets_emits_both_values():
 def test_rule_keys_is_derived_not_guessed():
     """The allow-list must equal what compute_targets can actually emit, or a
     newly added RULE is silently never written -- the cost of an allow-list,
-    paid here rather than in a shipped project."""
+    paid here rather than in a shipped project.
+
+    Derived BY SOURCE, from every `targets["..."] =` assignment in the
+    function. A first draft derived it from one CALL, which is blind to any key
+    gated on a `minima` entry that call does not supply -- the shape
+    `min_via_annular_width` already has, so the hole was one argument wide.
+    """
     print('\n-- 7. _RULE_KEYS vs compute_targets --')
-    emitted = set(compute_targets(
-        clearance=0.15, hole_clearance=0.15, hole_to_hole=0.2,
-        edge_clearance=0.2, track_width=0.1, via_diameter=0.4, via_drill=0.2,
-        minima={'min_via_annular_width': 0.1}, fab_edge=0.2))
-    check('every emitted rule key is registered',
-          emitted - {'class_clearance'} <= set(_RULE_KEYS),
-          sorted(emitted - {'class_clearance'} - set(_RULE_KEYS)))
-    check('every registered key is one compute_targets can emit',
-          set(_RULE_KEYS) <= emitted, sorted(set(_RULE_KEYS) - emitted))
+    src = open(os.path.join(ROOT, 'py_router', 'fix_kicad_drc_settings.py'),
+               encoding='utf-8').read()
+    fn = ''
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == 'compute_targets':
+            fn = ast.get_source_segment(src, node) or ''
+    check('compute_targets was found (guard not stale)', bool(fn))
+    assigned = set()
+    for node in ast.walk(ast.parse(fn.strip())):
+        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                and node.value.id == 'targets'
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)):
+            assigned.add(node.slice.value)
+    check('the source walk found the keys at all (non-vacuity)',
+          len(assigned) >= 8, sorted(assigned))
+    check('every key compute_targets can write is registered',
+          assigned - {'class_clearance'} <= set(_RULE_KEYS),
+          sorted(assigned - {'class_clearance'} - set(_RULE_KEYS)))
+    check('every registered key is one compute_targets can write',
+          set(_RULE_KEYS) <= assigned, sorted(set(_RULE_KEYS) - assigned))
 
 
 def test_the_created_class_unit_arm():

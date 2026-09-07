@@ -1136,13 +1136,22 @@ min track / via / drill / annular sizes.
 (#900). `rules.min_clearance` is an *absolute* floor KiCad applies underneath
 everything, including a pad's own `(clearance …)` override and a `.kicad_dru`
 rule — so it is capped at the smallest copper-pad clearance override on the
-board (#530) and at the smallest `.kicad_dru` layer-rule clearance (#498);
-leaving it above either would flag copper routed correctly at that value. The
-net classes carry the clearance the board was actually **routed** to and are
-capped by **neither**: a class lowered to one part's 2 mil library override
-would declare every pair in that class legal at 0.05 mm, and the next chain step
-reads that class back as the board's own floor and routes the whole board at it.
-Both writebacks — the file one and the live-`pcbnew` one — record the two apart. The net-class `track_width`,
+board (#530); leaving it above one would flag copper routed correctly at that
+value. The net classes carry the clearance the board was actually **routed** to
+and are capped by **neither** that override nor a `.kicad_dru` rule: a class
+lowered to one part's 2 mil library override would declare every pair in that
+class legal at 0.05 mm, and the next chain step reads that class back as the
+board's own floor and routes the whole board at it. Both writebacks — the file
+one and the live-`pcbnew` one — record the two apart.
+
+> A second cap, at the smallest `.kicad_dru` layer-rule clearance (#498),
+> applies to `rules.min_clearance` in the writeback the ROUTING steps use
+> (`fix_project_for_output`, and its live-board twin). This standalone CLI has
+> never applied it: run it on a board with a relaxing rule and the recorded
+> floor is your `--clearance`, not the rule. Pre-existing, and named here
+> because the paragraph above would otherwise imply otherwise.
+
+The net-class `track_width`,
 `via_diameter`, `via_drill` and `diff_pair_*` values are **never written**: KiCad
 loads them as draw defaults (`opt`), not DRC minimums, so lowering them prevents
 no violation and rewrites the designer's intent — one 0.127 mm neck used to make
