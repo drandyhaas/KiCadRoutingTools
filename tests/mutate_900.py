@@ -8,13 +8,21 @@ smallest .kicad_dru layer rule) and the NET-CLASS clearance (the routed value,
 capped by neither). Most of the rows below restore one of the four places the
 capped value used to reach a class.
 
-TWO ROWS EXIST ONLY BECAUSE THE FALLBACK HIDES THEM, and they are the point of
-the file. `_class_clearance` falls back to `min_clearance` so hand-built
-`{'min_clearance': ceiling}` dicts still work (gui_utils, the fanout tab). That
-fallback makes the NO-CAP case byte-identical either way, so
-`class-key-emitted-only-when-the-cap-fires` survives every behaviour arm and is
-killed by one assertion; and `fallback-dropped` survives every arm that uses a
-real compute_targets result and is killed only by the hand-built-dict arms.
+TWO ROWS EXIST BECAUSE THE FALLBACK HIDES THEM. `_class_clearance` falls back to
+`min_clearance` so hand-built `{'min_clearance': ceiling}` dicts still work
+(gui_utils, the fanout tab), which makes the no-cap case byte-identical either
+way. MEASURED, because the obvious prediction was wrong both times:
+
+  * `class-key-emitted-only-when-the-cap-fires` -- predicted "survives every
+    behaviour arm, killed by the unconditional-emission assertion alone".
+    It is killed by THREE: that assertion, plus both class checks in the
+    .kicad_dru arm. That board carries no pad override, so the key is absent,
+    so the fallback hands the class the DRU-capped floor. The dru arm turns out
+    to be a second, independent witness for this row -- worth knowing before
+    anyone "simplifies" it away.
+  * `fallback-dropped` -- killed by exactly the two hand-built-dict arms, as
+    predicted, and by nothing else. Every arm using a real `compute_targets`
+    result is blind to it.
 
 ONE EXPECTED SURVIVOR-BY-INSTRUMENT, named rather than hidden:
 `live-default-class-reverted` mutates `apply_targets_to_board`, which opens with
