@@ -1272,7 +1272,7 @@ def generate_underpad_escape(footprint: Footprint,
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
               carve=None, start_layer=None, cost_out=None, side=None,
-              goal=None):
+              goal=None, reach_out=None):
         """Route from the pad to any boundary cell -- or, with `goal`, to
         THAT boundary cell only (a planned exit gap): the search may then
         leave the window nowhere else.
@@ -1286,6 +1286,15 @@ def generate_underpad_escape(footprint: Footprint,
         `carve` = optional (all_layers_cells, {layer: cells}) from
         _carve_foreign: home cells that carry a FOREIGN stamp and therefore
         keep blocking despite the home exemption (#393).
+
+        `reach_out` (with `goal`): a set the search fills with every
+        outside-window cell a legal step could have reached. Meaningful only
+        when the search FAILS -- it then ran to exhaustion, so a goal at any
+        cell not in the set would fail the same way, and a caller walking
+        candidate goals (the plan-follow gap ladder) can skip them instead
+        of exhausting the region once per goal. The recorded cells pass the
+        same window, side and corner-cutting tests the goal cell passes, so
+        membership is exactly "this search would have found a path to it".
         """
         cv_all, cv_lay = carve if carve is not None else (_EMPTY, None)
 
@@ -1320,11 +1329,26 @@ def generate_underpad_escape(footprint: Footprint,
         _onx = occ.nx
         _ogrid = occ.grid
         _has_soft = occ.has_soft
-        _soft_foreign = occ.soft_foreign
+        _soft = occ.soft
+        _soft_owner = occ.soft_owner
         _steps = _STEPS
         _home = home
         _pour_soft = getattr(occ, 'pour_soft', None)
         _vcache = {}
+        # The three helpers the neighbour loop called per step -- exempt(),
+        # occ.soft_foreign() and the heuristic -- are written out inline
+        # below: the same expressions, the same order of tests, so the same
+        # cells are pushed at the same costs (byte-equivalent, like #561).
+        # K41's fanout stage profiled 200M such calls, a quarter of the
+        # search time (2026-09-06). `hm`: 0 = goal (octile to the goal),
+        # 1..4 = side (left, right, up, down), 5 = the boundary heuristic.
+        if goal is not None:
+            hm = 0
+        elif side:
+            hm = {'left': 1, 'right': 2, 'up': 3, 'down': 4}[side]
+        else:
+            hm = 5
+        _cv_lay = cv_lay if cv_lay else None
         while pq:
             _, cur = _heappop(pq)
             cx, cy, L = cur
@@ -1347,48 +1371,79 @@ def generate_underpad_escape(footprint: Footprint,
             cg = g[cur]
             if L in route_layers:
                 _gL = _ogrid[L]
+                cvL = _cv_lay.get(L) if _cv_lay is not None else None
+                _softL = _soft[L] if _has_soft else None
                 for dx, dy in _steps:
                     nx, ny = cx + dx, cy + dy
                     if not (0 <= nx < _onx and 0 <= ny < _ony):
                         continue
-                    if side is not None \
-                            and not (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
+                    inwin = bx0 <= nx <= bx1 and by0 <= ny <= by1
+                    if side is not None and not inwin \
                             and not _left_on(side, nx, ny):
                         continue
-                    if goal is not None \
-                            and not (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
-                            and (nx, ny) != goal:
-                        continue
-                    if (bx0 <= nx <= bx1 and by0 <= ny <= by1) \
-                            and _gL[nx * _ony + ny] \
-                            and not exempt(L, (nx, ny)):
-                        continue
-                    # No corner-cutting: a diagonal step past a blocked orthogonal
-                    # neighbour clips that obstacle's clearance (the diagonal line
-                    # passes nearer the via/pad than either cell). Forbid it.
                     if dx != 0 and dy != 0:
-                        if (_gL[(cx + dx) * _ony + cy] and not exempt(L, (cx + dx, cy))) or \
-                           (_gL[cx * _ony + cy + dy] and not exempt(L, (cx, cy + dy))):
+                        # No corner-cutting: a diagonal step past a blocked
+                        # orthogonal neighbour clips that obstacle's clearance
+                        # (the diagonal line passes nearer the via/pad than
+                        # either cell). Forbid it. (exempt() inlined.)
+                        if _gL[(cx + dx) * _ony + cy]:
+                            c1 = (cx + dx, cy)
+                            corner = not (c1 in _home and c1 not in cv_all
+                                          and not (cvL and c1 in cvL))
+                        else:
+                            corner = False
+                        if not corner and _gL[cx * _ony + cy + dy]:
+                            c2 = (cx, cy + dy)
+                            corner = not (c2 in _home and c2 not in cv_all
+                                          and not (cvL and c2 in cvL))
+                    else:
+                        corner = False
+                    if goal is not None and not inwin and (nx, ny) != goal:
+                        if reach_out is not None and not corner:
+                            reach_out.add((nx, ny))
+                        continue
+                    nidx = nx * _ony + ny
+                    if inwin and _gL[nidx]:
+                        nc = (nx, ny)
+                        if not (nc in _home and nc not in cv_all
+                                and not (cvL and nc in cvL)):
                             continue
+                    if corner:
+                        continue
                     step = 1.0 if (dx == 0 or dy == 0) else 1.6   # discourage zig-zag
                     # Soft keep-out (#278): stepping through a movable
                     # passive's pad zone is legal but leaves a graze the
                     # cap-placement step may be unable to clear -- pay a
                     # steep per-cell premium so routes detour when any
                     # detour exists, and only graze when boxed in.
-                    if _has_soft and (nx, ny) not in _home and \
-                            _soft_foreign(L, nx, ny, net_id):
+                    # (occ.soft_foreign inlined.)
+                    if _softL is not None and (nx, ny) not in _home and \
+                            _softL[nidx] and _soft_owner.get((L, nidx)) != net_id:
                         step += 4.0
                     if _pour_soft is not None:
                         _ps = _pour_soft.get(L)
                         if _ps is not None:
-                            step += _ps[nx * _ony + ny]
+                            step += _ps[nidx]
                     nxt = (nx, ny, L)
                     ng = cg + step
                     if ng < _g_get(nxt, 1e18):
                         g[nxt] = ng
                         came[nxt] = cur
-                        _heappush(pq, (ng + _h(nx, ny), nxt))
+                        if hm == 0:
+                            ddx = abs(nx - _gx)
+                            ddy = abs(ny - _gy)
+                            h = 1.6 * min(ddx, ddy) + abs(ddx - ddy)
+                        elif hm == 1:
+                            h = max(0, nx - bx0)
+                        elif hm == 2:
+                            h = max(0, bx1 - nx)
+                        elif hm == 3:
+                            h = max(0, ny - by0)
+                        elif hm == 4:
+                            h = max(0, by1 - ny)
+                        else:
+                            h = max(0, min(nx - bx0, bx1 - nx, ny - by0, by1 - ny))
+                        _heappush(pq, (ng + h, nxt))
             # The single via, only in the ball's own pad. A through via spans
             # all layers, so the site must also clear immovable foreign copper
             # on layers the run-blocking test never looks at (via_ok, #253/
@@ -2490,14 +2545,24 @@ def generate_underpad_escape(footprint: Footprint,
                         out.append((g[0], c) if ax else (c, g[1]))
             return out
 
-        def attempt(p, mv, level, goal_override=None):
+        def attempt(p, mv, level, goal_override=None, reach=None):
             """(mode, path, carve) for the ladder level: 0 exact (face, gap,
             layer, kind); 1 same face and layer at the NEAREST free gap, then
             any gap; 2 same face, the other layer/kind; 3 any face. None
-            when nothing routes."""
+            when nothing routes.
+
+            The level-1 walk tries the asked gap's neighbours nearest first,
+            a full search each; a gap that cannot be reached exhausts the
+            whole reachable region, and every later unreachable gap used to
+            exhaust it again (K41: 500 of 1,174 searches, 105 of 179 s,
+            2026-09-06 profile). One failed search now records what the
+            region can reach (astar's reach_out, per search configuration in
+            `reach`) and the later gaps outside it are skipped -- the same
+            walk order, the same first success, the same path."""
             if level == 1 and goal_override is None:
+                reach = {}
                 for gc in gap_goals(mv):
-                    r = attempt(p, mv, 1, goal_override=gc)
+                    r = attempt(p, mv, 1, goal_override=gc, reach=reach)
                     if r[1] is not None:
                         return r
             face, kind = mv['face'], mv.get('kind', 'surface')
@@ -2512,23 +2577,38 @@ def generate_underpad_escape(footprint: Footprint,
                 return None, None, None      # the asked gap is not in the window
             side = face if level < 3 else None
 
+            def search(key, *a, **kw):
+                # one goal search; with a walk's `reach` record, a goal the
+                # same configuration already proved unreachable is refused
+                # without a search, and a failure records the reach
+                if reach is None or goal is None:
+                    return astar(*a, goal=goal, **kw)
+                known = reach.get(key)
+                if known is not None and goal not in known:
+                    return None
+                out = set()
+                pth = astar(*a, goal=goal, reach_out=out, **kw)
+                if pth is None:
+                    reach[key] = out
+                return pth
+
             def surface():
-                return astar(sx, sy, home, {top_idx}, allow_via=False,
-                             net_id=p.net_id, carve=carve, side=side, goal=goal)
+                return search(('surface',), sx, sy, home, {top_idx}, allow_via=False,
+                              net_id=p.net_id, carve=carve, side=side)
 
             def inpad(lset):
-                return astar(sx, sy, home, set(lset), allow_via=True,
-                             via_ok=_make_via_ok(p), net_id=p.net_id,
-                             carve=carve, side=side, goal=goal)
+                return search(('inpad', frozenset(lset)), sx, sy, home, set(lset),
+                              allow_via=True, via_ok=_make_via_ok(p), net_id=p.net_id,
+                              carve=carve, side=side)
 
             def dog(lset):
                 if site is None:
                     return None
                 vsx, vsy = occ.cell(*site)
                 for L in sorted(lset):
-                    pth = astar(vsx, vsy, home, {L}, allow_via=False,
-                                net_id=p.net_id, carve=carve, start_layer=L,
-                                side=side, goal=goal)
+                    pth = search(('dog', L), vsx, vsy, home, {L}, allow_via=False,
+                                 net_id=p.net_id, carve=carve, start_layer=L,
+                                 side=side)
                     if pth is not None:
                         return pth
                 return None
