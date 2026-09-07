@@ -308,6 +308,57 @@ _LENS_RE = r'^VERDICT=(PASS|FAIL):lens=([A-Za-z0-9_-]+)'
 #: contradiction, refused above the membership check.
 FAIL_COMPATIBLE_STOPS = ('2', '4', 'STUCK', 'BUDGET')
 
+#: The WHOLE stop-condition vocabulary (#901), checked on every `record` that
+#: carries one -- not only when a lens FAILED, which is what let ~500 characters
+#: of prose into rows 29/30 of run 25 while the orchestrator's `4 (this half):
+#: ...` was refused twice at close-out. One record, two rules, depending on a
+#: lens. The numbers are convergence.md §3 (1 done, 2 budget spent, 3 plateau,
+#: 4 measured-unfixable); the names are what `verdict` prints and L5
+#: interpolates. FAIL_COMPATIBLE_STOPS is the subset legal beside a FAIL lens.
+STOP_TOKENS = ('1', '2', '3', '4', 'DONE-EXHAUSTED', 'STUCK', 'BUDGET')
+
+#: MSYS2's argv-rewrite signature. Git Bash rewrites any argument starting with
+#: `/` into a Windows path unless MSYS2_ARG_CONV_EXCL is set, and EVERY KiCad
+#: net name is `/`-prefixed -- so `/D_P` reaches the tool as
+#: `C:/Program Files/Git/D_P`. Nothing warns, because a tool cannot tell a
+#: mangled net name from a net that does not exist (CLAUDE.md). Row 31 of run 25
+#: holds exactly this in its `lever_argv`; `replay` of it would grade impedance
+#: on two nets that do not exist and return null, i.e. a vacuous pass.
+#: Unanchored ON PURPOSE, used two ways: `.match` for an --argv TOKEN, where
+#: the rewrite is always at position 0, and `.search` for --lever PROSE, where
+#: it is not -- and where splitting the prose on whitespace cannot find it
+#: either, because the rewritten path itself contains a space ("Program Files").
+_MANGLED_RE = re.compile(r'[A-Za-z]:[/\\]Program Files[/\\]Git[/\\]')
+
+_MSYS_REMEDY = ("export MSYS2_ARG_CONV_EXCL='*' before the command, and pass "
+                "Windows-style paths (C:/Users/...) in the same command since "
+                "the variable also stops ~/ and /c/ paths being converted")
+
+
+def split_stop_condition(value):
+    """``"4 (this half): the pair is parity-fixed"`` -> ``('4', 'the pair ...')``.
+
+    The TOKEN is the first whitespace-delimited chunk with a trailing ``:``
+    stripped, so both shapes run 25 actually recorded are legal as printed --
+    a bare ``DONE-EXHAUSTED`` and a token carrying an aside and a reason. The
+    remainder is the REASON and goes in its own field rather than being
+    validated as if it were a token. Returns ``(None, raw)`` when the token is
+    not one of :data:`STOP_TOKENS`; the caller refuses.
+    """
+    raw = (value or '').strip()
+    if not raw:
+        return None, ''
+    head, _, tail = raw.partition(' ')
+    token = head.rstrip(':')
+    if token not in STOP_TOKENS:
+        return None, raw
+    reason = tail.strip()
+    # `4 (this half): reason` -- the aside belongs to the reason, not the token.
+    if reason.startswith('(') or head.endswith(':'):
+        _, _, after = reason.partition(':')
+        reason = (after or reason).strip()
+    return token, reason.lstrip(':').strip()
+
 
 def score_component(score, key):
     """The graded count for `key`, or None when NOTHING measured it.
@@ -668,6 +719,31 @@ def cmd_record(a):
                   f"produced the board), or omit --argv for a prose-only "
                   f"entry. Nothing was written.", file=sys.stderr)
             return 2
+        # ...and EVERY OTHER TOKEN, for the one corruption a replay cannot
+        # detect either (#901). The guard above only ever saw argv[0], which is
+        # `python3` for every invocation the doctrine teaches, so a mangled net
+        # name three tokens later sailed through -- and `replay` re-executes the
+        # stored list verbatim, so the row grades nets that do not exist and
+        # returns null: a vacuous pass nothing reports.
+        _bad = [t for t in a.argv if _MANGLED_RE.match(str(t))]
+        if _bad:
+            print(f"record: --argv contains {len(_bad)} token(s) rewritten by "
+                  f"MSYS2 -- {', '.join(repr(t) for t in _bad[:3])}"
+                  f"{' ...' if len(_bad) > 3 else ''}. Git Bash converts any "
+                  f"argument starting with '/' into a Windows path, and every "
+                  f"KiCad net name is '/'-prefixed, so this row records nets "
+                  f"that do not exist and would REPLAY as a vacuous pass. "
+                  f"Re-run the command with {_MSYS_REMEDY}, then record it. "
+                  f"Nothing was written.", file=sys.stderr)
+            return 2
+    # The same shape in --lever is a WARNING, not a refusal: the lever is prose
+    # for a human, so a mangled name there misleads a reader without making the
+    # row unreplayable.
+    if a.lever and _MANGLED_RE.search(str(a.lever)):
+        print(f"record: WARNING -- --lever contains an MSYS2-rewritten token "
+              f"(a '/'-prefixed net name turned into a Windows path). The row "
+              f"is still replayable; the prose is wrong. {_MSYS_REMEDY}.",
+              file=sys.stderr)
     # Lens verdicts are stored RAW, so the grammar stays owned by
     # verifier-prompts.md and a malformed line stays visible instead of being
     # normalised into something that reads like a pass. Refuse the shape at
@@ -756,6 +832,29 @@ def cmd_record(a):
               "stop conditions ended it). Nothing was written.",
               file=sys.stderr)
         return 2
+    # ALWAYS, not only when a lens FAILED (#901). With every lens passing, any
+    # string was accepted and stored -- so the same record had two rules
+    # depending on a lens, and ~500 characters of prose went into the ledger as
+    # a "stop condition" while an orchestrator's `4 (this half): <reason>` was
+    # refused. The token is now checked wherever one is given, and the prose
+    # after it keeps its own field instead of being validated as a token.
+    _stop_token, _stop_reason = split_stop_condition(a.stop_condition)
+    if a.stop_condition and _stop_token is None:
+        print(f"record: --stop-condition {a.stop_condition!r} does not start "
+              f"with a stop condition. It must be one of "
+              f"{' | '.join(STOP_TOKENS)} -- the numbers are convergence.md "
+              f"S3 (1 done, 2 budget spent, 3 plateau, 4 measured-unfixable) "
+              f"and the names are what `verdict` prints. Prose about WHY goes "
+              f"after it (\"3: five laps, no new copper\") or in "
+              f"--stop-reason; both land in the row's stop_reason. Nothing "
+              f"was written.", file=sys.stderr)
+        return 2
+    if a.stop_reason and _stop_reason and a.stop_reason.strip() != _stop_reason:
+        print("record: a reason was given twice, in --stop-condition and in "
+              "--stop-reason, and they differ. Give it once. Nothing was "
+              "written.", file=sys.stderr)
+        return 2
+    _stop_reason = (a.stop_reason or '').strip() or _stop_reason
     # A run-closing record must carry the routed-board lenses. `blocking == 0`
     # and "every lens passes" are two different claims and the second had no
     # mechanism at all -- verifier-prompts.md states the conjunct and nothing
@@ -777,7 +876,9 @@ def cmd_record(a):
                   f"lens passes`. Nothing was written.", file=sys.stderr)
             return 2
         _failed = [v for v in (a.lens or []) if v.strip().startswith('VERDICT=FAIL')]
-        _sc = (a.stop_condition or '').strip()
+        # The extracted TOKEN, so `4 (this half): <reason>` is judged as a 4
+        # (#901). Both refusals below are unchanged in what they refuse.
+        _sc = _stop_token or ''
         # TWO STOP VOCABULARIES ARE OF RECORD, and both must be acceptable as
         # printed: the routing half closes on the NUMBERS of convergence.md §3,
         # and the outer loop's L5 interpolates the verdict NAMES this tool's
@@ -982,7 +1083,12 @@ def cmd_record(a):
               "no trigger.", file=sys.stderr)
     if a.final:
         entry['final'] = True
-        entry['stop_condition'] = a.stop_condition
+        # The TOKEN alone, so a reader (and `verdict`, and the film) can match
+        # it against the vocabulary instead of parsing prose (#901). The reason
+        # keeps its own key -- absent, not empty, when there is none.
+        entry['stop_condition'] = _stop_token
+        if _stop_reason:
+            entry['stop_reason'] = _stop_reason
     if a.exhausted:
         entry['exhausted'] = {'half': a.exhausted,
                               'reason': a.exhausted_reason.strip()}
@@ -1553,11 +1659,16 @@ def build_parser():
                         'reason as --render-json: a verdict that lives in '
                         'free-text --lever cannot be told from a lens nobody '
                         'ran. --final requires the three routed-board lenses.')
-    r.add_argument('--scope-refs', action='append', default=None,
+    # nargs='+' with 'extend' (#901): the help promised a list and argparse
+    # took exactly one token per flag, so `--scope-refs R1 R2 R3` was an
+    # argparse error and the writer had to repeat the flag. Both spellings now
+    # work, and the whitespace/comma split below still reads a quoted lock file.
+    r.add_argument('--scope-refs', action='extend', nargs='+', default=None,
                    metavar='REF',
                    help='the refs this lap was ALLOWED to move -- its search '
-                        'scope. Repeatable; a whitespace/comma-separated list '
-                        'is split, so a lock file reads straight in. Stored as '
+                        'scope. Takes a list, repeatable, and a '
+                        'whitespace/comma-separated string is split, so a lock '
+                        'file reads straight in. Stored as '
                         'entry["scope_refs"]. Same reason as --lens and '
                         '--render-json: a scope that lives in free-text '
                         '--lever cannot be told from a lap that scoped nothing '
@@ -1592,7 +1703,16 @@ def build_parser():
     r.add_argument('--final', action='store_true',
                    help='mark the run-closing record; requires --stop-condition')
     r.add_argument('--stop-condition', default=None,
-                   help='which stop condition ended the run (with --final)')
+                   help='which stop condition ended the run (with --final). '
+                        'A TOKEN -- ' + ' | '.join(STOP_TOKENS) + ' -- checked '
+                        'on every record, not only when a lens failed. Prose '
+                        'about WHY may follow it ("3: five laps, no new '
+                        'copper"); it is split off into stop_reason.')
+    r.add_argument('--stop-reason', default=None, metavar='TEXT',
+                   help='why that stop condition fired, in words. The same '
+                        'text may instead ride after the token in '
+                        '--stop-condition; giving it twice, differently, is '
+                        'refused. Stored as entry["stop_reason"].')
     r.add_argument('--argv', nargs=argparse.REMAINDER, default=None,
                    help='the command that produced it -- what makes replay '
                         'possible. Refused (exit 2) when its first token is '
