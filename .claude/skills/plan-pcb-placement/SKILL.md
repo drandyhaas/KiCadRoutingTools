@@ -768,6 +768,41 @@ whose `design_brief` section is the only DECLARED one in that document; every
 other section, `mechanical` included, is inference. `docs/design-brief.md` is
 the reference.
 
+**Read the component-context sheet before you decide any pose** (#891). It is
+the one document that prints what you actually need to reason from -- per part
+the body extent AND which geometry it came from, every pad grouped by the board
+face it escapes through at the current rotation with its net and pin function,
+which parts each net reaches, partners ranked by shared nets, and the
+pin-order-agreement table:
+
+```bash
+python3 -X utf8 py_tools/board_context.py board.kicad_pcb --md
+python3 -X utf8 py_tools/board_context.py board.kicad_pcb --panels wk/panels
+```
+
+(`-o PATH` writes it to a file, and `--json` gives the same document as data;
+the panels are referenced from the markdown by name.)
+
+Two rows to read first, because they are the ones a layout cannot recover from
+later:
+
+* **Pin-order agreement**, at BOTH scopes. A `CROSSED` pair forces at least
+  `inversions` crossings on any router, and on a two-layer board that is a via
+  per net or back-side copper under the pour. Rotation cannot fix it -- parity
+  flips only under a mirror or a via hop. Run 25 shipped a board whose USB pair
+  was crossed at every rotation of U1; the fact was visible before placement
+  started and was found after routing. `UNDETERMINED` means the two pads
+  project to one point on the channel axis, so the order is not a fact about
+  the board at that pose -- it is not a pass.
+* **Body source.** A part reading `pad_bbox` has no drawn body at all, and a
+  part reading `silk` was graded on a silkscreen marking, which a library may
+  draw as an assembly outline rather than the part. Neither is a defect; both
+  change how much a seam number is worth.
+
+Every derived column names its source and prints `unknown` where inference ran
+out, so a claim you carry forward can always be traced to the channel it came
+from.
+
 **1. List what the spec fixes, and cite the requirement next to each ref.**
 Read the board's requirements/spec before touching placement. Anything with a
 coordinate, a pitch, a mating standard or an enclosure feature is fixed:
