@@ -906,7 +906,13 @@ def format_text(b):
         c = db.get('counts') or {}
         L.append(f"  design brief {os.path.basename(db['path'])}: "
                  f"{c.get('interfaces', 0)} interface(s), "
-                 f"{c.get('keepouts', 0)} keep-out(s)")
+                 f"{c.get('keepouts', 0)} keep-out(s)"
+                 # #902. Appended only when there are any, so a brief that
+                 # declares none reads exactly as it did before -- and always
+                 # when there are, because a declared claim nobody prints is
+                 # one the reader has no way to know was ever made.
+                 + (f", {c['proximity']} proximity row(s)"
+                    if c.get('proximity') else ''))
         # Unknowns first: an unknown is the thing an author must go resolve.
         for k in (db.get('unknown') or ()):
             L.append(f"  !! design brief UNKNOWN: {k}")

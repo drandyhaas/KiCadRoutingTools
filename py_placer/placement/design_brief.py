@@ -16,11 +16,22 @@ edge each belongs on and where along it, what the enclosure forbids -- and
 Three design rules, each a decision rather than an omission:
 
 * IT IS A COMPILER, NOT A SECOND CONSTRAINT SYSTEM. Everything a brief declares
-  becomes an ordinary `edge_connectors[]` or `keepouts[]` entry that the
-  existing rules already grade and the existing seat search already honours.
-  The only intent keys this work adds are #712's two; provenance goes in
-  `source` and `context`, which the schema already accepts. A brief that could
-  express something the intent cannot would be a constraint nothing checks.
+  becomes an intent entry the existing rules already grade and the existing
+  seat search already honours -- ordinarily an `edge_connectors[]` or a
+  `keepouts[]` one. Provenance goes in `source` and `context`, which the schema
+  already accepts. A brief that could express something the intent cannot would
+  be a constraint nothing checks.
+
+  #712 added two intent FIELDS and no key. #902 adds one KEY, `proximity[]`,
+  and that is the rule applied rather than an exception to it: the principle is
+  not "never add a key", it is "never declare what nothing grades", and this
+  key arrives in the same change as `floorplan.rule_proximity`, which grades
+  it. It needed a key of its own because no existing entry means *these two
+  named parts, this far apart*. `decaps.max_distance_mm` is one board-wide
+  budget over a DERIVED population whose partner election cannot reach a 3-pad
+  regulator at any radius (#902's own measurement), and a keep-out is an
+  exclusion, not an attraction -- compiling into either would have graded a
+  different claim from the one written.
 
 * "I DO NOT KNOW" IS A VALUE, and it is distinct from "nobody said". The
   failure this is designed against is a brief nobody writes, so `"unknown"`
@@ -83,7 +94,7 @@ class BriefError(fp.IntentError):
 
 _TOP_LEVEL_KEYS = {'schema', 'kind', 'board', 'units', 'min_reader',
                    'product', 'interfaces', 'keepouts', 'fixed', 'unknown',
-                   'context'}
+                   'proximity', 'context'}
 
 #: Keys refused BY NAME, with the reason, rather than as merely unknown.
 _REFUSED_TOP_LEVEL = {
@@ -110,6 +121,37 @@ _FIXED_KEYS = {'ref', 'why', 'requirement', 'context'}
 _BAND_KEYS = {'from', 'to'}
 _OVERHANG_KEYS = {'min', 'max'}
 
+#: #902. "These two named parts, this far apart" -- the one class of claim the
+#: netlist IMPLIES and no instrument here can read: a 3mm crystal loop and a
+#: 30mm one have identical connectivity.
+_PROXIMITY_KEYS = {'ref', 'near', 'max_mm', 'basis', 'pads', 'requirement',
+                   'why', 'note', 'context'}
+
+#: Which geometry the gap is measured between. Spelled `body` and NOT
+#: `courtyard` -- see `_PROXIMITY_REFUSED_ROW` for the measurement that decided
+#: it. Mirrors `floorplan._PROXIMITY_BASES`, and a test asserts the two agree:
+#: the brief must not accept a spelling the intent loader then refuses.
+_PROXIMITY_BASES = ('pad_edge', 'body')
+_PROXIMITY_DEFAULT_BASIS = 'pad_edge'
+
+#: Row keys refused BY NAME with the reason, the way `_REFUSED_TOP_LEVEL` does
+#: it one level up. Each is a spelling an author reaches for first, so the
+#: message has to carry the correction rather than just the refusal.
+_PROXIMITY_REFUSED_ROW = {
+    'min_mm': 'a MINIMUM separation is the clearance channel\'s claim '
+              '(legality, and check_drc pad-to-pad), measured in a different '
+              'currency and enforced by a different gate. A second minimum '
+              'here would let one board pass one and fail the other with no '
+              'rule for which wins. This key is `max_mm`: how far apart these '
+              'parts may be, not how close',
+    'max_distance_mm': 'that is the `decaps` spelling, and it means cap '
+                       'CENTROID to the IC pad-bbox inflated 0.5mm, clamped '
+                       'to 0 inside. This key is `max_mm`, and it is pad edge '
+                       'to pad edge (or body to body). Two spellings for two '
+                       'currencies, so a reader cannot mistake one number for '
+                       'the other',
+}
+
 _PRIMARY_AXIS = ('east-west', 'north-south', UNKNOWN)
 _SIDES = ('F', 'B', UNKNOWN)
 _MOUNT_MODES = ('edge_mount', 'top_mount', 'bottom_mount', 'through_edge',
@@ -134,6 +176,9 @@ class Brief:
     keepouts: Tuple[Dict[str, object], ...]
     fixed: Tuple[Dict[str, object], ...]
     unknown: Tuple[str, ...]
+    #: #902. Defaulted, so every existing construction site keeps working and a
+    #: brief declaring none behaves exactly as it did before this key existed.
+    proximity: Tuple[Dict[str, object], ...] = ()
     context: Dict[str, object] = field(default_factory=dict)
     source_path: str = ''
 
@@ -141,7 +186,7 @@ class Brief:
 def empty_brief(board: str = '') -> Brief:
     return Brief(schema=SCHEMA_VERSION, kind=KIND, board=board, units='mm',
                  product={}, interfaces=(), keepouts=(), fixed=(),
-                 unknown=(), context={})
+                 unknown=(), proximity=(), context={})
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +259,167 @@ def _band(value, where: str):
                          f"the band is empty or inverted and no pose can "
                          f"satisfy it")
     return {'from': f0, 'to': f1}
+
+
+def _proximity_pads(value, where: str, allowed):
+    """`{ref: [pad numbers]}`, or `"unknown"`, or absent. Returns as given.
+
+    Pad numbers are refused unless they are STRINGS, and that is not
+    pedantry: `Pad.pad_number` is a string on both parse paths, so a JSON `1`
+    would match nothing, resolve zero pads, and grade CLEAN -- a refusal that
+    reads as a pass, in the one direction nobody checks. #710's rule ("a typo'd
+    key that loads clean is a constraint the author believes they set") applied
+    one level down, to a value.
+    """
+    if value is None or value == UNKNOWN:
+        return value
+    if not isinstance(value, dict):
+        raise BriefError(f"{where}: expected {{'REF': ['1', '2']}} or "
+                         f"\"{UNKNOWN}\", got {value!r}")
+    for ref, nums in value.items():
+        if ref not in allowed:
+            raise BriefError(
+                f"{where}: a pad list for {ref!r}, which this row says nothing "
+                f"about -- it names {' and '.join(repr(a) for a in allowed)}. "
+                f"A pad list nothing reads is a claim nothing checks")
+        if not isinstance(nums, (list, tuple)) or not nums:
+            raise BriefError(f"{where}.{ref}: expected a non-empty list of pad "
+                             f"numbers, got {nums!r}")
+        for n in nums:
+            if not isinstance(n, str):
+                raise BriefError(
+                    f"{where}.{ref}: pad {n!r} has type "
+                    f"{type(n).__name__}; pad numbers are a list of strings. "
+                    f"`Pad.pad_number` is a string, so {n!r} would match no "
+                    f"pad, measure nothing, and grade clean")
+    return {str(k): [str(n) for n in v] for k, v in value.items()}
+
+
+def _proximity_rows(raw: Dict) -> List[Dict[str, object]]:
+    """Validate `proximity[]` (#902). One row = one claim = one limit.
+
+    `ref` may be a LIST -- "C1/C3 are U2's bulk caps" -- and it is pure sugar:
+    `compile_brief` expands it to one intent row per member, so the intent's
+    own `proximity[].ref` is always a string. The alternative reading, "every
+    pair within the list", was rejected because a 3-list would then be three
+    claims sharing one number and `Violation.ref` is a single ref with nowhere
+    to say which pair the limit was about. "Q1 and Q2 together" is already
+    exactly `{"ref": "Q1", "near": "Q2"}`, so nothing is lost.
+    """
+    rows: List[Dict[str, object]] = []
+    seen: Dict[Tuple[str, str], int] = {}
+    unpadded: Dict[Tuple[str, str], int] = {}
+    for i, r in enumerate(raw.get('proximity') or []):
+        where = f"proximity[{i}]"
+        if not isinstance(r, dict):
+            raise BriefError(f"{where}: expected an object with `ref`, `near` "
+                             f"and `max_mm`")
+        for key, why in _PROXIMITY_REFUSED_ROW.items():
+            if key in r:
+                raise BriefError(f"{where}: `{key}` is not a proximity key -- "
+                                 f"{why}")
+        fp._reject_unknown(r, _PROXIMITY_KEYS, where)
+        fp._entry_context(r, where)
+
+        ref = r.get('ref')
+        refs = list(ref) if isinstance(ref, (list, tuple)) else [ref]
+        if not refs or any(not isinstance(x, str) or not x for x in refs):
+            raise BriefError(f"{where}: `ref` must be a reference or a list of "
+                             f"references, got {ref!r}")
+        if UNKNOWN in refs:
+            raise BriefError(
+                f"{where}: `ref` cannot be \"{UNKNOWN}\". A row whose subject "
+                f"is unknown is not a row -- there is nothing to compile and "
+                f"nothing to name in the report. Omit it, or name the part")
+        if len(set(refs)) != len(refs):
+            raise BriefError(f"{where}: `ref` lists {ref!r}, which names a "
+                             f"part twice")
+        near = r.get('near')
+        if not near or not isinstance(near, str):
+            raise BriefError(f"{where}: needs `near` -- the part the "
+                             f"subject(s) must stay close to")
+        if near == UNKNOWN:
+            raise BriefError(
+                f"{where}: `near` cannot be \"{UNKNOWN}\", for the same reason "
+                f"`ref` cannot: a claim with no partner measures nothing")
+        if near in refs:
+            raise BriefError(f"{where}: {near!r} is both the subject and the "
+                             f"partner; a part is 0mm from itself, so this "
+                             f"row grades nothing")
+
+        if 'max_mm' not in r:
+            raise BriefError(
+                f"{where}: needs `max_mm` -- how far apart these parts may be, "
+                f"in mm. There is no default: the whole point of the key is "
+                f"that a number nobody stated cannot be graded. If the spec "
+                f"says \"as short as possible\" and names no number, write "
+                f"\"{UNKNOWN}\": it is carried and REPORTED rather than "
+                f"guessed")
+        limit = r['max_mm']
+        if limit != UNKNOWN:
+            fp._number(limit, f"{where}.max_mm", lo=0.0)
+            if float(limit) <= 0.0:
+                raise BriefError(f"{where}.max_mm: {limit!r}, expected a "
+                                 f"positive distance in mm")
+        basis = r.get('basis')
+        if basis == UNKNOWN:
+            raise BriefError(
+                f"{where}.basis: \"{UNKNOWN}\" is not allowed here, unlike "
+                f"every other enum in this file, because `basis` HAS a default "
+                f"({_PROXIMITY_DEFAULT_BASIS!r}). Declaring it unknown would "
+                f"compile to that default while the report says nobody knows "
+                f"-- two different documents. Omit the key to take the "
+                f"default, or name the one you mean")
+        if basis == 'courtyard':
+            raise BriefError(
+                f"{where}.basis: \"courtyard\" is not a basis. Since #896 "
+                f"`placement.body` is a LADDER -- courtyard, fab, silk union "
+                f"pads, pad bbox -- and it answers whichever rung the library "
+                f"drew. On the board this rule was written for, 0 of 21 "
+                f"footprints draw a courtyard (10 answer from fab, 4 from "
+                f"silk, 4 from the pad bbox), so a claim spelled \"courtyard\" "
+                f"would grade nothing there at all. Write \"body\"; the rung "
+                f"that actually answered is reported in "
+                f"`measured.basis_source`")
+        _enum(basis, _PROXIMITY_BASES, f"{where}.basis")
+        pads = _proximity_pads(r.get('pads'), f"{where}.pads",
+                              tuple(refs) + (near,))
+
+        for ref_one in refs:
+            key = (ref_one, near)
+            if key in seen:
+                raise BriefError(
+                    f"{where}: duplicate proximity claim for {ref_one} near "
+                    f"{near} (already declared at proximity[{seen[key]}]) -- "
+                    f"two limits on one relation, with no rule for which "
+                    f"wins, and the rule charges BOTH")
+            seen[key] = i
+        # The REVERSED pair, and only when NEITHER row names pads. `rect_gap`
+        # is symmetric and both sides are then existential, so the two rows are
+        # provably the same number -- one fact charged twice. With `pads` on
+        # either row the claim is genuinely asymmetric (for each of MY declared
+        # pads, some pad of yours is close enough), so both are kept.
+        if pads is None:
+            for ref_one in refs:
+                rev = (near, ref_one)
+                if rev in unpadded:
+                    raise BriefError(
+                        f"{where}: {ref_one} near {near} is the reverse of "
+                        f"proximity[{unpadded[rev]}], and neither row names "
+                        f"`pads` -- so the two are the same measurement "
+                        f"charged twice. Keep one, or name the pads that make "
+                        f"them different claims")
+                unpadded[(ref_one, near)] = i
+
+        row = {'ref': refs if isinstance(ref, (list, tuple)) else refs[0],
+               'near': near, 'max_mm': limit}
+        for key in ('basis', 'requirement', 'why', 'note', 'context'):
+            if r.get(key) is not None:
+                row[key] = r[key]
+        if pads is not None:
+            row['pads'] = pads
+        rows.append(row)
+    return rows
 
 
 def brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
@@ -373,6 +579,8 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
         fp._str_tuple(k.get('allow'), f"{where}.allow")
         keepouts.append(k)
 
+    proximity = _proximity_rows(raw)
+
     fixed: List[Dict[str, object]] = []
     for i, f in enumerate(raw.get('fixed') or []):
         where = f"fixed[{i}]"
@@ -389,7 +597,7 @@ def _brief_from_dict(raw: Dict, source_path: str = '') -> Brief:
                  board=str(raw.get('board') or ''), units=units,
                  product=product, interfaces=tuple(interfaces),
                  keepouts=tuple(keepouts), fixed=tuple(fixed),
-                 unknown=unknown,
+                 unknown=unknown, proximity=tuple(proximity),
                  context=fp._obj(raw.get('context'), 'context'),
                  source_path=source_path)
 
@@ -534,16 +742,79 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         keeps.append(out)
         declared.append(f"keepouts[{out['name']}]")
 
+    # #902. Compiled 1:1 into the intent's own `proximity[]`, with a list
+    # `ref` EXPANDED here so the intent never carries the sugar -- one row is
+    # one claim is one limit, and `Violation.ref` has room for exactly one ref.
+    prox: List[Dict[str, object]] = []
+    for r in brief.proximity:
+        near = str(r['near'])
+        raw_ref = r['ref']
+        members = ([str(x) for x in raw_ref]
+                   if isinstance(raw_ref, (list, tuple)) else [str(raw_ref)])
+        pads = r.get('pads')
+        for ref in members:
+            claim = f"proximity[{ref}~{near}]"
+            if r['max_mm'] == UNKNOWN:
+                # DECLARED, and declared UNKNOWN. "Y1 must be beside U1, I do
+                # not know how close" is the issue's own phrase ("as short as
+                # possible"), and it compiles to NO ROW: there is no number to
+                # grade against, and inventing one would be the guess this
+                # whole channel exists to refuse. It is reported, not dropped,
+                # so it cannot read as a key nobody wrote.
+                unknown.append(f"{claim}.max_mm")
+                continue
+            entry: Dict[str, object] = {
+                'ref': ref, 'near': near, 'max_mm': float(r['max_mm']),
+                'source': 'brief'}
+            ctx: Dict[str, object] = dict(r.get('context') or {})
+            for key in ('why', 'requirement'):
+                if r.get(key):
+                    ctx[key] = r[key]
+            entry['context'] = ctx
+            if r.get('basis'):
+                entry['basis'] = r['basis']
+            if pads == UNKNOWN:
+                # Also declared-unknown, but at a different arity: the row
+                # still grades, part to part, and the reader is told that the
+                # pin-level claim was not stated rather than left to infer it
+                # from a missing key.
+                unknown.append(f"{claim}.pads")
+            elif isinstance(pads, dict):
+                mine = {k: list(v) for k, v in pads.items()
+                        if k in (ref, near)}
+                if mine:
+                    entry['pads'] = mine
+            if r.get('note'):
+                entry['note'] = str(r['note'])
+            declared.append(f"{claim}.max_mm")
+            for who in (ref, near):
+                if refs_known and refset and who not in refset:
+                    unmatched.append(who)
+            prox.append(entry)
+
     fragment: Dict[str, object] = {}
     if conns:
         fragment['edge_connectors'] = conns
     if keeps:
         fragment['keepouts'] = keeps
+    if prox:
+        fragment['proximity'] = prox
+    # A RUNNING MAX, not a literal, since #902: a brief carrying both an
+    # along-edge claim and a proximity row needs the HIGHER of the two readers,
+    # and writing whichever branch ran last would understate it. `min_reader`
+    # is the one field whose only job is to be true.
+    need_reader = 0
     if wrote_along_edge:
         # The first real use of the mechanism `min_reader` was built for: a
         # reader that predates #712 must refuse this document rather than
         # grade it without the along-edge claim.
-        fragment['min_reader'] = 2
+        need_reader = max(need_reader, 2)
+    if prox:
+        # Same argument one version on: a reader that predates #902 must refuse
+        # a document carrying `proximity[]` rather than grade it without.
+        need_reader = max(need_reader, 4)
+    if need_reader:
+        fragment['min_reader'] = need_reader
 
     absent = [k for k in _TIER0
               if (k == 'interfaces' and not brief.interfaces)
@@ -560,7 +831,13 @@ def compile_brief(brief: Brief, *, board_refs: Sequence[str] = (),
         'contradictions': [],
         'counts': {'interfaces': len(brief.interfaces),
                    'keepouts': len(brief.keepouts),
-                   'fixed': len(brief.fixed)},
+                   'fixed': len(brief.fixed),
+                   # The count of ROWS AS WRITTEN, so it matches what the
+                   # author sees in their own file; `proximity_claims` is the
+                   # count after a list `ref` is expanded, which is what the
+                   # intent carries and what the grade will report.
+                   'proximity': len(brief.proximity),
+                   'proximity_claims': len(prox)},
         # #711 asks for `place_fixed` ops. There is no plan-op implementation
         # in this tree -- `place_fixed` is named only in comments -- so a
         # fixed pose is CARRIED and reported, never asserted, and never turned
@@ -643,6 +920,15 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
     if fragment.get('keepouts'):
         out['keepouts'] = list(emitted.get('keepouts') or []) \
             + list(fragment['keepouts'])
+    # #902. APPENDED, like keepouts, and deliberately not the per-ref merge
+    # `edge_connectors` gets: there is no "declared outranks inferred" question
+    # to answer, because there is no inference. `emit_intent` writes no
+    # `proximity` -- a relation between two parts is not readable off a board,
+    # only the distance is -- so the emitted side is always empty and a
+    # reconciliation policy would be a rule for a case that cannot arise.
+    if fragment.get('proximity'):
+        out['proximity'] = list(emitted.get('proximity') or []) \
+            + list(fragment['proximity'])
     if fragment.get('min_reader'):
         out['min_reader'] = fragment['min_reader']
 
@@ -659,6 +945,16 @@ def merge_into_intent(emitted: Dict, fragment: Dict, report: Dict) -> Dict:
             f"emitter writes none; these came from the one channel that can "
             f"state one. Since #701 the seat search honours them, not only "
             f"the grade.")
+    if fragment.get('proximity'):
+        ctx['proximity_note'] = (
+            f"{len(fragment['proximity'])} proximity claim(s) DECLARED by the "
+            f"design brief {os.path.basename(report.get('path') or '')}. "
+            f"\"These two named parts, this far apart\" is a SPEC fact: the "
+            f"board supplies the distance but never the claim, so the emitter "
+            f"writes none and these came from the one channel that can state "
+            f"one. `rule_proximity` GRADES them; no search gates on them, so "
+            f"a violation is a finding to act on rather than a pose the "
+            f"engine will refuse.")
     out['context'] = ctx
     return out
 
@@ -688,6 +984,26 @@ def drift(intent_doc: Dict, fragment: Dict) -> List[str]:
         if k.get('name') not in names:
             out.append(f"keepout {k.get('name')!r}: declared by the brief, "
                        f"absent from the intent")
+    # #902. Keyed on the ORDERED (ref, near) pair, which is the row's identity
+    # in the brief too, so the two halves cannot disagree about what "the same
+    # claim" means. The list `ref` was expanded by `compile_brief`, so both
+    # sides here are already one-ref rows.
+    have_prox = {(str(p.get('ref')), str(p.get('near'))): p
+                 for p in (intent_doc.get('proximity') or [])}
+    for p in (fragment.get('proximity') or []):
+        key = (str(p.get('ref')), str(p.get('near')))
+        cur = have_prox.get(key)
+        if cur is None:
+            out.append(f"{key[0]} near {key[1]}: the brief declares this "
+                       f"proximity claim; the intent has no row for it")
+            continue
+        for field_name in ('max_mm', 'basis', 'pads'):
+            if field_name in p and cur.get(field_name) != p[field_name]:
+                out.append(
+                    f"{key[0]}~{key[1]}.{field_name}: brief says "
+                    f"{p[field_name]!r}, the intent "
+                    + ('says ' + repr(cur[field_name]) if field_name in cur
+                       else 'does not declare it'))
     return out
 
 
@@ -702,6 +1018,16 @@ def format_report(report: Dict, *, path: str = '') -> str:
     c = report.get('counts') or {}
     bits = [f"{c.get('interfaces', 0)} interface(s)",
             f"{c.get('keepouts', 0)} keep-out(s)"]
+    if c.get('proximity'):
+        # Printed whenever any row was written, even if every one of them
+        # declared `max_mm: "unknown"` and compiled to nothing -- a declared
+        # claim nobody prints is invisible, which is this module's own
+        # argument. The two counts differ exactly when a list `ref` expanded
+        # or an unknown limit dropped out, and both cases are worth seeing.
+        claims = c.get('proximity_claims', c['proximity'])
+        bits.append(f"{c['proximity']} proximity row(s)"
+                    + (f" -> {claims} claim(s)"
+                       if claims != c['proximity'] else ''))
     if c.get('fixed'):
         bits.append(f"{c['fixed']} fixed pose(s), carried not asserted")
     if report.get('unknown'):
