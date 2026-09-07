@@ -29,11 +29,14 @@ FINAL5 = os.path.join(ROOT, 'wk', 'run5', 'final5.kicad_pcb')
 HUMAN = os.path.join(ROOT, 'wk', 'run2', 'original', 'tigard_v10.kicad_pcb')
 
 
-def _grade(board, **kw):
+def _pcb(board):
     from kicad_parser import parse_kicad_pcb
+    return parse_kicad_pcb(board)
+
+
+def _grade(board, **kw):
     from placement.legality import grade_body_overlap
-    return grade_body_overlap(parse_kicad_pcb(board), 0.09,
-                              pcb_file=board, **kw)
+    return grade_body_overlap(_pcb(board), 0.09, pcb_file=board, **kw)
 
 
 
@@ -325,8 +328,8 @@ class TestContainment(unittest.TestCase):
         self.assertEqual(len(g['fab_unjudged_refs']), g['fab_unjudged'])
 
     def test_the_bodyless_hole_is_exactly_what_was_measured(self):
-        """140 footprints draw no .Fab body, and that is the FINAL answer,
-        not a TODO.
+        """77 footprints have no drawn body at all -- re-recorded at #896,
+        from 140, and no longer "the FINAL answer".
 
         It was 144 over 33 boards. The count is a census of whatever
         `kicad_files/` holds, and as the next test says, the generated
@@ -344,9 +347,22 @@ class TestContainment(unittest.TestCase):
         min/max over points).
 
         This test exists so a future "helpful" parser change that alters the
-        count has to come and argue with the number. The dangerous direction
-        is a FALLBACK body for bodyless parts: measured, that adds 77 fab
-        pairs, 65 above the threshold, and breaks the calibration gate below.
+        count has to come and argue with the number. #896 came and argued.
+
+        The dangerous direction named here -- a FALLBACK body for bodyless
+        parts, measured at +77 fab pairs, 65 above the threshold -- was a
+        COURTYARD-or-pad-bbox fallback, and it is still dangerous. The SILK
+        rung is different geometry and was measured separately over the same
+        corpus: 140 unjudged -> 77, +6 advisory pairs, +2 disclosed
+        containments, and ZERO new pairs able to gate, because a silk-sourced
+        body is excluded from `containment_blocking` and `courtyard_blocking`
+        structurally (see the next test down and legality's `_silk_*_pair`).
+
+        The 63 parts that gained a body are the ones #896 is about: on
+        esp_prog every one of the 21 footprints draws silk and none draws a
+        courtyard, so CON1, CON2, U1 and U2 -- the connector housings, the
+        SSOP and the SOT89 whose collisions cost run 25 two laps -- were
+        unjudged by this channel and are now judged.
         """
         boards = _corpus()
         # 22, not 30. The floor is an anti-vacuity guard -- a sweep
@@ -356,26 +372,31 @@ class TestContainment(unittest.TestCase):
         # file's own runner (#876) so nothing ever reported the drift.
         self.assertGreaterEqual(len(boards), 22)
         total_unjudged = sum(_grade(b)['fab_unjudged'] for b in boards)
-        self.assertEqual(total_unjudged, 140,
+        self.assertEqual(total_unjudged, 77,
                          f'corpus fab_unjudged moved to {total_unjudged}; if '
-                         f'that was deliberate, re-measure the 4-pair census '
+                         f'that was deliberate, re-measure the 6-pair census '
                          f'below and this number together')
 
-    def test_no_unjudged_part_has_fab_geometry_to_read(self):
+    def test_no_unjudged_part_has_body_geometry_to_read(self):
         """The INVARIANT behind the count above, and the stronger claim.
 
-        `fab_unjudged == 144` is a census of THIS corpus, and 11 of the 33
-        boards it sweeps are untracked generated fixtures, so the number moves
-        when someone regenerates one. This assertion does not depend on corpus
-        membership: whatever the set is, every unjudged part must draw NO .Fab
-        geometry at all.
+        The count is a census of THIS corpus, so it moves when someone adds or
+        regenerates a board. This assertion does not depend on corpus
+        membership: whatever the set is, every unjudged part must draw NO body
+        geometry the model could have read -- since #896 that means no .Fab
+        AND no silk the drawn-body ladder would accept, not just no .Fab.
 
         That is what licenses "a parser tolerance or polygon-closure fix moves
-        zero footprints" -- not the 144. If this ever fails, the parser really
-        is failing to read a body it was handed, and the disclosure-not-a-fix
-        conclusion has to be revisited.
+        zero footprints" -- not the count. If this ever fails, the parser
+        really is failing to read a body it was handed, and the
+        disclosure-not-a-fix conclusion has to be revisited.
+
+        Checked by calling `placement.body` rather than re-deriving the
+        ladder: a second implementation of the rung order is exactly what
+        #896 exists to remove, and a test carrying one would grade its own
+        copy.
         """
-        from placement.parser import extract_fab_sides
+        from placement.body import board_bodies
         boards = _corpus()
         # 22, not 30. The floor is an anti-vacuity guard -- a sweep
         # over an empty glob passes every assertion below it -- and it
@@ -385,33 +406,52 @@ class TestContainment(unittest.TestCase):
         self.assertGreaterEqual(len(boards), 22)
         readable, checked = [], 0
         for b in boards:
-            sides = extract_fab_sides(b)
+            bodies = board_bodies(_pcb(b), b)
             for ref in _grade(b)['fab_unjudged_refs']:
                 checked += 1
-                if sides.get(ref):
-                    readable.append((os.path.basename(b), ref))
+                geom = bodies.get(ref)
+                if geom is not None and geom.drawn_local is not None:
+                    readable.append((os.path.basename(b), ref,
+                                     geom.drawn_source))
         self.assertGreater(checked, 0, 'nothing was checked')
         self.assertEqual(readable, [], f'{len(readable)} part(s) are reported '
-                                       f'unjudged while their .Fab geometry '
+                                       f'unjudged while their body geometry '
                                        f'parses fine: {readable[:5]}')
 
     def test_corpus_carries_no_nonexempt_body_containment(self):
         """THE calibration gate for the threshold, sibling of
         test_all_healthy_boards_grade_zero_blocking.
 
-        Measured over all 33 boards: the fab census is exactly 4 pairs, and
-        every non-exempt one is a shell KISS three orders of magnitude below
-        the threshold (GPDI1/J5 at 0.011, GPDI1/SW1 at 0.001) against a
-        measured defect of 1.000. That ~90x separation is what licenses
-        CONTAINMENT_FRAC.
+        Measured over all 33 boards, BEFORE #896: the fab census was exactly 4
+        pairs, and every non-exempt one was a shell KISS three orders of
+        magnitude below the threshold (GPDI1/J5 at 0.011, GPDI1/SW1 at 0.001)
+        against a measured defect of 1.000. That ~90x separation is what
+        licenses CONTAINMENT_FRAC, and it is unchanged.
 
         It is also why the ENGINE predicate may use the fab currency and never
         the courtyard: the courtyard ships frac-1.0 containment on four healthy
         boards (esp_prog, orangecrab_ext_pll, rp2350_fpga_eensy_prePlane,
         ulx3s), so a courtyard-based predicate would false-veto legitimate
         poses on 12% of the corpus -- the run-4 lesson in a new costume.
+
+        RE-RECORDED at #896, from 4 to 6. The channel now reads the drawn-body
+        ladder (fab, else silk united with the pad bbox), so parts whose
+        library draws no .Fab are judged instead of being counted unjudged.
+        The two new pairs are both on esp_prog and both come from SILK:
+
+            CON2 <-> U2  frac 0.0538   (the -0.090mm seam of issue #896)
+            R1   <-> U2  frac 0.8917
+
+        R1 <-> U2 is why silk never gates. U2's OLIMEX SOT89 draws four corner
+        brackets at +/-2.5mm plus a pin-1 dot -- a 5.2 x 5.2mm assembly square
+        centred on an origin its pads are not centred on -- so R1, which clears
+        U2's real body by 2.1mm, reads as 89% contained. The pair is DISCLOSED
+        here, and the engine excludes silk-sourced pairs from
+        `containment_blocking` structurally, which the last assertion below
+        checks by calling the engine rather than re-deriving it.
         """
         from placement.legality import CONTAINMENT_FRAC
+        from placement.body import SOURCE_SILK
         boards = _corpus()
         # 22, not 30. The floor is an anti-vacuity guard -- a sweep
         # over an empty glob passes every assertion below it -- and it
@@ -420,15 +460,30 @@ class TestContainment(unittest.TestCase):
         # file's own runner (#876) so nothing ever reported the drift.
         self.assertGreaterEqual(len(boards), 22)
         census = []
+        gated = []
         for b in boards:
-            for p in _grade(b)['pairs']:
+            g = _grade(b)
+            srcs = g.get('body_sources') or {}
+            for p in g['pairs']:
                 if p.kind == 'fab':
                     census.append((os.path.basename(b), p.a, p.b,
-                                   p.contained_frac, bool(p.waiver)))
-        self.assertEqual(len(census), 4, census)
+                                   p.contained_frac, bool(p.waiver),
+                                   srcs.get(p.a, ''), srcs.get(p.b, '')))
+            gated += [(os.path.basename(b), q.a, q.b)
+                      for q in g['containment_blocking_pairs']]
+        self.assertEqual(len(census), 6, census)
+        # The threshold calibration, on the pairs that can reach a verdict:
+        # a silk body is an assembly marking as often as an outline, so it is
+        # disclosed above and excluded here -- the same rule the engine
+        # applies, stated once in each place because this arm deliberately
+        # re-derives the predicate the engine's `containment_blocking` uses.
         offenders = [c for c in census
-                     if c[3] >= CONTAINMENT_FRAC and not c[4]]
+                     if c[3] >= CONTAINMENT_FRAC and not c[4]
+                     and SOURCE_SILK not in (c[5], c[6])]
         self.assertEqual(offenders, [], offenders)
+        # And the engine's own answer, not a mirror of it: no corpus board
+        # gates on body containment.
+        self.assertEqual(gated, [], gated)
 
 
 if __name__ == '__main__':

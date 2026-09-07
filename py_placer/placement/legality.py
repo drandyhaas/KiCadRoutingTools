@@ -1365,33 +1365,54 @@ def grade_body_overlap(pcb_data, clearance: float,
             return 'edge_class'
         return ''
 
+    from placement.body import SOURCE_SILK as _BODY_SILK_NAME
+
     pairs: List[BodyOverlapPair] = []
-    # Refs the fab channel could not judge (no .Fab geometry). A board with no
+    # Refs the DRAWN-BODY channel could not judge: no .Fab outline and no
+    # usable silk either (#896 widened this from ".Fab only"). A board with no
     # readable source path leaves this empty AND judges nothing -- both are
     # reported rather than silently conflated with "clean".
     fab_unjudged: set = set()
+    # #896. Per-ref `drawn_source` for every judged part, so the caller can
+    # report "body from silk" instead of "no body" and can say which claims
+    # rest on a housing outline rather than a fab outline.
+    body_sources: Dict[str, str] = {}
+    # #896. Refs whose body came from SILK. Silk is the least trustworthy rung
+    # and it NEVER gates -- see the exclusion below, which is structural rather
+    # than a measured coincidence.
+    silk_sourced: set = set()
 
     # -- courtyard channel (advisory + the run-23 blocking policy below) ------
     for p in body_overlap_pairs(_graded):
         waiver = _waiver_for(p.a, p.b)
         pairs.append(p._replace(waived=bool(waiver), waiver=waiver))
 
-    # -- fab BODY channel (advisory) ------------------------------------------
+    # -- DRAWN BODY channel (advisory) ----------------------------------------
+    # Reads `placement.body`'s drawn-body ladder rather than calling
+    # extract_fab_sides itself: this loop WAS the second implementation of
+    # "what is this part's body" (#896), and its .Fab-only ladder is why six
+    # esp_prog parts -- the connector housings, the SSOP and the SOT89 -- were
+    # unjudged on a board where silk is the only body drawn.
     path = pcb_file or getattr(pcb_data, 'source_path', None)
     if path:
+        from placement.body import (SOURCE_NONE as _BODY_NONE,
+                                    SOURCE_SILK as _BODY_SILK, board_bodies)
         try:
-            from placement.parser import extract_fab_sides
-            fab = extract_fab_sides(path)
-        except Exception:
-            fab = {}
+            _bodies = board_bodies(pcb_data, path)
+        except Exception:                                    # noqa: BLE001
+            _bodies = {}
         fab_parts = []
         for ref, fp in sorted(fps.items()):
-            sides = fab.get(ref)
-            if not sides:
+            geom = _bodies.get(ref)
+            lb = geom.drawn_local if geom is not None else None
+            if lb is None:
                 fab_unjudged.add(ref)
                 continue
+            body_sources[ref] = (geom.drawn_source if geom is not None
+                                 else _BODY_NONE)
+            if body_sources[ref] == _BODY_SILK:
+                silk_sourced.add(ref)
             own = footprint_side(fp)
-            lb = sides.get(own) or next(iter(sides.values()))
             rot = fp.rotation or 0.0
             x0, y0, x1, y1 = rotate_local_bounds(*lb, rot)
             fab_parts.append((ref, own,
@@ -1547,8 +1568,33 @@ def grade_body_overlap(pcb_data, clearance: float,
     #
     # Corpus effect, measured: ZERO boards gate on this.
     _GATE_EXEMPT = ('marker_class', 'container_class', 'intent_declared')
+    # #896. A SILK-sourced body never gates, structurally -- not because a
+    # census happened to come out clean. Silk is the last rung and the least
+    # trustworthy: it is whatever the library drew on the silkscreen, and on a
+    # hand-rolled library that is routinely an assembly outline rather than a
+    # body. Measured on the shipped esp_prog: U2's OLIMEX SOT89 draws four
+    # corner brackets at +/-2.5mm plus a pin-1 dot, a 5.2 x 5.2mm square
+    # centred on an origin the pads are not centred on -- and R1, which clears
+    # U2's real body by 2.1mm, read as 89% CONTAINED inside it and gated the
+    # board NOT BUILDABLE. The pairs are still reported, with their source, in
+    # `pairs` / `advisory` and `body_sources`; what they may not do is decide.
+    # Scoped PER CHANNEL, because the two channels grade different rects: the
+    # containment/drawn-body channel reads `drawn_source`, the courtyard
+    # channel reads the occupancy source on `GradedPart`. A part can carry a
+    # real courtyard AND a silk drawn body at once, and suppressing its
+    # COURTYARD pair for that reason threw away findings silk had nothing to
+    # do with -- measured, glasgow_revC's J1<->TP13, J1<->TP15, J3<->TP1 and
+    # orangecrab's J5<->J6, all pre-existing.
+    _silk_occupancy = {g.ref for g in _graded if g.source == _BODY_SILK_NAME}
+
+    def _silk_drawn_pair(p) -> bool:
+        return p.a in silk_sourced or p.b in silk_sourced
+
+    def _silk_occupancy_pair(p) -> bool:
+        return p.a in _silk_occupancy or p.b in _silk_occupancy
     containment_blocking = [p for p in contained
-                            if p.waiver not in _GATE_EXEMPT]
+                            if p.waiver not in _GATE_EXEMPT
+                            and not _silk_drawn_pair(p)]
     # Courtyard BLOCKING (run-23): the subset of courtyard pairs that gates.
     # Both floors must trip -- area >= COURTYARD_BLOCKING_MIN_MM2 and depth
     # >= COURTYARD_BLOCKING_MIN_DEPTH_MM -- so by-design slivers a healthy
@@ -1644,7 +1690,10 @@ def grade_body_overlap(pcb_data, clearance: float,
         and (p.area_mm2 >= COURTYARD_BLOCKING_MIN_MM2
              or (p.contained_frac or 0.0) >= COURTYARD_BLOCKING_MIN_FRAC)
         and p.depth_mm >= COURTYARD_BLOCKING_MIN_DEPTH_MM
-        and p.a not in _synthetic_refs and p.b not in _synthetic_refs]
+        and p.a not in _synthetic_refs and p.b not in _synthetic_refs
+        # #896, same rule as containment above: a silk-sourced body reports,
+        # it does not gate.
+        and not _silk_occupancy_pair(p)]
     return {'blocking': len(blocking),
             'advisory': len(advisory),
             'waived': sum(1 for p in pairs if p.waived),
@@ -1700,6 +1749,10 @@ def grade_body_overlap(pcb_data, clearance: float,
             # let a reader judge.
             'fab_unjudged': len(fab_unjudged),
             'fab_unjudged_refs': sorted(fab_unjudged),
+            # #896. Which drawn geometry each judged part's body came from,
+            # so a reader can tell a housing outline from a fab outline
+            # rather than being told only that something was judged.
+            'body_sources': dict(body_sources),
             # Run-23 courtyard blocking channel -- see the selection above.
             # NOTE these pairs also remain in `advisory`/`advisory_pairs`
             # (that count's meaning is unchanged for its existing consumers);

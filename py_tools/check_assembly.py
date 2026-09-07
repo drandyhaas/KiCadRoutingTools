@@ -259,6 +259,7 @@ def main():
           + (f"  new-vs-baseline {len(new_advisory)}"
              if new_advisory is not None else ""))
     _cb_keys = {(q.a, q.b) for q in g['courtyard_blocking_pairs']}
+    _body_src = g.get('body_sources') or {}
     for q in g['pairs']:
         label = ('BLOCKING' if q.kind == 'pad_intersection'
                  else ('COURTYARD-BLOCKING'
@@ -271,7 +272,17 @@ def main():
         cont = ''
         if q.contained:
             cont = f"  CONTAINED {q.contained_frac:.0%}"
-        print(f"    {q.a} <-> {q.b}  {q.kind}  {q.area_mm2}mm2 "
+        # #896. Name the geometry the claim rests on. `kind` says which
+        # CHANNEL judged the pair; it does not say whether the body came from
+        # a drawn .Fab outline or from silkscreen, and those are claims of
+        # very different strength -- a silk body may be an assembly marking,
+        # which is why it never gates.
+        kind = q.kind
+        if kind == 'fab':
+            _sa, _sb = _body_src.get(q.a, ''), _body_src.get(q.b, '')
+            if 'silk' in (_sa, _sb):
+                kind = f'body({_sa}/{_sb})'
+        print(f"    {q.a} <-> {q.b}  {kind}  {q.area_mm2}mm2 "
               f"side {q.side}  {label}{cont}{star}")
         # Different-net pads touching is a short on top of the overlap. Say so
         # here rather than making a reader re-derive it from the board.
@@ -333,11 +344,31 @@ def main():
             print(f"    None of these BLOCK: each is a by-design containment "
                   f"(a marker or a board-sized container), which the corpus "
                   f"ships legitimately -- orangecrab FID2/J5 at 100%.")
+    # BODY COVERAGE (#896). Printed UNCONDITIONALLY, including the fully
+    # covered case: "which geometry was this board graded on" is a fact about
+    # every run, and a line that appears only when something is missing cannot
+    # tell a reader that a board was judged on silk rather than on drawn
+    # bodies. The mix comes from `grade_body_overlap`'s own `body_sources`, so
+    # the coverage claim and the geometry cannot drift apart.
+    _srcs = g.get('body_sources') or {}
+    _mix = {}
+    for _v in _srcs.values():
+        _mix[_v] = _mix.get(_v, 0) + 1
+    _judged = ', '.join(f"{_mix[k]} {k}" for k in ('fab', 'silk')
+                        if _mix.get(k))
+    print(f"  BODY COVERAGE: {len(_srcs)} of {len(pcb.footprints)} part(s) "
+          f"draw a body the containment channel can judge"
+          + (f" ({_judged})" if _judged else ""))
+    if _mix.get('silk'):
+        print(f"    A silk body is the LAST resort and never gates: a "
+              f"library may draw an assembly outline there rather than the "
+              f"part (esp_prog's SOT89 draws corner brackets 5.2mm apart "
+              f"around a 4.5mm part). Such pairs are reported, with their "
+              f"source, and excluded from the blocking channels.")
     if g['fab_unjudged']:
         _u = g['fab_unjudged_refs']
-        print(f"  BODY COVERAGE: {g['fab_unjudged']} of "
-              f"{len(pcb.footprints)} part(s) draw no .Fab outline, so the "
-              f"containment channel cannot judge them: "
+        print(f"    {g['fab_unjudged']} part(s) draw no body at all (no .Fab, "
+              f"no usable silk), so the channel cannot judge them: "
               + ', '.join(_u[:8]) + (' ...' if len(_u) > 8 else ''))
 
     # ASSEMBLY SIDES (#837). Report-only, and deliberately not a conjunct:

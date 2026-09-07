@@ -16,15 +16,28 @@ and the SOT89 whose collisions cost run 25 two laps; each was found only by an
 adversarial reviewer writing its own geometry, because no checker in the chain
 could see a housing at all.
 
-THE LADDER
-----------
-    courtyard  ->  fab  ->  silk U pad_bbox  ->  pad_bbox  ->  synthetic
+TWO LADDERS, ONE READER
+-----------------------
+They answer different questions, so they are two values and not one value with
+a flag:
 
-`source` names the rung that answered, always, so a consumer reports "body from
-silk" rather than "no body", and a pad-bbox answer is disclosed rather than
-passing as geometry somebody drew.
+    occupancy   courtyard -> fab -> silk U pad_bbox -> pad_bbox -> synthetic
+    drawn body  fab -> silk U pad_bbox -> (nothing)
 
-Two rules the ladder encodes, both measured rather than assumed:
+`occupancy_local` is *what does this part occupy* -- what a consumer deciding
+whether something may be seated somewhere must read. It never shrinks.
+
+`drawn_local` is *what did the library draw as this part's body*, and the
+courtyard is deliberately NOT on it: a courtyard is a body plus an assembly
+margin plus any shell overhang, which is exactly why run-6 calibrated the
+courtyard channel and the fab channel apart. A part with both a courtyard and a
+fab outline has `source == 'courtyard'` and `drawn_source == 'fab'` at once.
+
+`source` and `drawn_source` name the rung that answered, always, so a consumer
+reports "body from silk" rather than "no body", and a pad-bbox answer is
+disclosed rather than passing as geometry somebody drew.
+
+Two rules the ladders encode, both measured rather than assumed:
 
 1. **Courtyard and fab are taken AS DRAWN; only the silk rung unions with the
    pads.** Silk is not an outline -- on a stock KiCad footprint it is a pair of
@@ -110,6 +123,15 @@ class BodyGeometry(NamedTuple):
     occupancy_local: Optional[Bbox]
     source: str
     silk_rejected: bool = False
+    # #896. The DRAWN BODY, on its own ladder: fab, else silk U pads, else
+    # None. Deliberately NOT the winner of the ladder above, because a
+    # courtyard is not a body -- it is a body plus an assembly margin plus any
+    # shell overhang, which is why run-6 calibrated the courtyard channel and
+    # the fab channel apart in the first place. A part can therefore have a
+    # courtyard `source` and a fab `drawn_source` at once, and the body-overlap
+    # channel reads THIS pair, not the occupancy one.
+    drawn_local: Optional[Bbox] = None
+    drawn_source: str = SOURCE_NONE
 
 
 def _union(a: Bbox, b: Bbox) -> Bbox:
@@ -156,35 +178,50 @@ def body_geometry(fp, side: str,
         except Exception:                                    # noqa: BLE001
             pads = None
 
-    drawn = _for_side(courtyard_sides, side)
-    if drawn is not None:
-        return BodyGeometry(ref, drawn,
-                            drawn if pads is None else _union(drawn, pads),
-                            SOURCE_COURTYARD)
-
-    drawn = _for_side(fab_sides, side)
-    if drawn is not None:
-        return BodyGeometry(ref, drawn,
-                            drawn if pads is None else _union(drawn, pads),
-                            SOURCE_FAB)
-
+    fab = _for_side(fab_sides, side)
     silk = _for_side(silk_sides, side)
-    if silk is not None and pads is not None:
-        # Rule 1: the silk rung unions. Rule 2 (pad-less refusal) is the
-        # `pads is not None` guard above -- a logo reaches the branch below and
-        # is recorded as rejected.
-        body = _union(silk, pads)
-        if _contained(silk, pads):
-            # A tick mark: the union IS the pad bbox, so say `pad_bbox`.
-            return BodyGeometry(ref, body, body, SOURCE_PADS,
-                                silk_rejected=True)
-        return BodyGeometry(ref, body, body, SOURCE_SILK)
 
-    if pads is not None:
-        return BodyGeometry(ref, pads, pads, SOURCE_PADS,
-                            silk_rejected=silk is not None)
-    return BodyGeometry(ref, None, None, SOURCE_NONE,
-                        silk_rejected=silk is not None)
+    # -- the DRAWN-BODY ladder: fab, else silk U pads. Courtyard is not on it.
+    drawn_local: Optional[Bbox] = None
+    drawn_source = SOURCE_NONE
+    silk_rejected = False
+    if fab is not None:
+        drawn_local, drawn_source = fab, SOURCE_FAB
+    elif silk is not None:
+        if pads is None:
+            # Rule 2: a pad-less footprint gets no SILK body. A logo, an OSHW
+            # mark or a decorative drawing is not a part to collide with, and
+            # allowing them put 5 corpus pairs above the run-23 floors, all
+            # five of them logos.
+            silk_rejected = True
+        else:
+            # Rule 1: the silk rung unions with the pads, because silk alone
+            # is a pair of clipped ticks and would SHRINK the part.
+            body = _union(silk, pads)
+            if _contained(silk, pads):
+                # A tick mark: the union IS the pad bbox, so it says nothing
+                # about the body and must not be labelled one.
+                silk_rejected = True
+            else:
+                drawn_local, drawn_source = body, SOURCE_SILK
+
+    # -- the OCCUPANCY ladder: courtyard, else the drawn body, else the pads.
+    court = _for_side(courtyard_sides, side)
+    if court is not None:
+        body_local, source = court, SOURCE_COURTYARD
+    elif drawn_local is not None:
+        body_local, source = drawn_local, drawn_source
+    elif pads is not None:
+        body_local, source = pads, SOURCE_PADS
+    else:
+        return BodyGeometry(ref, None, None, SOURCE_NONE,
+                            silk_rejected=silk_rejected,
+                            drawn_local=None, drawn_source=SOURCE_NONE)
+
+    occupancy = (body_local if pads is None else _union(body_local, pads))
+    return BodyGeometry(ref, body_local, occupancy, source,
+                        silk_rejected=silk_rejected,
+                        drawn_local=drawn_local, drawn_source=drawn_source)
 
 
 def board_bodies(pcb_data, pcb_file: Optional[str] = None
