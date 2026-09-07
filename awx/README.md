@@ -516,6 +516,35 @@ vias, 339 s** (fanout 4.5 min, braid 3.2 min; 24 rips landed a lane) --
 the first complete K51 on this chain, against the human's 85 vias: the
 vias are where the work is now, not completion.
 
+### The destination passes never converge, and the last one ships (2026-09-07)
+
+At K41 the destination loop runs all eight passes (misses 10, 10, 4, 4,
+2, 2, 7, 6) because a miss is not a property of the banned move alone: a
+berth laid as asked in one pass fails in the next when its neighbours
+change. Two things were wrong with what shipped from that, one measured
+harmless and one fixed:
+
+- The sidecar was written from the RE-PLAN after the last pass -- a
+  choice no board was ever laid to -- with the last pass's `achieved`
+  patched over it. At K41 the two choices named the same nets, so no
+  copper differed; the sidecar now comes from the last pass fanned out
+  and audited (`laid_pass`), which is the only thing it can honestly
+  describe.
+- "Ship the best pass by audit" was built and measured WORSE: pass 5
+  (38/40 berths exact, 40/40 layers) graded 1 open 98v 30/41 in-band in
+  216 s against pass 7's (34/40 exact) 1 open 78v 40/41 in 130 s. Every
+  pass board was then braided (`tmp/passes_k41.sh`, committed braid):
+  passes 0..7 graded 6 / 3 / 4 / 5 / 3 / 1 / 1 / 1 open at 86 / 108 / 92
+  / 74 / 81 / 98 / 102 / 78 vias (pass 6 with 6 DRC). The last pass is
+  the best on this board, and neither the audit's exact count nor the
+  judge's cost of the choice (pass 6 the lowest at 152.56, pass 7
+  156.88, pass 0 160.93 -> 6 open) predicts the braid's grade. So the
+  last pass ships, as before -- with the ban set that makes it the
+  engine's most feasible choice -- and the fanout's convergence stays a
+  fanout-stage problem: SA9's menu is banned away by pass 3 and it is
+  fanned out unplanned every time (`plan from X: 40 of 41 nets; SA9 read
+  off the board`).
+
 ## History: what `bus622-take4` still has
 
 This tree was cut from the `bus622-take4` branch at `7c384245`
