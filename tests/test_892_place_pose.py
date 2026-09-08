@@ -614,6 +614,15 @@ with tempfile.TemporaryDirectory() as d:
     check("a missing input exits 2 with a summary",
           r.returncode == 2 and len(summaries(r)) == 1,
           "rc=%s summaries=%d" % (r.returncode, len(summaries(r))))
+    # The REASON, not just the code. Mutation-checked: delete the isfile()
+    # guard and the parser raises instead, so the run STILL exits 2 with a
+    # summary -- every arm above stays green while the message changes from
+    # "is not a file" to "cannot read ... [Errno 2]". Those send a caller to
+    # different places (a mistyped path vs a corrupt board), so the message is
+    # the contract here, not the code.
+    check("and it says the file is not there, not that it is unreadable",
+          'is not a file' in (summaries(r)[0].get('refused') or ''),
+          str(summaries(r)[0].get('refused')))
     # A directory that does not exist used to be a FileNotFoundError traceback
     # and an exit 1 the docstring's table does not list.
     r = run([POSE, BOARD, os.path.join(d, 'no', 'such', 'dir', 'o.kicad_pcb'),
