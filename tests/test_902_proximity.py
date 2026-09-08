@@ -24,6 +24,18 @@ and measuring it turned 26 into 5. It is written out here because the marked
 rows are the ones with a scar, and a reader deciding which of these to trust
 should not have to take the docstring's word for it.
 
+MEASURED, from the run and not predicted: `tests/mutate_902.py` is 21 rows,
+21 killed, 0 survived, 0 broken. Nine of those rows are branches that ALREADY
+survived a battery once -- the `min` that is the rule's stated invariant, both
+abstentions, the partial-pad miss, the courtyard-vs-body read, the bool check,
+longest-match waiver resolution, the `+ ':'` suffix guard and the whole DRIFTED
+arm -- so they are recorded there rather than remembered here.
+
+The battery also found a hole nothing else did: deleting the INTENT loader's
+finite check survived, because every non-finite case tested the BRIEF. An
+intent is a document a human may write directly, so each refusal has to exist
+on both sides or one path grades what the other refuses.
+
     python3 tests/test_902_proximity.py
 """
 import json
@@ -1041,6 +1053,49 @@ def test_a_body_claim_for_a_part_with_no_geometry_abstains():
           f"passing")
 
 
+def test_the_intent_loader_refuses_what_the_brief_loader_refuses():
+    """The hand-written intent never passes through the brief compiler.
+
+    Found by `tests/mutate_902.py`: deleting the INTENT loader's finite check
+    survived the whole suite, because every non-finite case tested the BRIEF.
+    An intent is a document a human may write directly -- `place_seed` and
+    `place_reconstruct` load one and never call `validate_intent` -- so each
+    refusal has to exist on both sides or one path grades what the other
+    refuses.
+    """
+    base = {'schema': fp.SCHEMA_VERSION, 'kind': fp.KIND, 'units': 'mm'}
+    cases = [
+        ({'ref': 'Y1', 'near': 'U1', 'max_mm': float('inf')},
+         'positive finite'),
+        ({'ref': 'Y1', 'near': 'U1', 'max_mm': float('nan')},
+         'positive finite'),
+        ({'ref': 'Y1', 'near': 'U1', 'max_mm': 0}, 'positive finite'),
+        ({'ref': 'Y1', 'near': 'U1', 'max_mm': -1}, 'positive finite'),
+        ({'ref': 'Y1', 'near': 'U1', 'max_mm': 2, 'pads': {'Y1': [1]}},
+         'match no pad'),
+        ({'ref': 'Y1', 'near': 'U1', 'max_mm': 2, 'basis': 'courtyard'},
+         'expected one of'),
+    ]
+    for row, why in cases:
+        try:
+            fp.intent_from_dict(dict(base, proximity=[row]))
+            raise AssertionError(f'NOT REFUSED: {row}')
+        except fp.IntentError as exc:
+            assert why in str(exc), (why, str(exc))
+    # And a real JSON document, since `json.load` accepts the literals that
+    # make this reachable from a file rather than only from the API.
+    doc = json.loads('{"schema": %d, "kind": "%s", "units": "mm", '
+                     '"proximity": [{"ref": "Y1", "near": "U1", '
+                     '"max_mm": Infinity}]}' % (fp.SCHEMA_VERSION, fp.KIND))
+    try:
+        fp.intent_from_dict(doc)
+        raise AssertionError('NOT REFUSED through real JSON')
+    except fp.IntentError as exc:
+        assert 'positive finite' in str(exc), str(exc)
+    print(f"  PASS: {len(cases)} shapes the brief refuses are refused by the "
+          f"intent loader too, including Infinity through real JSON")
+
+
 def test_the_intent_loader_refuses_the_reversed_pair_the_brief_refuses():
     """The hand-written intent is the path the brief compiler never sees.
 
@@ -1105,6 +1160,7 @@ TESTS = [
     test_the_minimum_over_partners_is_a_minimum,
     test_a_padless_part_abstains_rather_than_passing_silently,
     test_a_body_claim_for_a_part_with_no_geometry_abstains,
+    test_the_intent_loader_refuses_what_the_brief_loader_refuses,
     test_the_intent_loader_refuses_the_reversed_pair_the_brief_refuses,
 ]
 
