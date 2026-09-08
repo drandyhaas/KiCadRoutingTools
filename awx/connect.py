@@ -277,7 +277,10 @@ def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
             rows.append(r)
     if not rows:
         return
-    arr = np.unique(np.concatenate(rows), axis=0).astype(np.int32)
+    # no np.unique(axis=0): the map keeps the MAX cost per cell, so a cell
+    # stamped twice at the same cost is the same map, and the row sort
+    # was 41 of the K41 braid's 172 profiled seconds (2026-09-08)
+    arr = np.ascontiguousarray(np.concatenate(rows).astype(np.int32))
     obstacles.set_layer_proximity_batch(arr)
 
 
