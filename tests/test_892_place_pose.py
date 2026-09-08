@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""place_pose.py: the verb that APPLIES a model-chosen pose (#892).
+
+What this file is really testing, in one line each:
+
+* the pose that was asked for is the pose that lands in the file;
+* a request that makes the board WORSE is refused and writes NOTHING, while a
+  board's inherited damage is never charged to the caller;
+* `face` is not a prediction anyone has to trust -- FACE_CYCLE is checked here
+  against a real write + re-parse, and the verb re-measures the row on the
+  board it wrote;
+* several verbs in one call are ONE arrangement (every op reads the input);
+* lock and unlock are inverses, byte for byte;
+* every exit -- including the refusals -- prints exactly one JSON_SUMMARY.
+
+Refusals are asserted with `run_utils.check(..., refuse=..., code=N)` rather
+than on the exit code alone, so an ImportError or an argparse accident is
+reported as a BROKEN TEST instead of as a guard that held.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for p in (REPO,):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+        sys.path.insert(0, os.path.join(p, 'py_router'))
+        sys.path.insert(0, os.path.join(p, 'py_tools'))
+        sys.path.insert(0, os.path.join(p, 'py_placer'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from run_utils import check as refuse_check, tool                # noqa: E402
+
+BOARD = os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')
+ROUTED = os.path.join(REPO, 'kicad_files', 'qfn_interior_pads.kicad_pcb')
+PRO = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pro')
+
+passed = failed = 0
+
+
+def check(name, ok, detail=""):
+    global passed, failed
+    passed += bool(ok)
+    failed += not ok
+    print(f"  {'OK  ' if ok else 'FAIL'} {name}{(' -- ' + detail) if detail else ''}")
+
+
+def run(argv, hashseed="0", timeout=900):
+    env = dict(os.environ, PYTHONHASHSEED=hashseed, PYTHONIOENCODING='utf-8')
+    return subprocess.run([sys.executable, '-X', 'utf8'] + argv,
+                          capture_output=True, text=True, encoding='utf-8',
+                          errors='replace', cwd=REPO, env=env, timeout=timeout)
+
+
+def summaries(r):
+    return [json.loads(l.split(':', 1)[1]) for l in r.stdout.splitlines()
+            if l.startswith('JSON_SUMMARY:')]
+
+
+def summary(r):
+    s = summaries(r)
+    assert len(s) == 1, f"expected exactly one JSON_SUMMARY, got {len(s)}"
+    return s[0]
+
+
+for _f in (BOARD, ROUTED, PRO):
+    if not os.path.isfile(_f):
+        print("SKIP: fixture missing: %s" % _f)
+        sys.exit(77)
+
+POSE = tool('place_pose.py')
+
+from kicad_parser import parse_kicad_pcb                          # noqa: E402
+from placement import pose_ops                                    # noqa: E402
+from placement.parser import extract_locked_refs                  # noqa: E402
+from placement.seeder import stamp_locked, stamp_unlocked         # noqa: E402
+from placement.writer import write_placed_output                  # noqa: E402
+
+pcb0 = parse_kicad_pcb(BOARD)
+CLR, EDGE, TW, _knobs = pose_ops.resolve_knobs(BOARD)
+
+# ---------------------------------------------------------------------------
+print("FACE_CYCLE against a real rotation (the arithmetic nobody can eyeball)")
+# The cycle is a claim about the parser's own transform, so it is checked by
+# ROTATING A REAL PART and re-reading the engine's face rule -- not by
+# restating the constant. Per-pad agreement is not required: `escape.face_of`
+# takes an argmin against a box that is not square, so a CORNER pad can change
+# sides under a rotation that carries the row. The claim under test is the one
+# the verb makes, which is about the ROW's majority.
+base = pose_ops.part_faces(pcb0, 'U1', clearance=CLR, track_width=TW)
+base_face = {p.pad_number: f for f, pads in base.items() for p in pads}
+fp0 = pcb0.footprints['U1']
+with tempfile.TemporaryDirectory() as d:
+    for delta in (90, 180, 270):
+        out = os.path.join(d, 'r%d.kicad_pcb' % delta)
+        write_placed_output(BOARD, out, [
+            {'reference': 'U1', 'new_x': fp0.x, 'new_y': fp0.y,
+             'new_rotation': (fp0.rotation + delta) % 360}])
+        got = pose_ops.part_faces(parse_kicad_pcb(out), 'U1',
+                                  clearance=CLR, track_width=TW)
+        got_face = {p.pad_number: f for f, pads in got.items() for p in pads}
+        worst = None
+        for face, pads in base.items():
+            if face == 'interior' or len(pads) < 2:
+                continue
+            want = pose_ops.rotate_face(face, delta)
+            hit = sum(1 for p in pads if got_face.get(p.pad_number) == want)
+            frac = hit / float(len(pads))
+            worst = frac if worst is None else min(worst, frac)
+        check("delta %d: every multi-pad row keeps its predicted face by "
+              "majority" % delta, worst is not None and worst > 0.5,
+              "worst row agreement %s" % worst)
+
+check("rotate_face is a 4-cycle", all(
+    pose_ops.rotate_face(f, 360) == f for f in pose_ops.FACE_CYCLE))
+check("face_delta inverts rotate_face", all(
+    pose_ops.rotate_face(f, pose_ops.face_delta(f, g)) == g
+    for f in pose_ops.FACE_CYCLE for g in pose_ops.FACE_CYCLE))
+check("bearing_face reads y-down as north/south",
+      pose_ops.bearing_face((0, 0), (0, -5)) == 'north'
+      and pose_ops.bearing_face((0, 0), (0, 5)) == 'south'
+      and pose_ops.bearing_face((0, 0), (5, 0)) == 'east'
+      and pose_ops.bearing_face((0, 0), (-5, 0)) == 'west')
+
+# ---------------------------------------------------------------------------
+print("set: the pose asked for is the pose in the file")
+import pose_score                                                 # noqa: E402
+_st = pose_score.make_state(pcb0, BOARD, clearance=CLR,
+                            board_edge_clearance=EDGE)
+_ranked = pose_score.rank_poses(pcb0, BOARD, 'C3', radius=2.0, step=0.5,
+                                limit=3, state=_st)
+assert _ranked, "no legal pose for C3 -- fixture assumption broken"
+GOOD = _ranked[0]
+
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'set.kicad_pcb')
+    r = run([POSE, BOARD, out, 'set', 'C3', str(GOOD['x']), str(GOOD['y']),
+             '--rot', str(GOOD['rot'])])
+    check("exits 0", r.returncode == 0, (r.stdout + r.stderr)[-400:])
+    s = summary(r)
+    check("summary records the move", s['moved'] and
+          s['moved'][0]['ref'] == 'C3')
+    fp = parse_kicad_pcb(out).footprints['C3']
+    check("the file carries the requested pose",
+          abs(fp.x - GOOD['x']) < 1e-6 and abs(fp.y - GOOD['y']) < 1e-6
+          and (fp.rotation % 360) == GOOD['rot'] % 360,
+          "%s %s %s" % (fp.x, fp.y, fp.rotation))
+    check("legality did not get worse",
+          s['pad_conflicts_after'] <= s['pad_conflicts_before']
+          and s['oob_pad_count_after'] <= s['oob_pad_count_before'])
+
+    # ONE arrangement: both ops read the INPUT board, so op B may target the
+    # place op A is vacating. Resolve them in sequence instead and B lands on
+    # top of A's new pose -- which is the bug this asserts against.
+    a0 = parse_kicad_pcb(BOARD).footprints['C3']
+    b0 = parse_kicad_pcb(BOARD).footprints['C4']
+    multi = os.path.join(d, 'multi.kicad_pcb')
+    r = run([POSE, BOARD, multi,
+             'set', 'C3', str(GOOD['x']), str(GOOD['y']), '--rot',
+             str(GOOD['rot']),
+             'set', 'C4', str(a0.x), str(a0.y), '--force'])
+    check("two ops in one call exit 0 (forced past legality)",
+          r.returncode == 0, (r.stdout + r.stderr)[-400:])
+    if r.returncode == 0:
+        m = parse_kicad_pcb(multi)
+        check("op B landed on op A's INPUT pose, not its output pose",
+              abs(m.footprints['C4'].x - a0.x) < 1e-6
+              and abs(m.footprints['C4'].y - a0.y) < 1e-6,
+              "C4 at %s,%s want %s,%s" % (m.footprints['C4'].x,
+                                          m.footprints['C4'].y, a0.x, a0.y))
+        check("op A moved too", abs(m.footprints['C3'].x - GOOD['x']) < 1e-6)
+        check("C4 really did move", (b0.x, b0.y) != (a0.x, a0.y))
+
+# ---------------------------------------------------------------------------
+print("refusal: worse than the input, nothing written")
+with tempfile.TemporaryDirectory() as d:
+    # ON TOP OF ANOTHER 2-PAD PASSIVE, deliberately: a QFN's ORIGIN is the
+    # middle of its pad ring, which is empty copper, so "drop C3 on U1" is a
+    # legal pose and would have made this a test of nothing.
+    victim = parse_kicad_pcb(BOARD).footprints['C4']
+    out = os.path.join(d, 'bad.kicad_pcb')
+    r = run([POSE, BOARD, out, 'set', 'C3', str(victim.x), str(victim.y),
+             '--rot', str(victim.rotation % 360)])
+    check("exits 4 (well-formed, the board said no)", r.returncode == 4,
+          (r.stdout + r.stderr)[-300:])
+    check("nothing was written", not os.path.exists(out))
+    s = summary(r)
+    check("the refusal names the categories that got worse",
+          'WORSE' in (s.get('refused') or '')
+          and s['pad_conflicts_after'] > s['pad_conflicts_before'])
+    check("the refusal carries its exit code", s.get('exit_code') == 4)
+
+    # ...and the same request with --force writes, and SAYS it forced.
+    forced = os.path.join(d, 'forced.kicad_pcb')
+    r = run([POSE, BOARD, forced, 'set', 'C3', str(victim.x), str(victim.y),
+             '--rot', str(victim.rotation % 360), '--force'])
+    check("--force writes anyway", r.returncode == 0 and
+          os.path.isfile(forced))
+    check("--force is disclosed", summary(r).get('forced') is True)
+
+# ---------------------------------------------------------------------------
+print("inherited damage is not charged to the caller")
+with tempfile.TemporaryDirectory() as d:
+    # Build a board that ALREADY has a pad conflict (C4 dropped on U1), then
+    # ask to move an UNRELATED part to a pose that is fine. An absolute
+    # legality gate refuses this; a relative one must not. This is the
+    # zero-offset check: the predicate is False for parts before anything
+    # moves, so "is this pose legal" cannot be the question.
+    dirty = os.path.join(d, 'dirty.kicad_pcb')
+    c2 = parse_kicad_pcb(BOARD).footprints['C2']
+    write_placed_output(BOARD, dirty, [
+        {'reference': 'C1', 'new_x': c2.x, 'new_y': c2.y,
+         'new_rotation': c2.rotation % 360}])
+    dpcb = parse_kicad_pcb(dirty)
+    dirty_grade = pose_ops.grade(dpcb, dirty, CLR)
+    check("the fixture really is dirty", dirty_grade['pad_conflicts'] > 0,
+          str(dirty_grade['pad_conflicts']))
+    dr = pose_score.rank_poses(dpcb, dirty, 'C3', radius=2.0, step=0.5,
+                               limit=3)
+    if dr:
+        out = os.path.join(d, 'clean_move.kicad_pcb')
+        r = run([POSE, dirty, out, 'set', 'C3', str(dr[0]['x']),
+                 str(dr[0]['y']), '--rot', str(dr[0]['rot'])])
+        check("a good move on a dirty board is ACCEPTED", r.returncode == 0,
+              (r.stdout + r.stderr)[-300:])
+        if r.returncode == 0:
+            s = summary(r)
+            check("and the inherited conflicts are reported, not charged",
+                  s['pad_conflicts_before'] > 0
+                  and s['pad_conflicts_after'] <= s['pad_conflicts_before'])
+        # --strict-legal is the ABSOLUTE arm and must refuse the same move.
+        out2 = os.path.join(d, 'strict.kicad_pcb')
+        r2 = run([POSE, dirty, out2, 'set', 'C3', str(dr[0]['x']),
+                  str(dr[0]['y']), '--rot', str(dr[0]['rot']),
+                  '--strict-legal'])
+        check("--strict-legal refuses it", r2.returncode == 4,
+              (r2.stdout + r2.stderr)[-200:])
+        check("--strict-legal wrote nothing", not os.path.exists(out2))
+    else:
+        check("dirty-board ranking produced a candidate", False,
+              "no legal pose for C3 on the dirty fixture")
+
+# ---------------------------------------------------------------------------
+print("--near/--snap seats what the exact request could not")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'snap.kicad_pcb')
+    # C4's own pose: the exact form must refuse it (pad on pad), and --near
+    # must seat C3 somewhere legal within the radius.
+    c4 = parse_kicad_pcb(BOARD).footprints['C4']
+    tx, ty = c4.x, c4.y
+    r = run([POSE, BOARD, out, 'set', 'C3', str(tx), str(ty)])
+    exact_refused = r.returncode == 4
+    # 8 mm, because the point aimed at is another part's pose and the room
+    # nearby is genuinely occupied: at --radius 4 the snap REFUSES, which is
+    # the correct answer and not what this case is testing.
+    r = run([POSE, BOARD, out, 'set', 'C3', '--near', str(tx), str(ty),
+             '--radius', '8'])
+    if exact_refused and r.returncode == 0:
+        s = summary(r)
+        check("--near snapped", bool(s.get('snapped')),
+              json.dumps(s.get('snapped')))
+        check("the snapped pose is inside the radius, as a DISTANCE",
+              (s['snapped'] or {}).get('dist_mm', 99) <= 8.0,
+              str((s['snapped'] or {}).get('dist_mm')))
+        check("the snapped board grades no worse",
+              s['pad_conflicts_after'] <= s['pad_conflicts_before'])
+        fp = parse_kicad_pcb(out).footprints['C3']
+        check("the file carries the SNAPPED pose, not the requested one",
+              abs(fp.x - s['snapped']['to'][0]) < 1e-6
+              and abs(fp.y - s['snapped']['to'][1]) < 1e-6)
+    else:
+        check("--near seats a point the exact form refused",
+              exact_refused and r.returncode == 0,
+              "exact refused=%s, near rc=%s" % (exact_refused, r.returncode))
+
+# ---------------------------------------------------------------------------
+print("rotate: absolute by default, --relative for a delta")
+with tempfile.TemporaryDirectory() as d:
+    r1 = parse_kicad_pcb(BOARD).footprints['R1']
+    out = os.path.join(d, 'rot.kicad_pcb')
+    r = run([POSE, BOARD, out, 'rotate', 'R1', '90'])
+    check("rotate exits 0", r.returncode == 0, (r.stdout + r.stderr)[-300:])
+    if r.returncode == 0:
+        fp = parse_kicad_pcb(out).footprints['R1']
+        check("absolute rotation lands exactly", (fp.rotation % 360) == 90,
+              str(fp.rotation))
+        check("x/y are untouched",
+              abs(fp.x - r1.x) < 1e-9 and abs(fp.y - r1.y) < 1e-9)
+    out2 = os.path.join(d, 'rel.kicad_pcb')
+    # --force: the claim under test is the ARITHMETIC, and whether that
+    # particular angle happens to graze a neighbour is a different question.
+    r = run([POSE, BOARD, out2, 'rotate', 'R1', '90', '--relative',
+             '--force'])
+    if r.returncode == 0:
+        fp = parse_kicad_pcb(out2).footprints['R1']
+        check("--relative adds to the current rotation",
+              (fp.rotation % 360) == ((r1.rotation + 90) % 360),
+              "%s from %s" % (fp.rotation, r1.rotation))
+    else:
+        check("--relative run exits 0", False, (r.stdout + r.stderr)[-300:])
+
+# ---------------------------------------------------------------------------
+print("face: aimed, then MEASURED on the board it wrote")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'face.kicad_pcb')
+    r = run([POSE, BOARD, out, 'face', 'U1', 'S', 'USB1', '--force'])
+    check("face exits 0 under --force", r.returncode == 0,
+          (r.stdout + r.stderr)[-300:])
+    if r.returncode == 0:
+        s = summary(r)
+        op = s['ops'][0]
+        check("the op records the aim and the measurement",
+              'target_face' in op and 'row_on_target' in op
+              and 'row_landed' in op, json.dumps(op)[:300])
+        check("the measurement is of the row it named",
+              op['row_on_target'][1] == len(op['row_pads']))
+        # The independent check: re-derive the row's landing here.
+        fpcb = parse_kicad_pcb(out)
+        by = pose_ops.part_faces(fpcb, 'U1', clearance=CLR, track_width=TW)
+        landed = {p.pad_number: f for f, pads in by.items() for p in pads}
+        hit = sum(1 for n in op['row_pads']
+                  if landed.get(n) == op['target_face'])
+        check("the CLI's count matches an independent recount",
+              hit == op['row_on_target'][0],
+              "%s vs %s" % (hit, op['row_on_target'][0]))
+
+# ---------------------------------------------------------------------------
+print("lock / unlock are inverses, and a lock refuses a move")
+with tempfile.TemporaryDirectory() as d:
+    b = os.path.join(d, 'b.kicad_pcb')
+    shutil.copyfile(BOARD, b)
+    orig = open(b, encoding='utf-8').read()
+    n1 = stamp_locked(b, ['R1', 'C3'])
+    n2 = stamp_unlocked(b, ['R1', 'C3'])
+    check("stamp_unlocked inverts stamp_locked byte for byte",
+          n1 == 2 and n2 == 2 and open(b, encoding='utf-8').read() == orig)
+    check("unlocking what was never locked changes nothing",
+          stamp_unlocked(b, ['Q1']) == 0
+          and open(b, encoding='utf-8').read() == orig)
+
+    locked = os.path.join(d, 'locked.kicad_pcb')
+    r = run([POSE, BOARD, locked, 'lock', 'C3'])
+    check("lock exits 0 and stamps", r.returncode == 0
+          and 'C3' in extract_locked_refs(locked))
+    out = os.path.join(d, 'move.kicad_pcb')
+    # The move used here is GOOD -- the ranked-legal pose from the top of this
+    # file -- so the only thing that can refuse it is the lock. A move that
+    # legality would refuse anyway proves nothing about the lock guard.
+    move = ['set', 'C3', str(GOOD['x']), str(GOOD['y']),
+            '--rot', str(GOOD['rot'])]
+    r = run([POSE, locked, out] + move)
+    check("a locked part refuses a direct move (exit 4)", r.returncode == 4,
+          (r.stdout + r.stderr)[-200:])
+    check("the refusal is about the LOCK, not legality",
+          'locked in the board' in (r.stdout + r.stderr))
+    check("and wrote nothing", not os.path.exists(out))
+    r = run([POSE, locked, out, 'unlock', 'C3'] + move)
+    check("unlock in the SAME call opens it", r.returncode == 0,
+          (r.stdout + r.stderr)[-300:])
+    if r.returncode == 0:
+        opcb = parse_kicad_pcb(out)
+        check("the move landed and the lock is gone",
+              abs(opcb.footprints['C3'].x - GOOD['x']) < 1e-6
+              and 'C3' not in extract_locked_refs(out))
+
+# ---------------------------------------------------------------------------
+print("--dry-run writes nothing at all")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'dry.kicad_pcb')
+    r = run([POSE, BOARD, out, 'set', 'C3', str(GOOD['x']), str(GOOD['y']),
+             '--rot', str(GOOD['rot']), '--dry-run'])
+    check("dry-run exits 0", r.returncode == 0, (r.stdout + r.stderr)[-300:])
+    check("dry-run wrote no board", not os.path.exists(out))
+    check("dry-run left nothing else behind", os.listdir(d) == [])
+    s = summary(r)
+    check("dry-run says so and reports no output path",
+          s['dry_run'] is True and s['output'] is None)
+    check("dry-run still grades", s['pad_conflicts_after'] is not None)
+
+# ---------------------------------------------------------------------------
+print("siblings travel with the output (#441)")
+with tempfile.TemporaryDirectory() as d:
+    b = os.path.join(d, 'b.kicad_pcb')
+    shutil.copyfile(BOARD, b)
+    shutil.copyfile(PRO, os.path.join(d, 'b.kicad_pro'))
+    with open(os.path.join(d, 'b.kicad_dru'), 'w', encoding='utf-8') as f:
+        f.write('(version 1)\n')
+    out = os.path.join(d, 'out.kicad_pcb')
+    r = run([POSE, b, out, 'rotate', 'R1', '90'])
+    check("run on a board with siblings exits 0", r.returncode == 0,
+          (r.stdout + r.stderr)[-300:])
+    check("the .kicad_pro travelled", os.path.isfile(
+        os.path.join(d, 'out.kicad_pro')))
+    check("the .kicad_dru travelled", os.path.isfile(
+        os.path.join(d, 'out.kicad_dru')))
+    if r.returncode == 0:
+        s = summary(r)
+        check("the knobs came from the BOARD, not a constant",
+              s['knobs']['clearance']['source'] == 'board netclass',
+              json.dumps(s['knobs']))
+
+# ---------------------------------------------------------------------------
+print("the copper gate")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'r.kicad_pcb')
+    ref = sorted(parse_kicad_pcb(ROUTED).footprints)[0]
+    refuse_check([sys.executable, '-X', 'utf8', POSE, ROUTED, out,
+                  'rotate', ref, '90'],
+                 refuse='strands every track', code=3)
+    check("the copper gate wrote nothing", not os.path.exists(out))
+    r = run([POSE, ROUTED, out, 'rotate', ref, '90', '--allow-routed'])
+    check("--allow-routed proceeds", r.returncode in (0, 4),
+          (r.stdout + r.stderr)[-200:])
+
+# ---------------------------------------------------------------------------
+print("usage-shaped refusals exit 2, with the reason")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'x.kicad_pcb')
+    base = [sys.executable, '-X', 'utf8', POSE, BOARD, out]
+    refuse_check(base + ['set', 'NOPE', '130', '98'],
+                 refuse='is not a footprint on this board', code=2)
+    refuse_check(base + ['face', 'U1', 'sideways', 'USB1'],
+                 refuse='is not a face', code=2)
+    refuse_check(base + ['set', 'C3', '130', '98', 'set', 'C3', '131', '99'],
+                 refuse='named by two ops in one call', code=2)
+    refuse_check(base + ['set', 'C3', '130'],
+                 refuse='needs both X and Y', code=2)
+    refuse_check(base + ['set', 'C3'],
+                 refuse='asks for nothing', code=2)
+    refuse_check([sys.executable, '-X', 'utf8', POSE, BOARD, 'set', 'C3',
+                  '130', '98'],
+                 refuse='reads as the OUTPUT PATH here', code=2)
+    check("no usage refusal wrote a board", not os.path.exists(out))
+
+# ---------------------------------------------------------------------------
+print("every exit prints exactly one JSON_SUMMARY")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'j.kicad_pcb')
+    c4 = parse_kicad_pcb(BOARD).footprints['C4']
+    for name, argv in (
+            ('success', [POSE, BOARD, out, 'rotate', 'R1', '90']),
+            ('legality refusal', [POSE, BOARD, os.path.join(d, 'k.kicad_pcb'),
+                                  'set', 'C3', str(c4.x), str(c4.y),
+                                  '--rot', str(c4.rotation % 360)]),
+            ('usage refusal', [POSE, BOARD, os.path.join(d, 'l.kicad_pcb'),
+                               'set', 'NOPE', '1', '2'])):
+        r = run(argv)
+        check("%s prints one JSON_SUMMARY" % name, len(summaries(r)) == 1,
+              "%d found, rc=%s" % (len(summaries(r)), r.returncode))
+
+# ---------------------------------------------------------------------------
+print("the provenance regime accepts this lever and still refuses a hand script")
+with tempfile.TemporaryDirectory() as d:
+    from placement import provenance
+    b = os.path.join(d, 'b.kicad_pcb')
+    shutil.copyfile(BOARD, b)
+    provenance.start_regime(d, b)
+    check("place_pose.py is a registered lever",
+          'place_pose.py' in provenance.LEVER_REGISTRY)
+    out = os.path.join(d, 'armed.kicad_pcb')
+    r = run([POSE, b, out, 'rotate', 'R1', '90'])
+    check("a place_pose write is accepted under an armed regime",
+          r.returncode == 0 and os.path.isfile(out),
+          (r.stdout + r.stderr)[-400:])
+    # The hand script this tool replaces: same write, no declared lever.
+    hand = os.path.join(d, 'hand.kicad_pcb')
+    try:
+        write_placed_output(b, hand, [{'reference': 'R1', 'new_x': 10.0,
+                                       'new_y': 10.0, 'new_rotation': 0}])
+        raised = None
+    except provenance.UnaidedViolation as exc:
+        raised = str(exc)
+    check("an undeclared write is still refused", raised is not None,
+          (raised or "NO UnaidedViolation was raised")[:120])
+
+print()
+print(f"{passed} passed, {failed} failed")
+sys.exit(1 if failed else 0)

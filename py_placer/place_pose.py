@@ -18,11 +18,15 @@ SEVERAL VERBS IN ONE CALL describe ONE arrangement: every op is resolved
 against the INPUT board and written in a single pass, so no op sees another's
 effect and the result is one board state rather than a replayed sequence.
 
-EXIT CODES. 0 written; 2 bad arguments or an unreadable board; 3 the board
-carries copper (moving a footprint would strand its tracks -- `--allow-routed`
-to override); 4 the request was REFUSED and nothing was written. Note that 4
+EXIT CODES. 0 written; 2 the request does not name a thing on this board (bad
+arguments, an unreadable board, an unknown ref, a face with no pad row) -- a
+typo you fix by rewriting the command; 3 the board carries copper (moving a
+footprint would strand its tracks -- `--allow-routed` to override); 4 the
+request is WELL FORMED and the board said no (it grades worse, or the part is
+locked) and nothing was written -- a measurement you act on. Note that 4
 departs from `place_seed`, where it means "written, but the grade found
 errors": here a refusal writes nothing at all, which is what #892 asks for.
+Every exit prints exactly one `JSON_SUMMARY:` line, refusals included.
 
 WHAT IS GRADED, and what "illegal" means. The verdict is
 `placement.legality.grade_pad_legality` -- the same numbers `place_seed` and
@@ -80,7 +84,11 @@ def build_parser():
                         "exact geometry, so a candidate is verified, never "
                         "trusted). Implied by --near")
     p.add_argument('--radius', type=float, default=2.0, metavar='MM',
-                   help='How far --snap may look (default: 2.0mm)')
+                   help='How far --snap may move the part, as a straight-line '
+                        "distance (default: 2.0mm). The underlying sweep is a "
+                        'square lattice, so its corner reaches 1.41x further; '
+                        'the bound is applied here, where the flag reads as a '
+                        'distance')
     p.add_argument('--snap-step', type=float, default=0.25, metavar='MM',
                    help='Lattice step of the snap sweep (default: 0.25mm)')
     p.add_argument('--snap-tries', type=int, default=6, metavar='N',
@@ -212,6 +220,14 @@ def parse_segments(segments, parsers, error):
 def main(argv=None):
     p = build_parser()
     args, rest = p.parse_known_args(argv)
+    # BEFORE the split, or the verb this swallowed makes the NEXT token look
+    # like the error ("'C3' comes before any verb"), which sends the caller
+    # looking at the wrong end of their command line.
+    if args.output_file in VERBS:
+        p.error("%r reads as the OUTPUT PATH here, not a verb -- the shape is "
+                "`place_pose.py BOARD OUT %s ...`. Pass an output board (with "
+                "--dry-run too; it reports the path it would have written)"
+                % (args.output_file, args.output_file))
     parsers = _verb_parsers()
     try:
         segments = split_segments(rest)
@@ -221,11 +237,6 @@ def main(argv=None):
         p.error("no verb given: %s" % '/'.join(VERBS))
     ops, lock_refs, unlock_refs, near_snap = parse_segments(
         segments, parsers, p.error)
-    if args.output_file in VERBS:
-        p.error("%r reads as the OUTPUT PATH here, not a verb -- the shape is "
-                "`place_pose.py BOARD OUT %s ...`. Pass an output board (with "
-                "--dry-run too; it reports the path it would have written)"
-                % (args.output_file, args.output_file))
 
     try:
         from redo_record import record_invocation
@@ -291,9 +302,14 @@ def main(argv=None):
                        'moved': [], 'ops': [], 'legal': None}
             refused.update({k: v for k, v in exc.extra.items()
                             if k != 'summary'})
+        refused.setdefault('exit_code', exc.code)
         print('JSON_SUMMARY: ' + json.dumps(refused, sort_keys=True,
                                             default=str), flush=True)
-        return 4
+        # 2 = the request names something that is not there (a typo the caller
+        # rewrites); 4 = the request is well formed and the BOARD said no (a
+        # measurement the caller acts on). One code for both would make them
+        # indistinguishable to anything reading the exit status.
+        return exc.code
 
     _report(summary)
     print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True, default=str),

@@ -68,11 +68,21 @@ SHORTFALL_EPS = 1e-6
 
 
 class PoseRefusal(Exception):
-    """A request refused for a stated reason, with the numbers behind it."""
+    """A request refused for a stated reason, with the numbers behind it.
 
-    def __init__(self, reason: str, **extra):
+    `code` is the exit code the CLI should use, and the two values mean
+    different things to a caller: 2 is "the request does not name a thing on
+    this board" (an unknown ref, a face with no row, a rotation that is not a
+    multiple of 90) -- a typo the caller fixes by rewriting the command -- and
+    4 is "the request is well-formed and the board says no" (it grades worse,
+    or the part is locked), which is a MEASUREMENT the caller acts on. Folding
+    both into one code would make a typo indistinguishable from a finding.
+    """
+
+    def __init__(self, reason: str, code: int = 4, **extra):
         super().__init__(reason)
         self.reason = reason
+        self.code = code
         self.extra = extra
 
 
@@ -111,7 +121,7 @@ def normalize_face(token: str) -> str:
     if key not in FACE_ALIASES:
         raise PoseRefusal(
             "%r is not a face: use north/south/east/west (or N/S/E/W)"
-            % (token,))
+            % (token,), code=2)
     return FACE_ALIASES[key]
 
 
@@ -125,7 +135,7 @@ def rotate_face(face: str, delta_deg: float) -> str:
     if abs(delta_deg / 90.0 - round(delta_deg / 90.0)) > 1e-6:
         raise PoseRefusal(
             "a face can only be carried by an orthogonal rotation; %g degrees "
-            "is not a multiple of 90" % (delta_deg,))
+            "is not a multiple of 90" % (delta_deg,), code=2)
     steps = int(round(delta_deg / 90.0)) % 4
     return FACE_CYCLE[(FACE_CYCLE.index(face) + steps) % 4]
 
@@ -148,9 +158,10 @@ def part_faces(pcb_data, ref: str, *, clearance: float, track_width: float):
     from placement.escape import _part_rect        # noqa: PLC2701
     fp = pcb_data.footprints.get(ref)
     if fp is None:
-        raise PoseRefusal("%s is not a footprint on this board" % (ref,))
+        raise PoseRefusal("%s is not a footprint on this board" % (ref,), code=2)
     if not (fp.pads or ()):
-        raise PoseRefusal("%s has no pads, so it has no face to aim" % (ref,))
+        raise PoseRefusal("%s has no pads, so it has no face to aim" % (ref,),
+                          code=2)
     try:
         obstruction = board_copper_geometry(pcb_data, clearance)
     except Exception:                                        # noqa: BLE001
@@ -174,7 +185,8 @@ def part_centre(pcb_data, ref: str):
     """
     fp = pcb_data.footprints.get(ref)
     if fp is None:
-        raise PoseRefusal("%s is not a footprint on this board" % (ref,))
+        raise PoseRefusal("%s is not a footprint on this board" % (ref,),
+                          code=2)
     pads = list(fp.pads or ())
     if not pads:
         return float(fp.x), float(fp.y)
@@ -219,12 +231,12 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
         if fp is None:
             raise PoseRefusal(
                 "%s is not a footprint on this board (the parser names "
-                "duplicate references TP4 / TP4~2, #726)" % (ref,))
+                "duplicate references TP4 / TP4~2, #726)" % (ref,), code=2)
         if ref in seen:
             raise PoseRefusal(
                 "%s is named by two ops in one call (%s then %s); one call "
                 "describes one arrangement, so a part gets one pose"
-                % (ref, seen[ref], kind))
+                % (ref, seen[ref], kind), code=2)
         seen[ref] = kind
         # The baseline rotation is normalised to [0, 360) because the FILE's
         # spelling is not canonical: KiCad writes -90 where this tool writes
@@ -265,7 +277,7 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
                          'target_face': target, 'rotation_delta': delta,
                          'row_pads': [p.pad_number for p in by[face]]})
         else:
-            raise PoseRefusal("unknown op %r" % (kind,))
+            raise PoseRefusal("unknown op %r" % (kind,), code=2)
 
         note['to'] = [round(x, 4), round(y, 4), rot]
         note['moved'] = note['to'] != note['from']
@@ -382,7 +394,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
 
     if not dry_run and not out_path:
         raise PoseRefusal("a write needs an output path; pass one, or "
-                          "--dry-run to grade without writing")
+                          "--dry-run to grade without writing", code=2)
     clearance, board_edge_clearance, track_width, knobs = resolve_knobs(
         board_path, clearance, board_edge_clearance, track_width)
     pcb = pcb_data if pcb_data is not None else parse_kicad_pcb(board_path)
@@ -462,12 +474,23 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 board_edge_clearance=board_edge_clearance,
                 radius=snap_radius, step=snap_step,
                 rotations=(want_rot,), pcb_data=cand_pcb)
+            # `rank_poses`' radius is a CHEBYSHEV box half-width: `_offsets`
+            # walks square rings, so a corner of the r=4 ring sits 5.66 mm
+            # away and a caller who read `--radius 4` as "move it at most
+            # 4 mm" got 5.0 (measured, esp_prog C3). The sweep stays as it is
+            # -- `converge poses` shares it -- and the EUCLIDEAN bound is
+            # applied here, where the flag is spelled as a distance.
+            ranked_all = len(poses)
+            poses = [p for p in poses
+                     if (p.get('dist_mm') or 0.0) <= snap_radius + 1e-9]
             summary['nearest_legal'] = poses[0] if poses else None
             summary['snap_census'] = {
                 'dropped_total': diag.get('dropped_total', 0),
                 'dropped_in_place': diag.get('dropped_in_place', []),
                 'stopped_early': bool(diag.get('stopped_early')),
-                'ranked': len(poses)}
+                'ranked': len(poses),
+                'ranked_before_radius': ranked_all,
+                'radius_mm': snap_radius}
             tried = 0
             for cand_pose in poses[:snap_tries]:
                 tried += 1
@@ -570,7 +593,12 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                         'dropped_total': _d.get('dropped_total', 0),
                         'dropped_in_place': _d.get('dropped_in_place', []),
                         'stopped_early': bool(_d.get('stopped_early')),
-                        'radius_mm': max(snap_radius, 2.0),
+                        # The SWEEP's radius, and it is a Chebyshev box half
+                        # width, not the Euclidean bound `--radius` applies to
+                        # a snap: this list is information about what exists,
+                        # so a pose further out than the caller would accept
+                        # is still worth naming.
+                        'sweep_radius_mm': max(snap_radius, 2.0),
                         'rotations': [placements[0]['new_rotation']]}
                 except Exception as exc:                     # noqa: BLE001
                     summary['nearest_legal'] = None

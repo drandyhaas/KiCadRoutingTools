@@ -148,6 +148,55 @@ from the board's own Default netclass; override with `--width` /
 `--via-size` / `--via-drill`. `--keep-staged PATH` writes the staged board
 for inspection in KiCad. Exit 0 clean, 1 violations, 2 usage errors.
 
+## Pose Setter (`place_pose.py`)
+
+Applies a pose the MODEL chose, and lets the engine grade it (#892). The
+ranking half already existed (`converge.py poses` over `pose_score.rank_poses`);
+this is the verb that applies one, so a rotation or a lock is a registered
+lever rather than a hand script around `placement.writer`.
+
+```bash
+python py_placer/place_pose.py BOARD OUT set U1 129.9 98.3 --rot 270
+python py_placer/place_pose.py BOARD OUT set U1 --near 130 98 --rot 270
+python py_placer/place_pose.py BOARD OUT rotate CON2 180 [--relative]
+python py_placer/place_pose.py BOARD OUT face U1 W USB1
+python py_placer/place_pose.py BOARD OUT lock U1 CON1
+python py_placer/place_pose.py BOARD OUT set U1 129.9 98.3 rotate CON2 180 lock U1
+```
+
+Several verbs in one call describe ONE arrangement: every op is resolved
+against the INPUT board and written in a single pass, so no op sees another's
+effect. `set` takes exact coordinates positionally; `--near X Y` is the same
+point read as approximate and implies `--snap`, which takes the best legal
+pose within `--radius` (ranked by `pose_score`, then RE-GRADED here — the
+ranker's legality is an AABB gate and this verb's verdict is exact geometry,
+so a candidate is verified, never trusted). `face REF FACE PARTNER` names a
+pad row by the face it is on NOW and turns the part until that row points at
+the named partner; the rotation is predicted from the rigid body and then
+MEASURED on the board actually written, because `escape.face_of` takes an
+argmin against a box that is not square and a corner pad can change sides
+under a rotation that carries the row.
+
+The verdict is `placement.legality.grade_pad_legality` — the same numbers
+`place_seed` and the review sheet print, netclass- and `.kicad_dru`-aware
+(#697) — on the candidate board against the same grade on the input. A
+request is refused when it makes a category worse (pad conflicts, hole
+conflicts, pads off-board, or the shortfall magnitude), **never for damage the
+board already had**: an absolute gate is False for a large share of parts on a
+real board before anything moves, so it would refuse poses no worse than where
+the part already sits, and would make this tool useless on the unplaced pile
+it exists to arrange. `--strict-legal` is the absolute arm; `--force` writes
+anyway and records `forced` in the summary. A KiCad `(locked yes)` refuses a
+direct move — name the ref in `unlock` in the same call if you mean it;
+`--force` deliberately does not open that.
+
+Knobs come from the board (`list_nets.board_floor_knobs`) unless given, and
+the siblings are carried (#441). Exit 0 written, 2 usage, 3 the board carries
+copper (`--allow-routed` to override), 4 refused and nothing written — note
+that 4 departs from `place_seed`, where it means "written, but the grade found
+errors". There is no `--allow-unplaced`: this tool has no unplaced gate,
+because arranging a pile one decision at a time is what it is for.
+
 ## Seed Comparator (`compare_seeds.py`)
 
 Ranks `place_seed.py` seeds by ONE identical full-board probe route each —

@@ -51,7 +51,13 @@ CLI_MAINS = ["py_router/route.py", "py_router/route_diff.py",
              "py_router/route_planes.py", "py_router/repair_planes.py",
              "py_router/bga_fanout/__init__.py",
              "py_router/qfn_fanout/__init__.py",
-             "py_placer/place_fanout_clearance.py"]
+             "py_placer/place_fanout_clearance.py",
+             # #892: the pose setter WRITES boards, so a finalization pass
+             # added to its main() would be the same CLI-only drift. It has
+             # none today by construction -- the sibling carry and the legality
+             # grade live in `placement/pose_ops.py`, which both fronts call --
+             # and scanning it is what keeps that true.
+             "py_placer/place_pose.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if
 # ANY listed symbol appears anywhere under kicad_routing_plugin/. Keep the RHS

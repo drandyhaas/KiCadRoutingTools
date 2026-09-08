@@ -74,12 +74,19 @@ KNOWN_MODULES = (
     # its source, pads by board face, pin-order agreement, partners. An
     # instrument nobody can discover produces no findings.
     'board_context.py',
+    # #892. The verb that APPLIES a pose, beside the sheet that informs one:
+    # set / rotate / face / lock / unlock, graded by the legality engine. It
+    # is the sanctioned alternative to a hand pose writer, so a consumer that
+    # cannot discover it writes the hand script instead -- which is the whole
+    # failure this tool exists to end.
+    'place_pose.py',
 )
 
 # Scripts whose flag set a consumer may want to pin.
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
                 'repair_planes.py', 'place_route_loop.py',
-                'place_optimize.py', 'check_drc.py', 'check_floorplan.py')
+                'place_optimize.py', 'check_drc.py', 'check_floorplan.py',
+                'place_pose.py')
 
 # The long option, whether or not a SHORT one is declared before it. 46 call
 # sites in the tracked tree spell `add_argument('-q', '--quiet', ...)`, and
