@@ -68,6 +68,9 @@ import connect as cn  # noqa: E402
 import corridor as cr  # noqa: E402
 import detect_buses as db  # noqa: E402
 from schedule import Schedule  # noqa: E402
+import escape_moves as em  # noqa: E402
+from select_moves import pair_chirality  # noqa: E402
+from bga_fanout.flip_frame import to_front_frame, other_layer, mirror_axis  # noqa: E402
 
 TRACK = 0.127
 CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
@@ -292,7 +295,8 @@ def build_obstacles(pcb, nid, kids, layer):
     if src and os.path.exists(src):
         st_ = os.stat(src)
         bkey = (os.path.abspath(src), st_.st_mtime_ns, st_.st_size,
-                base_kids, layer, len(pcb.segments), len(pcb.vias))
+                base_kids, layer, len(pcb.segments), len(pcb.vias),
+                getattr(pcb, 'frame_axis', None))   # the board turned over is another board
         dkey = bkey + (nid,)
         hit = _OBS_MEMO.get(dkey)
         if hit is not None:
@@ -3188,6 +3192,44 @@ def main():
     return write_out(a, ctx, corridors, names, log)
 
 
+def pair_chirality_of(pcb, names, byname, dest):
+    """The pair's chirality as the fanout's plan computes it
+    (select_moves.pair_chirality on the same balls and the same array
+    boxes): the run's nets' pad on `dest` against their pad on the source
+    array, the boxes those arrays' pads span."""
+    src, dst, refs = {}, {}, Counter()
+    for nm in names:
+        _nid, net = byname[nm]
+        d = [p for p in net.pads if p.component_ref == dest]
+        o = [p for p in net.pads if p.component_ref != dest]
+        if d:
+            dst[nm] = (d[0].global_x, d[0].global_y)
+        if o:
+            src[nm] = (o[0].global_x, o[0].global_y)
+            refs[o[0].component_ref] += 1
+    if not src or not dst or dest not in pcb.footprints:
+        return 1
+    sref = max(refs, key=refs.get)
+    return pair_chirality(src, dst, em.grid_of(pcb.footprints[sref]).bbox,
+                          em.grid_of(pcb.footprints[dest]).bbox)
+
+
+def mirror_plan(plan, M):
+    """The plan dict in the turned frame: ends mirrored, layers swapped,
+    escape directions' y negated."""
+    q = dict(plan)
+    if 'ends' in plan:
+        q['ends'] = {nm: [list(M(*e[0])), list(M(*e[1]))]
+                     for nm, e in plan['ends'].items()}
+    for k in ('tooth_layer', 'dest_layer'):
+        if k in plan:
+            q[k] = {nm: other_layer(L) for nm, L in plan[k].items()}
+    for k in ('tooth_dir', 'stub_dir'):
+        if k in plan:
+            q[k] = {nm: [d[0], -d[1]] for nm, d in plan[k].items()}
+    return q
+
+
 def setup(board, names, dest, log, plan=None):
     """Everything the corridors are built from: the board, the ends,
     the static obstacles, the flow directions, the corridor groups.
@@ -3236,13 +3278,43 @@ def setup(board, names, dest, log, plan=None):
             except (OSError, ValueError) as _e:
                 log(f'plan sidecar unreadable ({_e}); reading the board')
                 plan = None
+    # THE PAIR'S FRAME: the braid is handed (two leg-layer ties fall to
+    # F, the back-only stretch filter, F as the main page, first-index
+    # runs), so a pair and its mirror were braided differently (the
+    # board turned over: K28 40 vias against 38, its plan judged 17 up /
+    # 3 down where the exact mirror is 16 / 5). Like the fanout's
+    # selector (PairFrame) the braid runs every pair in its +1 frame:
+    # a -1 pair's board is turned over IN MEMORY here (every part to
+    # the other face, y mirrored about a lattice line, layers swapped
+    # -- the engine's own flip_frame), the plan mirrored into it, the
+    # planner and the braid run unchanged, and the copper and the
+    # planner's layers are mirrored back at the two exits (plan_braid,
+    # write_out). Per pair, not per board: with three or more parts the
+    # chirality is each pair's own. The plan carries the chirality it
+    # was made in ('chi'); the braid's own reading of the same balls
+    # must agree, and says so if not.
+    chi = pair_chirality_of(pcb, names, byname, dest)
+    if plan and plan.get('chi') is not None and int(plan['chi']) != chi:
+        log(f'pair frame: the plan was made at chirality {plan["chi"]:+d}, '
+            f'the board reads {chi:+d} -- following the plan')
+        chi = int(plan['chi'])
+    ctx = Ctx()
+    ctx.chi, ctx.M = chi, None
+    if chi < 0:
+        CY = mirror_axis(pcb)     # the engine's own rule: a lattice line
+        pcb, M = to_front_frame(pcb, dest)
+        ctx.M = M
+        byname = {n.name.split('/')[-1]: (i, n) for i, n in pcb.nets.items()}
+        if plan:
+            plan = mirror_plan(plan, M)
+        log(f'pair frame: chirality -1, the board turned over about '
+            f'y = {CY:.3f} for the braid (copper mirrored back on write)')
     planned = {nm for nm in names if plan and nm in plan.get('ends', {})}
     ends = endpoints(pcb, [nm for nm in names if nm not in planned], byname,
                      dest_ref=dest) if len(planned) < len(names) else {}
     for nm in planned:
         e = plan['ends'][nm]
         ends[nm] = (tuple(e[0]), tuple(e[1]), dest)
-    ctx = Ctx()
     ctx.pcb, ctx.byname, ctx.ends, ctx.kids = pcb, byname, ends, kids
     ctx.plan = plan
     ctx.tooth_layer = {nm: (plan['tooth_layer'][nm] if nm in planned else
@@ -3372,7 +3444,7 @@ def setup(board, names, dest, log, plan=None):
     try:
         _st = os.stat(board)
         _tc_key = [int(_st.st_mtime_ns), int(_st.st_size),
-                   TAUT_CACHE_VERSION]
+                   TAUT_CACHE_VERSION, ctx.chi]
     except OSError:
         pass
     _cached = {}
@@ -3578,6 +3650,11 @@ def plan_braid(board, names, dest, plan, log=None):
                                    and hasattr(c, 'req') else None),
                        # dives under EARLIER corridors' lanes (2 each)
                        'cross_vias': cross.get(nm, 0)}
+    if ctx.M is not None:
+        for d in out.values():
+            for k in ('page', 'exit_leg_layer'):
+                if d.get(k) is not None:
+                    d[k] = other_layer(d[k])
     return out
 
 
@@ -3592,8 +3669,22 @@ def write_out(a, ctx, corridors, names, log):
     if refused and a.out != os.devnull:
         import json as _json
         rp = a.out + '_refusals.json'
+
+        def _real(info):
+            # the braid may have run on the board turned over (setup):
+            # the report is read in the board's own frame
+            if ctx.M is None or not info:
+                return info
+            d = dict(info)
+            for k in ('tooth', 'berth'):
+                if d.get(k) is not None:
+                    d[k] = list(ctx.M(*d[k]))
+            for k in ('page', 'tooth_layer', 'dest_layer'):
+                if d.get(k) is not None:
+                    d[k] = other_layer(d[k])
+            return d
         with open(rp, 'w') as _f:
-            _json.dump({nm: ctx.refusal_info.get(nm, {})
+            _json.dump({nm: _real(ctx.refusal_info.get(nm, {}))
                         for nm in refused}, _f, indent=1,
                        sort_keys=True)
         log(f'refusal reasons -> {rp}')
@@ -3633,7 +3724,12 @@ def write_out(a, ctx, corridors, names, log):
         f'{sum(post_len.values()):.2f} mm')
     smoothed = True
 
-    # ---- write board
+    # ---- write board: the copper back in the board's own frame (the
+    # braid may have run on the board turned over, see setup)
+    if ctx.M is not None:
+        M, OL = ctx.M, other_layer
+    else:
+        M, OL = (lambda x, y: (x, y)), (lambda L: L)
     txt = open(a.board, encoding='utf-8').read()
     n_trim = sum(len(v) for v in ctx.trim_spans.values())
     if n_trim:
@@ -3663,8 +3759,9 @@ def write_out(a, ctx, corridors, names, log):
         if n_deg or n_dup:
             log(f'dropped {n_deg} degenerate (< 1 um) and {n_dup} '
                 f'duplicate segment(s)')
-        emit = {nm: [((s.start_x, s.start_y), (s.end_x, s.end_y), s.layer,
-                      s.width) for s in final_segs[nm]] for nm in names}
+        emit = {nm: [(M(s.start_x, s.start_y), M(s.end_x, s.end_y),
+                      OL(s.layer), s.width) for s in final_segs[nm]]
+                for nm in names}
     for nm in names:
         nid, _ = byname[nm]
         for (p, q, layer, w) in emit[nm]:
@@ -3672,7 +3769,8 @@ def write_out(a, ctx, corridors, names, log):
                        f'(end {q[0]:.4f} {q[1]:.4f}) (width {w}) '
                        f'(layer "{layer}") (net {nid}))\n')
         for v in out_vias[nm]:
-            add.append(f'  (via (at {v.x:.4f} {v.y:.4f}) (size {VIA_SIZE}) '
+            vx, vy = M(v.x, v.y)
+            add.append(f'  (via (at {vx:.4f} {vy:.4f}) (size {VIA_SIZE}) '
                        f'(drill {VIA_DRILL}) (layers "F.Cu" "B.Cu") '
                        f'(net {nid}))\n')
 
@@ -3687,6 +3785,7 @@ def write_out(a, ctx, corridors, names, log):
     #                       braid's own points (join / exit leg ends,
     #                       spine corners) as a "+".
     def gl(p, q, layer, w=0.05):
+        p, q = M(*p), M(*q)
         return (f'  (gr_line (start {p[0]:.4f} {p[1]:.4f}) '
                 f'(end {q[0]:.4f} {q[1]:.4f}) '
                 f'(stroke (width {w}) (type solid)) (layer "{layer}"))\n')

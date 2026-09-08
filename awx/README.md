@@ -47,11 +47,14 @@ exact isometries of the plan and the braid's rules, the residual being
 the router's octilinear lattice; and the board TURNED OVER
 (`mirror_board.py`) exposed the chain's own front call-outs: the layer
 the taut paths relax against (fixed to the layer the teeth are born
-on), and the destination selector, which is handed and now runs every
+on), the destination selector, which is handed and now runs every
 pair in the pair's own frame (`PairFrame`: the mirror gets the mirror
-of the plan, the bench is untouched by construction); the mirror grades
-16 and 40 against the front's 16 and 38, the rest the braid's own
-handedness (the pose gate section below).
+of the plan, the bench is untouched by construction), and the braid's
+planner and the braid, which take the same frame at their own boundary
+(`braid.setup`: a -1 pair's board turned over in memory, the plan
+mirrored in, the copper mirrored back). The mirror now grades 16 and 38
+against the front's 16 and 38, the same plan to the letter (the pose
+gate section below).
 
 ## The chain
 
@@ -907,11 +910,54 @@ frame; a +1 pair never enters the wrapper, so the bench is unchanged
 by construction: K15 14 / K28 38 / K41 82, same segment counts.
 Measured on the origin board and its mirror: the selector alone
 chooses identically through every stage (0 of 15, 0 of 28 differ);
-the chain grades **K15 16 = 16, K28 38 against 40**. The residual is
-the braid's: the plan loop's rounds are judged by the braid's own
-planner, which still breaks two ties toward F and models the front as
-the main page, and on the mirror it keeps a slightly different round
-(17 up, 3 down where the exact mirror is 16 up, 5 down).
+the chain then graded K15 16 = 16, K28 38 against 40, the residual
+being the braid's own planner, which judges the plan loop's rounds and
+still broke two ties toward F.
+
+**The braid's frame** (`braid.setup`, 2026-09-08). The same move at
+the braid's boundary, for the planner (`plan_braid`, the judge) and the
+braid alike: `setup` reads the pair's chirality off the same balls and
+boxes as the fanout (`pair_chirality_of`), checks it against the one
+the plan was made in (`plan['chi']`, written by `braid_plan_of`), and
+for a -1 pair turns the board over in memory with the engine's own
+`flip_frame.to_front_frame`, mirrors the plan into that frame
+(`mirror_plan`: ends, layers, escape directions), and runs everything
+unchanged; `plan_braid` swaps the pages and leg layers back and
+`write_out` mirrors the copper, the Eco overlay and the refusal report
+back. A +1 pair never enters it, so the bench is unchanged to the
+segment (K15 14 / 673, K28 38 / 1530, K41 82 / 2051). Two things the
+frame alone did not give, each found by comparing the two worlds stage
+by stage until the planner agreed on every net:
+
+- the braid's obstacle memo (`_OBS_MEMO`) is keyed on the board FILE,
+  and the turned board is, as a file, the same board: it was handed the
+  real board's model, on which the mirror's front layer holds 22 discs
+  where the turned board's front holds 473, and every taut path was a
+  straight chord where the front's bent. The turned copy now carries
+  `frame_axis` and the key includes it. (The taut memo is content-keyed
+  and was never wrong, only cold: the mirror's first run at K15 took
+  61 s to the front's 21, and 21 s warm.)
+- the engine's mirror line was the bounds' centre, off the lattice;
+  the router's grids are anchored at the origin, so a mirror about it
+  mapped the grid onto a grid shifted by a fraction of a cell, and the
+  turned board fanned out with 0.2 mm jogs the front did not have (50
+  of 266 segments at K15). `mirror_axis` now snaps the line so that
+  twice it is a multiple of 0.1 mm, and the bounds are mirrored with
+  everything else (the flip-frame test asserts it).
+
+Measured with that: the mirror's plan is the front's to the letter at
+every round, its fanout has the same escapes and vias, and the chain
+grades **K15 16 = 16 (466 against 464 segments), K28 38 = 38 (1687 =
+1687)**. The segments that still differ are the fanout engine's
+exact-edge cells: the plan's exit points sit at pitch fractions that
+land exactly on the occupancy grid's cell edges, and a plain truncation
+lets the last bit of floating-point noise choose the cell. An epsilon
+before the truncation made the copper identical in both frames and was
+measured and REJECTED: it moves every exact-edge decision on every
+board, the bench included (K28 38 -> 36, K41 82 -> 85 and 120 s
+slower), because those decisions had been made by the same noise when
+the bench was tuned. The bar for the mirror is the same grade, not the
+same copper (user decision, 2026-09-08).
 
 **Non-orthogonal rotations.** 30 degrees: K15 complete at 33 vias, 6 of
 15 in-band; K28 0 open but 15 DRC, 95 vias, 12 of 28 in-band, 661 s.

@@ -94,8 +94,10 @@ def test_transform_on_real_boards(results):
                        or sorted(p2.layers) != sorted(p0.layers))
         _ok(results, f'{name}: turning over twice is the identity', back_pos == 0)
         if pcb.board_info and pcb.board_info.board_bounds:
-            _ok(results, f'{name}: the bounds are their own mirror',
-                rp.board_info.board_bounds == pcb.board_info.board_bounds)
+            b0, b1 = pcb.board_info.board_bounds, rp.board_info.board_bounds
+            _ok(results, f'{name}: the bounds are mirrored about the axis, on the lattice',
+                abs(b1[1] - (2 * CY - b0[3])) < 1e-9 and abs(b1[3] - (2 * CY - b0[1])) < 1e-9
+                and abs(2 * CY / 0.1 - round(2 * CY / 0.1)) < 1e-9, f'axis {CY}')
 
 
 # --- 2. the symmetry on a synthetic BGA ----------------------------------------
