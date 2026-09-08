@@ -180,22 +180,42 @@ under a rotation that carries the row.
 The verdict is `placement.legality.grade_pad_legality` — the same numbers
 `place_seed` and the review sheet print, netclass- and `.kicad_dru`-aware
 (#697) — on the candidate board against the same grade on the input. A
-request is refused when it makes a category worse (pad conflicts, hole
-conflicts, pads off-board, or the shortfall magnitude), **never for damage the
-board already had**: an absolute gate is False for a large share of parts on a
-real board before anything moves, so it would refuse poses no worse than where
-the part already sits, and would make this tool useless on the unplaced pile
-it exists to arrange. `--strict-legal` is the absolute arm; `--force` writes
-anyway and records `forced` in the summary. A KiCad `(locked yes)` refuses a
+request is refused when it makes a category worse — the counts (pad conflicts,
+hole conflicts, pads off-board) **and their magnitudes** (`pad_shortfall`,
+`oob_pad_amount`; a count arm alone accepted a part moved from 2.0 mm off the
+board to 204.66 mm off it) — and **never for damage the board already had**:
+an absolute gate is False for a large share of parts on a real board before
+anything moves, so it would refuse poses no worse than where the part already
+sits, and would make this tool useless on the unplaced pile it exists to
+arrange. The summary carries the two facts under different names: `no_worse`
+is the verdict the verb acts on, `legal` is whether the board is clean at this
+pose. `--strict-legal` refuses unless the result is clean; `--force` writes
+anyway and records `forced`. A KiCad `(locked yes)` refuses a
 direct move — name the ref in `unlock` in the same call if you mean it;
-`--force` deliberately does not open that.
+`--force` deliberately does not open that, and the unlock is verified on the
+staged board before anything is promoted.
 
-Knobs come from the board (`list_nets.board_floor_knobs`) unless given, and
-the siblings are carried (#441). Exit 0 written, 2 usage, 3 the board carries
-copper (`--allow-routed` to override), 4 refused and nothing written — note
-that 4 departs from `place_seed`, where it means "written, but the grade found
-errors". There is no `--allow-unplaced`: this tool has no unplaced gate,
-because arranging a pile one decision at a time is what it is for.
+`--snap` is a two-rung ladder, because one rung was not enough: `pose_score`
+ranks first (it knows about wirelength and crossings), then the bare lattice
+around the aimed point, and **every** candidate from either rung is re-graded
+in this verb's own currency before it is written. Measured on
+`flat_hierarchy`: the ranker alone returned zero candidates for
+`set C4 --near 128.0 49.53 --radius 3`, because its gate is the absolute one,
+while 236 poses inside the same radius graded no worse — the nearest 0.354 mm
+away. `snap_census` reports both rungs and `snapped.rung` says which answered.
+
+Knobs come from the board (`list_nets.board_floor_knobs`) unless given — a
+CLI-supplied `--clearance` loosens the verdict on a tool whose job is to
+refuse, so it is disclosed on stderr — and the siblings are carried (#441).
+Exit 0 written; 2 the request does not name a thing on this board (a typo you
+rewrite); 3 the board carries copper (`--allow-routed` to override); 4 well
+formed, and the board said no (a measurement you act on), nothing written —
+note that 4 departs from `place_seed`, where it means "written, but the grade
+found errors". Every exit the tool itself decides prints one `JSON_SUMMARY:`
+line; argparse's own usage errors exit 2 from inside argparse, before there is
+a board to summarise. There is no `--allow-unplaced`: this tool has no
+unplaced gate, because arranging a pile one decision at a time is what it is
+for.
 
 ## Seed Comparator (`compare_seeds.py`)
 

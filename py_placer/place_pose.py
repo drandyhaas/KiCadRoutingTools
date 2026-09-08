@@ -37,8 +37,13 @@ WHAT IS GRADED, and what "illegal" means. The verdict is
 `placement.legality.grade_pad_legality` -- the same numbers `place_seed` and
 the review sheet print, netclass- and `.kicad_dru`-aware (#697) -- taken on the
 candidate board and compared with the SAME grade on the input. A request is
-refused when it makes a category worse (pad conflicts, hole conflicts, pads
-off-board, or the shortfall magnitude), never for damage the board already had.
+refused when it makes a category worse -- the counts (pad conflicts, hole
+conflicts, pads off-board) and their MAGNITUDES (`pad_shortfall`,
+`oob_pad_amount`) -- and never for damage the board already had. The magnitude
+arms are not a nicety: on counts alone, a part already 2.0 mm off the board
+could be moved to 204.66 mm off it, exit 0, with nothing in the summary saying
+so. The two verdicts are reported apart: `no_worse` is what this verb refuses
+on, `legal` is whether the board is CLEAN at the resulting pose.
 That is deliberate: an absolute gate is False for a large share of parts on a
 real board before anything moves, so it would refuse poses no worse than where
 the part already sits -- and it would make this tool useless on exactly the
