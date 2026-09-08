@@ -648,6 +648,61 @@ flow frame, take4's idea). The quarter-turn frame stays opt-in until
 then: making it the default re-fans the bench's destination array (at
 90 degrees) and moves that draw again.
 
+### The flow frame: every pose of a pair is one run (2026-09-08 evening)
+
+The routing lattice's symmetries are the eight poses of a square: four
+quarter turns, each with or without a mirror. The mirror half was the
+chirality frame (the selector's `PairFrame`, the braid's turn-over in
+`setup`). The quarter-turn half is `flow_frame.py`, and it works at the
+FILE level: `chain_k.sh` asks it for the quarter turn that points the
+run's source-to-destination centroid vector along +x (`quarter`), turns
+the base board by exactly that (`turn`: (dx, dy) -> (-dy, dx) about a
+point on the 0.1 mm lattice, no trigonometry, so every routing grid is
+its own image and a turned file turned back is the file to the bit;
+footprints by their placement, the stored angle going DOWN by the turn
+and the pads' absolute angles with it; siblings copied; self-verified),
+runs every stage on that file unchanged, and turns the braid's board
+back. A pair dropped at any of the four angles is then the identical
+computation, because every stage sees one board: there is nothing to
+hunt stage by stage, and the last-bit ties fixed for translation hold
+in every frame. The bench itself is at k = 0 and runs on its own file,
+untouched; a near-diagonal pair sits on the boundary between two
+frames, either of which is a legitimate, translation-invariant run.
+
+Why it is the whole argument: the four poses' frame boards are the SAME
+board up to a translation (the same vector (+19.638, +0.635) from `U1`
+to `DU1`, the same part angles, the same 447 tracks and 8 vias of source
+copper), and the chain is exactly translation-invariant since the
+section above. Measured on the origin article's four poses (the source
+fanned with the engine's quarter-turn frame on, `tmp/frame/ffgate.out`):
+
+| pose | turn | K15 | K28 |
+|---|---|---|---|
+| R0 | 0 | 14 vias, 403 segments | 41 vias, 1239 segments |
+| R90 | 3 | 14, 403 | 41, 1239 |
+| R180 | 2 | 14, 403 | 41, 1239 |
+| R270 | 1 | 14, 403 | 41, 1239 |
+
+The four K28 frame boards compared to the segment after the shift:
+1465 segments each, 45 vias each, every net the same length, every
+endpoint shared but two a micron apart (the six-decimal file rounding
+at a boundary). Before this (`rot11.out`, the same articles): R90 and
+R270 agreed with each other and differed from R0 -- K15 14 / 701
+against 14 / 442, K28 36 with SA4 open against 40 -- by the plan's
+compass faces and the braid's octilinear search leaning on one axis; a
+half turn maps x to -x and y to -y, which no stage notices, and a
+quarter turn swaps them.
+
+What remains outside: a pair whose arrays sit at different angles
+(only one can be axis-aligned in the frame), and non-orthogonal poses
+(R30: the compass faces themselves), which need a trigonometric turn of
+the file that is not an exact lattice symmetry -- the engine's own
+`rotate_frame` does that for the fanout already; the chain-level version
+is TODO 5's remaining half. The engine's `KICAD_FANOUT_FRAME_QUARTER`
+stays as it is: inside the flow frame the destination array is at the
+bench's own angle, so the chain does not need it, and the source
+fanout that precedes the chain still does.
+
 ### The chain after the fanout: three more ties, and the pad offset in the main router (2026-09-08)
 
 With the fanout engine exactly translation-invariant, the chain on the
