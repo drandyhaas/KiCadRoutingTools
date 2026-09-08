@@ -33,8 +33,22 @@ for K in "$@"; do
   rm -f "${TAG}_fo_k${K}.kicad_pcb" "${TAG}_fo_k${K}.kicad_pro" \
         "${TAG}_k${K}.kicad_pcb" "${TAG}_k${K}.kicad_pro"
   NETS=$(python3 coherent_nets.py "$K" --board="$BASE")
+  # THE FLOW FRAME (flow_frame.py): the pair turned, as a file, by the
+  # exact quarter turn that points source-to-destination along +x; every
+  # stage runs on that file and the result is turned back, so a pair
+  # dropped at any of the four angles is the identical computation. k=0
+  # (the bench) runs on the base itself, unchanged.
+  read FK FCX FCY <<< "$(python3 flow_frame.py quarter "$BASE" "$DEST" "$NETS" 2>/dev/null | tail -1)"
+  RUNBASE="$BASE"
+  if [ -n "$FK" ] && [ "$FK" != "0" ]; then
+    RUNBASE="${TAG}_frame_k${K}.kicad_pcb"
+    rm -f "$RUNBASE"
+    python3 flow_frame.py turn "$BASE" "$RUNBASE" "$FK" "$FCX" "$FCY" > /dev/null 2>&1
+    if [ ! -f "$RUNBASE" ]; then echo "  FLOW FRAME: turn failed"; continue; fi
+    echo "  flow frame: $FK quarter turn(s) about ($FCX, $FCY) -> $(basename "$RUNBASE")"
+  fi
   python3 fanout_from_plan.py "${TAG}_fo_k${K}.kicad_pcb" "$K" \
-    --board="$BASE" > "${TAG}_fo_k${K}.log" 2>&1
+    --board="$RUNBASE" > "${TAG}_fo_k${K}.log" 2>&1
   grep -E "^plan|^wrote|^  round|^  kept|^  destination|source realize:|audit:|ORDER|plan model total" "${TAG}_fo_k${K}.log" | sed 's/^/  /'
   if [ ! -f "${TAG}_fo_k${K}.kicad_pcb" ]; then
     echo "  NO FANOUT BOARD"; continue
@@ -47,6 +61,13 @@ for K in "$@"; do
     --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
     > "${TAG}_k${K}.log" 2>&1
   echo "  braid stage done $(date +%H:%M:%S)"
+  if [ -f "${TAG}_k${K}.kicad_pcb" ] && [ "$RUNBASE" != "$BASE" ]; then
+    # back into the board's own frame (the frame board is kept beside it)
+    mv "${TAG}_k${K}.kicad_pcb" "${TAG}_k${K}_frame.kicad_pcb"
+    [ -f "${TAG}_k${K}.kicad_pro" ] && mv "${TAG}_k${K}.kicad_pro" "${TAG}_k${K}_frame.kicad_pro"
+    python3 flow_frame.py turn "${TAG}_k${K}_frame.kicad_pcb" "${TAG}_k${K}.kicad_pcb" \
+      "$((4 - FK))" "$FCX" "$FCY" > /dev/null 2>&1 || echo "  FLOW FRAME: turn back failed"
+  fi
   if [ -f "${TAG}_k${K}.kicad_pcb" ]; then
     grep -E "WARNING|violations$" "${TAG}_k${K}.log" | sed 's/^/  /'
     python3 grade_k.py "${TAG}_k${K}.kicad_pcb" "$NETS"
