@@ -136,7 +136,7 @@ from kicad_parser import (parse_kicad_pcb, iter_footprint_blocks,  # noqa: E402
 from kicad_writer import move_copper_text_to_silkscreen          # noqa: E402
 from placement.writer import write_placed_output, write_label_output  # noqa: E402
 from placement.labels import LabelResult                         # noqa: E402
-from placement.seeder import stamp_locked                        # noqa: E402
+from placement.seeder import stamp_locked, stamp_unlocked        # noqa: E402
 
 TOL = 1e-6      # mm; both sides are nm-quantized, so a real move is huge
 
@@ -438,6 +438,25 @@ def t_stamp_locked_locks_one_block():
           'and it is the one that was named', str(locked))
 
 
+def t_stamp_unlocked_unlocks_one_block():
+    """#892's inverse half inherits the same hazard, and the same key.
+
+    `stamp_unlocked` was written by copying `stamp_locked`'s loop, so the two
+    are one edit apart from disagreeing about what a name means -- and an
+    unlock that reaches the WRONG twin is worse than one that reaches none:
+    it lifts a decision on a part nobody named, silently.
+    """
+    src = _board(footprint_text('TP4', 10, 10, uuid='a'),
+                 footprint_text('TP4', 30, 10, uuid='b'))
+    stamp_locked(src, ['TP4', 'TP4' + DUP_REF_SEP + '2'])
+    n = stamp_unlocked(src, ['TP4'])
+    blocks = _blocks_by_key(src)
+    locked = {k: '(locked yes)' in t for k, t in blocks.items()}
+    check(n == 1, 'stamp_unlocked reports one block unlocked', str(n))
+    check(not locked['TP4'] and locked['TP4' + DUP_REF_SEP + '2'],
+          'and it is the one that was named', str(locked))
+
+
 def t_the_label_writer_edits_one_block():
     """`write_label_output` carried the identical defect."""
     src = _board(footprint_text('TP4', 10, 10, uuid='a'),
@@ -470,6 +489,7 @@ TESTS = (
     t_a_bare_name_no_longer_reaches_the_ordinal_twin,
     t_a_referenceless_block_is_addressable,
     t_stamp_locked_locks_one_block,
+    t_stamp_unlocked_unlocks_one_block,
     t_the_label_writer_edits_one_block,
 )
 

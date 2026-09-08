@@ -2808,11 +2808,20 @@ def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
     The inverse of `stamp_locked`, and it lives beside it deliberately: this
     repo had a stamper and no un-stamper, so a model that locked a rotation
     decision could not change its mind without hand-editing the board -- which
-    is the class of hand script #892 exists to remove. Both halves read the
-    same window (the header, before the first pad, where
-    `placement/parser.extract_locked_refs` and KiCad look) and address blocks
-    by the parser's own key (#726), so lock and unlock cannot disagree about
-    which block they mean.
+    is the class of hand script #892 exists to remove. This half reads exactly
+    the window `stamp_locked` writes into -- the header, up to `(pad` -- and
+    addresses blocks by the parser's own key (#726), so lock and unlock cannot
+    disagree about which block they mean.
+
+    Note for anyone tightening this: `placement/parser.extract_locked_refs`
+    cuts at `'(pad '` WITH the space and falls back to the first 500
+    characters when a block has no pad, so a header containing a token like
+    `(padstack` is read differently there than here. Both stamping halves
+    share that divergence and it predates them; no board in `kicad_files/`
+    triggers it (checked, 22 boards, 0 hits). It is called out because the
+    consequence is asymmetric: the reader would call a footprint locked that
+    this cannot unlock, which is why `pose_ops.apply_poses` VERIFIES the
+    unlock on the staged board before promoting anything.
 
     Returns the number of footprints actually changed; a ref that was not
     locked contributes 0 rather than raising, so unlocking twice is idempotent.

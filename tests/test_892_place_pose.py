@@ -38,6 +38,7 @@ from run_utils import check as refuse_check, tool                # noqa: E402
 BOARD = os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')
 ROUTED = os.path.join(REPO, 'kicad_files', 'qfn_interior_pads.kicad_pcb')
 PRO = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pro')
+FLAT = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pcb')
 
 passed = failed = 0
 
@@ -523,6 +524,150 @@ with tempfile.TemporaryDirectory() as d:
         raised = str(exc)
     check("an undeclared write is still refused", raised is not None,
           (raised or "NO UnaidedViolation was raised")[:120])
+
+# ---------------------------------------------------------------------------
+print("the OFF-BOARD magnitude is an arm, not just the count")
+with tempfile.TemporaryDirectory() as d:
+    # A part already off the board, moved much FURTHER off it. The count arm
+    # sees 1 -> 1 and shrugs; measured before `oob_pad_amount` was an arm, a
+    # part 2.0 mm out was moved to 204.66 mm out, exit 0, `legal: true`.
+    b = parse_kicad_pcb(BOARD)
+    bounds = b.board_info.board_bounds
+    off = os.path.join(d, 'off.kicad_pcb')
+    write_placed_output(BOARD, off, [
+        {'reference': 'C4', 'new_x': bounds[0] - 1.0,
+         'new_y': (bounds[1] + bounds[3]) / 2.0, 'new_rotation': 0}])
+    g0 = pose_ops.grade(parse_kicad_pcb(off), off, CLR)
+    check("the fixture starts off-board", g0['oob_pad_count'] >= 1,
+          str(g0['oob_pad_count']))
+    out = os.path.join(d, 'further.kicad_pcb')
+    r = run([POSE, off, out, 'set', 'C4', str(bounds[0] - 100.0),
+             str((bounds[1] + bounds[3]) / 2.0)])
+    check("further off-board at the same COUNT is refused", r.returncode == 4,
+          (r.stdout + r.stderr)[-300:])
+    check("nothing was written", not os.path.exists(out))
+    s = summary(r)
+    check("and the refusal names the AMOUNT",
+          'oob_pad_amount' in (s.get('refused') or ''), s.get('refused'))
+    check("the summary reports the amount both sides",
+          s['oob_pad_amount_after'] > s['oob_pad_amount_before'])
+    check("worsened() names it directly",
+          pose_ops.worsened({'oob_pad_count': 1, 'oob_pad_amount': 2.0},
+                            {'oob_pad_count': 1,
+                             'oob_pad_amount': 204.7}) == ['oob_pad_amount'])
+
+# ---------------------------------------------------------------------------
+print("`legal` means clean; `no_worse` is the verdict the verb acts on")
+with tempfile.TemporaryDirectory() as d:
+    dirty = os.path.join(d, 'dirty.kicad_pcb')
+    c2 = parse_kicad_pcb(BOARD).footprints['C2']
+    write_placed_output(BOARD, dirty, [
+        {'reference': 'C1', 'new_x': c2.x, 'new_y': c2.y,
+         'new_rotation': c2.rotation % 360}])
+    dr = pose_score.rank_poses(parse_kicad_pcb(dirty), dirty, 'C3',
+                               radius=2.0, step=0.5, limit=3)
+    if dr:
+        out = os.path.join(d, 'ok.kicad_pcb')
+        r = run([POSE, dirty, out, 'set', 'C3', str(dr[0]['x']),
+                 str(dr[0]['y']), '--rot', str(dr[0]['rot'])])
+        s = summary(r)
+        check("accepted", r.returncode == 0, (r.stdout + r.stderr)[-200:])
+        check("no_worse is true (that is what it was accepted on)",
+              s['no_worse'] is True)
+        check("legal is FALSE, because the board still is not clean",
+              s['legal'] is False and s['pad_conflicts_after'] > 0,
+              "legal=%s conflicts=%s" % (s['legal'],
+                                         s['pad_conflicts_after']))
+        check("and the summary says which is which",
+              'no_worse' in (s.get('legal_basis') or ''))
+    else:
+        check("dirty-board ranking produced a candidate", False)
+
+# ---------------------------------------------------------------------------
+print("a refusal never names an output path")
+with tempfile.TemporaryDirectory() as d:
+    c4 = parse_kicad_pcb(BOARD).footprints['C4']
+    out = os.path.join(d, 'never.kicad_pcb')
+    r = run([POSE, BOARD, out, 'set', 'C3', str(c4.x), str(c4.y),
+             '--rot', str(c4.rotation % 360)])
+    s = summary(r)
+    check("output is null on a legality refusal", s['output'] is None,
+          str(s['output']))
+    r2 = run([POSE, BOARD, out, 'set', 'NOPE', '1', '2'])
+    check("output is null on a usage refusal too",
+          summary(r2)['output'] is None)
+    check("neither wrote", not os.path.exists(out))
+
+# ---------------------------------------------------------------------------
+print("every exit THIS TOOL decides carries a summary")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'x.kicad_pcb')
+    ref = sorted(parse_kicad_pcb(ROUTED).footprints)[0]
+    r = run([POSE, ROUTED, out, 'rotate', ref, '90'])
+    check("the copper gate exits 3 with a summary",
+          r.returncode == 3 and len(summaries(r)) == 1,
+          "rc=%s summaries=%d" % (r.returncode, len(summaries(r))))
+    check("and the summary says why",
+          'strands every track' in (summaries(r)[0].get('refused') or ''))
+    r = run([POSE, os.path.join(d, 'nope.kicad_pcb'), out, 'rotate', 'R1',
+             '90'])
+    check("a missing input exits 2 with a summary",
+          r.returncode == 2 and len(summaries(r)) == 1,
+          "rc=%s summaries=%d" % (r.returncode, len(summaries(r))))
+    # A directory that does not exist used to be a FileNotFoundError traceback
+    # and an exit 1 the docstring's table does not list.
+    r = run([POSE, BOARD, os.path.join(d, 'no', 'such', 'dir', 'o.kicad_pcb'),
+             'rotate', 'R1', '90'])
+    check("an unwritable output path exits 2, not a traceback",
+          r.returncode == 2 and 'Traceback' not in (r.stdout + r.stderr),
+          "rc=%s" % r.returncode)
+    check("with a summary and a reason", len(summaries(r)) == 1
+          and 'cannot write' in (summaries(r)[0].get('refused') or ''))
+
+# ---------------------------------------------------------------------------
+print("the snap ladder: the lattice rung answers where the ranker does not")
+if os.path.isfile(FLAT):
+    with tempfile.TemporaryDirectory() as d:
+        # Measured by the #892 verifier on this board: `set C4 --near
+        # 128.0 49.53 --radius 3` had rung 1 (rank_poses) return ZERO
+        # candidates -- 625 dropped by the absolute gate -- while 236 poses on
+        # the same lattice inside the same radius graded no worse.
+        out = os.path.join(d, 'lad.kicad_pcb')
+        r = run([POSE, FLAT, out, 'set', 'C4', '--near', '128.0', '49.53',
+                 '--radius', '3'])
+        check("the snap seats it", r.returncode == 0,
+              (r.stdout + r.stderr)[-300:])
+        if r.returncode == 0:
+            s = summary(r)
+            check("the census reports BOTH rungs",
+                  'ranked' in (s.get('snap_census') or {})
+                  and 'lattice' in (s.get('snap_census') or {}),
+                  json.dumps(s.get('snap_census')))
+            check("and the answer says which rung produced it",
+                  (s['snapped'] or {}).get('rung') in ('ranked', 'lattice'),
+                  json.dumps(s.get('snapped')))
+            check("inside the radius, as a distance",
+                  (s['snapped'] or {}).get('dist_mm', 99) <= 3.0)
+            check("and the written board grades no worse",
+                  s['no_worse'] is True)
+else:
+    check("flat_hierarchy fixture present", False, FLAT)
+
+# ---------------------------------------------------------------------------
+print("a symmetric row is named, not reported as a near miss")
+if os.path.isfile(FLAT):
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, 'sym.kicad_pcb')
+        r = run([POSE, FLAT, out, 'face', 'C1', 'N', 'C2'])
+        check("a 2-pad row that cannot be aimed is refused", r.returncode == 4,
+              (r.stdout + r.stderr)[-200:])
+        check("and the refusal says WHY, not just where it landed",
+              'cannot be aimed by rotating' in (r.stdout + r.stderr),
+              (r.stdout + r.stderr)[-200:])
+        s = summary(r)
+        check("the op records the symmetry as a fact",
+              s['ops'][0].get('row_symmetric') is True,
+              json.dumps(s['ops'][0])[:200])
 
 print()
 print(f"{passed} passed, {failed} failed")

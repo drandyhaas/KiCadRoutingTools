@@ -26,7 +26,12 @@ request is WELL FORMED and the board said no (it grades worse, or the part is
 locked) and nothing was written -- a measurement you act on. Note that 4
 departs from `place_seed`, where it means "written, but the grade found
 errors": here a refusal writes nothing at all, which is what #892 asks for.
-Every exit prints exactly one `JSON_SUMMARY:` line, refusals included.
+
+Every exit THIS TOOL decides prints exactly one `JSON_SUMMARY:` line, refusals
+included -- the board gate and the unreadable-input path as well as the pose
+refusals. The exception is argparse's own usage errors, which exit 2 from
+inside argparse before there is a board, a grade or a summary to print; if you
+are parsing output, treat "exit 2 with no summary line" as a usage error.
 
 WHAT IS GRADED, and what "illegal" means. The verdict is
 `placement.legality.grade_pad_legality` -- the same numbers `place_seed` and
@@ -53,10 +58,28 @@ import sys
 
 VERBS = ('set', 'rotate', 'face', 'lock', 'unlock')
 
+#: The verbs and THEIR flags. They live in per-verb parsers, so `--help`'s
+#: option list cannot show them; this epilog is where a reader finds them.
+#: (`place_pose.py` is deliberately absent from `krt_capabilities.FLAG_SCRIPTS`
+#: for the same reason -- that contract is "every flag this script accepts is
+#: visible in --help as an option", and a per-verb flag is not.)
+VERB_HELP = """verbs (several in one call describe ONE arrangement):
+
+  set REF [X Y] [--rot DEG] [--near X Y]
+            --near X Y   the same point read as APPROXIMATE; implies --snap
+            --rot DEG    absolute rotation; omitted, the part keeps its own
+  rotate REF DEG [--relative]
+            --relative   add to the current rotation instead of replacing it
+  face REF FACE PARTNER      FACE names the row by the face it is on NOW
+  lock REF [REF ...]
+  unlock REF [REF ...]       the only way to move a KiCad-locked part
+"""
+
 
 def build_parser():
     p = argparse.ArgumentParser(
         description=__doc__,
+        epilog=VERB_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('input_file', help='board to read')
     p.add_argument('output_file',
@@ -158,6 +181,13 @@ def split_segments(rest):
     A verb token starts a segment; everything up to the next verb token
     belongs to it. This is what lets several verbs ride in one call without
     argparse subparsers, which stop at the first one.
+
+    KNOWN LIMIT, stated rather than papered over: a token is a verb by exact
+    lowercase match, so a footprint actually REFERENCED `set` or `lock` would
+    start a segment instead of being a name. KiCad references are conventionally
+    uppercase and no board in this repo has one, but if you meet one, place it
+    with `place_seed`/`place_optimize` rather than here -- a quoting escape
+    would be a second syntax to learn for a case nobody has.
     """
     segments = []
     cur = None
@@ -249,23 +279,22 @@ def main(argv=None):
     from placement.placement_state import assess_placement, UNPLACED_EXIT
 
     if not os.path.isfile(args.input_file):
-        print("place_pose: %s is not a file" % args.input_file,
-              file=sys.stderr)
-        return 2
+        return _refuse(args, "%s is not a file" % args.input_file, 2)
     try:
         pcb = parse_kicad_pcb(args.input_file)
     except Exception as exc:                                 # noqa: BLE001
-        print("place_pose: cannot read %s: %s" % (args.input_file, exc),
-              file=sys.stderr)
-        return 2
+        return _refuse(args, "cannot read %s: %s"
+                       % (args.input_file, exc), 2)
 
     st = assess_placement(pcb, args.input_file)
     if st.has_copper and not args.allow_routed:
-        print("place_pose: this board carries %d segment(s) and %d via(s); "
-              "moving a footprint strands every track attached to it. Pose "
-              "the unrouted board, or pass --allow-routed if you mean to."
-              % (st.segments, st.vias), file=sys.stderr)
-        return UNPLACED_EXIT
+        return _refuse(
+            args,
+            "this board carries %d segment(s) and %d via(s); moving a "
+            "footprint strands every track attached to it. Pose the unrouted "
+            "board, or pass --allow-routed if you mean to."
+            % (st.segments, st.vias), UNPLACED_EXIT,
+            segments=st.segments, vias=st.vias)
     if st.unplaced:
         # A NOTE, not a gate (see the module docstring): arranging a pile one
         # decision at a time is what this tool is for, and the relative
@@ -317,6 +346,23 @@ def main(argv=None):
     return 0
 
 
+def _refuse(args, reason, code, **extra):
+    """Print the refusal AND a summary, then hand back the exit code.
+
+    Every exit this tool decides carries a summary: a caller that has to parse
+    stderr for the board gate and JSON for a pose refusal will parse stderr for
+    neither.
+    """
+    print("place_pose REFUSED: %s" % reason, file=sys.stderr)
+    doc = {'input': args.input_file, 'output': None,
+           'dry_run': bool(args.dry_run), 'refused': reason,
+           'exit_code': code, 'moved': [], 'ops': [], 'legal': None}
+    doc.update(extra)
+    print('JSON_SUMMARY: ' + json.dumps(doc, sort_keys=True, default=str),
+          flush=True)
+    return code
+
+
 def _report(summary):
     """The human half of the summary -- the numbers, not a verdict."""
     print("legality at clearance %g (%s), edge %g (%s)" % (
@@ -342,6 +388,15 @@ def _report(summary):
                         summary['hole_conflicts_after'],
                         summary['oob_pad_count_before'],
                         summary['oob_pad_count_after']))
+    if summary['knobs']['clearance']['source'] == 'cli':
+        # A refusing tool whose threshold is a flag has to say when the
+        # threshold came from the caller: measured on esp_prog (no netclass),
+        # 7 of 81 probe poses were refused at the board-resolved 0.25 and
+        # accepted at --clearance 0.01. run_watch's FLOOR scope does not cover
+        # this tool, so this line is the disclosure.
+        print("note: the verdict ran at --clearance %g, which YOU supplied; "
+              "the board's own floor was not used"
+              % summary['clearance'], file=sys.stderr)
     _sc = summary.get('snap_census') or {}
     if _sc.get('skipped'):
         # On stderr and in the summary both: a flag that did nothing has to
@@ -349,7 +404,10 @@ def _report(summary):
         print("note: --snap/--near did not apply -- %s" % _sc['skipped'],
               file=sys.stderr)
     if summary.get('forced'):
-        print("WARNING: written under --force -- %s" % summary['refused'])
+        # NOT the refusal sentence verbatim: it ends "Refused rather than
+        # written", which is false on a run that wrote.
+        print("WARNING: WRITTEN under --force, over this finding -- %s"
+              % summary['refused'])
     if summary.get('locked_count') is not None:
         print("locked %d, unlocked %d" % (summary.get('locked_count') or 0,
                                           summary.get('unlocked_count') or 0))
