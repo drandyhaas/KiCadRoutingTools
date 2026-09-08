@@ -109,13 +109,24 @@ EDGE_BAND_SANITY_MM = 5.0
 #: same reasoning as 2 applies -- the unknown-key refusal already protects an
 #: older build, and the bump is about `min_reader` being able to name the
 #: version that can act on the claim.
-READER_VERSION = 3
+#:
+#: 4 (#902): `proximity[]` -- "these two named parts, this far apart". The one
+#: class of constraint the netlist IMPLIES and nothing here could read: a 3mm
+#: crystal loop and a 30mm one have identical connectivity, so no instrument
+#: that reads the board can tell them apart. Declarable, and it changes the
+#: exit code, so the rule above mandates the bump. The same reasoning as 2 and
+#: 3 -- the unknown-key refusal already protects an older build (it raises
+#: `unknown key(s) proximity` and refuses the file), so the bump is not for
+#: SAFETY. It is because `READER_VERSION` is the number `compile_brief` copies
+#: into `min_reader`, and at 3 a brief-compiled intent would claim a reader-3
+#: build acts on a claim it has never heard of.
+READER_VERSION = 4
 
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
     'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
-    'assembly',
+    'assembly', 'proximity',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
                'tolerance_mm', 'note', 'context'}
@@ -176,6 +187,30 @@ _CENTER_ON_EDGE_KEYS = {'tolerance_mm'}
 _ALONG_EDGE_BAND_KEYS = {'from', 'to'}
 _DECAP_KEYS = {'max_distance_mm', 'exempt', 'search_radius_mm',
                'max_pin_distance_mm', 'pin_functions', 'same_side'}
+#: #902. One declared claim: these two named parts, no further apart than
+#: `max_mm`. `ref` is always a SINGLE ref here -- the brief's list form is
+#: sugar that `compile_brief` expands, so the intent carries one row per claim
+#: and `Violation.ref` always has a ref to name.
+#:
+#: No `why` / `requirement`: prose lives in `context`, which is this schema's
+#: own rule, and the brief compiler moves them there exactly as it does for
+#: `interfaces[]`.
+_PROXIMITY_KEYS = {'ref', 'near', 'max_mm', 'basis', 'pads', 'note', 'source',
+                   'context'}
+#: Which geometry the gap is measured between.
+#:
+#: `pad_edge` is pad copper to pad copper -- the currency `decap_pin_distance`
+#: already uses, so a reader meets one definition of "how far apart" rather
+#: than two. `body` measures #896's drawn bodies, and it exists because two
+#: parts a brief wants "together" may share no net at all: an auto-reset
+#: transistor pair has no pad pair to measure.
+#:
+#: `courtyard` is deliberately NOT a spelling, and `design_brief` refuses it by
+#: name with the measurement that decided it -- `placement.body` is a ladder,
+#: and on the board this rule was written for 0 of 21 footprints draw a
+#: courtyard, so the word would name geometry the board does not have.
+_PROXIMITY_BASES = ('pad_edge', 'body')
+_PROXIMITY_DEFAULT_BASIS = 'pad_edge'
 _DEFAULTS_KEYS = {'zone_tolerance_mm'}
 #: `zoned_blocks` is setdefault-injected into this same dict by `grade` after
 #: load, and `affinity_exempt_net_ids` is derived there from
@@ -292,6 +327,14 @@ class Intent:
     # the honest "nobody asked" reason rather than grading a board against a
     # policy nothing states.
     assembly: Dict[str, object] = field(default_factory=dict)
+    # #902. Declared proximity claims, one row per (ref, near) pair. NEVER
+    # emitted: a relation between two parts is not readable off a board -- the
+    # board supplies the distance and never the claim -- so an emitter writing
+    # one would be blessing the current pose as the spec, which is the
+    # emit-then-grade round trip this file guards against everywhere else.
+    # Defaulted, so every existing `Intent(...)` construction site is
+    # untouched and an intent declaring none behaves exactly as before.
+    proximity: Tuple[Dict[str, object], ...] = ()
 
     def assembly_sides(self) -> str:
         """The declared policy, or 'both' -- which constrains nothing.
@@ -442,6 +485,113 @@ def _number(value, where: str, lo=None, hi=None) -> float:
                else (f">= {lo}" if lo is not None else f"<= {hi}"))
         raise IntentError(f"{where}: expected {rng}, got {v!r}")
     return v
+
+
+def _proximity_claims(raw: Dict) -> List[Dict]:
+    """Validate `proximity[]` (#902), AT LOAD.
+
+    At load and not in `validate_intent`, the deviation `_along_edge_claim`
+    already documents and for the same reason: `validate_intent` has exactly
+    one caller -- `grade()` -- while `place_seed` and `place_reconstruct` load
+    an intent and never call it. A refusal that lived there would leave those
+    holding a row whose `pads` is a number.
+
+    Pad numbers are refused unless they are STRINGS. `Pad.pad_number` is a
+    string on both parse paths, so a JSON `1` matches no pad, resolves an empty
+    set, and grades CLEAN -- a refusal that reads as a pass, in the one
+    direction nobody checks. `design_brief` refuses the same shape at its own
+    level; this is the second reader of the same document, and a document that
+    can reach the grade by a path that skips the brief (a hand-written intent)
+    must not be graded on a claim that cannot resolve.
+    """
+    got = raw.get('proximity')
+    if got is not None and not isinstance(got, list):
+        raise IntentError(f"proximity: expected a list of claims, got "
+                          f"{type(got).__name__}")
+    out: List[Dict] = []
+    seen: Dict[Tuple[str, str], int] = {}
+    for i, p in enumerate(got or []):
+        where = f"proximity[{i}]"
+        if not isinstance(p, dict):
+            raise IntentError(f"{where}: expected an object with `ref`, "
+                              f"`near` and `max_mm`")
+        _reject_unknown(p, _PROXIMITY_KEYS, where)
+        _entry_context(p, where)
+        ref, near = p.get('ref'), p.get('near')
+        for name, val in (('ref', ref), ('near', near)):
+            if not val or not isinstance(val, str):
+                raise IntentError(
+                    f"{where}: `{name}` must be a single reference. The "
+                    f"brief's list form is sugar that `compile_brief` expands, "
+                    f"so an intent row names exactly one part on each side")
+        if ref == near:
+            raise IntentError(f"{where} ({ref}): the subject and the partner "
+                              f"are the same part, which is 0mm from itself")
+        if (ref, near) in seen:
+            raise IntentError(
+                f"{where} ({ref} near {near}): duplicate claim, already "
+                f"declared at proximity[{seen[(ref, near)]}] -- two claims "
+                f"about one relation, with no rule for which wins, and the "
+                f"grade would charge BOTH")
+        seen[(ref, near)] = i
+        # The REVERSED pair, when neither row names a SUBJECT pad list -- the
+        # same refusal `design_brief` makes, and it has to be made here too:
+        # this loader exists for the HAND-WRITTEN intent, which never passes
+        # through the brief compiler. Without it the two documents disagreed
+        # about the same rows, and the grade charged one symmetric measurement
+        # twice, reporting an identical number under two claims.
+        #
+        # A subject pad list is what turns the existential minimum into "for
+        # EACH of my pads", so with one on either side the two rows really are
+        # different claims and both are kept.
+        if not (p.get('pads') or {}).get(ref) and (near, ref) in seen:
+            j = seen[(near, ref)]
+            if not ((got[j].get('pads') or {}).get(near)):
+                raise IntentError(
+                    f"{where} ({ref} near {near}): the reverse of "
+                    f"proximity[{j}], and neither row names a `pads` list for "
+                    f"its own subject -- so the two are the same symmetric "
+                    f"measurement declared twice, with no rule for which "
+                    f"claim wins. Keep one, or name the pads that make them "
+                    f"different claims")
+        if 'max_mm' not in p:
+            raise IntentError(f"{where} ({ref}): needs `max_mm`, the distance "
+                              f"in mm these parts may be apart")
+        limit = _number(p['max_mm'], f"{where} ({ref}).max_mm")
+        if not math.isfinite(limit) or limit <= 0.0:
+            raise IntentError(
+                f"{where} ({ref}).max_mm: {p['max_mm']!r}. A limit must be a "
+                f"positive finite distance -- infinity can never be exceeded "
+                f"and NaN fails every comparison, so either would be a "
+                f"declared claim nothing can ever violate")
+        basis = p.get('basis', _PROXIMITY_DEFAULT_BASIS)
+        if basis not in _PROXIMITY_BASES:
+            raise IntentError(
+                f"{where} ({ref}).basis: {basis!r}, expected one of "
+                f"{', '.join(map(repr, _PROXIMITY_BASES))}")
+        pads = p.get('pads')
+        if pads is not None:
+            if not isinstance(pads, dict) or not pads:
+                raise IntentError(
+                    f"{where} ({ref}).pads: expected a non-empty "
+                    f"{{'REF': ['1', '2']}}")
+            for who, nums in pads.items():
+                if who not in (ref, near):
+                    raise IntentError(
+                        f"{where} ({ref}).pads: a pad list for {who!r}, which "
+                        f"this claim does not name")
+                if not isinstance(nums, (list, tuple)) or not nums:
+                    raise IntentError(f"{where} ({ref}).pads.{who}: expected a "
+                                      f"non-empty list of pad numbers")
+                for n in nums:
+                    if not isinstance(n, str):
+                        raise IntentError(
+                            f"{where} ({ref}).pads.{who}: pad {n!r} has type "
+                            f"{type(n).__name__}; pad numbers are strings. "
+                            f"`Pad.pad_number` is a string, so {n!r} would "
+                            f"match no pad, measure nothing, and grade clean")
+        out.append(dict(p))
+    return out
 
 
 def _along_edge_claim(c: Dict, i: int) -> None:
@@ -651,6 +801,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         _along_edge_claim(c, i)
         conns.append(c)
 
+    proximity = _proximity_claims(raw)
+
     severity = _obj(raw.get('severity'), 'severity')
     if any(v not in (ERROR, WARN) for v in severity.values()):
         raise IntentError(
@@ -796,6 +948,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             _obj(context.get('budget_withheld'),
                  'context.budget_withheld').items()},
         assembly=dict(assembly),
+        proximity=tuple(proximity),
     )
 
 
@@ -1380,6 +1533,8 @@ class _Ctx:
         self._decap_pops: Dict[float, tuple] = {}
         self._supply_pins = None
         self._assembly_census = None
+        self._bodies = None
+        self._bodies_error = ''
 
     def assembly_census(self) -> Dict[str, object]:
         """#837's per-side census, memoised. The SAME function
@@ -1393,6 +1548,61 @@ class _Ctx:
             from .legality import assembly_census as _ac
             self._assembly_census = _ac(self.pcb)
         return self._assembly_census
+
+    def body_rect(self, ref: str):
+        """`(rect_in_board_coords, source)` for one part's DRAWN body (#902).
+
+        LAZY and memoised, the `_supply_pins` precedent: `body.board_bodies`
+        reads the board FILE three times (courtyard, fab and silk graphics
+        reach neither parse path), and no board without a proximity claim may
+        pay for that.
+
+        THE DRAWN body, `drawn_local`, and not `body_local`. #896 stores two
+        ladders on purpose and says why: a courtyard "is not a body -- it is a
+        body plus an assembly margin plus any shell overhang", and
+        `body_local` is courtyard-FIRST. Reading it would have made
+        `basis: "body"` silently measure courtyards on any board that draws
+        them, under-stating every gap by the assembly margin and passing
+        claims that should fail -- while `basis: "courtyard"` is refused BY
+        NAME on the grounds that boards do not draw them. The fixture this
+        rule was written against draws 0 courtyards of 21, so no test here
+        could ever have seen it.
+
+        `drawn_local` is `fab`, else `silk` unioned with the pads. When the
+        library drew NEITHER it is None, and the fall-back is the pad bbox
+        from `body_local` -- reported as `pad_bbox`, so a reader always knows
+        the number rests on copper rather than on a drawn outline. That
+        fall-back is what lets a transistor pair sharing no net be measured at
+        all, which is the case the second basis exists for.
+
+        `occupancy_local` is deliberately never used: it is the body unioned
+        with the pads, which answers "may something be seated here" and would
+        make `body` a superset of `pad_edge` rather than a second currency.
+        """
+        if self._bodies is None:
+            from .body import board_bodies
+            try:
+                self._bodies = board_bodies(self.pcb, self.pcb_file)
+            except Exception as exc:                         # noqa: BLE001
+                # Remembered, and reported as ITSELF. Falling through to the
+                # "this part draws no body" reason would tell an author a
+                # false fact about their board and send them to fix a
+                # footprint that is fine.
+                self._bodies = {}
+                self._bodies_error = f"{type(exc).__name__}: {exc}"
+        geom = self._bodies.get(ref)
+        fp_obj = self.pcb.footprints.get(ref)
+        rect_local = None if geom is None else (geom.drawn_local
+                                                or geom.body_local)
+        source = 'none' if geom is None else (geom.drawn_source
+                                              if geom.drawn_local is not None
+                                              else geom.source)
+        if rect_local is None or fp_obj is None:
+            return None, source
+        x0, y0, x1, y1 = legality.rotate_local_bounds(
+            *rect_local, fp_obj.rotation or 0.0)
+        return ((fp_obj.x + x0, fp_obj.y + y0, fp_obj.x + x1, fp_obj.y + y1),
+                source)
 
     def sev(self, rule: str) -> str:
         return self.intent.severity_of(rule)
@@ -2697,6 +2907,45 @@ def _pin_gap(pin_pad, cap_fp, net_id: int) -> Optional[float]:
     return best
 
 
+def _pads_named(fp_obj, names) -> List:
+    """Every pad carrying one of `names`. A pad NUMBER is not unique.
+
+    `Y1` on the board this rule was written for has two pads both numbered
+    `3` (a crystal's two ground tabs), and `USB1` has six numbered `0` plus two
+    with an empty name. A first-hit lookup would pick whichever the parser saw
+    first, so the answer would depend on file order; taking every match and
+    minimising over them cannot.
+    """
+    want = set(names)
+    return [p for p in (fp_obj.pads or ()) if p.pad_number in want]
+
+
+def _proximity_reach(pad, partners, net_match: bool):
+    """`(gap, partner_pad, how)` for ONE subject pad -- the MINIMUM over its
+    partner set, or None when that set is empty.
+
+    SIGNED, never clamped: `rect_gap` goes negative on overlap, and erasing
+    that magnitude is the scar `_pin_gap` records at the top of this file.
+
+    `net_match` narrows the partner set to the pads on this pad's OWN net when
+    any partner carries it. That is `_pin_gap`'s rule generalised, and its
+    docstring is the argument verbatim: "the cap's RAIL leg, never its nearest
+    pad -- a 0402's ground pad can sit half a millimetre nearer and shave the
+    number". It is the one NARROWING in this rule, so it is the one place a
+    finding could be manufactured; `how` goes on the wire for exactly that
+    reason, so every finding is falsifiable from its own payload.
+    """
+    same = ([q for q in partners if q.net_id == pad.net_id and pad.net_id > 0]
+            if net_match else [])
+    use, how = (same, 'net') if same else (partners, 'any')
+    best = None
+    for q in use:
+        g = legality.rect_gap(legality.pad_rect(pad), legality.pad_rect(q))
+        if best is None or g < best[0]:
+            best = (g, q, how)
+    return best
+
+
 def _arm_decap_pins(ctx) -> Optional[str]:
     """Why this BOARD cannot answer the pin question. None = it can.
 
@@ -2952,6 +3201,225 @@ def rule_legality(ctx) -> Iterator[Violation]:
                 measured={key: round(float(got), 4)}, expected={key: lim})
 
 
+def rule_proximity(ctx) -> Iterator[Violation]:
+    """These two named parts, no further apart than `max_mm` (#902).
+
+    The one class of constraint the NETLIST implies and nothing here could
+    read: a 3mm crystal loop and a 30mm one have identical connectivity, so no
+    instrument that reads the board can tell them apart. `decap_distance`
+    cannot stand in for it -- a decap is syntactic (`ref` starts with `C`,
+    bridges exactly two nets) and its partner must carry >= 4 copper pads, so a
+    3-pad SOT89 regulator can never be a tether target at ANY radius. Measured
+    on the board this was written for, the election gives `C1 -> USB1 2.03mm`
+    and `C3 -> U1 1.83mm`: the regulator's own bulk caps, graded against a USB
+    socket and a bridge IC.
+
+    THE INVARIANT. For each SUBJECT pad the claim declares, take the MINIMUM
+    over a partner set that is a SUPERSET of the pads which could satisfy it,
+    and violate only when that minimum exceeds `max_mm`. Because the metric is
+    a minimum, every partner added can only lower it, so the only way to
+    manufacture a violation is to have MISSED a partner. The quantifiers are
+    `for all subject pads, there exists a partner pad` -- the same shape as
+    `decap_pin_distance` and for the same reason: a crystal whose XTAL_IN leg
+    is 30mm away must not be blessed because XTAL_OUT is 1mm away.
+
+    TWO ARITIES, because they are two claims:
+
+      `pads[ref]` declared   per-PIN reach. Each declared subject pad against
+                             the partner's pads, narrowed to its own net when
+                             any partner carries it (`_proximity_reach`).
+      `pads[ref]` omitted    part-to-part ADJACENCY. Every pad against every
+                             pad, no net matching, one finding per claim.
+
+    All pads rather than shared-net pads in the second arity, and that is the
+    invariant again: all-pads is the SUPERSET, so the minimum can only fall.
+    Shared-net is a subset and can RAISE the number, which is the one direction
+    that manufactures findings. And with no `pads` the author stated a GEOMETRY
+    claim; net-matching it would silently make it an electrical one.
+
+    TOTAL OVER ITS CLAIMS, which is why there is no `_ARM` entry. Every claim
+    yields exactly one of: a measured pass (silence), a `proximity` violation,
+    a `proximity_unresolved` violation, or an abstention on `ctx.abstained`. A
+    branch that `continue`d without one of those would put this rule in
+    `rules_run` having graded a claim it never measured -- the vacuous pass
+    `--require-rules` exists to catch, arriving through the mechanism that
+    implements it.
+    """
+    sev_unres = ctx.intent.severity_of('proximity_unresolved', default=ERROR)
+    for i, claim in enumerate(ctx.intent.proximity):
+        ref, near = str(claim['ref']), str(claim['near'])
+        limit = float(claim['max_mm'])
+        basis = claim.get('basis', _PROXIMITY_DEFAULT_BASIS)
+        spec = claim.get('pads') or {}
+        where = f"proximity[{i}]"
+        # The abstention key carries the INTENT ROW INDEX as well as the two
+        # refs, so a consumer reporting per-clause coverage can attribute an
+        # abstention to the claim that caused it. The index is not decoration:
+        # a reference may legally contain `~` (`disambiguate_references`
+        # produces `TP4~2`, and this very board parses `Ref*~2`), so a bare
+        # `ref~near` makes a row `A~B` near `C` and a row `A` near `B~C` share
+        # one string -- and `ctx.abstained` is a DICT, so one of the two
+        # abstentions would silently disappear. The index is unique by
+        # construction, and a consumer resolves it against the intent's own
+        # row to recover the pair exactly.
+        akey = f"proximity[{i}:{ref}~{near}]"
+
+        a_fp = ctx.pcb.footprints.get(ref)
+        b_fp = ctx.pcb.footprints.get(near)
+        missing = [r for r, f in ((ref, a_fp), (near, b_fp)) if f is None]
+        if missing:
+            # A VIOLATION, not a skip: `rule_edge_connector` reports an
+            # unmatched brief ref at error severity and `compile_brief` KEEPS
+            # such a ref precisely so it does. Dropping it would make a typo
+            # grade clean, which is `block_unresolved`'s failure one level
+            # over -- and an ARM skip would lose the ref's name entirely.
+            yield Violation(
+                rule='proximity_unresolved', severity=sev_unres,
+                ref=ref, block=ctx.owner.get(ref),
+                message=(f"{where}: {' and '.join(missing)} "
+                         f"{'are' if len(missing) > 1 else 'is'} not on this "
+                         f"board, so {ref} near {near} cannot be measured"),
+                measured={'missing': missing, 'near': near},
+                expected={'max_mm': limit})
+            continue
+
+        if basis == 'body':
+            a_rect, a_src = ctx.body_rect(ref)
+            b_rect, b_src = ctx.body_rect(near)
+            if a_rect is None or b_rect is None:
+                nogeom = [r for r, rect in ((ref, a_rect), (near, b_rect))
+                          if rect is None]
+                # The READER's own failure is reported as itself. Falling
+                # through to "draws no body" would state a false fact about
+                # the author's board and send them to fix a footprint that is
+                # fine -- on the fixture here both parts draw a body and carry
+                # 4 and 20 pads.
+                why = (f"placement.body could not be read for this board "
+                       f"({ctx._bodies_error}), so no body claim can be "
+                       f"measured -- this is a failure of the geometry "
+                       f"reader, not of {' or '.join(nogeom)}"
+                       if ctx._bodies_error else
+                       f"{' and '.join(nogeom)} draws no body and has no "
+                       f"pads, so placement.body answers source 'none' -- "
+                       f"there is no geometry to measure. Name pads and use "
+                       f"basis pad_edge, or drop the claim")
+                ctx.abstain(f"{akey}.basis", why)
+                continue
+            gap = legality.rect_gap(a_rect, b_rect)
+            if gap <= limit + legality.EPS:
+                continue
+            yield Violation(
+                rule='proximity', severity=ctx.sev('proximity'),
+                ref=ref, block=ctx.owner.get(ref),
+                message=(f"{ref} is {gap:.2f}mm from {near}, body to body, "
+                         f"past the declared {limit:.2f}mm "
+                         f"(bodies from {a_src}/{b_src})"),
+                measured={'gap_mm': round(gap, 4), 'near': near,
+                          'basis': 'body', 'basis_source': a_src,
+                          'near_basis_source': b_src,
+                          'pads_basis': 'body'},
+                expected={'max_mm': limit})
+            continue
+
+        declared = bool(spec.get(ref))
+        subject = (_pads_named(a_fp, spec[ref]) if declared
+                   else list(a_fp.pads or ()))
+        partners = (_pads_named(b_fp, spec[near]) if spec.get(near)
+                    else list(b_fp.pads or ()))
+        # A NAME that matches nothing is unresolved, not clean -- and it is
+        # reported PER NAME, not only when every name misses. The first
+        # version fired on `not got`, so `pads: {'Y1': ['2', '7']}` graded
+        # CLEAN on the survivor while `'7'` vanished: the claim then measured
+        # a strictly smaller subject set than it declared, which is the very
+        # failure the loader cites when it refuses an integer pad number
+        # ("would match no pad, measure nothing, and grade clean"). It also
+        # falsified this rule's own invariant, which is quantified over the
+        # pads the claim DECLARES and not over the ones that happened to
+        # resolve.
+        #
+        # The loader can refuse a pad number of the wrong TYPE; only here,
+        # holding a board, can "pad 7 of a 4-pad part" be seen at all.
+        blind = False
+        for who, names, got in ((ref, spec.get(ref), subject),
+                                (near, spec.get(near), partners)):
+            if not names:
+                continue
+            have = {p.pad_number for p in got}
+            missing = [n for n in names if n not in have]
+            if not missing:
+                continue
+            blind = True
+            yield Violation(
+                rule='proximity_unresolved', severity=sev_unres,
+                ref=ref, block=ctx.owner.get(ref),
+                message=(f"{where}: {who} has no pad numbered "
+                         f"{', '.join(repr(n) for n in missing)}"
+                         + (f" (it has {', '.join(sorted(repr(p.pad_number) for p in (b_fp if who == near else a_fp).pads or ()))})"
+                            if len(missing) == len(names) else
+                            f" -- {len(names) - len(missing)} of "
+                            f"{len(names)} named pad(s) resolved, so the "
+                            f"claim would measure less than it declares")),
+                measured={'unresolved_ref': who, 'pads': list(missing),
+                          'declared_pads': list(names),
+                          'resolved_pads': len(names) - len(missing),
+                          'near': near},
+                expected={'max_mm': limit})
+        if blind:
+            # Not measured at all: a distance taken over a subject set smaller
+            # than the claim declares is a number about a different claim.
+            continue
+        if not subject or not partners:
+            ctx.abstain(
+                f"{akey}.pads",
+                f"{ref if not subject else near} has no pads at all, so there "
+                f"is nothing to measure pad edge to pad edge. Use basis body, "
+                f"or drop the claim")
+            continue
+
+        # PER SUBJECT PAD when the claim declares them; ONCE for the pair when
+        # it does not -- because those are the two claims the two arities
+        # make. `decap_pin_distance` reports per PIN for the same reason: "the
+        # crystal is too far" is one fact, but "XTAL_IN is 4.74mm away AND
+        # XTAL_OUT is 2.52mm away" is two, and collapsing them to the worst
+        # hides a leg the author still has to move. Measured on the unplaced
+        # board: reporting only the worst turned three failing pads into two
+        # findings. With no declared pads there is no pin to name, so the
+        # part-adjacency arity reports once.
+        reaches = []
+        for pad in subject:
+            got = _proximity_reach(pad, partners, net_match=declared)
+            if got is not None:
+                reaches.append((got[0], pad, got[1], got[2]))
+        # No `if not reaches` arm: `partners` is proven non-empty by the guard
+        # above and `_proximity_reach` falls back to it, so it never returns
+        # None here. An arm that cannot run is not a safety net -- it is a
+        # claim about the code that no test can check, and this one survived
+        # being replaced by `raise AssertionError`.
+        if not declared:
+            reaches = [min(reaches, key=lambda t: t[0])]
+        for gap, pad, partner, how in reaches:
+            if gap <= limit + legality.EPS:
+                continue
+            net = pad.net_name or ''
+            yield Violation(
+                rule='proximity', severity=ctx.sev('proximity'),
+                ref=ref, block=ctx.owner.get(ref),
+                message=(f"{ref} pad {pad.pad_number} is {gap:.2f}mm from "
+                         f"{near} pad {partner.pad_number}"
+                         + (f" on {net}" if how == 'net' and net else '')
+                         + f", past the declared {limit:.2f}mm proximity "
+                           f"limit"),
+                measured={'gap_mm': round(gap, 4), 'near': near,
+                          'pad': pad.pad_number,
+                          'near_pad': partner.pad_number,
+                          'net': net or None, 'paired_by': how,
+                          'pads_basis': 'declared' if declared else 'part',
+                          'basis': 'pad_edge',
+                          'subject_pads': len(subject),
+                          'near_pads': len(partners)},
+                expected={'max_mm': limit})
+
+
 RULES = (
     ('envelope', rule_envelope),
     ('zone_containment', rule_zone_containment),
@@ -2963,6 +3431,7 @@ RULES = (
     ('decap_distance', rule_decap_distance),
     ('decap_ungraded', rule_decap_ungraded),
     ('decap_pin_distance', rule_decap_pin_distance),
+    ('proximity', rule_proximity),
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
 )
@@ -2981,7 +3450,13 @@ _NON_RULE_SEVERITIES = frozenset({
     # are not RULES entries" -- a rule may raise more than one FINDING, and
     # severity is settable per finding because a channel-3 inference and a
     # declared pin are different claims about the same measurement.
-    'decap_pin_distance_inferred', 'decap_pin_uncovered'})
+    'decap_pin_distance_inferred', 'decap_pin_uncovered',
+    # #902. Raised BESIDE `proximity`'s own name rather than outside the
+    # loop: a named ref or pad number the board does not have is a
+    # different CLAIM from a distance, and severity is settable per name,
+    # so a DNP-variant board legitimately missing a part can demote the
+    # resolution finding without demoting the distance one.
+    'proximity_unresolved'})
 
 #: Every rule name an intent may set a severity for. Derived from `RULES`, so a
 #: new rule is settable the moment it is registered -- a hand-listed set would
@@ -3001,6 +3476,7 @@ _SKIP_REASON = {
     'decap_distance': 'the intent declares no decaps.max_distance_mm',
     'decap_ungraded': 'the intent declares no decaps.max_distance_mm',
     'decap_pin_distance': 'the intent declares no decaps.max_pin_distance_mm',
+    'proximity': 'the intent declares no proximity claims',
     'must_lock': 'the intent declares no must_lock patterns',
     'legality': 'the intent declares no legality_budget',
 }
@@ -3137,6 +3613,8 @@ def _wants(intent: Intent, rule: str) -> bool:
         # arms one and not the other would report a partition with a
         # missing half and no way to see that it was missing.
         return (intent.decaps or {}).get('max_distance_mm') is not None
+    if rule == 'proximity':
+        return bool(intent.proximity)
     if rule == 'must_lock':
         return bool(intent.must_lock)
     if rule == 'legality':

@@ -505,8 +505,14 @@ def main():
               for s in ('F', 'B', 'both')))
     check("loader: an intent with no assembly key defaults to both",
           fp.intent_from_dict(base).assembly_sides() == 'both')
+    # 3 when #837 added `assembly.sides`; 4 since #902 added `proximity[]`.
+    # Re-stated rather than loosened to `>= 3`: the literal IS the detector,
+    # and this is the fourth one that bump had to move -- the others live in
+    # test_712_edge_centering, mutate_711 and mutate_837. It is also the only
+    # one `run_all.py --fast` cannot see, because this file is classified
+    # integration, so a red here reads as a green suite.
     check("reader version names the field it learned",
-          fp.READER_VERSION == 3, fp.READER_VERSION)
+          fp.READER_VERSION == 4, fp.READER_VERSION)
 
     check("graded every fixture", graded == len(EXPECT), f"{graded}")
     print(f"\n{'FAIL' if FAILURES else 'PASS'}: #837 census over {graded} "

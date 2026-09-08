@@ -69,9 +69,15 @@ a clean-looking report.
 
 **1. `intent`** — given `intent.json`, `intent_result.json`, the front panel.
 > Does this board honour the declared floorplan? Report every `violations[]`
-> entry with its `measured` vs `expected`. Check `rules_run` and
-> `rules_skipped`: if `rules_run` is 0 this is a vacuous pass and you must FAIL
-> it. You may not conclude anything about DRC or connectivity.
+> entry with its `measured` vs `expected`. Then check CLAUSE COVERAGE, which
+> is a different question from the rule count: read `brief_coverage` and FAIL
+> if any clause the design brief declared is `uncovered` or `abstained`, or if
+> one is `drifted` -- graded, but not against what the brief says. `rules_run`
+> counts RULES: one run graded six of them, passed, and measured not one
+> clause its brief declared. `rules_run: 0` is still a vacuous pass and still a
+> FAIL, as the floor beneath that. A clause the author wrote `"unknown"`, and
+> one this toolchain carries by design, are NOT findings. You may not conclude
+> anything about DRC or connectivity.
 
 **2. `legality`** — given `view.log`'s JSON, both side panels.
 > Did legality regress? Compare `overlap_area` and `oob_count`/`oob_amount`
@@ -198,8 +204,9 @@ Two failure modes to refuse by name:
   warnings" describes a board that did not pass. Either fix it, or report it as
   not done.
 - **Do not accept a lens that passed vacuously.** A lens whose inputs were empty
-  has not verified anything; that is why lens 1 must FAIL on `rules_run == 0` and
-  lens 9 must report `ungraded` as a finding.
+  has not verified anything; that is why lens 1 must FAIL on any declared brief
+  clause reported `uncovered` or `abstained` (and on `rules_run == 0` beneath
+  that), and lens 9 must report `ungraded` as a finding.
 
 **Stop condition 4 is the exception, and it is the only one.** A requirement that
 is geometrically unsatisfiable does not get more iterations — it gets a

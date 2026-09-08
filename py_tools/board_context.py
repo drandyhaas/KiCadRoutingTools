@@ -406,6 +406,49 @@ def _verdict(m):
     return 'AGREES' if not m.get('inversions') else 'CROSSED'
 
 
+def _pair_span_mm(pcb_data, a: str, b: str, only_nets=None):
+    """Worst straight-line pad-to-pad span between two parts, over the nets
+    they SHARE. `None` when they share none.
+
+    #895's criterion 1 asks for the length a pair or bus is forced to run, and
+    nothing in this toolchain produced it: `pair_metrics` computes inversions
+    and discards the distance, `render_placement --json-out` gives a
+    board-total `hpwl`, and `net_affinity` needs declared zoned blocks. So it
+    is measured here, where the pin-order rows already stand.
+
+    The WORST net rather than the mean: a bus is as long as its longest
+    member, and averaging hides the one that will not fit. Pad CENTRES, not
+    edges, because this is a routing-length question rather than a clearance
+    one -- and it is deliberately a straight line, not a route: the criterion
+    compares it against what the two footprints would allow side by side,
+    which is a judgement the reader makes with the two `body_mm` extents
+    printed beside it. A tool that guessed that denominator would be inventing
+    the threshold the criterion exists to leave to a human.
+    """
+    import math
+    fa = (pcb_data.footprints or {}).get(a)
+    fb = (pcb_data.footprints or {}).get(b)
+    if fa is None or fb is None:
+        return None
+    want = set(only_nets or ())
+    by_a = {}
+    for pad in (fa.pads or ()):
+        nid = getattr(pad, 'net_id', 0) or 0
+        if nid > 0 and (not want or nid in want):
+            by_a.setdefault(nid, []).append(pad)
+    worst = None
+    for pad in (fb.pads or ()):
+        nid = getattr(pad, 'net_id', 0) or 0
+        if nid <= 0 or nid not in by_a:
+            continue
+        near = min(math.dist((q.global_x, q.global_y),
+                             (pad.global_x, pad.global_y))
+                   for q in by_a[nid])
+        if worst is None or near > worst:
+            worst = near
+    return None if worst is None else round(worst, 3)
+
+
 def pin_order_rows(pcb_data, pcb_file: str, clearance: float):
     """Pin-order agreement for every connected part pair sharing >= 2 nets.
 
@@ -434,6 +477,7 @@ def pin_order_rows(pcb_data, pcb_file: str, clearance: float):
             'a': a, 'b': b, 'nets': m.get('nets'), 'scope': 'interface',
             'inversions': m.get('inversions'), 'lis': m.get('lis'),
             'ties': m.get('ties', 0), 'verdict': _verdict(m),
+            'span_mm': _pair_span_mm(pcb_data, a, b),
         })
 
     # PAIR-SCOPED rows, and they are the point. A differential pair's polarity
@@ -467,10 +511,12 @@ def pin_order_rows(pcb_data, pcb_file: str, clearance: float):
                         'scope': f'pair {pos}/{neg}',
                         'inversions': m['inversions'], 'lis': m['lis'],
                         'ties': m.get('ties', 0), 'verdict': _verdict(m),
+                        'span_mm': _pair_span_mm(pcb_data, a, b,
+                                                 only_nets=ids),
                     })
     except Exception as exc:                                 # noqa: BLE001
         rows.append({'a': '-', 'b': '-', 'nets': 0, 'scope': 'pair',
-                     'inversions': None, 'lis': None,
+                     'inversions': None, 'lis': None, 'span_mm': None,
                      'verdict': f'NOT MEASURED ({type(exc).__name__})'})
 
     # Pair rows first: they are the narrow, unfixable-by-rotation claim.
@@ -518,12 +564,22 @@ def format_md(doc) -> str:
                  'back-side copper. Rotation cannot fix it -- parity flips '
                  'only under a mirror.')
         L.append('')
-        L.append('| A | B | scope | nets | inversions | max planar | '
-                 'verdict |')
-        L.append('|---|---|---|---|---|---|---|')
+        L.append('| A | B | scope | nets | span mm | inversions | '
+                 'max planar | verdict |')
+        L.append('|---|---|---|---|---|---|---|---|')
         for r in po['rows']:
+            _sp = r.get('span_mm')
             L.append(f"| {r['a']} | {r['b']} | {r['scope']} | {r['nets']} | "
+                     f"{'-' if _sp is None else _sp} | "
                      f"{r['inversions']} | {r['lis']} | {r['verdict']} |")
+        L.append('')
+        L.append('`span mm` is the WORST straight-line pad-to-pad distance '
+                 'over the nets the two parts share -- the length this pair '
+                 'or bus is forced to run. Compare it against the shortest '
+                 'the two bodies allow side by side (their `body_mm` are '
+                 'below); a ratio much above 1.5 is a finding to explain. '
+                 'The threshold is a judgement, which is why the tool '
+                 'reports the measurement and not a verdict.')
     L.append('')
 
     L.append('## Parts')

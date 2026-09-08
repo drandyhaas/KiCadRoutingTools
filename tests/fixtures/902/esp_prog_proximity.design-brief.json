@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "kind": "design-brief",
+  "units": "mm",
+  "board": "esp_prog_placed.kicad_pcb",
+
+  "product": {
+    "form_factor": "usb_stick",
+    "primary_axis": "east-west",
+    "held_by": "hand; plugs directly into a host USB-A port",
+    "user_top_side": "F"
+  },
+
+  "proximity": [
+    { "ref": "Y1", "near": "U1", "max_mm": 2.0, "basis": "pad_edge",
+      "pads": { "Y1": ["1", "2"], "U1": ["9", "10"] },
+      "requirement": "PROG-CLK01",
+      "why": "the crystal loop is the oscillator's stability; both legs must reach XI/XO, not just the nearer one" },
+
+    { "ref": ["C1", "C3"], "near": "U2", "max_mm": 2.0, "basis": "pad_edge",
+      "pads": { "C1": ["1"], "C3": ["1"], "U2": ["2", "3"] },
+      "requirement": "PROG-PWR01",
+      "why": "U2 is a 3-pad SOT89 and can never be a decap tether target, so its bulk caps are ungradable by any decap rule" },
+
+    { "ref": "Q1", "near": "Q2", "max_mm": 3.0, "basis": "body",
+      "requirement": "PROG-RST01",
+      "why": "the auto-reset pair shares no net, so there is no pad pair to measure -- only their bodies" }
+  ]
+}

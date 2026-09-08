@@ -126,7 +126,7 @@ KEY_SETS = {
         'schema', 'kind', 'board', 'units', 'min_reader', 'envelope',
         'defaults', 'blocks', 'keepouts', 'edge_connectors', 'decaps',
         'must_lock', 'legality_budget', 'health', 'severity', 'context',
-        'overlap_waivers', 'assembly'},
+        'overlap_waivers', 'assembly', 'proximity'},
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
@@ -156,6 +156,11 @@ KEY_SETS = {
     # records how it was reached, and `emit_intent` fills it with the
     # observation rather than a reason nobody gave.
     '_ASSEMBLY_KEYS': {'sides', 'why', 'context'},
+    # #902: one declared claim -- these two named parts, no further apart
+    # than `max_mm`. `ref` is a single ref here; the brief's list form is
+    # sugar that `compile_brief` expands before it reaches this schema.
+    '_PROXIMITY_KEYS': {'ref', 'near', 'max_mm', 'basis', 'pads', 'note',
+                        'source', 'context'},
 }
 
 
@@ -205,6 +210,7 @@ def test_the_key_sets_are_exactly_what_is_documented():
         '_OVERHANG_KEYS': 'edge_connectors[].overhang_mm',
         '_EDGE_CONNECTOR_KEYS': 'edge_connectors[]',
         '_ASSEMBLY_KEYS': 'assembly',
+        '_PROXIMITY_KEYS': 'proximity[]',
     }
     checked = 0
     for name, row in sorted(TABLE_ROWS.items()):
@@ -274,6 +280,12 @@ def test_an_intent_using_every_known_key_loads():
                              'context': {'why': 'w'}}],
         'assembly': {'sides': 'F', 'why': 'one reflow pass',
                      'context': {'quoted': 'the fab'}},
+        # #902. `source` is compiler-written, `note` and `context` are the
+        # prose slots, and `pads` names only refs this claim mentions.
+        'proximity': [{'ref': 'Y1', 'near': 'U1', 'max_mm': 2.0,
+                       'basis': 'body', 'pads': {'Y1': ['1']},
+                       'note': 'n', 'source': 'brief',
+                       'context': {'why': 'w'}}],
     }
     # Every key of every set must appear above, or this proves less than it
     # claims -- the point is coverage of the vocabulary, not of a sample.
@@ -290,6 +302,7 @@ def test_an_intent_using_every_known_key_loads():
     seen |= set(raw['health']['bus_corridors'][0])
     seen |= set(raw['overlap_waivers'][0])
     seen |= set(raw['assembly'])
+    seen |= set(raw['proximity'][0])
     for k in raw['keepouts']:
         seen |= set(k)
     missing = sorted({k for keys in KEY_SETS.values() for k in keys} - seen)
@@ -555,7 +568,8 @@ def test_severity_keys_are_checked_against_the_rule_names():
                                         'intent_zone_in_keepout',
                                         'keepout_allow_unresolved',
                                         'decap_pin_distance_inferred',
-                                        'decap_pin_uncovered'}
+                                        'decap_pin_uncovered',
+                                        'proximity_unresolved'}
     assert _SEVERITY_KEYS == expected, sorted(_SEVERITY_KEYS ^ expected)
     for name in sorted(expected):
         i = intent_from_dict(_base(severity={name: WARN}))
