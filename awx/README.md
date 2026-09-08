@@ -286,15 +286,19 @@ the order worth taking them, each with what is known.
    lattice symmetry -- the engine's own `rotate_frame` does it for the
    fanout; the chain-level version is this item. Also a pair whose two
    arrays sit at different angles (only one can be axis-aligned).
-5. **Better spines -- BUILT, measured, not yet a default (2026-09-08
-   late; the section "Better spines: the medial line, relaxed, in grid
-   legs").** The relaxed medial line is back on the batched relaxer, in
-   octilinear legs; the bench is byte-identical (a clear chord is never
-   relaxed) and on an article whose channel holds a part no track can
-   pass, K28 goes from 3 open / 12 DRC to 0 / 0. Left: the in-band
-   count on that article (the leg repair, measured last), a ribbon
-   model with per-side extents (the inflation is one scalar today), and
-   the user's call on landing it.
+5. **Better spines -- BUILT, measured, and the DEFAULT since 0b826fbf
+   (2026-09-08 late; the section "Better spines: the medial line,
+   relaxed, in grid legs"; `corridor.build_spine(relax=True)`, no
+   switch).** The relaxed medial line is back on the batched relaxer,
+   in octilinear legs; the bench is byte-identical (a clear chord is
+   never relaxed) and on an article whose channel holds a part no
+   track can pass, K28 goes from 3 open / 12 DRC to 0 / 0 (reproduced
+   2026-09-08 night: chanD K15 0 open 26 vias 692 segs, K28 0 open 0
+   DRC 54 vias 1777 segs). What is NOT finished: the in-band count on
+   that article trails the chord's (K15 9 of 15 against 10, K28 13 of
+   28; the last call routes the rest), and the ribbon model is one
+   scalar inflation where the ribbon is asymmetric (per-side, per-s
+   extents, the section's last paragraph). Neither has an arm yet.
 6. **The second bench's in-band gap.** zynq_ad9364 (`tmp/bench2`, not in
    git; `make_bench.py` rebuilds it) K28: 0 open, 55 vias, but 17 of 28
    in band -- 11 lanes at the last call (A4 A6 DQ9 DQ8 DQ14 RAS CKE DQ3
@@ -315,15 +319,17 @@ the order worth taking them, each with what is known.
    braid's own rules as the plan's cost) and its rip assist are the
    references; candidates are most-constrained-first, the min-cut
    probe's crossing counts as the order, and the negotiator's history.
-10. **Memory.** The chain reaches about 2 GB of real memory at K28
-    (user, 2026-09-08 evening; measured the same evening: the braid
-    stage's python peaked at 1956 MB RSS on the channel article's K28,
-    sampled every 3 s; two chains side by side had the system killing
-    background tasks). Keep the whole chain under 1 GB RSS at every K. First suspects: the per-net obstacle
-    models memoised for the plan loop (`_OBS_MEMO`, one derived model
-    per net per board), the router's per-attempt base maps (TODO 3's
-    "one base map per window"), the sharded taut memo loaded lazily,
-    and the fanout's plan-follow occupancy snapshots.
+10. **Memory -- DONE 2026-09-08 night (the section "Memory: the chain
+    under a gigabyte").** Every stage under 1 GB with the copper
+    identical: chanD K28 fanout 1161 -> 303 MB, braid 1746 -> 771; the
+    bench K41 fanout 442, braid 511. Two of the evening's four
+    suspects were real (the taut memo parsed from JSON at 3.6x its disk
+    size; `_OBS_MEMO` never evicting the models of boards the plan loop
+    had left behind) and the two largest were not on the list (the band
+    cells' window-sized intermediates per attempt; the min-cut probe's
+    disc-per-point soft stamp). Left, both Rust: the band expressed as
+    millions of blocked cells in hash tables (~300 MB a window) and the
+    allocator's ~200 MB retained from the first big map.
 11. **The exact taut solver**, if that line is picked up again
     (`tmp/uncommitted_0906_archive/taut_exact.py`, its section above):
     the union walk done in the batched array, and the homotopy class
@@ -1208,6 +1214,116 @@ ramp, grid legs, mitred corners): the ribbon rounds the part in
 segments against the chord's 24 and 899). Rendered by
 `tmp/render_eco.py`, whose defaults are now a faint plan overlay and
 bright copper for every track.*
+
+### Memory: the chain under a gigabyte (2026-09-08 night)
+
+TODO 10. The chain reached 2 GB of real memory at K28, and two chains
+side by side had the system killing background tasks (the machine has
+8 GB). Measured stage by stage and attributed to the line, it was four
+things, none of them the router's search; all four are fixed with the
+copper IDENTICAL -- every segment and via of every board below equal
+as a set (`copper_same.py A B`; a file diff cannot say, the UUIDs
+differ run to run) -- and every stage of the chain is under a gigabyte.
+
+**How it was measured.** `mem_chain.sh TAG K...` is `chain_k.sh` under
+`mem_watch.py`: every second, for each process of the chain, ps's RSS
+and top's MEM and CMPRS, and `mem_report.py` prints the peak per
+process. Read the MEM column: it is the physical footprint, compressed
+pages included, and a peak read as RSS under memory pressure is LOW --
+macOS compresses pages out of RSS, so the 1956 MB of the evening's
+first measurement (RSS, sampled beside another chain) was itself an
+undercount. Attribution came from two instruments: `MEM_TRACE=1`, which
+stamps every braid log line with the seconds since start and the
+process's peak RSS so far (a jump names the phase), and stamps each
+step of `connect()` -- window, base map, band cells, band stamped, soft
+stamped, routed -- with the same; and `tmp/memtrace_run.py`, the stage
+run in-process under tracemalloc with a sampling thread that keeps the
+top allocation sites at every new high. The tracer sees the Python side
+only, and on a run that holds 16 million small objects it costs a
+gigabyte of its own, so its absolute numbers are not the process's; its
+site lists are what mattered.
+
+**What the memory was** (the `chanD` article of the spines section,
+K28; the footprint column of `mem_report.py`):
+
+- The fanout stage, 1161 MB. The taut memo's shards, parsed from JSON
+  into nested lists of two-element lists: 150 shards touched, 177 MB on
+  disk, resident at 3.6 times the disk size (measured: 4.9 MB of shards
+  became 17 MB), 550 MB in 15.9 million objects and still growing at
+  the last sample. And the braid's obstacle memo (`_OBS_MEMO`), one
+  model per net per layer per BOARD FILE, where every realized round of
+  the plan loop writes a new board (`src1`, `src2`, ...) and nothing was
+  ever evicted: 1580 models, 220 MB.
+- The braid stage, 1746 MB. Per lane attempt, `_band_cells`: every
+  window cell outside the lane's band, as rows for the router -- 3.1
+  million of a 1.77-million-cell window's 3.5 million -- built by
+  projecting every cell onto the spine and evaluating the band with a
+  dozen window-sized float64 intermediates alive at once: the first
+  attempt took the process from 148 to 564 MB, and the ladder's wider
+  windows (2.1 million cells, 4.2 million cells outside) more. In the
+  rip phase, the min-cut probe's soft stamp: a disc of cells at EVERY
+  Bresenham point of every priced lane -- 197 cells at half-width 8 on
+  the 0.025 mm grid -- 12 million int64 rows for one probe, 660 MB at
+  the peak moment (the arrays were the tracer's top two sites, 331 and
+  330 MB). The memo again, 27 shards, 116 MB. And the Rust map itself:
+  a 1.77-million-cell window with 3.1 million blocked cells is ~300 MB
+  of hash tables per attempt, and mimalloc keeps ~200 MB of a dropped
+  map for the next one (measured in isolation: the same with
+  `MIMALLOC_PURGE_DELAY` 0 and 10, and the in-process setting from
+  `rust_alloc` reads back as 10 in mimalloc's own option dump on this
+  machine), a one-time floor rather than growth.
+
+**The four changes.**
+
+1. `connect._walk_capsule_cells`: the union of the discs along a walk as
+   ONE span per column. Exact: a Bresenham walk visits every column
+   between its ends and consecutive centres differ by at most one cell
+   per coordinate, so in any column the discs' intervals overlap or
+   touch and their union is contiguous -- [min over the taps of (the
+   walk's lowest y in the tapped column - h(ex)), max of (highest +
+   h(ex))], h(ex) = isqrt(hw^2 - ex^2). Checked against the disc union
+   on 2184 random walks at seven radii: identical, no duplicate cell;
+   11.5x fewer rows for a 2400-cell lane at half-width 8; a millisecond
+   per lane. Rows int32 from the start. The map keeps the MAX cost per
+   cell, so the deduplicated stamp is the same map.
+2. `band()` in `braid.band_of`, and `_band_cells`, in STRIPS of 64
+   columns: the projection into two window-sized arrays a strip at a
+   time (`Spine.project` is per point), the sample edges `lo1`/`hi1`
+   computed once on the whole window's sample set exactly as before,
+   every per-cell formula -- an interpolation onto those samples, a
+   comparison, a searchsorted -- per strip, and the rows built int32 per
+   strip in the order one nonzero over the whole mask gave them. The
+   first attempt's band cells: +72 MB instead of +416.
+3. `detect_buses`: the memo's resident form is a flat double array per
+   entry (`_compact` on read, `_expand` on write); the JSON on disk is
+   byte-identical (three real shards written back equal to the byte),
+   and a shard now costs about half its disk size resident instead of
+   3.6 times. `memo_stats()`, and a line at exit -- `taut memo: N
+   shard(s) resident, M MB on disk` -- so the count is in every log.
+4. `braid._OBS_MEMO` keeps the models of the two most recent boards
+   only (`_obs_remember`): a model is a pure function of its key, so an
+   evicted one asked for again is rebuilt.
+
+**Measured** (footprint peak per stage, MB; grades and copper identical
+in every row):
+
+| article | K | fanout before | fanout after | braid before | braid after |
+|---|---|---|---|---|---|
+| chanD | 15 | 532 | 201 | 1621 | 569 |
+| chanD | 28 | 1161 | 303 | 1746 | 771 |
+| bench | 15 | -- | 181 | -- | 229 |
+| bench | 28 | -- | 316 | -- | 503 |
+| bench | 41 | -- | 442 | -- | 511 |
+
+The braid alone on chanD K28, same machine: 158-163 s before, 147 s
+after (the 41-second row sort of 2026-09-08 was the same stamp; its
+rows are now a twentieth). What is left is the Rust side: a band
+expressed as four million blocked cells in per-layer hash tables is
+~300 MB a window, and a bitmap band or a spans API for
+`add_blocked_cells_batch` would take that to a few megabytes -- a Rust
+change, so not here (the rule in CLAUDE.md); and
+`blocking_analysis._NET_CELLS_MEMO`, production code, ~85 MB by the end
+of the rip phase.
 
 ### The sidecar describes the board it sits beside (2026-09-07)
 

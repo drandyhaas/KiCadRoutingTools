@@ -70,16 +70,25 @@ def _band_cells(coord: GridCoord, window: PCBData, band,
     gys = np.arange(gy0, gy1 + 1)
     xs = np.array([coord.to_float(int(g), 0)[0] for g in gxs])
     ys = np.array([coord.to_float(0, int(g))[1] for g in gys])
+    # the rows built int32 a strip of columns at a time, in the order one
+    # nonzero over the whole mask gave them (layer, then gx, then gy):
+    # the int64 index pair, stack and concatenation of 3.1M cells outside
+    # a band were ~200 MB of transient per attempt (README TODO 10)
+    STRIP = 64
     parts = []
     for L, lname in enumerate(layers):
         ok = np.asarray(band(xs, ys, lname), dtype=bool)
-        bi, bj = np.nonzero(~ok)
-        if len(bi):
-            parts.append(np.stack([gxs[bi], gys[bj],
-                                   np.full(len(bi), L)], axis=1))
+        for i in range(0, len(gxs), STRIP):
+            bi, bj = np.nonzero(~ok[i:i + STRIP])
+            if len(bi):
+                r = np.empty((len(bi), 3), dtype=np.int32)
+                r[:, 0] = gxs[i + bi]
+                r[:, 1] = gys[bj]
+                r[:, 2] = L
+                parts.append(r)
     if not parts:
         return np.zeros((0, 3), dtype=np.int32)
-    return np.concatenate(parts).astype(np.int32)
+    return np.concatenate(parts)
     # vectorized over gy (the pure-Python double loop was 3.5s of an
     # 18s braid); the per-gx fn(x) and to_grid calls are kept
     # CALL-FOR-CALL identical to the loop they replace, so the cell
@@ -136,6 +145,14 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     layer_map = build_layer_map(cfg.layers)
     if a_layer not in layer_map or b_layer not in layer_map:
         raise ValueError(f'layer not routable: {a_layer} / {b_layer}')
+    if os.environ.get('MEM_TRACE') == '1':
+        import resource as _res
+
+        def _m(tag):
+            print(f'      mem {tag}: rss<={_res.getrusage(_res.RUSAGE_SELF).ru_maxrss / 1048576:.0f} MB', flush=True)
+    else:
+        def _m(tag):
+            pass
 
     pts = [a, b] + list(window_pts or [])
     bx0, bx1 = min(p[0] for p in pts), max(p[0] for p in pts)
@@ -166,8 +183,12 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     # documented byte-identical, hasattr-guarded, and measured
     # ~2x on the cold/large windows the margin-escalated retries
     # build (19.9 -> 10.5 ms; warm small windows equal)
+    _m(f'window {len(window.segments)} segs {len(window.vias)} vias '
+       f'{(window.board_info.board_bounds[2] - window.board_info.board_bounds[0]) / cfg.grid_step:.0f}x'
+       f'{(window.board_info.board_bounds[3] - window.board_info.board_bounds[1]) / cfg.grid_step:.0f} cells')
     obstacles = build_base_obstacle_map(window, cfg, [net_id],
                                         static_base=True)
+    _m('base map')
     _fence_window(obstacles, window, cfg)
     # the net's own barrels are free layer changes, and its own
     # via/drill spacing still applies (the rescue recipe, #470 and
@@ -178,16 +199,20 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     keep = same_net_pad_via_keepout_cells(pcb, net_id, cfg)
     if len(keep):
         obstacles.add_blocked_vias_batch(keep)
+    _m('fence, free vias, keepouts')
     if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
         cells = _band_cells(coord, window, band, list(cfg.layers),
                             band_slack)
+        _m(f'band cells {len(cells)}')
         if len(cells):
             obstacles.add_blocked_cells_batch(cells)
+        _m('band stamped')
 
     if soft or soft_vias:
         _stamp_soft(obstacles, coord, layer_map, cfg, soft or (),
                     soft_vias or (), soft_cost)
+        _m('soft stamped')
 
     x0, y0, x1, y1 = window.board_info.board_bounds
     g0 = coord.to_grid(x0, y0)
@@ -210,6 +235,7 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
                                       bounds=bounds,
                                       sources_override=sources,
                                       targets_override=targets)
+    _m('routed')
     if not result or result.get('failed'):
         if report is not None and result:
             report['blocked'] = (list(result.get('blocked_cells_forward') or [])
@@ -225,6 +251,47 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
 
 
 
+def _walk_capsule_cells(pts: np.ndarray, hw: int) -> Tuple[np.ndarray, np.ndarray]:
+    """The cells of the union of the integer discs of radius `hw` (every
+    (ex, ey) with ex*ex + ey*ey <= hw*hw) centred on each point of a
+    Bresenham walk `pts` ((n, 2) int, connected, monotone), as (gx, gy)
+    int32 arrays with NO cell twice. Exact: the walk visits every column
+    between its ends and consecutive centres differ by at most one cell
+    in each coordinate, so in any column the discs' intervals overlap or
+    touch and their union is ONE span, [min over the taps of (the walk's
+    lowest y in the tapped column - h), max of (highest + h)], with
+    h(ex) = isqrt(hw*hw - ex*ex). One disc per point was 197 cells at
+    hw 8 for every point of every priced lane -- 12 million rows for a
+    K28 min-cut probe, 660 MB at the peak of the braid (README TODO 10)."""
+    px = pts[:, 0].astype(np.int64)
+    py = pts[:, 1].astype(np.int64)
+    xmin = int(px.min())
+    n = int(px.max()) - xmin + 1
+    BIG = np.int64(1 << 40)
+    ymin = np.full(n + 2 * hw, BIG, dtype=np.int64)
+    ymax = np.full(n + 2 * hw, -BIG, dtype=np.int64)
+    idx = px - xmin + hw
+    np.minimum.at(ymin, idx, py)
+    np.maximum.at(ymax, idx, py)
+    taps = 2 * hw + 1
+    ex = np.arange(-hw, hw + 1)
+    h = np.array([math.isqrt(hw * hw - int(e) * int(e)) for e in ex], dtype=np.int64)
+    # output column c = xmin - hw + i, i in [0, n + 2hw); tap j = hw - ex
+    # reads the walk's column c - ex, which sits at padded index i + j
+    from numpy.lib.stride_tricks import sliding_window_view
+    pad_lo = np.concatenate([np.full(hw, BIG, dtype=np.int64), ymin, np.full(hw, BIG, dtype=np.int64)])
+    pad_hi = np.concatenate([np.full(hw, -BIG, dtype=np.int64), ymax, np.full(hw, -BIG, dtype=np.int64)])
+    lo = (sliding_window_view(pad_lo, taps) - h[None, ::-1]).min(axis=1)
+    hi = (sliding_window_view(pad_hi, taps) + h[None, ::-1]).max(axis=1)
+    cols = np.arange(xmin - hw, xmin - hw + n + 2 * hw, dtype=np.int64)
+    lens = hi - lo + 1
+    total = int(lens.sum())
+    gx = np.repeat(cols, lens)
+    starts = np.cumsum(lens) - lens
+    gy = np.repeat(lo, lens) + (np.arange(total, dtype=np.int64) - np.repeat(starts, lens))
+    return gx.astype(np.int32), gy.astype(np.int32)
+
+
 def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
                 soft, soft_vias, soft_cost: float) -> None:
     """Price the clearance footprint of `soft` copper per cell on its
@@ -232,7 +299,10 @@ def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
     of `soft_vias` on every layer. The footprint is the obstacle model's
     own: half the copper width + the clearance + half a track of the
     searching net -- a cell whose centre lies inside it is one the hard
-    model would have blocked."""
+    model would have blocked. Each piece's footprint is stamped ONCE per
+    cell (_walk_capsule_cells): the map keeps the max per cell, so the
+    map is the one a disc per walk point made, in a twentieth of the
+    rows."""
     from bresenham_utils import walk_line
     cost = cfg.cell_cost(soft_cost)
     rows = []
@@ -244,9 +314,17 @@ def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
             rr = range(-r_grid, r_grid + 1)
             d = np.array([(ex, ey) for ex in rr for ey in rr
                           if ex * ex + ey * ey <= r_grid * r_grid],
-                         dtype=np.int64)
+                         dtype=np.int32)
             disks[r_grid] = d
         return d
+
+    def stamp(li, gx, gy):
+        r = np.empty((gx.size, 4), dtype=np.int32)
+        r[:, 0] = li
+        r[:, 1] = gx
+        r[:, 2] = gy
+        r[:, 3] = cost
+        rows.append(r)
     for (p, q, layer, w) in soft:
         li = layer_map.get(layer)
         if li is None:
@@ -255,32 +333,20 @@ def _stamp_soft(obstacles, coord: GridCoord, layer_map, cfg: GridRouteConfig,
         gx1, gy1 = coord.to_grid(p[0], p[1])
         gx2, gy2 = coord.to_grid(q[0], q[1])
         pts = np.asarray(list(walk_line(gx1, gy1, gx2, gy2)), dtype=np.int64)
-        off = disk(hw)
-        gx = (pts[:, 0:1] + off[:, 0]).ravel()
-        gy = (pts[:, 1:2] + off[:, 1]).ravel()
-        r = np.empty((gx.size, 4), dtype=np.int64)
-        r[:, 0] = li
-        r[:, 1] = gx
-        r[:, 2] = gy
-        r[:, 3] = cost
-        rows.append(r)
+        gx, gy = _walk_capsule_cells(pts, int(hw))
+        stamp(li, gx, gy)
     for (x, y, size) in soft_vias:
         hw = coord.to_grid_dist(size / 2 + cfg.clearance + cfg.track_width / 2)
         gx0, gy0 = coord.to_grid(x, y)
         off = disk(hw)
         for li in range(len(cfg.layers)):
-            r = np.empty((len(off), 4), dtype=np.int64)
-            r[:, 0] = li
-            r[:, 1] = gx0 + off[:, 0]
-            r[:, 2] = gy0 + off[:, 1]
-            r[:, 3] = cost
-            rows.append(r)
+            stamp(li, gx0 + off[:, 0], gy0 + off[:, 1])
     if not rows:
         return
     # no np.unique(axis=0): the map keeps the MAX cost per cell, so a cell
     # stamped twice at the same cost is the same map, and the row sort
     # was 41 of the K41 braid's 172 profiled seconds (2026-09-08)
-    arr = np.ascontiguousarray(np.concatenate(rows).astype(np.int32))
+    arr = np.ascontiguousarray(np.concatenate(rows))
     obstacles.set_layer_proximity_batch(arr)
 
 

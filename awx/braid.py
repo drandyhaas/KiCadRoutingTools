@@ -54,6 +54,7 @@ import argparse
 import math
 import re
 import os
+import time as _time
 import shutil
 import sys
 from collections import Counter
@@ -269,6 +270,33 @@ def reserve(ctx, nm):
 
 
 _OBS_MEMO = {}
+# the boards whose models the memo holds, oldest first: the plan loop
+# writes a new board every realized round (src1, src2, ...) and never
+# returns to one older than the round it keeps, so the models of every
+# board but the last two are dead weight -- 1580 of them, 220 MB, at a
+# K28 fanout stage (2026-09-08 trace; README TODO 10). A model is a pure
+# function of its key, so an evicted one that is asked for again is
+# simply rebuilt.
+_OBS_BOARDS = []
+_OBS_KEEP_BOARDS = 2
+
+
+def _obs_board_of(bkey):
+    """The board identity inside a memo key: everything but the excluded
+    nets and the layer."""
+    return bkey[:3] + bkey[5:9]      # a derived key carries the net id after
+
+
+def _obs_remember(bkey):
+    b = _obs_board_of(bkey)
+    if b in _OBS_BOARDS:
+        return
+    _OBS_BOARDS.append(b)
+    if len(_OBS_BOARDS) > _OBS_KEEP_BOARDS:
+        dead = set(_OBS_BOARDS[:-_OBS_KEEP_BOARDS])
+        del _OBS_BOARDS[:-_OBS_KEEP_BOARDS]
+        for k in [k for k in _OBS_MEMO if _obs_board_of(k) in dead]:
+            del _OBS_MEMO[k]
 
 
 def unthreadable(fp, track=None, clear=None):
@@ -323,6 +351,7 @@ def build_obstacles(pcb, nid, kids, layer):
     if base is None:
         base = _build_obstacles(pcb, base_kids, layer)
         if bkey is not None:
+            _obs_remember(bkey)
             _OBS_MEMO[bkey] = base
     obs = base.exclude({nid})
     if dkey is not None:
@@ -2088,33 +2117,35 @@ class Corridor:
         cache = {}
         BIG = 1e6
 
+        # The mask in STRIPS of columns (README TODO 10): the projection
+        # of every window cell and the dozen window-sized float64
+        # intermediates the formulas below make were 416 MB of one
+        # 1.77M-cell attempt, the largest transient of the braid. The
+        # sample edges lo1/hi1 are computed ONCE on the whole window's
+        # sample set; everything else here is per cell in (S, O) -- an
+        # interpolation onto those samples, a comparison, a searchsorted
+        # -- and Spine.project is per point (the nearest leg), so a strip
+        # at a time is the identical arithmetic over a 25th of the cells.
+        STRIP = 64
+
         def band(xs, ys, L):
             key = (float(xs[0]), float(xs[-1]), float(ys[0]), float(ys[-1]),
                    len(xs), len(ys))
             if key not in cache:
-                X, Y = np.meshgrid(xs, ys, indexing='ij')
                 cache.clear()
-                S, O = sp.project(X, Y)
+                S = np.empty((len(xs), len(ys)))
+                O = np.empty((len(xs), len(ys)))
+                for i in range(0, len(xs), STRIP):
+                    X, Y = np.meshgrid(xs[i:i + STRIP], ys, indexing='ij')
+                    S[i:i + STRIP], O[i:i + STRIP] = sp.project(X, Y)
                 cache[key] = (S, O, self._band_samples(nm, float(S.min()),
                                                        float(S.max())))
             S, O, sg = cache[key]
             ms = np.array([p[0] for p in self.mid[nm]])
             mo = np.array([p[1] for p in self.mid[nm]])
-            present = (S >= ms[0] - 1e-9) & (S <= ms[-1] + 1e-9)
-            o_nm = np.interp(S, ms, mo)
-            okL = (np.ones(S.shape, dtype=bool) if open_layers
-                   else self.allowed_vec(nm, S, L))
             sc = getattr(self, 'sched_cur', None)
-            if sc is not None and sc.page.get(nm) is None:
-                # a ribbon SWIMMER weaves through the page lattice: the
-                # neighbour-pinch band is wrong for it -- its same-layer
-                # neighbours are the very lanes it crosses, and they
-                # squeezed it to a thin fragmented thread (K11,
-                # refused). A wide tube around its straight line; the
-                # obstacle map and the virtual copper are the law
-                lo = o_nm - SWIM_TUBE
-                hi = o_nm + SWIM_TUBE
-            else:
+            swim = sc is not None and sc.page.get(nm) is None
+            if not swim:
                 o_nm1 = np.interp(sg, ms, mo)
                 prev = np.full(sg.shape, -BIG)
                 nxt = np.full(sg.shape, BIG)
@@ -2132,47 +2163,67 @@ class Corridor:
                     nxt = np.where(m & (o_m > o_nm1), np.minimum(nxt, o_m), nxt)
                 lo1 = np.where(prev > -BIG / 2, (prev + o_nm1) / 2 + HALF_SEP, -BIG)
                 hi1 = np.where(nxt < BIG / 2, (nxt + o_nm1) / 2 - HALF_SEP, BIG)
-                lo = np.interp(S, sg, lo1)
-                hi = np.interp(S, sg, hi1)
-                if sc is not None:
-                    # a RIBBON page lane may dodge locally: the
-                    # neighbours' virtual/real copper is the law, the
-                    # pinch only a guide (PAGE_TUBE)
-                    lo = np.minimum(lo, o_nm - PAGE_TUBE)
-                    hi = np.maximum(hi, o_nm + PAGE_TUBE)
-            # never narrower than a grid cell: at the stub ends the
-            # lanes are 0.25 apart and the corridor formula gives
-            # 0.0115 -- a band that on an unlucky grid alignment holds
-            # no cell at all. Clearance to the neighbours' copper is
-            # the obstacle map's job. (A floor growing with the lane's
-            # slope was tried for K28 SDQ7 -- slope 6 where two movers
-            # pass it -- and measured inert THERE: band_conn.py shows
-            # the 0.03 band connected end to end; what refuses that
-            # lane is C5 inside the corridor, see Known walls. Under
-            # TWO pages it is load-bearing: a W_XING crossing is a
-            # steep diagonal, and the +-0.03 tube around it holds no
-            # connected cell path, so the floor grows with the local
-            # slope of the lane's own centreline.)
-            if getattr(self, 'sched_cur', None) is not None:
+            if sc is not None:
                 dms = np.maximum(np.diff(ms), 1e-9)
                 sl = np.abs(np.diff(mo)) / dms
-                seg_i = np.clip(np.searchsorted(ms, S, side='right') - 1,
-                                0, len(sl) - 1)
-                fl = 0.03 + SLOPE_W * np.minimum(sl[seg_i], 30.0)
-            else:
-                fl = 0.03
-            lo = np.minimum(lo, o_nm - fl) - slack
-            hi = np.maximum(hi, o_nm + fl) + slack
-            ok = present & okL & (O >= lo) & (O <= hi)
-            for (s_l, oa, ob) in self.legs[nm]:
-                rect = ((np.abs(S - s_l) <= LEG_W + slack)
-                        & (O >= min(oa, ob) - LEG_O - slack)
-                        & (O <= max(oa, ob) + LEG_O + slack))
-                ok |= rect & okL
-            for ((sa, oa), (sb, ob)) in self.jogs.get(nm, ()):
-                rect = ((S >= min(sa, sb) - LEG_O) & (S <= max(sa, sb) + LEG_O)
-                        & (np.abs(O - oa) <= LEG_O))
-                ok |= rect & okL
+            ok = np.empty(S.shape, dtype=bool)
+            for i in range(0, S.shape[0], STRIP):
+                Ss = S[i:i + STRIP]
+                Os = O[i:i + STRIP]
+                present = (Ss >= ms[0] - 1e-9) & (Ss <= ms[-1] + 1e-9)
+                o_nm = np.interp(Ss, ms, mo)
+                okL = (np.ones(Ss.shape, dtype=bool) if open_layers
+                       else self.allowed_vec(nm, Ss, L))
+                if swim:
+                    # a ribbon SWIMMER weaves through the page lattice: the
+                    # neighbour-pinch band is wrong for it -- its same-layer
+                    # neighbours are the very lanes it crosses, and they
+                    # squeezed it to a thin fragmented thread (K11,
+                    # refused). A wide tube around its straight line; the
+                    # obstacle map and the virtual copper are the law
+                    lo = o_nm - SWIM_TUBE
+                    hi = o_nm + SWIM_TUBE
+                else:
+                    lo = np.interp(Ss, sg, lo1)
+                    hi = np.interp(Ss, sg, hi1)
+                    if sc is not None:
+                        # a RIBBON page lane may dodge locally: the
+                        # neighbours' virtual/real copper is the law, the
+                        # pinch only a guide (PAGE_TUBE)
+                        lo = np.minimum(lo, o_nm - PAGE_TUBE)
+                        hi = np.maximum(hi, o_nm + PAGE_TUBE)
+                # never narrower than a grid cell: at the stub ends the
+                # lanes are 0.25 apart and the corridor formula gives
+                # 0.0115 -- a band that on an unlucky grid alignment holds
+                # no cell at all. Clearance to the neighbours' copper is
+                # the obstacle map's job. (A floor growing with the lane's
+                # slope was tried for K28 SDQ7 -- slope 6 where two movers
+                # pass it -- and measured inert THERE: band_conn.py shows
+                # the 0.03 band connected end to end; what refuses that
+                # lane is C5 inside the corridor, see Known walls. Under
+                # TWO pages it is load-bearing: a W_XING crossing is a
+                # steep diagonal, and the +-0.03 tube around it holds no
+                # connected cell path, so the floor grows with the local
+                # slope of the lane's own centreline.)
+                if sc is not None:
+                    seg_i = np.clip(np.searchsorted(ms, Ss, side='right') - 1,
+                                    0, len(sl) - 1)
+                    fl = 0.03 + SLOPE_W * np.minimum(sl[seg_i], 30.0)
+                else:
+                    fl = 0.03
+                lo = np.minimum(lo, o_nm - fl) - slack
+                hi = np.maximum(hi, o_nm + fl) + slack
+                oks = present & okL & (Os >= lo) & (Os <= hi)
+                for (s_l, oa, ob) in self.legs[nm]:
+                    rect = ((np.abs(Ss - s_l) <= LEG_W + slack)
+                            & (Os >= min(oa, ob) - LEG_O - slack)
+                            & (Os <= max(oa, ob) + LEG_O + slack))
+                    oks |= rect & okL
+                for ((sa, oa), (sb, ob)) in self.jogs.get(nm, ()):
+                    rect = ((Ss >= min(sa, sb) - LEG_O) & (Ss <= max(sa, sb) + LEG_O)
+                            & (np.abs(Os - oa) <= LEG_O))
+                    oks |= rect & okL
+                ok[i:i + STRIP] = oks
             return ok
         return band
 
@@ -3195,8 +3246,28 @@ def main():
     a = ap.parse_args()
     names = [n.strip() for n in a.nets.split(',') if n.strip()]
 
+    # MEM_TRACE=1: every log line carries the seconds since start, the
+    # process's peak RSS so far (ru_maxrss, monotone: a jump names the
+    # phase that allocated) and, under `python3 -X tracemalloc`, the
+    # Python-side peak SINCE THE PREVIOUS LINE (reset after each), which
+    # catches an allocation freed before the next line -- the 800 MB
+    # swings the sampler saw at K15 (README TODO 10).
+    _t0 = _time.time()
+    _trace = os.environ.get('MEM_TRACE') == '1'
+
     def log(msg=''):
-        print(msg)
+        if _trace:
+            import resource
+            import tracemalloc
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576
+            tm = ''
+            if tracemalloc.is_tracing():
+                cur, pk = tracemalloc.get_traced_memory()
+                tm = f' py {cur / 1048576:5.0f}/{pk / 1048576:5.0f}MB'
+                tracemalloc.reset_peak()
+            print(f'[{_time.time() - _t0:6.1f}s rss<={peak:5.0f}MB{tm}] {msg}', flush=True)
+        else:
+            print(msg)
     ctx, groups = setup(a.board, names, a.dest, log)
     corridors = []
     for ci, members in enumerate(groups):

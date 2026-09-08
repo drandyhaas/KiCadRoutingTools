@@ -24,6 +24,8 @@ import math
 import numpy as np
 from typing import Callable, Dict, List, Sequence, Tuple
 
+import atexit
+from array import array
 import json
 import os
 import topo_strings as ts
@@ -50,6 +52,24 @@ TAUT_MAX_AGE = 14 * 86400
 _TAUT_SHARDS: Dict[str, dict] = {}
 _TAUT_DIRTY = set()
 _TAUT_MIGRATED = False
+_TAUT_LOADED_BYTES = 0
+_TAUT_LOOKUPS = [0, 0]      # asked, answered
+
+
+def memo_stats():
+    """(shards resident in this process, their bytes on disk, lookups,
+    hits)."""
+    return len(_TAUT_SHARDS), _TAUT_LOADED_BYTES, _TAUT_LOOKUPS[0], _TAUT_LOOKUPS[1]
+
+
+def _memo_report():
+    n, b, asked, hit = memo_stats()
+    if n:
+        print(f'taut memo: {n} shard(s) resident, {b / 1048576:.0f} MB on disk, '
+              f'{asked} lookups, {hit} hits', flush=True)
+
+
+atexit.register(_memo_report)
 
 
 def _shard_of(key):
@@ -60,10 +80,33 @@ def _shard_path(prefix):
     return os.path.join(_TAUT_MEMO_DIR, prefix + '.json')
 
 
+def _compact(d):
+    """A shard as parsed from JSON -> its resident form: per key
+    (array('d') of the points flattened, t or None for a legacy entry
+    without a stamp). A nested list of two-element lists cost 3.6x the
+    shard's size on disk (measured: 4.9 MB of shards -> 17 MB resident);
+    the flat double array is 16 bytes a point, under the JSON text."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            pts, t = v['p'], v.get('t')
+        else:
+            pts, t = v, None
+        out[k] = (array('d', (c for pt in pts for c in pt)), t)
+    return out
+
+
+def _expand(d, now):
+    """The resident form back to JSON's, a legacy entry stamped `now`."""
+    return {k: {'p': [[a[i], a[i + 1]] for i in range(0, len(a), 2)],
+                't': now if t is None else t}
+            for k, (a, t) in d.items()}
+
+
 def _read_shard(prefix):
     try:
         with open(_shard_path(prefix), encoding='utf-8') as f:
-            return json.load(f)
+            return _compact(json.load(f))
     except (OSError, ValueError):
         return {}
 
@@ -87,20 +130,20 @@ def _memo_migrate():
     now = _t.time()
     by = {}
     for k, v in old.items():
-        by.setdefault(_shard_of(k), {})[k] = {'p': v, 't': now}
+        by.setdefault(_shard_of(k), {})[k] = (array('d', (c for pt in v for c in pt)), now)
     for prefix, d in by.items():
         cur = _read_shard(prefix)
         cur.update(d)
-        _write_shard(prefix, cur)
+        _write_shard(prefix, cur, now)
     os.replace(_TAUT_MEMO_LEGACY, _TAUT_MEMO_LEGACY + '.migrated')
     print(f'taut memo: {len(old)} entries migrated into {len(by)} shards '
           f'under {os.path.relpath(_TAUT_MEMO_DIR)}', flush=True)
 
 
-def _write_shard(prefix, d):
+def _write_shard(prefix, d, now):
     tmp = _shard_path(prefix) + f'.{os.getpid()}.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(d, f)
+        json.dump(_expand(d, now), f)
     os.replace(tmp, _shard_path(prefix))
 
 
@@ -115,21 +158,28 @@ def _memo_shard(prefix):
     if d is None:
         _memo_migrate()
         d = _TAUT_SHARDS[prefix] = _read_shard(prefix)
+        global _TAUT_LOADED_BYTES
+        try:
+            _TAUT_LOADED_BYTES += os.path.getsize(_shard_path(prefix))
+        except OSError:
+            pass
     return d
 
 
 def _memo_get(key):
     e = _memo_shard(_shard_of(key)).get(key)
+    _TAUT_LOOKUPS[0] += 1
     if e is None:
         return None
-    pts = e['p'] if isinstance(e, dict) else e
-    return [tuple(p) for p in pts]
+    _TAUT_LOOKUPS[1] += 1
+    a = e[0]
+    return list(zip(a[0::2], a[1::2]))
 
 
 def _memo_put(key, pts):
     import time as _t
     prefix = _shard_of(key)
-    _memo_shard(prefix)[key] = {'p': [list(p) for p in pts], 't': _t.time()}
+    _memo_shard(prefix)[key] = (array('d', (c for pt in pts for c in pt)), _t.time())
     _TAUT_DIRTY.add(prefix)
 
 
@@ -146,13 +196,13 @@ def _memo_save():
             disk = _read_shard(prefix)
             mine = _TAUT_SHARDS.get(prefix, {})
             for k, v in mine.items():
-                if isinstance(v, dict):
+                if v[1] is not None:
                     disk[k] = v
                 elif k not in disk:
-                    disk[k] = {'p': v, 't': now}
+                    disk[k] = (v[0], now)
             keep = {k: v for k, v in disk.items()
-                    if not isinstance(v, dict) or now - v.get('t', now) <= TAUT_MAX_AGE}
-            _write_shard(prefix, keep)
+                    if v[1] is None or now - v[1] <= TAUT_MAX_AGE}
+            _write_shard(prefix, keep, now)
             _TAUT_SHARDS[prefix] = keep
     except OSError:
         pass
