@@ -20,13 +20,17 @@ intervals and the virtual copper are all functions of s. The mapping
 back to the board is `project` (board -> (s, o), vectorised for the
 router's grid cells) and `lane_xy` ((s, o) polyline -> board polyline).
 
-At a corner of the spine the mapping is what a bundle of tracks
-actually does: on the OUTER side of the turn a lane at offset o rounds
-the corner on an arc of radius |o| (every cell in that wedge projects
-to the corner's s, at its own radius), on the INNER side the two offset
-lines meet at the mitre point. Adjacent lanes stay a pitch apart
-through the turn either way. No swap column is ever placed inside a
-corner's wedge, so a lane's o is constant through it.
+At a corner of the spine the offset lines of a lane at o meet at the
+MITRE point on both sides (the corner displaced along the bisector by
+o / cos(turn/2)); a cell in the outer wedge projects to the corner's s
+at the larger of its two offsets from the legs' lines, which is the
+offset polyline that passes through it. Adjacent lanes stay a pitch
+apart along the legs and 1/cos(turn/2) of it across the mitre. The
+outer side used to be an ARC of radius |o| (what a bundle of curved
+tracks does); on an octilinear router the band of an arc is a
+staircase, and every lane took one round every corner (channel article
+K28: 4021 segments for 28 lanes against 1166 on the chord). The spine's
+legs are octilinear (octilinearise), so mitred lanes are grid legs too.
 """
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+import taut_fast as tf
 import topo_strings as ts
 
 Pt = Tuple[float, float]
@@ -72,8 +77,36 @@ def simplify(pts: Sequence[Pt], tol: float = 0.03) -> List[Pt]:
     return keep
 
 
+def resample(pts: Sequence[Pt], n: int) -> List[Pt]:
+    """n points at equal fractions of the polyline's length."""
+    if len(pts) == 1:
+        return [tuple(pts[0])] * n
+    seg = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:])]
+    L = sum(seg)
+    if L < 1e-9:
+        return [tuple(pts[0])] * n
+    out = []
+    for k in range(n):
+        t = L * k / (n - 1)
+        acc = 0.0
+        for (a, b), sl in zip(zip(pts, pts[1:]), seg):
+            if acc + sl >= t - 1e-12 and sl > 0:
+                u = (t - acc) / sl
+                out.append((a[0] + u * (b[0] - a[0]), a[1] + u * (b[1] - a[1])))
+                break
+            acc += sl
+        else:
+            out.append(tuple(pts[-1]))
+    return out
 
 
+def mean_path(paths: Sequence[Sequence[Pt]], n: int = 60) -> List[Pt]:
+    """The pointwise mean of the paths, each resampled by fraction of
+    its length: the bundle's medial line, in the homotopy class the
+    members' taut paths chose (which side of a chip they went)."""
+    rs = [resample(p, n) for p in paths]
+    return [(sum(r[k][0] for r in rs) / len(rs),
+             sum(r[k][1] for r in rs) / len(rs)) for k in range(n)]
 
 
 def polyline_len(pts) -> float:
@@ -347,6 +380,26 @@ class Spine:
             best_k = np.where(better, k, best_k)
             best_t = np.where(better, tc, best_t)
         # outer wedges: nearest point is an interior vertex
+        at_end = (best_t >= self.len[best_k] - 1e-9) & (best_k < self.n - 1)
+        at_start = (best_t <= 1e-9) & (best_k > 0)
+        wedge = at_end | at_start
+        if wedge.any():
+            vk = np.where(at_end, best_k + 1, best_k)
+            # a point whose nearest point is a vertex lies on the OUTER
+            # side of that corner (an inner point always has a foot on
+            # one of the two legs), so its sign is the outer side's:
+            # opposite to the turn; its offset is the larger of its
+            # offsets from the two legs' lines -- the mitred offset
+            # polyline that passes through it
+            ka = np.clip(vk - 1, 0, self.n - 1)
+            kb = np.clip(vk, 0, self.n - 1)
+            outer = -np.sign(self.turn[np.clip(vk - 1, 0, self.n - 2)])
+            outer = np.where(outer == 0, 1.0, outer)
+            o1 = (X - self.P[ka, 0]) * self.nrm[ka, 0] + (Y - self.P[ka, 1]) * self.nrm[ka, 1]
+            o2 = (X - self.P[kb, 0]) * self.nrm[kb, 0] + (Y - self.P[kb, 1]) * self.nrm[kb, 1]
+            r = np.maximum(np.abs(o1), np.abs(o2))
+            best_o = np.where(wedge, outer * r, best_o)
+            best_s = np.where(wedge, self.S[vk], best_s)
         return best_s.reshape(shape), best_o.reshape(shape)
 
     def project_pt(self, p: Pt) -> Tuple[float, float]:
@@ -379,6 +432,23 @@ class Spine:
         for (sa, oa), (sb, ob) in zip(so, so[1:]):
             push(self.xy(sa, oa))
             # vertices strictly inside (sa, sb)
+            for j in range(1, self.n):
+                Sj = self.S[j]
+                if not (sa + 1e-9 < Sj < sb - 1e-9):
+                    continue
+                if abs(self.turn[j - 1]) < 1e-6:
+                    continue
+                o = oa + (ob - oa) * (Sj - sa) / max(sb - sa, 1e-12)
+                n1 = self.nrm[j - 1]
+                n2 = self.nrm[j]
+                V = self.P[j]
+                if abs(o) > 1e-9:
+                    # the mitre of the two offset lines, either side
+                    den = 1.0 + float(n1 @ n2)
+                    m = (n1 + n2) / max(den, 1e-6)
+                    push((float(V[0] + o * m[0]), float(V[1] + o * m[1])))
+                else:
+                    push((float(V[0]), float(V[1])))
             push(self.xy(sb, ob))
         if len(out) == 1:
             out.append(out[0])
@@ -389,48 +459,90 @@ class Spine:
 
 class RampedObstacles:
     """The obstacle set a spine is relaxed against: the base obstacles
-    (static copper), inflated by up to `H` -- the bundle's half-width --
-    with the inflation ramping from nothing within R0 of either endpoint
-    to full at R1, because a bundle is not yet a bundle where its lanes
-    are still joining or already leaving. `extra` obstacles (the tubes
-    of corridors already laid) are ramped the same way, all the way to
-    zero radius at the ends: a corridor's exits may legitimately sit
-    among another corridor's stubs."""
+    (the big parts' pads) and the TUBES of the corridors already laid --
+    each one's spine at a lane pitch's radius -- every obstacle inflated
+    by its own amount `infl`: the bundle's half-width H for a part, H
+    plus the OTHER corridor's half-width for a tube, so two corridors
+    never overlap along their length (a later corridor runs beside an
+    earlier one, or crosses it transversally). The inflation is RAMPED
+    by the distance to the nearer end: nothing within `infl` of an end,
+    the full amount from 2*infl, because a bundle is not yet a bundle
+    where its lanes are still joining or already leaving, and a
+    corridor's exits may legitimately sit among another corridor's
+    stubs. The ramp scales with each obstacle's OWN inflation, so a fat
+    neighbour tube never reaches a thin corridor's end zone.
+    `extra`: [(a, b, rad[, infl])] capsules; infl defaults to H."""
 
-    def __init__(self, base: 'ts.Obstacles', ends: Tuple[Pt, Pt], H: float,
-                 extra: Optional[List[Tuple[Pt, Pt, float]]] = None,
-                 R0: Optional[float] = None, R1: Optional[float] = None):
+    def __init__(self, base: 'ts.Obstacles', ends: Tuple[Pt, Pt], H,
+                 extra: Optional[List[tuple]] = None, zones=None):
         self.base = base
         self.ends = ends
+        # `zones`: ((C, u, R) at the launch, (C, u, R) at the arrival) --
+        # the end centroid, the unit flow INTO the corridor, the end
+        # zone's length along it. With them the PARTS ramp ALONG THE
+        # FLOW: nothing inside an end zone (a part beside the teeth is
+        # the lanes' business, and the string's frozen end is never
+        # inside an inflated obstacle), then one millimetre of inflation
+        # per millimetre of run past it, up to H -- the fastest a ribbon
+        # of 45-degree legs can shift sideways, so a part the string can
+        # reach is inflated exactly as much as the lanes can honour. The
+        # radial ramp (distance to the centroid, nothing within H of it)
+        # zeroed the inflation for a part 7 mm ahead of the teeth when H
+        # was 5.9, and the top lanes ran into it. Without zones the
+        # parts ramp radially like the tubes.
+        self.zones = zones
+        # `H`: the bundle's half-width the parts are inflated by (ramped).
+        # A RIBBON model -- the parts inflated by the ribbon's half-extent
+        # interpolated from the teeth's spread to the stubs', UNRAMPED --
+        # was measured on 2026-09-08 and LOST: full-width inflation from
+        # the launch makes the string wander into a sawtooth of eleven
+        # grid legs (both channel articles at K28: 3 open, 3 to 5 of 28
+        # lanes in band, against 0 open with the ramp). The ramp stays.
         self.H = H
-        self.R0 = H if R0 is None else R0
-        self.R1 = 2 * H if R1 is None else R1
-        # the extra capsules go into a hashed Obstacles at their FULL
-        # inflated radius; a query shrinks them back by the part of the
-        # inflation the ramp has not reached yet
-        self.extra = None
-        if extra:
-            self.extra = ts.Obstacles()
-            for (a, b, rad) in extra:
-                self.extra.add_cap(a, b, rad + H, 'laid')
-            self.extra.build()
+        self.extra_raw = []
+        for tup in (extra or []):
+            a, b, rad = tup[0], tup[1], tup[2]
+            infl = tup[3] if len(tup) > 3 else H
+            self.extra_raw.append((a, b, rad, infl))
 
-    def ramp(self, p: Pt) -> float:
-        d = min(math.hypot(p[0] - e[0], p[1] - e[1]) for e in self.ends)
-        if self.R1 <= self.R0:
-            return 1.0 if d >= self.R0 else 0.0
-        return max(0.0, min(1.0, (d - self.R0) / (self.R1 - self.R0)))
+    def d_end(self, p: Pt) -> float:
+        return min(math.hypot(p[0] - e[0], p[1] - e[1]) for e in self.ends)
+
+    def along(self, p: Pt) -> float:
+        """How far past the nearer end zone the point is, along that
+        end's flow (negative inside or behind a zone)."""
+        return min((p[0] - c[0]) * u[0] + (p[1] - c[1]) * u[1] - r
+                   for (c, u, r) in self.zones)
+
+    def part_inflation(self, p: Pt) -> float:
+        if self.zones is None:
+            return self.inflation(self.d_end(p), self.H)
+        return max(0.0, min(self.H, self.along(p)))
+
+
+    @staticmethod
+    def inflation(d: float, infl: float) -> float:
+        """How much an obstacle inflated by `infl` is inflated at a point
+        `d` from the nearer end: 0 within infl, infl from 2*infl."""
+        return max(0.0, min(infl, d - infl))
 
     def point_violation(self, p: Pt, pad: float = 0.0):
-        r = self.ramp(p)
-        worst = self.base.point_violation(p, pad=pad + self.H * r)
-        if self.extra is not None and r > 0:
-            # radius held: rad + H; wanted: (rad + H) * r
-            # -> shrink by (rad + H) * (1 - r); rad is per capsule, so
-            # approximate with the common H (rad << H for a lane tube)
-            v = self.extra.point_violation(p, pad=pad - self.H * (1.0 - r))
-            if v is not None and (worst is None or v[0] > worst[0]):
-                worst = v
+        d = self.d_end(p)
+        worst = self.base.point_violation(p, pad=pad + self.part_inflation(p))
+        for (a, b, rad, infl) in self.extra_raw:
+            sx, sy = b[0] - a[0], b[1] - a[1]
+            L2 = sx * sx + sy * sy
+            u = 0.0 if L2 < 1e-12 else max(0.0, min(1.0, ((p[0] - a[0]) * sx + (p[1] - a[1]) * sy) / L2))
+            ex, ey = p[0] - (a[0] + u * sx), p[1] - (a[1] + u * sy)
+            dist = math.hypot(ex, ey)
+            depth = rad + self.inflation(d, infl) + pad - dist
+            if depth > 0 and (worst is None or depth > worst[0]):
+                if dist > 1e-9:
+                    nrm = (ex / dist, ey / dist)
+                else:
+                    L = math.sqrt(L2) if L2 > 1e-12 else 1.0
+                    nrm = (-sy / L, sx / L)
+                worst = (depth, nrm)
         return worst
 
     def seg_clear(self, a: Pt, b: Pt) -> bool:
@@ -444,6 +556,172 @@ class RampedObstacles:
         return True
 
 
+
+
+def octilinearise(pts: Sequence[Pt], obs, flows=None, tol: float = 1.0) -> List[Pt]:
+    """A relaxed spine as a few OCTILINEAR legs. The relaxation hands
+    back an arc round the obstacle -- ten vertices turning 10 or 15
+    degrees each -- and a lane in the band of such a leg is a shallow
+    line on the router's grid: a staircase of sub-pitch octilinear
+    steps (measured on the channel article at K15: 2683 segments for
+    15 lanes against 590 on the straight chord, 2501 of them under
+    0.3 mm). A bundle turns a part the way a human's does, in legs at
+    0, 45 or 90 degrees. So: the polyline simplified at `tol`, then
+    every interior leg off the grid directions replaced by the two
+    grid legs that span it (the leg's vector decomposed on the two
+    octilinear directions that bracket it), in whichever order keeps
+    the intermediate vertex clear of the ramped obstacles -- the
+    order that folds INTO the part is the other one.  is COARSE
+    on purpose: at 0.25 mm an arc of radius 4 mm kept eight legs and
+    each became a 45-degree pair, a sawtooth the lanes could not
+    follow (channel article K15: 5 of 15 in band); at 1 mm the arc is
+    one or two chords, and the clear order of their grid legs lies
+    OUTSIDE the arc (the chord cuts inside it, the grid legs round it),
+    so the frame ends up no closer to the part than the relaxed line. A leg neither
+    order can clear keeps its own direction. A first or last leg that
+    still runs along its end zone's FLOW (`flows` = launch, arrival
+    unit vectors; within 3 degrees) is left as it is -- the flow may
+    sit off the grid (the bench's chord is 2 degrees off) and the end
+    zones are the teeth's and berths' business; a straight corridor
+    never comes here."""
+    pts = simplify(pts, tol)
+    if len(pts) < 3:
+        return list(pts)
+    out = [pts[0]]
+
+    def bad(a, b):
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        n = max(1, int(L / 0.25))
+        return sum(1 for k in range(n + 1)
+                   if obs.point_violation((a[0] + (b[0] - a[0]) * k / n,
+                                           a[1] + (b[1] - a[1]) * k / n)) is not None)
+    for i, (P, Q) in enumerate(zip(pts, pts[1:])):
+        vx, vy = Q[0] - P[0], Q[1] - P[1]
+        ang = math.degrees(math.atan2(vy, vx))
+        k = round(ang / 45.0)
+        on_flow = False
+        if flows is not None:
+            f = flows[0] if i == 0 else (flows[1] if i == len(pts) - 2 else None)
+            if f is not None:
+                on_flow = _angle(_unit((vx, vy)), f) <= 3.0
+        if on_flow or abs(ang - 45.0 * k) < 1.0:
+            out.append(Q)
+            continue
+        lo = 45.0 * math.floor(ang / 45.0)
+        d1 = (math.cos(math.radians(lo)), math.sin(math.radians(lo)))
+        d2 = (math.cos(math.radians(lo + 45.0)), math.sin(math.radians(lo + 45.0)))
+        det = d1[0] * d2[1] - d1[1] * d2[0]
+        al = (vx * d2[1] - vy * d2[0]) / det
+        be = (d1[0] * vy - d1[1] * vx) / det
+        cands = []
+        for order in ((d1, al), (d2, be)):
+            d, m = order
+            M = (P[0] + m * d[0], P[1] + m * d[1])
+            cands.append((bad(P, M) + bad(M, Q), M))
+        own = bad(P, Q)
+        best = min(cands, key=lambda c: c[0])
+        if best[0] <= own:
+            out.append(best[1])
+        out.append(Q)
+    return simplify(out, 0.08)
+
+
+def merge_short_legs(pts: Sequence[Pt], min_len: float) -> List[Pt]:
+    """An interior leg shorter than `min_len` is a quantisation notch
+    (the channel article's K15 spine: flat, a 0.55 mm step down, then
+    the climb), not a bend the lanes should follow: it is removed and
+    its neighbours extended to where their lines meet. Neighbours that
+    are parallel keep the notch (there is no meeting point). The first
+    and last legs are the flows and are never merged."""
+    P = [tuple(p) for p in pts]
+    changed = True
+    while changed and len(P) > 3:
+        changed = False
+        for i in range(1, len(P) - 2):
+            a, b = P[i], P[i + 1]
+            if math.hypot(b[0] - a[0], b[1] - a[1]) >= min_len:
+                continue
+            d1 = _unit((a[0] - P[i - 1][0], a[1] - P[i - 1][1]))
+            d2 = _unit((P[i + 2][0] - b[0], P[i + 2][1] - b[1]))
+            det = d1[0] * d2[1] - d1[1] * d2[0]
+            if abs(det) < 1e-9:
+                continue
+            s = ((b[0] - P[i - 1][0]) * d2[1] - (b[1] - P[i - 1][1]) * d2[0]) / det
+            m = (P[i - 1][0] + s * d1[0], P[i - 1][1] + s * d1[1])
+            # the meeting point must lie ahead on the previous leg and
+            # behind on the next, or the merge would fold the polyline
+            if s <= 0 or ((P[i + 2][0] - m[0]) * d2[0] + (P[i + 2][1] - m[1]) * d2[1]) <= 0:
+                continue
+            P[i:i + 2] = [m]
+            changed = True
+            break
+    return P
+
+
+def clear_legs(pts: Sequence[Pt], obs, rounds: int = 8, step: float = 0.1) -> List[Pt]:
+    """The octilinear polyline pushed OUT of the ramped obstacles, leg by
+    leg, its directions kept. A grid leg is a chord of the relaxed arc
+    and a chord cuts inside it: on the channel article the 45-degree leg
+    into the bottom of the dip lay 1.8 mm nearer the header than the
+    string had settled, and the island logic then saw the part 3.55 mm
+    from the spine where the relaxation had cleared 5.9. Each round
+    samples every interior leg against the model; a violating leg is
+    moved along its own normal, in the direction the deepest violation
+    pushes, by that depth, and its ends re-cut where its line meets the
+    neighbouring legs' lines (their directions kept, so the polyline
+    stays octilinear). The first and last legs are anchored at the
+    ends: the string never bends inside the end zones (no inflation
+    there), so a violation on them is left to the lanes. Converges in a
+    few rounds (every move is outward); `rounds` bounds it."""
+    P = [tuple(p) for p in pts]
+    if len(P) < 3:
+        return P
+
+    def worst_on(a, b):
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        n = max(1, int(L / step))
+        w = None
+        for k in range(n + 1):
+            q = (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
+            v = obs.point_violation(q)
+            if v is not None and (w is None or v[0] > w[0]):
+                w = v
+        return w
+
+    def line_isect(p, d, q, e):
+        det = d[0] * e[1] - d[1] * e[0]
+        if abs(det) < 1e-9:
+            return None
+        s = ((q[0] - p[0]) * e[1] - (q[1] - p[1]) * e[0]) / det
+        return (p[0] + s * d[0], p[1] + s * d[1])
+    for _r in range(rounds):
+        moved = False
+        for i in range(1, len(P) - 2):
+            a, b = P[i], P[i + 1]
+            w = worst_on(a, b)
+            if w is None:
+                continue
+            depth, (ux, uy) = w
+            d = _unit((b[0] - a[0], b[1] - a[1]))
+            nrm = (-d[1], d[0])
+            sgn = 1.0 if (nrm[0] * ux + nrm[1] * uy) >= 0 else -1.0
+            shift = (depth + 0.02) * sgn
+            a2 = (a[0] + shift * nrm[0], a[1] + shift * nrm[1])
+            dp = _unit((a[0] - P[i - 1][0], a[1] - P[i - 1][1]))
+            dn = _unit((P[i + 2][0] - b[0], P[i + 2][1] - b[1]))
+            na = line_isect(a2, d, P[i - 1], dp)
+            nb = line_isect(a2, d, P[i + 2], dn)
+            if na is None or nb is None:
+                continue
+            P[i], P[i + 1] = na, nb
+            moved = True
+        if not moved:
+            break
+    out = [P[0]]
+    for q in P[1:]:
+        if math.hypot(q[0] - out[-1][0], q[1] - out[-1][1]) > 1e-6:
+            out.append(q)
+    return out
 
 
 def _unit(v: Pt) -> Pt:
@@ -507,48 +785,111 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
 
     def spread(pts, c, u):
         return max([0.0] + [(p[0] - c[0]) * u[0] + (p[1] - c[1]) * u[1] for p in pts])
+
+    def spread_across(pts, c, u):
+        return max([0.0] + [abs((p[0] - c[0]) * u[1] - (p[1] - c[1]) * u[0]) for p in pts])
     straight = _angle(u_t, u_s) <= 30.0
+    obs = None
     if straight:
+        # ONE straight line through the midpoint: the channel between
+        # two facing arrays, however their centroids are offset -- the
+        # offset is the lanes' morph, not a tilt of the frame
         u = _unit((u_t[0] + u_s[0], u_t[1] + u_s[1]))
         mid = ((Ct[0] + Cs[0]) / 2, (Ct[1] + Cs[1]) / 2)
         ta = (Ct[0] - mid[0]) * u[0] + (Ct[1] - mid[1]) * u[1]
         tb = (Cs[0] - mid[0]) * u[0] + (Cs[1] - mid[1]) * u[1]
         a = (mid[0] + ta * u[0], mid[1] + ta * u[1])
         b = (mid[0] + tb * u[0], mid[1] + tb * u[1])
-        u_t = u_s = u
-    else:
-        a, b = Ct, Cs
+        R_t = spread(teeth, a, u) + 0.5
+        R_s = spread(stubs, b, (-u[0], -u[1])) + 0.5
+        p1 = (a[0] + R_t * u[0], a[1] + R_t * u[1])
+        p2 = (b[0] - R_s * u[0], b[1] - R_s * u[1])
+        gap = (p2[0] - p1[0]) * u[0] + (p2[1] - p1[1]) * u[1]
+        if gap <= 0.5:
+            # the two zones overlap: nothing left to relax
+            return Spine(simplify([a, b], 0.08))
+        obs = RampedObstacles(base_obs, (Ct, Cs), H, extra=extra)
+        if obs.seg_clear(p1, p2):
+            # a clear straight channel: the chord, not relaxed (relaxing
+            # it against the ramped obstacles can only add wiggles)
+            sp = simplify([a, p1, p2, b], 0.08)
+            if log:
+                log(f'    spine: 2 mean pts -> 2 relaxed (0 rounds) -> '
+                    f'{len(sp)} vertices, {polyline_len(sp):.2f} mm, corners []')
+            return Spine(sp)
+    # THE MIDDLE, when the flows BEND (more than 30 degrees between
+    # launch and arrival) or a big part / a laid corridor stands in the
+    # chord: the members' MEAN TAUT PATH between the two end zones (the
+    # bundle's medial line, in the homotopy class the taut paths chose:
+    # which side of a part they went), from the teeth's centroid to the
+    # stubs' centroid along their own flows, relaxed as a string against
+    # the ramped obstacles by taut_fast.relax_spine (the strings' own
+    # rules -- contact a constraint, a tube crossed transversally
+    # transparent -- with the ramp as a per-point inflation), then made
+    # OCTILINEAR (octilinearise: a bundle turns a part in legs at 0, 45
+    # or 90 degrees, as a human's does; an arc's bands sit at shallow
+    # angles to the router's grid and every lane became a staircase).
+    # The inflation is the larger of the nominal half-width and the
+    # ends' actual spread across their flows: a face of 15 teeth at the
+    # ball pitch is 3.5 mm wide where the lane pitch says 2.8, and a dip
+    # sized for the spine alone left the top lanes in the part (channel
+    # article K15). Until 2026-09-08 the bent branch was the chord with
+    # two corners: the mean-path relaxation had been pruned as never
+    # reached at K28, and its absence crashed K51's singleton.
+    a, b = Ct, Cs
     R_t = spread(teeth, a, u_t) + 0.5
     R_s = spread(stubs, b, (-u_s[0], -u_s[1])) + 0.5
     p1 = (a[0] + R_t * u_t[0], a[1] + R_t * u_t[1])
     p2 = (b[0] - R_s * u_s[0], b[1] - R_s * u_s[1])
-    gap = (p2[0] - p1[0]) * u_t[0] + (p2[1] - p1[1]) * u_t[1]
-    if gap <= 0.5:
-        # the two zones overlap: nothing left to relax
+    if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) <= 0.5:
         return Spine(simplify([a, b], 0.08))
-    obs = RampedObstacles(base_obs, (Ct, Cs), H, extra=extra)
-    # the spine's middle: the chord between the two zones' ends. When
-    # the flows BEND (more than 30 degrees between launch and arrival)
-    # the ends a -> p1 and p2 -> b point different ways and the chord
-    # p1 -> p2 joins them with two corners; the mean-path relaxation
-    # that used to bend this middle round obstacles is not in this
-    # chain (never reached at K28), and without it a bent corridor --
-    # K51's singleton SZQ -- had no polyline at all (UnboundLocalError).
-    init = [p1, p2]
-    if straight:
-        # a clear straight channel needs no relaxing (and relaxing it
-        # against the ramped obstacles can only add wiggles)
-        if obs.seg_clear(p1, p2):
-            relax = False
-    pts = list(init)
-    sp = simplify([a] + list(pts) + [b], 0.08)
+    H_eff = max(H, spread_across(teeth, Ct, u_t) + 0.1,
+                spread_across(stubs, Cs, u_s) + 0.1)
+    obs = RampedObstacles(base_obs, (Ct, Cs), H_eff, extra=extra,
+                          zones=((Ct, u_t, R_t), (Cs, (-u_s[0], -u_s[1]), R_s)))
+    M = mean_path(paths)
+    keep = [p for p in M
+            if math.hypot(p[0] - Ct[0], p[1] - Ct[1]) > R_t
+            and math.hypot(p[0] - Cs[0], p[1] - Cs[1]) > R_s]
+    init = [p1] + keep + [p2]
+    used = 0
+    if relax:
+        pts, used = tf.relax_spine(init, obs)
+        n_arc = len(simplify(pts, 0.08))
+        mid = octilinearise(pts, obs, flows=(u_t, u_s))
+        mid = merge_short_legs([p1] + mid[1:-1] + [p2], 2 * 0.35)
+        mid = clear_legs(mid, obs)
+    else:
+        pts = list(init)
+        n_arc = len(pts)
+        mid = pts
+    sp = simplify([a] + list(mid) + [b], 0.08)
     # a bundle never doubles back: a vertex the string folded at (a
     # string stuck between two pushes) is dropped, and the polyline
     # re-simplified, until every turn is a real corner
+    while len(sp) > 2:
+        s_ = Spine(sp)
+        bad = [j + 1 for j in range(s_.n - 1) if abs(s_.turn[j]) > 120.0]
+        if not bad:
+            break
+        sp = simplify([p for j, p in enumerate(sp) if j not in set(bad)], 0.08)
+    # a spine with MANY near-right-angle corners is not a corridor
+    # axis -- it is the string OSCILLATING between pushes, which the
+    # fold filter (>120 deg) never catches (take4, K35 corridor
+    # SA6/SA4/SBA1: 34 vertices with 32 corners, 47 mm of spine for a
+    # ~20 mm run). The frame is a coordinate AXIS, not a route: fall
+    # back to the chord and let the lanes morph.
+    if sum(1 for _i, _s, t_ in Spine(sp).corners() if abs(t_) > 80.0) > 4:
+        if log:
+            log(f'    spine DEGENERATE ({len(sp)} vertices, '
+                f'{polyline_len(sp):.1f} mm) -- straight-chord fallback')
+        sp = simplify([a, b], 0.08)
     if log:
-        log(f'    spine: {len(init)} mean pts -> {len(pts)} relaxed -> '
-            f'{len(sp)} vertices, {polyline_len(sp):.2f} mm, '
-            f'corners {[round(t) for _i, _s, t in Spine(sp).corners()]}')
+        log(f'    spine: {len(init)} mean pts -> {len(pts)} relaxed '
+            f'({used} rounds, H {H:.2f} -> {H_eff:.2f}) -> {n_arc} vertices -> '
+            f'{len(sp)} octilinear, {polyline_len(sp):.2f} mm, '
+            f'corners {[round(t_) for _i, _s, t_ in Spine(sp).corners()]}'
+            + (f'  {[(round(x, 2), round(y, 2)) for x, y in sp]}' if len(sp) <= 8 else ''))
     return Spine(sp)
 
 

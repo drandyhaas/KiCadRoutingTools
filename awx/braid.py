@@ -271,6 +271,23 @@ def reserve(ctx, nm):
 _OBS_MEMO = {}
 
 
+def unthreadable(fp, track=None, clear=None):
+    """True when no lane can pass between two of the part's pads: the
+    smallest edge-to-edge gap between any two pads is below a track
+    plus two clearances."""
+    track = TRACK if track is None else track
+    clear = CLEAR if clear is None else clear
+    ps = fp.pads
+    if len(ps) < 2:
+        return False
+    X = np.array([p.global_x for p in ps])
+    Y = np.array([p.global_y for p in ps])
+    R = np.array([max(p.size_x, p.size_y) / 2 for p in ps])
+    d = np.hypot(X[:, None] - X[None, :], Y[:, None] - Y[None, :]) - R[:, None] - R[None, :]
+    np.fill_diagonal(d, np.inf)
+    return float(d.min()) < track + 2 * clear
+
+
 def build_obstacles(pcb, nid, kids, layer):
     """A static-copper model for one net on one layer: every foreign
     pad as a disc, every foreign segment as a capsule, every foreign
@@ -623,8 +640,14 @@ class Corridor:
         ctx = self.ctx
         n_m = len(self.members)
         self.H = LPITCH * (n_m - 1) / 2 + LPITCH
-        extra = [(p, q, LPITCH) for poly in ctx.laid
-                 for p, q in zip(poly, poly[1:])]
+        # the corridors already laid, each as ONE tube: its spine at a
+        # lane pitch's radius, inflated (ramped) by its half-width plus
+        # this corridor's, so this spine runs beside it or crosses it
+        # transversally -- never snakes between its lanes (per-lane tubes
+        # did that: a singleton beside the K15 bundle took five corners)
+        extra = [(p, q, LPITCH, H_c + self.H)
+                 for (pts, H_c) in getattr(ctx, 'laid_tubes', ())
+                 for p, q in zip(pts, pts[1:])]
         teeth = {nm: ctx.ends[nm][0] for nm in self.members}
         stubs = {nm: ctx.ends[nm][1] for nm in self.members}
         # what a SPINE avoids is BIG PARTS: the pads of every array-
@@ -640,8 +663,16 @@ class Corridor:
         # lanes route round them (or a lane is refused, and says so).
         own = {ctx.src_ref[nm] for nm in self.members} | \
             {ctx.ends[nm][2] for nm in self.members}
+        # ... and only a part the lanes cannot THREAD: a 2.54 mm header
+        # with 1.7 mm pads leaves 0.84 mm between pins, and the straight
+        # chord with the island logic threads 27 of 28 K28 lanes between
+        # them (46 vias) where a spine bent round the header shipped 57;
+        # with 2.3 mm pads (0.24 mm gaps) the chord ships 3 open and 12
+        # DRC and the bent spine 0 / 0. A part is solid for the spine
+        # when some pair of its pads is closer, edge to edge, than a
+        # track plus two clearances.
         big = {ref for ref, fp in ctx.pcb.footprints.items()
-               if len(fp.pads) >= 10 and ref not in own}
+               if len(fp.pads) >= 10 and ref not in own and unthreadable(fp)}
         obs = ts.Obstacles()
         for (x, y, r, name) in ctx.spine_obs.discs:
             if name.split('.')[0] in big:
@@ -649,6 +680,7 @@ class Corridor:
         obs.build()
         spine = ctx.spine_of(self.members, extra=extra, log=self.log,
                              H=self.H, base_obs=obs)
+        self.spine_core = spine          # unextended: the tube for later corridors
         # extend so every free end projects strictly inside the spine
         P0, d0 = spine.P[0], spine.d[0]
         Pn, dn = spine.P[-1], spine.d[-1]
@@ -2936,6 +2968,7 @@ class Corridor:
         ctx.base_segments = list(ctx.pcb.segments)
         ctx.base_vias = list(ctx.pcb.vias)
         ctx.laid.extend(self.lane_xy[nm] for nm in self.members)
+        ctx.laid_tubes.append((self.spine_core.pts, self.H))
         # Eco: required-B stretches on the centreline, '+' marks
         sp = self.spine
         for nm in self.members:
@@ -3179,9 +3212,12 @@ def main():
             c.run(plan_only=True)
             ctx.laid.extend(c.lane_xy[nm] for nm in c.members
                             if nm in getattr(c, 'lane_xy', {}))
+            if getattr(c, 'spine_core', None) is not None:
+                ctx.laid_tubes.append((c.spine_core.pts, c.H))
         except Exception as e:
             log(f'  plan phase: corridor {c.idx} not planned ({e})')
     ctx.laid = []
+    ctx.laid_tubes = []
     ctx.pcb.segments = list(ctx.base_segments)
     ctx.pcb.vias = list(ctx.base_vias)
     for c in corridors:
@@ -3542,6 +3578,7 @@ def setup(board, names, dest, log, plan=None):
                           [v for v in pcb.vias if v.net_id == byname[nm][0]])
                      for nm in names}
     ctx.laid = []
+    ctx.laid_tubes = []
     return ctx, groups
 
 
@@ -3632,6 +3669,8 @@ def plan_braid(board, names, dest, plan, log=None):
             c.run(plan_only=True)
             ctx.laid.extend(c.lane_xy[nm] for nm in c.members
                             if nm in getattr(c, 'lane_xy', {}))
+            if getattr(c, 'spine_core', None) is not None:
+                ctx.laid_tubes.append((c.spine_core.pts, c.H))
         except Exception as e:
             _log(f'  plan phase: corridor {c.idx} not planned ({e})')
     cross = cross_corridor_vias(corridors)
