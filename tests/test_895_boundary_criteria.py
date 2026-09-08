@@ -41,6 +41,9 @@ REFERENCE = os.path.join(ROOT, '.claude', 'skills',
 #: The board the example is drawn from. Named HERE and never in the reference.
 FIXTURE = os.path.join(ROOT, 'tests', 'fixtures', 'run25',
                        'esp_prog_lap5.kicad_pcb')
+#: The declared clauses criterion 3 is worked from.
+BRIEF = os.path.join(ROOT, 'tests', 'fixtures', '902',
+                     'esp_prog_proximity.design-brief.json')
 
 FAILURES = []
 
@@ -157,6 +160,118 @@ def test_criterion_6_is_what_the_instrument_reports():
           'COURTYARD AREA' in ref)
 
 
+def test_criterion_3_is_what_the_grader_reports():
+    """Every distance criterion 3 quotes, re-derived through the real grader.
+
+    This gate exists because the reference first shipped the crystal leg as
+    3.14mm -- the right number for a DIFFERENT fixture of the same board, one
+    lap earlier. The file claimed every figure was pinned by a test; criterion
+    3's were not, so the one figure measured on the wrong board was the one
+    nothing caught.
+
+    The PASSING distances matter as much as the failing one, so the brief is
+    re-read with every `max_mm` tightened to 0.001: that makes each declared
+    row report its measured gap instead of only the row that exceeds its own
+    limit. It is the same rule measuring either way -- a limit decides what is
+    REPORTED, never what is measured.
+    """
+    import tempfile
+
+    from kicad_parser import parse_kicad_pcb
+    from placement import groups
+
+    with open(BRIEF, encoding='utf-8') as fh:
+        brief = json.load(fh)
+    for row in brief['proximity']:
+        row['max_mm'] = 0.001
+    ref = _text(REFERENCE)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tight = os.path.join(tmp, 'tight.json')
+        intent = os.path.join(tmp, 'intent.json')
+        graded = os.path.join(tmp, 'graded.json')
+        with open(tight, 'w', encoding='utf-8') as fh:
+            json.dump(brief, fh)
+        cf = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
+        emit = subprocess.run([sys.executable, '-X', 'utf8', cf, FIXTURE,
+                               '--brief', tight, '--emit-intent', intent],
+                              capture_output=True, text=True)
+        check('check_floorplan emitted an intent', os.path.isfile(intent),
+              emit.stderr[-300:])
+        if not os.path.isfile(intent):
+            return
+        subprocess.run([sys.executable, '-X', 'utf8', cf, FIXTURE,
+                        '--brief', tight, '--intent', intent,
+                        '--json', graded], capture_output=True, text=True)
+        check('check_floorplan wrote a graded document',
+              os.path.isfile(graded))
+        if not os.path.isfile(graded):
+            return
+        with open(graded, encoding='utf-8') as fh:
+            doc = json.load(fh)
+
+    # Key on the PAIR, not on the number. Two of the measured gaps round to
+    # the same two decimals (the second bulk cap at 0.292 and the transistor
+    # pair at 0.295), so a bare `f'{gap:.2f}' in ref` sweep passes for a row
+    # the reference never quotes, satisfied by a different row's digits.
+    gaps = {}
+    for v in doc['violations']:
+        m = v.get('measured') or {}
+        if v.get('rule') == 'proximity' and 'gap_mm' in m:
+            gaps[(v.get('ref'), m.get('near'), m.get('pad'))] = m['gap_mm']
+    check('the rule measured every declared row', len(gaps) >= 5, sorted(gaps))
+    #: The distances criterion 3 states, and the subject pad each belongs to.
+    quoted = (('Y1', 'U1', '1'), ('Y1', 'U1', '2'),
+              ('C1', 'U2', '1'), ('C3', 'U2', '1'))
+    for key in quoted:
+        gap = gaps.get(key)
+        check(f'{key[0]} pad {key[2]} -> {key[1]} was measured', gap is not None,
+              sorted(gaps))
+        if gap is None:
+            continue
+        check(f'the reference quotes it as {gap:.2f}mm', f'{gap:.2f}' in ref,
+              f'measured {gap}')
+    # The transistor pair is measured on the body basis and deliberately NOT
+    # quoted -- criterion 3's text is about the regulator and the crystal. It
+    # is asserted absent-by-pair rather than by digits, which C3 also carries.
+    check('the body-basis pair was measured too',
+          ('Q1', 'Q2', None) in gaps, sorted(gaps))
+
+    # The two tether distances the same section cites as the WRONG partners.
+    # They are the argument for the rule existing, so they are pinned too.
+    tethers = groups.decap_tethers(parse_kicad_pcb(FIXTURE))
+    wrong = sorted(mm for rows in (tethers or {}).values() for _, mm in rows)
+    check('the reference quotes the wrong-partner distances it cites',
+          all(f'{mm:.2f}' in ref for mm in wrong[-2:]),
+          [f'{mm:.2f}' for mm in wrong])
+
+
+def test_criterion_1_quotes_the_bodies_it_compares_against():
+    """The denominator, not only the span.
+
+    Criterion 1 is a RATIO, and the reference used to state its two bodies as
+    round numbers nobody could source -- one of them out by 2mm. A span with an
+    invented denominator is a criterion measuring nothing.
+    """
+    r = subprocess.run([sys.executable, os.path.join(ROOT, 'py_tools',
+                                                     'board_context.py'),
+                        FIXTURE, '--json'],
+                       capture_output=True, text=True)
+    check('board_context exits 0', r.returncode == 0, r.stderr[-300:])
+    parts = {p['ref']: p for p in json.loads(r.stdout).get('parts', [])}
+    ref = _text(REFERENCE)
+    for who in ('U1', 'USB1'):
+        body = (parts.get(who) or {}).get('body_mm')
+        check(f'{who} reports a body', bool(body), sorted(parts))
+        if not body:
+            continue
+        for mm in body:
+            check(f'the reference quotes the {mm:.2f}mm body extent',
+                  f'{mm:.2f}' in ref, f'measured {body}')
+        src = parts[who].get('body_source')
+        check(f'...and names the rung it came from ({src})', str(src) in ref)
+
+
 def test_the_reference_says_which_journal_numbers_did_not_reproduce():
     """The example's own warning about prose.
 
@@ -175,6 +290,8 @@ def test_the_reference_says_which_journal_numbers_did_not_reproduce():
 TESTS = [test_the_seven_criteria_are_named_and_the_ordering_is_stated,
          test_the_reference_names_no_board_and_no_work_directory,
          test_criterion_1_and_2_are_what_the_instrument_reports,
+         test_criterion_1_quotes_the_bodies_it_compares_against,
+         test_criterion_3_is_what_the_grader_reports,
          test_criterion_5_is_what_the_instrument_reports,
          test_criterion_6_is_what_the_instrument_reports,
          test_the_reference_says_which_journal_numbers_did_not_reproduce]

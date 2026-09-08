@@ -27,10 +27,15 @@ board_context.py <board> --json   ->   pin_order.rows[].span_mm
 | header ↔ regulator | interface (3 nets) | 13.77 mm |
 | bulk cap ↔ regulator | interface (2 nets) | 2.56 mm |
 
-The two parts are 7.2 × 5.3 mm and 9 × 7 mm. Placed edge to edge their pads
-could face each other across roughly 2–3 mm, so the pair is running about **3×
-the shortest length these bodies allow** — well past the ratio worth explaining.
-On a 2-layer board that length is also where the return path has to come from.
+Read the denominator off the same document: `parts[].body_mm` gives the
+receptacle **7.12 × 7.40 mm** (`fab`) and the bridge **8.51 × 7.62 mm** (`silk`).
+Two bodies of that size sitting against each other put their facing pad rows a
+few millimetres apart, so a 12.70 mm interface span means there is roughly a
+part's width of board between them — which is what the numbers say plainly: the
+two are not adjacent. **The denominator stays the reviewer's judgement**; the
+criterion asks you to state it beside the span, not to read a verdict off a
+tool. On a 2-layer board that length is also where the return path has to come
+from.
 
 **Verdict: explain or move.** The two parts are on opposite sides of the board
 with a header between them.
@@ -62,9 +67,10 @@ wrong partners. Nothing in the toolchain measured the thing the spec actually
 said.
 
 That is what `proximity` clauses are for. Declared, the same board reports the
-crystal's far leg at **3.14 mm** from the pin it loads against a 2.00 mm limit,
-and the bulk caps at 1.12 mm and 0.29 mm from the regulator — measured pad edge
-to pad edge, against the parts the spec names.
+crystal's far leg at **2.69 mm** from the pin it loads against a 2.00 mm limit
+— its near leg is 1.62 mm and passes — and the bulk caps at 1.12 mm and 0.29 mm
+from the regulator, measured pad edge to pad edge against the parts the spec
+names.
 
 The input-cap-on-the-input-side half is **not measured by anything**. Say it in
 words or it is not said.
