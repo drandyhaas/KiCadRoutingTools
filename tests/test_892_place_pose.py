@@ -16,6 +16,55 @@ What this file is really testing, in one line each:
 Refusals are asserted with `run_utils.check(..., refuse=..., code=N)` rather
 than on the exit code alone, so an ImportError or an argparse accident is
 reported as a BROKEN TEST instead of as a guard that held.
+
+WHAT THE BATTERY MEASURED (`python3 -X utf8 tests/mutate_892.py`, 27 rows over
+`placement/pose_ops.py`, `place_pose.py`, `placement/seeder.py`,
+`placement/provenance.py` and the manifest parity gate), run in a clean
+worktree at the commit that carries this docstring:
+
+    face-cycle-reversed                                  KILLED
+    the-face-row-is-keyed-by-pad-number-again            KILLED
+    a-face-aim-is-claimed-rather-than-measured           KILLED
+    worsened-count-arm-neutered                          KILLED
+    worsened-magnitude-arm-neutered                      KILLED
+    off-board-amount-stops-being-an-arm                  KILLED
+    is_clean-ignores-the-magnitudes                      KILLED
+    legal-goes-back-to-meaning-no_worse                  KILLED
+    a-refusal-names-an-output-path-again                 KILLED
+    a-forced-run-reports-only-the-last-finding           KILLED
+    the-snap-ladder-loses-its-lattice-rung               KILLED
+    the-radius-stops-bounding-the-distance               KILLED
+    the-snapped-pose-is-not-re-staged                    KILLED
+    dry-run-writes-the-board-anyway                      KILLED
+    the-lock-guard-is-skipped                            KILLED
+    lock-and-unlock-of-one-ref-is-allowed-again          KILLED
+    an-unknown-lock-ref-is-accepted-again                KILLED
+    a-failed-promote-is-not-atomic-again                 KILLED
+    a-forced-run-is-not-disclosed                        KILLED
+    only-the-first-op-is-written                         KILLED
+    the-copper-gate-stops-refusing                       KILLED
+    a-missing-input-file-is-no-longer-named              KILLED
+    the-snap-knobs-are-unvalidated-again                 KILLED
+    stamp_unlocked-removes-nothing                       KILLED
+    stamp_unlocked-unlocks-every-namesake                KILLED
+    place_pose-leaves-the-lever-registry                 KILLED
+    the-parity-gate-goes-back-to-a-hand-picked-list      KILLED
+
+    27 rows: 27 killed, 0 survived, 0 broken, 0 disagreeing with expectation
+
+Four earlier rounds are the reason several arms here look pedantic:
+
+  * neutering the COUNT arm of `worsened()` left every CLI assertion green,
+    because the shortfall arm refused the same request -- so `worsened()` is
+    checked arm by arm, not only through the CLI;
+  * dropping the Euclidean `--radius` bound also left them green, because the
+    case had been loosened to `--radius 8` while the overshoot it was written
+    for is 5.0 mm under `--radius 4`;
+  * deleting the `isfile` guard changed only the MESSAGE (the parser raises
+    and the run still exits 2 with a summary), so that arm asserts the reason;
+  * `a-forced-run-reports-only-the-last-finding` SURVIVED until the ROW was
+    fixed: it mutated the face block's `append`, after which the legality
+    block appends anyway. Only the last writer can erase what came before.
 """
 import json
 import os
