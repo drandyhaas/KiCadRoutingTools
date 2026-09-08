@@ -2817,8 +2817,12 @@ def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
     cuts at `'(pad '` WITH the space and falls back to the first 500
     characters when a block has no pad, so a header containing a token like
     `(padstack` is read differently there than here. Both stamping halves
-    share that divergence and it predates them; no board in `kicad_files/`
-    triggers it (checked, 22 boards, 0 hits). It is called out because the
+    share that divergence and it predates them. Measured over the 22 boards in
+    `kicad_files/` (1349 footprint blocks): 0 blocks contain `(pad` before
+    `(pad `, and 0 disagree about a `(locked yes)`. 30 blocks DO take the
+    reader's 500-character fallback (they have no pad at all) -- they simply
+    carry no late lock, so the two windows still agree today. It is called out
+    because the
     consequence is asymmetric: the reader would call a footprint locked that
     this cannot unlock, which is why `pose_ops.apply_poses` VERIFIES the
     unlock on the staged board before promoting anything.

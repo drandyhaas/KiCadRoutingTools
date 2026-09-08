@@ -678,6 +678,233 @@ if os.path.isfile(FLAT):
               s['ops'][0].get('row_symmetric') is True,
               json.dumps(s['ops'][0])[:200])
 
+# ---------------------------------------------------------------------------
+print("a face row is identified by PAD, not by pad number")
+with tempfile.TemporaryDirectory() as d:
+    # esp_prog's USB1 carries six pads numbered `0`, one on each face. A
+    # `{pad_number: face}` map answers about whichever the dict saw last, so
+    # the verification scored a row that had provably rotated as 0/2 and then
+    # called it symmetric. 117 parts across 12 of the 22 tracked boards have
+    # duplicate pad numbers, so this is the common case, not a corner.
+    dup = [ref for ref, fp in parse_kicad_pcb(BOARD).footprints.items()
+           if len(set(p.pad_number for p in (fp.pads or ()))) < len(fp.pads or ())]
+    check("the fixture has a part with duplicate pad numbers", 'USB1' in dup,
+          str(dup))
+    out = os.path.join(d, 'dup.kicad_pcb')
+    r = run([POSE, BOARD, out, 'face', 'USB1', 'north', 'U1', '--force'])
+    check("face on it exits 0", r.returncode == 0, (r.stdout + r.stderr)[-300:])
+    if r.returncode == 0:
+        op = summary(r)['ops'][0]
+        check("the row is measured by pad index, not by number",
+              'row_pad_ix' in op and len(op['row_pad_ix']) == len(op['row_pads']))
+        check("and it lands where the prediction says",
+              op['row_on_target'][0] == op['row_on_target'][1],
+              "%s of %s, landed %s" % (op['row_on_target'][0],
+                                       op['row_on_target'][1],
+                                       op['row_landed']))
+        check("a row that MOVED is not called symmetric",
+              op.get('row_symmetric') is False)
+        # The independent recount, deliberately NOT the engine's expression:
+        # match pads by their LOCAL coordinates, which a rotation leaves alone.
+        before_fp = parse_kicad_pcb(BOARD).footprints['USB1']
+        after_pcb = parse_kicad_pcb(out)
+        by = pose_ops.part_faces(after_pcb, 'USB1', clearance=CLR,
+                                 track_width=TW)
+        landed_local = {}
+        for f, pads in by.items():
+            for p in pads:
+                landed_local[(round(p.local_x, 4), round(p.local_y, 4))] = f
+        row_local = [(round(before_fp.pads[i].local_x, 4),
+                      round(before_fp.pads[i].local_y, 4))
+                     for i in op['row_pad_ix']]
+        hit = sum(1 for k in row_local
+                  if landed_local.get(k) == op['target_face'])
+        check("a local-coordinate recount agrees with the CLI",
+              hit == op['row_on_target'][0],
+              "%s vs %s" % (hit, op['row_on_target'][0]))
+
+# ---------------------------------------------------------------------------
+print("a failed promote leaves the PREVIOUS output untouched")
+with tempfile.TemporaryDirectory() as d:
+    import stat
+    src = os.path.join(d, 'in.kicad_pcb')
+    shutil.copyfile(BOARD, src)
+    shutil.copyfile(PRO, os.path.join(d, 'in.kicad_pro'))
+    out = os.path.join(d, 'out.kicad_pcb')
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write('OLD-OUTPUT\n')
+    pro = os.path.join(d, 'out.kicad_pro')
+    with open(pro, 'w', encoding='utf-8') as f:
+        f.write('OLD-PRO\n')
+    os.chmod(pro, stat.S_IREAD)
+    try:
+        r = run([POSE, src, out, 'rotate', 'R1', '90'])
+        wrote = open(out, encoding='utf-8').read()
+        check("the run refuses rather than half-writing", r.returncode == 2,
+              "rc=%s" % r.returncode)
+        check("the OLD board is still there, byte for byte",
+              wrote == 'OLD-OUTPUT\n', wrote[:40])
+        check("and the summary says nothing was written",
+              summary(r)['output'] is None
+              and 'Nothing was written' in (summary(r).get('refused') or ''),
+              str(summary(r).get('refused'))[:120])
+        check("no .krt-tmp file is left behind",
+              not [f for f in os.listdir(d) if f.endswith('.krt-tmp')],
+              str(os.listdir(d)))
+    finally:
+        os.chmod(pro, stat.S_IWRITE)
+
+# ---------------------------------------------------------------------------
+print("lock and unlock hygiene")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'x.kicad_pcb')
+    base = [sys.executable, '-X', 'utf8', POSE, BOARD, out]
+    # The re-lock workflow this tool's own refusal message recommends: it used
+    # to move the part, DROP the lock, and report `locked: ["C4"]`, because
+    # apply_locks stamps then strips whatever the caller wrote.
+    refuse_check(base + ['unlock', 'C3', 'rotate', 'C3', '90', 'lock', 'C3'],
+                 refuse='named by both lock and unlock', code=2)
+    refuse_check(base + ['lock', 'NOSUCHREF'],
+                 refuse='not on this board', code=2)
+    refuse_check(base + ['unlock', 'NOSUCHREF'],
+                 refuse='not on this board', code=2)
+    check("neither wrote a board", not os.path.exists(out))
+    # And the guard that was added but never reachable in a test: an unlock
+    # that does not take must refuse BEFORE the board is promoted.
+    import placement.seeder as _seeder
+    real = _seeder.stamp_unlocked
+    locked = os.path.join(d, 'locked.kicad_pcb')
+    r = run([POSE, BOARD, locked, 'lock', 'C3'])
+    check("staged a locked board", r.returncode == 0)
+    try:
+        _seeder.stamp_unlocked = lambda *a, **k: 0      # the failure mode
+        out2 = os.path.join(d, 'y.kicad_pcb')
+        try:
+            # The op is a NO-OP rotation (C3's own angle): the point is the
+            # unlock guard, and a rotation that also fails legality would
+            # refuse earlier for a different reason.
+            _rot_now = parse_kicad_pcb(locked).footprints['C3'].rotation % 360
+            pose_ops.apply_poses(locked, out2, [
+                {'kind': 'rotate', 'ref': 'C3', 'rot': _rot_now,
+                 'relative': False}], unlock_refs=['C3'])
+            raised = None
+        except pose_ops.PoseRefusal as exc:
+            raised = exc.reason
+        check("a silent unlock failure is refused", raised is not None
+              and 'unlock did not take' in raised, str(raised)[:120])
+        check("and nothing was promoted", not os.path.exists(out2))
+    finally:
+        _seeder.stamp_unlocked = real
+
+# ---------------------------------------------------------------------------
+print("the knobs that used to crash, and the ones that do not")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'k.kicad_pcb')
+    base = [sys.executable, '-X', 'utf8', POSE, BOARD, out]
+    # --snap-step 0 divided the sweep by zero: traceback, exit 1, NO summary.
+    refuse_check(base + ['set', 'C3', '130', '98', '--snap', '--snap-step',
+                         '0'],
+                 refuse='must be positive', code=2)
+    refuse_check(base + ['set', 'C3', '130', '98', '--radius', '-3'],
+                 refuse='is not one', code=2)
+    refuse_check(base + ['set', 'C3', '130', '98', '--snap-tries', '-1'],
+                 refuse='is not a count', code=2)
+    check("no knob refusal wrote a board", not os.path.exists(out))
+
+# ---------------------------------------------------------------------------
+print("a face naming an empty row is a TYPO (2), not a measurement (4)")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'e.kicad_pcb')
+    by = pose_ops.part_faces(pcb0, 'C3', clearance=CLR, track_width=TW)
+    empty = [f for f in ('north', 'south', 'east', 'west') if not by.get(f)]
+    if empty:
+        refuse_check([sys.executable, '-X', 'utf8', POSE, BOARD, out,
+                      'face', 'C3', empty[0], 'U1'],
+                     refuse='so there is no row to aim', code=2)
+        check("and it wrote nothing", not os.path.exists(out))
+    else:
+        check("C3 has an empty face to name", False, str(sorted(by)))
+
+# ---------------------------------------------------------------------------
+print("a forced run reports EVERY finding, not the last one")
+if os.path.isfile(FLAT):
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, 'both.kicad_pcb')
+        c5 = parse_kicad_pcb(FLAT).footprints['C5']
+        r = run([POSE, FLAT, out, 'face', 'C1', 'north', 'C2',
+                 'set', 'C4', str(c5.x), str(c5.y), '--force'])
+        if r.returncode == 0:
+            s = summary(r)
+            ref = s.get('refused') or ''
+            check("the legality finding is there", 'WORSE' in ref, ref[:80])
+            check("and the face finding survived beside it",
+                  'C1' in ref and 'row' in ref, ref[:200])
+            check("the run is marked forced", s.get('forced') is True)
+        else:
+            check("the forced run wrote", False, (r.stdout + r.stderr)[-200:])
+
+# ---------------------------------------------------------------------------
+print("what a refusal hands back for the next attempt")
+with tempfile.TemporaryDirectory() as d:
+    c4 = parse_kicad_pcb(BOARD).footprints['C4']
+    out = os.path.join(d, 'n.kicad_pcb')
+    r = run([POSE, BOARD, out, 'set', 'C3', str(c4.x), str(c4.y),
+             '--rot', str(c4.rotation % 360)])
+    s = summary(r)
+    check("the refusal names a nearest candidate", s['nearest_legal'] is not None
+          or (s.get('nearest_legal_census') or {}).get('ranked') == 0,
+          json.dumps(s.get('nearest_legal_census')))
+    check("and says what currency that is in",
+          'candidate_valid' in (s.get('nearest_legal_basis') or ''))
+    if s['nearest_legal']:
+        check("the refusal message names it too",
+              'nearest candidate' in (s.get('refused') or ''),
+              (s.get('refused') or '')[-120:])
+
+# ---------------------------------------------------------------------------
+print("--near on a call carrying several ops says it did not apply")
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'multi2.kicad_pcb')
+    r = run([POSE, BOARD, out, 'set', 'C3', '--near', str(GOOD['x']),
+             str(GOOD['y']), 'rotate', 'R1', '90', '--force'])
+    check("the run proceeds", r.returncode == 0, (r.stdout + r.stderr)[-200:])
+    if r.returncode == 0:
+        s = summary(r)
+        check("and the census says the snap was skipped, with the count",
+              'carries 2' in ((s.get('snap_census') or {}).get('skipped') or ''),
+              json.dumps(s.get('snap_census')))
+        check("the operator sees it on stderr",
+              '--snap/--near did not apply' in r.stderr)
+
+# ---------------------------------------------------------------------------
+print("two parts on one coordinate have no direction to aim")
+with tempfile.TemporaryDirectory() as d:
+    stacked = os.path.join(d, 'stacked.kicad_pcb')
+    c3 = parse_kicad_pcb(BOARD).footprints['C3']
+    write_placed_output(BOARD, stacked, [
+        {'reference': 'C4', 'new_x': c3.x, 'new_y': c3.y,
+         'new_rotation': c3.rotation % 360}])
+    refuse_check([sys.executable, '-X', 'utf8', POSE, stacked,
+                  os.path.join(d, 'o.kicad_pcb'), 'face', 'C3', 'north', 'C4'],
+                 refuse='share a centre', code=2)
+
+check("bearing_face breaks a diagonal tie on the x axis, deterministically",
+      pose_ops.bearing_face((0, 0), (-5, -5)) == 'west'
+      and pose_ops.bearing_face((0, 0), (5, 5)) == 'east'
+      and pose_ops.bearing_face((0, 0), (-5, 5)) == 'west')
+check("a dry run reports the path it would have written",
+      True)   # asserted below against a real run
+
+with tempfile.TemporaryDirectory() as d:
+    out = os.path.join(d, 'w.kicad_pcb')
+    r = run([POSE, BOARD, out, 'rotate', 'R1', '90', '--dry-run'])
+    s = summary(r)
+    check("would_write names the output path a dry run declined",
+          s.get('would_write') == out and s['output'] is None,
+          "%s / %s" % (s.get('would_write'), s['output']))
+    check("and the lock keys are present even though none were asked for",
+          'locked' in s and s['locked'] == [] and s['locked_count'] is None)
+
 print()
 print(f"{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

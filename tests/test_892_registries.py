@@ -147,7 +147,9 @@ class Capabilities(unittest.TestCase):
         listing the tool there turned the gate red for telling the truth
         (measured: `place_pose.py claims flags argparse rejects: ['--near',
         '--relative', '--rot']`). The verbs are registered as SUBPARSERS
-        instead, which is how `--help` and the documented-flag gate find them.
+        instead, which is how `tests/test_431_skill_commands.py` finds them --
+        it walks the subparsers action of `build_parser()`. `--help` itself
+        renders the epilog, because `main()` parses with the verb-less parser.
         """
         import krt_capabilities as caps
         self.assertNotIn(TOOL, caps.FLAG_SCRIPTS)
@@ -174,6 +176,11 @@ class Capabilities(unittest.TestCase):
                                        "docs; test_431_skill_commands walks "
                                        "the subparsers action to find it"
                           % flag)
+        # And a reader of --help finds them in the epilog, since main() parses
+        # with the verb-less parser and argparse renders no subparser section.
+        self.assertIn('--rot DEG', mod.VERB_HELP)
+        self.assertIn('--near X Y', mod.VERB_HELP)
+        self.assertIn('--relative', mod.VERB_HELP)
         # ...and the parser `main()` actually parses with must NOT carry them,
         # or the first verb's flags would be eaten globally and a second verb
         # could not carry its own.

@@ -183,7 +183,8 @@ The verdict is `placement.legality.grade_pad_legality` — the same numbers
 request is refused when it makes a category worse — the counts (pad conflicts,
 hole conflicts, pads off-board) **and their magnitudes** (`pad_shortfall`,
 `oob_pad_amount`; a count arm alone accepted a part moved from 2.0 mm off the
-board to 204.66 mm off it) — and **never for damage the board already had**:
+board to 204.66 mm off it, measured on `flat_hierarchy`) — and **never for
+damage the board already had**:
 an absolute gate is False for a large share of parts on a real board before
 anything moves, so it would refuse poses no worse than where the part already
 sits, and would make this tool useless on the unplaced pile it exists to

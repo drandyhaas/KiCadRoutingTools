@@ -40,9 +40,9 @@ candidate board and compared with the SAME grade on the input. A request is
 refused when it makes a category worse -- the counts (pad conflicts, hole
 conflicts, pads off-board) and their MAGNITUDES (`pad_shortfall`,
 `oob_pad_amount`) -- and never for damage the board already had. The magnitude
-arms are not a nicety: on counts alone, a part already 2.0 mm off the board
-could be moved to 204.66 mm off it, exit 0, with nothing in the summary saying
-so. The two verdicts are reported apart: `no_worse` is what this verb refuses
+arms are not a nicety: on counts alone, and measured on flat_hierarchy, a part
+already 2.0 mm off the board could be moved to 204.66 mm off it, exit 0, with
+nothing in the summary saying so. The two verdicts are reported apart: `no_worse` is what this verb refuses
 on, `legal` is whether the board is CLEAN at the resulting pose.
 That is deliberate: an absolute gate is False for a large share of parts on a
 real board before anything moves, so it would refuse poses no worse than where
@@ -63,11 +63,14 @@ import sys
 
 VERBS = ('set', 'rotate', 'face', 'lock', 'unlock')
 
-#: The verbs and THEIR flags. They live in per-verb parsers, so `--help`'s
-#: option list cannot show them; this epilog is where a reader finds them.
-#: (`place_pose.py` is deliberately absent from `krt_capabilities.FLAG_SCRIPTS`
-#: for the same reason -- that contract is "every flag this script accepts is
-#: visible in --help as an option", and a per-verb flag is not.)
+#: The verbs and THEIR flags. `main()` parses with the verb-less parser, so
+#: what `--help` renders is THIS TEXT -- the subparsers exist for a reader who
+#: goes looking through the parser object (and for
+#: `tests/test_431_skill_commands.py`, which does exactly that), not for the
+#: help screen. (`place_pose.py` is deliberately absent from
+#: `krt_capabilities.FLAG_SCRIPTS` for the same reason -- that contract is
+#: "every flag this script accepts is visible in --help as an option and
+#: accepted at the top level", and a per-verb flag is neither.)
 VERB_HELP = """verbs (several in one call describe ONE arrangement):
 
   set REF [X Y] [--rot DEG] [--near X Y]
@@ -84,10 +87,12 @@ VERB_HELP = """verbs (several in one call describe ONE arrangement):
 def build_parser(with_verbs=True):
     """The CLI's parser.
 
-    `with_verbs` registers the verb parsers as subparsers -- what `--help` and
-    the documented-flag gate read. `main()` asks for the parser WITHOUT them,
-    because a subparsers action consumes the rest of the line at the first
-    verb and this tool takes several in one call.
+    `with_verbs` registers the verb parsers as subparsers -- which is how
+    `tests/test_431_skill_commands.py` finds `--rot` / `--near` / `--relative`
+    when it checks that a documented flag exists. `main()` asks for the parser
+    WITHOUT them, because a subparsers action consumes the rest of the line at
+    the first verb and this tool takes several in one call; so what `--help`
+    actually renders is the epilog, not a subparser section.
     """
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -96,9 +101,10 @@ def build_parser(with_verbs=True):
     p.add_argument('input_file', help='board to read')
     p.add_argument('output_file',
                    help='board to write (still required with --dry-run, '
-                        'which reports the path it would have written -- the '
-                        'same shape place_seed uses, and it keeps a verb '
-                        'token from being read as the output path)')
+                        'which writes nothing and reports the path under '
+                        '`would_write` -- the same shape place_seed uses, and '
+                        'it keeps a verb token from being read as the output '
+                        'path)')
     p.add_argument('--clearance', type=float, default=None, metavar='MM',
                    help="Pad clearance the grade runs at. Omitted, it comes "
                         "from the BOARD (its Default netclass / constraints) "
@@ -159,8 +165,9 @@ def _verb_parsers(sub=None):
     call, which a subparsers action cannot express -- it consumes the rest of
     the line at the first one). The registration is not decoration: it is how
     `--rot` / `--near` / `--relative` are discoverable, and both
-    `tests/test_431_skill_commands.py` (documented flags must exist) and a
-    reader of `--help` go looking for them through the subparsers action. The
+    `tests/test_431_skill_commands.py` (documented flags must exist) goes
+    looking for them through the subparsers action -- `--help` itself renders
+    the epilog, since `main()` builds the verb-less parser. The
     parsers registered there are the SAME objects the split-segment path
     parses with, so a flag cannot be documented in one and honoured by the
     other.
@@ -293,6 +300,18 @@ def main(argv=None):
     # BEFORE the split, or the verb this swallowed makes the NEXT token look
     # like the error ("'C3' comes before any verb"), which sends the caller
     # looking at the wrong end of their command line.
+    # Validated HERE, where a bad value is a usage error with a message,
+    # rather than inside `pose_score._offsets`, which divides by the step:
+    # `--snap-step 0` was a ZeroDivisionError traceback, exit 1, and ZERO
+    # JSON_SUMMARY lines -- the third crash of that family.
+    if args.snap_step <= 0:
+        p.error("--snap-step is a lattice pitch in mm and must be positive; "
+                "%g would divide the sweep by zero" % args.snap_step)
+    if args.radius < 0:
+        p.error("--radius is a distance in mm; %g is not one" % args.radius)
+    if args.snap_tries < 0:
+        p.error("--snap-tries counts candidates to re-grade; %d is not a "
+                "count (0 means 'do not try any')" % args.snap_tries)
     if args.output_file in VERBS:
         p.error("%r reads as the OUTPUT PATH here, not a verb -- the shape is "
                 "`place_pose.py BOARD OUT %s ...`. Pass an output board (with "
@@ -357,7 +376,12 @@ def main(argv=None):
             strict=args.strict_legal, force=args.force,
             dry_run=args.dry_run)
     except pose_ops.PoseRefusal as exc:
-        print("place_pose REFUSED: %s" % exc.reason, file=sys.stderr)
+        # The VERB is the caller's to print, not the finding's: the reason
+        # text is reprinted verbatim by the --force path on a run that WROTE,
+        # so a "refused rather than written" inside it contradicted the
+        # outcome in its own last clause.
+        print("place_pose REFUSED, nothing written: %s" % exc.reason,
+              file=sys.stderr)
         # EVERY exit carries a summary, including the refusals raised before
         # one was built (an unknown ref, a locked part, a face with no pads):
         # a machine caller that has to parse stderr for those and JSON for the
@@ -372,6 +396,12 @@ def main(argv=None):
             refused.update({k: v for k, v in exc.extra.items()
                             if k != 'summary'})
         refused.setdefault('exit_code', exc.code)
+        _sc = (refused.get('snap_census') or {})
+        if _sc.get('skipped'):
+            # `_report` runs only on the success path, so without this a
+            # refused run carried the "did nothing" note in the JSON alone.
+            print("note: --snap/--near did not apply -- %s" % _sc['skipped'],
+                  file=sys.stderr)
         print('JSON_SUMMARY: ' + json.dumps(refused, sort_keys=True,
                                             default=str), flush=True)
         # 2 = the request names something that is not there (a typo the caller
@@ -393,7 +423,8 @@ def _refuse(args, reason, code, **extra):
     stderr for the board gate and JSON for a pose refusal will parse stderr for
     neither.
     """
-    print("place_pose REFUSED: %s" % reason, file=sys.stderr)
+    print("place_pose REFUSED, nothing written: %s" % reason,
+          file=sys.stderr)
     doc = {'input': args.input_file, 'output': None,
            'dry_run': bool(args.dry_run), 'refused': reason,
            'exit_code': code, 'moved': [], 'ops': [], 'legal': None}
@@ -431,8 +462,11 @@ def _report(summary):
     if summary['knobs']['clearance']['source'] == 'cli':
         # A refusing tool whose threshold is a flag has to say when the
         # threshold came from the caller: measured on esp_prog (no netclass),
-        # 7 of 81 probe poses were refused at the board-resolved 0.25 and
-        # accepted at --clearance 0.01. run_watch's FLOOR scope does not cover
+        # sweeping U1 over the 81 positions of `pose_score._offsets(2.0, 0.5)`,
+        # 7 were refused at the board-resolved 0.25 and accepted at
+        # --clearance 0.01. Per-part, not board-wide -- CON2 flips 10 of 81 on
+        # the same sweep and C1 none -- so the part and the sweep are named
+        # rather than the ratio alone. run_watch's FLOOR scope does not cover
         # this tool, so this line is the disclosure.
         print("note: the verdict ran at --clearance %g, which YOU supplied; "
               "the board's own floor was not used"

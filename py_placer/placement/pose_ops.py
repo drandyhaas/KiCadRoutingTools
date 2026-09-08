@@ -68,9 +68,11 @@ LEGALITY_KEYS = ('pad_conflicts', 'hole_conflicts', 'oob_pad_count')
 
 #: The MAGNITUDES, and they are not a nicety: a count arm alone accepts a
 #: request that keeps the tally and deepens the damage. Measured on the
-#: count-plus-shortfall version -- a part already 2.0 mm off the board was
-#: moved to 204.66 mm off it, `oob_pad_count 1 -> 1`, exit 0, `legal: true`,
-#: and no field in the summary said so. CLAUDE.md calls pad copper outside the
+#: count-plus-shortfall version, on flat_hierarchy: a part already 2.0 mm off
+#: the board was moved to 204.66 mm off it, `oob_pad_count 1 -> 1`, exit 0,
+#: `legal: true`, and no field in the summary said so. (esp_prog reproduces
+#: the same mechanism at 2.008 -> 101.008 mm.) CLAUDE.md calls copper outside
+#: the
 #: outline the top-priority placement defect, so its AMOUNT is an arm too.
 MAGNITUDE_KEYS = ('pad_shortfall', 'oob_pad_amount')
 MAGNITUDE_EPS = 1e-6
@@ -81,8 +83,8 @@ class PoseRefusal(Exception):
 
     `code` is the exit code the CLI should use, and the two values mean
     different things to a caller: 2 is "the request does not name a thing on
-    this board" (an unknown ref, a face with no row, a rotation that is not a
-    multiple of 90) -- a typo the caller fixes by rewriting the command -- and
+    this board" (an unknown ref, a face with no row) -- a typo the caller
+    fixes by rewriting the command -- and
     4 is "the request is well-formed and the board says no" (it grades worse,
     or the part is locked), which is a MEASUREMENT the caller acts on. Folding
     both into one code would make a typo indistinguishable from a finding.
@@ -139,7 +141,10 @@ def rotate_face(face: str, delta_deg: float) -> str:
 
     Only multiples of 90 are meaningful here; a non-orthogonal delta is
     refused rather than rounded, because rounding it would silently answer a
-    different question than the caller asked.
+    different question than the caller asked. That refusal is an INTERNAL
+    guard, not a CLI path: the only production caller passes `face_delta`'s
+    output, which is a multiple of 90 by construction. `rotate R4 45` reaches
+    the writer and is graded like any other pose.
     """
     if abs(delta_deg / 90.0 - round(delta_deg / 90.0)) > 1e-6:
         raise PoseRefusal(
@@ -290,12 +295,16 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
                             track_width=track_width)
             if not by.get(face):
                 raise PoseRefusal(
+                    # code=2: the docstring and PoseRefusal both file this as
+                    # "the request does not name a thing on this board", and
+                    # it was exiting 4 -- the code that means the board said
+                    # no about a well-formed request.
                     "%s has no pads on its %s face right now, so there is no "
                     "row to aim; it has %s" % (
                         ref, face,
                         ', '.join('%s: %d' % (f, len(p))
                                   for f, p in sorted(by.items())) or 'none'),
-                    faces={f: len(p) for f, p in by.items()})
+                    code=2, faces={f: len(p) for f, p in by.items()})
             if op['partner'] == ref:
                 raise PoseRefusal(
                     "%s cannot face itself; name the part its %s row should "
@@ -312,8 +321,24 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
             target = bearing_face(here, there)
             delta = face_delta(face, target)
             rot = (rot + delta) % 360.0
+            # The row is identified by each pad's INDEX in `fp.pads`, never by
+            # its number. Pad numbers are NOT unique -- a shield, a split
+            # thermal paddle and every unnumbered mechanical pad share one --
+            # and a number-keyed map collapses them to whichever pad the dict
+            # saw last. Measured: esp_prog's USB1 carries SIX pads numbered
+            # `0`, spread across its faces, so the verification below scored a
+            # row that had provably rotated as 0/2 and then called it
+            # SYMMETRIC. Over the 22 tracked boards in `kicad_files/`, 196
+            # parts on 16 boards repeat a pad number at all (57 on 11 boards
+            # if the empty number is excluded, 49 on 8 if `0` is too) -- the
+            # definition matters, so it is written down rather than summarised
+            # as one figure. The index is stable across the write (the
+            # writer reorders nothing), and `row_pads` keeps the numbers for a
+            # human to read.
+            ix = {id(p): i for i, p in enumerate(fp.pads or ())}
             note.update({'face': face, 'partner': op['partner'],
                          'target_face': target, 'rotation_delta': delta,
+                         'row_pad_ix': [ix[id(p)] for p in by[face]],
                          'row_pads': [p.pad_number for p in by[face]]})
         else:
             raise PoseRefusal("unknown op %r" % (kind,), code=2)
@@ -448,6 +473,15 @@ def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
             lattice.append({'x': x, 'y': y, 'rot': rot,
                             'dist_mm': round(dist, 4), 'rung': 'lattice'})
         lattice.sort(key=lambda p: (p['dist_mm'], p['x'], p['y']))
+    # Each rung stays in ITS OWN order -- ranked by cost, lattice by distance
+    # -- and `apply_poses` walks them in two phases with a budget each. It
+    # does not concatenate them into one nearest-first list: measured on
+    # esp_prog, the 24 candidates nearest a refused point ALL failed (they sit
+    # beside the thing that refused it) while a cost-ranked pose 4.78 mm away
+    # passed, so a single nearest-first cap turns a snap that worked into a
+    # refusal. The caller's "stay near" is honoured in the second phase, which
+    # only considers lattice poses NEARER than the ranked answer.
+    ordered = out + lattice
     census = {'ranked': len(out),
               'ranked_before_radius': len(ranked),
               'lattice': len(lattice),
@@ -457,12 +491,44 @@ def snap_candidates(board_path: str, ref: str, *, rot: float, clearance: float,
               'dropped_total': diag.get('dropped_total', 0),
               'dropped_in_place': diag.get('dropped_in_place', []),
               'stopped_early': bool(diag.get('stopped_early'))}
-    return out + lattice, census
+    return ordered, census
 
 
 # ---------------------------------------------------------------------------
 # locks
 # ---------------------------------------------------------------------------
+
+def check_lock_refs(pcb_data, lock_refs=(), unlock_refs=()) -> None:
+    """Refuse a lock/unlock request the board cannot honour.
+
+    Two ways it could not, both of which used to exit 0 with a summary that
+    said otherwise:
+
+    * a ref that is not on the board. `set NOSUCHREF` refuses with code 2 and
+      the #726 hint, while `lock NOSUCHREF` wrote the board, exited 0, and
+      listed the ref under `locked` -- telling a consumer a decision had been
+      recorded that had not.
+    * the same ref in BOTH lists. `apply_locks` stamps then strips, so unlock
+      always won whatever the caller wrote: `unlock C4 set C4 ... lock C4` --
+      the re-lock workflow this tool's own refusal message recommends -- moved
+      the part, dropped the lock, and reported `locked: ["C4"]`.
+    """
+    known = set((pcb_data.footprints or {}))
+    missing = sorted((set(lock_refs) | set(unlock_refs)) - known)
+    if missing:
+        raise PoseRefusal(
+            "%s %s not on this board, so there is nothing to lock or unlock "
+            "(the parser names duplicate references TP4 / TP4~2, #726)"
+            % (', '.join(missing), 'is' if len(missing) == 1 else 'are'),
+            code=2, missing=missing)
+    both = sorted(set(lock_refs) & set(unlock_refs))
+    if both:
+        raise PoseRefusal(
+            "%s is named by both lock and unlock in one call; the stamping "
+            "order would decide it silently (unlock wins), and one call "
+            "describes one arrangement. Say which you mean."
+            % ', '.join(both), code=2, conflicting=both)
+
 
 def apply_locks(board_file: str, lock_refs=(), unlock_refs=()) -> Dict:
     """Stamp / strip `(locked yes)` in place. Returns what actually changed."""
@@ -511,6 +577,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
 
     placements, notes = resolve_ops(pcb, ops, clearance=clearance,
                                     track_width=track_width)
+    check_lock_refs(pcb, lock_refs, unlock_refs)
 
     # A KiCad lock is a DECISION someone recorded in the file -- the seeder
     # stamps the intent's must_lock refs there, and run 25 stamped its rotation
@@ -548,6 +615,17 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         'nearest_legal': None,
         'refused': None,
         'forced': False,
+        # The lock INTENT rides in every summary, refusals included: it used
+        # to be added only on the two paths that reached the stamping, so a
+        # refused dry run had no `locked` key at all and a reader could not
+        # tell "asked for nothing" from "never got that far".
+        'locked': sorted(lock_refs),
+        'unlocked': sorted(unlock_refs),
+        'locked_count': None,
+        'unlocked_count': None,
+        # What a dry run WOULD have written, since the flag's own help says
+        # it reports the path.
+        'would_write': out_path,
     }
 
     before = grade(pcb, board_path, clearance)
@@ -597,46 +675,85 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 'pose_score.rank_poses / QuenchState.candidate_valid -- an '
                 'AABB gate, RE-GRADED here before it is written')
             summary['snap_census'] = census
-            tried = 0
-            for cand_pose in poses[:snap_tries]:
-                tried += 1
-                trial = [{'reference': ref, 'new_x': cand_pose['x'],
-                          'new_y': cand_pose['y'],
-                          'new_rotation': cand_pose['rot']}]
+
+            def _grade_pose(cp):
+                """Write one candidate onto the staging board and grade it."""
+                trial = [{'reference': ref, 'new_x': cp['x'],
+                          'new_y': cp['y'], 'new_rotation': cp['rot']}]
                 write_placed_output(board_path, cand, trial)
                 copy_siblings(board_path, cand)
-                cand_pcb = parse_kicad_pcb(cand)
-                after = grade(cand_pcb, cand, clearance)
-                bad = worsened(before, after)
-                if not bad:
-                    placements = trial
-                    summary['snapped'] = {
-                        'ref': ref,
-                        'to': [cand_pose['x'], cand_pose['y'],
-                               cand_pose['rot']],
-                        'dist_mm': cand_pose.get('dist_mm'),
-                        # WHICH rung answered: 'ranked' means the pose scorer
-                        # and this verb agreed, 'lattice' means only this
-                        # verb's own grade accepted it.
-                        'rung': cand_pose.get('rung'),
-                        'candidates_tried': tried}
-                    summary['snap_census']['candidates_tried'] = tried
-                    for n in notes:
-                        if n['ref'] == ref:
-                            n['to'] = [round(cand_pose['x'], 4),
-                                       round(cand_pose['y'], 4),
-                                       cand_pose['rot']]
-                            n['moved'] = n['to'] != n['from']
-                            n['snapped'] = True
-                    summary['moved'] = [n for n in notes if n['moved']]
+                pcb_c = parse_kicad_pcb(cand)
+                g = grade(pcb_c, cand, clearance)
+                return trial, pcb_c, g, worsened(before, g)
+
+            # TWO PHASES, each with its OWN budget, and the reason is the
+            # measured behaviour of the two rungs rather than tidiness:
+            #
+            # * the RANKED rung is pre-filtered by `candidate_valid`, so its
+            #   candidates usually pass this verb's grade too -- on esp_prog
+            #   the first one did. Cost-ordered, so its first answer can be
+            #   several mm out.
+            # * the LATTICE rung is unfiltered, and its nearest members sit
+            #   right beside a point that was just refused, so they mostly
+            #   fail. Measured: the 24 nearest candidates around C4's pose all
+            #   failed while a ranked pose 4.78 mm away passed.
+            #
+            # So: take the ranked rung's first passing pose, then spend a
+            # SECOND budget on lattice poses that are NEARER than it, and
+            # prefer one of those if it passes. A single shared cap in either
+            # order loses one of the two -- nearest-first starves the ranked
+            # rung, ranked-first starves the lattice (the reviewer's finding).
+            chosen = None
+            tried = 0
+            for cp in [p for p in poses if p['rung'] == 'ranked'][:snap_tries]:
+                tried += 1
+                trial, pcb_c, g, b = _grade_pose(cp)
+                if not b:
+                    chosen = (cp, trial, pcb_c, g, b)
                     break
+            limit = chosen[0]['dist_mm'] if chosen else float('inf')
+            for cp in [p for p in poses
+                       if p['rung'] == 'lattice'
+                       and (p['dist_mm'] or 0.0) < limit][:snap_tries]:
+                tried += 1
+                trial, pcb_c, g, b = _grade_pose(cp)
+                if not b:
+                    chosen = (cp, trial, pcb_c, g, b)   # strictly nearer
+                    break
+            summary['snap_census']['candidates_tried'] = tried
+
+            if chosen is not None:
+                cand_pose, placements, cand_pcb, after, bad = chosen
+                # RE-STAGE the winner. Phase 2 may have graded other poses
+                # after it, so the staging file holds the LAST candidate
+                # tried, not the chosen one -- and the staging file is what
+                # gets promoted. (Caught by the test that compares the written
+                # board against `snapped.to`, which is the whole point of
+                # asserting on the FILE rather than on the summary.)
+                write_placed_output(board_path, cand, placements)
+                copy_siblings(board_path, cand)
+                summary['snapped'] = {
+                    'ref': ref,
+                    'to': [cand_pose['x'], cand_pose['y'], cand_pose['rot']],
+                    'dist_mm': cand_pose.get('dist_mm'),
+                    # WHICH rung answered: 'ranked' means the pose scorer and
+                    # this verb agreed, 'lattice' means only this verb's own
+                    # grade accepted it.
+                    'rung': cand_pose.get('rung'),
+                    'candidates_tried': tried}
+                for n in notes:
+                    if n['ref'] == ref:
+                        n['to'] = [round(cand_pose['x'], 4),
+                                   round(cand_pose['y'], 4), cand_pose['rot']]
+                        n['moved'] = n['to'] != n['from']
+                        n['snapped'] = True
+                summary['moved'] = [n for n in notes if n['moved']]
             else:
                 # Nothing TRIED graded clean: put the board back to the pose
                 # the caller actually asked for, so the refusal below reports
-                # THEIR request rather than the last thing tried. Note the cap
-                # -- `candidates_tried` against `ranked + lattice` is how a
-                # reader tells "there was nothing" from "we stopped looking".
-                summary['snap_census']['candidates_tried'] = tried
+                # THEIR request rather than the last thing tried.
+                # `candidates_tried` against `ranked + lattice` is how a reader
+                # tells "there was nothing" from "we stopped looking".
                 write_placed_output(board_path, cand, placements)
                 copy_siblings(board_path, cand)
                 cand_pcb = parse_kicad_pcb(cand)
@@ -656,18 +773,28 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         # on flat_hierarchy is often 180-degree symmetric, so its face cannot
         # be changed by any rotation at all. Hence: predict, MEASURE on the
         # board actually written, and say which happened.
+        findings: List[str] = []
         face_miss = []
         for n in [n for n in notes if n['kind'] == 'face']:
             by = part_faces(cand_pcb, n['ref'], clearance=clearance,
                             track_width=track_width)
-            landed = {p.pad_number: f for f, pads in by.items() for p in pads}
+            # By INDEX, for the reason `resolve_ops` records the indices: a
+            # `{pad_number: face}` map silently answers about a DIFFERENT pad
+            # whenever a footprint repeats a number, which 196 parts across 16
+            # of this repo's 22 tracked boards do.
+            after_pads = (cand_pcb.footprints[n['ref']].pads or ())
+            face_by_ix = {}
+            for f, pads in by.items():
+                for p in pads:
+                    face_by_ix[id(p)] = f
             counts: Dict[str, int] = {}
-            for num in n['row_pads']:
-                key = landed.get(num, 'gone')
+            for i in n['row_pad_ix']:
+                key = ('gone' if i >= len(after_pads)
+                       else face_by_ix.get(id(after_pads[i]), 'gone'))
                 counts[key] = counts.get(key, 0) + 1
             hit = counts.get(n['target_face'], 0)
             n['row_landed'] = counts
-            n['row_on_target'] = [hit, len(n['row_pads'])]
+            n['row_on_target'] = [hit, len(n['row_pad_ix'])]
             n['row_predicted_face'] = rotate_face(n['face'],
                                                   n['rotation_delta'])
             # A row that did not MOVE under a rotation that should have
@@ -678,7 +805,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             n['row_symmetric'] = (len(counts) == 1
                                   and n['face'] in counts
                                   and n['face'] != n['target_face'])
-            if hit * 2 <= len(n['row_pads']):
+            if hit * 2 <= len(n['row_pad_ix']):
                 face_miss.append(n)
 
         summary.update(_legality_row(before, after))
@@ -693,7 +820,7 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             'legal = the board is clean at this pose; no_worse = the verdict '
             'this verb refuses on (relative to the input board)')
 
-        if face_miss and not bad:
+        if face_miss:
             reason = '; '.join(
                 ("%s: the %s row cannot be aimed by rotating -- it reads %s "
                  "at every rotation this measured (a 2-pad row is often "
@@ -705,10 +832,15 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                                    for f, c in sorted(
                                        n['row_landed'].items()))))
                 for n in face_miss)
-            summary['refused'] = reason
+            # ACCUMULATED, not assigned: the legality block below used to
+            # overwrite this, so a forced run that missed its aim AND made the
+            # board worse shipped with only the legality finding in `refused`
+            # -- the face facts surviving nowhere a reader looks.
+            findings.append(reason)
+            summary['refused'] = '; '.join(findings)
             if not force:
                 summary['output'] = None      # nothing was written
-                raise PoseRefusal(reason, summary=summary)
+                raise PoseRefusal(summary['refused'], summary=summary)
             summary['forced'] = True
 
         if bad or (strict and not summary['legal']):
@@ -748,24 +880,22 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                     summary['nearest_legal'] = None
                     summary['nearest_legal_census'] = {
                         'error': '%s: %s' % (type(exc).__name__, exc)}
-            reason = _refusal_reason(bad, strict, before, after, summary)
-            summary['refused'] = reason
+            findings.append(_refusal_reason(bad, strict, before, after,
+                                            summary))
+            summary['refused'] = '; '.join(findings)
             if not force:
                 # A refusal writes nothing, so the summary must not name a
                 # path: the two refusal channels disagreed about this, and a
                 # machine caller cannot key on a field that means "written"
                 # on one path and "would have been" on the other.
                 summary['output'] = None
-                raise PoseRefusal(reason, summary=summary)
+                raise PoseRefusal(summary['refused'], summary=summary)
             summary['forced'] = True
 
         if dry_run:
-            # A dry run still says what the locks WOULD do, with the counts
-            # left None: "0 stamped" and "not attempted" must not read alike.
-            if lock_refs or unlock_refs:
-                summary.update({'locked': sorted(lock_refs),
-                                'unlocked': sorted(unlock_refs),
-                                'locked_count': None, 'unlocked_count': None})
+            # The lock keys are already in the summary with `None` counts:
+            # "0 stamped" and "not attempted" must not read alike, and every
+            # summary carries the intent whether or not this path is reached.
             return summary
 
         # Locks are stamped on the STAGED board and VERIFIED before anything is
@@ -789,40 +919,83 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                     "unlock did not take on %s: the board still carries "
                     "`(locked yes)` for it after stamping, so a move guarded "
                     "by that lock would have been written with the lock "
-                    "intact. Nothing was written." % ', '.join(still))
+                    "intact." % ', '.join(still))
                 summary['refused'] = reason
                 summary['output'] = None
                 raise PoseRefusal(reason, summary=summary, unlock_failed=still)
 
-        _promote(cand, out_path)
+        _promote(cand, out_path, summary)
         return summary
     finally:
         stage.cleanup()
 
 
-def _promote(staged: str, out_path: str) -> None:
-    """Move a finished staged board (and its siblings) onto the output path."""
-    from placement.portfolio import copy_siblings
+def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None:
+    """Move a finished staged board and its siblings onto the output path.
+
+    ALL OR NOTHING. Every file is copied to a `.krt-tmp` name beside its
+    destination and only then `os.replace`d into place, so a failure part way
+    leaves the previous output exactly as it was. It used to copy the board and
+    then the siblings inside one `try`, and a sibling that could not be written
+    left the NEW board on disk beside the OLD project -- the #441 pairing
+    hazard -- while the refusal said "nothing was written". Measured with a
+    read-only `.kicad_pro`: an 11-byte output file came back at 831914 bytes
+    and the summary reported `output: null`.
+    """
+    from copy_board import SIBLING_EXTS
+    src_base = os.path.splitext(staged)[0]
+    dst_base = os.path.splitext(out_path)[0]
+    pairs = [(staged, out_path)]
+    for ext in SIBLING_EXTS:
+        if os.path.isfile(src_base + ext):
+            pairs.append((src_base + ext, dst_base + ext))
+    staged_tmps = []
     try:
-        shutil.copyfile(staged, out_path)
-        copy_siblings(staged, out_path)
+        for src, dst in pairs:
+            tmp = dst + '.krt-tmp'
+            shutil.copyfile(src, tmp)
+            staged_tmps.append((tmp, dst))
+        # NOT `pop()` before the replace: a failing `os.replace` would then
+        # have already removed its own tmp from the cleanup list, and the file
+        # it could not move was left beside the output. Remove only on
+        # success, so `finally` still owns everything that did not land.
+        for entry in list(reversed(staged_tmps)):
+            os.replace(entry[0], entry[1])
+            staged_tmps.remove(entry)
     except OSError as exc:
         # A missing output directory used to surface as a FileNotFoundError
-        # traceback and an exit 1 that the CLI's own table does not list --
-        # after the whole grade had printed, so the run looked successful
-        # until the last line.
-        raise PoseRefusal(
-            "cannot write %s: %s. The grade above is real; nothing was "
-            "written." % (out_path, exc), code=2)
+        # traceback and an exit 1 that the CLI's own table does not list.
+        reason = ("cannot write %s: %s. Nothing was written: the board and "
+                  "its siblings are staged beside their destination and moved "
+                  "into place together, so a failure here leaves the previous "
+                  "output untouched." % (out_path, exc))
+        doc = dict(summary or {})
+        # The grade this run already did is kept, and any finding it was
+        # forced past is kept WITH the write error rather than replaced by it:
+        # a summary that reports only the last thing to go wrong is how a
+        # waived finding disappears.
+        doc['refused'] = '; '.join(x for x in (doc.get('refused'), reason) if x)
+        doc['output'] = None
+        raise PoseRefusal(reason, code=2, summary=doc)
+    finally:
+        for tmp, _dst in staged_tmps:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _refusal_reason(bad, strict, before, after, summary) -> str:
     if bad:
         parts = ', '.join('%s %s -> %s' % (k, before.get(k), after.get(k))
                           for k in bad)
-        reason = ("this pose makes the board's pad legality WORSE (%s). "
-                  "Refused rather than written; the board's inherited "
-                  "violations are not counted against you." % parts)
+        # NO verdict verb in the sentence. It used to end "Refused rather
+        # than written", and `--force` reprints this text on a run that WROTE
+        # -- so the finding contradicted the outcome in its own last clause.
+        # What happened is the caller's line to print; this is the finding.
+        reason = ("this pose makes the board's pad legality WORSE (%s); the "
+                  "board's inherited violations are not counted against you."
+                  % parts)
     else:
         reason = ("--strict-legal was asked for and the board is not clean at "
                   "this pose (%s)" % ', '.join(
