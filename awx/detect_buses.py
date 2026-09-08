@@ -30,36 +30,133 @@ import topo_strings as ts
 
 Pt = Tuple[float, float]
 
-_TAUT_MEMO: Dict[str, List[Pt]] = {}
-_TAUT_MEMO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               'tmp', 'taut_memo.json')
-_TAUT_MEMO_LOADED = False
+# THE TAUT MEMO, sharded. A taut path is a pure function of its two ends
+# and the obstacle model it relaxes against, so it is memoised on
+# `ends@signature` and persists across processes (the fanout loop and the
+# braid are separate runs on the same ends and copper). One file held
+# every entry ever computed: 158 MB, 31,000 entries, loaded in full by
+# every process (1.6 s, two processes per K) and REWRITTEN in full each
+# time a run added an entry -- a cold K41 dumped it twenty times. Now a
+# file per two-hex-digit prefix of the signature under tmp/taut_memo/,
+# loaded on first touch, only dirty shards written, merged with what is
+# on disk first (a parallel chain's additions survive), entries untouched
+# for TAUT_MAX_AGE days dropped at write time. The old single file is
+# migrated into shards once and renamed.
+_TAUT_MEMO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'tmp', 'taut_memo')
+_TAUT_MEMO_LEGACY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'tmp', 'taut_memo.json')
+TAUT_MAX_AGE = 14 * 86400
+_TAUT_SHARDS: Dict[str, dict] = {}
+_TAUT_DIRTY = set()
+_TAUT_MIGRATED = False
+
+
+def _shard_of(key):
+    return key.rsplit('@', 1)[-1][:2] or '00'
+
+
+def _shard_path(prefix):
+    return os.path.join(_TAUT_MEMO_DIR, prefix + '.json')
+
+
+def _read_shard(prefix):
+    try:
+        with open(_shard_path(prefix), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _memo_migrate():
+    """The single-file memo into shards, once: every entry it holds is
+    still a valid answer, and a board that has been run pays nothing."""
+    global _TAUT_MIGRATED
+    if _TAUT_MIGRATED:
+        return
+    _TAUT_MIGRATED = True
+    if not os.path.exists(_TAUT_MEMO_LEGACY):
+        return
+    import time as _t
+    try:
+        with open(_TAUT_MEMO_LEGACY, encoding='utf-8') as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        return
+    os.makedirs(_TAUT_MEMO_DIR, exist_ok=True)
+    now = _t.time()
+    by = {}
+    for k, v in old.items():
+        by.setdefault(_shard_of(k), {})[k] = {'p': v, 't': now}
+    for prefix, d in by.items():
+        cur = _read_shard(prefix)
+        cur.update(d)
+        _write_shard(prefix, cur)
+    os.replace(_TAUT_MEMO_LEGACY, _TAUT_MEMO_LEGACY + '.migrated')
+    print(f'taut memo: {len(old)} entries migrated into {len(by)} shards '
+          f'under {os.path.relpath(_TAUT_MEMO_DIR)}', flush=True)
+
+
+def _write_shard(prefix, d):
+    tmp = _shard_path(prefix) + f'.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(d, f)
+    os.replace(tmp, _shard_path(prefix))
 
 
 def _memo_load():
-    """The taut-path memo persists across processes (the fanout loop and
-    the braid are separate runs on the same ends and copper)."""
-    global _TAUT_MEMO_LOADED
-    if _TAUT_MEMO_LOADED:
-        return
-    _TAUT_MEMO_LOADED = True
-    try:
-        with open(_TAUT_MEMO_PATH, encoding='utf-8') as f:
-            _TAUT_MEMO.update({k: [tuple(p) for p in v]
-                               for k, v in json.load(f).items()})
-    except (OSError, ValueError):
-        pass
+    """Kept for callers that poke the memo (probes): nothing to do, the
+    shards load on first touch."""
+    _memo_migrate()
+
+
+def _memo_shard(prefix):
+    d = _TAUT_SHARDS.get(prefix)
+    if d is None:
+        _memo_migrate()
+        d = _TAUT_SHARDS[prefix] = _read_shard(prefix)
+    return d
+
+
+def _memo_get(key):
+    e = _memo_shard(_shard_of(key)).get(key)
+    if e is None:
+        return None
+    pts = e['p'] if isinstance(e, dict) else e
+    return [tuple(p) for p in pts]
+
+
+def _memo_put(key, pts):
+    import time as _t
+    prefix = _shard_of(key)
+    _memo_shard(prefix)[key] = {'p': [list(p) for p in pts], 't': _t.time()}
+    _TAUT_DIRTY.add(prefix)
 
 
 def _memo_save():
+    """Dirty shards only, merged with the shard on disk (another process
+    may have added to it meanwhile), stale entries dropped."""
+    import time as _t
+    if not _TAUT_DIRTY:
+        return
+    now = _t.time()
     try:
-        os.makedirs(os.path.dirname(_TAUT_MEMO_PATH), exist_ok=True)
-        tmp = _TAUT_MEMO_PATH + f'.{os.getpid()}.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({k: [list(p) for p in v] for k, v in _TAUT_MEMO.items()}, f)
-        os.replace(tmp, _TAUT_MEMO_PATH)
+        os.makedirs(_TAUT_MEMO_DIR, exist_ok=True)
+        for prefix in sorted(_TAUT_DIRTY):
+            disk = _read_shard(prefix)
+            mine = _TAUT_SHARDS.get(prefix, {})
+            for k, v in mine.items():
+                if isinstance(v, dict):
+                    disk[k] = v
+                elif k not in disk:
+                    disk[k] = {'p': v, 't': now}
+            keep = {k: v for k, v in disk.items()
+                    if not isinstance(v, dict) or now - v.get('t', now) <= TAUT_MAX_AGE}
+            _write_shard(prefix, keep)
+            _TAUT_SHARDS[prefix] = keep
     except OSError:
         pass
+    _TAUT_DIRTY.clear()
 
 
 def taut_paths(nets: Sequence[str],
@@ -70,6 +167,41 @@ def taut_paths(nets: Sequence[str],
     import taut_clean as tc
     out = {}
     dirty = False
+    # The batched, convergent relaxation (taut_fast) is the default since
+    # 2026-09-08: every string missing from the memo relaxed together in
+    # one array, contact as a constraint (no wedged oscillation), a string
+    # that touches nothing leaves after one block. Its strings are not the
+    # old relaxation's, so its memo entries carry their own tag and never
+    # mix with the old algorithm's inside a run. TAUT_FAST=0 keeps the old
+    # per-string relaxation reachable for comparison.
+    fast = os.environ.get('TAUT_FAST', '1') != '0'
+    tag = '#fast' if fast else ''
+    if fast:
+        import taut_fast as tf
+        todo = []
+        for nm in nets:
+            obs = obs_for(nm)
+            key = (f'{ends[nm][0][0]:.4f},{ends[nm][0][1]:.4f}>'
+                   f'{ends[nm][1][0]:.4f},{ends[nm][1][1]:.4f}@{obs.signature()}{tag}')
+            hit = _memo_get(key)
+            if hit is not None:
+                out[nm] = hit
+            else:
+                todo.append((nm, key, obs))
+        if todo:
+            res = tf.relax_many([(ends[nm][0], ends[nm][1], obs) for (nm, _k, obs) in todo])
+            for (nm, key, obs), (pts, it) in zip(todo, res):
+                pts, it, status, n_re = tc.assess(pts, it, obs)
+                _memo_put(key, pts)
+                dirty = True
+                out[nm] = pts
+                if status == 'violating':
+                    print(f'TAUT VIOLATING: {nm} -- {tc.relax_clean.last} (assert-only)', flush=True)
+                elif status == 'tolerated':
+                    print(f'TAUT tolerated: {nm} -- {tc.relax_clean.last}', flush=True)
+        if dirty:
+            _memo_save()
+        return out
     for nm in nets:
         # CLEANLINESS, not convergence (user, 0902): relax can settle
         # in a stable cycle THROUGH a thin foreign capsule and report
@@ -83,16 +215,15 @@ def taut_paths(nets: Sequence[str],
         # the same paths again at every judgment -- 14 times at K15, 82 %
         # of the fanout stage. Same inputs, same answer, no recomputation.
         obs = obs_for(nm)
-        _memo_load()
         key = (f'{ends[nm][0][0]:.4f},{ends[nm][0][1]:.4f}>'
                f'{ends[nm][1][0]:.4f},{ends[nm][1][1]:.4f}@{obs.signature()}')
-        hit = _TAUT_MEMO.get(key)
+        hit = _memo_get(key)
         if hit is not None:
-            out[nm] = list(hit)
+            out[nm] = hit
             continue
         pts, iters, status, n_re = tc.relax_clean(
             ends[nm][0], ends[nm][1], obs)
-        _TAUT_MEMO[key] = [tuple(p) for p in pts]
+        _memo_put(key, pts)
         dirty = True
         out[nm] = pts
         if status == 'reseeded':
