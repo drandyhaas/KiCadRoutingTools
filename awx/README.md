@@ -45,12 +45,13 @@ has 28 of 28. The pose gate (`pose_gate.sh`: both arrays on the back,
 either one, the board rotated) completes every pose; the rotations are
 exact isometries of the plan and the braid's rules, the residual being
 the router's octilinear lattice; and the board TURNED OVER
-(`mirror_board.py`) exposed the chain's own front call-out, the layer
-the taut paths relax against -- fixed to the layer the teeth are born
-on, which took the mirror from 50 to 48 vias at K28 and left the bench
-identical; the front still plans 38, and the rest of the gap is the
-destination selector breaking exact ties by menu and face order, the
-next call-out to make canonical (the pose gate section below).
+(`mirror_board.py`) exposed the chain's own front call-outs: the layer
+the taut paths relax against (fixed to the layer the teeth are born
+on), and the destination selector, which is handed and now runs every
+pair in the pair's own frame (`PairFrame`: the mirror gets the mirror
+of the plan, the bench is untouched by construction); the mirror grades
+16 and 40 against the front's 16 and 38, the rest the braid's own
+handedness (the pose gate section below).
 
 ## The chain
 
@@ -868,32 +869,49 @@ equal cost) and filters back-side required stretches near s1 only; and
 the taut paths, the spine and the plan's pad-clear test relaxed against
 FRONT copper by name. That last one is fixed -- the layer the majority of
 teeth are born on (`braid.bundle_layer_of`), identical on the bench by
-construction -- and moved the mirror to 48. What remains is the PLAN:
-the front chooses 17 berths on its down face where the mirror should
-choose 17 on its up face and chooses 9 up, 12 down, with the predicted
+construction -- and moved the mirror to 48. What remained was the PLAN:
+the front chose 17 berths on its down face where the mirror should
+choose 17 on its up face and chose 9 up, 12 down, with the predicted
 vias 55 against 37; the mirrored geometry ties every cost exactly, so
-the selector's tie-breaks -- the menu's gap order and the face
-iteration order in `select_moves` -- decide, and they are not
-mirror-invariant. Making those ties canonical (a geometric key, not a
-list order) is the next step; the two braid tie-breaks are the step
-after. With the engine symmetric, the side poses re-measured:
+the selector's tie-breaks -- the menu's gap order, the face iteration
+order, a first-index LIS, a quarter-turn axis, a crossing test that
+counts a shared endpoint on one side only -- decided, and none is
+mirror-invariant.
 
-
-| pose | K15 | K28 |
-|------|-----|-----|
-| FF (control) | 0 / 0 / 16 / 13 of 15 | 0 / 0 / 38 / 22 of 28 |
-| BF, source on the back | 0 / 0 / 21 / 14 | 0 / 0 / 46 / 26 |
-| FB, destination on the back | 0 / 0 / 21 / 11 | 0 / 0 / 52 / 21 |
-| BB, both on the back | 0 / 0 / 26 / 9 | 1 / 0 / 57 / 23 |
-| MM, the FF article turned over | 0 / 0 / 16 / 13 | 0 / 0 / 48 / 22 |
-
-BB is still not FF, and is not meant to be its mirror: the gate flips an
-array and only the parts its pads collide with, so the other passives
-stay on their face and the pages meet different islands -- a different
-board, which the chain completes. MM is the mirror (`pose_gate.sh` now
-builds it from the FF article), and its gap to FF at K28 -- 48 against
-38, identical at K15 -- is the chain's own: the selector's tie-breaks,
-above. `bga_fanout` itself is out of the picture now.
+**The selector's frame** (`select_moves.PairFrame`, 2026-09-08). Two
+answers were measured. Making every tie canonical (invariant keys, an
+oriented axis, a symmetric crossing test) did make the selector
+symmetric, but the crossing count had been tuned into the plan: the
+physical count lost the bench at every K and every weight (K28 38 ->
+44..52, K41 82 -> 114), and the tie changes alone turned K41 into a
+different draw (100 vias; five single reverts all 100..112). So the
+handed selector stays exactly as it is, and runs every pair in the
+pair's own canonical frame instead -- the move `flip_frame` makes for
+the fanout engine, done at the selector's boundary: `pair_chirality`
+reads the sign of the run's BALLS' moment about the line between the
+two array centres (+1395 on the front article, -1395 on its mirror,
+positive on the bench at every K and on the zynq; the balls, not the
+teeth, because the plan's rounds move the teeth and at K15 their sign
+flipped at round 1 and mirrored the bench against itself), and a -1
+pair has its menus, launches, box and pads mirrored in, the chosen
+moves mapped back by identity. Three things the mirror alone did not
+give, each found by comparing the two worlds stage by stage: the
+menus re-sorted into the generator's own order (`menu_order`, read off
+a move's geometry and verified equal to the generated order on every
+net of the bench, the origin board and the zynq -- the selector breaks
+ties by list order), the layer NAMES swapped (the refinement sorts
+slots by name), and a mirror line on the 0.0005 mm lattice. The judge's
+`plan_pages` and the source refinement take the same frame. Read off
+the pair alone, so a board with three arrays gives every pair its own
+frame; a +1 pair never enters the wrapper, so the bench is unchanged
+by construction: K15 14 / K28 38 / K41 82, same segment counts.
+Measured on the origin board and its mirror: the selector alone
+chooses identically through every stage (0 of 15, 0 of 28 differ);
+the chain grades **K15 16 = 16, K28 38 against 40**. The residual is
+the braid's: the plan loop's rounds are judged by the braid's own
+planner, which still breaks two ties toward F and models the front as
+the main page, and on the mirror it keeps a slightly different round
+(17 up, 3 down where the exact mirror is 16 up, 5 down).
 
 **Non-orthogonal rotations.** 30 degrees: K15 complete at 33 vias, 6 of
 15 in-band; K28 0 open but 15 DRC, 95 vias, 12 of 28 in-band, 661 s.
