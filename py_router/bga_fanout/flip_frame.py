@@ -49,28 +49,49 @@ def _fold(a: float) -> float:
     return a if a <= 90.0 else a - 180.0
 
 
+AXIS_LATTICE = 0.05   # 2 * axis a multiple of 0.1: every routing grid step
+                      # that divides 0.1 mm (0.1, 0.05, 0.025) is its own mirror
+
+
 def mirror_axis(pcb_data: PCBData) -> float:
-    """The board's horizontal centre line: the bounds' middle, so the
-    bounds are their own mirror; the pads' middle when there are none."""
+    """The board's horizontal centre line, on the lattice: the bounds'
+    middle (the pads' middle when there are none), rounded so that twice
+    the axis is a multiple of 0.1 mm. The routers' grids are anchored at
+    the origin, so a mirror about an arbitrary line maps the grid onto a
+    shifted grid and the turned board routes differently in the last
+    cell (measured: an array on the back fanned out with 0.2 mm jogs its
+    front twin did not have); about a lattice line the grid is its own
+    mirror and the copper is exact."""
     b = pcb_data.board_info.board_bounds if pcb_data.board_info else None
     if b:
-        return (b[1] + b[3]) / 2.0
-    ys = [p.global_y for f in pcb_data.footprints.values() for p in f.pads]
-    return (min(ys) + max(ys)) / 2.0 if ys else 0.0
+        c = (b[1] + b[3]) / 2.0
+    else:
+        ys = [p.global_y for f in pcb_data.footprints.values() for p in f.pads]
+        c = (min(ys) + max(ys)) / 2.0 if ys else 0.0
+    return round(c / AXIS_LATTICE) * AXIS_LATTICE
 
 
-def to_front_frame(pcb_data: PCBData, ref: str
+def to_front_frame(pcb_data: PCBData, ref: str, axis: float = None
                    ) -> Tuple[PCBData, Callable[[float, float], Point]]:
     """Return (turned_pcb, back). `turned_pcb` is a deep copy of the board
     turned over about its centre line: `ref` (and every other part) on
     the other face. `back(x, y)` maps a point of the turned board to the
-    real one (the mirror is its own inverse)."""
-    CY = mirror_axis(pcb_data)
+    real one (the mirror is its own inverse).
+
+    `axis` -- the mirror line's y; default `mirror_axis` (the board's
+    centre line on the lattice). The board bounds are mirrored about it
+    like everything else."""
+    CY = mirror_axis(pcb_data) if axis is None else float(axis)
 
     def m(x, y):
         return (x, 2.0 * CY - y)
 
     rp = copy.deepcopy(pcb_data)
+    # the turned copy says so: a memo keyed on the board FILE (path,
+    # mtime, size) would otherwise hand the turned board the real one's
+    # model -- measured: the braid's obstacle memo gave the turned
+    # mirror an F.Cu model of 22 discs where the front had 473
+    rp.frame_axis = CY
     seen = set()
 
     def xform_pad(pad):
@@ -98,6 +119,9 @@ def to_front_frame(pcb_data: PCBData, ref: str
     for plist in rp.pads_by_net.values():
         for pad in plist:
             xform_pad(pad)
+    for net in rp.nets.values():
+        for pad in getattr(net, 'pads', ()) or ():
+            xform_pad(pad)
     for seg in rp.segments:
         seg.start_x, seg.start_y = m(seg.start_x, seg.start_y)
         seg.end_x, seg.end_y = m(seg.end_x, seg.end_y)
@@ -115,6 +139,9 @@ def to_front_frame(pcb_data: PCBData, ref: str
             gp.points = [m(x, y) for (x, y) in gp.points]
     bi = rp.board_info
     if bi is not None:
+        if bi.board_bounds:
+            x0, y0, x1, y1 = bi.board_bounds
+            bi.board_bounds = (x0, 2.0 * CY - y1, x1, 2.0 * CY - y0)
         for attr in ('board_outline',):
             pts = getattr(bi, attr, None)
             if pts:

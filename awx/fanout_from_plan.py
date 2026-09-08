@@ -205,7 +205,7 @@ def braid_plan_of(st, choice, board, achieved=None):
     its copper by the braid's own _end_dir; the berth's = its face)."""
     pcb = st['pcb']
     plan = {'ends': {}, 'tooth_layer': {}, 'dest_layer': {},
-            'tooth_dir': {}, 'stub_dir': {}}
+            'tooth_dir': {}, 'stub_dir': {}, 'chi': int(st['chi'])}
     for nm, m in choice.items():
         nid, net = st['byname'][nm]
         # the sidecar describes the BOARD it sits beside: once the fanout
