@@ -2162,7 +2162,18 @@ tell a finished run from a stalled one.
 
 {why}
 
-Confirm with the instruments, and put the numbers in the report beside the
+FIRST, LOOK -- before any verdict, not merely before any checklist key. Build
+the review sheet and answer the seven boundary criteria (the combined SKILL's
+"Eyes at the boundaries"), then run the checkers below, then reconcile. This
+order is the whole mechanism: a reviewer who has already read three checker
+verdicts has a closed question, and at one close-out those three were read 16
+seconds before the sheet existed -- satisfying the letter of the old rule and
+defeating its purpose. That is why this block comes first in this text.
+
+  python3 -X utf8 py_tools/render_placement.py {a.board} \
+      --review-sheet wk/close_sheet.png --json-out wk/close_sheet.json --quiet
+
+THEN confirm with the instruments, and put the numbers in the report beside the
 names of the instruments that produced them:
 
   python3 -X utf8 check_complete.py {a.board} --clearance <floor> \\

@@ -368,6 +368,8 @@ for it, and the reason is printed:
 | `decap_pin_distance` | a DECLARED supply pin is further than `max_pin_distance_mm` from the nearest decoupling cap on its own rail, pad edge to pad edge ([#705](https://github.com/drandyhaas/KiCadRoutingTools/issues/705)) | `floorplan.supply_pins`, `legality.pad_rect` + `rect_gap` |
 | `decap_pin_distance_inferred` | the same measurement for a pin inferred from a net NAME rather than from a `pintype` or `pinfunction`. **warn** by default, because the pin set is the inference | same |
 | `decap_pin_uncovered` | a declared supply pin's rail carries no decoupling cap at all, anywhere. A design fact, not a placement failure, so **warn** and per (IC, rail) rather than per pin | same |
+| `proximity` | two DECLARED parts are further apart than `max_mm` ([#902](https://github.com/drandyhaas/KiCadRoutingTools/issues/902)). Per SUBJECT pad when the claim names `pads`, once per pair when it does not | `legality.pad_rect` + `rect_gap`, or `placement.body`'s DRAWN body for `basis: "body"` |
+| `proximity_unresolved` | a proximity claim names a ref, or a pad number, this board does not have. A separate NAME so a DNP-variant board can demote it without demoting the distance claim | same |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
 | `block_unresolved` | a block matched no footprint | — |
@@ -415,6 +417,7 @@ reports the whole picture in `accept_basis`.
 | `decap_ungraded`, `decap_pin_*` | yes | — | no | `decap_ungraded` is a claim about what the GRADE covers rather than about any pose, so there is nothing for a search to refuse. The pin rules are a THIRD currency — pad edge to pad edge on one net — and the objection below applies to them more strongly, not less |
 | `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |
 | `legality` | yes | — | no | a whole-board aggregate against a BUDGET, so a per-pose form is non-local: whether A's move is admissible would depend on B's violation |
+| `proximity` | yes | — | no | the pad-edge form is a FOURTH currency (pad edge to pad edge between two DECLARED refs) and the body form a fifth, so a gate in either would be the wrong currency -- and the `decap_distance` row above already records what that costs: a gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. Unlike a decap tether the pair is DECLARED and stationary, so a per-move attraction term is genuinely constructible and `reseat.clusters_from_tethers` is already generic over (member, anchor, radius) -- but it has no production caller today, so wiring one would ship a new engine path with no consumer under a grading fix. Separable work, named rather than silently absent |
 
 The two zone rows reach the seat search by **different channels**, and the
 difference is the reason one of them could be gated and the other could not.

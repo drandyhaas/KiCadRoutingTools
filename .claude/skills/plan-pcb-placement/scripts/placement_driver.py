@@ -956,6 +956,27 @@ def _guard_render(a):
             f'--expect-moved {d.get("expected")}.\n\nOne of the two is wrong, '
             f'and "more parts moved than the step claimed" is exactly what '
             f'mandate 8(d) exists to catch. Resolve it before continuing.')
+    # #895's fifth check. `render_placement` records the sheet it composed in
+    # `review_sheet`, so "was a review sheet built at all" becomes a gate
+    # rather than a paragraph -- and the seven boundary criteria are answered
+    # FROM that sheet. It still cannot check that anybody LOOKED; what it can
+    # check is that the thing to look at exists, which is where the previous
+    # mandate stopped. A `None` means the run asked for a sheet and the tool
+    # could not write one; an absent key means it was never asked for.
+    _sheet = doc.get('review_sheet') if 'review_sheet' in doc else ''
+    if _sheet is None or (_sheet == '' and 'review_sheet' in doc):
+        return False, (
+            'That render was asked for a review sheet and none was written, '
+            'so there is nothing to answer the seven boundary criteria from.'
+            '\n\nRe-render with --review-sheet <PATH> --json-out <PATH>.json '
+            '--quiet -- the last two flags are what keep the read BLIND, and '
+            'the sheet is what the criteria are measured off.')
+    if _sheet and not os.path.isfile(_sheet):
+        return False, (
+            f'That render names a review sheet that is not there:\n'
+            f'      {_sheet}\n\n'
+            f'A document that names a sheet nobody can open is the same '
+            f'evidence as no sheet at all.')
     return True, ''
 
 
@@ -1892,6 +1913,35 @@ def _self_test():
             want(out.startswith('<error>') and 'UNRECOGNISED' in out,
                  f'an unrecognised clause state ({_st!r}) refuses and is '
                  f'named, rather than passing as if it were graded')
+
+        # #895's fifth render check. It is BACKWARD-COMPATIBLE by design -- a
+        # document with no `review_sheet` key was produced by a run that never
+        # asked for one -- so it can only be seen by feeding the two shapes
+        # that mean something, or it is an arm nothing exercises.
+        _sheet_file = _wr('sheet_exists.json', {'x': 1})
+        for _val, _want in ((None, 'none was written'),
+                            (os.path.join(tmp3, 'no_such_sheet.png'),
+                             'not there')):
+            _rj = dict(_r15)
+            _rj['review_sheet'] = _val
+            out = STAGES['P-close'](_args(
+                ['--board', _pb, '--before', _pa,
+                 '--render-json', _wr('rs1.json', _rj),
+                 '--intent-json', _wr('is1.json', _covered([])),
+                 '--congestion-before', _wr('rs2.json', _dmg),
+                 '--waive', 'congestion:spent']))
+            want(out.startswith('<error>') and _want in out,
+                 f'a render whose review sheet is {_val!r} is refused')
+        _rj = dict(_r15)
+        _rj['review_sheet'] = _sheet_file
+        out = STAGES['P-close'](_args(
+            ['--board', _pb, '--before', _pa,
+             '--render-json', _wr('rs3.json', _rj),
+             '--intent-json', _wr('is3.json', _covered([], brief=None)),
+             '--congestion-before', _wr('rs4.json', _dmg),
+             '--waive', 'congestion:spent']))
+        want(not out.startswith('<error>'),
+             'a render naming a sheet that EXISTS passes the fifth check')
 
         # A malformed block REFUSES; it does not traceback. "Refused, never
         # assumed" is arm 2's contract, and a crash is neither.

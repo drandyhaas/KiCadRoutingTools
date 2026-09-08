@@ -216,6 +216,66 @@ first and the raw logs only when a section names one. `tests/stress/RUNBOOK.md`
 has the mechanics; `tests/stress/run_watch.py` is the part that costs nothing to
 leave running and should be started at the beginning.
 
+### The seven criteria, MEASURED and written down
+
+Looking is not enough on its own, and that is measured too: run 25's boundary
+review followed the mandate above to the letter -- sheet built with stdout
+suppressed, viewed, observations written first, then reconciled -- and passed a
+layout a human rejects at a glance. A bridge IC 9mm from its USB socket with the
+pair needing a hop, a header squeezing two resistors into a 0.18mm seam, three
+nets forced onto the back. Both reviewers looked for what the list above names,
+because that is what the text told them to look for. The run-23 lesson repeated
+one level up: numbers gate legality, nothing gates LOOKING, and now the LOOK has
+a list and nothing gates JUDGING.
+
+So the observations are not free-form. Answer all seven, in writing, each with
+its number and the instrument that produced it. A threshold here is a JUDGEMENT
+and not a tool's verdict -- the tools report measurements precisely so the
+reviewer has to decide -- and an unanswered criterion blocks the close.
+
+1. **Pair and bus length.** For every diff pair and every bus of two parts,
+   `span_mm` from `board_context.py --json` (`pin_order.rows[].span_mm`) is the
+   straight-line pad distance the connection is forced to run. Compare it with
+   the shortest the two bodies allow side by side -- their `body_mm` are on the
+   same sheet. A ratio much above 1.5 is a finding you must explain or move.
+2. **Pin-order agreement.** `pin_order.rows[].verdict`. A `CROSSED` pair costs
+   back-side copper or a via per net on two layers, and rotation cannot fix it:
+   parity flips only under a mirror. Say WHICH nets.
+3. **Cluster distance.** Every decap and series part within N mm of the pin it
+   serves -- `check_floorplan`'s `decap_pin_distance` where the intent declares
+   a limit. For the parts its tether election cannot reach (a regulator with
+   fewer than four pads is never a tether target), declare `proximity` clauses
+   and read the `proximity` findings. The regulator's input cap belongs on its
+   input side and its output cap on its output side; nothing measures that, so
+   say it in words.
+4. **Facing.** Each IC's pad row that carries a connector's nets should face
+   that connector, and a crystal's pads should face the pins they load. Read
+   `parts[].pads_by_face` and `parts[].partners` from the same sheet.
+5. **Seams.** The tightest body-to-body seam on the board, in mm:
+   `checklist.b_body_seam` from `render_placement --review-sheet ... --json-out`.
+   Below 0.3mm is a finding -- ask whether a hand could place or rework it. The
+   sheet also names which rung each body came from, and a seam measured between
+   two silk markings is a much weaker claim than one between two drawn outlines.
+6. **Density and balance.** `check_pockets.py --bin 5 --json <PATH>`: the
+   emptiest region (`cold_regions[0].area_mm2`) against the densest
+   (`hot[].ratio`), and the centroid offset (`arrangement.sides[*].offset_mm`).
+   That centroid is weighted by COURTYARD AREA, not pad area, and the tool says
+   so -- quote it as what it is.
+7. **The human question, written out.** "Would a competent engineer accept this
+   layout without changes? If not, the first thing they would move is ___."
+
+A worked example, with the numbers a real board produced, is in
+[references/boundary-criteria.md](references/boundary-criteria.md).
+
+### The sheet comes before any VERDICT, not merely before any key
+
+The mandate above says "before reading any checklist key". Its intent is
+stronger: before any verdict at all. At one close-out the three checker
+verdicts -- assembly, connectivity, DRC -- were read 16 seconds before the
+review sheet existed, which satisfies the letter and defeats the purpose. Build
+the sheet and answer the seven criteria FIRST, then run the checkers, then
+reconcile. Anything else is a reviewer with a closed question.
+
 ## What a run DELIVERS
 
 Seven artifacts, every time, in the work dir, **AND IN THIS ORDER**. A run that
