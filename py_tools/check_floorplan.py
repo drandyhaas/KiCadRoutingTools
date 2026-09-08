@@ -431,8 +431,16 @@ def main(argv=None):
     # anything for.
     if args.require_brief_coverage:
         if not coverage.get('clauses'):
+            # Keyed on whether a brief was FOUND, not on the coverage block's
+            # truthiness. The block became unconditional in this same change,
+            # so `if not coverage` turned into a dead branch and every absence
+            # started printing "the brief that was found ..." -- a fabricated
+            # fact, and worse than the case `_brief_absence_reason`'s own
+            # docstring forbids ("saying 'no design brief was found' when the
+            # caller passed --no-brief blames the board for the caller's own
+            # flag"). Its three cases are the whole point of that function.
             print("  FAIL: --require-brief-coverage, but "
-                  + (_brief_absence_reason(args, brief) if not coverage
+                  + (_brief_absence_reason(args, brief) if not brief_fragment
                      else "the brief that was found declares no gradable "
                           "clause")
                   + ". There is nothing here to have covered, so this cannot "

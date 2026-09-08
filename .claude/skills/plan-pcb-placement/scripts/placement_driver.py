@@ -615,6 +615,27 @@ def p_close(a):
         # ARM 2 -- NO COVERAGE BLOCK. Refused rather than assumed: "assume
         # covered" is the inert gate again, one key over.
         _cov = _idoc.get('brief_coverage')
+        if _cov is not None and not isinstance(_cov, dict):
+            return err(
+                f'That document\'s `brief_coverage` is '
+                f'{type(_cov).__name__}, not an object, so this gate cannot '
+                f'read it. A malformed block must REFUSE and not crash: a '
+                f'traceback is neither the pass nor the refusal this stage '
+                f'promises, and a non-zero exit is not evidence unless it '
+                f'names its reason.\n' + _regrade)
+        if isinstance(_cov, dict) and _cov.get('schema') not in (None, 1):
+            return err(
+                f'That `brief_coverage` block declares schema '
+                f'{_cov.get("schema")!r} and this gate reads schema 1. A '
+                f'schema this stage has never seen is not something to grade '
+                f'optimistically -- reading a newer block with older rules is '
+                f'the inert gate again, one key over.\n' + _regrade)
+        if isinstance(_cov, dict) and not isinstance(
+                _cov.get('clauses', []), list):
+            return err(
+                f'That `brief_coverage.clauses` is '
+                f'{type(_cov.get("clauses")).__name__}, not a list of '
+                f'clauses.\n' + _regrade)
         if _cov is None:
             return err(
                 f'That intent result carries no `brief_coverage`, so nothing '
@@ -624,8 +645,12 @@ def p_close(a):
                 f'and measured not one clause its brief declared -- the count '
                 f'was satisfied by rules nobody had declared anything for. '
                 f'Re-grade with a build that writes the block:\n' + _regrade
-                + f'\n\nIf this board has no design brief at all, say so on the '
-                  f'record instead: --waive brief:<why nobody can declare one>.')
+                + f'\n\nA board with no design brief at all still closes -- the '
+                  f'block is written EMPTY for it, and this stage prints the '
+                  f'absence. What it cannot do is read a document that '
+                  f'predates the block. If there is no spec to declare at all, '
+                  f'the honest route is the intent waiver: drop --intent-json '
+                  f'and pass --waive intent:<why there is no spec>.')
         # ARM 3 -- CLAUSE COVERAGE. `not_claimed` and `carried` never reach
         # here: an author writing "unknown" is declaring honestly, and
         # punishing that is how a channel teaches people to stop declaring.
@@ -637,6 +662,12 @@ def p_close(a):
         # That is why the block is written even when it is empty: absent and
         # empty would otherwise be the same document.
         _rows = _cov.get('clauses') or []
+        _junk = [r for r in _rows if not isinstance(r, dict)]
+        if _junk:
+            return err(
+                f'A `brief_coverage.clauses` entry is '
+                f'{type(_junk[0]).__name__}, not a clause object.\n'
+                + _regrade)
         _known = {str(r.get('id')) for r in _rows}
         # The id is resolved AGAINST THE DOCUMENT rather than by splitting on
         # colons: a clause id contains them (`proximity[0:Y1~U1].max_mm`) and
@@ -647,10 +678,19 @@ def p_close(a):
             if not _w.startswith('brief-clause:'):
                 continue
             _rest = _w[len('brief-clause:'):]
+            # LONGEST first, and the `+ ':'` matters: without it
+            # `keepouts[batt]xyz:reason` would silently waive `keepouts[batt]`,
+            # and without longest-first a waiver for `interfaces[J1].edge_band`
+            # could resolve to `interfaces[J1].edge` and leave the real clause
+            # open while reporting it waived.
             _hit = next((i for i in sorted(_known, key=len, reverse=True)
                          if _rest == i or _rest.startswith(i + ':')), None)
             if _hit is None:
-                _phantom.append(_rest.split(':', 1)[0])
+                # The WHOLE residue, not `split(':', 1)[0]` -- that is the
+                # very bug this resolution fixed, surviving one line over in
+                # the message: a waiver for `proximity[0:Y1~U2].max_mm` was
+                # reported as naming `proximity[0`.
+                _phantom.append(_rest)
             elif not _rest[len(_hit) + 1:].strip():
                 _noreason.append(_hit)
             else:
@@ -667,10 +707,17 @@ def p_close(a):
                 f'document does not carry. A waiver that matches nothing is a '
                 f'gate that looks satisfied and is not. The clause ids here '
                 f'are:\n' + '\n'.join(f'  {i}' for i in sorted(_known)))
+        # A WHITELIST of the states that may pass, not a blacklist of the two
+        # that may not. The producer's good set is closed and tiny, and a
+        # blacklist fails OPEN on a sixth state: measured, a row spelled
+        # `ungraded` or `UNCOVERED` or carrying no `state` at all sailed
+        # through while the clause was genuinely unmeasured. Note the
+        # asymmetry that made this easy to miss -- the producer raises on a
+        # novel state (`counts[state] += 1`) while the consumer stayed silent.
+        _PASSES = ('graded', 'not_claimed', 'carried')
         _open = [r for r in _rows
                  if str(r.get('id')) not in _waived
-                 and (r.get('state') in ('uncovered', 'abstained')
-                      or r.get('drifted'))]
+                 and (r.get('state') not in _PASSES or r.get('drifted'))]
         if _open:
             def _bucket(name, pred):
                 got = [r for r in _open if pred(r)]
@@ -691,6 +738,15 @@ def p_close(a):
                           'declares',
                           lambda r: (r.get('drifted')
                                      and r.get('state') == 'graded'))
+                # The catch-all, so a row can never land in `_open` and in no
+                # bucket: that produced a refusal with a BLANK list, which is
+                # unactionable and reads like a bug in the gate rather than a
+                # finding about the board.
+                + _bucket('UNRECOGNISED -- this gate does not know this state',
+                          lambda r: (r.get('state') not in
+                                     ('uncovered', 'abstained')
+                                     and not (r.get('drifted')
+                                              and r.get('state') == 'graded')))
                 + f'\n\n`rules_run` counts RULES, not CLAUSES, and a count of '
                   f'six is what let one run close clean with a whole list like '
                   f'this ungraded. Fold the brief into the document that is '
@@ -708,6 +764,16 @@ def p_close(a):
             f"clause(s) graded"
             + (f", {len(_waived)} waived by name" if _waived else '')
             + '.') if _rows else (
+            # Read off `brief`, which `clause_coverage` fills with the brief's
+            # own basename precisely so a consumer can tell these apart.
+            # Inferring absence from an EMPTY CLAUSE LIST made this stage
+            # report "no design brief beside this board" for a board whose
+            # brief was named in the very same block -- it declared only
+            # free-text unknowns, so it compiled to no clause.
+            f"the design brief {_cov.get('brief')} declares no gradable "
+            f"clause -- everything in it is carried, declared unknown, or "
+            f"free text, so there was nothing for a rule to reach."
+            if _cov.get('brief') else
             'no design brief beside this board, so 0 clauses were declared '
             'and none could be graded. Every `edge` in that intent is an '
             'INFERENCE from a part pose, not a declaration.')
@@ -1663,9 +1729,12 @@ def _self_test():
              and 'require-brief-coverage' in out,
              'P-close refuses a graded intent that carries no coverage block')
 
-        def _covered(rows, graded=0):
+        def _covered(rows, graded=0, brief='b.json'):
+            # `brief` is what the block says was FOUND, and it is a separate
+            # fact from whether any clause compiled: a brief declaring only
+            # free-text unknowns names itself here and carries no clause.
             return {'rules_run': _six,
-                    'brief_coverage': {'brief': 'b.json', 'clauses': rows,
+                    'brief_coverage': {'brief': brief, 'clauses': rows,
                                        'graded': graded}}
 
         _open_rows = [
@@ -1677,7 +1746,7 @@ def _self_test():
              'drifted': False, 'why': 'this board has no usable bounds'},
         ]
 
-        def _close_cov(rows, extra=(), graded=0):
+        def _close_cov(rows, extra=(), graded=0, brief='b.json'):
             # The `_r15` / `_dmg` pair is run 15's shape, which this stage
             # REPORTS and refuses until somebody dispositions it -- so every
             # case that expects the stage to PROCEED carries that disposition
@@ -1685,7 +1754,8 @@ def _self_test():
             return STAGES['P-close'](_args(
                 ['--board', _pb, '--before', _pa,
                  '--render-json', _wr('rc.json', _r15),
-                 '--intent-json', _wr('ic.json', _covered(rows, graded)),
+                 '--intent-json', _wr('ic.json',
+                                      _covered(rows, graded, brief)),
                  '--congestion-before', _wr('rd.json', _dmg),
                  '--waive', 'congestion:every lever spent'] + list(extra)))
 
@@ -1730,9 +1800,113 @@ def _self_test():
 
         # A brief-less board closes, and SAYS SO: #711 made declaring nothing
         # cost nothing, and this must not reverse that.
-        out = _close_cov([])
+        out = _close_cov([], brief=None)
         want(not out.startswith('<error>') and 'no design brief' in out,
              'a board with no brief closes with the absence on the record')
+        # ...and a brief that WAS found but declares no gradable clause must
+        # not be reported as absent. Inferring absence from an empty clause
+        # list said "no design brief beside this board" about a board whose
+        # brief was named in the same block.
+        out = _close_cov([], brief='minimal.design-brief.json')
+        want(not out.startswith('<error>')
+             and 'minimal.design-brief.json' in out
+             and 'no design brief beside' not in out,
+             'a brief that declares no gradable clause is named, not called '
+             'absent')
+
+        # The four mutants that SURVIVED the first battery. Each names the
+        # code it pins, because a case whose subject is not obvious is a case
+        # somebody later deletes as redundant.
+
+        # `True` is an `int` in Python, so without the explicit bool check a
+        # `rules_run: true` reads as a count of ONE and passes every arm.
+        for _b in (True, False):
+            out = STAGES['P-close'](_args(
+                ['--board', _pb, '--before', _pa,
+                 '--render-json', _wr('rb1.json', _r15),
+                 '--intent-json', _wr('ib1.json', {'rules_run': _b}),
+                 '--congestion-before', _wr('rb2b.json', _dmg)]))
+            want(out.startswith('<error>') and 'cannot read' in out,
+                 f'P-close refuses rules_run: {_b} -- a bool is an int in '
+                 f'Python and would read as a count')
+
+        # LONGEST-MATCH resolution. The pair has to be COLON-AMBIGUOUS or the
+        # two orders agree: with `keepouts[a]` and `keepouts[a]:b`, a waiver
+        # for the longer one begins with the shorter one PLUS a colon, so
+        # shortest-first waives the WRONG clause and reads `b:...` as the
+        # reason. A first draft used `edge` / `edge_band`, where no colon
+        # separates them, both orders resolved correctly, and the mutation
+        # survived -- a case that cannot tell the two apart is not a case.
+        _pair = [
+            {'id': 'keepouts[a]', 'state': 'uncovered', 'drifted': False,
+             'why': 'the short one'},
+            {'id': 'keepouts[a]:b', 'state': 'uncovered', 'drifted': False,
+             'why': 'the long one'},
+        ]
+        out = _close_cov(_pair, extra=[
+            '--waive', 'brief-clause:keepouts[a]:b:cannot answer'])
+        want(out.startswith('<error>') and 'the short one' in out
+             and 'the long one' not in out,
+             'a waiver resolves to the LONGEST matching id, leaving the '
+             'shorter clause open')
+
+        # A typo'd SUFFIX must not silently waive the real clause: the `+ ':'`
+        # is what stops `keepouts[batt]xyz:reason` matching `keepouts[batt]`.
+        out = _close_cov(
+            [{'id': 'keepouts[batt]', 'state': 'uncovered', 'drifted': False,
+              'why': 'x'}],
+            extra=['--waive', 'brief-clause:keepouts[batt]xyz:typo'])
+        want(out.startswith('<error>') and 'does not carry' in out
+             and 'keepouts[batt]xyz' in out,
+             'an id with a typo\'d suffix does not waive the real clause')
+
+        # ...and the refusal names the WHOLE id the caller typed. This one
+        # CONTAINS a colon, which is what makes it discriminate: the old
+        # `split(':', 1)[0]` reported `proximity[0` and sent a reader looking
+        # for a clause by that name. A phantom id with no colon in it cannot
+        # tell the two spellings apart.
+        out = _close_cov(
+            [{'id': 'keepouts[batt]', 'state': 'uncovered', 'drifted': False,
+              'why': 'x'}],
+            extra=['--waive', 'brief-clause:proximity[0:Y1~U2].max_mm:typo'])
+        want(out.startswith('<error>')
+             and 'proximity[0:Y1~U2].max_mm' in out,
+             'the phantom-id refusal names the whole id, not the fragment '
+             'before its first colon')
+
+        # THE DRIFTED ARM. Every other fixture here carries `drifted: False`,
+        # so deleting the drift test left the self-test green while the
+        # verifier prompt requires it.
+        out = _close_cov([{'id': 'interfaces[USB1].edge', 'state': 'graded',
+                           'drifted': True, 'why': ''}], graded=1)
+        want(out.startswith('<error>') and 'DRIFTED' in out
+             and 'interfaces[USB1].edge' in out,
+             'a GRADED clause that drifted still refuses -- measured, against '
+             'the wrong requirement')
+
+        # A state this gate has never seen must FAIL CLOSED. The producer
+        # raises on a novel state; the consumer used to pass silently.
+        for _st in ('ungraded', 'UNCOVERED', None):
+            out = _close_cov([{'id': 'keepouts[k]', 'state': _st,
+                               'drifted': False, 'why': 'novel'}])
+            want(out.startswith('<error>') and 'UNRECOGNISED' in out,
+                 f'an unrecognised clause state ({_st!r}) refuses and is '
+                 f'named, rather than passing as if it were graded')
+
+        # A malformed block REFUSES; it does not traceback. "Refused, never
+        # assumed" is arm 2's contract, and a crash is neither.
+        for _shape in ([], 'x', 0, {'clauses': 'x'}, {'clauses': ['x']},
+                       {'schema': 2, 'clauses': []}):
+            out = STAGES['P-close'](_args(
+                ['--board', _pb, '--before', _pa,
+                 '--render-json', _wr('rm1.json', _r15),
+                 '--intent-json', _wr('im1.json',
+                                      {'rules_run': _six,
+                                       'brief_coverage': _shape}),
+                 '--congestion-before', _wr('rm2.json', _dmg)]))
+            want(out.startswith('<error>'),
+                 f'a malformed brief_coverage ({_shape!r}) is refused, not a '
+                 f'traceback')
 
     # Banned shapes: hedging, and a subagent prompt the model might obey itself.
     # The evidence must be REAL files: this used to pass bare names ('b', 'a',

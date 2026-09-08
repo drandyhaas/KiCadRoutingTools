@@ -805,6 +805,48 @@ def test_the_cli_refuses_and_names_every_uncovered_clause():
           "coverage gate rather than the rule count")
 
 
+def test_the_absence_reason_names_what_is_actually_absent():
+    """`--require-brief-coverage` must not fabricate a brief.
+
+    The coverage block became UNCONDITIONAL on the `--intent` path, which
+    turned `if not coverage` into a dead branch -- so every absence started
+    printing "the brief that was found declares no gradable clause" about
+    boards that have no brief at all, and under `--no-brief` it blamed the
+    board for the caller's own flag. `_brief_absence_reason` keeps three cases
+    apart on purpose; the gate has to reach them.
+    """
+    import subprocess
+    tool = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
+    board = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
+    intent = os.path.join(ROOT, 'wk', 'abs_intent.json')
+    os.makedirs(os.path.dirname(intent), exist_ok=True)
+    subprocess.run([sys.executable, '-X', 'utf8', tool, board, '--no-brief',
+                    '--emit-intent', intent, '-q'],
+                   capture_output=True, text=True, check=True)
+
+    def _run(*extra):
+        return subprocess.run(
+            [sys.executable, '-X', 'utf8', tool, board, '--intent', intent,
+             '--require-brief-coverage', '-q'] + list(extra),
+            capture_output=True, text=True)
+
+    found = _run()
+    assert found.returncode == 4, found.returncode
+    assert 'no design brief was found' in found.stderr, found.stderr
+    assert 'brief that was found' not in found.stderr, found.stderr
+
+    flag = _run('--no-brief')
+    assert flag.returncode == 4, flag.returncode
+    assert '--no-brief was passed' in flag.stderr, flag.stderr
+    assert 'no design brief was found' not in flag.stderr, flag.stderr
+
+    # The two reasons are DIFFERENT, which is the whole point of keeping
+    # three cases: one blames the board, the other blames the flag.
+    assert found.stderr != flag.stderr
+    print("  PASS: an absent brief and a suppressed one give different "
+          "reasons, and neither claims a brief was found")
+
+
 def test_a_board_with_no_brief_is_untouched():
     """The control. `counts`, the report line and the JSON must be what they
     were before this key existed, or every board on the corpus starts
@@ -1057,6 +1099,7 @@ TESTS = [
     test_unknown_and_carried_clauses_never_block,
     test_the_cli_refuses_and_names_every_uncovered_clause,
     test_a_board_with_no_brief_is_untouched,
+    test_the_absence_reason_names_what_is_actually_absent,
     test_the_body_basis_measures_the_DRAWN_body_not_the_courtyard,
     test_a_partially_wrong_pad_list_is_not_graded_on_the_survivors,
     test_the_minimum_over_partners_is_a_minimum,
