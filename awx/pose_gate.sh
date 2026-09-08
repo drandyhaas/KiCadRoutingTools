@@ -1,7 +1,8 @@
 #!/bin/bash
 # THE POSE GATE: the chain over the same pair in every pose -- both
 # arrays on the front (FF, the control), the source on the back (BF),
-# the destination on the back (FB), both (BB), and the whole FF article
+# the destination on the back (FB), both (BB), the FF article turned
+# over entirely (MM, the reflection isometry), and the FF article
 # rotated by 90 / 180 / 270 degrees. A rotation is an isometry, so a
 # grade that changes there is a stage leaning on the board's axes; a
 # side switch is a different article (the caps under an array follow
@@ -22,7 +23,7 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do KS+=("$1"); shift; done
 [ "$1" = "--" ] && shift
 STEM=tmp/gate/$(basename "${BOARD%.kicad_pcb}")
 mkdir -p tmp/gate
-POSES=${POSES:-"FF BF FB BB R90 R180 R270"}   # a subset by env; (macOS bash 3.2: no associative arrays)
+POSES=${POSES:-"FF BF FB BB MM R90 R180 R270"}   # a subset by env; (macOS bash 3.2: no associative arrays)
 GATE=${GATE:-gate}                               # the run's name: chain tags and the table
 opts_of() {
   case "$1" in
@@ -33,8 +34,15 @@ opts_of() {
 }
 for P in $POSES; do
   echo "##### building $P"
+  if [ "$P" = MM ]; then
+    # the full mirror of the FF article, copper included -- the reflection
+    # isometry (BB flips the arrays and only the parts they collide with)
+    [ -f "${STEM}_FF.kicad_pcb" ] || python3 make_bench.py "$BOARD" "$SRC" "$DST" "${STEM}_FF.kicad_pcb" "$@" > /dev/null 2>&1
+    python3 mirror_board.py "${STEM}_FF.kicad_pcb" "${STEM}_MM.kicad_pcb" 2>/dev/null | grep -E "wrote|FAILED" | sed 's/^/  /'
+  else
   python3 make_bench.py "$BOARD" "$SRC" "$DST" "${STEM}_$P.kicad_pcb" $(opts_of "$P") "$@" 2>/dev/null \
     | grep -E "flipped|fanned|DRC|ladder|rotation" | sed 's/^/  /'
+  fi
   if [ -n "$LADDER" ]; then cp "$LADDER" "${STEM}_$P.ladder.txt";
   elif [ "$P" != FF ] && [ -f "${STEM}_FF.ladder.txt" ]; then cp "${STEM}_FF.ladder.txt" "${STEM}_$P.ladder.txt"; fi
 done

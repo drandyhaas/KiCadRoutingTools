@@ -13,6 +13,14 @@ Creates escape routing for BGA (Ball Grid Array) packages in KiCad PCB files.
   placements skip it entirely and are unaffected. Foreign-pad clearance is exact, including
   for rotated rectangular neighbours (both the routing obstacle map and the explicit
   pad-collision test honour each pad's rotation).
+- **Either face** - A BGA on the back fans out as the mirror of the same BGA on the
+  front: the whole board is turned over in memory (every part to the other face, y
+  mirrored about the board's centre line, every layer swapped, pad locals re-derived
+  under the parser's convention), the pipeline runs on the part now on F -- the
+  rotation transform above still applies after it -- and the copper is mirrored back
+  (`bga_fanout/flip_frame.py`). Measured before this on a board and its mirror, 18 of
+  51 escapes differed (gaps along a face assigned in the other order, one net on the
+  other layer with an extra via); after it, none. A part on the front skips it entirely.
 - **Differential pair routing** - P/N pairs routed together on same layer
 - **Collision-free routing** - Automatic layer assignment to avoid conflicts
 - **Multi-layer support** - Distributes routes evenly across available layers

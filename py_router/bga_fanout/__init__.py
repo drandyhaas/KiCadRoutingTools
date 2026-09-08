@@ -2693,6 +2693,7 @@ def _generate_bga_fanout_core(footprint: Footprint,
     Returns:
         Tuple of (tracks, vias_to_add, vias_to_remove, failed_nets)
     """
+    _entry_args = dict(locals())   # the call as made, for the face wrapper below
     # #621 escape-pass head. EVERY escape pass -- the rotated-frame recursion,
     # both escape-priority passes, the single-pass coverage probe and the
     # under-pad auto-fallback -- is a call to THIS function, so one check here
@@ -2759,6 +2760,30 @@ def _generate_bga_fanout_core(footprint: Footprint,
         print(f"  .kicad_dru: fanout clearance floored {clearance} -> {_mx_498} "
               f"(largest per-layer rule on the escape layers, #498)")
         clearance = _mx_498
+
+    from bga_fanout.flip_frame import (is_back_side, to_front_frame, flip_hints,
+                                       flip_results)
+    if is_back_side(footprint):
+        # a part on the BACK fans out as the mirror of the same part on
+        # the front: the board turned over in memory, the core run again
+        # on the part now on F (so the rotation wrapper below still
+        # applies), the copper mirrored back
+        print(f"  {footprint.reference} sits on {footprint.layer} - routing the board "
+              f"turned over and mirroring back (flip_frame)")
+        rp, back = to_front_frame(pcb_data, footprint.reference)
+        _args = dict(_entry_args)
+        _args['footprint'] = rp.footprints[footprint.reference]
+        _args['pcb_data'] = rp
+        _args['escape_dir_hints'] = flip_hints(escape_dir_hints, footprint, rp, back)
+        for _a in ('_fanout_all_foreign_immovable',):
+            if hasattr(pcb_data, _a):
+                setattr(rp, _a, getattr(pcb_data, _a))
+        _res = _generate_bga_fanout_core(**_args)
+        if hasattr(rp, '_fanout_plan_report'):
+            pcb_data._fanout_plan_report = rp._fanout_plan_report
+        tracks, vias_to_add, vias_to_remove, failed_nets = _res
+        flip_results(tracks, vias_to_add, vias_to_remove, back)
+        return tracks, vias_to_add, vias_to_remove, failed_nets
 
     from bga_fanout.rotate_frame import (is_orthogonal, to_axis_aligned_frame,
                                          back_transform_results)
@@ -4181,6 +4206,17 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 x=v['x'], y=v['y'], size=v['size'], drill=v['drill'],
                 layers=v.get('layers') or ['F.Cu', 'B.Cu'],
                 net_id=v['net_id']))
+        from bga_fanout.flip_frame import is_back_side, to_front_frame, flip_results
+        if is_back_side(footprint):
+            rp, back = to_front_frame(pcb_data, footprint.reference)
+            d_tracks, d_vias, rep = generate_plane_drops(
+                rp.footprints[footprint.reference], rp, layers,
+                track_width=track_width, clearance=clearance,
+                via_size=via_size, via_drill=via_drill,
+                net_filter=net_filter, grid_step=grid_step,
+                plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad)
+            flip_results(d_tracks, d_vias, [], back)
+            return d_tracks, d_vias, rep
         from bga_fanout.rotate_frame import (is_orthogonal,
                                              to_axis_aligned_frame,
                                              back_transform_results)

@@ -848,10 +848,16 @@ sensitivity is a finding for the engine, not for this chain.
 **The board turned over.** Both arrays on the back should grade like
 both on the front -- a reflection through the board's plane is an
 isometry too -- and the gate's BB pose (24 / 44 vias) is nowhere near
-FF (16 / 38). The fresh back-side fanout is one reason (611 tracks and
+FF (16 / 38). The fresh back-side fanout was one reason (611 tracks and
 6 vias for the same balls the front fans out in 502 and 8, four teeth
-on the far side), so `mirror_board.py` turns the FANNED front article
-over instead -- every part to the other face through the placement
+on the far side) -- FIXED in the engine: `bga_fanout/flip_frame.py`
+turns the board over in memory for a part on the back, runs the
+pipeline on the part now on F and mirrors the copper back, the way
+`rotate_frame.py` handles an angle, so a chip on the back now fans out
+as the exact mirror of the same chip on the front (0 of 51 escapes
+differ on the origin board and its mirror; `tests/test_fanout_flip_frame.py`
+pins it with a change detector). Before that, `mirror_board.py` had
+turned the FANNED front article over instead -- every part to the other face through the placement
 writer, y mirrored, every layer swapped, self-verified -- and the chain
 on that mirror measures its own front call-outs alone: K15 16 vias (=
 FF), **K28 50 against 38**. Every literal `F.Cu` in the chain was then
@@ -870,7 +876,24 @@ the selector's tie-breaks -- the menu's gap order and the face
 iteration order in `select_moves` -- decide, and they are not
 mirror-invariant. Making those ties canonical (a geometric key, not a
 list order) is the next step; the two braid tie-breaks are the step
-after.
+after. With the engine symmetric, the side poses re-measured:
+
+
+| pose | K15 | K28 |
+|------|-----|-----|
+| FF (control) | 0 / 0 / 16 / 13 of 15 | 0 / 0 / 38 / 22 of 28 |
+| BF, source on the back | 0 / 0 / 21 / 14 | 0 / 0 / 46 / 26 |
+| FB, destination on the back | 0 / 0 / 21 / 11 | 0 / 0 / 52 / 21 |
+| BB, both on the back | 0 / 0 / 26 / 9 | 1 / 0 / 57 / 23 |
+| MM, the FF article turned over | 0 / 0 / 16 / 13 | 0 / 0 / 48 / 22 |
+
+BB is still not FF, and is not meant to be its mirror: the gate flips an
+array and only the parts its pads collide with, so the other passives
+stay on their face and the pages meet different islands -- a different
+board, which the chain completes. MM is the mirror (`pose_gate.sh` now
+builds it from the FF article), and its gap to FF at K28 -- 48 against
+38, identical at K15 -- is the chain's own: the selector's tie-breaks,
+above. `bga_fanout` itself is out of the picture now.
 
 **Non-orthogonal rotations.** 30 degrees: K15 complete at 33 vias, 6 of
 15 in-band; K28 0 open but 15 DRC, 95 vias, 12 of 28 in-band, 661 s.
