@@ -953,8 +953,8 @@ _UNRESOLVABLE = {}
 #: Every `tests/mutate_*.py` in the tree, pinned. A resolver that quietly stops
 #: finding batteries would otherwise report a clean sweep over nothing -- the
 #: exact shape of the defect #877 is about, reproduced in its own gate.
-#: 42 before #902 added `mutate_902.py`.
-_BATTERY_COUNT = 43
+#: 42 before #902 added `mutate_902.py`; 43 before #892 added `mutate_892.py`.
+_BATTERY_COUNT = 44
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.
