@@ -64,6 +64,10 @@ REFUSED_TOOLS = {
         'generates a SLATE of placements to choose between; the plan format has '
         'no placement step, and picking one is a decision, not a replayable '
         'step. Run it on the CLI and start the plan from the adopted board'),
+    'place_pose.py': (
+        'applies a pose the MODEL chose (#892); the plan format has no '
+        'placement step, and a pose is a decision rather than a replayable '
+        'parameter set. Run it on the CLI and start the plan from its output'),
     'render_placement.py': (
         'renders a PNG; it changes no board and has nothing to replay'),
     'beautify_labels.py': (

@@ -48,6 +48,10 @@ LEVER_REGISTRY = (
     'place_seed.py', 'place_optimize.py',
     'place_reconstruct.py', 'place_portfolio.py', 'place_route_loop.py',
     'place_fanout_clearance.py', 'converge.py',
+    # #892: the sanctioned pose SETTER. It exists so that applying a model's
+    # own layout decision is a registered lever rather than the hand script
+    # this regime is built to refuse (run 25's `pose_assist.py`).
+    'place_pose.py',
     # The ROUTER is a deliberate pose author: #666's scoped cap move calls
     # `write_placed_output` to relocate a cap off a rescue via. Absent from
     # this list it raised `UnaidedViolation` inside the funnel, route.py's

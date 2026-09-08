@@ -74,12 +74,26 @@ KNOWN_MODULES = (
     # its source, pads by board face, pin-order agreement, partners. An
     # instrument nobody can discover produces no findings.
     'board_context.py',
+    # #892. The verb that APPLIES a pose, beside the sheet that informs one:
+    # set / rotate / face / lock / unlock, graded by the legality engine. It
+    # is the sanctioned alternative to a hand pose writer, so a consumer that
+    # cannot discover it writes the hand script instead -- which is the whole
+    # failure this tool exists to end.
+    'place_pose.py',
 )
 
 # Scripts whose flag set a consumer may want to pin.
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
                 'repair_planes.py', 'place_route_loop.py',
                 'place_optimize.py', 'check_drc.py', 'check_floorplan.py')
+# NOT here, deliberately: `place_pose.py`. This tuple's contract, enforced by
+# `tests/test_798_registrar_flags.py`, is that every flag the source registers
+# is visible in `--help` as an option and accepted by the top-level parser.
+# `place_pose`'s `--rot` / `--near` / `--relative` belong to per-VERB parsers
+# (`place_pose.py set --rot ...`), so they are neither, and listing the script
+# here made the gate red for telling the truth. Its verbs and their flags are
+# in the `--help` epilog, and the module is in KNOWN_MODULES above, so a
+# consumer can still discover it -- it just cannot pin a flat flag set.
 
 # The long option, whether or not a SHORT one is declared before it. 46 call
 # sites in the tracked tree spell `add_argument('-q', '--quiet', ...)`, and

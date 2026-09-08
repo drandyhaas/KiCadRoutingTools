@@ -698,9 +698,18 @@ order:
    **For every must_lock part under a HARD geometric clause, run Step 0a-bis
    ON THE SEEDED OUTPUT before the portfolio** — the seeder keeps the pile's
    input rotation, which is a generator default, not a decision. If a
-   rotation wins on inversions, apply it with `write_placed_output` and
-   RE-SEAT the decaps that served its supply pins (`seeder._try_place` at
-   the relocated pin, zone-constrained), then re-run the pin-exact gate:
+   rotation wins on inversions, apply it with **`place_pose.py`** — never a
+   hand script around `write_placed_output`, which is what that instruction
+   used to say and what the cheats watcher flags every time it appears:
+
+   ```bash
+   python3 -X utf8 py_placer/place_pose.py seed.kicad_pcb posed.kicad_pcb \
+       rotate U3 180 lock U3
+   ```
+
+   Then RE-SEAT the decaps that served its supply pins
+   (`seeder._try_place` at the relocated pin, zone-constrained) and re-run
+   the pin-exact gate:
    rotating a part moves its pins, and a decap seated to the old pin
    silently breaks the proximity clause (measured, run 7: 7.74 mm vs the
    3 mm limit until the re-seat).
@@ -802,6 +811,23 @@ later:
 Every derived column names its source and prints `unknown` where inference ran
 out, so a claim you carry forward can always be traced to the channel it came
 from.
+
+**On a FROM-SCRATCH board, that sheet is the input to a loop you drive
+yourself** (#892). The engine legalises; it does not decide:
+
+1. read the context sheet above — faces, partners, pin-order agreement;
+2. write the arrangement as `place_pose.py` verbs (poses, rotations, locks);
+3. `place_pose.py` applies it and grades it — exit 4 names what got worse and
+   the nearest legal pose, so a refusal tells you where to aim next;
+4. `render_placement.py --review-sheet --json-out ...` and LOOK at it;
+5. adjust with more `place_pose.py` calls;
+6. `place_seed --repair` / the quench only as the final polish.
+
+The zone-intent path below stays for the recovery task it was built for — a
+damaged placement, where the intent describes where things belonged. Do not
+hand-write a script that calls `write_placed_output` or `stamp_locked`: that
+is what `place_pose.py` is, it is a registered lever, and a hand script is
+refused under an armed regime and flagged by the cheats watcher.
 
 **1. List what the spec fixes, and cite the requirement next to each ref.**
 Read the board's requirements/spec before touching placement. Anything with a
@@ -962,6 +988,26 @@ The mechanical tools: `converge.py poses --ref U3` ranks legal poses and its
 tie). A **series part in a matched chain** (source-termination resistor, AC
 cap) is a *free terminal*: its pose is the knob that sets where the chain's
 segment lands, so enumerate its poses too, not just the ICs'.
+
+**`place_pose.py` is what APPLIES the pose you chose** (#892) — the other
+half of `converge poses`, and the reason no run needs a hand pose writer:
+
+```bash
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    set U3 129.9 98.3 --rot 270            # exact; exit 4 if it grades worse
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    set U3 --near 130 98 --rot 270         # approximate: the engine seats it
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    face U1 W USB1 rotate CON2 180 lock U1 CON2
+```
+
+Several verbs in one call are ONE arrangement (every op reads the input
+board), the sibling `.kicad_pro`/`.kicad_dru` travel with the output, and
+the run is a REGISTERED lever, so an armed unaided regime accepts it.
+Read its refusals as information, not as an obstacle: exit 4 prints the
+categories that got worse and names the nearest legal pose. It refuses to
+move a part carrying KiCad's `(locked yes)` — say `unlock REF` in the same
+call when you mean to change your own earlier decision.
 
 **Read `poses` output with two caveats** (run-7 S4). The JSON now discloses
 its `knobs` (unset clearance/edge resolve from the BOARD's own floor) and a

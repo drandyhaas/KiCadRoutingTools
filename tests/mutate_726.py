@@ -182,9 +182,20 @@ ROWS = [
      "        yield _raw_ref, fp_text",
      (T_CONS,), 'KILLED'),
 
+    # RE-ANCHORED (#892). `stamp_unlocked` landed beside `stamp_locked` with
+    # the same loop head, so `        if key not in want:` began matching
+    # TWICE and `replace(..., 1)` pointed this row at whichever copy comes
+    # first in the file -- an anchor that silently stops testing what it
+    # names. `tests/test_718_static_test_hygiene.py` is what caught it. The
+    # windows below each carry the line only ONE half has.
     ('stamp_locked-locks-every-namesake', 's',
-     "        if key not in want:",
-     "        if _raw_ref not in want:",
+     "        if key not in want:\n            continue\n        if re.search",
+     "        if _raw_ref not in want:\n            continue\n        if re.search",
+     (T_WRITER,), 'KILLED'),
+
+    ('stamp_unlocked-unlocks-every-namesake', 's',
+     "        if key not in want:\n            continue\n        head_end",
+     "        if _raw_ref not in want:\n            continue\n        head_end",
      (T_WRITER,), 'KILLED'),
 
     ('footprint-blocks-uses-the-old-formula', 'a',

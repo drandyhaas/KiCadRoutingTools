@@ -445,6 +445,37 @@ and will not be invented) and refuses a board that already looks placed
 legal seeds; the same seed reproduces byte for byte. The two compose:
 `place_seed --seed N` → `place_portfolio` diversifies and ranks.
 
+## place_pose.py — the sanctioned pose setter (issue #892)
+
+The engine's decision-makers all SEARCH; this is the one that takes an order.
+`converge.py poses` ranks legal (x, y, rot) candidates and `grade_pad_legality`
+grades a pose, but until #892 nothing applied one, so a model's own layout
+decision reached the board through a hand script around `placement.writer`
+(run 25's `pose_assist.py`) — the very thing the provenance regime refuses.
+
+```bash
+python py_placer/place_pose.py board.kicad_pcb out.kicad_pcb set U1 129.9 98.3 --rot 270
+python py_placer/place_pose.py board.kicad_pcb out.kicad_pcb face U1 W USB1 lock U1
+```
+
+Verbs: `set` (exact, or `--near X Y` which implies `--snap`), `rotate`
+(absolute, `--relative` for a delta), `face REF FACE PARTNER`, `lock`,
+`unlock`. Several verbs in one call are ONE arrangement — every op resolves
+against the input board and one `write_placed_output` call writes them all.
+
+The engine half is `placement/pose_ops.py`, so the writer, the sibling carry
+(#441), the grade and the snap are shared rather than living in a CLI `main()`
+the GUI cannot reach. `seeder.stamp_unlocked` is the inverse of `stamp_locked`,
+added here because the repo had a stamper and no un-stamper.
+
+Legality is RELATIVE: `grade_pad_legality` on the candidate against the same
+grade on the input, refusing (exit 4, nothing written) only a request that
+makes a category worse. An absolute gate would refuse poses no worse than
+where the part already sits — and would refuse to arrange the unplaced pile
+this tool exists for. `--strict-legal` is the absolute arm, `--force` the
+waiver, and a KiCad `(locked yes)` is refused unless the same call `unlock`s
+it. See `docs/utilities.md` for the full contract.
+
 ## place_fanout_clearance.py — decoupling-cap clearance repair (issue #130)
 
 Run **after** `bga_fanout.py`. Nudges decoupling caps near a BGA so their

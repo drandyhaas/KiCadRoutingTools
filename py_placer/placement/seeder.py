@@ -2802,6 +2802,60 @@ def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
     return count
 
 
+def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
+    """Remove `(locked yes)` from the named footprints, in place (#892).
+
+    The inverse of `stamp_locked`, and it lives beside it deliberately: this
+    repo had a stamper and no un-stamper, so a model that locked a rotation
+    decision could not change its mind without hand-editing the board -- which
+    is the class of hand script #892 exists to remove. This half reads exactly
+    the window `stamp_locked` writes into -- the header, up to `(pad` -- and
+    addresses blocks by the parser's own key (#726), so lock and unlock cannot
+    disagree about which block they mean.
+
+    Note for anyone tightening this: `placement/parser.extract_locked_refs`
+    cuts at `'(pad '` WITH the space and falls back to the first 500
+    characters when a block has no pad, so a header containing a token like
+    `(padstack` is read differently there than here. Both stamping halves
+    share that divergence and it predates them. Measured over the 22 boards in
+    `kicad_files/` (1349 footprint blocks): 0 blocks contain `(pad` before
+    `(pad `, and 0 disagree about a `(locked yes)`. 30 blocks DO take the
+    reader's 500-character fallback (they have no pad at all) -- they simply
+    carry no late lock, so the two windows still agree today. It is called out
+    because the
+    consequence is asymmetric: the reader would call a footprint locked that
+    this cannot unlock, which is why `pose_ops.apply_poses` VERIFIES the
+    unlock on the staged board before promoting anything.
+
+    Returns the number of footprints actually changed; a ref that was not
+    locked contributes 0 rather than raising, so unlocking twice is idempotent.
+    Only KiCad's footprint `(locked yes)` is touched -- locked SEGMENTS and
+    VIAS are copper, read by a different rule (#521), and are not footprint
+    blocks, so nothing here can reach them.
+    """
+    from kicad_parser import iter_footprint_blocks
+    with open(board_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    want = set(refs)
+    count = 0
+    # Reverse order keeps the spans valid as text is removed, exactly as the
+    # stamping half relies on it while text is inserted.
+    for start, end, fp_text, _raw_ref, key in reversed(
+            list(iter_footprint_blocks(content))):
+        if key not in want:
+            continue
+        head_end = fp_text.find('(pad') if '(pad' in fp_text else len(fp_text)
+        head, tail = fp_text[:head_end], fp_text[head_end:]
+        new_head, n = re.subn(r'\s*\(locked\s+yes\)', '', head)
+        if not n:
+            continue
+        content = content[:start] + new_head + tail + content[end:]
+        count += 1
+    with open(board_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return count
+
+
 #: What a containment charges. Flat, not area-scaled: a 0402 wholly
 #: inside a TSSOP measures 0.5mm2 and an area charge would floor it to
 #: the 1.0mm budget, while a large part half-swallowed would outrank
