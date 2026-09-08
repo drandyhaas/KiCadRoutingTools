@@ -2802,6 +2802,47 @@ def stamp_locked(board_file: str, refs: Sequence[str]) -> int:
     return count
 
 
+def stamp_unlocked(board_file: str, refs: Sequence[str]) -> int:
+    """Remove `(locked yes)` from the named footprints, in place (#892).
+
+    The inverse of `stamp_locked`, and it lives beside it deliberately: this
+    repo had a stamper and no un-stamper, so a model that locked a rotation
+    decision could not change its mind without hand-editing the board -- which
+    is the class of hand script #892 exists to remove. Both halves read the
+    same window (the header, before the first pad, where
+    `placement/parser.extract_locked_refs` and KiCad look) and address blocks
+    by the parser's own key (#726), so lock and unlock cannot disagree about
+    which block they mean.
+
+    Returns the number of footprints actually changed; a ref that was not
+    locked contributes 0 rather than raising, so unlocking twice is idempotent.
+    Only KiCad's footprint `(locked yes)` is touched -- locked SEGMENTS and
+    VIAS are copper, read by a different rule (#521), and are not footprint
+    blocks, so nothing here can reach them.
+    """
+    from kicad_parser import iter_footprint_blocks
+    with open(board_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    want = set(refs)
+    count = 0
+    # Reverse order keeps the spans valid as text is removed, exactly as the
+    # stamping half relies on it while text is inserted.
+    for start, end, fp_text, _raw_ref, key in reversed(
+            list(iter_footprint_blocks(content))):
+        if key not in want:
+            continue
+        head_end = fp_text.find('(pad') if '(pad' in fp_text else len(fp_text)
+        head, tail = fp_text[:head_end], fp_text[head_end:]
+        new_head, n = re.subn(r'\s*\(locked\s+yes\)', '', head)
+        if not n:
+            continue
+        content = content[:start] + new_head + tail + content[end:]
+        count += 1
+    with open(board_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return count
+
+
 #: What a containment charges. Flat, not area-scaled: a 0402 wholly
 #: inside a TSSOP measures 0.5mm2 and an area charge would floor it to
 #: the 1.0mm budget, while a large part half-swallowed would outrank
