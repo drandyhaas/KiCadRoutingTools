@@ -25,11 +25,15 @@ moved anywhere on the sheet (the translation section below):
 | 15 | 0 | 16  | 15 / 15 | 10 s  | 22 | 14, 15 s | 14, 15 s |
 | 28 | 0 | 36  | 28 / 28 | 36 s  | 46 | 36, 37 s | 38, 28 s |
 | 35 | 0 | 61  | 35 / 35 | 89 s  | 58 | 54, 81 s | 54, 76 s |
-| 41 | 0 | 106 | 30 / 41 | 245 s | 70 | 86, 200 s | 82, 155 s |
+| 41 | 0 | 112 | 32 / 41 | 174 s | 70 | 86, 200 s | 82, 155 s |
 | 51 | **1 (SBA1)** | 129 | 33 / 48 | 355 s | 85 | 1 open (SA4), 130, 429 s | 0 open, 141, 339 s |
 
 Measured 2026-09-08 evening with the batched relaxation as the default
-(tags `tf4`, `td2`; cold: 13 / 37 / 261 s and K35 142 s, K51 562 s).
+(tags `tf4`, `td2`; cold: 13 / 37 / 261 s and K35 142 s, K51 562 s);
+K41's row re-measured late that evening (tag `ps`) after the braid took
+the board's edge clearance (the fence at the bottom edge moved its
+draw, 106 -> 112) and the soft stamp lost its row sort (-48 s on the
+same draw; the section on the K41 profile below).
 K41 and K51 completed for the first time on 09-07 (the blocker-directed
 rip at the last call); since then two general rules re-decided the
 draws: the pose work's exact-tie stamps in the fanout and the main
@@ -648,6 +652,44 @@ flow frame, take4's idea). The quarter-turn frame stays opt-in until
 then: making it the default re-fans the bench's destination array (at
 90 degrees) and moves that draw again.
 
+### Where the K41 time goes: the chain profiled warm and cold (2026-09-08 evening)
+
+`tmp/prof_k41.sh`: the two stages under cProfile, memo warm and with
+the memo set aside (the profiler inflates Python-heavy code, so the
+numbers rank, they do not add up to the wall time; the wall time alone
+was fanout 85 s + braid 160 s warm before the fix below).
+
+The fanout stage (warm 119 s profiled): two thirds is the under-pad
+engine's A* in pure Python -- 825 searches, 57 s of their own time,
+through the plan-follow's attempt ladder (exact, face and layer, face,
+any), where a search that fails explores its whole window. The rest:
+the braid's own planner as the judge (18 calls, 12 s), the per-net
+obstacle models (4,281 derivations, 7.6 s plus the cell packing), the
+selector (5.8 s), the source realisation (5.5 s), the taut strings
+warm (6.7 s). Cold adds the strings: 90 s profiled for 33 batched
+calls (25,000 rounds), which is what the memo is for.
+
+The braid stage (warm 172 s profiled): `connect` 118 s over 499 lanes,
+of which the Rust search itself is 24 s and the rest is what the Python
+side does around it -- `_stamp_soft` 43 s, of which 41 s was ONE
+`np.unique(axis=0)` sorting the soft copper's cell rows before the
+batch call (the map keeps the MAX cost per cell, so a duplicate row is
+the same map: the sort is gone, -48 s on the same draw, copper
+identical); a fresh base obstacle map per lane attempt (499 builds, 25
+s); the band cells (10 s). Then the last-call rip (73 s, inside those
+connects) and the octilinear smoother (46 s: 41,000 clearance checks,
+each sampling the span every 0.02 mm against the windowed foreign
+segments -- `_seg_foreign_seg_dist`, 36 s of its own time).
+
+What is left, in order of what it would buy on the warm K41 (174 s at
+the current draw, fanout 86 + braid 87): the fanout's Python A* (~60 s
+real; fewer failed searches, or the search itself in Rust -- a heavy
+change); the smoother's clearance sweep (~25 s real; an exact
+segment-to-segment distance instead of the 0.02 mm sampling, or a
+spatial hash -- production code, `pcb_modification`); one base map per
+lane instead of per attempt (~15 s); and the last-call rip's re-lay
+(TODO 8). Cold, the strings (~35 s real) stay on the memo.
+
 ### The flow frame: every pose of a pair is one run (2026-09-08 evening)
 
 The routing lattice's symmetries are the eight poses of a square: four
@@ -1226,6 +1268,38 @@ U1 DU1 15 28`), open / DRC / vias / in-band:
 | R90, the FF article rotated | 0 / 0 / 14 / 13 | 0 / 0 / 38 / 22 |
 | R180 | 0 / 0 / 16 / 13 | 0 / 0 / 38 / 22 |
 | R270 | 0 / 0 / 14 / 13 | 0 / 0 / 38 / 22 |
+
+**The same gate on 2026-09-08 evening**, with every rule of that day
+(the translation ties, the batched strings as the default, the flow
+frame) and the source fanned in the engine's own frame
+(`KICAD_FANOUT_FRAME_QUARTER=1`; `tmp/gate/h3_final_table.txt`, and
+`h3_tgate_table.txt` for T), open / DRC / vias / segments / in-band:
+
+| pose | K15 | K28 |
+|------|-----|-----|
+| FF (control) | 0 / 0 / 14 / 417 / 15 of 15 | 0 / 0 / 43 / 1252 / 22 of 28 |
+| T, moved by (10.3, -7.7) mm | 0 / 0 / 14 / 417 / 15 | 0 / 0 / 43 / 1252 / 22 |
+| MM, turned over | 0 / 0 / 14 / 417 / 15 | 0 / 0 / 43 / 1252 / 22 |
+| R90 | 0 / 0 / 14 / 417 / 15 | 0 / 0 / 43 / 1252 / 22 |
+| R180 | 0 / 0 / 14 / 417 / 15 | 0 / 0 / 43 / 1252 / 22 |
+| R270 | 0 / 0 / 14 / 417 / 15 | 0 / 0 / 43 / 1252 / 22 |
+| BF, source on the back | 0 / 0 / 17 / 312 / 14 | 0 / **3 edge** / 42 / 1265 / 27 |
+| FB, destination on the back | 0 / 0 / 29 / 926 / 7 | 0 / 0 / 50 / 1085 / 23 |
+| BB, both on the back | 0 / 0 / 26 / 470 / 14 | 0 / 0 / 52 / 1160 / 27 |
+
+Every isometry is now the control to the via and the segment -- the
+mirror included, which had differed by two segments at K15 before the
+day's tie fixes -- and `pose_gate.sh` says so itself: it builds the T
+pose (`translate_board.py`), prints the segments, and ends with an
+ISOMETRY VERDICT per pose and K against FF on (open, vias, segments),
+exit status 1 on a failure. The side switches are other articles and
+grade as such. BF's three DRC at K28 were a finding of their own: the
+braid's router ran with `board_edge_clearance` at its default 0, which
+falls back to the 0.1 mm track clearance, while the project grades the
+edge at 0.2 -- a lane along an edge never happens on the bench, and
+SCAS's did on that article. The braid now takes the board's own
+`min_copper_edge_clearance`, tighten-only, beside the hole-to-hole
+floor it already took.
 
 Three readings. Every back-side article completes (the one open, SA0
 with the destination on the back at K28, is a rip whose victim SDQ14

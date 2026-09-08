@@ -3524,6 +3524,15 @@ def setup(board, names, dest, log, plan=None):
     kw = {}
     if h2h and h2h > cn.GridRouteConfig().hole_to_hole_clearance:
         kw['hole_to_hole_clearance'] = float(h2h)
+    # and the board's own copper-to-edge floor, likewise tighten-only: the
+    # config's 0 falls back to the track clearance (0.1), the project
+    # grades the edge at its min_copper_edge_clearance (0.2 on the
+    # bench's family), and a lane along an edge -- never on the bench,
+    # SCAS on the pose gate's BF article at K28 -- shipped three edge
+    # violations at 0.079 mm over (2026-09-08)
+    edge = board_constraint(board, 'min_copper_edge_clearance')
+    if edge and edge > CLEAR:
+        kw['board_edge_clearance'] = float(edge)
     ctx.cfg = cn.make_config(pcb, TRACK, CLEAR, VIA_SIZE, VIA_DRILL,
                              grid_step=0.025, **kw)
     ctx.base_segments = list(pcb.segments)
