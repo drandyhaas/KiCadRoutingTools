@@ -67,10 +67,17 @@ wrong partners. Nothing in the toolchain measured the thing the spec actually
 said.
 
 That is what `proximity` clauses are for. Declared, the same board reports the
-crystal's far leg at **2.69 mm** from the pin it loads against a 2.00 mm limit
-— its near leg is 1.62 mm and passes — and the bulk caps at 1.12 mm and 0.29 mm
-from the regulator, measured pad edge to pad edge against the parts the spec
-names.
+crystal's far leg at **2.69 mm** from the pin it loads, past its 2.00 mm limit —
+measured pad edge to pad edge, against the part the spec names.
+
+**A passing clause is silent, and that is a limit of the criterion.** The rule
+yields nothing when a gap is inside its limit, so the crystal's near leg
+(1.62 mm) and the two bulk caps (1.12 mm and 0.29 mm) produce no output at this
+board's declared limits. They are real measurements — the gate that pins this
+page re-derives each one by tightening the declared `max_mm`, which is how they
+are quoted here — but a reviewer who only reads the findings sees the one
+failure and no evidence that the other three were measured at all. Answer the
+criterion from the clause list, not from the finding list.
 
 The input-cap-on-the-input-side half is **not measured by anything**. Say it in
 words or it is not said.

@@ -680,9 +680,13 @@ def p_close(a):
             _rest = _w[len('brief-clause:'):]
             # LONGEST first, and the `+ ':'` matters: without it
             # `keepouts[batt]xyz:reason` would silently waive `keepouts[batt]`,
-            # and without longest-first a waiver for `interfaces[J1].edge_band`
-            # could resolve to `interfaces[J1].edge` and leave the real clause
-            # open while reporting it waived.
+            # and without longest-first a waiver for `keepouts[usb-shell]`
+            # could resolve to `keepouts[usb]` and leave the real clause open
+            # while reporting it waived. That pair is REAL -- keep-out names
+            # are the author's, so one being a prefix of another is ordinary.
+            # (`interfaces[J1].edge_band` stood here and is not a clause id any
+            # producer emits: the interface ids are `.edge`, `.along_edge`,
+            # `.user_facing`, `.overhang_mm`.)
             _hit = next((i for i in sorted(_known, key=len, reverse=True)
                          if _rest == i or _rest.startswith(i + ':')), None)
             if _hit is None:
