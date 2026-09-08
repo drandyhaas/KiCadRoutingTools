@@ -136,7 +136,48 @@ class Capabilities(unittest.TestCase):
     def test_inventoried(self):
         import krt_capabilities as caps
         self.assertIn(TOOL, caps.KNOWN_MODULES)
-        self.assertIn(TOOL, caps.FLAG_SCRIPTS)
+
+    def test_deliberately_not_a_flag_script(self):
+        """FLAG_SCRIPTS is a CONTRACT, and this tool cannot meet it.
+
+        `tests/test_798_registrar_flags.py` reads that tuple as "every flag
+        the source registers is visible in --help as an option AND accepted by
+        the top-level parser". `place_pose`'s `--rot` / `--near` /
+        `--relative` belong to per-VERB parsers, so they are neither, and
+        listing the tool there turned the gate red for telling the truth
+        (measured: `place_pose.py claims flags argparse rejects: ['--near',
+        '--relative', '--rot']`). The verbs are registered as SUBPARSERS
+        instead, which is how `--help` and the documented-flag gate find them.
+        """
+        import krt_capabilities as caps
+        self.assertNotIn(TOOL, caps.FLAG_SCRIPTS)
+
+    def test_the_verb_flags_are_discoverable_anyway(self):
+        import argparse
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'place_pose_probe', os.path.join(_ROOT, 'py_placer', TOOL))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        def options(parser):
+            out = {s for a in parser._actions for s in a.option_strings}
+            for a in parser._actions:
+                if isinstance(a, argparse._SubParsersAction):
+                    for sub in a.choices.values():
+                        out |= options(sub)
+            return out
+
+        found = options(mod.build_parser())
+        for flag in ('--rot', '--near', '--relative'):
+            self.assertIn(flag, found, "%s is documented in the skill and the "
+                                       "docs; test_431_skill_commands walks "
+                                       "the subparsers action to find it"
+                          % flag)
+        # ...and the parser `main()` actually parses with must NOT carry them,
+        # or the first verb's flags would be eaten globally and a second verb
+        # could not carry its own.
+        self.assertNotIn('--rot', options(mod.build_parser(with_verbs=False)))
 
     def test_resolvable_on_disk(self):
         self.assertTrue(os.path.isfile(

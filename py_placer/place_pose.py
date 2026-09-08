@@ -81,7 +81,14 @@ VERB_HELP = """verbs (several in one call describe ONE arrangement):
 """
 
 
-def build_parser():
+def build_parser(with_verbs=True):
+    """The CLI's parser.
+
+    `with_verbs` registers the verb parsers as subparsers -- what `--help` and
+    the documented-flag gate read. `main()` asks for the parser WITHOUT them,
+    because a subparsers action consumes the rest of the line at the first
+    verb and this tool takes several in one call.
+    """
     p = argparse.ArgumentParser(
         description=__doc__,
         epilog=VERB_HELP,
@@ -139,14 +146,42 @@ def build_parser():
     p.add_argument('--dry-run', action='store_true',
                    help='Grade the request and print the summary; write '
                         'nothing')
+    if with_verbs:
+        _verb_parsers(p.add_subparsers(dest='verb', metavar='VERB'))
     return p
 
 
-def _verb_parsers():
-    """One tiny parser per verb, so a verb's own flags cannot drift."""
+def _verb_parsers(sub=None):
+    """One parser per verb, so a verb's own flags cannot drift.
+
+    They are REGISTERED as subparsers when `build_parser` is asked for them,
+    even though `main()` parses each segment by hand (several verbs in one
+    call, which a subparsers action cannot express -- it consumes the rest of
+    the line at the first one). The registration is not decoration: it is how
+    `--rot` / `--near` / `--relative` are discoverable, and both
+    `tests/test_431_skill_commands.py` (documented flags must exist) and a
+    reader of `--help` go looking for them through the subparsers action. The
+    parsers registered there are the SAME objects the split-segment path
+    parses with, so a flag cannot be documented in one and honoured by the
+    other.
+    """
+    if sub is None:
+        # ONE construction path. Asked for the map without a subparsers action
+        # to hang it on, build the documented parser and read the map back out
+        # of it -- so the parsers `main()` parses each segment with are the
+        # very objects `--help` and the documented-flag gate looked at, and no
+        # second definition can drift from the first.
+        for action in build_parser(with_verbs=True)._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                return dict(action.choices)
+        raise RuntimeError('build_parser() registered no verbs')
+
+    def _new(name, **kw):
+        return sub.add_parser(name, add_help=False, **kw)
+
     out = {}
 
-    q = argparse.ArgumentParser(prog='set', add_help=False)
+    q = _new('set', help='place a part at a pose')
     q.add_argument('ref')
     q.add_argument('x', nargs='?', type=float)
     q.add_argument('y', nargs='?', type=float)
@@ -159,14 +194,14 @@ def _verb_parsers():
                         'keeps the rotation it has')
     out['set'] = q
 
-    q = argparse.ArgumentParser(prog='rotate', add_help=False)
+    q = _new('rotate', help='turn a part, absolutely by default')
     q.add_argument('ref')
     q.add_argument('degrees', type=float)
     q.add_argument('--relative', action='store_true',
                    help='add to the current rotation instead of replacing it')
     out['rotate'] = q
 
-    q = argparse.ArgumentParser(prog='face', add_help=False)
+    q = _new('face', help='turn a part so a named pad row faces a partner')
     q.add_argument('ref')
     q.add_argument('face', help='which pad row, named by the face it is on '
                                 'NOW: north/south/east/west (or N/S/E/W)')
@@ -174,7 +209,7 @@ def _verb_parsers():
     out['face'] = q
 
     for verb in ('lock', 'unlock'):
-        q = argparse.ArgumentParser(prog=verb, add_help=False)
+        q = _new(verb, help="stamp / strip KiCad's `(locked yes)`")
         q.add_argument('refs', nargs='+')
         out[verb] = q
     return out
@@ -253,7 +288,7 @@ def parse_segments(segments, parsers, error):
 
 
 def main(argv=None):
-    p = build_parser()
+    p = build_parser(with_verbs=False)
     args, rest = p.parse_known_args(argv)
     # BEFORE the split, or the verb this swallowed makes the NEXT token look
     # like the error ("'C3' comes before any verb"), which sends the caller
