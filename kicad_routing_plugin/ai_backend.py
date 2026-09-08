@@ -143,6 +143,40 @@ def _denied_opencode_tools(allowed_tools):
     return out
 
 
+#: The repo's opencode config, which is the ONLY place `pcb-analysis` is
+#: defined. `AISkillRunner` launches with `cwd=ROOT_DIR`, so this is the file
+#: opencode itself reads.
+OPENCODE_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "opencode.json")
+
+#: `opencode run --agent <unknown>` does NOT fail (#926): it prints this to stderr and
+#: runs on the DEFAULT agent anyway, exit 0 (measured on 1.18.9). That is a
+#: silent hole straight through this backend's only write protection -- the
+#: pinned agent IS the allowlist, which is the whole basis on which `build_cmd`
+#: refuses a write-capable `allowed_tools`. Matched lowercased, on the durable
+#: half of the sentence rather than on its quoting.
+_OPENCODE_AGENT_FALLBACK = "falling back to default agent"
+
+
+def opencode_agent_declared(config_path=None):
+    """Is the pinned analysis agent actually declared in opencode.json? (#926)
+
+    A LOCAL file read, deliberately: it costs no subprocess and no model call,
+    and it catches the realistic failure -- the config missing, renamed, or the
+    agent key edited away -- BEFORE a run starts on a write-capable default
+    agent. It cannot see a global user config that shadows the repo's, which is
+    why the stderr check in `_OpencodeStreamState.finish` exists as well.
+    Returns True when the file cannot be read as JSON at all, so a parse
+    problem surfaces as opencode's own error rather than as this guard
+    inventing one.
+    """
+    try:
+        with open(config_path or OPENCODE_CONFIG, encoding="utf-8") as fh:
+            return OPENCODE_ANALYSIS_AGENT in (json.load(fh).get("agent") or {})
+    except (OSError, ValueError):
+        return True
+
+
 class AIBackend:
     """One headless agent CLI. Subclasses fill in the specifics."""
 
@@ -160,14 +194,45 @@ class AIBackend:
     _auth_markers = ()
 
     def find_cli(self):
-        """Return the CLI path, or None if not installed."""
+        """Return the CLI path, or None if not installed.
+
+        On Windows a REAL executable beats a `.cmd`/`.bat` shim (#925). npm
+        installs put `opencode.cmd` / `claude.cmd` on PATH, and Popen runs a
+        shim through an implicit cmd.exe, whose tokenizer does not understand
+        the `\\"` escaping `list2cmdline` produces -- so the first quote in a
+        quoting-heavy prompt ends the quoted region and any `|` in it becomes
+        a shell pipe. Measured: the real ~3 kB skill prompt died at launch
+        with "The system cannot find the file specified."
+
+        The shim is still RETURNED when nothing better exists -- it does work
+        for a well-behaved argv, and `stdin_prompt` below keeps the prompt out
+        of that argv entirely. This only reorders the preference; it never
+        turns a working install into "not found".
+        """
         path = shutil.which(self.cli_name)
-        if path:
+        is_shim = (os.name == "nt" and bool(path)
+                   and path.lower().endswith((".cmd", ".bat")))
+        if path and not is_shim:
             return path
         for candidate in self.candidates:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return candidate
-        return None
+        return path or None
+
+    def stdin_prompt(self, cmd, prompt):
+        """Split `prompt` out of `cmd` so it can be fed on stdin (#925).
+
+        Returns `(cmd_without_prompt, prompt)` when this backend can take its
+        prompt on stdin, else `(cmd, None)`. The caller uses this ONLY when it
+        must launch a Windows shim, because that is the one case where argv
+        cannot carry a quoting-heavy prompt intact.
+
+        Lives on the backend rather than in the GUI runner because only the
+        backend knows the shape of its own argv -- the runner used to search
+        for Claude's `-p` flag, which no opencode command line contains, so
+        opencode kept passing the prompt through cmd.exe and kept failing.
+        """
+        return cmd, None
 
     def not_found_message(self):
         return (f"{self.label} CLI not found. Install it ({self.install_url}) "
@@ -365,6 +430,18 @@ class ClaudeBackend(AIBackend):
             cmd += ["--effort", effort]
         return cmd
 
+    def stdin_prompt(self, cmd, prompt):
+        """Claude Code reads the `-p` prompt from stdin when the flag's value
+        is omitted, so drop the argv element and hand it over that way."""
+        try:
+            i = cmd.index("-p")
+        except ValueError:
+            return cmd, None
+        if i + 1 < len(cmd) and cmd[i + 1] == prompt:
+            cmd = list(cmd)
+            return cmd, cmd.pop(i + 1)
+        return cmd, None
+
     def stream_state(self):
         return _ClaudeStreamState()
 
@@ -414,6 +491,20 @@ class _OpencodeStreamState(_StreamState):
         return None  # step_start / step_finish / reasoning: no transcript line
 
     def finish(self, returncode, stderr):
+        # (#926) BEFORE the result is trusted, and it fails a run that otherwise
+        # SUCCEEDED: opencode answers an unknown --agent by warning on stderr
+        # and running on the default agent at exit 0, so the read-only pin this
+        # backend's write refusal rests on was never in force. A result
+        # produced under unknown permissions is not a result this can hand back
+        # as if it were the pinned agent's.
+        if _OPENCODE_AGENT_FALLBACK in (stderr or "").lower():
+            return None, (
+                f"opencode did not find the '{OPENCODE_ANALYSIS_AGENT}' agent "
+                f"and fell back to its DEFAULT agent, so the read-only "
+                f"permissions this backend promises were not in force. The "
+                f"reply is discarded rather than returned. Check that "
+                f"{OPENCODE_CONFIG} declares the agent and that no global "
+                f"opencode config shadows it.")
         if self._errors:
             return None, "; ".join(self._errors)
         if not self._texts:
@@ -431,6 +522,16 @@ class OpencodeBackend(AIBackend):
     login_hint = ("opencode is installed but has no working provider "
                   "credentials: open a terminal and run `opencode auth login`.")
     candidates = (
+        # Windows FIRST, and they are real .exe files rather than the npm
+        # `opencode.cmd` shim that `shutil.which` finds (#925). An unset env
+        # var leaves the literal %VAR% in the path, which simply fails
+        # isfile(). These cover the npm-global and native layouts; other
+        # package managers (pnpm, yarn, volta, bun) put the binary elsewhere,
+        # which is why `stdin_prompt` below is the real fix and this is only
+        # the cheap one.
+        os.path.expandvars(
+            r"%APPDATA%\npm\node_modules\opencode-ai\bin\opencode.exe"),
+        os.path.expanduser("~/.opencode/bin/opencode.exe"),
         os.path.expanduser("~/.opencode/bin/opencode"),
         os.path.expanduser("~/.local/bin/opencode"),
         "/opt/homebrew/bin/opencode",
@@ -474,6 +575,19 @@ class OpencodeBackend(AIBackend):
                 + f": it runs the read-only '{OPENCODE_ANALYSIS_AGENT}' agent, "
                 "whose opencode.json permissions deny edits. Use the Claude "
                 "backend for a skill that writes.")
+        # (#926) The refusal above is only worth anything if the pinned agent is
+        # really the one that runs. `--agent <unknown>` does not fail -- it
+        # warns and falls back to the DEFAULT agent, which has no such
+        # permissions -- so an absent declaration is refused HERE, before a
+        # model call, rather than discovered afterwards in stderr.
+        if not opencode_agent_declared():
+            raise ValueError(
+                f"opencode.json does not declare the "
+                f"'{OPENCODE_ANALYSIS_AGENT}' agent, so this run would fall "
+                f"back to opencode's DEFAULT agent -- which is not read-only, "
+                f"and whose permissions this backend has made no promise "
+                f"about. Restore the agent in {OPENCODE_CONFIG}, or use the "
+                f"Claude backend.")
         cmd = [
             cli_path, "run",
             "--format", "json",       # one JSON event per line
@@ -485,6 +599,21 @@ class OpencodeBackend(AIBackend):
             cmd += ["--variant", effort]
         cmd += ["--", prompt]
         return cmd
+
+    def stdin_prompt(self, cmd, prompt):
+        """`opencode run` takes its message on stdin when no positional one is
+        given, so pop the trailing prompt and leave the bare `--` (#925).
+
+        VERIFIED against opencode 1.18.9, both with and without the trailing
+        `--`: the run starts, `--format json` streams normally and rc is 0.
+        Matched by IDENTITY on the last element rather than by scanning for a
+        flag -- opencode's own `-p` is `--password`, so Claude's search would
+        find the wrong argument here.
+        """
+        if len(cmd) >= 2 and cmd[-1] == prompt and cmd[-2] == "--":
+            cmd = list(cmd)
+            return cmd, cmd.pop()
+        return cmd, None
 
     def stream_state(self):
         return _OpencodeStreamState()
