@@ -38,6 +38,13 @@ POINT_TOKENS = ('start', 'end', 'center', 'mid', 'xy', 'at')
 LAYER_RE = re.compile(r'"([FB])\.([A-Za-z_]+)"')
 
 
+def _fmt(v: float) -> str:
+    """A coordinate as KiCad writes it: six decimals, trailing zeros
+    dropped -- full precision, so a mirror mirrored back is the board."""
+    t = f'{v:.6f}'.rstrip('0').rstrip('.')
+    return '0' if t in ('', '-0') else t
+
+
 def swap_layer_names(s):
     return LAYER_RE.sub(lambda m: f'"{"B" if m.group(1) == "F" else "F"}.{m.group(2)}"', s)
 
@@ -66,7 +73,7 @@ def mirror_items(txt, CY):
                     nums = None
                 if nums and len(nums) >= 2:
                     rest = ' ' + ' '.join(parts[2:]) if len(parts) > 2 else ''
-                    out.append(f'({name} {parts[0]} {2 * CY - nums[1]:.6g}{rest})')
+                    out.append(f'({name} {parts[0]} {_fmt(2 * CY - nums[1])}{rest})')
                     i = k + 1
                     continue
             if depth == 2 and not in_fp and name in ('layer', 'layers'):

@@ -38,7 +38,19 @@ Pt = Tuple[float, float]
 SWIM_VIAS = 2      # a swimmer's dive and surface; its mid-corridor changes are the braid's
 
 
-def plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
+def plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses, chi: int = 1):
+    """`_plan_pages` in the pair's canonical frame (select_moves.PairFrame):
+    a -1 pair's choice, launches and box are mirrored in; the pages and
+    the prediction are per net and come back as they are."""
+    if chi > 0:
+        return _plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses)
+    fr = sm.PairFrame(-1, sm.frame_line(launch, dst_box))
+    mc = cache.setdefault('_mirror', {}) if cache is not None else None
+    return _plan_pages(fr.choice(dst_choice), fr.points(launch), fr.box(dst_box), mc,
+                       fr.layers(tooth_layer), buses)
+
+
+def _plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
     """The PAGES the braid will route on, decided here with the braid's
     own schedule code (schedule.Schedule) on the plan's launch and exit
     orders per corridor, with both ends' layers -- so there is one
@@ -113,7 +125,7 @@ def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
 
 
 def judged_cost(dst_choice, launch, dst_box, cache, src_box,
-                tooth_layer, tooth_vias, buses=None):
+                tooth_layer, tooth_vias, buses=None, chi: int = 1):
     """What a plan is judged on: the VIAS it implies, in the plan's own
     model -- per net a dive if the corridor cannot keep it on its tooth
     layer, a via where the delivered layer is not the berth escape's, the
@@ -128,7 +140,7 @@ def judged_cost(dst_choice, launch, dst_box, cache, src_box,
     # corridors the braid will form (buses = planned_buses); the source
     # escape's vias and the ride round both arrays are added
     groups = list(buses) if buses else sm.corridor_groups(dst_choice)
-    _pages, pred = plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, groups)
+    _pages, pred = plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, groups, chi=chi)
     return (sum(pred.values())
             + sum(tooth_vias.get(n, 0) for n in dst_choice)
             + sm.ride_mm(dst_choice, launch, dst_box, src_box) / sm.VIA_MM)
@@ -140,7 +152,29 @@ def refine_source(src_choice: Dict[str, Move],
                   dst_box, launch0: Dict[str, Pt],
                   rounds: int = 5, cache=None, log=None,
                   src_box=None, tooth_layer0=None, tooth_vias0=None,
-                  buses=None):
+                  buses=None, chi: int = 1):
+    """`_refine_source` in the pair's canonical frame: a -1 pair's
+    moves, launches and boxes are mirrored in, the source moves and
+    launch points chosen are mapped back."""
+    if chi > 0:
+        return _refine_source(src_choice, src_menu, dst_choice, dst_box, launch0,
+                              rounds, cache, log, src_box, tooth_layer0, tooth_vias0, buses)
+    fr = sm.PairFrame(-1, sm.frame_line(launch0, dst_box))
+    mc = cache.setdefault('_mirror', {}) if cache is not None else None
+    sc, nxt, sf = _refine_source(fr.choice(src_choice), fr.menu(src_menu),
+                                 fr.choice(dst_choice), fr.box(dst_box),
+                                 fr.points(launch0), rounds, mc, log, fr.box(src_box),
+                                 fr.layers(tooth_layer0), tooth_vias0, buses)
+    return fr.choice_back(sc), fr.points(nxt), sf
+
+
+def _refine_source(src_choice: Dict[str, Move],
+                   src_menu: Dict[str, List[Move]],
+                   dst_choice: Dict[str, Move],
+                   dst_box, launch0: Dict[str, Pt],
+                   rounds: int = 5, cache=None, log=None,
+                   src_box=None, tooth_layer0=None, tooth_vias0=None,
+                   buses=None):
     """Move source exits to cut the WHOLE-PLAN cost, one net at a time.
 
     select() at the source end optimises select()'s cost -- reach,

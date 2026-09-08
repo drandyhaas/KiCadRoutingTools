@@ -711,7 +711,182 @@ def refine_lis(choice: Dict[str, Move], groups, menu, geo: 'Corridor',
     return choice
 
 
+_FLIP_FACE = {'up': 'down', 'down': 'up', 'left': 'left', 'right': 'right'}
+
+
+def pair_chirality(src_pads: Dict[str, Pt], dst_pads: Dict[str, Pt],
+                   src_box, dst_box) -> int:
+    """+1 or -1: which side of the source -> destination axis the PAIR's
+    own BALLS lie on -- the run's nets' pads on both arrays, nothing else
+    on the board -- as the sign of their moment about it. The selector
+    is handed (menu and face order, sort ties, a quarter-turn axis, a
+    crossing test that counts a shared endpoint on one side only), so a
+    board and its mirror got different plans; the pair's chirality flips
+    exactly under the mirror (+1395 against -1395 on the origin board
+    and the board turned over at K28), so the selector runs every pair
+    in its +1 frame (PairFrame) and the mirror gets the mirror of the
+    plan. Balls, not teeth: the teeth move as the plan's rounds re-fan
+    the source, and at K15 the teeth's moment changed sign at round 1
+    (+373 -> -156) and mirrored the bench against itself mid-loop; the
+    balls are the same on every realized board. A pair whose balls
+    balance exactly is +1 by convention. Read off the pair alone so a
+    board with three or more arrays gives every pair its own frame."""
+    sc = ((src_box[0] + src_box[2]) / 2, (src_box[1] + src_box[3]) / 2)
+    dc = ((dst_box[0] + dst_box[2]) / 2, (dst_box[1] + dst_box[3]) / 2)
+    ax, ay = dc[0] - sc[0], dc[1] - sc[1]
+    pts = list(src_pads.values()) + list(dst_pads.values())
+    mom = sum(ax * (y - sc[1]) - ay * (x - sc[0]) for x, y in pts)
+    return -1 if mom < 0 else 1
+
+
+_DIRS_ORDER = ('left', 'right', 'up', 'down')
+_KIND_ORDER = {'surface': 0, 'via_in_pad': 1, 'dogbone': 2}
+
+
+def ms_sites(moves, fr=None):
+    """The centre of a net's dog-bone sites (its ball): the sign of a
+    site about it is the generator's site order."""
+    pts = [(fr.pt(m.site) if fr else m.site) for m in moves
+           if m.kind == 'dogbone' and m.site is not None]
+    if not pts:
+        return (0.0, 0.0)
+    return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+
+
+def menu_order(m: Move, ball: Pt, layers=('F.Cu', 'B.Cu')) -> tuple:
+    """escape_moves.menu's own order, read off a move's geometry:
+    surface moves by face then by the gap's coordinate along it, via-
+    in-pad by layer then face, dog-bones by the site's signs about the
+    ball then face then layer. Verified equal to the generated order on
+    every net of the bench (K15..K51), the origin board and the zynq
+    article, so a mirrored menu re-sorted by it is the front's menu."""
+    d = _DIRS_ORDER.index(m.direction) if m.direction in _DIRS_ORDER else 9
+    along = m.exit_pt[1] if m.direction in ('left', 'right') else m.exit_pt[0]
+    L = layers.index(m.layer) if m.layer in layers else 9
+    k = _KIND_ORDER.get(m.kind, 3)
+    if k == 0:
+        return (0, d, round(along, 6))
+    if k == 1:
+        return (1, L, d)
+
+    def sgn(v):
+        return -1 if v < -1e-6 else (1 if v > 1e-6 else 0)
+    sx = sgn(m.site[0] - ball[0]) if m.site else 0
+    sy = sgn(m.site[1] - ball[1]) if m.site else 0
+    return (2, sx, sy, d, L)
+
+
+def frame_line(launch, keep_out, pads=None) -> float:
+    """The y of the pair's mirror line: the middle of the pair's own
+    points' extent (the run's launches, berth pads and the destination
+    box), on the 0.0005 mm lattice so twice it has three decimals and a
+    mirrored coordinate keeps its decimals -- the selector rounds
+    absolute coordinates in places, and a line that translated the
+    mirrored geometry off the front's decimal grid flipped a few of
+    those roundings (4 of 28 choices)."""
+    ys = [p[1] for p in launch.values()] + [keep_out[1], keep_out[3]]
+    if pads:
+        ys += [p[1] for p in pads.values()]
+    c = (min(ys) + max(ys)) / 2
+    return round(c * 2000.0) / 2000.0
+
+
+class PairFrame:
+    """The pair's canonical handed frame: +1 is the identity; -1 mirrors
+    every point about the horizontal line y = CY and swaps up and down
+    (layers stay: the selector only ever compares them). Moves are
+    mirrored into new Move objects and mapped back by identity."""
+
+    def __init__(self, chi: int, CY: float):
+        self.chi, self.CY = chi, CY
+        self._back: Dict[int, Move] = {}
+        self._fwd: Dict[int, Move] = {}
+
+    def pt(self, p: Pt) -> Pt:
+        return p if self.chi > 0 else (p[0], 2 * self.CY - p[1])
+
+    def box(self, b):
+        if self.chi > 0 or b is None:
+            return b
+        return (b[0], 2 * self.CY - b[3], b[2], 2 * self.CY - b[1])
+
+    @staticmethod
+    def layer(L):
+        """F.* <-> B.*: the turn-over swaps faces, and the selector sorts
+        slots by layer NAME, so the names must swap with the geometry."""
+        if isinstance(L, str) and len(L) > 1 and L[1] == '.' and L[0] in 'FB':
+            return ('B' if L[0] == 'F' else 'F') + L[1:]
+        return L
+
+    def layers(self, d):
+        return d if self.chi > 0 or d is None else {n: self.layer(L) for n, L in d.items()}
+
+    def move(self, m: Move) -> Move:
+        if self.chi > 0:
+            return m
+        mm = self._fwd.get(id(m))
+        if mm is None:
+            mm = Move(net=m.net, kind=m.kind,
+                      direction=_FLIP_FACE.get(m.direction, m.direction),
+                      layer=self.layer(m.layer), exit_pt=self.pt(m.exit_pt), vias=m.vias,
+                      legs=[(self.pt(a), self.pt(b), self.layer(L)) for (a, b, L) in m.legs],
+                      site=None if m.site is None else self.pt(m.site))
+            self._fwd[id(m)] = mm
+            self._back[id(mm)] = m
+        return mm
+
+    def back(self, mm: Move) -> Move:
+        return mm if self.chi > 0 else self._back[id(mm)]
+
+    def menu(self, menu):
+        """The menus mirrored AND re-ordered as the generator orders
+        them (menu_order): the selector breaks ties by list order, and a
+        mirror alone leaves the mirror's own order."""
+        if self.chi > 0:
+            return menu
+        return {n: sorted((self.move(m) for m in ms), key=lambda mm: menu_order(mm, ms_sites(ms, self)))
+                for n, ms in menu.items()}
+
+    def points(self, d):
+        return d if self.chi > 0 or d is None else {n: self.pt(p) for n, p in d.items()}
+
+    def choice(self, ch):
+        return ch if self.chi > 0 or ch is None else {n: self.move(m) for n, m in ch.items()}
+
+    def choice_back(self, ch):
+        return ch if self.chi > 0 or ch is None else {n: self.back(m) for n, m in ch.items()}
+
+
 def select(menu: Dict[str, List[Move]],
+           launch: Dict[str, Pt],
+           via_weight: float = 3.0,
+           channel_weight: float = 2.0,
+           keep_out=None,
+           buses: Optional[Sequence[Sequence[str]]] = None,
+           side_weight: float = 6.0,
+           tooth_layer: Optional[Dict[str, str]] = None,
+           mismatch_weight: float = 4.0,
+           cross_weight: float = 6.0,
+           align_rounds: int = 4,
+           log=None,
+           pads: Optional[Dict[str, Pt]] = None,
+           chi: int = 1,
+           ) -> Tuple[Dict[str, Move], List[str]]:
+    """`_select` in the pair's canonical frame (pair_chirality): a -1
+    pair has its menus, launches, box and pads mirrored in, the handed
+    selection run unchanged, and the chosen moves mapped back."""
+    if chi > 0 or not keep_out:
+        return _select(menu, launch, via_weight, channel_weight, keep_out, buses,
+                       side_weight, tooth_layer, mismatch_weight, cross_weight,
+                       align_rounds, log, pads)
+    fr = PairFrame(-1, frame_line(launch, keep_out, pads))
+    ch, un = _select(fr.menu(menu), fr.points(launch), via_weight, channel_weight,
+                     fr.box(keep_out), buses, side_weight, fr.layers(tooth_layer),
+                     mismatch_weight, cross_weight, align_rounds, log, fr.points(pads))
+    return fr.choice_back(ch), un
+
+
+def _select(menu: Dict[str, List[Move]],
            launch: Dict[str, Pt],
            via_weight: float = 3.0,
            channel_weight: float = 2.0,

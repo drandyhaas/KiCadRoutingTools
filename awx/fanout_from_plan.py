@@ -134,12 +134,18 @@ def plan_state(pcb, names, banned=frozenset()):
     # ignored the arrays' own side; the bench (every tooth on F) is
     # unchanged by construction
     bundle_layer = te.bundle_layer_of(tooth0)
+    # the pair's canonical frame for the handed selector (select_moves)
+    chi = pe.sm.pair_chirality({nm: (src_pad[nm].global_x, src_pad[nm].global_y)
+                                for nm in names if src_pad.get(nm) is not None},
+                               {nm: (dst_pad[nm].global_x, dst_pad[nm].global_y)
+                                for nm in names if dst_pad.get(nm) is not None},
+                               sgrid.bbox, dgrid.bbox)
     paths = db.taut_paths(names, ends, lambda nm: obs(byname[nm][0], bundle_layer))
     buses = db.cluster(names, paths)
     return {'byname': byname, 'dmenu': dmenu, 'smenu': smenu, 'launch': launch,
             'tooth0': tooth0, 'tooth_vias': tooth_vias, 'src_pad': src_pad,
             'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,
-            'bundle_layer': bundle_layer,
+            'bundle_layer': bundle_layer, 'chi': chi,
             'dgrid': dgrid, 'buses': buses, 'obs': obs, 'pcb': pcb,
             'pads_of': {ref: [(p.global_x, p.global_y) for p in fp.pads]
                         for ref, fp in pcb.footprints.items()}}
@@ -244,7 +250,8 @@ def total(dst_c, st, cache, buses=None):
     corridors the braid will form (planned_buses)."""
     return pe.judged_cost(dst_c, st['launch'], st['dgrid'].bbox, cache,
                           st['sgrid'].bbox, st['tooth0'], st['tooth_vias'],
-                          buses if buses is not None else planned_buses(st, dst_c))
+                          buses if buses is not None else planned_buses(st, dst_c),
+                          chi=st['chi'])
 
 
 def plan(base, names, work):
@@ -277,7 +284,7 @@ def plan(base, names, work):
                 for nm in names}
         dst_choice, un = pe.sm.select(st['dmenu'], st['launch'],
                                       keep_out=st['dgrid'].bbox, buses=st['buses'],
-                                      tooth_layer=st['tooth0'], log=None, pads=pads)
+                                      tooth_layer=st['tooth0'], log=None, pads=pads, chi=st['chi'])
         if not dst_choice:
             print(f'  round {r}: no destination choice'); break
         pb = planned_buses(st, dst_choice)
@@ -303,7 +310,7 @@ def plan(base, names, work):
                                                 src_box=st['sgrid'].bbox,
                                                 tooth_layer0=st['tooth0'],
                                                 tooth_vias0=st['tooth_vias'],
-                                                buses=pb)
+                                                buses=pb, chi=st['chi'])
         print(f'  round {r}: source refine on PAPER -> floor {sf:.2f} '
               f'({len(src_choice)} teeth to move)')
         if not src_choice:
@@ -423,7 +430,7 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
                 for nm in names}
         new_choice, un = pe.sm.select(st['dmenu'], st['launch'],
                                       keep_out=st['dgrid'].bbox, buses=st['buses'],
-                                      tooth_layer=st['tooth0'], log=None, pads=pads)
+                                      tooth_layer=st['tooth0'], log=None, pads=pads, chi=st['chi'])
         if not new_choice or new_choice == choice:
             print('  destination: the re-plan changed nothing -- stopping')
             break
