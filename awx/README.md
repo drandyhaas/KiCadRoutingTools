@@ -219,42 +219,110 @@ prints open / DRC / vias / in-band / seconds per pose and K.
 
 ## TODO for future sessions
 
-1. **A re-berth AND a re-fan move for trapped stubs.** The rip stops at
-   "walled by static copper -- a fanout matter". Take4's negotiator
-   answered that by re-berthing (`negotiate_stubs`, `relay_net.py
-   --ref`): rip the berth and fan the ball out again in another move.
-   Do the same for the TEETH -- a re-fan of the source escape for a
-   trapped stub, at either end, judged by the chain. First concrete
-   case: the FB pose (destination array on the back) at K28 leaves SA0
-   open after a depth-2 rip, walled by static copper at its berth.
-2. **Try the packing** (take4's `pack_lanes` / `relax_attract`: a
+THE one list (2026-09-08 evening; the session memory points here). In
+the order worth taking them, each with what is known.
+
+1. **Vias, and the K51 open.** The ladder with every rule of 2026-09-08
+   is 16 / 36 / 61 / 112 vias and K51 one open (SBA1 on this draw),
+   against the human's 22 / 46 / 58 / 70 / 85. Two moves are known:
+   - **A re-berth AND a re-fan move for trapped stubs.** The rip stops
+     at "walled by static copper -- a fanout matter". Take4's negotiator
+     answered that by re-berthing (`negotiate_stubs`, `relay_net.py
+     --ref`): rip the berth and fan the ball out again in another move.
+     Do the same for the TEETH -- a re-fan of the source escape for a
+     trapped stub, at either end, judged by the chain. Concrete cases:
+     the FB pose (destination array on the back) at K28 leaves SA0 open
+     after a depth-2 rip, walled by static copper at its berth; K51's
+     SA4 or SBA1, whichever the draw leaves.
+   - **Collapse the short dives** (take4's `collapse_dives.py`, 388
+     lines, never ported): on a routed board, a short dive is two
+     same-net vias joined by a brief single-layer bridge -- the A*'s
+     zigzag escapes, a lane that surfaces for 0.85 mm and dives again.
+     Each pair is tried serially, accept-and-build: rip the two vias and
+     the bridge, ask the real router band-free for a path between the
+     cut ends, keep it only if it adds no via (two saved per accept),
+     verify by re-walking the net's endpoint degrees, grade as ever. The
+     cheapest via reducer on the table; `ledger_cal.py` (floor against
+     slack per lane) says where the slack is.
+2. **The corpus A/B for the production changes, then the PR to main.**
+   Three engine changes of 2026-09-07/08 are in shared code and owe the
+   A/B before main: the pad keep-out's sub-cell offset quantised
+   (`routing_utils.pad_blocked_cells_array`, every routing step), the
+   back-side BGA fanned as the front's mirror (`bga_fanout/flip_frame`),
+   and the rotate frame's fixes (exact quarter turns, pad sizes swapped,
+   foreign angles). Plus a B-side case in the GUI fanout parity gate
+   (today only a rotated F-side QFN). Sets 1-5 on Modal, both arms at
+   one commit, per the RUNBOOK.
+3. **Time: K41 at 174 s warm against the two-minute edict**, profiled
+   stage by stage (the section "Where the K41 time goes"). In order of
+   value per effort:
+   - the fanout's A* is 50 of its 82 s and 40 of those are searches
+     that FAIL by flooding their window (284 of 820; a failure is ten
+     times a success). The reach record that skips hopeless gaps exists
+     inside the level-1 walk only: hand level 0's reach to levels 1 and
+     2 in `underpad._follow_plan.attempt` -- about 15-20 s, contained;
+   - one base obstacle map per WINDOW in `connect` instead of per
+     attempt, a `clone_fresh` per attempt (byte-identical: that is how
+     the router's own per-net maps are made); the key must cover the
+     window's copper (lanes land and rips re-lay between attempts) and
+     the virtual copper appended before the build; only same-window
+     attempts share (the ladder's first two rungs, margin 2.0) -- about
+     5-10 s, moderate;
+   - the octilinear smoother's clearance sweep (`_seg_foreign_seg_dist`,
+     41,000 calls sampling every 0.02 mm against the windowed foreign
+     segments; ~25 s real; production `pcb_modification`): an exact
+     segment-to-segment distance or a spatial hash;
+   - the last-call rip's econ re-lay: cap its widening for a lane the
+     rip just placed (K41's braid spends ~30 s there; K51 355 s).
+   The A* core itself moves only with a Rust port. Cold adds the taut
+   strings (~35 s real at K41), which stay on the sharded memo.
+4. **Poses off the axes.** The flow frame makes the four quarter turns
+   one run; a non-orthogonal pose (R30: K15 33 vias 6/15 in band, K28
+   15 DRC; R45 fails the plan stage at K28) breaks the plan's compass
+   faces and needs a trigonometric turn of the file, which is not a
+   lattice symmetry -- the engine's own `rotate_frame` does it for the
+   fanout; the chain-level version is this item. Also a pair whose two
+   arrays sit at different angles (only one can be axis-aligned).
+5. **Better spines.** The spine is the straight chord between the two
+   end zones (two corners when the flows bend). Take4 relaxed the
+   members' mean taut path against ramped obstacles (`mean_path`,
+   `relax_path`, `resample`), so a corridor bent only where something
+   was in the way; it was pruned here as never reached at K28, and its
+   absence crashed K51's singleton corridor until the chord took both
+   branches. A corridor that must bend round a part needs it back; the
+   batched relaxation (`taut_fast.relax_many`, the default since today)
+   can relax the mean path in the same array it relaxes the strings.
+6. **The second bench's in-band gap.** zynq_ad9364 (`tmp/bench2`, not in
+   git; `make_bench.py` rebuilds it) K28: 0 open, 55 vias, but 17 of 28
+   in band -- 11 lanes at the last call (A4 A6 DQ9 DQ8 DQ14 RAS CKE DQ3
+   DQ1 A5 DQ10). The leg rules were tuned on one bench. `wall_probe.py`
+   takes `DEST=U2` now; probe those eleven; run K34 / 40 / 44.
+7. **Fanout non-convergence.** K41's destination passes never converge
+   (8 passes, the last ships) and SA9 is never planned -- its menu is
+   banned away. A net whose menu is exhausted gets its achieved berth
+   back as a menu entry ("freeze what worked"); measure K41 / K51.
+8. **Try the packing** (take4's `pack_lanes` / `relax_attract`: a
    follow-the-neighbour force pulling each lane to `pitch` from the
    nearest packed lane on its layer). Tidier rivers for the same grade
    at K28, and packed rivers leave room for the swimmers and their vias.
-3. **A better routing order.** Lanes are laid sequentially -- pages in
+9. **A better routing order.** Lanes are laid sequentially -- pages in
    target order, then swimmers largest displacement first, refused
    lanes boosted next attempt -- and every refusal the rip repairs is a
    sequential loss. Take4's order model (`plan_order.BraidOrder`, the
    braid's own rules as the plan's cost) and its rip assist are the
    references; candidates are most-constrained-first, the min-cut
    probe's crossing counts as the order, and the negotiator's history.
-4. **Better spines.** The spine is the straight chord between the two
-   end zones (two corners when the flows bend). Take4 relaxed the
-   members' mean taut path against ramped obstacles (`mean_path`,
-   `relax_path`, `resample`), so a corridor bent only where something
-   was in the way; it was pruned here as never reached at K28, and its
-   absence crashed K51's singleton corridor until the chord took both
-   branches. A corridor that must bend round a part needs it back.
-5. **Collapse the short dives** (take4's `collapse_dives.py`, 388 lines,
-   never ported): on a routed board, a short dive is two same-net vias
-   joined by a brief single-layer bridge -- the A*'s zigzag escapes, a
-   lane that surfaces for 0.85 mm and dives again. Each pair is tried
-   serially, accept-and-build: rip the two vias and the bridge, ask the
-   real router band-free for a path between the cut ends, keep it only
-   if it adds no via (two saved per accept), verify by re-walking the
-   net's endpoint degrees, grade as ever. The cheapest via reducer on
-   the table for K41's 82 and K51's 141.
+10. **The exact taut solver**, if that line is picked up again
+    (`tmp/uncommitted_0906_archive/taut_exact.py`, its section above):
+    the union walk done in the batched array, and the homotopy class
+    chosen the way the flow chooses it rather than by the nearer side.
 
+Closed on 2026-09-08 and recorded in their sections above, not here:
+the braid's own handedness (the mirror grades as the front), the
+chain's translation invariance, the flow frame for the quarter turns,
+the pose gate's own verdict, the taut memo sharded and the batched
+relaxation as the default, the braid's edge clearance from the board,
+the soft stamp's sort.
 
 ## Still on take4, worth a port
 
