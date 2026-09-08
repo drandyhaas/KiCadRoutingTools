@@ -802,7 +802,19 @@ with tempfile.TemporaryDirectory() as d:
     pro = os.path.join(d, 'out.kicad_pro')
     with open(pro, 'w', encoding='utf-8') as f:
         f.write('OLD-PRO\n')
-    os.chmod(pro, stat.S_IREAD)
+    # The DESTINATION DIRECTORY is what gets write-protected, and the atomic
+    # promote is the reason: `_promote` copies each file to `<dst>.krt-tmp`
+    # and `os.replace`s it into place, and BOTH of those need write permission
+    # on the DIRECTORY. This case used to protect the destination `.kicad_pro`
+    # instead, which stopped the pre-atomic implementation -- a `copyfile`
+    # straight onto a mode-0444 file -- and stops nothing now, because
+    # `rename(2)` overwrites a read-only destination. So from the commit that
+    # made the promote all-or-nothing until this one, three checks here were
+    # asserting a refusal that no longer happens, and `tests/mutate_892.py`
+    # refused to run at all (its baseline guard: a red target test scores
+    # every row KILLED for the wrong reason). Both halves are measured now --
+    # the read-only SIBLING is the block below, where the write proceeds.
+    os.chmod(d, stat.S_IRUSR | stat.S_IXUSR)
     try:
         r = run([POSE, src, out, 'rotate', 'R1', '90'])
         wrote = open(out, encoding='utf-8').read()
@@ -818,7 +830,40 @@ with tempfile.TemporaryDirectory() as d:
               not [f for f in os.listdir(d) if f.endswith('.krt-tmp')],
               str(os.listdir(d)))
     finally:
-        os.chmod(pro, stat.S_IWRITE)
+        os.chmod(d, stat.S_IRWXU)
+
+# ---------------------------------------------------------------------------
+print("a write-protected SIBLING is replaced, not refused")
+with tempfile.TemporaryDirectory() as d:
+    import stat
+    src = os.path.join(d, 'in.kicad_pcb')
+    shutil.copyfile(BOARD, src)
+    shutil.copyfile(PRO, os.path.join(d, 'in.kicad_pro'))
+    out = os.path.join(d, 'out.kicad_pcb')
+    pro = os.path.join(d, 'out.kicad_pro')
+    for _path, _text in ((out, 'OLD-OUTPUT\n'), (pro, 'OLD-PRO\n')):
+        with open(_path, 'w', encoding='utf-8') as f:
+            f.write(_text)
+    os.chmod(pro, stat.S_IRUSR)
+    try:
+        # Recorded rather than left as folklore, because it is a CHANGE: the
+        # pre-atomic promote copied onto the destination and a read-only
+        # `.kicad_pro` refused the whole run. `os.replace` needs write
+        # permission on the directory, not on the file it replaces, so the
+        # #441 pairing wins over the file mode -- board and project travel
+        # together, and a caller who means to protect an output protects the
+        # directory it lives in (the block above).
+        r = run([POSE, src, out, 'rotate', 'R1', '90'])
+        check("the run writes", r.returncode == 0, "rc=%s" % r.returncode)
+        check("the board is a real board, not the old placeholder",
+              open(out, encoding='utf-8').read().startswith('(kicad_pcb'))
+        check("and the write-protected sibling was replaced with it",
+              open(pro, encoding='utf-8').read() != 'OLD-PRO\n')
+        check("no .krt-tmp file is left behind",
+              not [f for f in os.listdir(d) if f.endswith('.krt-tmp')],
+              str(os.listdir(d)))
+    finally:
+        os.chmod(pro, stat.S_IRUSR | stat.S_IWUSR)
 
 # ---------------------------------------------------------------------------
 print("lock and unlock hygiene")
