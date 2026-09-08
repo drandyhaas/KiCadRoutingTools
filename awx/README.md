@@ -205,6 +205,9 @@ octilinear, so a non-orthogonal pose is outside both models today.*
                           [--src-side F|B] [--dst-side F|B] [--rotate DEG]
     python3 rotate_board.py IN OUT DEG      # the whole board, self-verified
     python3 mirror_board.py IN OUT          # the board turned over, self-verified
+    python3 bend_bench.py OUT.kicad_pcb CX CY [--rot DEG] [--bottom Y]
+    python3 channel_bench.py OUT.kicad_pcb DCX DCY HX HY [--right X] [--bottom Y]
+                             [--rows N] [--pad MM] [--drill MM]
     [POSES="R90 R30"] [GATE=name] [LADDER=file] bash pose_gate.sh BOARD SRC DST K...
 
 `make_bench.py` prepares an article the way the bench was prepared:
@@ -283,15 +286,15 @@ the order worth taking them, each with what is known.
    lattice symmetry -- the engine's own `rotate_frame` does it for the
    fanout; the chain-level version is this item. Also a pair whose two
    arrays sit at different angles (only one can be axis-aligned).
-5. **Better spines.** The spine is the straight chord between the two
-   end zones (two corners when the flows bend). Take4 relaxed the
-   members' mean taut path against ramped obstacles (`mean_path`,
-   `relax_path`, `resample`), so a corridor bent only where something
-   was in the way; it was pruned here as never reached at K28, and its
-   absence crashed K51's singleton corridor until the chord took both
-   branches. A corridor that must bend round a part needs it back; the
-   batched relaxation (`taut_fast.relax_many`, the default since today)
-   can relax the mean path in the same array it relaxes the strings.
+5. **Better spines -- BUILT, measured, not yet a default (2026-09-08
+   late; the section "Better spines: the medial line, relaxed, in grid
+   legs").** The relaxed medial line is back on the batched relaxer, in
+   octilinear legs; the bench is byte-identical (a clear chord is never
+   relaxed) and on an article whose channel holds a part no track can
+   pass, K28 goes from 3 open / 12 DRC to 0 / 0. Left: the in-band
+   count on that article (the leg repair, measured last), a ribbon
+   model with per-side extents (the inflation is one scalar today), and
+   the user's call on landing it.
 6. **The second bench's in-band gap.** zynq_ad9364 (`tmp/bench2`, not in
    git; `make_bench.py` rebuilds it) K28: 0 open, 55 vias, but 17 of 28
    in band -- 11 lanes at the last call (A4 A6 DQ9 DQ8 DQ14 RAS CKE DQ3
@@ -312,7 +315,16 @@ the order worth taking them, each with what is known.
    braid's own rules as the plan's cost) and its rip assist are the
    references; candidates are most-constrained-first, the min-cut
    probe's crossing counts as the order, and the negotiator's history.
-10. **The exact taut solver**, if that line is picked up again
+10. **Memory.** The chain reaches about 2 GB of real memory at K28
+    (user, 2026-09-08 evening; measured the same evening: the braid
+    stage's python peaked at 1956 MB RSS on the channel article's K28,
+    sampled every 3 s; two chains side by side had the system killing
+    background tasks). Keep the whole chain under 1 GB RSS at every K. First suspects: the per-net obstacle
+    models memoised for the plan loop (`_OBS_MEMO`, one derived model
+    per net per board), the router's per-attempt base maps (TODO 3's
+    "one base map per window"), the sharded taut memo loaded lazily,
+    and the fanout's plan-follow occupancy snapshots.
+11. **The exact taut solver**, if that line is picked up again
     (`tmp/uncommitted_0906_archive/taut_exact.py`, its section above):
     the union walk done in the batched array, and the homotopy class
     chosen the way the flow chooses it rather than by the nearer side.
@@ -1032,6 +1044,170 @@ exact shortest-homotopic-path solver with explicit contacts (~100x, and
 it converges), which is a rewrite, not a fix. Decision: keep the memo,
 sharded; a new pose pays its strings once (K15 mirror: 61 s cold, 21 s
 warm).
+
+### Better spines: the medial line, relaxed, in grid legs (2026-09-08 late)
+
+TODO 5. The spine was the straight chord between the two end zones,
+with two corners when the flows bent; take4's relaxation of the members'
+mean taut path had been pruned as never reached at K28. It is back, in
+four pieces, all in `corridor.py` / `taut_fast.py` / `braid.py`:
+
+- **When.** A straight, CLEAR chord is never relaxed -- the bench's
+  corridors all are, so the ladder is byte-identical (K15 16 / 341,
+  K28 36 / 1574, K35 61 / 1435, K41 112 / 2258; K51 1 open 129 vias
+  on both arms). The middle is relaxed when the flows bend by more than
+  30 degrees, or when a corridor already laid stands in the chord, or
+  when a big part (10 pads or more) that the lanes cannot THREAD does
+  (`braid.unthreadable`: some pair of its pads closer, edge to edge,
+  than a track plus two clearances). A part the lanes can pass between
+  is transparent to the spine: a 2.54 mm header with 1.7 mm pads leaves
+  0.84 mm between pins, and the chord with the island logic threads 27
+  of 28 K28 lanes through it at 46 vias where a spine bent round it
+  shipped 57 vias and 4021 segments; with 2.3 mm pads (0.24 mm gaps)
+  the chord ships 3 open and 12 DRC and the bent spine 0 / 0.
+- **From what.** The members' mean taut path between the two end zones
+  (`resample`, `mean_path`), from the teeth's centroid to the stubs'
+  centroid along their own flows: the bundle's medial line, in the
+  homotopy class the taut paths chose. (The straight branch's axis
+  through the MIDPOINT of the two centroids is kept for the chord; for a
+  relaxed spine it left the teeth 2 mm off the axis and the top lanes in
+  the part.)
+- **Against what.** `RampedObstacles`: the big parts' pads, inflated by
+  the bundle's half-width, and every corridor already laid as ONE tube
+  (its spine at a lane pitch, inflated by its half-width plus this
+  one's), each obstacle's inflation ramped by the distance to the nearer
+  end -- nothing within the amount, all of it from twice the amount, so
+  a fat neighbour never reaches a thin corridor's end zone. The
+  half-width is the larger of the nominal (a lane pitch per member) and
+  the ends' actual spread across their flows: a face of 15 teeth at the
+  ball pitch is 5.9 mm half-wide where the pitch says 2.8. Per-LANE
+  tubes (take4's) made a later spine snake between an earlier
+  corridor's lanes (bench K15 SA9: seven vertices, corners to 43
+  degrees); whole tubes leave both chords clear.
+- **How.** `taut_fast.relax_spine`: the strings' own rounds (Jacobi
+  under the trust region, projection onto the boundary, a shortcut per
+  block, coarse then fine, done when the resampled polyline stops
+  moving), with the ramp as a per-point, per-obstacle inflation; a tube
+  crossed transversally is transparent, one run along pushes. A string
+  several chords long returns the chord. 30 ms for a 20 mm chord.
+- **In what shape.** `octilinearise` + `clear_legs`: the relaxed arc
+  simplified at 1 mm, every off-grid leg replaced by the two grid legs
+  that span it in the order whose corner clears the model, then every
+  leg pushed out of the ramped model along its own normal by the depth
+  it violates and re-cut against its neighbours' lines (a grid leg is a
+  chord of the arc and cuts inside it: the 45-degree leg into the bottom
+  of a dip lay 1.8 mm nearer the part than the string had settled). The
+  arc itself was measured first: its bands sit at shallow angles to the
+  router's grid and every lane became a staircase -- channel article
+  K15, 2683 segments for 15 lanes against 590, 2501 of them under 0.3
+  mm. A bundle turns a part in legs at 0, 45 and 90 degrees, as a
+  human's does.
+- `Spine.project`'s outer-wedge branch and `Spine.lane_xy`'s corner
+  rendering are back from take4 (a lane piece across a bend was drawn
+  as its chord), with one change: a corner is MITRED on both sides. The
+  arc take4 drew on the outer side is what curved tracks do; on an
+  octilinear router the band of an arc is a staircase, and every lane
+  took one round every corner (`chanD` K28: 2492 segments, 2087 with
+  mitres; K15 839 -> 735). A cell in the outer wedge projects at the
+  larger of its offsets from the two legs' lines, the mitred offset
+  polyline that passes through it.
+
+**Where it engages, and what it measures.** The bench has no bent bundle,
+and neither does the L-shaped article (`bend_bench.py`: the DDR moved
+south-east): the plan puts every berth on the face that faces the
+source and both arms are identical at K15 and K28. The corpus has no
+two-layer BGA-to-BGA pair whose bus bends (`muzy_zynq2`'s TSOP
+destination has no berth menu; the chain is BGA-to-BGA). So the case is
+the TODO's own: a part standing in the channel (`channel_bench.py`: the
+DDR 20 mm further east, a synthetic 2x5 through-hole header in the
+chord; the spine sees parts of 10 pads or more). The two articles, from
+the bench, byte-reproducible:
+
+    python3 channel_bench.py tmp/chanH.kicad_pcb 160.0 64.56 136.0 60.0 --right 178
+    python3 channel_bench.py tmp/chanD.kicad_pcb 160.0 64.56 136.0 60.0 --right 178 --bottom 90 --pad 2.3 --drill 1.2
+    BASE=tmp/chanD.kicad_pcb DEST=DU1 bash chain_k.sh TAG 15 28
+
+and the L-shaped one, `python3 bend_bench.py tmp/bendL.kicad_pcb 138.0 84.0`.
+
+| article | K | straight chord | relaxed, octilinear |
+|---|---|---|---|
+| header at 2.54 mm pitch, threadable (`chanH`) | 15 | 0 open, 18 vias, 590 segs, 12/15 in band | identical (transparent to the spine; bent: 18 vias, 672 segs) |
+| same | 28 | 0 open, 46 vias, 1166 segs, 27/28 in band | identical (bent: 57 vias, 4021 segs) |
+| header with 2.3 mm pads, no track passes (`chanD`) | 15 | 0 open, 24 vias, 899 segs | 0 open, 26 vias, 692 segs (9/15 in band; radial ramp: 20 vias, 735 segs, 7/15) |
+| same | 28 | **3 open, 12 DRC**, 52 vias, 1867 segs | **0 open, 0 DRC, 54 vias, 1777 segs** (13/28 in band; radial ramp: 64 vias, 2087 segs, 19/28) |
+
+The straight chord threads 27 of 28 lanes between a 2.54 mm header's
+pins at K28 and is the better frame there, which is why such a part is
+now transparent to the spine; where no track can pass, the chord's
+frame runs through the part, the island logic repairs the lanes one by
+one, and at K28 three ship open with twelve DRC, while the relaxed spine
+takes the whole ribbon under the part in 45-degree legs and ships
+clean. The in-band count on `chanD` K15 is 7 of 15 for the relaxed
+spine against 10 (the last call routes the rest; the vias still favour
+the relaxed frame) -- the leg repair above was the answer to that and
+is measured below.
+
+The leg repair changed nothing there: the grid legs already cleared the
+RAMPED model. The 3.55 mm the island logic saw is the ramp itself --
+nothing is inflated within one half-width of an end, and with the
+teeth's spread the half-width is 5.9 mm, so a part 6 to 8 mm from the
+launch centroid stands in a 12 mm end zone where the parts are barely
+inflated; the 7 mm dip was for the header's FAR pads. The obvious
+correction -- the parts inflated by the ribbon's half-extent
+interpolated from the teeth's spread to the stubs', with no ramp -- was
+built and measured and LOST: full-width inflation from the launch makes
+the string wander, the grid legs became a sawtooth of eleven (corners
+46, 45, -90, 45, -90, 45, -45, 45), and both articles shipped 3 open
+at K28 (`chanD` 69 vias, 3 to 5 of 28 lanes in band).
+
+**The ramp, along the flow (2026-09-08, last).** What was wrong with
+the radial ramp was not the ramp but what it measured: the distance to
+the end CENTROID, so a part 7 mm ahead of the teeth and one 7 mm beside
+them were the same, and the dead zone grew with the ribbon's width. The
+parts now ramp ALONG THE FLOW, anchored at the end zone the spine
+already has (the launch leg: the teeth's spread along the flow plus
+half a millimetre): nothing inside it -- a part beside the teeth stays
+the lanes' business and the string's frozen end is never inside an
+inflated obstacle, which is what wrecked the unramped variant -- then
+one millimetre of inflation per millimetre of run past it, up to the
+half-width, because a ribbon of 45-degree legs cannot shift sideways
+faster than that; a part the string can reach is inflated exactly as
+much as the lanes can honour. The tubes of earlier corridors keep the
+radial ramp (a corridor's exits may sit among another's stubs in any
+direction). Measured on `chanD`: K28 64 -> 54 vias and 2087 -> 1777
+segments at 0 open; K15 20 -> 26 vias (two more lanes in band, 735 ->
+692 segments) -- the K15 draw moves by that much between any two
+variants here, the K28 gain does not. A sub-pitch leg left by the
+quantisation (a 0.55 mm step between the flat and the climb) is merged
+into its neighbours (`merge_short_legs`), which is where the K15 draw
+moved from 24 to 26. The ribbon's asymmetry (the joiners' side inflated
+as wide as the head-on side) is the remaining slack in the dip.
+
+Two things the work said about the frame itself. The ribbon is
+ASYMMETRIC: joiners come in on one side, and it narrows toward the
+target where the exit slots pack at a lane pitch; one scalar inflation
+is the ribbon's widest side everywhere, so the dip is deeper than the
+lanes need (chanH K15: 7 mm). The right model is per-side, per-s extents
+(the teeth's about the launch axis lerped to the stubs' about the
+arrival axis), which the relaxer can carry as easily as the scalar.
+And a chord tolerance for the grid legs is a real parameter: at 0.25 mm
+an arc of radius 4 mm kept eight legs and became a sawtooth (5 of 15 in
+band); at 1 mm it is one or two chords.
+
+![chanD K15, the straight chord](img/spine_chanD_k15_chord.png)
+
+*K15 on the unthreadable-header article with the straight chord: the
+frame runs through the header and the lanes are squeezed under it one
+by one (24 vias).*
+
+![chanD K15, the relaxed spine in grid legs](img/spine_chanD_k15_relaxed.png)
+
+*The same with the relaxed spine (the final rules: the along-flow
+ramp, grid legs, mitred corners): the ribbon rounds the part in
+45-degree legs, lanes a pitch apart through the bend (26 vias, 692
+segments against the chord's 24 and 899). Rendered by
+`tmp/render_eco.py`, whose defaults are now a faint plan overlay and
+bright copper for every track.*
 
 ### The sidecar describes the board it sits beside (2026-09-07)
 

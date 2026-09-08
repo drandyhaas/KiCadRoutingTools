@@ -165,14 +165,20 @@ REACH = 0.9       # per-point candidate obstacles: within this of the point
 KMAX = 16         # candidates kept per point (the nearest)
 
 
-def _candidates(P, D, C):
+def _candidates(P, D, C, extra=None):
     """Per point, the indices of the nearest obstacles within REACH, as
     padded (N, KMAX) index arrays (-1 = none) -- the spatial hash, in
-    numpy, rebuilt at every resample."""
+    numpy, rebuilt at every resample. `extra`: a per-point reach on top
+    (relax_spine's ramp inflation, plus the drift before a rebuild)."""
     n = len(P)
+    if extra is None:
+        reach = REACH
+    else:
+        ex = np.asarray(extra, dtype=float)
+        reach = REACH + (ex[:, None] if ex.ndim else float(ex))
     if len(D):
         dd = np.hypot(P[:, None, 0] - D[None, :, 0], P[:, None, 1] - D[None, :, 1]) - D[None, :, 2]
-        dd = np.where(dd <= REACH, dd, np.inf)
+        dd = np.where(dd <= reach, dd, np.inf)
         k = min(KMAX, dd.shape[1])
         od = np.argsort(dd, axis=1)[:, :k]
         vd = np.take_along_axis(dd, od, 1) < np.inf
@@ -186,7 +192,7 @@ def _candidates(P, D, C):
         py = P[:, None, 1] - ay[None]
         t = np.clip((px * sx[None] + py * sy[None]) / L2[None], 0.0, 1.0)
         dc = np.hypot(px - t * sx[None], py - t * sy[None]) - r[None]
-        dc = np.where(dc <= REACH, dc, np.inf)
+        dc = np.where(dc <= reach, dc, np.inf)
         k = min(KMAX, dc.shape[1])
         oc = np.argsort(dc, axis=1)[:, :k]
         vc = np.take_along_axis(dc, oc, 1) < np.inf
@@ -196,8 +202,13 @@ def _candidates(P, D, C):
     return od, oc
 
 
-def _deepest_k(Q, T, D, C, od, oc):
-    """_deepest over each point's own candidates."""
+def _deepest_k(Q, T, D, C, od, oc, dend=None, infl_d=None, infl_c=None, pad_d=None):
+    """_deepest over each point's own candidates. The spine's model
+    (corridor.RampedObstacles): `pad_d` per POINT inflates every disc
+    (the along-flow ramp, part_inflation); `dend` (per point, the
+    distance to the nearer end) with `infl_c` per capsule inflates the
+    tubes, ramped radially. `infl_d` per disc with `dend` is the radial
+    form for discs. None = the strings' model."""
     n = len(Q)
     best = np.full(n, -np.inf)
     nx = np.ones(n)
@@ -210,6 +221,11 @@ def _deepest_k(Q, T, D, C, od, oc):
         ey = Q[:, None, 1] - Ds[:, :, 1]
         d = np.hypot(ex, ey)
         depth = np.where(valid, Ds[:, :, 2] - d, -np.inf)
+        if pad_d is not None:
+            depth = depth + pad_d[:, None]
+        elif dend is not None and infl_d is not None:
+            inf = infl_d[np.where(valid, od, 0)]
+            depth = depth + np.clip(dend[:, None] - inf, 0.0, inf)
         j = depth.argmax(1)
         bd = depth[ar, j]
         dd = d[ar, j]
@@ -231,6 +247,9 @@ def _deepest_k(Q, T, D, C, od, oc):
         ey = py - t * sy
         d = np.hypot(ex, ey)
         depth = r - d
+        if dend is not None:
+            inf = infl_c[np.where(valid, oc, 0)]
+            depth = depth + np.clip(dend[:, None] - inf, 0.0, inf)
         cross = np.abs(T[:, None, 0] * (sy / L) - T[:, None, 1] * (sx / L))
         depth = np.where(valid & (cross <= CROSS_SIN), depth, -np.inf)
         j = depth.argmax(1)
@@ -540,6 +559,118 @@ def relax_many(items, rounds: int = 400, start=None):
             idx = sub
         out.append(([tuple(map(float, q)) for q in B.P], u1[s] + u2[s]))
     return out
+
+
+def relax_spine(init, robs, rounds: int = 400):
+    """The corridor SPINE, relaxed from `init` -- the members' mean taut
+    path between the two end zones -- against a corridor.RampedObstacles:
+    the strings' own rounds (Jacobi smoothing under the trust region, the
+    projection onto the boundary, a shortcut-and-densify after every
+    block, coarse then fine, done when the resampled polyline stops
+    moving), with every obstacle inflated by its OWN ramped amount
+    (RampedObstacles.inflation: the bundle's half-width for a part, that
+    plus the other corridor's for a laid corridor's tube, nothing within
+    the amount of either end). A tube the spine crosses transversally is
+    transparent (the lanes cross it on either layer); one it runs along
+    pushes it a half-width off. The candidate reach carries the largest
+    inflation plus the drift allowed before a rebuild, so no inflated
+    boundary can slip in unseen. A string several chords long is not a
+    corridor axis (wedged between overlapping pushes it wanders; take4
+    measured hours on K51's corner corridor): the chord is returned."""
+    base = robs.base
+    D = np.array([(x, y, r) for (x, y, r, _n) in base.discs], dtype=float).reshape(-1, 3)
+    infl_d = np.full(len(D), float(robs.H))
+    C = np.array([(a[0], a[1], b[0] - a[0], b[1] - a[1], r) for (a, b, r, _i) in robs.extra_raw],
+                 dtype=float).reshape(-1, 5)
+    infl_c = np.array([i for (_a, _b, _r, i) in robs.extra_raw], dtype=float)
+    E = np.array(robs.ends, dtype=float)
+    reach_x = max([float(robs.H)] + [float(i) for i in infl_c]) + 0.6
+
+    def dend(P):
+        return np.minimum(np.hypot(P[:, 0] - E[0, 0], P[:, 1] - E[0, 1]),
+                          np.hypot(P[:, 0] - E[1, 0], P[:, 1] - E[1, 1]))
+
+    zones = getattr(robs, 'zones', None)
+
+    def pad_parts(P):
+        """The parts' inflation per point: the along-flow ramp when the
+        model carries end zones, else the radial one."""
+        if zones is None:
+            return np.clip(dend(P) - robs.H, 0.0, robs.H)
+        al = np.full(len(P), np.inf)
+        for (c, u, r) in zones:
+            al = np.minimum(al, (P[:, 0] - c[0]) * u[0] + (P[:, 1] - c[1]) * u[1] - r)
+        return np.clip(al, 0.0, robs.H)
+
+    def length(P):
+        return float(np.hypot(np.diff(P[:, 0]), np.diff(P[:, 1])).sum())
+
+    def project(Q, free, od, oc):
+        T = _tangents(Q)
+        de = dend(Q)
+        idx = np.nonzero(free)[0]
+        for _k in range(PUSHES):
+            if not len(idx):
+                break
+            depth, ux, uy = _deepest_k(Q[idx], T[idx], D, C, od[idx], oc[idx],
+                                       de[idx], infl_d, infl_c, pad_parts(Q)[idx])
+            v = depth > 0.0
+            if not v.any():
+                break
+            sub = idx[v]
+            Q[sub, 0] += ux[v] * (depth[v] + OUT)
+            Q[sub, 1] += uy[v] * (depth[v] + OUT)
+            idx = sub
+        return Q
+
+    ends = (tuple(init[0]), tuple(init[-1]))
+    chord = math.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1])
+    cap = 3.0 * chord + 10.0
+    P = np.array(ts.densify([tuple(p) for p in init], COARSE), dtype=float)
+    used = 0
+    for step in (COARSE, STEP):
+        P = np.array(ts.densify([tuple(p) for p in P], step), dtype=float)
+        prev = None
+        quiet = False
+        while used < rounds and not quiet:
+            od, oc = _candidates(P, D, C, reach_x)
+            anchor = P.copy()
+            for _it in range(BLOCK):
+                used += 1
+                if len(P) < 3:
+                    quiet = True
+                    break
+                free = _free_mask(P, ends)
+                Q = P.copy()
+                Q[1:-1] = 0.5 * P[1:-1] + 0.25 * (P[:-2] + P[2:])
+                dx = Q[:, 0] - P[:, 0]
+                dy = Q[:, 1] - P[:, 1]
+                mag = np.hypot(dx, dy)
+                sc = np.where(mag > CAP, CAP / np.where(mag > 0, mag, 1.0), 1.0)
+                Q[:, 0] = P[:, 0] + dx * sc
+                Q[:, 1] = P[:, 1] + dy * sc
+                Q[~free] = P[~free]
+                Q = project(Q, free, od, oc)
+                moved = np.hypot(Q[:, 0] - P[:, 0], Q[:, 1] - P[:, 1])
+                P = Q
+                if np.hypot(P[:, 0] - anchor[:, 0], P[:, 1] - anchor[:, 1]).max() > 0.5:
+                    od, oc = _candidates(P, D, C, reach_x)
+                    anchor = P.copy()
+                if moved.max() < 1e-6:
+                    quiet = True          # nothing touched anything: done
+                    break
+            if length(P) > cap:
+                return ts.densify([ends[0], ends[1]]), used
+            R = _resample(P, robs, step)
+            if prev is not None and len(prev) and _hausdorff(R, prev) < 0.02:
+                P = R
+                break
+            prev = R
+            P = R
+    # the last projection, so the answer sits on the boundary
+    od, oc = _candidates(P, D, C, reach_x)
+    P = project(P, _free_mask(P, ends), od, oc)
+    return [tuple(map(float, q)) for q in P], used
 
 
 def _own_net(obs):
