@@ -342,6 +342,12 @@ def _report(summary):
                         summary['hole_conflicts_after'],
                         summary['oob_pad_count_before'],
                         summary['oob_pad_count_after']))
+    _sc = summary.get('snap_census') or {}
+    if _sc.get('skipped'):
+        # On stderr and in the summary both: a flag that did nothing has to
+        # say so where the operator is looking, not only in the JSON.
+        print("note: --snap/--near did not apply -- %s" % _sc['skipped'],
+              file=sys.stderr)
     if summary.get('forced'):
         print("WARNING: written under --force -- %s" % summary['refused'])
     if summary.get('locked_count') is not None:

@@ -474,6 +474,10 @@ with tempfile.TemporaryDirectory() as d:
                  refuse='needs both X and Y', code=2)
     refuse_check(base + ['set', 'C3'],
                  refuse='asks for nothing', code=2)
+    refuse_check(base + ['face', 'U1', 'N', 'U1'],
+                 refuse='cannot face itself', code=2)
+    refuse_check(base + ['face', 'R1', 'north', 'R1'],
+                 refuse='cannot face itself', code=2)
     refuse_check([sys.executable, '-X', 'utf8', POSE, BOARD, 'set', 'C3',
                   '130', '98'],
                  refuse='reads as the OUTPUT PATH here', code=2)

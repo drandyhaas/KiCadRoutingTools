@@ -269,8 +269,20 @@ def resolve_ops(pcb_data, ops: Sequence[Dict], *, clearance: float,
                         ', '.join('%s: %d' % (f, len(p))
                                   for f, p in sorted(by.items())) or 'none'),
                     faces={f: len(p) for f, p in by.items()})
-            target = bearing_face(part_centre(pcb_data, ref),
-                                  part_centre(pcb_data, op['partner']))
+            if op['partner'] == ref:
+                raise PoseRefusal(
+                    "%s cannot face itself; name the part its %s row should "
+                    "point at" % (ref, face), code=2)
+            here = part_centre(pcb_data, ref)
+            there = part_centre(pcb_data, op['partner'])
+            if abs(here[0] - there[0]) < 1e-9 and abs(here[1] - there[1]) < 1e-9:
+                # Two parts on one coordinate is a PILE, not a direction. The
+                # bearing would fall out of a tie-break and read as an answer.
+                raise PoseRefusal(
+                    "%s and %s share a centre (%.4f, %.4f), so there is no "
+                    "direction to aim -- place one of them first"
+                    % (ref, op['partner'], here[0], here[1]), code=2)
+            target = bearing_face(here, there)
             delta = face_delta(face, target)
             rot = (rot + delta) % 360.0
             note.update({'face': face, 'partner': op['partner'],
