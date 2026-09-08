@@ -296,7 +296,8 @@ def build_obstacles(pcb, nid, kids, layer):
         st_ = os.stat(src)
         bkey = (os.path.abspath(src), st_.st_mtime_ns, st_.st_size,
                 base_kids, layer, len(pcb.segments), len(pcb.vias),
-                getattr(pcb, 'frame_axis', None))   # the board turned over is another board
+                getattr(pcb, 'frame_axis', None),   # the board turned over, or rotated,
+                getattr(pcb, 'frame_rotation', None))   # is another board
         dkey = bkey + (nid,)
         hit = _OBS_MEMO.get(dkey)
         if hit is not None:

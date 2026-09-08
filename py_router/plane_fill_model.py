@@ -592,7 +592,12 @@ class ZoneFillModel:
         px = self.x0 + (i0 + ii + 0.5) * self.cell
         py = self.y0 + (j0 + jj + 0.5) * self.cell
         d2 = (px - x) ** 2 + (py - y) ** 2
-        k = int(d2.argmin())
+        # rounded before the argmin: a ball at a corner of the fill is
+        # EQUALLY near two cells in exact arithmetic, and the last bit of
+        # the squared distance otherwise chose its pour-direct stub (the
+        # same board shifted in memory tapped the other way, #622 pose
+        # gate 2026-09-08); equal stays equal and raster order decides
+        k = int(np.round(d2, 9).argmin())
         d = math.sqrt(float(d2[k]))
         if d > max_r_mm:
             return None

@@ -205,6 +205,10 @@ def iter_pad_blocked_cells(
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
     if corner_buffer is None:
         corner_buffer = grid_step / 2
+    # The sub-cell offset to a nanometre, as in pad_blocked_cells_array
+    # (its bit-identical twin): the one absolute-coordinate input.
+    off_x = round(off_x, 9)
+    off_y = round(off_y, 9)
     # DELIBERATELY NOT MEMOIZED -- do not paste the _PAD_OFFSETS_CACHE
     # fast-path from pad_blocked_cells_array in here. Two reasons:
     #   1. This is a GENERATOR. `return <array>` inside one is not a result,
@@ -304,6 +308,17 @@ def pad_blocked_cells_array(
     """
     if corner_buffer is None:
         corner_buffer = grid_step / 2
+    # The sub-cell offset is the one input that comes from ABSOLUTE
+    # coordinates (pad.global_x - pad_gx*grid_step), and it carries their
+    # last-bit noise: the same pad on the same board moved 10 mm arrives
+    # with an offset a few 1e-15 different, and a cell sitting exactly on
+    # the keep-out boundary (dist_sq == margin_sq, a 3-4-5 cell of a
+    # roundrect's corner arc) is then blocked in one frame and open in the
+    # other -- three via cells on the #622 bench, one A* iteration, and a
+    # different braid (2026-09-08). To a nanometre the offset is the same
+    # number in every frame, so the whole computation below is.
+    off_x = round(off_x, 9)
+    off_y = round(off_y, 9)
     key = (half_width, half_height, margin, grid_step, corner_radius,
            corner_buffer, off_x, off_y, rotation_deg)
     offs = _PAD_OFFSETS_CACHE.get(key)

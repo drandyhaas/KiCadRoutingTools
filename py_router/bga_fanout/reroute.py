@@ -82,6 +82,13 @@ def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
     copper (the antenna at mikoto's AE1: a 20x11mm bbox reaching a QFN 8mm off,
     the #232 phantom class). Mirrors check_drc's polygon model so the two agree.
     """
+    # A sample point within a nanometre of the boundary is decided the
+    # same way in every frame (the last bit used to decide it, and the
+    # same board shifted in memory repaired a different route): with no
+    # margin the test is a raw crossing and a centreline ON the pad edge
+    # is copper on copper, a hit; with a clearance margin a centreline
+    # EXACTLY at clearance is clear, as KiCad grades it.
+    eps = 1e-9 if margin <= 0.0 else -1e-9
     polys = getattr(pad, 'polygons', None) if getattr(pad, 'shape', None) == 'custom' else None
     if polys:
         from check_drc import _point_to_polys_distance
@@ -89,11 +96,11 @@ def _seg_hits_pad(x1, y1, x2, y2, pad, samples=16, margin: float = 0.0) -> bool:
         for t in range(n + 1):
             f = t / n
             if _point_to_polys_distance(x1 + (x2 - x1) * f,
-                                        y1 + (y2 - y1) * f, polys) <= margin + 1e-9:
+                                        y1 + (y2 - y1) * f, polys) <= margin + eps:
                 return True
         return False
-    hx = pad.size_x / 2.0 + margin
-    hy = pad.size_y / 2.0 + margin
+    hx = pad.size_x / 2.0 + margin + eps
+    hy = pad.size_y / 2.0 + margin + eps
     px, py = pad.global_x, pad.global_y
     rr = getattr(pad, 'rect_rotation', 0.0)
     if rr:

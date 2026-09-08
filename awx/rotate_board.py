@@ -30,7 +30,7 @@ pcb0 = parse_kicad_pcb(src)
 xs = [p.global_x for f in pcb0.footprints.values() for p in f.pads]
 ys = [p.global_y for f in pcb0.footprints.values() for p in f.pads]
 CX, CY = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
-# Snap the rotation centre to the 0.025 routing lattice, so an
+# Snap the rotation centre to the 0.05 lattice (every routing grid), so an
 # orthogonal rotation maps lattice-aligned geometry to lattice-aligned
 # geometry. The gate tests isometry invariance; without the snap every
 # coordinate also shifts grid PHASE by a half-cell-ish offset, and any
@@ -38,7 +38,7 @@ CX, CY = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
 # claimed as the cap-graze cause -- the bench's own cap pads sit
 # off-lattice unrotated and grade clean; the grazes track which nets
 # the per-rotation plan leaves to the engine's under-pad rescue.)
-CX, CY = round(CX / 0.025) * 0.025, round(CY / 0.025) * 0.025
+CX, CY = round(CX / 0.05) * 0.05, round(CY / 0.05) * 0.05   # 0.05: the engines' strap grid too (0.025 shifted it by a half cell)
 r = math.radians(deg)
 C, S = math.cos(r), math.sin(r)
 

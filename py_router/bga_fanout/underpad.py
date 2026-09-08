@@ -103,8 +103,24 @@ class _Occ:
         self._ones = b'\x01' * self.ny
         self._disk_memo = {}       # #864: see disk_cells
 
+    # The lattice is a NODE lattice: cell (ix, iy) is the point
+    # x0 + ix*res (see `xy`), and a coordinate is quantised by truncation.
+    # A point within a billionth of a cell of a node belongs to THAT node,
+    # in every frame. Balls sit exactly on nodes whenever the window
+    # margin is a whole number of cells (0.8 / 1.0 / 0.5 mm pitches on the
+    # 0.025 grid), and a plain truncation then let the last bit of the
+    # coordinate choose between the node and the one below it, so the same
+    # board shifted in memory by whole cells fanned out differently (#622
+    # pose gate, 2026-09-08: a corner ball out of the other face, five nets
+    # re-assigned by the rescue). The LOWER cell was tried first and was
+    # translation-invariant too, but it moved every on-node ball one cell
+    # down: a via-in-pad at the ball centre with its stub starting a cell
+    # away (tests/test_bga_fanout_dogbone.py, ulx3s B12).
+    CELL_EPS = 1e-9
+
     def cell(self, x, y):
-        return (int((x - self.x0) / self.res), int((y - self.y0) / self.res))
+        return (int((x - self.x0) / self.res + self.CELL_EPS),
+                int((y - self.y0) / self.res + self.CELL_EPS))
 
     def xy(self, ix, iy):
         return (self.x0 + ix * self.res, self.y0 + iy * self.res)
@@ -119,8 +135,16 @@ class _Occ:
         flip a boundary cell), but computed with one sqrt per column instead
         of float math per cell. The 28.6M-yield _disk generator was 42% of a
         BGA fanout profile; the block_* writers blit these spans instead."""
-        fx = (x - self.x0) / self.res
-        fy = (y - self.y0) / self.res
+        # The centre in cell units, to a billionth of a cell: a point on a
+        # node (every ball, when the window margin is whole cells) is an
+        # exact integer here, and boundary cells at an exact integer
+        # radius (i*i + j*j == (r/res)**2, e.g. 3-4-5) are then decided
+        # the same way in every frame. Raw, the last bit of the
+        # coordinate difference decided them: the same board moved
+        # 10 mm stamped 244 boundary cells differently (#622 pose
+        # gate, 2026-09-08) and one net's jog took the other side.
+        fx = round((x - self.x0) / self.res, 9)
+        fy = round((y - self.y0) / self.res, 9)
         cx, cy = int(fx), int(fy)
         rc = int(r / self.res) + 2
         thr = (r / self.res) ** 2
@@ -243,10 +267,14 @@ class _Occ:
         """
         res = self.res
         inv = 1.0 / res
-        fx0 = (p[0] - self.x0) * inv
-        fy0 = (p[1] - self.y0) * inv
-        fx1 = (q[0] - self.x0) * inv
-        fy1 = (q[1] - self.y0) * inv
+        # Endpoints in cell units to a billionth of a cell (see
+        # _disk_spans): an edge of the capsule landing exactly on a node
+        # row is then decided the same way in every frame -- everything
+        # below is arithmetic on these four numbers and R.
+        fx0 = round((p[0] - self.x0) * inv, 9)
+        fy0 = round((p[1] - self.y0) * inv, 9)
+        fx1 = round((q[0] - self.x0) * inv, 9)
+        fy1 = round((q[1] - self.y0) * inv, 9)
         R = r * inv
         thr = R * R
         lo_x = fx0 if fx0 < fx1 else fx1
@@ -1267,8 +1295,16 @@ def generate_underpad_escape(footprint: Footprint,
     _hint_missed = []
 
     def depth(p):
-        return min(p.global_x - grid.min_x, grid.max_x - p.global_x,
-                   p.global_y - grid.min_y, grid.max_y - p.global_y)
+        # Rounded to a nanometre: balls on one ring are EQUALLY deep in
+        # exact arithmetic, and the last bit of a coordinate difference
+        # otherwise decides their order -- the same array shifted 1 mm
+        # in x routed its rings in another order, one ball's escape then
+        # failed and the rip-swap rescue re-assigned five nets (502
+        # against 447 tracks, #622 pose gate 2026-09-08). Equal depths
+        # now stay equal and the stable sort keeps the footprint's own
+        # pad order, which moves and turns with the part.
+        return round(min(p.global_x - grid.min_x, grid.max_x - p.global_x,
+                         p.global_y - grid.min_y, grid.max_y - p.global_y), 6)
 
     def astar(sx, sy, home, route_layers, allow_via, via_ok=None, net_id=0,
               carve=None, start_layer=None, cost_out=None, side=None,
@@ -1867,7 +1903,11 @@ def generate_underpad_escape(footprint: Footprint,
             return False
         Lc = half_axis - half_sp        # 45-degree converge length
         # Two escape directions perpendicular to the axis; nearer boundary first.
-        cand_e = sorted([(-ay, ax), (ay, -ax)], key=lambda e: boundary_dist(mx, my, e))
+        # (distance to a nanometre: a pair centred in the array has two
+        # equally near boundaries, and the list order -- not the last
+        # bit -- should decide, or the same board moved takes the other)
+        cand_e = sorted([(-ay, ax), (ay, -ax)],
+                        key=lambda e: round(boundary_dist(mx, my, e), 6))
         homes = home_of(pp) | home_of(nn)
         # Foreign copper in the pair's home lens keeps blocking (#393). The
         # partner's OWN pad/reservation is not carved (both pair nets exempt):
