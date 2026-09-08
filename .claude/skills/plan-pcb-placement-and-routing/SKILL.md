@@ -236,8 +236,8 @@ reviewer has to decide -- and an unanswered criterion blocks the close.
 1. **Pair and bus length.** For every diff pair and every bus of two parts,
    `span_mm` from `board_context.py --json` (`pin_order.rows[].span_mm`) is the
    straight-line pad distance the connection is forced to run. Compare it with
-   the shortest the two bodies allow side by side -- their `body_mm` are on the
-   same sheet. A ratio much above 1.5 is a finding you must explain or move.
+   the shortest the two bodies allow side by side -- `parts[].body_mm` is on
+   the same sheet. A ratio much above 1.5 is a finding you must explain or move.
 2. **Pin-order agreement.** `pin_order.rows[].verdict`. A `CROSSED` pair costs
    back-side copper or a via per net on two layers, and rotation cannot fix it:
    parity flips only under a mirror. Say WHICH nets.
@@ -257,8 +257,9 @@ reviewer has to decide -- and an unanswered criterion blocks the close.
    sheet also names which rung each body came from, and a seam measured between
    two silk markings is a much weaker claim than one between two drawn outlines.
 6. **Density and balance.** `check_pockets.py --bin 5 --json <PATH>`: the
-   emptiest region (`cold_regions[0].area_mm2`) against the densest
-   (`hot[].ratio`), and the centroid offset (`arrangement.sides[*].offset_mm`).
+   emptiest region (`cold_regions[0].area_mm2`) against the densest window
+   (`windows[0].ratio` -- `windows` is already sorted by descending ratio),
+   and the centroid offset (`arrangement.sides[<layer>].offset_mm`).
    That centroid is weighted by COURTYARD AREA, not pad area, and the tool says
    so -- quote it as what it is.
 7. **The human question, written out.** "Would a competent engineer accept this

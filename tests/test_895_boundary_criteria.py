@@ -160,6 +160,73 @@ def test_criterion_6_is_what_the_instrument_reports():
           'COURTYARD AREA' in ref)
 
 
+def test_the_criteria_name_keys_the_instruments_actually_emit():
+    """A criterion keyed on a field that does not exist measures nothing.
+
+    Criterion 6 shipped reading `hot[].ratio`. `hot` is a LOCAL inside
+    check_pockets; the emitted key is `windows[].ratio`, already sorted by
+    descending ratio. A reviewer following it finds no such field and either
+    guesses or skips -- and the criterion is mandatory, so skipping it blocks
+    the close for a reason that is the document's fault.
+
+    Every dotted path the seven criteria quote is resolved here against the
+    real output of the instrument named beside it.
+    """
+    s = _text(SKILL)
+    ctx = subprocess.run([sys.executable, os.path.join(ROOT, 'py_tools',
+                                                       'board_context.py'),
+                          FIXTURE, '--json'], capture_output=True, text=True)
+    ctx_doc = json.loads(ctx.stdout)
+    check('board_context exits 0', ctx.returncode == 0, ctx.stderr[-200:])
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        pk_path = os.path.join(tmp, 'pockets.json')
+        subprocess.run([sys.executable, '-X', 'utf8',
+                        os.path.join(ROOT, 'py_tools', 'check_pockets.py'),
+                        FIXTURE, '--bin', '5', '--json', pk_path],
+                       capture_output=True, text=True)
+        check('check_pockets wrote a document', os.path.isfile(pk_path))
+        if not os.path.isfile(pk_path):
+            return
+        with open(pk_path, encoding='utf-8') as fh:
+            pk_doc = json.load(fh)
+
+    #: (the path as the criteria spell it, the document, a resolver)
+    paths = (
+        ('pin_order.rows[].span_mm', ctx_doc,
+         lambda d: d['pin_order']['rows'][0]['span_mm']),
+        ('pin_order.rows[].verdict', ctx_doc,
+         lambda d: d['pin_order']['rows'][0]['verdict']),
+        ('parts[].body_mm', ctx_doc, lambda d: d['parts'][0]['body_mm']),
+        ('parts[].pads_by_face', ctx_doc,
+         lambda d: d['parts'][0]['pads_by_face']),
+        ('parts[].partners', ctx_doc, lambda d: d['parts'][0]['partners']),
+        ('cold_regions[0].area_mm2', pk_doc,
+         lambda d: d['cold_regions'][0]['area_mm2']),
+        ('windows[0].ratio', pk_doc, lambda d: d['windows'][0]['ratio']),
+        ('arrangement.sides[<layer>].offset_mm', pk_doc,
+         lambda d: next(iter(d['arrangement']['sides'].values()))['offset_mm']),
+    )
+    for path, doc, resolve in paths:
+        check(f'the criteria quote `{path}`', path in s)
+        try:
+            resolve(doc)
+            check(f'...and the instrument emits it', True)
+        except (KeyError, IndexError, TypeError, StopIteration) as exc:
+            check(f'...and the instrument emits it', False,
+                  f'{type(exc).__name__}: {exc}')
+
+    # The seam comes from render_placement, which is too slow to run here; its
+    # key is asserted at the emit site instead of by re-rendering the board.
+    rp = _text(os.path.join(ROOT, 'py_tools', 'render_placement.py'))
+    check('the criteria quote `checklist.b_body_seam`',
+          'checklist.b_body_seam' in s)
+    check("...and render_placement emits 'b_body_seam'", "'b_body_seam':" in rp)
+
+    check('`hot[` is gone -- it was never an emitted key', 'hot[' not in s)
+
+
 def test_criterion_3_is_what_the_grader_reports():
     """Every distance criterion 3 quotes, re-derived through the real grader.
 
@@ -288,6 +355,7 @@ def test_the_reference_says_which_journal_numbers_did_not_reproduce():
 
 
 TESTS = [test_the_seven_criteria_are_named_and_the_ordering_is_stated,
+         test_the_criteria_name_keys_the_instruments_actually_emit,
          test_the_reference_names_no_board_and_no_work_directory,
          test_criterion_1_and_2_are_what_the_instrument_reports,
          test_criterion_1_quotes_the_bodies_it_compares_against,
