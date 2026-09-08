@@ -563,6 +563,12 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
     The candidate is STAGED and graded before anything reaches `out_path`, so a
     refused request leaves no half-written board behind and `dry_run` grades
     exactly what a real run would have written.
+
+    `pcb_data` is an OPTIMISATION, not a second input: it must be the parse of
+    `board_path`. Ops and both grades read it, while the writer re-reads the
+    file, so handing over a `PCBData` that differs from what is on disk would
+    describe one board and write another. An in-process caller with a live
+    pcbnew board must write it out first and pass that path.
     """
     from kicad_parser import parse_kicad_pcb
     from placement.portfolio import copy_siblings

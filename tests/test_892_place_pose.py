@@ -360,14 +360,31 @@ with tempfile.TemporaryDirectory() as d:
         check("the op records the aim and the measurement",
               'target_face' in op and 'row_on_target' in op
               and 'row_landed' in op, json.dumps(op)[:300])
-        check("the measurement is of the row it named",
-              op['row_on_target'][1] == len(op['row_pads']))
-        # The independent check: re-derive the row's landing here.
+        # NOT `row_on_target[1] == len(row_pads)`, which the engine assigns on
+        # one line and so asserts nothing. The claim worth pinning is that the
+        # row it measured is the row that was ON that face before the write.
+        by_before = pose_ops.part_faces(pcb0, 'U1', clearance=CLR,
+                                        track_width=TW)
+        check("the measured row IS the named face's row on the input board",
+              len(op['row_pad_ix']) == len(by_before[op['face']]),
+              "%d vs %d" % (len(op['row_pad_ix']),
+                            len(by_before[op['face']])))
+        # The independent recount, deliberately NOT the engine's expression:
+        # pads are matched by LOCAL coordinates, which a rotation leaves alone,
+        # where the engine matches by index. Keying by pad NUMBER here (as an
+        # earlier version did) mirrors the very bug the index fixed.
         fpcb = parse_kicad_pcb(out)
         by = pose_ops.part_faces(fpcb, 'U1', clearance=CLR, track_width=TW)
-        landed = {p.pad_number: f for f, pads in by.items() for p in pads}
-        hit = sum(1 for n in op['row_pads']
-                  if landed.get(n) == op['target_face'])
+        landed_local = {}
+        for f, pads in by.items():
+            for p in pads:
+                landed_local[(round(p.local_x, 4), round(p.local_y, 4))] = f
+        before_pads = pcb0.footprints['U1'].pads
+        row_local = [(round(before_pads[i].local_x, 4),
+                      round(before_pads[i].local_y, 4))
+                     for i in op['row_pad_ix']]
+        hit = sum(1 for k in row_local
+                  if landed_local.get(k) == op['target_face'])
         check("the CLI's count matches an independent recount",
               hit == op['row_on_target'][0],
               "%s vs %s" % (hit, op['row_on_target'][0]))
