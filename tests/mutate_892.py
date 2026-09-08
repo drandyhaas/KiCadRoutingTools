@@ -108,9 +108,15 @@ ROWS = [
      "                raise PoseRefusal(summary['refused'], summary=summary)",
      (T_POSE,), 'KILLED'),
 
+    # The LEGALITY site, not the face one. Mutating the face append survives:
+    # the legality block appends after it either way, so both findings still
+    # reach the summary. Only the LAST writer can erase what came before -- and
+    # erasing it is exactly the defect this row exists for.
     ('a-forced-run-reports-only-the-last-finding', 'o',
-     "            findings.append(reason)",
-     "            findings[:] = [reason]",
+     "            findings.append(_refusal_reason(bad, strict, before, after,\n"
+     "                                            summary))",
+     "            findings[:] = [_refusal_reason(bad, strict, before, after,\n"
+     "                                           summary)]",
      (T_POSE,), 'KILLED'),
 
     # ---- the snap ---------------------------------------------------------
