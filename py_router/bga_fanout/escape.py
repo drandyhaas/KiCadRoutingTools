@@ -36,8 +36,10 @@ def preferred_escape_dirs(pcb_data, footprint) -> Dict[Tuple[float, float], str]
         if not targets:
             continue
         px, py = pad.global_x, pad.global_y
-        tx, ty = min(targets, key=lambda t: (t[0] - px) ** 2 + (t[1] - py) ** 2)
-        dx, dy = tx - px, ty - py
+        tx, ty = min(targets, key=lambda t: round((t[0] - px) ** 2 + (t[1] - py) ** 2, 6))
+        # rounded: a far end on the array's own diagonal is EXACTLY as far
+        # in x as in y, and the last bit otherwise picked the side
+        dx, dy = round(tx - px, 6), round(ty - py, 6)
         if abs(dx) >= abs(dy):
             d = 'right' if dx > 0 else 'left'
         else:
@@ -67,8 +69,8 @@ def preferred_pair_dirs(pcb_data, footprint, diff_pairs) -> Dict[str, str]:
             continue
         cx = (pair.p_pad.global_x + pair.n_pad.global_x) / 2
         cy = (pair.p_pad.global_y + pair.n_pad.global_y) / 2
-        tx, ty = min(targets, key=lambda t: (t[0] - cx) ** 2 + (t[1] - cy) ** 2)
-        dx, dy = tx - cx, ty - cy
+        tx, ty = min(targets, key=lambda t: round((t[0] - cx) ** 2 + (t[1] - cy) ** 2, 6))
+        dx, dy = round(tx - cx, 6), round(ty - cy, 6)
         if abs(dx) >= abs(dy):
             prefs[pair_id] = 'right' if dx > 0 else 'left'
         else:
@@ -104,10 +106,15 @@ def find_escape_channel(pad_x: float, pad_y: float,
     if is_edge:
         return None, edge_dir
 
-    dist_left = pad_x - grid.min_x
-    dist_right = grid.max_x - pad_x
-    dist_up = pad_y - grid.min_y
-    dist_down = grid.max_y - pad_y
+    # Rounded to a nanometre: a corner ball is EQUALLY far from two edges
+    # in exact arithmetic and the last bit of the difference otherwise
+    # chose its exit (the same board shifted in memory took the other
+    # edge, #622 pose gate 2026-09-08); equal stays equal, and the list
+    # order below decides, the same everywhere
+    dist_left = round(pad_x - grid.min_x, 6)
+    dist_right = round(grid.max_x - pad_x, 6)
+    dist_up = round(pad_y - grid.min_y, 6)
+    dist_down = round(grid.max_y - pad_y, 6)
 
     # Build list of (distance, direction, orientation) options
     options = [
@@ -132,12 +139,12 @@ def find_escape_channel(pad_x: float, pad_y: float,
         if orientation == 'horizontal':
             h_channels = [c for c in channels if c.orientation == 'horizontal']
             if h_channels:
-                best = min(h_channels, key=lambda c: abs(c.position - pad_y))
+                best = min(h_channels, key=lambda c: round(abs(c.position - pad_y), 6))
                 return best, escape_dir
         else:  # vertical
             v_channels = [c for c in channels if c.orientation == 'vertical']
             if v_channels:
-                best = min(v_channels, key=lambda c: abs(c.position - pad_x))
+                best = min(v_channels, key=lambda c: round(abs(c.position - pad_x), 6))
                 return best, escape_dir
 
     # Fallback: return closest edge direction even without channel
@@ -177,10 +184,10 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
         return []  # Edge pairs have fixed escape direction
 
     # Calculate distances to each edge
-    dist_left = center_x - grid.min_x
-    dist_right = grid.max_x - center_x
-    dist_up = center_y - grid.min_y
-    dist_down = grid.max_y - center_y
+    dist_left = round(center_x - grid.min_x, 6)
+    dist_right = round(grid.max_x - center_x, 6)
+    dist_up = round(center_y - grid.min_y, 6)
+    dist_down = round(grid.max_y - center_y, 6)
 
     min_pad_y = min(p_pad_y, n_pad_y)
     max_pad_y = max(p_pad_y, n_pad_y)
@@ -202,7 +209,7 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
     elif channels_above:
         h_channel = max(channels_above, key=lambda c: c.position)
     else:
-        h_channel = min(h_channels, key=lambda c: abs(c.position - center_y)) if h_channels else None
+        h_channel = min(h_channels, key=lambda c: round(abs(c.position - center_y), 6)) if h_channels else None
 
     if h_channel:
         h_dir = 'left' if dist_left <= dist_right else 'right'
@@ -222,7 +229,7 @@ def get_pair_escape_options(p_pad_x: float, p_pad_y: float,
     elif channels_left:
         v_channel = max(channels_left, key=lambda c: c.position)
     else:
-        v_channel = min(v_channels, key=lambda c: abs(c.position - center_x)) if v_channels else None
+        v_channel = min(v_channels, key=lambda c: round(abs(c.position - center_x), 6)) if v_channels else None
 
     if v_channel:
         v_dir = 'up' if dist_up <= dist_down else 'down'
@@ -568,10 +575,10 @@ def assign_pair_escapes(diff_pairs: Dict[str, DiffPairPads],
             continue
 
         # Calculate distance to nearest edge
-        dist_left = center_x - grid.min_x
-        dist_right = grid.max_x - center_x
-        dist_up = center_y - grid.min_y
-        dist_down = grid.max_y - center_y
+        dist_left = round(center_x - grid.min_x, 6)
+        dist_right = round(grid.max_x - center_x, 6)
+        dist_up = round(center_y - grid.min_y, 6)
+        dist_down = round(grid.max_y - center_y, 6)
         min_dist = min(dist_left, dist_right, dist_up, dist_down)
 
         pair_info.append((pair_id, pair, min_dist, center_x, center_y))

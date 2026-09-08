@@ -13,22 +13,28 @@ left open:
     python3 make_bench.py BOARD SRC DST OUT # another array pair, any board
     bash pose_gate.sh BOARD SRC DST 15 28   # the same pair in every pose
 
-## Where it stands (2026-09-07)
+## Where it stands (2026-09-08)
 
 The bench (`fb_t2q_fresh`: an H3 BGA `U1` to a DDR3 `DU1`, the coherent
 K-ladder), one fanout per K, byte-deterministic, 0 DRC at the routed 0.1
-mm floor everywhere:
+mm floor everywhere, and since 2026-09-08 the SAME result for the board
+moved anywhere on the sheet (the translation section below):
 
-| K  | open | vias | in-band | chain | human vias |
-|----|------|------|---------|-------|------------|
-| 15 | 0 | 14  | 15 / 15 | 15 s  | 22 |
-| 28 | 0 | 38  | 28 / 28 | 28 s  | 46 |
-| 35 | 0 | 54  | 34 / 35 | 76 s  | 58 |
-| 41 | 0 | 82  | 40 / 41 | 155 s | 70 |
-| 51 | 0 | 141 | 31 / 47 | 339 s | 85 |
+| K  | open | vias | in-band | chain | human vias | 09-07 (before the pose work) |
+|----|------|------|---------|-------|------------|------------------------------|
+| 15 | 0 | 14  | 15 / 15 | 15 s  | 22 | 14, 15 s |
+| 28 | 0 | 36  | 28 / 28 | 37 s  | 46 | 38, 28 s |
+| 35 | 0 | 54  | 34 / 35 | 81 s  | 58 | 54, 76 s |
+| 41 | 0 | 86  | 37 / 41 | 200 s | 70 | 82, 155 s |
+| 51 | **1 (SA4)** | 130 | 33 / 47 | 429 s | 85 | 0 open, 141, 339 s |
 
-K41 and K51 complete for the first time today (the blocker-directed rip
-at the last call); the work is now vias, not completion. "In-band" is
+Timed alone, 2026-09-08 (tag `ft`). K41 and K51 completed for the first
+time on 09-07 (the blocker-directed rip at the last call); the pose work
+since then re-decided every exact-tie stamp in the fanout and the main
+router's pad keep-outs, and the large-K draws moved with them: K28 -2,
+K41 +4, and K51's SA4 (the chronic one: TODO 1's re-berth case) is open
+again on this draw. Those draws are the chain's knife edge, not the
+rules' -- the same rules grade the moved board identically. "In-band" is
 the lanes the braid routed inside their planned bands; the rest were
 re-laid at the last call.
 
@@ -211,7 +217,9 @@ prints open / DRC / vias / in-band / seconds per pose and K.
    answered that by re-berthing (`negotiate_stubs`, `relay_net.py
    --ref`): rip the berth and fan the ball out again in another move.
    Do the same for the TEETH -- a re-fan of the source escape for a
-   trapped stub, at either end, judged by the chain.
+   trapped stub, at either end, judged by the chain. First concrete
+   case: the FB pose (destination array on the back) at K28 leaves SA0
+   open after a depth-2 rip, walled by static copper at its berth.
 2. **Try the packing** (take4's `pack_lanes` / `relax_attract`: a
    follow-the-neighbour force pulling each lane to `pitch` from the
    nearest packed lane on its layer). Tidier rivers for the same grade
@@ -527,7 +535,272 @@ SA7 0 vias); **K41 8 open -> 1 open (SA4), 80 -> 86 vias**, one corridor
 of 41. Chain times K35 67 s, K41 151 s (fanout 68 + braid 82). The
 first run after any plan change pays the taut memo cold (K41: 342
 recomputations, ~5 minutes) -- a one-time cost, not the mechanism.
-`chain_k.sh` now stamps the fanout and braid stage boundaries.
+`chain_k.sh` now stamps the fanout and braid stage boundaries. (The
+memo, `tmp/taut_memo.json`, is content-keyed and has never been wrong,
+but it has grown to 158 MB and every process loads all of it, 1.6 s
+each and two processes per K; a mirror or a new pose pays it cold --
+K15 61 s against 21 s warm. Pruning it, or keying a file per board, is
+a time item of its own.)
+
+### The fanout engine's axes: translation first, then rotation (2026-09-08)
+
+The pose gate had shown the engine's fanout depends on the angle the
+array was dropped at: a FRESH fanout of the same source array on the
+board rotated by 0 / 90 / 180 / 270 degrees gave 502 / 540 / 425 / 430
+tracks and the chain 38 / 42 / 54 / 38 vias at K28. Routing every
+rotated part in its own frame (`rotate_frame`, extended from the
+non-orthogonal case to every angle, exact quarter turns about a lattice
+point, the whole board carried: holes, zones, keep-outs, bounds, foreign
+parts' angles by MINUS the turn, pad sizes swapped on odd quarter turns,
+`frame_rotation` stamped for the braid's obstacle memo) made the half
+turn exact and the quarter turns agree with each other -- and left them
+different from the unrotated article. The reason was not rotation: the
+engine was not TRANSLATION-invariant. The same board shifted 1 mm in x
+fanned out to 447 tracks instead of 502.
+
+**Translation invariance, found by bisecting the engine's own log and
+its per-ball searches on the native and the shifted board
+(`tmp/frame/src_*.py`, `trace_ball.py`, `gnd_trace*.py`).** Every cause
+was a decision made by the last bit of a coordinate where exact
+arithmetic has a tie, and every fix is the same: round the key so equal
+stays equal, and let a deterministic order decide.
+
+- `underpad.depth`, the ball routing order: balls on one ring are
+  equally deep; the noise ordered them, and a different order routed one
+  ball (SDQ4) into a corner, whose rip-swap rescue re-assigned five nets.
+  Rounded to a nanometre; the stable sort keeps the footprint's own pad
+  order, which moves and turns with the part.
+- `escape.py`: the four edge distances of a ball (a corner ball ties two),
+  the nearest channel to a pad that sits exactly midway between two, the
+  nearest far end of a net, and the target-side comparison |dx| >= |dy| (a
+  far pad on the array's own diagonal ties). `__init__._surface_gap_escape`'s
+  four-exit order. All rounded.
+- `reroute._seg_hits_pad`: a sample point exactly on a pad edge. With no
+  margin a centreline on the edge is copper on copper (a hit); with a
+  clearance margin exactly-at-clearance is clear, as KiCad grades it.
+- `plane_fill_model.nearest_component_point`: the pour-direct tap of a
+  corner plane ball is equally near two fill cells; the argmin is rounded.
+- `underpad._Occ.cell`: the occupancy lattice is a NODE lattice (cell
+  `(ix, iy)` is the point `x0 + ix*res`), and balls sit EXACTLY on nodes
+  whenever the window margin is a whole number of cells (0.8 / 1.0 / 0.5
+  mm pitches: 1.0 mm = 40 cells of pitch/32); the truncation let the last
+  bit choose between the node and the one below. A point within 1e-9 of a
+  node now belongs to THAT node (the upper cell). The LOWER cell was
+  shipped first -- translation-invariant too, and the bench draw the user
+  accepted (14 / 38 / 98) -- until `tests/test_bga_fanout_dogbone.py`
+  showed what it does: every on-node ball moves one cell down, so a
+  via-in-pad at the ball centre has its stub start 25 um away (ulx3s B12,
+  the one orphan of 8 checks). The upper cell is the right one; what had
+  made it look wrong was the next two items.
+- `underpad._Occ._disk_spans` / `_capsule_spans`, the rasterisers behind
+  every stamp: the centre in cell units (`(x - x0)/res`) carries the
+  coordinate's noise, and a boundary cell at an exact integer radius
+  (`i*i + j*j == (r/res)**2`: the 3-4-5 cells of a 0.125 mm disc, the
+  edge of a capsule on a node row) was decided by it -- 244 and 288 cells
+  of the initial stamp on the orangecrab article, and one net's jog took
+  the other side of its corridor. Quantised to a billionth of a cell;
+  everything downstream is arithmetic on those numbers and is then
+  bit-identical in every frame.
+
+`tests/test_fanout_translation.py` pins it wx-free on a real 96-ball
+BGA (orangecrab U4): under three lattice translations the engine's
+INITIAL OCCUPANCY STAMP is byte-identical (the check that exposed both
+rasteriser ties) and the routing is the same (vias exact, every segment
+endpoint within one occupancy cell of the other run's copper; with the
+upper cell the moved runs have the same track count as in place), with a
+non-vacuity check that the board has ring ties the shift re-orders in
+raw arithmetic. The origin article (`U1` on `h3_FF_base`) is the same
+447 tracks and 8 vias under eleven shifts. `translate_board.py` makes a
+moved article for the pose gate (the third isometry, beside rotation and
+the mirror).
+
+**The bench's cost, and the decision.** The ordering fixes alone leave
+the bench at 14 / 38 / 82. The cell rule cannot: every deterministic
+convention re-decides the exact-edge stamps at the destination array,
+and K41's draw moves with them (K15 14 and K28 38 hold under all). The
+tuned 82 was the noise's draw, and that K41 sits on a knife edge is the
+chain's (the rip and plan-adherence items). Decided by the user
+2026-09-08: whichever rule is right ships and K41 is to be won back in
+the chain. The lower cell went in first (14 / 38 / 98); the section
+below is what it took to make the CHAIN invariant, and the bench with
+the final rules is **14 / 36 / 86**.
+
+**Rotation, measured with that in** (`tmp/frame/rot10.out`, a fresh
+fanout on the rotated article, then the chain; K15 / K28 vias):
+
+| pose | frame off (default) | frame on (`KICAD_FANOUT_FRAME_QUARTER=1`) |
+|---|---|---|
+| R0 | 14 / 42 | 12 / 40 (417 / 2107 segments) |
+| R90 | 16 / 50 | 12 / 36 + SA4 open (705 / 1578) |
+| R180 | 14 / 54 | 12 / 40, identical to R0 to the segment |
+| R270 | 16 / 42 | 12 / 36 + SA4 open, identical to R90 |
+
+With the frame on all four poses fan out to the same 447 tracks and 8
+vias: the FANOUT is exactly rotation-covariant now. The half turn is an
+exact symmetry of the whole chain; the quarter turns agree with each
+other and differ from R0 by the PLAN's and the BRAID's own axes (the
+braid's octilinear search leans on one axis, the plan's faces are
+compass directions), which is the next frame to build (TODO: the pair's
+flow frame, take4's idea). The quarter-turn frame stays opt-in until
+then: making it the default re-fans the bench's destination array (at
+90 degrees) and moves that draw again.
+
+### The chain after the fanout: three more ties, and the pad offset in the main router (2026-09-08)
+
+With the fanout engine exactly translation-invariant, the chain on the
+bench moved by (10.3, -7.7) mm (`translate_board.py`, `tmp/gate/fbT`)
+still graded K41 109 against 98 in place (K15 and K28 identical). Found
+by diffing the two chains' logs stage by stage with the numbers
+stripped, and fixed in order; each fix was measured by re-running both
+chains and diffing again.
+
+1. **The rip-swap rescue's victim order** (`bga_fanout.__init__.
+   _underpad_rip_rescue`). In destination pass 2 the plan-follow stage
+   was identical on both boards to the ball, and then the rescue of SA3
+   evicted SA2 in place and SA15 moved: the two neighbours are EQUALLY far
+   from the ball (0.425 mm, the symmetric pair on a regular pitch), the
+   log printed the last bit as 0.42 and 0.43, and whichever came first
+   opened a different corridor. Both rescues succeed. Rule now: the
+   distance to a nanometre, and victims at the SAME distance are all
+   tried and the RESULT decides (fewest vias, least copper, then name) --
+   a general rule, not a coin. The corridor band's widest-gap choice got
+   the same nanometre key. Chain identical in both frames after this,
+   grading 109 in both: the tie-by-name draw. (`_surface_gap_escape`'s
+   `KICAD_FANOUT_RESCUE_DEBUG=1` prints every corridor it tries.)
+2. **The occupancy rasterisers** (the bullet above): found when the
+   upper cell, adopted for the dogbone orphan, failed the translation test
+   on the orangecrab article -- 244 boundary cells of the initial stamp
+   differed, and the fix for the disc showed the capsule's 288. With the
+   upper cell and both rasterisers quantised the chain grades 14 / 36 in
+   both frames at K15 / K28, and at K41 86 in place against 84 moved:
+   the FANOUT stage identical to the log line, the braid's first lane
+   differing by ONE A* iteration (92960 against 92959).
+3. **The main router's pad keep-out** (`routing_utils.
+   pad_blocked_cells_array`, shared by every routing step). Dumping the
+   obstacle map the braid hands the router for that first lane on both
+   boards (`is_blocked` / `is_via_blocked` / the two cost maps over the
+   lane's region, `tmp/frame/braid_obs_*.py`) and comparing them shifted:
+   blocked, layer costs and stub costs identical, THREE via-keep-out cells
+   different -- each exactly at the keep-out boundary of a roundrect
+   passive's pad (R3.1, R3.2, C12.2 at 0.5663 mm: a 3-4-5 cell of the
+   corner arc). The rasteriser is exact in the pad's own frame, but its
+   sub-cell offset `pad.global_x - gx*grid_step` is computed from the
+   absolute coordinate and carries its last bit into `dist_sq <
+   margin_sq`, which has no tie epsilon. The offset is quantised to a
+   nanometre at the function's entry (and in `iter_pad_blocked_cells`,
+   its bit-identical twin); `_capsule_mask` already resolves its ties
+   through `GRID_TIE_EPS`, and the via stamps' `off_cells` is a hypot
+   (never negative), so those were robust. After this the first lane's
+   map is byte-identical, and the whole chain is: **K15 14 / 673, K28
+   36 / 1596, K41 86 / 2489 in both frames, the K41 braid logs identical
+   line for line.** This one is production code: it joins the engine
+   changes owed a corpus A/B before main (TODO 7).
+
+What the exercise says about the chain: every stage that orders by a
+raw distance or rasterises from an absolute coordinate has a tie on a
+regular pitch, and a translation is the cheapest instrument for finding
+them -- the two chains differ only where a last bit decided something.
+The same instrument on the braid's own keys (`braid.py` has thirty
+keyed sorts on raw projections and distances) is available whenever a
+pose gate shows the braid leaning.
+
+### The relaxation, vectorised and convergent: `taut_fast` (2026-09-08, `TAUT_FAST=1`)
+
+The user asked for the current algorithm sped up, its oscillations
+removed and its rounds vectorised, and `taut_fast.relax_many` is that:
+the same model (curve shortening on a densified polyline against discs
+and capsules, the ends frozen, a shortcut every 25 rounds), with
+
+- contact as a CONSTRAINT: a pushed point lands on the boundary plus a
+  micron, not 0.01 mm past it, so smooth-then-project is a projected
+  gradient step and the round trip that kept every contact string at its
+  limit cycle for 400 rounds is gone;
+- a capsule the string crosses transversally (more than 30 degrees off
+  its direction) is transparent for the crossing -- a dive, which the
+  cleanliness check already tolerates -- while one it runs along still
+  pushes, so the mean spine stays off foreign tracks;
+- every string of a `taut_paths` call in ONE array (a Jacobi sweep,
+  diffusion number 1/4; a trust region of 0.05 mm per round so no step
+  can jump a thin capsule; per-point candidate lists of the 16 nearest
+  obstacles within 0.9 mm from the shared base model, the string's own
+  net masked), coarse spacing (0.48 mm) then fine (0.12);
+- convergence judged where it can be seen: the shortcut-and-densify
+  polyline stopping between blocks (Hausdorff below 0.02 mm), and a
+  string that touches nothing leaves after one block;
+- a Douglas-Peucker pass before each shortcut -- a relaxed string is
+  straight between contacts and the chord along a straight run needs no
+  clearance test (the shortcut had become 1.8 of 2.2 s: 64,000 tests);
+- the output projected once more after its final densify, so chord
+  points between two contact points are not left inside the disc.
+
+Measured on the front article (`tmp/frame/fast_batch.py`): K28's 28
+strings 8.9 -> 1.9 s (x4.6), K41's 41 strings 7.9 -> 3.0 s (x2.7,
+its strings still spend their round budget: the tangential creep of
+contact points is diffusion-limited too). The strings are cleaner: the
+old relaxation's wedged oscillation left SA7's and SWE's strings 0.19
+mm INSIDE pads U1.Y20 and Y21, the new goes round them; the disc-side
+"disagreements" between old and new are those, and ties at touching
+pads. The bench through the chain (`TAUT_FAST=1`, `tmp/frame/tf1.out`):
+K15 16 / K28 38 / K41 94 vias against 14 / 38 / 98 -- equivalent, a
+different draw of the same plan loop. Chain time, memo warm: 10 / 35 /
+161 s against 17 / 27 / 182 s; cold (every string computed): 22 / 87 /
+342 s. The memo tags its entries `#fast`, so the two algorithms'
+strings never mix inside a run.
+
+What it does not reach: the 100x that would retire the memo. A cold
+K41 still computes its 342 strings (~35 s batched against ~160 s), so
+the sharded memo stays. The rounds are the limit now, not the
+arithmetic: sliding a contact point along its disc is as diffusion-
+limited as bending the string was, and only an implicit smoothing step
+(with a per-round crossing check, since a large step can carry a run of
+points across a 0.23 mm capsule) or the vertex solver (contacts as the
+state, tangent geometry, a few iterations) goes further. Translation:
+the batched relaxation is a float algorithm like the old one, so the
+chain downstream of the fanout is not translation-invariant at K41's
+knife edge either way (the bench moved by (10.3, -7.7) mm,
+`translate_board.py`, grades 14 / 38 / 109 against 14 / 38 / 98 in
+place; K15 and K28 to the segment).
+
+### The taut memo, sharded; and why the relaxation itself is not fast (2026-09-08)
+
+`detect_buses.taut_paths` memoises each taut string on `ends@signature`
+(the obstacle model's content hash) and persists the memo across the
+chain's processes. It had grown into ONE file of 158 MB and 31,000
+entries, loaded in full by every process (1.6 s, two processes per K)
+and rewritten in full whenever a run added an entry -- a cold K41
+dumped it twenty times. It is now `tmp/taut_memo/<xx>.json`, one shard
+per two-hex-digit prefix of the signature, loaded on first touch, only
+dirty shards written, each merged with the shard on disk first (a
+parallel chain's additions survive), entries untouched for 14 days
+dropped at write time; the old file is migrated into shards once and
+renamed `.migrated`. Nothing about the answers changes.
+
+Whether the memo could go altogether -- the user's question -- was
+measured on the front article's 28 K28 strings (`tmp/frame/taut_*.py`):
+13.3 s cold, 0.47 s mean, 1.0-1.5 s for the long ones, 83 % of it in
+`point_violation` (59 million `hypot` calls: 400 iterations x ~200
+points x the pushes). Every string that touches copper runs ALL 400
+iterations: the exit test (total movement below 1e-4 mm per point)
+never triggers, because a point where the string crosses a foreign
+track's capsule -- a legitimate dive on a two-layer ribbon, the
+assert-only "violating" strings -- is pushed out and smoothed back
+every iteration, an oscillation of 0.01-0.2 mm that the periodic
+shortcut-and-densify rebuilds each time. The movement plateaus by
+iteration 50-100 and then creeps (SRAS: 0.34 at 25, 0.30 at 100,
+0.27 at 200, 0.25 at 400). What was tried against the 400-iteration
+result: stop when the movement stagnates (5 % over 50 iterations):
+2.5x fewer iterations, paths drift up to 0.17 mm; 2 %: 2.3x, 0.15 mm;
+count only un-wedged movement: nothing (their neighbours keep moving);
+freeze the wedged points: nothing, and one string drifted 0.57 mm (the
+rebuild re-forms them). A numpy red-black sweep is worth about 2x on
+top and changes the update scheme; numba is not installed and mypyc
+was measured and rejected for this repo. The relaxation's floor is the
+contact oscillation, and a 0.17 mm drift is a quarter of the lane
+pitch -- a different plan, not a faster one. The real answer is an
+exact shortest-homotopic-path solver with explicit contacts (~100x, and
+it converges), which is a rewrite, not a fix. Decision: keep the memo,
+sharded; a new pose pays its strings once (K15 mirror: 61 s cold, 21 s
+warm).
 
 ### The sidecar describes the board it sits beside (2026-09-07)
 

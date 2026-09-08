@@ -2354,7 +2354,10 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
         free = [(a, b) for (a, b) in free if b - a > eps]
         if not free:
             return None
-        a, b = max(free, key=lambda ab: ab[1] - ab[0])
+        # Widest gap, width to a nanometre: two equal slivers either
+        # side of a via sitting on the corridor line are a tie, and the
+        # first (lower coordinate) wins rather than the last bit.
+        a, b = max(free, key=lambda ab: round(ab[1] - ab[0], 6))
         return (a + b) / 2.0
 
     for fnet in list(failed_nets):
@@ -2366,10 +2369,13 @@ def _surface_gap_escape(footprint, pcb_data, tracks, vias_to_add,
                 continue
             bx, by = p.global_x, p.global_y
             nid = p.net_id
-            # Four exits, nearest edge first.
+            # Four exits, nearest edge first -- distances rounded to a
+            # nanometre, so a corner ball's two equal edges stay equal and
+            # the list order decides (the last bit used to, and the same
+            # board shifted in memory took the other edge)
             exits = sorted([
                 ('S', maxy - by), ('N', by - miny),
-                ('E', maxx - bx), ('W', bx - minx)], key=lambda t: t[1])
+                ('E', maxx - bx), ('W', bx - minx)], key=lambda t: round(t[1], 6))
             for d, _dist in exits:
                 horiz = d in ('E', 'W')
                 sgn = 1 if d in ('S', 'E') else -1
@@ -2467,6 +2473,7 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
             escaped_via_nets.setdefault(nm, []).append((v['x'], v['y']))
 
     from geometry_utils import point_to_segment_distance as _p2s_r
+    from itertools import groupby as _groupby
 
     for fnet in list(failed_nets):
         fpads = pads_by_net.get(fnet, [])
@@ -2499,9 +2506,19 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                        t['end'][0], t['end'][1])
             if d < 1.5:
                 cand_d[nm] = min(cand_d.get(nm, 9e9), d)
-        cands = sorted((d, nm) for nm, d in cand_d.items())
-        rescued = False
-        for d, victim in cands[:max_victims]:
+        # Distance to a nanometre: two neighbours equally far (the
+        # symmetric pair on a regular pitch) are an exact tie, and the
+        # last bit used to order them -- the same board moved 10 mm
+        # evicted the other one (0.42499 vs 0.42500 printed as 0.42 and
+        # 0.43) and the whole pass followed it. Ties go by name.
+        cands = sorted((round(d, 6), nm) for nm, d in cand_d.items())
+
+        def _attempt(victim, d):
+            """One eviction, three shapes in turn: the pair re-run through
+            the engine; the failed ball's vialess surface walk with the
+            victim re-escaped around it; both by surface walks. Returns the
+            write lists it would ship (plus the escape-via bookkeeping and
+            the log line), or None. Touches nothing outside."""
             vic_nids = {p.net_id for p in pads_by_net.get(victim, ())}
             t2base = [t for t in tracks if nid2name.get(t['net_id']) != victim]
             v2base = [v for v in vias_to_add if nid2name.get(v['net_id']) != victim]
@@ -2529,33 +2546,27 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                 del pcb_data.segments[n_seg0:]
                 del pcb_data.vias[n_via0:]
             if fnet not in f2 and victim not in f2:
-                tracks = t2base + t2
-                vias_to_add = v2base + v2
-                failed_nets = [n for n in failed_nets if n != fnet]
-                escaped_via_nets[victim] = [
-                    (v['x'], v['y']) for v in v2 if v['net_id'] in vic_nids]
-                escaped_via_nets[fnet] = [
-                    (v['x'], v['y']) for v in v2
-                    if nid2name.get(v['net_id']) == fnet]
-                print(f"  Rip-swap rescue (#652): evicted {victim} "
-                      f"(copper {d:.2f}mm away), re-escaped BOTH it and "
-                      f"{fnet} at the fab floor")
-                warn_fab_escalation('rip-swap escape rescue')
-                rescued = True
-                break
+                return {
+                    'tracks': t2base + t2, 'vias': v2base + v2,
+                    'evn': {victim: [(v['x'], v['y']) for v in v2
+                                     if v['net_id'] in vic_nids],
+                            fnet: [(v['x'], v['y']) for v in v2
+                                   if nid2name.get(v['net_id']) == fnet]},
+                    'msg': (f"  Rip-swap rescue (#652): evicted {victim} "
+                            f"(copper {d:.2f}mm away), re-escaped BOTH it and "
+                            f"{fnet} at the fab floor")}
             # Attempt B: the via world may be closed regardless (the fab-
             # floor via can bust the half-pitch budget outright) -- with
             # this victim evicted, try the vialess SURFACE walk for the
             # failed ball, then re-escape the victim through the engine
             # against the surface track.
             if not env_knobs.FANOUT_SURFACE_RESCUE:
-                continue
+                return None
             t_surf, f_surf = _surface_gap_escape(
                 footprint, pcb_data, t2base, v2base, [fnet],
                 tw, cl, up_kw.get('exit_margin', 0.5))
             if fnet in f_surf:
-                continue
-            surf_new = t_surf[len(t2base):]
+                return None
             n_seg0, n_via0 = len(pcb_data.segments), len(pcb_data.vias)
             try:
                 for t in t_surf:
@@ -2579,17 +2590,13 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                 del pcb_data.segments[n_seg0:]
                 del pcb_data.vias[n_via0:]
             if victim not in f3:
-                tracks = t_surf + t3
-                vias_to_add = v2base + v3
-                failed_nets = [n for n in failed_nets if n != fnet]
-                escaped_via_nets[victim] = [
-                    (v['x'], v['y']) for v in v3 if v['net_id'] in vic_nids]
-                print(f"  Rip-swap rescue (#652): evicted {victim} "
-                      f"(copper {d:.2f}mm away); {fnet} escaped by VIALESS "
-                      f"surface walk, {victim} re-escaped around it")
-                warn_fab_escalation('rip-swap escape rescue')
-                rescued = True
-                break
+                return {
+                    'tracks': t_surf + t3, 'vias': v2base + v3,
+                    'evn': {victim: [(v['x'], v['y']) for v in v3
+                                     if v['net_id'] in vic_nids]},
+                    'msg': (f"  Rip-swap rescue (#652): evicted {victim} "
+                            f"(copper {d:.2f}mm away); {fnet} escaped by VIALESS "
+                            f"surface walk, {victim} re-escaped around it")}
             # The victim may ALSO be surface-escapable (the classic shape:
             # a last-row ball whose original escape was a long surface
             # walkabout through the failed ball's corridor -- orangecrab
@@ -2600,16 +2607,47 @@ def _underpad_rip_rescue(footprint, pcb_data, grid, layers, up_kw,
                     footprint, pcb_data, t_surf, v2base, [victim],
                     tw, cl, up_kw.get('exit_margin', 0.5))
                 if victim not in f_surf2:
-                    tracks = t_surf2
-                    vias_to_add = v2base
-                    failed_nets = [n for n in failed_nets if n != fnet]
-                    escaped_via_nets.pop(victim, None)
-                    print(f"  Rip-swap rescue (#652): evicted {victim} "
-                          f"(copper {d:.2f}mm away); BOTH it and {fnet} "
-                          f"re-escaped by vialess surface walks")
-                    warn_fab_escalation('rip-swap escape rescue')
-                    rescued = True
-                    break
+                    return {
+                        'tracks': t_surf2, 'vias': v2base,
+                        'evn': {victim: None},
+                        'msg': (f"  Rip-swap rescue (#652): evicted {victim} "
+                                f"(copper {d:.2f}mm away); BOTH it and {fnet} "
+                                f"re-escaped by vialess surface walks")}
+            return None
+
+        def _copper(tl):
+            return sum(math.hypot(t['end'][0] - t['start'][0],
+                                  t['end'][1] - t['start'][1]) for t in tl)
+
+        # Nearest victim first, one at a time -- except that victims at the
+        # SAME distance (the symmetric pair on a regular pitch, an exact tie
+        # to the nanometre) are all tried and the RESULT decides: fewest
+        # vias, least copper, then name. The last bit of the distance used
+        # to pick one, and the same board moved 10 mm picked the other.
+        rescued = False
+        for d, grp in _groupby(cands[:max_victims], key=lambda t: t[0]):
+            outs = []
+            for _d, victim in grp:
+                o = _attempt(victim, d)
+                if o is not None:
+                    outs.append((o, victim))
+            if not outs:
+                continue
+            o, victim = min(outs, key=lambda ov: (
+                len(ov[0]['vias']), round(_copper(ov[0]['tracks']), 6), ov[1]))
+            tracks = o['tracks']
+            vias_to_add = o['vias']
+            failed_nets = [n for n in failed_nets if n != fnet]
+            for nm, lst in o['evn'].items():
+                if lst is None:
+                    escaped_via_nets.pop(nm, None)
+                else:
+                    escaped_via_nets[nm] = lst
+            print(o['msg'] + (f" [{len(outs)} equally near victims tried, "
+                              f"judged by vias then copper]" if len(outs) > 1 else ""))
+            warn_fab_escalation('rip-swap escape rescue')
+            rescued = True
+            break
         if not rescued and cands:
             print(f"  Rip-swap rescue (#652): {fnet} still dropped after "
                   f"trying {min(len(cands), max_victims)} eviction(s)")
@@ -2785,11 +2823,12 @@ def _generate_bga_fanout_core(footprint: Footprint,
         flip_results(tracks, vias_to_add, vias_to_remove, back)
         return tracks, vias_to_add, vias_to_remove, failed_nets
 
-    from bga_fanout.rotate_frame import (is_orthogonal, to_axis_aligned_frame,
+    from bga_fanout.rotate_frame import (needs_frame, to_axis_aligned_frame,
                                          back_transform_results)
-    if not is_orthogonal(footprint.rotation):
+    if needs_frame(footprint.rotation):
         print(f"  {footprint.reference} placed at {footprint.rotation:.1f}° - routing "
-              f"in the footprint frame and mapping back (issue #137)")
+              f"in the footprint frame and mapping back (issue #137; every "
+              f"rotation since #622's pose gate)")
         rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
         # escape_dir_hints are keyed by BOARD pad position and name
         # BOARD directions; the core runs in the footprint frame, so
@@ -2801,10 +2840,14 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 footprint.reference].pads}
             _vec = {'right': (1.0, 0.0), 'left': (-1.0, 0.0),
                     'down': (0.0, 1.0), 'up': (0.0, -1.0)}
-            _th = _m.radians(-footprint.rotation)
-            _c, _s = _m.cos(_th), _m.sin(_th)
             from bga_fanout.rotate_frame import forward_transform
             _fwd = forward_transform(pcb_data, footprint.reference)
+            # a face turns exactly as the geometry does: the same map,
+            # applied to a unit vector. (It used to turn by MINUS the
+            # angle, the opposite sense to the frame; the chain's first
+            # quarter-turn array then asked for the face opposite its
+            # exit point and every escape fell back to via-in-pad.)
+            _o = _fwd(footprint.x, footprint.y)
             _moved = {}
             for p in footprint.pads:
                 d = _hints.get((round(p.global_x, 3), round(p.global_y, 3)))
@@ -2816,7 +2859,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                 if d not in _vec:
                     continue
                 vx, vy = _vec[d]
-                rx, ry = vx * _c - vy * _s, vx * _s + vy * _c
+                _r = _fwd(footprint.x + vx, footprint.y + vy)
+                rx, ry = _r[0] - _o[0], _r[1] - _o[1]
                 nd = min(_vec, key=lambda k: (_vec[k][0] - rx) ** 2
                          + (_vec[k][1] - ry) ** 2)
                 if _full:
@@ -4217,10 +4261,10 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad)
             flip_results(d_tracks, d_vias, [], back)
             return d_tracks, d_vias, rep
-        from bga_fanout.rotate_frame import (is_orthogonal,
+        from bga_fanout.rotate_frame import (needs_frame,
                                              to_axis_aligned_frame,
                                              back_transform_results)
-        if not is_orthogonal(footprint.rotation):
+        if needs_frame(footprint.rotation):
             rp, back = to_axis_aligned_frame(pcb_data, footprint.reference)
             d_tracks, d_vias, rep = generate_plane_drops(
                 rp.footprints[footprint.reference], rp, layers,
