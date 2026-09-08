@@ -19,13 +19,18 @@ from disk and would write committed text over uncommitted work.
 THE MEASURED TABLE GOES IN THE HEADER OF THE TEST FILE IT DEFENDS, FROM THE
 RUN -- never predicted here and never edited afterwards to match.
 
-Every row here has a scar. Nine of them are branches that ALREADY survived a
-battery once: five found by the verifier of the rule (the `min` that is the
-stated invariant, both abstentions, the partial-pad miss, the courtyard-vs-body
-read) and four by the verifier of the close-out gate (the bool check, longest-
-match resolution, the `+ ':'` suffix guard, the whole DRIFTED arm). They are
-recorded here so the next change has to get past them rather than past a
-memory.
+Every row here has a scar. FIVE of these rows are branches that ALREADY
+survived a battery once, all found by the verifier of the rule: the `min` that
+is the stated invariant, both abstentions, the partial-pad miss and the
+courtyard-vs-body read.
+
+Four MORE such branches exist and are deliberately NOT rows here -- the bool
+check, longest-match waiver resolution, the `+ ':'` suffix guard and the whole
+DRIFTED arm all live in `.claude/skills/plan-pcb-placement/scripts/
+placement_driver.py`, which this battery does not target, and they are killed
+by that driver's own `--self-test`. Saying "nine rows" would have credited this
+file with four kills it does not perform, which is the kind of arithmetic a
+reader has no way to check without opening TARGETS.
 """
 import argparse
 import os

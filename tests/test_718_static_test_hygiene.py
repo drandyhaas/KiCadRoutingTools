@@ -129,6 +129,13 @@ _ROOT_JOIN_ARGV_OK = {
         'ALREADY qualified by directory ("py_router/route.py") straight out '
         'of the skill text and filters them through os.path.isfile -- so the '
         'join is over a relative path, not a bare basename.',
+    'mutate_902.py':
+        'its `tests` values are the module-level T902/T895/T891/TSCH '
+        'constants, every one a directory-qualified literal '
+        '("tests/test_902_proximity.py"), so the join is over a relative path '
+        'and not a bare basename. `run_utils.tool()` is the wrong resolver '
+        'here: these are TEST files rather than shipped CLIs, and it looks '
+        'only in the four tool directories #522 created.',
 }
 
 
@@ -946,7 +953,8 @@ _UNRESOLVABLE = {}
 #: Every `tests/mutate_*.py` in the tree, pinned. A resolver that quietly stops
 #: finding batteries would otherwise report a clean sweep over nothing -- the
 #: exact shape of the defect #877 is about, reproduced in its own gate.
-_BATTERY_COUNT = 42
+#: 42 before #902 added `mutate_902.py`.
+_BATTERY_COUNT = 43
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

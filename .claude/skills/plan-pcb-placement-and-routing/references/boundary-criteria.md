@@ -124,10 +124,11 @@ is the only change that can fix the crossing without a via.
 
 ## What the example is for
 
-Three of the seven fire on a board that passed every automated gate, and the
-three that fire are the three a human notices in the first five seconds. That
-gap is the reason the criteria are written down rather than left to judgement:
-the judgement was there, and it had nothing to measure.
+FOUR of the seven fire on a board that passed every automated gate -- pair
+length, pin order, cluster distance and the seam -- and they are the ones a
+human notices in the first five seconds. That gap is the reason the criteria
+are written down rather than left to judgement: the judgement was there, and it
+had nothing to measure.
 
 Two of the numbers here are also a warning about prose. The seam was recorded
 in a run journal as 0.183 mm and the pair as 9.3 mm; re-measured with the

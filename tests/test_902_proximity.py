@@ -25,11 +25,12 @@ rows are the ones with a scar, and a reader deciding which of these to trust
 should not have to take the docstring's word for it.
 
 MEASURED, from the run and not predicted: `tests/mutate_902.py` is 21 rows,
-21 killed, 0 survived, 0 broken. Nine of those rows are branches that ALREADY
+21 killed, 0 survived, 0 broken. FIVE of those rows are branches that ALREADY
 survived a battery once -- the `min` that is the rule's stated invariant, both
-abstentions, the partial-pad miss, the courtyard-vs-body read, the bool check,
-longest-match waiver resolution, the `+ ':'` suffix guard and the whole DRIFTED
-arm -- so they are recorded there rather than remembered here.
+abstentions, the partial-pad miss and the courtyard-vs-body read. Four more
+such branches (the bool check, longest-match waiver resolution, the `+ ':'`
+suffix guard and the whole DRIFTED arm) live in the placement driver, which
+that battery does not target; they are killed by its own `--self-test`.
 
 The battery also found a hole nothing else did: deleting the INTENT loader's
 finite check survived, because every non-finite case tested the BRIEF. An
@@ -42,6 +43,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _d in ('py_router', 'py_placer', 'py_tools'):
@@ -795,8 +797,11 @@ def test_the_cli_refuses_and_names_every_uncovered_clause():
     """The acceptance #902 asks for, through the real CLI."""
     import subprocess
     board = PLACED
-    intent = os.path.join(ROOT, 'wk', 'cov_test_intent.json')
-    os.makedirs(os.path.dirname(intent), exist_ok=True)
+    # A TEMP dir, not `wk/`: this file is an output of the test, and writing
+    # it under the gitignored work tree made `test_718_static_test_hygiene`
+    # read the whole file as depending on a board out of `wk/` -- which it
+    # does not. The dependency it flagged would have been a false declaration.
+    intent = os.path.join(tempfile.mkdtemp(), 'cov_test_intent.json')
     tool = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
     emit = subprocess.run([sys.executable, '-X', 'utf8', tool, board,
                            '--no-brief', '--emit-intent', intent, '-q'],
@@ -830,8 +835,11 @@ def test_the_absence_reason_names_what_is_actually_absent():
     import subprocess
     tool = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
     board = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
-    intent = os.path.join(ROOT, 'wk', 'abs_intent.json')
-    os.makedirs(os.path.dirname(intent), exist_ok=True)
+    # A TEMP dir, not `wk/`: this file is an output of the test, and writing
+    # it under the gitignored work tree made `test_718_static_test_hygiene`
+    # read the whole file as depending on a board out of `wk/` -- which it
+    # does not. The dependency it flagged would have been a false declaration.
+    intent = os.path.join(tempfile.mkdtemp(), 'abs_intent.json')
     subprocess.run([sys.executable, '-X', 'utf8', tool, board, '--no-brief',
                     '--emit-intent', intent, '-q'],
                    capture_output=True, text=True, check=True)
@@ -866,8 +874,11 @@ def test_a_board_with_no_brief_is_untouched():
     """
     import subprocess
     tool = os.path.join(ROOT, 'py_tools', 'check_floorplan.py')
-    intent = os.path.join(ROOT, 'wk', 'cov_nobrief_intent.json')
-    os.makedirs(os.path.dirname(intent), exist_ok=True)
+    # A TEMP dir, not `wk/`: this file is an output of the test, and writing
+    # it under the gitignored work tree made `test_718_static_test_hygiene`
+    # read the whole file as depending on a board out of `wk/` -- which it
+    # does not. The dependency it flagged would have been a false declaration.
+    intent = os.path.join(tempfile.mkdtemp(), 'cov_nobrief_intent.json')
     board = os.path.join(ROOT, 'kicad_files', 'tigard.kicad_pcb')
     subprocess.run([sys.executable, '-X', 'utf8', tool, board, '--no-brief',
                     '--emit-intent', intent, '-q'], capture_output=True,
