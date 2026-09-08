@@ -244,6 +244,66 @@ def test_panels_are_written_and_referenced():
                    if not os.path.isfile(p['panel'])][:3]))
 
 
+def test_the_span_column_is_the_length_the_pair_is_forced_to_run():
+    """#895's criterion 1 had NO instrument.
+
+    `pair_metrics` computes inversions and discards the distance,
+    `render_placement --json-out` gives a board-total `hpwl`, and
+    `net_affinity` needs declared zoned blocks -- so "how long is this pair
+    forced to run" could not be read off anything, and a reviewer asked to
+    judge it had to estimate.
+
+    Re-derived here from pad coordinates rather than trusted: the sheet's
+    number must be the WORST shared-net pad distance, because a bus is as long
+    as its longest member and a mean hides the one that will not fit.
+    """
+    import math
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(ROOT, 'py_router'))
+    from kicad_parser import parse_kicad_pcb
+
+    doc = json.loads(_run(LAP5, '--json').stdout)
+    rows = {(r['a'], r['b'], r['scope']): r for r in doc['pin_order']['rows']}
+    pcb = parse_kicad_pcb(LAP5)
+
+    def _worst(a, b, only=None):
+        fa, fb = pcb.footprints[a], pcb.footprints[b]
+        by = {}
+        for pad in fa.pads or ():
+            nid = pad.net_id or 0
+            if nid > 0 and (only is None or pad.net_name in only):
+                by.setdefault(nid, []).append(pad)
+        worst = None
+        for pad in fb.pads or ():
+            nid = pad.net_id or 0
+            if nid <= 0 or nid not in by:
+                continue
+            near = min(math.dist((q.global_x, q.global_y),
+                                 (pad.global_x, pad.global_y))
+                       for q in by[nid])
+            worst = near if worst is None else max(worst, near)
+        return worst
+
+    pair = rows.get(('U1', 'USB1', 'pair /D_P//D_N'))
+    check('the pair row carries a span', pair is not None
+          and pair.get('span_mm') is not None, sorted(rows))
+    if pair:
+        mine = _worst('U1', 'USB1', only={'/D_P', '/D_N'})
+        check('the pair span is the worst shared-net pad distance',
+              abs(pair['span_mm'] - mine) < 1e-3,
+              f"sheet {pair['span_mm']} vs {mine}")
+        # The INTERFACE row blends more nets, so it cannot be smaller than the
+        # pair-scoped one -- if it were, the scope column would be meaningless.
+        iface = rows.get(('U1', 'USB1', 'interface'))
+        check('the interface span is at least the pair span',
+              iface and iface['span_mm'] >= pair['span_mm'],
+              f"{iface and iface['span_mm']} vs {pair['span_mm']}")
+    md = _run(LAP5, '--md').stdout
+    check('the md table has the span column', '| span mm |' in md)
+    check('the md says the threshold is a judgement',
+          'a judgement' in md and '1.5' in md)
+
+
 def test_md_is_a_sheet_a_reader_can_use():
     r = _run(TRACKED, '--md')
     check('--md exits 0', r.returncode == 0, r.stderr[-300:])
@@ -260,6 +320,7 @@ TESTS = [test_json_is_parseable_from_char_zero,
          test_every_derived_fact_names_its_source,
          test_the_body_column_is_the_896_model,
          test_panels_are_written_and_referenced,
+         test_the_span_column_is_the_length_the_pair_is_forced_to_run,
          test_md_is_a_sheet_a_reader_can_use]
 
 
