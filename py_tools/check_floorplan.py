@@ -353,14 +353,20 @@ def main(argv=None):
     # #902. Computed on the --intent path only: an --emit-intent run produces
     # no grade, so there is nothing for a clause to be covered BY, and saying
     # "covered" there would be a claim about a document nobody graded.
-    coverage = {}
+    # Written ALWAYS on this path, even with no brief -- then `clauses` is
+    # empty and `brief` is null. An absent block would be ambiguous between
+    # "this board declares nothing" and "an older build produced this
+    # document", and a consumer cannot refuse the second without also refusing
+    # the first, which would reverse #711's contract that a brief-less board
+    # costs nothing. Present-and-empty says "nothing was declared" out loud.
+    _graded_doc = intent_doc_for_drift(args.intent)
+    coverage = _db.clause_coverage(
+        brief_report, _graded_doc,
+        rules_run=result.rules_run,
+        abstained=result.budget_abstained,
+        drifted_ids=(_db.drifted_clause_ids(_graded_doc, brief_fragment)
+                     if brief_fragment else ()))
     if brief_fragment:
-        _graded_doc = intent_doc_for_drift(args.intent)
-        coverage = _db.clause_coverage(
-            brief_report, _graded_doc,
-            rules_run=result.rules_run,
-            abstained=result.budget_abstained,
-            drifted_ids=_db.drifted_clause_ids(_graded_doc, brief_fragment))
         if not args.quiet and coverage['clauses']:
             print(f"  brief clause coverage: {coverage['graded']} graded, "
                   f"{coverage['uncovered']} uncovered, "
@@ -385,8 +391,7 @@ def main(argv=None):
 
     if args.json:
         doc = to_json(result)
-        if coverage:
-            doc['brief_coverage'] = coverage
+        doc['brief_coverage'] = coverage
         with open(args.json, 'w', encoding='utf-8') as fh:
             json.dump(doc, fh, indent=1, sort_keys=True)
             fh.write('\n')
@@ -400,7 +405,7 @@ def main(argv=None):
     s['brief_absent'] = len(brief_report.get('absent') or ())
     s['brief_unknown_keys'] = sorted(brief_report.get('unknown') or ())
     s['brief_drift'] = len(brief_drift)
-    if coverage:
+    if coverage.get('clauses'):
         s['brief_clauses'] = len(coverage['clauses'])
         for _k in ('graded', 'uncovered', 'abstained', 'not_claimed',
                    'carried', 'drifted'):
@@ -425,7 +430,7 @@ def main(argv=None):
     # declared -- the count was satisfied by rules nobody had declared
     # anything for.
     if args.require_brief_coverage:
-        if not coverage or not coverage['clauses']:
+        if not coverage.get('clauses'):
             print("  FAIL: --require-brief-coverage, but "
                   + (_brief_absence_reason(args, brief) if not coverage
                      else "the brief that was found declares no gradable "

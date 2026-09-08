@@ -1287,11 +1287,24 @@ you mean to grade at a different floor than the board's own.
 Worth declaring, in rough order of value: `must_lock` for the parts the lock
 advisor flagged; `edge_connectors` for anything that is *meant* to overhang
 (this is what stops `oob_count` reporting a card edge as a defect forever);
-`keepouts` for mounting holes and antenna clearances; `decaps.max_distance_mm`;
+`keepouts` for mounting holes and antenna clearances; **`proximity` for the
+pairs whose separation is a requirement rather than an outcome -- a crystal to
+its load pins, bulk caps to the regulator they feed -- because that is the one
+constraint the netlist implies and nothing here measures until it is declared
+(a 3mm crystal loop and a 30mm one have identical connectivity, and the decap
+rules cannot stand in: they elect their own partner and need four copper pads,
+so a 3-pad regulator is never one);** `decaps.max_distance_mm`;
 and `blocks` with a `zone` **only where the parts really are one contiguous
 area**. Schematic sheets usually are not: on one 4-layer corpus board all ten sheet
 bounding boxes overlap each other, so `--emit-intent` claims a zone for only 4 of 10 and
 says why for the rest.
+
+Declaring is half of it. A clause reaches a rule only if the **graded**
+document carries it, so after editing the brief, re-emit and read
+`brief_coverage` in the `--json` result: `rules_run` counts *rules*, not
+*clauses*, and one run closed clean with six rules run and every declared
+clause ungraded. `--require-brief-coverage` turns that into a non-zero exit
+instead of a paragraph nobody reads.
 
 A misspelled key is **refused**, at every level of the file and including
 `severity` keys — you will be told the key that was wrong and the ones that
