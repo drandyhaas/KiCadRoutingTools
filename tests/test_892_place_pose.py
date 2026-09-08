@@ -127,6 +127,33 @@ check("bearing_face reads y-down as north/south",
       and pose_ops.bearing_face((0, 0), (-5, 0)) == 'west')
 
 # ---------------------------------------------------------------------------
+print("worsened(): the guard itself, arm by arm")
+# The CLI-level refusal fires if ANY arm reports a regression, so a test that
+# only drives the CLI cannot tell which arm did the work -- measured: neutering
+# the COUNT arm left every CLI assertion green, because the shortfall arm
+# refused the same request. Each arm is therefore checked here directly.
+_zero = {'pad_conflicts': 0, 'hole_conflicts': 0, 'oob_pad_count': 0,
+         'pad_shortfall': 0.0}
+check("a clean-to-clean move is not a regression",
+      pose_ops.worsened(_zero, dict(_zero)) == [])
+for _k in ('pad_conflicts', 'hole_conflicts', 'oob_pad_count'):
+    check("%s +1 is caught" % _k,
+          pose_ops.worsened(_zero, dict(_zero, **{_k: 1})) == [_k])
+    check("%s -1 is NOT a refusal (an improvement is welcome)" % _k,
+          pose_ops.worsened(dict(_zero, **{_k: 2}),
+                            dict(_zero, **{_k: 1})) == [])
+check("a deeper overlap at the same COUNT is caught",
+      pose_ops.worsened(dict(_zero, pad_conflicts=1, pad_shortfall=0.1),
+                        dict(_zero, pad_conflicts=1,
+                             pad_shortfall=0.2)) == ['pad_shortfall'])
+check("float noise in the shortfall is not a regression",
+      pose_ops.worsened(_zero, dict(_zero, pad_shortfall=1e-12)) == [])
+check("inherited damage carried forward unchanged is not charged",
+      pose_ops.worsened(dict(_zero, pad_conflicts=3, pad_shortfall=0.5),
+                        dict(_zero, pad_conflicts=3,
+                             pad_shortfall=0.5)) == [])
+
+# ---------------------------------------------------------------------------
 print("set: the pose asked for is the pose in the file")
 import pose_score                                                 # noqa: E402
 _st = pose_score.make_state(pcb0, BOARD, clearance=CLR,
@@ -268,6 +295,22 @@ with tempfile.TemporaryDirectory() as d:
               str((s['snapped'] or {}).get('dist_mm')))
         check("the snapped board grades no worse",
               s['pad_conflicts_after'] <= s['pad_conflicts_before'])
+        # The BOUND, at a radius the unfiltered sweep would overshoot: the
+        # lattice is a square, so its ring corners reach 1.41x the radius and
+        # the ranker's best answer here is 5.0 mm. Either the snap stays
+        # inside the number the caller typed, or it refuses -- never a silent
+        # 5 mm move under `--radius 4`. (Mutation-checked: dropping the filter
+        # left every other snap assertion green.)
+        r4 = run([POSE, BOARD, os.path.join(d, 'r4.kicad_pcb'), 'set', 'C3',
+                  '--near', str(tx), str(ty), '--radius', '4'])
+        if r4.returncode == 0:
+            s4 = summary(r4)
+            check("--radius 4 is a bound, not a suggestion",
+                  (s4['snapped'] or {}).get('dist_mm', 99) <= 4.0,
+                  str((s4['snapped'] or {}).get('dist_mm')))
+        else:
+            check("--radius 4 refuses rather than overshooting",
+                  r4.returncode == 4, str(r4.returncode))
         fp = parse_kicad_pcb(out).footprints['C3']
         check("the file carries the SNAPPED pose, not the requested one",
               abs(fp.x - s['snapped']['to'][0]) < 1e-6

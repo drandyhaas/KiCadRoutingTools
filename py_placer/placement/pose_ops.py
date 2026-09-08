@@ -453,6 +453,14 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
         after = grade(cand_pcb, cand, clearance)
         bad = worsened(before, after)
 
+        if snap and len(placements) != 1:
+            # SAID, not silently dropped: --snap/--near relocates ONE part,
+            # and a call carrying several ops has no single point to sweep
+            # around. A flag that quietly does nothing is how a caller
+            # concludes the engine considered an alternative and found none.
+            summary['snap_census'] = {
+                'skipped': 'snap applies to exactly one pose op; this call '
+                           'carries %d' % len(placements)}
         if bad and snap and len(placements) == 1:
             # Rank around the REQUESTED point, not the part's old one: the
             # sweep in `rank_poses` is centred on where the part sits in the
@@ -484,6 +492,9 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
             poses = [p for p in poses
                      if (p.get('dist_mm') or 0.0) <= snap_radius + 1e-9]
             summary['nearest_legal'] = poses[0] if poses else None
+            summary['nearest_legal_basis'] = (
+                'pose_score.rank_poses / QuenchState.candidate_valid -- an '
+                'AABB gate, RE-GRADED here before it is written')
             summary['snap_census'] = {
                 'dropped_total': diag.get('dropped_total', 0),
                 'dropped_in_place': diag.get('dropped_in_place', []),
@@ -584,6 +595,10 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                         rotations=(placements[0]['new_rotation'],),
                         pcb_data=cand_pcb)
                     summary['nearest_legal'] = poses[0] if poses else None
+                    summary['nearest_legal_basis'] = (
+                        'pose_score.rank_poses / QuenchState.candidate_valid '
+                        '-- an AABB gate, NOT re-graded: a suggestion to try, '
+                        'not a pose this verb has verified')
                     # An empty ranking has two opposite meanings and they are
                     # reported apart (run-7 S4): "nowhere to go" and "the
                     # knobs veto even staying put". A swallowed exception is
@@ -649,7 +664,9 @@ def _refusal_reason(bad, strict, before, after, summary) -> str:
                       if after.get(k)))
     nl = summary.get('nearest_legal')
     if nl:
-        reason += (" Nearest legal pose: x=%g y=%g rot=%g (%.3f mm away)."
+        reason += (" The pose ranker's nearest candidate is x=%g y=%g "
+                   "rot=%g (%.3f mm away) -- try it with --snap, which "
+                   "re-grades before writing."
                    % (nl['x'], nl['y'], nl['rot'], nl.get('dist_mm') or 0.0))
     elif summary.get('snap_census', {}).get('dropped_in_place'):
         reason += (" No legal pose was found nearby, and the census shows the "
