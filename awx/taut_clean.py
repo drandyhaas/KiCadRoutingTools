@@ -117,6 +117,13 @@ def relax_clean(src, dst, obs, rounds=400, depth=3):
     clean), or 'INVALID' (no clean sector found -- the least-violating
     polyline is returned, and the caller must say so loudly)."""
     pts, it = ts.relax(src, dst, obs)
+    return assess(pts, it, obs)
+
+
+def assess(pts, it, obs):
+    """The cleanliness verdict on a relaxed polyline: (pts, it, status,
+    n_reseeds), status 'clean' / 'tolerated' / 'violating' -- the second
+    half of relax_clean, shared with the batched relaxation."""
     n_re = 0
     relax_clean.last = None
     # assert-only: violations are classified and reported, never

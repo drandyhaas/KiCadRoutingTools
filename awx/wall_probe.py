@@ -8,7 +8,8 @@ a VIRTUAL lane (by owner net + layer + which piece), REAL copper (net,
 layer), a via, or the BAND alone (no copper within reach). Prints the
 pocket size, whether the target is reachable, and the wall census.
 
-usage: wall_probe.py K TAG NET [R=2.0] [--png OUT] [--call last]
+usage: [DEST=REF] wall_probe.py K TAG NET [R=2.0] [--png OUT] [--call last]
+  (DEST: the destination reference, default DU1 -- the second bench's is U2)
 """
 import sys, os, json, math
 from collections import Counter, deque
@@ -19,6 +20,7 @@ import braid as te
 import connect as cn
 from coherent_nets import coherent_nets
 
+DEST = os.environ.get('DEST', 'DU1')   # the destination reference, as chain_k.sh takes it
 K = int(sys.argv[1]); tag = sys.argv[2]; NET = sys.argv[3]
 R = float(sys.argv[4]) if len(sys.argv) > 4 and not sys.argv[4].startswith('--') else 2.0
 png = None
@@ -35,7 +37,7 @@ names = coherent_nets(K)
 fo = f'tmp/{tag}_fo_k{K}.kicad_pcb'
 plan = json.load(open(f'tmp/{tag}_fo_k{K}.plan.json'))
 logs = []
-ctx, groups = te.setup(fo, names, 'DU1', logs.append, plan=plan)
+ctx, groups = te.setup(fo, names, DEST, logs.append, plan=plan)
 nid = ctx.byname[NET][0]
 tooth = ctx.ends[NET][0]
 stub = ctx.ends[NET][1]
@@ -272,6 +274,55 @@ def analyze(window, cfg, obstacles, kw, cc, routed, label):
             P = pts[who]
             so_ = [sp_.project_pt(p) for p in P]
             print(f'      frontier wall {c:5d} cells  {who:34s} s {min(v[0] for v in so_):.2f}..{max(v[0] for v in so_):.2f} '
+                  f'o {min(v[1] for v in so_):+.2f}..{max(v[1] for v in so_):+.2f}')
+    # POCKET FROM THE STUB: the stub end's own neighbourhood on each
+    # layer -- a frontier that passes the stub's s without reaching the
+    # stub cell means the END is enclosed, and that closure is named here
+    for L in (0, 1):
+        Lname = cfg.layers[L]
+        RS = 0.8
+        sx0, sy0 = stub[0] - RS, stub[1] - RS
+        m = int(2 * RS / G) + 1
+        sgx0, sgy0 = coord.to_grid(sx0, sy0)
+        stx, sty = coord.to_grid(*stub)
+        blocked = np.zeros((m, m), dtype=bool)
+        for i in range(m):
+            for j in range(m):
+                blocked[i, j] = obstacles.is_blocked(sgx0 + i, sgy0 + j, L)
+        si, sj = stx - sgx0, sty - sgy0
+        if not (0 <= si < m and 0 <= sj < m):
+            continue
+        if blocked[si, sj]:
+            print(f'  layer {Lname}: the STUB cell itself is blocked -> {attrib(stub[0], stub[1], L)}')
+        seen = np.zeros((m, m), dtype=bool)
+        q = deque([(si, sj)]); seen[si, sj] = True; cnt = 0
+        while q:
+            i, j = q.popleft(); cnt += 1
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    a, b = i + di, j + dj
+                    if 0 <= a < m and 0 <= b < m and not seen[a, b] and not blocked[a, b]:
+                        seen[a, b] = True; q.append((a, b))
+        ii, jj = np.nonzero(seen)
+        touches_edge = ii.min() == 0 or jj.min() == 0 or ii.max() == m - 1 or jj.max() == m - 1
+        print(f'  layer {Lname}: pocket from the STUB = {cnt} cells'
+              f'{"  (reaches the box edge: OPEN)" if touches_edge else "  (CLOSED pocket)"}')
+        wall = Counter(); wall_pts = {}
+        for i, j in zip(ii, jj):
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    a, b = i + di, j + dj
+                    if 0 <= a < m and 0 <= b < m and blocked[a, b] and not seen[a, b]:
+                        px, py = sx0 + a * G, sy0 + b * G
+                        who = attrib(px, py, L)
+                        wall[who] += 1
+                        wall_pts.setdefault(who, []).append((px, py))
+        for who, c in wall.most_common(10):
+            if who.startswith('??'):
+                continue
+            P = wall_pts[who]
+            so_ = [sp_.project_pt(pp) for pp in P]
+            print(f'      stub wall {c:5d} cells  {who:34s} s {min(v[0] for v in so_):.2f}..{max(v[0] for v in so_):.2f} '
                   f'o {min(v[1] for v in so_):+.2f}..{max(v[1] for v in so_):+.2f}')
     x0, y0 = tooth[0] - R, tooth[1] - R
     n = int(2 * R / G) + 1

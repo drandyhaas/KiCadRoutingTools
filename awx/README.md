@@ -20,23 +20,26 @@ K-ladder), one fanout per K, byte-deterministic, 0 DRC at the routed 0.1
 mm floor everywhere, and since 2026-09-08 the SAME result for the board
 moved anywhere on the sheet (the translation section below):
 
-| K  | open | vias | in-band | chain | human vias | 09-07 (before the pose work) |
-|----|------|------|---------|-------|------------|------------------------------|
-| 15 | 0 | 14  | 15 / 15 | 15 s  | 22 | 14, 15 s |
-| 28 | 0 | 36  | 28 / 28 | 37 s  | 46 | 38, 28 s |
-| 35 | 0 | 54  | 34 / 35 | 81 s  | 58 | 54, 76 s |
-| 41 | 0 | 86  | 37 / 41 | 200 s | 70 | 82, 155 s |
-| 51 | **1 (SA4)** | 130 | 33 / 47 | 429 s | 85 | 0 open, 141, 339 s |
+| K  | open | vias | in-band | chain (memo warm) | human vias | old strings, same engine | 09-07 |
+|----|------|------|---------|-------------------|------------|--------------------------|-------|
+| 15 | 0 | 16  | 15 / 15 | 10 s  | 22 | 14, 15 s | 14, 15 s |
+| 28 | 0 | 36  | 28 / 28 | 36 s  | 46 | 36, 37 s | 38, 28 s |
+| 35 | 0 | 61  | 35 / 35 | 89 s  | 58 | 54, 81 s | 54, 76 s |
+| 41 | 0 | 106 | 30 / 41 | 245 s | 70 | 86, 200 s | 82, 155 s |
+| 51 | **1 (SBA1)** | 129 | 33 / 48 | 355 s | 85 | 1 open (SA4), 130, 429 s | 0 open, 141, 339 s |
 
-Timed alone, 2026-09-08 (tag `ft`). K41 and K51 completed for the first
-time on 09-07 (the blocker-directed rip at the last call); the pose work
-since then re-decided every exact-tie stamp in the fanout and the main
-router's pad keep-outs, and the large-K draws moved with them: K28 -2,
-K41 +4, and K51's SA4 (the chronic one: TODO 1's re-berth case) is open
-again on this draw. Those draws are the chain's knife edge, not the
-rules' -- the same rules grade the moved board identically. "In-band" is
-the lanes the braid routed inside their planned bands; the rest were
-re-laid at the last call.
+Measured 2026-09-08 evening with the batched relaxation as the default
+(tags `tf4`, `td2`; cold: 13 / 37 / 261 s and K35 142 s, K51 562 s).
+K41 and K51 completed for the first time on 09-07 (the blocker-directed
+rip at the last call); since then two general rules re-decided the
+draws: the pose work's exact-tie stamps in the fanout and the main
+router's pad keep-outs ("old strings, same engine": K28 -2, K41 +4,
+K51's SA4 open), and then the convergent relaxation's strings (this
+column: K15 +2, K35 +7, K41 +20, K51 SBA1 open instead of SA4, 74 s
+faster). Both draws are the chain's knife edge, not the rules' -- the
+same rules grade the moved board identically -- and the vias are TODO
+2's business. "In-band" is the lanes the braid routed inside their
+planned bands; the rest were re-laid at the last call.
 
 ![K41 on the bench: one corridor of 41 lanes, both pages, the rides round the destination](img/k41_corridor.png)
 
@@ -704,7 +707,7 @@ The same instrument on the braid's own keys (`braid.py` has thirty
 keyed sorts on raw projections and distances) is available whenever a
 pose gate shows the braid leaning.
 
-### The relaxation, vectorised and convergent: `taut_fast` (2026-09-08, `TAUT_FAST=1`)
+### The relaxation, vectorised and convergent: `taut_fast` (2026-09-08; the DEFAULT since that evening, `TAUT_FAST=0` for the old one)
 
 The user asked for the current algorithm sped up, its oscillations
 removed and its rounds vectorised, and `taut_fast.relax_many` is that:
@@ -747,6 +750,16 @@ different draw of the same plan loop. Chain time, memo warm: 10 / 35 /
 342 s. The memo tags its entries `#fast`, so the two algorithms'
 strings never mix inside a run.
 
+**Default since 2026-09-08 (user decision).** The old relaxation is a
+known-wedged algorithm whose K41 strings we liked by accident; this
+one is the same model with the defects removed, faster and convergent,
+and the bench draw it changes (K41 86 -> 106 on the final engine, K15
+14 -> 16, K28 36 = 36) is the chain's knife edge, by the same
+reasoning that let the fanout's cell rule change the bench. The status
+table at the top is measured with it. `TAUT_FAST=0` keeps the old
+per-string relaxation reachable for comparison; the two never mix in a
+run (memo tag `#fast`).
+
 What it does not reach: the 100x that would retire the memo. A cold
 K41 still computes its 342 strings (~35 s batched against ~160 s), so
 the sharded memo stays. The rounds are the limit now, not the
@@ -754,12 +767,65 @@ arithmetic: sliding a contact point along its disc is as diffusion-
 limited as bending the string was, and only an implicit smoothing step
 (with a per-round crossing check, since a large step can carry a run of
 points across a 0.23 mm capsule) or the vertex solver (contacts as the
-state, tangent geometry, a few iterations) goes further. Translation:
-the batched relaxation is a float algorithm like the old one, so the
-chain downstream of the fanout is not translation-invariant at K41's
-knife edge either way (the bench moved by (10.3, -7.7) mm,
-`translate_board.py`, grades 14 / 38 / 109 against 14 / 38 / 98 in
-place; K15 and K28 to the segment).
+state, tangent geometry, a few iterations) goes further. (The translation
+remark that stood here is superseded: the chain is exactly translation-
+invariant since the section above, whichever strings it uses.)
+
+### The exact solver: contacts, unions, and what the bench said (2026-09-08, `TAUT_FAST=2`)
+
+Whether the rounds could go altogether was measured first
+(`tmp/frame/contact_stab.py`): the batched relaxation's TOPOLOGY is not
+settled early -- at 25 rounds 18 of 28 strings (22 of 41) wrap the same
+bodies as at 400, at 200 rounds 3 of 28 still differ. The late rounds
+are contacts sliding off one body onto the next tangent. So a solver
+that tightens a seed's class exactly cannot replace the rounds; it has
+to choose its contacts itself. `taut_exact.solve` does: the string is a
+list of CONTACTS (a wall and the side the path keeps it on) with tangent
+chords between them; from the bare chord, every blocked chord gets its
+deepest blocker as a contact (recursively, so a chord along a row of
+pads gets every pad in one sweep), each contact is re-placed from its
+neighbours' nodes on whichever side is the shorter way round, contacts
+whose chord clears them lift off, and the sweeps end when nothing
+moves. Bodies are convex polygons a micron outside their boundary
+(discs and capsules on one code path); a transversal capsule is
+transparent, as before. Overlapping walls are walked as ONE: the entry
+and exit tangents are taken over the union, and the walk follows each
+body's polygon in turn, switching at the intersections and growing the
+union when it meets a wall that is not a member yet -- the convex hull
+was tried first and is wrong wherever a pinned end sits in the escape
+comb (a rubber band pinned in a concavity lies in it). Bodies that a
+contact's chord enters again merge into it. A string whose contacts do
+not settle (the comb's overlapping pads and stubs can cycle between one
+union and its parts: 4 of 41, 5 of 28) gets `POLISH` rounds of the
+batched relaxation FROM the exact string (`taut_fast.relax_many(start=)`).
+Exact on eight synthetic cases (tangent lengths analytic, all chords
+clear: disc, capsule, slalom, overlapping discs, overlapping parallel
+tracks, a via with its transversal track, a row of six, a pinned end in
+a corner). `TRACE` lists the contacts per sweep.
+
+On the origin article: K41 41 strings 1.2 s against the batched 1.9 s
+(x1.6) and the old relaxation's ~8 s; cleanliness 36 clean / 5
+violating against 31 / 10 (K28: 19 / 2 / 7 against 17 / 1 / 10). The
+strings are in other homotopy classes than the relaxation's for about
+half the nets (shorter for 8, longer for 23 at K41; the class is the
+greedy nearer-side choice, not the flow's). **The bench, through the
+chain, said no**: cold 10 / 106 / 440 s at 16 / 38 / 100 vias, warm 11 /
+47 / 213 s at the same, against the base strings' 15 / 37 / 200 s at
+14 / 36 / 86 (the batched relaxation's own strings: 16 / 36 / 106, warm
+10 / 36 / 245). Cold it is SLOWER than the relaxation in the chain: the
+plan loop computes each net's string against each round's board, and
+per-string Python with a few unsettled strings costs more than one
+batched array of all of them. Every set of strings is a different draw
+of the same plan loop; none of the three is better than the base on
+this bench, and the exact one is not faster where it counts. Not kept in the
+tree: `taut_exact.py` is archived in `tmp/uncommitted_0906_archive/`
+beside the abandoned planners (user decision, 2026-09-08), this section
+being its record. What would change
+the picture: the walk vectorised or the contacts solved in the batched
+array (the per-string cost), and the class chosen as the flow chooses
+it rather than by the nearer side (the draw) -- or, more simply, the
+memo, which already makes a warm chain indifferent to which solver
+computed its strings.
 
 ### The taut memo, sharded; and why the relaxation itself is not fast (2026-09-08)
 
