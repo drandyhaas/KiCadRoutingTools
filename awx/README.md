@@ -309,16 +309,49 @@ the order worth taking them, each with what is known.
    banned away. A net whose menu is exhausted gets its achieved berth
    back as a menu entry ("freeze what worked"); measure K41 / K51.
 8. **The packing -- BUILT 2026-09-09 (`pack.py`, opt-in `BRAID_PACK=1`;
-   the section "The pack: every lane a taut string against its
-   neighbour"). Every lane, vias included, relaxed as one taut string
-   against the board as it stands and re-emitted octilinear where a
-   build clears; from the roomy side of the corridor inward. 0 open 0
-   DRC at K28/35/41 with the vias unchanged; K28 1574 -> 1012
-   segments and the rivers read as a hand would draw them, K41 2258 ->
-   1992; K35 1435 -> 1620 (its base was already clean and spread, and
-   packing it round the swimmers' vias makes every lane copy the wrap).
-   Pack 4.7 / 7.5 / 10.0 s. Not a default: the K35 row and the wavy
-   wraps (below) first.**
+   `pack_board.py` packs a braided board again in seconds; the section
+   "The pack: every lane a taut string against its neighbour").** Every
+   lane, vias included, relaxed as one taut string against the board as
+   it stands and re-emitted octilinear where a build clears; from the
+   roomy side of the corridor inward. 0 open 0 DRC at K28/35/41 with the
+   vias unchanged; K28 1574 -> 875 segments and the rivers read as a hand
+   would draw them, K41 2258 -> 1843; K35 1435 -> 1475 (its base was
+   already clean and spread). Pack 4 / 6 / 10 s. Not a default. The
+   follow-ups, in the order worth taking them:
+   - **Its purpose is unmeasured.** The rationale was that packed rivers
+     leave room for the swimmers and their vias; every grade so far is
+     at write time on the pk0 boards, where the pack is grade-neutral by
+     construction. Run `BRAID_PACK=1` through `chain_k.sh` on the ladder
+     (K15..K51) and the zynq bench, and try a pack BEFORE the last call
+     so the refused lanes search a river's free width in one piece (a
+     mode removed untested; the runner is the emitter for it now).
+   - **Default or not.** K35's base is already clean and its packed
+     board carries more segments (1475 vs 1435) at the lowest off-grid
+     length; whether to pack a board whose lanes are not staircases is a
+     verdict for the renders (`img/pack_k*_{before,after}.png`).
+   - **The fan from the source's south row** (6-degree lanes between a
+     pad row and a river): a taut string is a straight line at whatever
+     angle its ends dictate, and there is no elbow room in any order.
+     Needs an octilinear-metric tension -- a staircase costing what its
+     chord costs -- and the cheap first step is the straightening's taut
+     path (`_straighten`) with the octilinear length as its edge cost;
+     the emitter already elbows a chord where clear.
+   - **Coupled corners** (SRST and SA9 turning into adjacent gaps of the
+     passives, each hugging the other's any-angle corner): no order
+     breaks the cycle. Related: the full second pass
+     (`BRAID_PACK_PASS2=1`) packs tighter (median 0.47 -> 0.32 mm) and
+     emits worse because tight packing round vias makes arcs; if the
+     chamfer emission improves at exact pitch, re-measure it.
+   - **Untested paths.** The sidecar and `pack_board.py` handle a
+     mirrored or turned board (`ctx.M`) in code; no pose-gate run has
+     exercised them. A lane the pack rejects and leaves as router copper
+     has not been checked through the runner's stub trim.
+   - **Residue.** A 1-degree approach piece at SA4's landing; `HUG_FLAT`
+     0.05 and `PULL_MIN` 3 tuned on three boards; the off-grid proxy
+     (`tmp/offgrid.py`) moves 5-10 mm when one long chord flips, so it
+     is read with a render. The via count is TODO 1's business (SA12's
+     rip re-lay with three vias is the dive collapse's case); the pack
+     adds 10 s to K41's braid against TODO 3.
 9. **A better routing order.** Lanes are laid sequentially -- pages in
    target order, then swimmers largest displacement first, refused
    lanes boosted next attempt -- and every refusal the rip repairs is a
