@@ -138,6 +138,13 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     # ranked total -- the objective must not chase a bound it can't trade off
     # (fact (a): proxies mislead optimizers). rot-0 vs rot-180 ties in `cost`
     # are exactly where this number decides (test-board U3: 9 -> 0).
+    #
+    # STILL TRUE HERE after #893, and not by accident: that issue added a
+    # `facing_weight` which DOES put this bound into `total_cost`, but
+    # `make_state` never sets it, so a state built by this module ranks on a
+    # total with no facing term and the sentence above holds. A caller that
+    # passes its own armed state via `state=` gets a ranked total that includes
+    # it -- which is a deliberate choice by that caller, not this default.
     from placement.pair_order import ref_inversions
     base_inv = ref_inversions(st, ref)
 

@@ -27,10 +27,18 @@ off the two net orders, and count order inversions between them:
 
 These are lower bounds on what ANY router must pay, which is what makes them
 safe to rank poses by -- unlike a correlational proxy, improving them cannot be
-gamed by the optimizer, which is also why they deliberately do NOT join
-``quench.total_cost`` (docs/placement-optimization.md fact (a): proxies mislead
-optimizers). The consumers are pose ranking (pose_score components) and the
-operator reading a report.
+gamed by the optimizer.
+
+They join ``quench.total_cost`` ONLY under an explicit non-zero
+``facing_weight``, whose default is 0.0 (#893). Before that they joined it
+never, and the reason is still the operative one for the default:
+docs/placement-optimization.md is a file-length negative result about adding
+proxies to this objective. Being a lower bound rather than a correlational
+proxy is an argument for trying it, not a measurement that it helps -- so the
+weight exists to MEASURE the question and
+``tests/test_placement_ab.py`` exists to decide it. The consumers are pose
+ranking (pose_score components), the operator reading a report, and
+``QuenchState._facing_cost`` when it is armed.
 """
 from __future__ import annotations
 
