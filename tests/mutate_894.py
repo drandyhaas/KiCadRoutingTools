@@ -83,10 +83,14 @@ ROWS = [
     # ---- the comparison ----------------------------------------------------
     # A moved population must not be judged. Without this the plane term's
     # blocker set going 11 -> 1 reads as a spectacular improvement.
+    # Gated on the TERMS test, which is where the moved-basis assertion lives.
+    # Pointed at the ranking test first, this row SURVIVED -- a gate that does
+    # not contain the assertion passes for free, which is the same defect as a
+    # stale anchor wearing different clothes.
     ('compare-judges-across-a-moved-basis', 'ps',
      "        if comparable and a.get('basis') != b.get('basis'):\n",
      "        if False:\n",
-     (T_RANK,), KILLED),
+     (T_TERMS,), KILLED),
 
     # Pareto, not "any improvement wins": a lap that trades one term for
     # another is not an improvement.

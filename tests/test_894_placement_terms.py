@@ -287,6 +287,19 @@ def test_plane_cut_credits_the_crossing_and_grows_with_the_blocker():
     check('a bigger blocker obstructs MORE, monotonically',
           all(x < y for x, y in zip(vals, vals[1:])), str(vals))
     t = ps.plane_cut_proxy(pcb, PLACED)
+    # The TERM must use the clipped length, not just the helper. Asserted on
+    # its published rows, because a mutation battery showed the unit test
+    # above passing while the term itself credited the whole chord.
+    rows = t.get('rows') or []
+    check('every row credits no more than the net\'s own chord',
+          rows and all(r['inside_mm'] <= r['chord_mm'] + 1e-6 for r in rows),
+          f'{len(rows)} row(s)')
+    check('...and at least one credits strictly LESS, so the clip is live',
+          any(r['inside_mm'] < r['chord_mm'] - 1e-6 for r in rows),
+          str([(r['inside_mm'], r['chord_mm']) for r in rows[:3]]))
+    check('the value is the sum of the clipped lengths',
+          abs(t['value'] - round(sum(r['inside_mm'] for r in rows), 3)) < 0.05,
+          f"value={t['value']} sum={round(sum(r['inside_mm'] for r in rows), 3)}")
     check('the reference nets are excluded and named',
           any('GND' in n for n in (t.get('excluded_nets') or [])),
           str(t.get('excluded_nets')))
