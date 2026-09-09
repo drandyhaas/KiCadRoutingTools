@@ -59,6 +59,18 @@ def _unblock_debug() -> bool:
 # kernels skip the bulk of the board's pads. Generous (~10x the largest realistic
 # margin) so routing stays byte-for-byte identical.
 _FOREIGN_PAD_WINDOW = 5.0  # mm
+# The sample-by-foreign sweeps below (_seg_foreign_pad_dist,
+# _seg_foreign_seg_dist) run in ROW CHUNKS so that no matrix exceeds this
+# many elements (512 KB of float64). Every element is computed from its own
+# sample and its own foreign item, and the result is the min, so the chunked
+# sweep is bit-identical to one matrix; what changes is what the allocator
+# keeps. Each call's matrix was a different size, and macOS's malloc keeps a
+# freed large block for reuse only by a block of its own size: a braid's
+# smoother (41,000 calls) left 230 MB of freed matrices resident, and a
+# probe of 300 sweep-shaped calls left 636 MB (random sizes) against 39 MB
+# at this cap -- and ran faster (1.9 s vs 2.1 s; 64 KB chunks: 3.1 s).
+# A call under the cap takes exactly the one-matrix path it always did.
+_SWEEP_CHUNK = 65536
 
 
 def _pad_corner_radius(pad):
@@ -300,25 +312,32 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         return best_custom
     fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
     frc, frs = rc[near], rs[near]
-    # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
-    # rotated by R(-rot); identity for axis-aligned pads): shrink the
-    # half-extents by the corner radius, take the outside distance to that
-    # inner rect, then subtract the radius.
-    ddx = sx[:, None] - fcx[None, :]
-    ddy = sy[:, None] - fcy[None, :]
-    lx = np.abs(ddx * frc[None, :] + ddy * frs[None, :])
-    ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
-    dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
-    dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
-    d = np.hypot(dx, dy) - fcr[None, :]
+    excess = None
     if base_clearance is not None:
         excess = np.maximum(plc[near] - base_clearance, 0.0)
         if net_clearances:
             fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
                              for f in nids[near]], dtype=float)
             excess = np.maximum(excess, fcls)
-        d = d - excess[None, :]
-    return min(float(np.min(d)), best_custom)
+    # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
+    # rotated by R(-rot); identity for axis-aligned pads): shrink the
+    # half-extents by the corner radius, take the outside distance to that
+    # inner rect, then subtract the radius.
+    rows = max(1, _SWEEP_CHUNK // fcx.size)     # see _SWEEP_CHUNK
+    best = math.inf
+    for r0 in range(0, sx.size, rows):
+        sxc, syc = sx[r0:r0 + rows], sy[r0:r0 + rows]
+        ddx = sxc[:, None] - fcx[None, :]
+        ddy = syc[:, None] - fcy[None, :]
+        lx = np.abs(ddx * frc[None, :] + ddy * frs[None, :])
+        ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
+        dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
+        dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
+        d = np.hypot(dx, dy) - fcr[None, :]
+        if excess is not None:
+            d = d - excess[None, :]
+        best = min(best, float(np.min(d)))
+    return min(best, best_custom)
 
 
 def _foreign_seg_arrays(pcb_data, layer):
@@ -440,14 +459,8 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     sy = y1 + (y2 - y1) * t
     abx = bx - ax; aby = by - ay                      # (M,)
     L2 = abx * abx + aby * aby                         # (M,)
-    pax = sx[:, None] - ax[None, :]                    # (S, M)
-    pay = sy[:, None] - ay[None, :]
     safe_L2 = np.where(L2 > 0, L2, 1.0)
-    tt = (pax * abx[None, :] + pay * aby[None, :]) / safe_L2[None, :]
-    tt = np.where(L2[None, :] > 0, np.clip(tt, 0.0, 1.0), 0.0)
-    projx = ax[None, :] + tt * abx[None, :]
-    projy = ay[None, :] + tt * aby[None, :]
-    dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
+    excess = None
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
         # The track-rule value raises the same per-foreign requirement (#735).
@@ -458,8 +471,21 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                max(_nc.get(int(f), base_clearance),
                                    _tc.get(int(f), 0.0)) - base_clearance)
                            for f in fnid], dtype=float)
-        dist = dist - excess[None, :]
-    return float(np.min(dist))
+    rows = max(1, _SWEEP_CHUNK // ax.size)      # see _SWEEP_CHUNK
+    best = math.inf
+    for r0 in range(0, sx.size, rows):
+        sxc, syc = sx[r0:r0 + rows], sy[r0:r0 + rows]
+        pax = sxc[:, None] - ax[None, :]                   # (rows, M)
+        pay = syc[:, None] - ay[None, :]
+        tt = (pax * abx[None, :] + pay * aby[None, :]) / safe_L2[None, :]
+        tt = np.where(L2[None, :] > 0, np.clip(tt, 0.0, 1.0), 0.0)
+        projx = ax[None, :] + tt * abx[None, :]
+        projy = ay[None, :] + tt * aby[None, :]
+        dist = np.hypot(sxc[:, None] - projx, syc[:, None] - projy) - hw[None, :]
+        if excess is not None:
+            dist = dist - excess[None, :]
+        best = min(best, float(np.min(dist)))
+    return best
 
 
 def _foreign_via_arrays(pcb_data):

@@ -329,10 +329,11 @@ the order worth taking them, each with what is known.
     cells' window-sized intermediates per attempt; the min-cut probe's
     disc-per-point soft stamp). The band then moved into the map's
     static bitmap (Python-only; the Rust allocator's peak 329 -> 90 MB).
-    Left: the production octilinear smoother's sweep, now the braid's
-    peak (its freed matrices kept by macOS malloc as 230 MB of empty
-    large regions; uniform chunks would fix it, byte-identical), and
-    `blocking_analysis._NET_CELLS_MEMO`.
+    Then the production smoother's sweep in row chunks of 512 KB
+    (its freed matrices had been kept by macOS malloc as 230 MB of empty
+    large regions): K28 braid high-water 797 -> 372 MB, route.py
+    copper-identical. Left: `blocking_analysis._NET_CELLS_MEMO` (~85 MB)
+    and the fanout stage's resident memo shards (K41 ~140 MB).
 11. **The exact taut solver**, if that line is picked up again
     (`tmp/uncommitted_0906_archive/taut_exact.py`, its section above):
     the union walk done in the batched array, and the homotopy class
@@ -1361,11 +1362,36 @@ against every windowed foreign segment, float64, eight per call),
 freed, and kept by macOS's malloc as dirty empty regions because every
 call's matrix is a different size and none reuses another's. Neither
 tracer could see it: tracemalloc counts live Python objects, mimalloc
-is the Rust side (peak commit 90 MB). The fix is uniform chunk sizes in
-that sweep (the min over row chunks is the min over the matrix, to the
-bit), which is production code shared with `route.py`, so it is the
-next item and not this one; `blocking_analysis._NET_CELLS_MEMO`,
-production too, is ~85 MB by the end of the rip phase.
+is the Rust side (peak commit 90 MB).
+
+**The sweep in row chunks (the sixth change, production code).** A probe
+of 300 sweep-shaped calls at random sizes left 636 MB resident; the
+same calls with every matrix capped at 65536 elements (512 KB of
+float64) left 39 MB and ran faster (1.9 s against 2.1 s; a 64 KB cap
+was slower, 3.1 s). So `_seg_foreign_seg_dist` and `_seg_foreign_pad_dist`
+in `py_router/single_ended_routing.py` now run in row chunks of that
+cap (`_SWEEP_CHUNK`): every element is computed from its own sample and
+its own foreign item and the result is the min, so the chunked sweep is
+the one-matrix sweep to the bit, and a call under the cap takes exactly
+the path it always did. Measured on the K28 braid: the smoother now
+RELEASES memory (rss 315 MB before it, 216 after; Python's peak inside
+it 14 MB where 103), the process high-water 797 -> 372 MB, the footprint
+peak 342 MB; copper identical. Standard routing, which shares the
+helper: `route.py` on `kicad_files/splitflap_driver` copper-identical
+(1423 segments, 168 vias), and on `kicad_files/flat_hierarchy` (487 segments, 39 vias; the committed
+sweep run against the chunked one in one serialized script), and the four tests that cover the
+helpers and the smoother pass (`test_pad_shape_distance`,
+`test_617_pcb_modification_hole_clearance`, `test_760_hole_local_clearance`,
+`test_smooth_route`). Chain and bench with everything: chanD K15 fanout 202 / braid 365, K28 303 / 372
+(the fanout stage is the memo and the plan loop, untouched by this);
+bench K15 181 / 163, K28 317 / 226, K41 450 / 523 -- against the
+evening's starting point of 532 / 1621, 1161 / 1746 on chanD. Copper
+identical on all five boards; chanD K28 chain 2 min 20 s, bench K41
+chain 2 min 24 s, the machine otherwise idle.
+
+Left: `blocking_analysis._NET_CELLS_MEMO`, production, ~85 MB by the end
+of the rip phase; and the taut memo in the fanout stage (K41: 244
+shards, ~140 MB resident at the compact ratio).
 
 ### The sidecar describes the board it sits beside (2026-09-07)
 
