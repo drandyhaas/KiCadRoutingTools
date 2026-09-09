@@ -57,7 +57,6 @@ import json
 import math
 import os
 import sys
-import time
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _d in ('', 'py_router', 'py_placer', 'py_tools'):
@@ -602,7 +601,6 @@ def pad_area_balance(pcb_data) -> dict:
 
 def placement_terms(pcb_data, pcb_file, *, clearance=None, intent=None) -> dict:
     """All five terms for one board."""
-    t0 = time.time()
     if clearance is None:
         try:
             import list_nets
@@ -624,8 +622,7 @@ def placement_terms(pcb_data, pcb_file, *, clearance=None, intent=None) -> dict:
             'segments': len(getattr(pcb_data, 'segments', ()) or ()),
             'clearance': clearance,
             'term_order': list(TERM_ORDER),
-            'terms': terms,
-            'elapsed_s': round(time.time() - t0, 2)}
+            'terms': terms}
 
 
 # --------------------------------------------------------------- comparison
