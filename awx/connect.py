@@ -57,8 +57,20 @@ def make_config(pcb: PCBData, track: float, clearance: float,
 
 def _band_cells(coord: GridCoord, window: PCBData, band,
                 layers: List[str], slack: float) -> np.ndarray:
-    """Every window cell outside the band, as an (N, 3) int32 array for
-    add_blocked_cells_batch.
+    """Every window cell outside the band, as ONE (N, 3) int32 array
+    (the strips of _band_cell_strips concatenated; probes use it)."""
+    parts = list(_band_cell_strips(coord, window, band, layers, slack))
+    if not parts:
+        return np.zeros((0, 3), dtype=np.int32)
+    return np.concatenate(parts)
+
+
+def _band_cell_strips(coord: GridCoord, window: PCBData, band,
+                      layers: List[str], slack: float):
+    """Every window cell outside the band, as (n, 3) int32 arrays of
+    (gx, gy, layer) for add_blocked_cells_batch / the static stamp, a
+    strip of columns at a time, in the order one nonzero over the whole
+    mask gave them (layer, then gx, then gy).
 
     `band` is a callable band(xs, ys, layer_name) -> bool mask of shape
     (len(xs), len(ys)), True where the lane may go; a layer the band
@@ -70,12 +82,10 @@ def _band_cells(coord: GridCoord, window: PCBData, band,
     gys = np.arange(gy0, gy1 + 1)
     xs = np.array([coord.to_float(int(g), 0)[0] for g in gxs])
     ys = np.array([coord.to_float(0, int(g))[1] for g in gys])
-    # the rows built int32 a strip of columns at a time, in the order one
-    # nonzero over the whole mask gave them (layer, then gx, then gy):
-    # the int64 index pair, stack and concatenation of 3.1M cells outside
-    # a band were ~200 MB of transient per attempt (README TODO 10)
+    # the rows built int32 a strip of columns at a time: the int64 index
+    # pair, stack and concatenation of 3.1M cells outside a band were
+    # ~200 MB of transient per attempt (README TODO 10)
     STRIP = 64
-    parts = []
     for L, lname in enumerate(layers):
         ok = np.asarray(band(xs, ys, lname), dtype=bool)
         for i in range(0, len(gxs), STRIP):
@@ -85,10 +95,7 @@ def _band_cells(coord: GridCoord, window: PCBData, band,
                 r[:, 0] = gxs[i + bi]
                 r[:, 1] = gys[bj]
                 r[:, 2] = L
-                parts.append(r)
-    if not parts:
-        return np.zeros((0, 3), dtype=np.int32)
-    return np.concatenate(parts)
+                yield r
     # vectorized over gy (the pure-Python double loop was 3.5s of an
     # 18s braid); the per-gx fn(x) and to_grid calls are kept
     # CALL-FOR-CALL identical to the loop they replace, so the cell
@@ -202,12 +209,23 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     _m('fence, free vias, keepouts')
     if band is not None and (isinstance(band, dict) or callable(band)
                              or band[0] is not None or band[1] is not None):
-        cells = _band_cells(coord, window, band, list(cfg.layers),
-                            band_slack)
-        _m(f'band cells {len(cells)}')
-        if len(cells):
-            obstacles.add_blocked_cells_batch(cells)
-        _m('band stamped')
+        # The band into the map's STATIC bitmap (#422's
+        # add_static_blocked_cells_batch, which is_blocked ORs exactly as
+        # a refcount entry: same source/target override, same tracking),
+        # a strip at a time: a band is three to four million cells
+        # outside the lane's corridor, never removed (the map lives one
+        # attempt), and as refcount hash entries they were ~300 MB a
+        # window -- the braid's largest remaining allocation after the
+        # strips (README TODO 10). The bitmap holds them in a bit each.
+        # An older binary without the static API takes the hash path.
+        stamp = getattr(obstacles, 'add_static_blocked_cells_batch', None) \
+            or obstacles.add_blocked_cells_batch
+        n_band = 0
+        for cells in _band_cell_strips(coord, window, band, list(cfg.layers),
+                                       band_slack):
+            n_band += len(cells)
+            stamp(cells)
+        _m(f'band stamped {n_band} cells')
 
     if soft or soft_vias:
         _stamp_soft(obstacles, coord, layer_map, cfg, soft or (),

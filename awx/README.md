@@ -327,9 +327,12 @@ the order worth taking them, each with what is known.
     size; `_OBS_MEMO` never evicting the models of boards the plan loop
     had left behind) and the two largest were not on the list (the band
     cells' window-sized intermediates per attempt; the min-cut probe's
-    disc-per-point soft stamp). Left, both Rust: the band expressed as
-    millions of blocked cells in hash tables (~300 MB a window) and the
-    allocator's ~200 MB retained from the first big map.
+    disc-per-point soft stamp). The band then moved into the map's
+    static bitmap (Python-only; the Rust allocator's peak 329 -> 90 MB).
+    Left: the production octilinear smoother's sweep, now the braid's
+    peak (its freed matrices kept by macOS malloc as 230 MB of empty
+    large regions; uniform chunks would fix it, byte-identical), and
+    `blocking_analysis._NET_CELLS_MEMO`.
 11. **The exact taut solver**, if that line is picked up again
     (`tmp/uncommitted_0906_archive/taut_exact.py`, its section above):
     the union walk done in the batched array, and the homotopy class
@@ -1317,13 +1320,52 @@ in every row):
 
 The braid alone on chanD K28, same machine: 158-163 s before, 147 s
 after (the 41-second row sort of 2026-09-08 was the same stamp; its
-rows are now a twentieth). What is left is the Rust side: a band
-expressed as four million blocked cells in per-layer hash tables is
-~300 MB a window, and a bitmap band or a spans API for
-`add_blocked_cells_batch` would take that to a few megabytes -- a Rust
-change, so not here (the rule in CLAUDE.md); and
-`blocking_analysis._NET_CELLS_MEMO`, production code, ~85 MB by the end
-of the rip phase.
+rows are now a twentieth).
+
+**The band into the static bitmap (the fifth change, the same night).**
+What the table above still carried on the Rust side was the band
+itself: four million cells outside the lane's corridor stamped through
+`add_blocked_cells_batch` into the map's ref-counted per-layer hash
+tables, ~300 MB a window (measured in isolation: 3.1 million cells,
++305 MB), and the allocator keeping ~200 MB of it after the map is
+dropped. The map has had a static keep-out BITMAP since #422
+(`add_static_blocked_cells_batch`; `is_blocked` ORs it, the search's
+step and via moves both test through `segment_blocked` -> `is_blocked`,
+the frontier sink records a statically blocked cell exactly as a
+refcounted one, and the base map is already stamped through it by the
+proxy in `build_base_obstacle_map`) -- the band went through the hash
+path only because that was the call `connect` made. It now goes to the
+bitmap, a strip at a time (`_band_cell_strips`; the full array is never
+built), and an older binary without the API takes the hash path.
+Measured on the K28 braid alone: mimalloc's committed peak 329.5 -> 89.6
+MB (`MIMALLOC_SHOW_STATS=1`), the process high-water 1021 -> 797 MB, the
+first attempt's band +29 MB where +72 (and +416 before the strips),
+130 s where 147; copper identical as a set, and the chain / bench rows:
+chanD K15 fanout 201, braid 569 -> 315; chanD K28 303 / 771 -> 775 (the
+smoother's, see below); bench K15 181 / 229 -> 179, K28 320 / 503 -> 327,
+K41 442 / 511 -> 584 (the bench K41 rows were sampled beside a traced
+braid running on the same machine; its K41 braid alone is the number to
+re-read).
+
+With that, the braid's peak is no longer routing at all: the process
+sits under 375 MB for the whole lay and rip (104 of 126 s) and climbs
+to 670-825 MB in the 22 seconds of the production octilinear smoother
+(`smooth_octolinear_chains`, #536) that runs after every lane is laid,
+and STAYS there (rss 299 MB before it, 451-800 after). Stamped around
+that one call (`MEM_TRACE=1`: ps, `vmmap --summary`, and a tracemalloc
+window): Python holds 103 MB at the peak inside the smoother and 13 MB
+after it -- nothing is kept -- while `MALLOC_LARGE (empty)` goes from
+27 to 230 MB resident in 37 regions. Those are the clearance sweep's
+matrices (`_seg_foreign_seg_dist`: a sample every 0.02 mm along a span
+against every windowed foreign segment, float64, eight per call),
+freed, and kept by macOS's malloc as dirty empty regions because every
+call's matrix is a different size and none reuses another's. Neither
+tracer could see it: tracemalloc counts live Python objects, mimalloc
+is the Rust side (peak commit 90 MB). The fix is uniform chunk sizes in
+that sweep (the min over row chunks is the min over the matrix, to the
+bit), which is production code shared with `route.py`, so it is the
+next item and not this one; `blocking_analysis._NET_CELLS_MEMO`,
+production too, is ~85 MB by the end of the rip phase.
 
 ### The sidecar describes the board it sits beside (2026-09-07)
 
