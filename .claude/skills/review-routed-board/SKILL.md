@@ -237,9 +237,8 @@ Then present a compact report — one pass/fail line per category, details only 
 ```
 ## Board Review: board.kicad_pcb
 
-BLOCKING=0  (unrouted=0 broken=0 drc=0 undersized=0 floorplan=0 assembly=0
-             impedance=0 length=0 net_widths=0)
-UNGRADED: impedance, length          <- unexamined, NOT passed
+BLOCKING=0  (unrouted=0 broken=0 drc=0 undersized=0 floorplan=0 assembly=0 net_widths=0)  vias=214 copper_mm=1893.4
+UNGRADED (not scored, not passed): impedance, length
 
 | Check | Result |
 |-------|--------|

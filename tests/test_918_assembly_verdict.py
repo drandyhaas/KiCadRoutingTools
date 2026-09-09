@@ -21,9 +21,16 @@ re-derive the disjunction here.
 The fixture is the run-19 shape, built the same way
 `tests/test_assembly_coincident_stack.py` builds it: C1 (an 0603) moved onto
 C3's origin (an 8x10 electrolytic whose pads sit ~3mm out). No pad intersects,
-so `blocking` stays 0 and ONLY the coincident-origin conjunct fires. That is
-the sharpest possible input for this claim: every other conjunct is zero, so a
-non-zero assembly count can only have come from the verdict.
+so `blocking` stays 0 and the verdict rests entirely on conjuncts this
+component used to ignore.
+
+MEASURED on that board, and asserted below rather than assumed: TWO conjuncts
+fire, `coincident_origins` 1 and `containment_blocking` 1 -- one defect, C1
+sitting inside C3, seen by the origin-stack channel and by the fab-body
+channel. An earlier draft of this file claimed "ONLY the coincident-origin
+conjunct fires", pinned nothing, and was simply wrong; worse, it is exactly
+the overlap that makes summing the conjuncts a double-count, which is why the
+count is `blocking` floored at 1 and never a total.
 
 Both arms run the REAL `score_assembly` against the REAL `check_assembly`. A
 unit test over a hand-built dict would re-implement the partition it is meant
@@ -125,9 +132,19 @@ def main():
         check('...and says so in the key it publishes for consumers',
               doc is not None and doc.get('buildable') is False,
               f"buildable={doc and doc.get('buildable')}")
-        check('the firing conjunct is the coincident-origin stack',
-              doc is not None and (doc.get('coincident_origins') or 0) >= 1,
+        # BOTH firing conjuncts, pinned. One defect seen by two channels is
+        # what makes summing them a double-count, so the overlap is asserted
+        # rather than described.
+        check('the coincident-origin conjunct fires',
+              doc is not None and (doc.get('coincident_origins') or 0) == 1,
               f"coincident_origins={doc and doc.get('coincident_origins')}")
+        check('...and so does the containment conjunct, on the SAME defect',
+              doc is not None and (doc.get('containment_blocking') or 0) == 1,
+              f"containment_blocking={doc and doc.get('containment_blocking')} "
+              f"containments={doc and doc.get('containments')}")
+        check('no OTHER conjunct fires (locked contacts stay 0)',
+              doc is not None and (doc.get('locked_contacts') or 0) == 0,
+              f"locked_contacts={doc and doc.get('locked_contacts')}")
 
         # ---------------------------------------------- the CLAIM under test.
         print('board_score.score_assembly does not score that board clean')
@@ -198,15 +215,16 @@ def main():
               and 'contradicts itself' in (r.get('reason') or ''),
               repr(r.get('reason')))
 
-        print('a verdict whose every published magnitude is 0 still counts')
+        print('NOT BUILDABLE at blocking 0 counts 1 -- never a sum')
         r = board_score.assembly_component(
             {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',
-             'locked_contacts': 0, 'coincident_origins': 0,
-             'containment_blocking': 0, 'courtyard_blocking_gating': None}, 4)
-        check('count is floored at 1, not 0', r.get('count') == 1,
+             'locked_contacts': 0, 'coincident_origins': 3,
+             'containment_blocking': 5, 'courtyard_blocking_gating': None}, 4)
+        check('count is 1, not 8', r.get('count') == 1,
               f"count={r.get('count')!r} basis={r.get('count_basis')!r}")
-        check('...and the basis says the floor was used',
-              'floored at 1' in (r.get('count_basis') or ''),
+        check('...and the basis says WHY it is not a sum',
+              'not one currency' in (r.get('count_basis') or '')
+              and 'coincident_origins' in (r.get('count_basis') or ''),
               repr(r.get('count_basis')))
         check('the unarmed fifth conjunct is named, never counted as 0',
               r.get('conjuncts_unmeasured') == ['courtyard_blocking_gating']
@@ -214,15 +232,63 @@ def main():
               and '--baseline' in (r.get('courtyard_gating_reason') or ''),
               f"unmeasured={r.get('conjuncts_unmeasured')!r}")
 
-        print('the containment conjunct is the BLOCKING subset, not `contained`')
+        # THE double-count the first draft of this fix shipped.
+        # `locked_contacts` is a strict SUBSET of `blocking` -- `locked_ref` is
+        # assigned at exactly one site, inside the pad-intersection channel --
+        # so a component that added them reported 30 pad intersections plus 3
+        # of those same pairs again as 33.
+        print('a conjunct that is a SUBSET of blocking is not added to it')
+        r = board_score.assembly_component(
+            {'blocking': 30, 'buildable': False, 'verdict': 'NOT BUILDABLE',
+             'locked_contacts': 3, 'coincident_origins': 0,
+             'containment_blocking': 0, 'courtyard_blocking_gating': None}, 4)
+        check('count is 30, not 33', r.get('count') == 30,
+              f"count={r.get('count')!r} basis={r.get('count_basis')!r}")
+
+        # ...on a NOT BUILDABLE document, so the conjunct keys are actually
+        # READ. The first version of this check used a BUILDABLE one, where
+        # `count` is `blocking` and no conjunct is consulted at all -- so it
+        # passed unchanged with `contained` wrongly added to
+        # ASSEMBLY_CONJUNCTS, which is the very thing it claimed to prevent.
+        print('`contained` is not a conjunct: by-design containments do not count')
+        r = board_score.assembly_component(
+            {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',
+             'locked_contacts': 0, 'coincident_origins': 1,
+             'contained': 4, 'containment_blocking': 0,
+             'courtyard_blocking_gating': None}, 4)
+        check('`contained` is absent from the conjunct set',
+              'contained' not in r['conjuncts']
+              and set(r['conjuncts']) == set(board_score.ASSEMBLY_CONJUNCTS),
+              f"conjuncts={sorted(r['conjuncts'])}")
+        check('...and only the conjunct that really fired is named',
+              r.get('conjuncts_fired') == ['coincident_origins'],
+              f"fired={r.get('conjuncts_fired')!r}")
+
+        print('the two conjuncts that can REALLY fire at blocking 0 are named')
+        check('locked_contacts and courtyard gating are not among them',
+              tuple(board_score.ASSEMBLY_LIVE_CONJUNCTS)
+              == ('coincident_origins', 'containment_blocking'),
+              repr(board_score.ASSEMBLY_LIVE_CONJUNCTS))
+        r = board_score.assembly_component(
+            {'blocking': 0, 'buildable': False, 'verdict': 'NOT BUILDABLE',
+             'locked_contacts': 0, 'coincident_origins': 0,
+             'containment_blocking': 2, 'courtyard_blocking_gating': None}, 4)
+        check('a containment-only board reports it as the live conjunct',
+              r.get('live_conjuncts_fired') == ['containment_blocking'],
+              repr(r.get('live_conjuncts_fired')))
+
+        print('`courtyard_gating_armed` is READ from the doc, not asserted')
         r = board_score.assembly_component(
             {'blocking': 0, 'buildable': True, 'verdict': 'buildable',
              'locked_contacts': 0, 'coincident_origins': 0,
-             'contained': 4, 'containment_blocking': 0,
-             'courtyard_blocking_gating': None}, 0)
-        check('4 by-design containments do not make a buildable board score',
-              r.get('count') == 0 and r['conjuncts']['containment_blocking'] == 0,
-              f"count={r.get('count')!r} conjuncts={r.get('conjuncts')!r}")
+             'containment_blocking': 0, 'courtyard_blocking_gating': 0,
+             'courtyard_gating_basis': 'moved-vs-baseline'}, 0)
+        check('a doc produced WITH --baseline reports the conjunct as armed',
+              r.get('courtyard_gating_armed') is True
+              and r.get('courtyard_gating_reason') is None
+              and r.get('conjuncts_unmeasured') == [],
+              f"armed={r.get('courtyard_gating_armed')!r} "
+              f"reason={r.get('courtyard_gating_reason')!r}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

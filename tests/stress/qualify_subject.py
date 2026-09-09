@@ -112,9 +112,12 @@ def _gates(board, clearance):
         if m:
             nv = int(m.group(1))
         else:
-            # No recognisable summary: do not invent a number. -1 is "unknown",
-            # which is still truthy for the `> 0` gate but cannot be mistaken
-            # for a measured count if this is ever read quantitatively.
+            # No recognisable summary: do not invent a number. -1 is
+            # "unknown" -- it cannot be mistaken for a measured count if this
+            # is ever read quantitatively, and the caller tests `!= 0` so it
+            # fires the gate. (This comment used to claim -1 was "still truthy
+            # for the `> 0` gate". It is not: -1 > 0 is False, and an
+            # unmeasurable board therefore read as one whose gates were clean.)
             nv = -1
     # READ THE JSON, do not scrape stdout (#918). `blocking` is ONE of
     # check_assembly's five `not_buildable` conjuncts (check_assembly.py's
@@ -139,8 +142,9 @@ def _gates(board, clearance):
             except Exception:                               # noqa: BLE001
                 doc = {}
     if not isinstance(doc.get('buildable'), bool):
-        # -1 is "unknown", exactly as the DRC arm above uses it: still truthy
-        # for the `> 0` gate, and impossible to mistake for a measured count.
+        # -1 is "unknown", exactly as the DRC arm above uses it: impossible
+        # to mistake for a measured count, and the caller's `!= 0` test makes
+        # it FIRE the gate rather than pass it.
         return nv, -1
     blocking = int(doc.get('blocking') or 0)
     if not doc['buildable']:
@@ -183,7 +187,13 @@ def qualify(board, draws=5, seed=None):
                 landed += 1
                 nv, blk = _gates(out, clearance)
                 blocked.append((nv, blk))
-                if nv > 0 or blk > 0:
+                # `!= 0`, not `> 0`. Both gates use -1 for "could not be
+                # measured", and `-1 > 0` is False -- so an unmeasurable
+                # result counted as A GATE THAT DID NOT FIRE, which is the
+                # measured-clean-because-unexamined error this whole file is
+                # about. Both sentinels' comments claimed -1 was "still truthy
+                # for the `> 0` gate"; it never was.
+                if nv != 0 or blk != 0:
                     fired += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

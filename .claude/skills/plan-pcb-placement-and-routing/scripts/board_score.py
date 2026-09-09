@@ -352,12 +352,39 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
 #: publishes (check_assembly.py:508-510). `blocking` -- pad INTERSECTIONS -- is
 #: the first of them and is the only one this component used to read (#918).
 #:
-#: `courtyard_blocking_gating` is None here BY CONSTRUCTION: it is the
+#: THEY ARE NOT DISJOINT AND THEY ARE NOT ONE CURRENCY, which is why `count`
+#: below does not add them up:
+#:
+#:   * `locked_contacts` is a strict SUBSET of `blocking`. `locked_ref` is set
+#:     at exactly one site, inside the pad-intersection channel, so every
+#:     locked-contact pair is already a blocking pair --
+#:     `tests/test_run8_locked_contact.py` asserts in so many words that it is
+#:     "a second channel, not a re-count".
+#:   * `coincident_origins` counts GROUPS, not pairs: an N-part stack is one
+#:     group and N(N-1)/2 potential pairs.
+#:   * `containment_blocking` counts `fab`-kind pairs, a different geometry
+#:     channel from `blocking`'s pad intersections -- but routinely the SAME
+#:     ref pair. Measured on a perturbed corpus board, 3 of 11 containments
+#:     named a pair already in `blocking`; on the fixture
+#:     `tests/test_918_assembly_verdict.py` builds, one stacked-capacitor
+#:     defect appears as a group AND as a containment.
+#:
+#: `courtyard_blocking_gating` is null here BY CONSTRUCTION: it is the
 #: moved-vs-baseline subset of the courtyard census, and board_score passes no
-#: --baseline, so check_assembly publishes null rather than 0. That is reported
-#: as unmeasured, never counted as clean.
+#: --baseline, so check_assembly publishes null rather than 0. Reported as
+#: unmeasured, never counted as clean.
 ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
                       'containment_blocking', 'courtyard_blocking_gating')
+
+#: The conjuncts that can ACTUALLY flip the verdict while `blocking` is 0, in
+#: this scorer's invocation. Two, not four:
+#:   * `locked_contacts` cannot -- it is a subset of `blocking` (above), so a
+#:     locked contact implies `blocking >= 1` and the board never had 0;
+#:   * `courtyard_blocking_gating` cannot -- it is `[]` unless `--baseline` was
+#:     passed, and board_score never passes one.
+#: Written down because the issue, and this file's first draft, claimed all
+#: four -- and a motivating case that cannot occur is not a motivating case.
+ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking')
 
 
 def assembly_component(doc: dict, rc: int) -> dict:
@@ -365,20 +392,28 @@ def assembly_component(doc: dict, rc: int) -> dict:
 
     `not_buildable` is `blocking or locked_contact or stack_groups or
     containment_blocking or courtyard_gating`. This component read `blocking`
-    ALONE and accepted rc 4, so a board unbuildable through any of the other
-    four contributed 0 to `blocking` -- the headline the whole loop ranks and
-    stops on. check_assembly publishes `buildable` and `verdict` for exactly
-    this reader, and the comment above them names this defect verbatim, so the
-    verdict is READ here and the disjunction is never re-derived.
+    ALONE, so a board unbuildable through a coincident-origin stack or a
+    containment contributed 0 to `blocking` -- the headline the whole loop
+    ranks and stops on. check_assembly publishes `buildable` and `verdict` for
+    exactly this reader, and the comment above them names this defect verbatim,
+    so the verdict is READ here and the disjunction is never re-derived.
 
-    `count` stays `blocking` on a buildable board -- every ledger row ever
-    recorded means that number by it -- and becomes `blocking` plus the other
-    MEASURED conjuncts, floored at 1, when the verdict says NOT BUILDABLE. The
-    floor is not decoration: conjunct 5 publishes null without a --baseline, so
-    a real NOT BUILDABLE verdict can arrive with every published magnitude at
-    0, and a component that then returned 0 would reproduce the whole bug.
-    `count_basis` names the terms that went in, so the number is falsifiable
-    from its own payload.
+    `count` IS `blocking`, floored at 1 when the verdict says NOT BUILDABLE.
+    It is deliberately NOT the sum of the conjuncts, and that was the first
+    draft's bug: `locked_contacts` is a subset of `blocking` and
+    `containment_blocking` routinely names a ref pair already in it, so adding
+    them counts one defect twice (measured on a perturbed corpus board: the
+    sum reported 44 where there were 38 distinct defective ref pairs and 30
+    pad intersections; and 2 on the stacked-capacitor fixture in
+    `tests/test_918_assembly_verdict.py`, where one defect appears as a group
+    AND as a containment). And they are not one currency -- pairs, a subset of
+    those pairs, and GROUPS -- so their total is a number with no unit.
+
+    The floor of 1 is therefore the whole mechanism, not a safety net: it says
+    "this board is not buildable" without inventing a magnitude. All five
+    conjuncts are published in `conjuncts` for a reader who wants to know
+    WHICH fired, and `count_basis` names how `count` was reached, so the
+    number is falsifiable from its own payload.
 
     Two refusals rather than a quiet answer:
 
@@ -410,28 +445,50 @@ def assembly_component(doc: dict, rc: int) -> dict:
     measured = {k: v for k, v in conjuncts.items()
                 if isinstance(v, int) and not isinstance(v, bool)}
     unmeasured = sorted(k for k in conjuncts if k not in measured)
-    total = sum(measured.values())
+    blocking = int(doc.get('blocking') or 0)
+    fired = sorted(k for k, v in measured.items() if v and k != 'blocking')
     if buildable:
-        count, basis = int(doc.get('blocking') or 0), 'blocking (buildable)'
+        count, basis = blocking, 'blocking (buildable)'
+    elif blocking:
+        count = blocking
+        basis = (f'blocking ({blocking}); NOT BUILDABLE, and the conjuncts are '
+                 f'not summed -- they overlap and are not one currency'
+                 + (f' (also fired: {", ".join(fired)})' if fired else ''))
     else:
-        count = max(total, 1)
-        basis = ('sum of measured conjuncts (' +
-                 ', '.join(f'{k}={v}' for k, v in sorted(measured.items())) +
-                 ')' + ('' if total else ', floored at 1: every measured '
-                        'conjunct is 0, so the verdict rests on one this '
-                        'scorer cannot see'))
+        # THE case this component exists for: NOT BUILDABLE at blocking 0.
+        count = 1
+        basis = ('1: NOT BUILDABLE with blocking 0, so the verdict rests '
+                 'entirely on '
+                 + (', '.join(fired) if fired else
+                    'a conjunct this scorer cannot see')
+                 + '. One, not a sum: the conjuncts overlap (locked_contacts '
+                   'is a subset of blocking; a containment routinely names a '
+                   'pair already in it) and are not one currency (pairs vs '
+                   'GROUPS), so their total has no unit')
+    # WHICH conjuncts can actually reach this branch, so a reader is not sent
+    # looking for a case that cannot happen.
+    live = [k for k in ASSEMBLY_LIVE_CONJUNCTS if measured.get(k)]
+    # `courtyard_gating_basis` is the producer's own word for whether conjunct
+    # 5 was armed. READ it rather than asserting it: this function is public
+    # and pure, so it can legitimately be handed a document produced WITH
+    # --baseline, and a payload whose thesis is "not measured must never read
+    # as measured" must not hardcode an armedness it never measured.
+    _cg_basis = doc.get('courtyard_gating_basis')
     return {'ran': True, 'count': count, 'count_basis': basis,
             'buildable': buildable, 'verdict': doc.get('verdict'),
             'conjuncts': conjuncts,
             'conjuncts_unmeasured': unmeasured,
-            # NAMED, not just counted: `courtyard_blocking_gating` is null on
-            # every board this scorer grades, and "not measured" must never
-            # read as "measured clean".
-            'courtyard_gating_armed': False,
-            'courtyard_gating_reason':
-                'board_score passes check_assembly no --baseline, so its fifth '
-                'conjunct (moved-vs-baseline courtyard interpenetration) is '
-                'structurally unarmed here and publishes null',
+            'conjuncts_fired': fired,
+            'live_conjuncts_fired': live,
+            'courtyard_gating_armed':
+                isinstance(conjuncts['courtyard_blocking_gating'], int),
+            'courtyard_gating_basis': _cg_basis,
+            'courtyard_gating_reason': (
+                None if isinstance(conjuncts['courtyard_blocking_gating'], int)
+                else 'no --baseline was passed, so check_assembly\'s fifth '
+                     'conjunct (moved-vs-baseline courtyard interpenetration) '
+                     'is unarmed and publishes null. board_score never passes '
+                     'one, so it is unarmed on every board this scorer grades'),
             'advisory_pairs': int(doc.get('advisory') or 0),
             'waived_pairs': int(doc.get('waived') or 0),
             'pairs': doc.get('blocking_pairs') or [],

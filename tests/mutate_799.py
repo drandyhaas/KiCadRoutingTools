@@ -216,8 +216,23 @@ ROWS = [
     # unbuildable through any of the other four scored 0 against the headline
     # the whole loop ranks and stops on.
     ('assembly-reads-blocking-alone-again', 'bs',
-     "        count = max(total, 1)\n",
-     "        count = int(doc.get('blocking') or 0)\n",
+     "        # THE case this component exists for: NOT BUILDABLE at blocking 0.\n"
+     "        count = 1\n",
+     "        count = blocking\n",
+     (T918,), 'KILLED'),
+
+    # ...and the other half of the same claim: the conjuncts must NOT be
+    # summed. They overlap (locked_contacts is a subset of blocking) and are
+    # not one currency (pairs vs GROUPS), so a sum double-counts -- which is
+    # what the first draft of this fix shipped.
+    ('assembly-sums-the-overlapping-conjuncts', 'bs',
+     "        count, basis = blocking, 'blocking (buildable)'\n"
+     "    elif blocking:\n"
+     "        count = blocking\n",
+     "        count, basis = blocking, 'blocking (buildable)'\n"
+     "    elif blocking:\n"
+     "        count = blocking + sum(v for k, v in measured.items()\n"
+     "                               if k != 'blocking')\n",
      (T918,), 'KILLED'),
 
     # ...and the self-check that refuses an instrument disagreeing with
