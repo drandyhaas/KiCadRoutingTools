@@ -1575,9 +1575,56 @@ hugged and shipped an 8 mm chord 4 degrees off; SA9 hugged that.
 
 ("off-grid > 1 mm": routed-net pieces over 1 mm more than 3 degrees
 from a grid direction, the proxy for what the eye calls colinearity.)
-What is left at K41: SCS1's 8 mm chord at 7 degrees and SCKE1's 6 mm
-one, each a lane converging on a neighbour it does not reach within
-the window, and the chords round the source's south row.
+**Packing on its own: `pack_board.py` (2026-09-09, later).** The braid
+now writes `<out>.pack.json` beside its board at write time -- each
+lane's copper as the pack receives it, every corridor's members and
+target order, its planned centrelines, each lane's tooth and stub end,
+and the destination stub chain tip-first -- and `pack_board.py BOARD`
+packs a braided board again from that in seconds (K41 10 s where the
+braid took 92 + 10), with the stub trim re-run on the result.
+`tmp/pk_pack.sh TAG K..` packs the pk0 boards, grades and renders. The
+`PK_*` environment overrides on the constants and rule switches exist
+for bisecting a change that way; that is how the flat-hug tolerance
+below was found. Identity: the runner's pack summary matches a braid
+mode-1 run to within one lane (the braid's re-anchor also sees stub
+vertices its trim has already removed; now excluded).
+
+**Five little things (2026-09-09, later still; tag `fin2`).** A 0.05 mm
+bump on SRST's top ride and a 0.1 mm dip on SA9's: the FOLLOW pulled a
+single point up through the gap between two pads toward a ride 0.9 mm
+above, because plain sight was true for that one point and false for
+its neighbours. A pull now applies only in a run of PULL_MIN (3)
+consecutive pulled points; spreading each refusal to its neighbours
+instead cost K35 its hugs (off-grid 17 -> 74 mm). A hug of one chord
+varying by under HUG_FLAT (0.05 mm) is one line at its largest
+distance; at 0.15 it moved long hugs off their neighbour for one short
+plateau (K35 12 -> 48 mm). SA4's 0.8 mm hairpin above its via: the lane
+was routed to the stub's far tip, and a lane arriving from the other
+side ran up alongside the stub to reach it; the landing may now be any
+stub vertex nearer the approach when the chord to it clears, and the
+trim drops the bypassed stub. SA11's jog and SRST's corner: the fold
+re-pack (a lane whose relaxed string still folds is packed again
+against the final board; the full second pass stays opt-in, it packs
+tighter and emits worse: K28 982 -> 1120 segments) and a vertex
+THINNING of every emitted run (a vertex within 20 um of its
+neighbours' chord goes when the chord clears and no grid leg is lost).
+
+| K  | lanes | segments base -> packed | off-grid length mm (pieces > 0.5 mm, > 3 deg): commit 8389558f -> now | pack s |
+|----|-------|-------------------------|-----------------------------------------------------------------------|--------|
+| 28 | 28 / 28 | 1574 -> 875  | 27 -> 36 | 4.4 |
+| 35 | 35 / 35 | 1435 -> 1475 | 17 -> 7  | 5.5 |
+| 41 | 41 / 41 | 2258 -> 1843 | 72 -> 40 | 10.5 |
+
+0 open, 0 DRC, vias unchanged. The proxy is noisy per board (one long
+chord flipping is 5-10 mm), so it is read with the render. What is
+left: the coupled corner where SRST and SA9 turn into the passives'
+row gaps (two 0.2-0.6 mm chords at 63 and 157 degrees, each hugging
+the other's corner), a 1-degree approach piece at SA4's landing, and
+the fan from the source's south row into the bottom river, where a
+6-degree lane between a pad row and a river has no room for an elbow
+in any order -- a taut string is a straight line at whatever angle its
+ends dictate, and only an octilinear-metric tension would make the
+staircase cost the same as the chord.
 
 **A fold is alongside nothing, and a via feels its two stretches
 (2026-09-09, the circled via).** K41's SA12 had a via wedged between

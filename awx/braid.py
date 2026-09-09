@@ -3849,6 +3849,40 @@ def write_out(a, ctx, corridors, names, log):
     _res_list = [{'new_segments': list(out_segs[nm])} for nm in names]
     _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
         _res_list, pcb, kids, clearance=0.1, keep_input_copper=True)
+    if a.out != os.devnull:
+        # THE PACK SIDECAR (<out>.pack.json): what pack.py needs to pack
+        # this board again on its own -- each lane's copper as the pack
+        # would receive it (smoothed), every corridor's members and target
+        # order, its planned centrelines, each lane's tooth and stub end
+        # -- in the WRITTEN board's frame. `pack_board.py BOARD` packs a
+        # braided board in seconds where the braid took a minute
+        import json as _json_pk
+        _M = ctx.M if ctx.M is not None else (lambda x, y: (x, y))
+        _OL = other_layer if ctx.M is not None else (lambda L: L)
+        _side = {
+            'layers': [_OL(L) for L in ctx.cfg.layers],
+            'board_edge_clearance': float(getattr(ctx.cfg, 'board_edge_clearance', 0.0) or 0.0),
+            'corridors': [{
+                'members': list(c.members),
+                'target': list(getattr(c, 'target', c.members)),
+                'lane_xy': {nm: [list(_M(*p_)) for p_ in poly]
+                            for nm, poly in (getattr(c, 'lane_xy', {}) or {}).items()},
+            } for c in corridors],
+            'ends': {nm: [list(_M(*ends[nm][0])), list(_M(*ends[nm][1]))] for nm in names},
+            # the destination stub chain, tip-side first, as it stands on
+            # the written board (the trim above may have shortened it)
+            'dest_chain': {nm: [[*_M(*_t), *_M(*_p), _OL(s_.layer)]     # tip, pad
+                                for (s_, _t, _p) in (ctx.dest_chain.get(nm) or [])
+                                if s_ in pcb.segments]
+                           for nm in names},
+            'lanes': {nm: {
+                'segs': [[*_M(s.start_x, s.start_y), *_M(s.end_x, s.end_y), _OL(s.layer), s.width]
+                         for s in _res_list[k]['new_segments']],
+                'vias': [list(_M(v.x, v.y)) for v in out_vias.get(nm, [])],
+            } for k, nm in enumerate(names)},
+        }
+        with open(a.out + '.pack.json', 'w') as _f:
+            _json_pk.dump(_side, _f)
     if PACK_MODE:
         # PACK (README TODO 8) at write time: every corridor's smoothed
         # lanes packed into rivers (pack.py, opt-in: BRAID_PACK=1)
@@ -3869,6 +3903,10 @@ def write_out(a, ctx, corridors, names, log):
         # the pack moves vias: the dicts read at the top are stale
         out_segs = {nm: c.out_segs[nm] for c in corridors for nm in c.members}
         out_vias = {nm: c.out_vias[nm] for c in corridors for nm in c.members}
+        # ...and may end a lane at another vertex of its stub: the trim again
+        for nm in names:
+            if out_segs.get(nm) and nm not in refused:
+                note_joint(ctx, nm, out_segs[nm])
     for nm in names:
         nid, _ = byname[nm]
         final_segs[nm] = [s for s in pcb.segments if s.net_id == nid]

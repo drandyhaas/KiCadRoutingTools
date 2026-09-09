@@ -54,11 +54,18 @@ import topo_strings as ts
 import taut_fast as tf
 
 DEBUG = os.environ.get('BRAID_PACK_DEBUG') == '1'
+# PK_* environment overrides (PK_HUG_FLAT, PK_PULL_MIN, PK_SNAP_DEV, and the
+# rule switches PK_REANCHOR / PK_FOLDS / PK_THIN / PK_ARC = 0) exist for
+# bisecting a change on the benches through pack_board.py; the defaults
+# are the rules as measured
 STEP = 0.08                   # spacing of the string (mm)
 FREEZE = ts.FREEZE            # no moves this close to a lane's end (0.35)
 CAP = 0.05                    # a point moves at most this per round: below a
                               # thin capsule's radius, so it never jumps one
 PUSHES = 6                    # projections per round for a wedged point
+PULL_MIN = int(os.environ.get('PK_PULL_MIN', '3'))   # a pull applies only in a run of this many
+                              # consecutive pulled points (a point alone in a
+                              # slot is refused)
 VIA_SPAN = 5                  # a via's smoothing pull comes from the points this
                               # many steps away on either side (0.4 mm): a joint
                               # feels the angle between its two stretches, not the
@@ -118,9 +125,17 @@ CHORD_TOL = 0.03              # settled copper simplified at this before a hug
 HUG_MAX = 0.8                 # a point hugs copper within this (the pitch, or a
                               # plateau past a via); farther is a free stretch
 OCT_FREE_TOLS = (0.4, 0.15, 0.06)   # a free stretch simplified at these, coarsest first
-OCT_DTOL = 0.03               # a hug at a distance this different is another line
+OCT_DTOL = 0.03               # a hug at a distance this different is another line...
+HUG_FLAT = float(os.environ.get('PK_HUG_FLAT', '0.05'))   # ...unless the whole hug of one chord varies by no
+                              # more than this: then it is ONE line at the LARGEST
+                              # distance (a 0.05 mm bump in a hug is the wiggle the
+                              # eye sees; SRST's top ride). At 0.15 it moved long
+                              # hugs 0.1 mm off their neighbour for one short
+                              # plateau and K35's off-grid length went 12 -> 48 mm;
+                              # 0.05 measured 7 / 40 / 36 mm on K35 / K41 / K28
+                              # against 12 / 54 / 42 with the rule off (2026-09-09)
 OCT_SNAP = 2.0                # degrees: a chord this close to a grid direction IS one
-SNAP_DEV = 0.01               # ...if the snap moves its far end by no more than this
+SNAP_DEV = float(os.environ.get('PK_SNAP_DEV', '0.01'))   # ...if the snap moves its far end by no more than this
 MIN_LEG = 0.05                # a grid leg shorter than this is dropped
 JOG_MIN = 0.06                # parallel lines offset by less than this are one line
 REPAIR_TOL = 0.012            # the string's chords that replace an unclear leg:
@@ -809,6 +824,28 @@ def relax_lane(P, cls, anchors, Ds, Cs, Ts, pitch, window, rounds=250, gain=1.0,
             A0 = Qf[pi]
             A1 = np.stack([tx[pi], ty[pi]], 1)
             blocked = _segs_hit(A0, A1, Ms[c])
+            # a pull applies only as part of a RUN of pulls: a point whose
+            # own way to the tube is clear while its neighbours' is not is a
+            # point alone in a slot (SRST's apex pulled 0.05 mm up into the
+            # gap between two pads toward a ride 0.9 mm above, the bump on
+            # its top ride, 2026-09-09). Runs of fewer than PULL_MIN
+            # consecutive pulled points are refused; a hug of any length
+            # keeps every pull it has (spreading each refusal to its
+            # neighbours instead cost K35 its hugs, 17 -> 74 mm off-grid)
+            if len(pi) > 1:
+                si = sel[pi]
+                ok = np.zeros(n, dtype=bool)
+                ok[si[~blocked]] = True
+                run = np.zeros(n, dtype=int)
+                cnt = 0
+                for _i in range(n):
+                    cnt = cnt + 1 if ok[_i] else 0
+                    run[_i] = cnt
+                # the run length each point belongs to: the max over its run
+                for _i in range(n - 2, -1, -1):
+                    if ok[_i] and ok[_i + 1]:
+                        run[_i] = run[_i + 1]
+                blocked = blocked | (run[si] < PULL_MIN)
             if TRACE:
                 for k_, gi in enumerate(sel[pi]):
                     if int(gi) in TRACE:
@@ -1213,10 +1250,19 @@ def _hug_groups(q, TC, hug_j, hug_d):
     i = 0
     while i < n:
         if hj[i] >= 0:
+            # the whole hug of this chord: one line at its largest distance
+            # when it varies by no more than HUG_FLAT, else split where the
+            # distance steps by more than OCT_DTOL
             j = i
-            ref = hd[i]
-            while j + 1 < n and hj[j + 1] == hj[i] and abs(hd[j + 1] - ref) <= OCT_DTOL:
+            while j + 1 < n and hj[j + 1] == hj[i]:
                 j += 1
+            if hd[i:j + 1].max() - hd[i:j + 1].min() <= HUG_FLAT:
+                hd[i:j + 1] = hd[i:j + 1].max()
+            else:
+                j = i
+                ref = hd[i]
+                while j + 1 < n and hj[j + 1] == hj[i] and abs(hd[j + 1] - ref) <= OCT_DTOL:
+                    j += 1
             groups.append(['hug', i, j])
         else:
             j = i
@@ -1257,7 +1303,7 @@ def _octilinear_run(q, M, TC, hug_j, hug_d, free_tol):
     # free groups split into wraps (chamfers) and the rest
     split = []
     for (kind, i0, i1) in groups:
-        if kind == 'hug':
+        if kind == 'hug' or os.environ.get('PK_ARC', '1') != '1':
             split.append((kind, i0, i1, None))
         else:
             split.extend(_arc_lines(qa, i0, i1, Mm, dep_, jj_, tt_))
@@ -1305,6 +1351,8 @@ def _octilinear_run(q, M, TC, hug_j, hug_d, free_tol):
                 lines.extend(_elbow_lines(a, b, M))
     if not lines:
         return None
+    if DEBUG and _elbow_lines.notes:
+        emit_lane.notes.append('any-angle kept: ' + ' | '.join(_elbow_lines.notes[:3]))
     out = _lines_to_poly(lines, tuple(map(float, q[0])), tuple(map(float, q[-1])))
     if out is None or len(out) < 2:
         _octilinear_run.note = (f'no build ({_lines_to_poly.why}; {len(lines)} lines '
@@ -1420,6 +1468,40 @@ def _hug_of(q, TC):
     return hj, hd
 
 
+THIN_TOL = 0.02               # a vertex this close to the chord of its neighbours
+                              # is thinned away when the chord clears and the
+                              # thinning destroys no grid leg (an arc of five
+                              # 0.1 mm chords round a corner, a 0.05 mm jog)
+
+
+def _thin(q, M, dq_of):
+    """Vertices thinned from an emitted run: v[i] goes when it lies within
+    THIN_TOL of the chord v[i-1]->v[i+1], that chord clears the inflated
+    model at the string's allowance there, and either both pieces at
+    v[i] were off the grid already or the chord is on it (a grid leg
+    never becomes a chord a degree off). Repeated until nothing goes."""
+    changed = True
+    while changed and len(q) > 2:
+        changed = False
+        for i in range(1, len(q) - 1):
+            a, b, c = q[i - 1], q[i], q[i + 1]
+            vx, vy = c[0] - a[0], c[1] - a[1]
+            L = math.hypot(vx, vy)
+            if L < 1e-9:
+                continue
+            dev = abs((b[0] - a[0]) * vy - (b[1] - a[1]) * vx) / L
+            if dev > THIN_TOL:
+                continue
+            if not ((not _is_grid(a, b) and not _is_grid(b, c)) or _is_grid(a, c)):
+                continue
+            if not _chord_clear(a, c, M, dq_of(a, c)):
+                continue
+            del q[i]
+            changed = True
+            break
+    return q
+
+
 def _despike(q, turn_cos=-0.94, short=0.12):
     """A vertex where the run doubles back on itself (turn over ~160
     degrees) with a short leg on either side is a spur, not copper:
@@ -1485,6 +1567,16 @@ def emit_lane(P, cls, layers, models, worlds):
                 Q = tf._simplify(np.asarray(seg, dtype=float), EMIT_TOL)
         q = [(round(float(x), 4), round(float(y), 4)) for x, y in Q]
         q = _despike([p for i, p in enumerate(q) if i == 0 or p != q[i - 1]])
+        qa_ = np.asarray(seg, dtype=float)
+        dq_ = np.maximum(_deepest_plain(qa_, M)[0], 0.0)
+
+        def _allow(a_, b_, qa_=qa_, dq_=dq_):
+            ia_ = int(np.argmin(np.hypot(qa_[:, 0] - a_[0], qa_[:, 1] - a_[1])))
+            ib_ = int(np.argmin(np.hypot(qa_[:, 0] - b_[0], qa_[:, 1] - b_[1])))
+            lo_, hi_ = min(ia_, ib_), max(ia_, ib_)
+            return REPAIR_TOL + 1e-3 + float(dq_[lo_:hi_ + 1].max())
+        if os.environ.get('PK_THIN', '1') == '1':
+            q = _thin(q, M, _allow)
         emit_lane.repaired += _octilinear_run.repaired
         emit_lane.arcs += _octilinear_run.arcs
         runs.append((layers[c], q))
@@ -1712,6 +1804,7 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     n_oct = n_runs = 0
     n_rep = [0]
     n_arc = [0]
+    folds = {}
     why = {}
     packed = []
 
@@ -1728,6 +1821,45 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
         L0 = poly_len(pts)
         if L0 < 2 * FREEZE + 0.3:
             return 'short'
+        # THE LANDING MAY BE ANY VERTEX OF THE STUB (2026-09-09): the lane
+        # was routed to the stub's far tip, and a lane that now arrives
+        # from the other side runs up alongside the stub to reach it -- a
+        # 0.8 mm hairpin of doubled copper (K41's SA4, its stub pointing
+        # north, the lane packed in from the south-west). The braid's
+        # stub trim removes whatever stub lies tip-side of the vertex the
+        # lane ends at, so the string is re-anchored at the stub vertex
+        # nearest its approach when the chord to it clears -- the copper
+        # shortens by the hairpin, and the trim drops the bypassed stub
+        chain = (getattr(ctx, 'dest_chain', {}) or {}).get(nm) or []
+        # only the stub segments still on the board (the braid's chain also
+        # lists what its trim already removed)
+        _on = {id(s_) for s_ in ctx.pcb.segments}
+        chain = [(s_, t_, p_) for (s_, t_, p_) in chain if s_ is not None and id(s_) in _on]
+        if chain and len(pts) > 6 and os.environ.get('PK_REANCHOR', '1') == '1':
+            verts = [tuple(chain[0][1])] + [tuple(p_) for (_s, _t, p_) in chain]
+            L_last = layers.index(lays[-1])
+            wl = world_of(lays[-1], nid)
+            best = None
+            for vi_, v_ in enumerate(verts[1:], 1):
+                # the approach point: the string 0.5 mm before its end
+                acc = 0.0
+                ka = len(pts) - 1
+                while ka > 0 and acc < 0.5:
+                    acc += math.hypot(pts[ka][0] - pts[ka - 1][0], pts[ka][1] - pts[ka - 1][1])
+                    ka -= 1
+                ap = pts[ka]
+                d_new = math.hypot(v_[0] - ap[0], v_[1] - ap[1])
+                d_old = poly_len(pts[ka:])
+                if d_new + 0.05 < d_old and not (wl.slack([(ap[0], ap[1], v_[0], v_[1])]) < -SLACK_TOL).any():
+                    if best is None or d_new < best[0]:
+                        best = (d_new, vi_, ka, v_)
+            if best is not None:
+                _d, vi_, ka, v_ = best
+                pts = pts[:ka + 1] + [(round(v_[0], 4), round(v_[1], 4))]
+                lays = lays[:ka] + [lays[-1]]
+                if DEBUG:
+                    log(f'    pack {nm}: landing moved to stub vertex {vi_} ({v_[0]:.3f},{v_[1]:.3f}), '
+                        f'{_d:.2f} mm from the approach instead of {poly_len(pts[ka:]) if False else 0:.2f}')
         P, cls = lane_string(pts, lays, layers)
         own_vias = {}
         anchors = [tuple(pts[0]), tuple(pts[-1])]
@@ -1813,6 +1945,11 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
             np.savez(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp', f'dump_{nm}.npz'),
                      P0=P0_, P=P, cls=cls, hug=_hug, anchors=np.asarray(anchors, dtype=float),
                      tgt=tgt, side=np.asarray(side, dtype=float))
+        _tg, _fold = _tangents(P, folds=True)
+        free_ = np.ones(len(P), dtype=bool)
+        for a_ in anchors:
+            free_ &= np.hypot(P[:, 0] - a_[0], P[:, 1] - a_[1]) >= FREEZE
+        folds[nm] = int((_fold & free_ & (cls != VIA)).sum())
         models = [(_as_caps(*tf._near(Ds[i], Cs[i], P)), _chords_of(_near_T(Ts[i], P)))
                   for i in range(len(layers))]
         runs, new_vias = emit_lane(P, cls, layers, models, worlds)
@@ -1941,6 +2078,16 @@ def pack_corridor(c, log, pitch=None, window=None, tag=''):
     n2 = 0
     for nm in (order if os.environ.get('BRAID_PACK_PASS2', '0') == '1' else ()):
         if nm in still:
+            continue
+        if pack_one(nm) is None:
+            n2 += 1
+    # ...and, always, the lanes whose relaxed string still FOLDS (a turn
+    # over 90 degrees away from an anchor): a hairpin an early lane kept
+    # round a neighbour's router copper that has since moved (K41's SA4
+    # above its via, packed one lane before SA6, 2026-09-09). Few lanes,
+    # and a fold the topology forces just stays
+    for nm in (order if os.environ.get('PK_FOLDS', '1') == '1' else ()):
+        if nm in still or folds.get(nm, 0) == 0:
             continue
         if pack_one(nm) is None:
             n2 += 1
