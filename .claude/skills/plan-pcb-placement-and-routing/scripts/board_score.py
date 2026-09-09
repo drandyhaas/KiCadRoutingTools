@@ -961,6 +961,52 @@ def quality(board: str) -> dict:
         return {'error': str(e)}
 
 
+def score_placement(root: str, board: str, tmp: str, intent: str = '',
+                    parent: dict = None) -> dict:
+    """Placement quality for a copper-free lap (#894). REPORT-ONLY.
+
+    NOT in `parts`, so not in `blocking`, not in `blocking_by`, not in
+    `ungraded`, not in `unknown`, and it cannot move the exit code. Three
+    reasons, and the first is the one to read: its terms are millimetres and
+    counts in four different currencies, and `blocking` is a sum. Adding
+    metres of pair length to a violation count produces a number with no unit.
+    The second is that `parts` is AST-scraped by
+    `tests/test_904_lens_components_cover_blocking.py`, which would then
+    demand a verifier lens for a component no lens grades. The third is that
+    keeping it out leaves every existing ledger's `blocking` untouched.
+
+    Run as a SUBPROCESS, like every other component here (see this module's
+    header): `placement_score` builds a quench state that PRINTS to stdout,
+    and this script's stdout carries `SCORE_JSON=` which every consumer parses
+    whole. The tool takes `--json`, so nothing of its own reaches this stream.
+    """
+    out = os.path.join(tmp, 'placement.json')
+    args = [board, '--json', out]
+    if intent:
+        args += ['--intent', intent]
+    rc, text = run_tool(root, 'placement_score.py', *args)
+    if rc != 0 or not os.path.exists(out):
+        return skipped(f'placement_score rc {rc}: {text.strip()[-200:]}')
+    try:
+        with open(out, encoding='utf-8') as f:
+            doc = json.load(f)
+    except Exception as exc:                                 # noqa: BLE001
+        return skipped(f'placement_score json unreadable: {exc}')
+    if parent is not None:
+        try:
+            sys.path.insert(0, os.path.join(root, 'py_placer'))
+            import placement_score as _ps
+            verdict, detail = _ps.compare_terms(
+                (parent.get('placement') or {}).get('terms'), doc['terms'])
+            doc['vs_parent'] = {
+                'verdict': verdict, 'terms': detail,
+                'board_sha': parent.get('board_sha'),
+                'label': parent.get('label')}
+        except Exception as exc:                             # noqa: BLE001
+            doc['vs_parent'] = {'error': f'{type(exc).__name__}: {exc}'}
+    return doc
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description='One authoritative (blocking, quality) score for a board',
@@ -998,6 +1044,18 @@ def build_parser():
     p.add_argument('--length-groups', metavar='JSON',
                    help='{"group": {"nets": [...], "tolerance_mm": 0.1, '
                         '"mode": "pin_pair"}} -- enables the length component')
+    p.add_argument('--placement-terms', action='store_true',
+                   help='grade the PLACEMENT terms (#894): worst diff-pair '
+                        'span, crossed pin orders, cluster distance, plane-cut '
+                        'proxy, pad-area balance. REPORT-ONLY -- never in '
+                        '`blocking`, never in the exit code. On a copper-free '
+                        'board `quality` is (0, 0.0, 0) for every placement, '
+                        'so this is the only thing that can rank two of them. '
+                        'Opt-in because it builds a quench state')
+    p.add_argument('--parent-score', metavar='PATH',
+                   help="the parent lap's board_score JSON. Each placement "
+                        "term is then reported raw AND as a delta against it. "
+                        "Ignored without --placement-terms")
     p.add_argument('--json', metavar='PATH', help='write the full score here')
     p.add_argument('--label', default='', help='free text carried into the JSON '
                                                '(the ledger uses it for the lever)')
@@ -1037,6 +1095,18 @@ def main():
         imped = score_impedance(root, args.board, _imp_nets, tmp)
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
+        placement = None
+        if args.placement_terms:
+            _parent = None
+            if args.parent_score:
+                try:
+                    with open(args.parent_score, encoding='utf-8') as _f:
+                        _parent = json.load(_f)
+                except Exception as _exc:                    # noqa: BLE001
+                    print(f'--parent-score unreadable, so no delta is '
+                          f'reported: {_exc}', file=sys.stderr)
+            placement = score_placement(root, args.board, tmp, args.intent,
+                                        _parent)
 
     # Both connectivity components carry their work list, not just their count --
     # see score_connectivity. `unrouted` needs names; `broken` needs names, piece
@@ -1085,6 +1155,10 @@ def main():
              'advisory': {k: v.get('count') for k, v in advisory.items()},
              'ungraded': sorted(k for k, v in parts.items() if v.get('ran') is False),
              'unknown': sorted(unknown), 'quality': quality(args.board),
+             # BESIDE `quality`, never inside `parts` -- see score_placement.
+             # Absent entirely without the flag, so a payload that carries the
+             # key is one that asked for it.
+             **({'placement': placement} if placement is not None else {}),
              'components': {**parts, **advisory},
              'floors': _floors(args.board, sizes),
              'connectivity_nets': conn.get('nets', [])}
@@ -1106,6 +1180,34 @@ def main():
     _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
     if _adv_bits:
         print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
+    # PLACEMENT terms, and the note when they are missing on a board where
+    # nothing else can rank a lap.
+    if placement is not None:
+        _pt = placement.get('terms') or {}
+        _bits = ' '.join(
+            f"{k}={_pt[k]['value']}" for k in (placement.get('term_order') or [])
+            if _pt.get(k, {}).get('value') is not None)
+        _ungraded = [k for k in (placement.get('term_order') or [])
+                     if _pt.get(k, {}).get('ran') is False]
+        print(f"PLACEMENT (report-only, not blocking): {_bits or 'nothing '
+              'measured'}")
+        if _ungraded:
+            print(f"  placement terms UNGRADED (not scored, not passed): "
+                  f"{', '.join(_ungraded)}")
+        _vs = placement.get('vs_parent') or {}
+        if _vs.get('terms'):
+            sys.path.insert(0, os.path.join(root, 'py_placer'))
+            try:
+                import placement_score as _ps
+                print(f"  vs parent: {_vs.get('verdict')} -- "
+                      f"{_ps.format_delta(_vs['terms'])}")
+            except Exception:                                # noqa: BLE001
+                pass
+    elif (score['quality'] or {}).get('segments') == 0:
+        print("DEGENERATE QUALITY KEY: this board carries 0 copper segments, "
+              "so `quality` is (0, 0.0, 0) on EVERY such board and cannot "
+              "rank two placements. Re-score with --placement-terms to get a "
+              "key the placement half can compare.")
     # WHICH LEVER. `unrouted` looks the same whether the router had a path and
     # missed it (parameter-shaped) or the net has fewer than 2 pads ON the
     # board (placement-shaped, and no router setting will ever fix it). The
