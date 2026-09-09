@@ -173,6 +173,20 @@ ROWS = [
                                      for d in (90.0, 180.0, 270.0)]:""",
      (T_ROT,), KILLED),
 
+    # A SECOND seating stage. The first version of this work threaded the
+    # declared ladder through 2 of 13 `_try_place` sites, so `must_lock`,
+    # decap and eviction seats silently used the fallback -- the very failure
+    # #893 removes, reintroduced by its own fix. Found in pre-push review;
+    # verified by reverting this one site, which places U1 at 0 despite a
+    # declared 90.
+    ('rotation-ladder-skipped-by-the-must-lock-stage', 'sd',
+     """        clr = _try_place(state, ref, part.x, part.y, unplaced - {ref},
+                         constraint=rect, tol=tol, info=info,
+                         rotations=_rot_ladder(ref))""",
+     """        clr = _try_place(state, ref, part.x, part.y, unplaced - {ref},
+                         constraint=rect, tol=tol, info=info)""",
+     (T_ROT,), KILLED),
+
     # The candidate ORDER is load-bearing: the search keeps the first that fits.
     ('rotation-candidate-order-sorted-away', 'fp',
      '''            f"{where}: rotation_candidates has repeated angles {out!r}")

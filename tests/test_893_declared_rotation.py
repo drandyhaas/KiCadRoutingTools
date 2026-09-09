@@ -254,6 +254,54 @@ def test_candidates_restrict_the_ladder():
 TESTS.append(test_candidates_restrict_the_ladder)
 
 
+def test_every_seating_stage_honours_the_declaration():
+    """The claim is about the SEEDER, not about one stage of it.
+
+    `seed_from_intent` seats parts from several stages, and `_try_place` is
+    called from 13 sites. The first version of this work threaded the declared
+    ladder through TWO of them, so a part seated by stage 1.5 (`must_lock`),
+    stage 2.5 (the decap seats) or the eviction rung took the FALLBACK ladder
+    and could be turned silently -- the exact failure #893 exists to remove,
+    reintroduced by the fix for it. The tests above did not catch it because
+    their intents declared no locks and no decap rules, so those stages never
+    ran.
+
+    This exercises them together: a `must_lock` part, a decap rule, and a zone,
+    all with one declared angle over every ref. Nothing may be placed at any
+    other angle.
+    """
+    import random
+    from kicad_parser import parse_kicad_pcb
+    from placement import seeder
+
+    path = run_utils.evidence(os.path.join(ROOT, 'kicad_files', BOARD), 'board')
+    pcb = parse_kicad_pcb(path)
+    angle = 90.0
+    intent = _intent(
+        [{'name': 'all', 'refs': ['*'], 'rotation': angle}],
+        must_lock=['U1'],
+        decaps={'max_distance_mm': 3.0},
+    )
+    res = seeder.seed_from_intent(pcb, path, intent, random.Random('893'),
+                                  group_sources=('kicad', 'sheet'),
+                                  decap_owner_chips=True)
+    wrong = {p['reference']: p['new_rotation'] % 360
+             for p in res['placements']
+             if abs((p['new_rotation'] % 360) - angle) > 1e-6}
+    assert not wrong, (
+        'placed at an angle other than the declared %g with must_lock and '
+        'decap stages live: %r -- a seating stage is not honouring the '
+        'declared ladder' % (angle, sorted(wrong.items())[:5]))
+    # And the stages must actually have RUN, or this proves nothing.
+    assert res['placements'] or res['unseated'], (
+        'the seeder neither placed nor refused anything, so no stage ran')
+    print('  %d placed, %d unseated, none turned away from %g deg'
+          % (len(res['placements']), len(res['unseated']), angle))
+
+
+TESTS.append(test_every_seating_stage_honours_the_declaration)
+
+
 def test_no_declaration_leaves_the_seeder_unchanged():
     """`rotations=None` must reproduce the pre-#893 ladder exactly."""
     a, _ = _seed([{'name': 'z', 'refs': ['U1']}])

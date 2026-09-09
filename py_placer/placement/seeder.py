@@ -2085,12 +2085,14 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         tol = intent.zone_tolerance(z) if z is not None else 0.5
         info: Dict = {}
         clr = _try_place(state, ref, part.x, part.y, unplaced - {ref},
-                         constraint=rect, tol=tol, info=info)
+                         constraint=rect, tol=tol, info=info,
+                         rotations=_rot_ladder(ref))
         if clr is None and z is not None:
             zx = (z.rect[0] + z.rect[2]) / 2.0
             zy = (z.rect[1] + z.rect[3]) / 2.0
             clr = _try_place(state, ref, zx, zy, unplaced - {ref},
-                             constraint=rect, tol=tol, info=info)
+                             constraint=rect, tol=tol, info=info,
+                             rotations=_rot_ladder(ref))
         if clr is not None:
             placed.add(ref)
             unplaced.discard(ref)
@@ -2275,9 +2277,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
 
         def _seat(ref, tx, ty, owner, pn, constraint=None, tol=0.5):
             clr = _try_place(state, ref, tx, ty, unplaced - {ref},
-                             constraint=constraint, tol=tol)
+                             constraint=constraint, tol=tol,
+                             rotations=_rot_ladder(ref))
             if clr is None and constraint is not None:
-                clr = _try_place(state, ref, tx, ty, unplaced - {ref})
+                clr = _try_place(state, ref, tx, ty, unplaced - {ref},
+                                 rotations=_rot_ladder(ref))
             if clr is None:
                 return False
             avail.remove(ref)
@@ -2400,7 +2404,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             clr = _try_place(state, ref, round((zx0 + zx1) / 2.0, 3),
                              round((zy0 + zy1) / 2.0, 3), unplaced - {ref},
                              constraint=z.rect,
-                             tol=intent.zone_tolerance(z))
+                             tol=intent.zone_tolerance(z),
+                             rotations=_rot_ladder(ref))
             if clr is None:
                 notes.append(f"{ref}: the pin stage declined it and its zone "
                              f"{z.name!r} has no legal pose either -- falls "
@@ -2756,7 +2761,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                     continue
                 ox, oy = state.parts[ref].x, state.parts[ref].y
                 if _try_place(state, ref, target[0], target[1],
-                              set()) is not None:
+                              set(),
+                              rotations=_rot_ladder(ref)) is not None:
                     if math.hypot(state.parts[ref].x - ox,
                                   state.parts[ref].y - oy) > 1e-6:
                         moved_n += 1
