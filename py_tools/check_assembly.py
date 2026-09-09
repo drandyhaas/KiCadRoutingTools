@@ -538,6 +538,16 @@ def main():
             'waived': g['waived'],
             'pairs': [q._asdict() for q in g['pairs']],
             'contained': g['contained'],
+            # The BLOCKING subset, published beside the total for exactly the
+            # reason `buildable` is published above: it is one of the five
+            # conjuncts of the verdict, and a consumer that wants to say WHICH
+            # conjunct fired otherwise has only `contained` -- which counts the
+            # by-design containments the corpus ships legitimately (orangecrab
+            # FID2/J5 at 100%) and so names a defect where there is none. The
+            # number has existed in the grade dict since the channel was added
+            # and has decided the verdict at :508-510 ever since; it just never
+            # reached a reader (#918).
+            'containment_blocking': g['containment_blocking'],
             'containments': [q._asdict() for q in g['containment_pairs']],
             'fab_unjudged': g['fab_unjudged'],
             'fab_unjudged_refs': g['fab_unjudged_refs'],

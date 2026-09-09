@@ -421,6 +421,30 @@ python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_scor
     --json wk/score_iter3.json
 ```
 
+**On a PLACEMENT lap — a board with no copper — add the placement terms**, or
+the lap cannot be ranked against the one before it:
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py \
+    placed.kicad_pcb --intent floorplan.json \
+    --placement-terms --parent-score wk/score_lap2.json \
+    --json wk/score_lap3.json
+```
+
+`placement` is REPORT-ONLY: it never enters `blocking`, never changes the exit
+code, and every other key of the document is identical with the flag and
+without. What it changes is that `converge verdict` can tell a placement half
+that has stopped moving from one whose laps it could not compare — on a
+copper-free board `quality` is `(0, 0.0, 0)` for every placement, so without
+it seven laps of one board scored the same number and the half read as
+finished while it was still moving. Scored without it, such a board now says
+so (`DEGENERATE QUALITY KEY`).
+
+The terms are compared PARETO, never summed: a lap that trades pair length for
+balance is not an improvement, and `converge status` prints both sides. There
+is deliberately no aggregate — #694 is the run where a collapsed verdict kept
+printing PASS while one of its inputs had reversed sign.
+
 **Every one of those flags is what makes its clause reach `blocking`. A component
 with no flag reports `ungraded`, which is not a pass.** The pattern is identical
 each time, and it is how a HARD clause ships unmeasured:
@@ -430,6 +454,7 @@ each time, and it is how a HARD clause ships unmeasured:
 | `--net-min-widths` | `undersized` sees only BOARD-WIDE floors, so a clause naming ONE net — a 0.8 mm pair, a 0.4 mm rail — is invisible | `net_widths` 5, while `undersized` read 0 |
 | `--impedance-nets` | the component returns *"no --impedance-nets given"* and a plane-continuity clause is never checked at all | `impedance` 10 — 68 reference crossings, 63 segments over void |
 | `--length-groups` | length matching is ungraded | — |
+| `--placement-terms` | a COPPER-FREE lap is unrankable: `quality` is `(0, 0.0, 0)` for every placement of every board, so the plateau test has nothing to compare | seven laps of one board scored one number |
 
 Same board, same copper: **`blocking` 12 without those flags, 27 with them.** A
 run that reports 12 has not found a better board; it has looked at less of it.
@@ -457,7 +482,8 @@ when `blocking` reads 0, and wire it into `place_route_loop --accept-cmd` so the
 inner loop stops accepting rounds that break it.
 
 **Produce:** the command above, every iteration, on the board you just wrote.
-**Read:** `blocking`, `blocking_by`, `ungraded`, `unknown`, `quality`.
+**Read:** `blocking`, `blocking_by`, `ungraded`, `unknown`, `quality` — and
+`placement` on a copper-free lap.
 **Decide:** `blocking == 0` → go to 9.4. Otherwise pick the lever by **9.1a**,
 NOT by the largest `blocking_by` entry.
 
@@ -670,7 +696,10 @@ success message.
 Three rules about that number:
 
 - **`blocking` must reach 0 before a board is deliverable.** It is
-  `unrouted + broken + drc + undersized + floorplan + impedance + length`.
+  `unrouted + broken + drc + undersized + floorplan + assembly + impedance +
+  length + net_widths` -- NINE components, which is what `board_score.py`'s
+  `parts` dict sums (#918: this line said seven for as long as `assembly` and
+  `net_widths` had existed).
   `quality` (vias, copper length) is a **tie-break only**, compared once
   `blocking` is 0 — otherwise a router buys off a disconnected net with a lower
   via count.
@@ -1160,7 +1189,9 @@ What it checks, each with the artifact that decides:
    with no names in the lever text is a FAIL (the whack-a-mole rule above).
 5. **Assembly-clean** (run 6; placement-phase and fix-loop boundaries) —
    the verifier additionally receives the fresh `check_assembly` JSON and
-   the render JSON, and FAILS unless `blocking == 0`, the checklist's
+   the render JSON, and FAILS unless the JSON's `buildable` is `true`
+   (NOT `blocking == 0` -- that is 1 of its 5 not_buildable conjuncts,
+   #918), the checklist's
    `b_body_overlap_pairs` is empty, and every NEW-vs-baseline advisory
    pair is either fixed or dispositioned in the entry. A claim of
    "placement done" with no attached `check_assembly` JSON is itself a

@@ -96,10 +96,13 @@ ROWS = [
      (T902,), KILLED),
     # `body_local` is COURTYARD-first, and #896 says a courtyard is not a
     # body. Reading it under-states every gap by the assembly margin.
+    # Re-anchored for #894: the ladder moved out of `_Ctx.body_rect` into the
+    # module-level `drawn_body_rect`, so a caller that is not grading an
+    # intent can share it. Same mutation, same target, one indent level out.
     ('body-reads-the-courtyard', 'fp',
-     "        rect_local = None if geom is None else (geom.drawn_local\n"
-     "                                                or geom.body_local)",
-     "        rect_local = None if geom is None else geom.body_local",
+     "    rect_local = None if geom is None else (geom.drawn_local\n"
+     "                                            or geom.body_local)",
+     "    rect_local = None if geom is None else geom.body_local",
      (T902,), KILLED),
     # A missing ref must be a FINDING, not silence: a typo would grade clean,
     # which is `block_unresolved`'s failure one level over.

@@ -417,8 +417,14 @@ DESIGN, so the absolute count fires on healthy and human-placed boards alike.
 The delta cancels the design term because both boards carry it.
 
 What each one refuses to let pass:
-  check_assembly     a blocking pair (two parts on the same copper -- not
-                     buildable whatever the nets), or copper on a LOCKED part
+  check_assembly     `buildable: false` -- ANY of its five not_buildable
+                     conjuncts: a blocking pad pair (two parts on the same
+                     copper), copper on a LOCKED part, a coincident-origin
+                     stack, a containment, or a moved-vs-baseline courtyard
+                     gate. Read the VERDICT, NOT `blocking == 0`: that scalar
+                     is one of the five, so a board unbuildable through a
+                     stack or a containment reads 0 and is not buildable
+                     (#918)
   check_channels     a face that now carries demand and has LOST its escape
                      relative to the baseline -- all of it, or a large share
                      of it (--min-supply-drop, default 0.20). #847: the

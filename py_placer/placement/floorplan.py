@@ -1530,6 +1530,18 @@ class _Ctx:
         #: an edge, declared or not. A number nobody has to opt into is the
         #: half of this feature that can catch a defect nobody suspected.
         self.edge_seating: List[Dict[str, object]] = []
+        #: #894. Every gap `rule_proximity` MEASURES, whether it passed or
+        #: violated -- the same "a measurement, never a verdict" channel as
+        #: `edge_seating` above, and for a sharper reason: `rule_proximity` is
+        #: SILENT on a passing clause, because a rule yields violations. So
+        #: the number behind a clause that holds -- exactly what a score wants
+        #: to report and to compare against the previous lap -- was computed
+        #: and thrown away, and any consumer wanting it had to re-derive the
+        #: pad-resolution ladder (declared pads vs part adjacency, the net
+        #: narrowing, the body basis). That second copy is the drift this
+        #: repo has a dedicated test class against, so the rule RECORDS what
+        #: it measures and the consumer reads it.
+        self.proximity_measured: List[Dict[str, object]] = []
         self._decap_pops: Dict[float, tuple] = {}
         self._supply_pins = None
         self._assembly_census = None
@@ -1590,19 +1602,8 @@ class _Ctx:
                 # footprint that is fine.
                 self._bodies = {}
                 self._bodies_error = f"{type(exc).__name__}: {exc}"
-        geom = self._bodies.get(ref)
-        fp_obj = self.pcb.footprints.get(ref)
-        rect_local = None if geom is None else (geom.drawn_local
-                                                or geom.body_local)
-        source = 'none' if geom is None else (geom.drawn_source
-                                              if geom.drawn_local is not None
-                                              else geom.source)
-        if rect_local is None or fp_obj is None:
-            return None, source
-        x0, y0, x1, y1 = legality.rotate_local_bounds(
-            *rect_local, fp_obj.rotation or 0.0)
-        return ((fp_obj.x + x0, fp_obj.y + y0, fp_obj.x + x1, fp_obj.y + y1),
-                source)
+        return drawn_body_rect(self._bodies.get(ref),
+                               self.pcb.footprints.get(ref))
 
     def sev(self, rule: str) -> str:
         return self.intent.severity_of(rule)
@@ -2907,6 +2908,37 @@ def _pin_gap(pin_pad, cap_fp, net_id: int) -> Optional[float]:
     return best
 
 
+def drawn_body_rect(geom, fp_obj):
+    """`(rect_in_board_coords, source)` for one part's DRAWN body.
+
+    Lifted out of `_Ctx.body_rect` (#894) so a caller that is not grading an
+    intent can have the same rect without building a `_Ctx`. `geom` is a
+    `placement.body.BodyGeometry` (or None); `fp_obj` a parsed footprint.
+
+    THE DRAWN body, `drawn_local`, and not `body_local`. #896 stores two
+    ladders on purpose and says why: a courtyard "is not a body -- it is a
+    body plus an assembly margin plus any shell overhang", and `body_local` is
+    courtyard-FIRST, so reading it would under-state every gap by the assembly
+    margin. `occupancy_local` is deliberately never used either: it is the
+    body unioned with the pads, which answers "may something be seated here".
+
+    The fall-back when the library drew NEITHER fab nor silk is the pad bbox,
+    reported as source `pad_bbox`, so a reader always knows the number rests
+    on copper rather than on a drawn outline.
+    """
+    rect_local = None if geom is None else (geom.drawn_local
+                                            or geom.body_local)
+    source = 'none' if geom is None else (geom.drawn_source
+                                          if geom.drawn_local is not None
+                                          else geom.source)
+    if rect_local is None or fp_obj is None:
+        return None, source
+    x0, y0, x1, y1 = legality.rotate_local_bounds(
+        *rect_local, fp_obj.rotation or 0.0)
+    return ((fp_obj.x + x0, fp_obj.y + y0, fp_obj.x + x1, fp_obj.y + y1),
+            source)
+
+
 def _pads_named(fp_obj, names) -> List:
     """Every pad carrying one of `names`. A pad NUMBER is not unique.
 
@@ -3306,6 +3338,14 @@ def rule_proximity(ctx) -> Iterator[Violation]:
                 ctx.abstain(f"{akey}.basis", why)
                 continue
             gap = legality.rect_gap(a_rect, b_rect)
+            # Recorded before the branch, as in the pad_edge arity below (#894).
+            ctx.proximity_measured.append({
+                'claim': akey, 'index': i, 'ref': ref, 'near': near,
+                'gap_mm': round(gap, 4), 'limit_mm': limit,
+                'passes': gap <= limit + legality.EPS,
+                'pad': None, 'near_pad': None, 'net': None, 'paired_by': None,
+                'pads_basis': 'body', 'basis': 'body',
+                'basis_source': a_src, 'near_basis_source': b_src})
             if gap <= limit + legality.EPS:
                 continue
             yield Violation(
@@ -3398,9 +3438,22 @@ def rule_proximity(ctx) -> Iterator[Violation]:
         if not declared:
             reaches = [min(reaches, key=lambda t: t[0])]
         for gap, pad, partner, how in reaches:
+            net = pad.net_name or ''
+            # RECORDED BEFORE the pass/fail branch, so a clause that HOLDS
+            # publishes its number too (#894). The `continue` below is what
+            # makes this rule silent on a pass; without this line the gap a
+            # score wants to compare lap-to-lap is computed and discarded.
+            ctx.proximity_measured.append({
+                'claim': akey, 'index': i, 'ref': ref, 'near': near,
+                'gap_mm': round(gap, 4), 'limit_mm': limit,
+                'passes': gap <= limit + legality.EPS,
+                'pad': pad.pad_number, 'near_pad': partner.pad_number,
+                'net': net or None, 'paired_by': how,
+                'pads_basis': 'declared' if declared else 'part',
+                'basis': 'pad_edge',
+                'subject_pads': len(subject), 'near_pads': len(partners)})
             if gap <= limit + legality.EPS:
                 continue
-            net = pad.net_name or ''
             yield Violation(
                 rule='proximity', severity=ctx.sev('proximity'),
                 ref=ref, block=ctx.owner.get(ref),
@@ -3648,6 +3701,14 @@ class GradeResult:
     #: whether or not anyone declared a claim about it. Advisory, like the
     #: `health` block -- a measurement, never a verdict.
     edge_seating: List[Dict[str, object]] = field(default_factory=list)
+    #: #894: every gap `rule_proximity` measured, PASSING CLAUSES INCLUDED.
+    #: A rule yields violations, so a clause that holds is silent and its
+    #: number -- the one a placement score wants to report and compare against
+    #: the previous lap -- was discarded. Same channel and same standing as
+    #: `edge_seating`: a measurement, never a verdict. Empty when the intent
+    #: declares no proximity claim, which is DIFFERENT from every claim
+    #: passing, and the consumer must not confuse the two.
+    proximity_measured: List[Dict[str, object]] = field(default_factory=list)
     #: #705: HOW the pin rule reached its answer, whether or not it found
     #: anything. Without it a board graded entirely on channel-3 inference
     #: and a board graded on declared pintype print the same clean pass --
@@ -3879,6 +3940,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
         rules_run=tuple(ran), rules_skipped=skipped,
         budget_abstained=abstained,
         edge_seating=list(ctx.edge_seating),
+        proximity_measured=list(ctx.proximity_measured),
         decap_pin_evidence=pin_evidence,
         n_footprints=len(pcb_data.footprints))
 

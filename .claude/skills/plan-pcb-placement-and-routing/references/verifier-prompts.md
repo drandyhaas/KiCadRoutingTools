@@ -281,7 +281,9 @@ Rules of engagement, mirrored from 9.4b:
 
 At any placement-phase or fix-loop boundary the verifier's input set grows
 by the fresh `check_assembly --json` output (and the render JSON's
-`checklist.b_body_overlap_pairs`). FAIL unless: `blocking == 0`;
+`checklist.b_body_overlap_pairs`). FAIL unless: `buildable` is `true`
+(NOT `blocking == 0` -- that scalar is 1 of check_assembly's 5
+`not_buildable` conjuncts, #918);
 `b_body_overlap_pairs` is `[]`; every `new_advisory_pairs` entry (the
 --baseline delta -- the loop currency) is fixed or dispositioned in the
 ledger entry. An operator claim of "placement done" with no check_assembly
