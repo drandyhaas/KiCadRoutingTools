@@ -181,9 +181,18 @@ class HandbackContractTest(unittest.TestCase):
         self.assertIn(w + '/freeze_refs.json', out,
                       'the freeze list is DECLARED by the placement half, not '
                       'inferred from a pose diff')
-        for want in (w + '/frozen.kicad_pcb --kind placement',):
+        for want in (w + '/frozen.kicad_pcb --kind systemic',):
             self.assertIn(want, out,
-                          'the freeze is a lap and must be recorded: ' + want)
+                          'the freeze must be recorded, and recorded as a '
+                          'lever rather than a lap: ' + want)
+        self.assertNotIn(w + '/frozen.kicad_pcb --kind placement', out,
+                         '--kind systemic, NOT placement (ae84327a): a freeze '
+                         'turns no lap. Recorded as a placement row it entered '
+                         "the placement half's plateau window carrying no "
+                         'score -- so the half read as UNANSWERABLE -- and '
+                         'RETRACTED the `--exhausted placement` declaration '
+                         'before it, because any later row of a half reads as '
+                         'that half going back to work')
 
     def test_l2_states_who_owns_each_classification(self):
         _placed, out = self._l2_prompt()
@@ -194,12 +203,23 @@ class HandbackContractTest(unittest.TestCase):
                       'a placement/floorplan verdict must stop the teammate, '
                       'not become a router retry')
 
-    def test_l2_asks_for_the_lens_verdicts_the_ledger_refuses_without(self):
+    def test_l2_asks_where_the_lens_verdicts_ARE_not_for_their_text(self):
         _placed, out = self._l2_prompt()
-        self.assertIn('VERDICT=', out)
-        self.assertIn('connectivity', out)
-        self.assertIn('drc', out)
-        self.assertIn('spec', out)
+        # ae84327a rewrote item 2 of the L2 return contract: the teammate names
+        # the ARTIFACTS it wrote instead of retyping the three VERDICT= lines.
+        # A verdict retyped into a hand-back is a claim; a path plus the sha it
+        # graded is checkable, and it is the sha that makes it checkable at all
+        # -- the --final row is recorded against the board the OUTER loop
+        # ships, so a verdict taken on an earlier board is history.
+        self.assertIn('PATH of every lens verdict', out,
+                      'the return must name where each lens verdict IS')
+        self.assertIn('board sha', out,
+                      'a verdict without the sha it graded cannot be bound to '
+                      'the board this run ships, which is what the --final '
+                      'row is recorded against')
+        self.assertIn('do not retype the numbers', out,
+                      'retyped numbers are the failure mode the artifact '
+                      'paths replace')
 
     # ------------------------------------------------------------------
     # the fence, on both prompts

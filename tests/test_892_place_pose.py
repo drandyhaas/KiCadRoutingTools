@@ -792,7 +792,6 @@ with tempfile.TemporaryDirectory() as d:
 # ---------------------------------------------------------------------------
 print("a failed promote leaves the PREVIOUS output untouched")
 with tempfile.TemporaryDirectory() as d:
-    import stat
     src = os.path.join(d, 'in.kicad_pcb')
     shutil.copyfile(BOARD, src)
     shutil.copyfile(PRO, os.path.join(d, 'in.kicad_pro'))
@@ -802,38 +801,63 @@ with tempfile.TemporaryDirectory() as d:
     pro = os.path.join(d, 'out.kicad_pro')
     with open(pro, 'w', encoding='utf-8') as f:
         f.write('OLD-PRO\n')
-    # The DESTINATION DIRECTORY is what gets write-protected, and the atomic
-    # promote is the reason: `_promote` copies each file to `<dst>.krt-tmp`
-    # and `os.replace`s it into place, and BOTH of those need write permission
-    # on the DIRECTORY. This case used to protect the destination `.kicad_pro`
-    # instead, which stopped the pre-atomic implementation -- a `copyfile`
-    # straight onto a mode-0444 file -- and stops nothing now, because
-    # `rename(2)` overwrites a read-only destination. So from the commit that
-    # made the promote all-or-nothing until this one, three checks here were
-    # asserting a refusal that no longer happens, and `tests/mutate_892.py`
-    # refused to run at all (its baseline guard: a red target test scores
-    # every row KILLED for the wrong reason). Both halves are measured now --
-    # the read-only SIBLING is the block below, where the write proceeds.
-    os.chmod(d, stat.S_IRUSR | stat.S_IXUSR)
-    try:
-        r = run([POSE, src, out, 'rotate', 'R1', '90'])
-        wrote = open(out, encoding='utf-8').read()
-        check("the run refuses rather than half-writing", r.returncode == 2,
-              "rc=%s" % r.returncode)
-        check("the OLD board is still there, byte for byte",
-              wrote == 'OLD-OUTPUT\n', wrote[:40])
-        check("and the summary says nothing was written",
-              summary(r)['output'] is None
-              and 'Nothing was written' in (summary(r).get('refused') or ''),
-              str(summary(r).get('refused'))[:120])
-        check("no .krt-tmp file is left behind",
-              not [f for f in os.listdir(d) if f.endswith('.krt-tmp')],
-              str(os.listdir(d)))
-    finally:
-        os.chmod(d, stat.S_IRWXU)
+    # THE STAGING NAME IS WHAT GETS BLOCKED, with a directory standing on it.
+    # `_promote` copies each file to `<dst>.krt-tmp` before it `os.replace`s
+    # anything, so a directory at that name fails the very first copy --
+    # IsADirectoryError on POSIX, PermissionError on Windows, both OSError,
+    # both at the staging step, before a single destination is touched. That
+    # is the point: the mechanism is the SAME on both platforms.
+    #
+    # It used to write-protect the destination DIRECTORY (`chmod 0500`), which
+    # is a POSIX statement: on Windows `os.chmod` can only toggle a file's
+    # read-only attribute and is a NO-OP on directories, so the promote
+    # succeeded there and the three refusal checks below asserted the inverse
+    # of what happened -- 3 of the 6 rows of #928, on a suite with no platform
+    # gate. Before that it protected the destination `.kicad_pro`, which
+    # stopped the pre-atomic implementation (a `copyfile` straight onto a
+    # mode-0444 file) and stops nothing now, because `rename(2)` overwrites a
+    # read-only destination. The read-only SIBLING is the block below, which
+    # measures the other half -- what happens when a REPLACE, not a copy, is
+    # the step that cannot proceed.
+    blocker = out + '.krt-tmp'
+    os.mkdir(blocker)
+    r = run([POSE, src, out, 'rotate', 'R1', '90'])
+    wrote = open(out, encoding='utf-8').read()
+    check("the run refuses rather than half-writing", r.returncode == 2,
+          "rc=%s" % r.returncode)
+    check("the OLD board is still there, byte for byte",
+          wrote == 'OLD-OUTPUT\n', wrote[:40])
+    check("and the summary says nothing was written",
+          summary(r)['output'] is None
+          and 'Nothing was written' in (summary(r).get('refused') or ''),
+          str(summary(r).get('refused'))[:120])
+    # `isfile`, because the blocker this case planted is itself named
+    # `.krt-tmp` and is ours, not debris the promote left.
+    check("no .krt-tmp file is left behind",
+          not [f for f in os.listdir(d)
+               if f.endswith('.krt-tmp') and os.path.isfile(os.path.join(d, f))],
+          str(os.listdir(d)))
 
 # ---------------------------------------------------------------------------
-print("a write-protected SIBLING is replaced, not refused")
+# WHAT A READ-ONLY SIBLING MEANS IS PLATFORM LAW, AND THE TWO PLATFORMS
+# DISAGREE -- so this case asserts each one's own answer, and asserts the
+# all-or-nothing property, which is the part that is NOT platform law, on
+# both. `os.replace` needs write permission on the DIRECTORY and not on the
+# file it replaces -- on POSIX. Windows honours the read-only attribute on the
+# destination and raises PermissionError [WinError 5], so the promote refuses
+# there. Asserting the POSIX answer unconditionally was the other 3 rows of
+# #928; skipping the case on Windows would have dropped the one platform where
+# a REPLACE can fail, and with it the only coverage of a promote that dies
+# after staging succeeded.
+#
+# The invariant that holds either way is the one worth pinning: `_promote`
+# replaces in REVERSED order -- siblings first, board LAST -- so the sibling
+# that cannot be replaced stops the run before the board is touched. The old
+# board survives byte for byte, which is exactly the #441 pairing hazard the
+# atomic promote exists to prevent (measured, pre-atomic: an 11-byte output
+# came back at 831914 bytes while the summary reported `output: null`).
+_WINDOWS = os.name == 'nt'
+print("a write-protected SIBLING is replaced (POSIX), or refuses cleanly (Windows)")
 with tempfile.TemporaryDirectory() as d:
     import stat
     src = os.path.join(d, 'in.kicad_pcb')
@@ -846,19 +870,27 @@ with tempfile.TemporaryDirectory() as d:
             f.write(_text)
     os.chmod(pro, stat.S_IRUSR)
     try:
-        # Recorded rather than left as folklore, because it is a CHANGE: the
-        # pre-atomic promote copied onto the destination and a read-only
-        # `.kicad_pro` refused the whole run. `os.replace` needs write
-        # permission on the directory, not on the file it replaces, so the
-        # #441 pairing wins over the file mode -- board and project travel
-        # together, and a caller who means to protect an output protects the
-        # directory it lives in (the block above).
         r = run([POSE, src, out, 'rotate', 'R1', '90'])
-        check("the run writes", r.returncode == 0, "rc=%s" % r.returncode)
-        check("the board is a real board, not the old placeholder",
-              open(out, encoding='utf-8').read().startswith('(kicad_pcb'))
-        check("and the write-protected sibling was replaced with it",
-              open(pro, encoding='utf-8').read() != 'OLD-PRO\n')
+        board_text = open(out, encoding='utf-8').read()
+        if _WINDOWS:
+            check("the run refuses: Windows honours the read-only destination",
+                  r.returncode == 2, "rc=%s" % r.returncode)
+            # The kill that matters, and the reason this arm is not a skip: a
+            # promote that copied straight onto the destinations would have
+            # replaced the board BEFORE hitting the unwritable sibling, and
+            # would refuse with exactly the same rc.
+            check("the OLD board is still there, byte for byte",
+                  board_text == 'OLD-OUTPUT\n', board_text[:40])
+            check("and the summary says nothing was written",
+                  summary(r)['output'] is None
+                  and 'Nothing was written' in (summary(r).get('refused') or ''),
+                  str(summary(r).get('refused'))[:120])
+        else:
+            check("the run writes", r.returncode == 0, "rc=%s" % r.returncode)
+            check("the board is a real board, not the old placeholder",
+                  board_text.startswith('(kicad_pcb'))
+            check("and the write-protected sibling was replaced with it",
+                  open(pro, encoding='utf-8').read() != 'OLD-PRO\n')
         check("no .krt-tmp file is left behind",
               not [f for f in os.listdir(d) if f.endswith('.krt-tmp')],
               str(os.listdir(d)))
