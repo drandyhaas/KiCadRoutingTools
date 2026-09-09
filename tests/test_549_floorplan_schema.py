@@ -130,7 +130,9 @@ KEY_SETS = {
     '_ENVELOPE_KEYS': {'rect', 'tolerance_mm'},
     '_DEFAULTS_KEYS': {'zone_tolerance_mm'},
     '_BLOCK_KEYS': {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
-                    'tolerance_mm', 'note', 'context'},
+                    'tolerance_mm', 'note', 'context',
+                    # #893: a DECISION and a SET, never both on one block.
+                    'rotation', 'rotation_candidates'},
     '_KEEPOUT_KEYS': {'name', 'rect', 'circle', 'sides', 'allow', 'note',
                       'context'},
     '_EDGE_CONNECTOR_KEYS': {
@@ -241,9 +243,16 @@ def test_an_intent_using_every_known_key_loads():
         'board': 'b.kicad_pcb', 'min_reader': READER_VERSION,
         'envelope': {'rect': [0, 0, 100, 80], 'tolerance_mm': 0.4},
         'defaults': {'zone_tolerance_mm': 0.6},
+        # TWO blocks, for the same reason `edge_connectors` below carries two:
+        # #893's `rotation` (a decision) and `rotation_candidates` (a set the
+        # search may choose from) are mutually exclusive and are REFUSED on one
+        # block, so the vocabulary cannot be covered by a single entry.
         'blocks': [{'name': 'power', 'group': 'sheet:1', 'refs': ['U3'],
                     'zone': [2, 2, 40, 30], 'side': 'F', 'exclusive': True,
-                    'tolerance_mm': 0.7, 'note': 'n', 'context': {'why': 'w'}}],
+                    'tolerance_mm': 0.7, 'rotation': 90,
+                    'note': 'n', 'context': {'why': 'w'}},
+                   {'name': 'mcu', 'refs': ['U1'],
+                    'rotation_candidates': [0, 90, 180, 270]}],
         'keepouts': [{'name': 'k', 'rect': [0, 0, 6, 6], 'sides': ['F'],
                       'allow': ['MH1'], 'note': 'n', 'context': {'why': 'w'}},
                      {'name': 'k2', 'circle': [50, 5, 8], 'sides': ['F', 'B'],
@@ -290,7 +299,11 @@ def test_an_intent_using_every_known_key_loads():
     # Every key of every set must appear above, or this proves less than it
     # claims -- the point is coverage of the vocabulary, not of a sample.
     seen = set(raw) | set(raw['envelope']) | set(raw['defaults'])
-    seen |= set(raw['blocks'][0]) | set(raw['decaps']) | set(raw['health'])
+    # UNION over every block, not block [0] -- see the two-block comment in the
+    # fixture above; reading only the first would under-report the vocabulary.
+    for _b in raw['blocks']:
+        seen |= set(_b)
+    seen |= set(raw['decaps']) | set(raw['health'])
     seen |= set(raw['legality_budget'])
     # UNION over every entry, not entry [0]: the two #712 fields cannot share
     # one entry, so reading only the first would under-report the vocabulary.

@@ -23,13 +23,23 @@ What each intent construct becomes, in placement order:
                            drag everything to the board middle) -- which is
                            also what lands a decap next to its IC.
 
-Rotations: the input rotation is tried IN FULL first and kept when it fits;
-a part with no contained legal pose at it falls back to its 90-degree
-lattice, and the note names the change. The intent schema cannot express a
-rotation, so a part whose rotation is a DECISION (pin order, the U3 rot-180
-case) must be locked -- an unlocked load-bearing rotation was never
-protected from the quench either. Explore rotations deliberately with
-place_portfolio's `poses` strategy.
+Rotations: UNDECLARED, the input rotation is tried IN FULL first and kept
+when it fits; a part with no contained legal pose at it falls back to its
+90-degree lattice, and the note names the change.
+
+Since #893 the intent CAN express a rotation, which is what a part whose
+rotation is a DECISION (pin order, the U3 rot-180 case) should use.
+`blocks[].rotation` is honoured exactly -- a part that does not fit at it is
+reported UNSEATED in `rotation_unseated`, never quietly turned -- and
+`blocks[].rotation_candidates` narrows the ladder to the author's set, in the
+author's order, because this search keeps the FIRST pose that fits.
+
+Note what a declared rotation deliberately does NOT do: it does not lock the
+part. The advice this paragraph used to give -- lock it -- costs the part its
+POSITION too, because `_Part.locked` is one boolean covering both, and
+`place_seed` stamps it into the board. The angle is held by handing
+`_try_place` a one-element ladder instead. `place_portfolio`'s `poses`
+strategy is still how you EXPLORE rotations; this is how you FIX one.
 
 Determinism: the only randomness is ``random.Random(f"{seed}")`` -- it breaks
 ties in the packing order and jitters non-spec targets, so different seeds
@@ -1002,7 +1012,8 @@ def _evict_trade(state, ref: str, blockers: Sequence[str],
 def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                constraint=None, tol: float = 0.5,
                max_disp: Optional[float] = None,
-               info: Optional[Dict] = None) -> Optional[float]:
+               info: Optional[Dict] = None,
+               rotations: Optional[Sequence[float]] = None) -> Optional[float]:
     """Nearest FULLY-CONTAINED legal pose to (tx, ty); applies the move and
     returns True.
 
@@ -1053,8 +1064,15 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
             # cache is keyed on it implicitly, so clear it on every change.
             state.clearance = clr
             state._inc_violation.clear()
-            for rot in [part.rot] + [(part.rot + d) % 360
-                                     for d in (90.0, 180.0, 270.0)]:
+            # #893. `rotations` is the DECLARED ladder when an intent gave
+            # this ref one -- a single angle for `blocks[].rotation`, the
+            # author's set for `rotation_candidates` -- in the author's order,
+            # because this search keeps the FIRST pose that fits and a
+            # reordered ladder changes which angle wins. None keeps the
+            # fallback ladder every caller had before #893, byte for byte.
+            for rot in (list(rotations) if rotations is not None
+                        else [part.rot] + [(part.rot + d) % 360
+                                           for d in (90.0, 180.0, 270.0)]):
                 xfine = max(0.05, getattr(state, 'grid_step', 0.1) or 0.1)
                 for radius, step in ((SEARCH_RADIUS_MM, SEARCH_STEP_MM),
                                      (SEARCH_FINE_RADIUS_MM,
@@ -1815,6 +1833,23 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
 
     lock_refs: List[str] = sorted({
         r for pat in intent.must_lock for r in fnmatch.filter(refs_all, pat)})
+    # #893. {ref: (declared rotation, declared candidates)}. NOTE these refs
+    # are deliberately NOT added to `lock_refs`: that flag becomes
+    # `_Part.locked`, one boolean covering position AND rotation, and
+    # `place_seed` stamps it into the board -- so locking a part to hold its
+    # angle would also freeze wherever the seeder first dropped it, which is
+    # the very trade `_try_place`'s docstring told authors to accept for want
+    # of anything better. The angle is held by handing `_try_place` a
+    # one-element ladder instead.
+    declared_rot = floorplan.rotations_for_ref(intent, blocks) if intent else {}
+
+    def _rot_ladder(ref):
+        """The declared ladder for `ref`, or None for the fallback one."""
+        claim = declared_rot.get(ref)
+        if claim is None:
+            return None
+        rot, cands = claim
+        return [rot] if rot is not None else list(cands)
 
     placed: Set[str] = set()
     unplaced: Set[str] = {r for r, p in state.parts.items()}
@@ -2147,6 +2182,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             rot_before = state.parts[ref].rot
             zinfo: Dict = {}
             clr = _try_place(state, ref, cx + jx, cy + jy, unplaced - {ref},
+                             rotations=_rot_ladder(ref),
                              constraint=z.rect, tol=tol, info=zinfo)
             if clr is not None:
                 placed.add(ref)
@@ -2404,7 +2440,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         jx, jy = _jitter()
         rot_before = state.parts[ref].rot
         clr = _try_place(state, ref, target[0] + jx, target[1] + jy,
-                         unplaced - {ref})
+                         unplaced - {ref},
+                         rotations=_rot_ladder(ref))
         if clr is not None:
             placed.add(ref)
             unplaced.discard(ref)
@@ -2762,6 +2799,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # reached them by -- including the neighbours and pairs it did
             # NOT census, so a cap can never read as a complete sweep.
             'no_pose_verdict': no_pose_verdict,
+            # #893. Declared rotations that could NOT be seated, by ref and
+            # angle. The refusal is structural rather than a check: a declared
+            # ladder has only the declared angle in it, so a part that does not
+            # fit at it reaches `unseated` instead of being quietly turned --
+            # which is what happened before, with a note nobody gated on. This
+            # key exists so a caller can say WHICH claim it could not meet
+            # rather than reporting a bare unseated ref.
+            'rotation_unseated': {
+                r: (declared_rot[r][0] if declared_rot[r][0] is not None
+                    else list(declared_rot[r][1]))
+                for r in unseated if r in declared_rot},
             'no_pose_census': no_pose_census}
 
 

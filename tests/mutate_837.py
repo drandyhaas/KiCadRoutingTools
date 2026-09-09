@@ -229,13 +229,13 @@ ROWS = [
      "'both',\n",
      (CEN,), 'KILLED'),
 
-    # RE-ANCHORED for #902, which took READER_VERSION 3 -> 4. The MUTATION is
+    # RE-ANCHORED for #902 (3 -> 4) and again for #893 (4 -> 5). The MUTATION is
     # unchanged in kind -- fail to move the reader when a declarable field
     # arrives -- so it reverts 4 to the version before this key, exactly as it
     # used to revert 3 to the version before `assembly.sides`.
     ('the-reader-version-does-not-move', 'fp',
+     "READER_VERSION = 5\n",
      "READER_VERSION = 4\n",
-     "READER_VERSION = 3\n",
      (CEN,), 'KILLED'),
 
     # ------------------------------------------------------- the arithmetic

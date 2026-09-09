@@ -100,11 +100,12 @@ ROWS = [
      (TSCH, T712, T711), KILLED),
     # RE-ANCHORED for #837 (2 -> 3) and again for #902 (3 -> 4). The mutation
     # is restated rather than transliterated each time: it must move the
-    # version BELOW the one #712's fields need, so `4 -> 3` would be a bump
+    # version BELOW the one #712's fields need, so `5 -> 4` would be a bump
     # merely smaller rather than absent -- a row that could survive for the
-    # wrong reason. `4 -> 1` is the same claim the row has always made.
+    # wrong reason. `5 -> 1` is the same claim the row has always made.
+    # RE-ANCHORED for #893, which took READER_VERSION 4 -> 5.
     ('reader-version-not-bumped', 'fp',
-     "READER_VERSION = 4",
+     "READER_VERSION = 5",
      "READER_VERSION = 1",
      (TSCH, T712), KILLED),
 

@@ -120,7 +120,20 @@ EDGE_BAND_SANITY_MM = 5.0
 #: SAFETY. It is because `READER_VERSION` is the number `compile_brief` copies
 #: into `min_reader`, and at 3 a brief-compiled intent would claim a reader-3
 #: build acts on a claim it has never heard of.
-READER_VERSION = 4
+#: 5 (#893): `blocks[].rotation` and `blocks[].rotation_candidates` -- the
+#: ANGLE a part is to be placed at, and the set a search may choose from. The
+#: one placement decision the board file cannot hold as a decision: a
+#: footprint's `(at x y rot)` records the angle it HAS, and nothing
+#: distinguishes an angle somebody chose from a generator default, so
+#: `seeder._try_place` has always been free to turn a part whose rotation was
+#: load-bearing. Its docstring said so and told the author to lock the part
+#: instead, which freezes its POSITION too. Declarable, and it changes a
+#: verdict twice over -- the seeder honours it and REFUSES rather than falling
+#: back to the 90-degree lattice, and `rule_rotation` grades it -- so the rule
+#: above mandates the bump. Contrast `blocks[].side`, which is declarable and
+#: whose rule docs/floorplan-intent.md calls "vacuous, not conservative"
+#: because no search move carries a side: rotation is carried by every nudge.
+READER_VERSION = 5
 
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
@@ -129,7 +142,12 @@ _TOP_LEVEL_KEYS = {
     'assembly', 'proximity',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
-               'tolerance_mm', 'note', 'context'}
+               'tolerance_mm', 'note', 'context',
+               # #893. `rotation` is a DECISION (honoured exactly, and the
+               # seeder refuses rather than silently turning the part);
+               # `rotation_candidates` is a SET a search may choose from.
+               # Declaring both on one block is refused -- see `_rotation`.
+               'rotation', 'rotation_candidates'}
 #: #837. The board-level assembly policy: which faces the fab will populate.
 #: `blocks[].side` is a claim about ONE subsystem; this is a claim about the
 #: whole board, and it is the thing `options.grow_board` needed and could not
@@ -285,6 +303,10 @@ class Zone:
     refs: Tuple[str, ...] = ()
     exclusive: bool = False
     tolerance_mm: Optional[float] = None
+    #: #893. The angle this block's members are to be placed at (a DECISION,
+    #: honoured exactly), and the set a search may choose from. Never both.
+    rotation: Optional[float] = None
+    rotation_candidates: Optional[Tuple[float, ...]] = None
     note: str = ''
     #: Free-form provenance, read by nothing (see `_BLOCK_KEYS`). Carried on
     #: the Zone rather than dropped: `keepouts`/`edge_connectors`/
@@ -418,6 +440,52 @@ def _rect(value, where: str) -> Tuple[float, float, float, float]:
                           f"numbers, got {value!r}")
     x0, y0, x1, y1 = (float(v) for v in value)
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+
+def _rotation(raw, where: str) -> Optional[float]:
+    """One declared angle, normalised to [0, 360). Refuses anything else.
+
+    Normalised because KiCad writes -90 where this tool writes 270, and an
+    author copying an angle out of a board file must not get a claim that can
+    never be met. `bool` is refused explicitly: it is an int subclass, so
+    `rotation: true` would otherwise load as 1.0 degrees.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise IntentError(
+            f"{where}: rotation {raw!r}, expected a number of degrees")
+    return float(raw) % 360.0
+
+
+def _rotation_candidates(raw, where: str) -> Tuple[float, ...]:
+    """The declared candidate set, order PRESERVED.
+
+    Order is load-bearing, not cosmetic: the seeder keeps the FIRST pose that
+    fits, so a reordered list changes which rotation wins a tie. That is why
+    this returns a tuple in the author's order and never a set -- the same
+    warning `quench._candidate_rotations`' docstring carries.
+
+    An EMPTY list is refused rather than treated as "no constraint": an author
+    who writes `[]` has said something, and the something they said admits no
+    pose at all.
+    """
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
+        raise IntentError(
+            f"{where}: rotation_candidates {raw!r}, expected a list of "
+            f"degrees")
+    if not raw:
+        raise IntentError(
+            f"{where}: rotation_candidates is empty. An empty candidate set "
+            f"admits no pose at all; omit the key to leave the rotation free")
+    out = []
+    for i, v in enumerate(raw):
+        out.append(_rotation(v, f"{where}[{i}]"))
+    # Duplicates are refused rather than de-duplicated, for the same reason the
+    # empty list is: it is almost always a typo, and silently collapsing it
+    # would make the declared set differ from the graded one.
+    if len(set(out)) != len(out):
+        raise IntentError(
+            f"{where}: rotation_candidates has repeated angles {out!r}")
+    return tuple(out)
 
 
 def _reject_unknown(obj, allowed, where: str) -> None:
@@ -729,6 +797,21 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
         if side is not None and side not in ('F', 'B'):
             raise IntentError(
                 f"blocks[{i}] ({name}): side {side!r}, expected 'F' or 'B'")
+        # #893. A decision and a search set are contradictory: one says
+        # "this angle", the other "any of these". Refused rather than given a
+        # precedence rule nobody would remember.
+        if b.get('rotation') is not None and b.get('rotation_candidates') is not None:
+            raise IntentError(
+                f"blocks[{i}] ({name}): declares BOTH rotation and "
+                f"rotation_candidates. `rotation` is a decision the seeder "
+                f"honours exactly; `rotation_candidates` is a set it may "
+                f"choose from. Declare one")
+        rot = (None if b.get('rotation') is None
+               else _rotation(b['rotation'], f"blocks[{i}].rotation"))
+        rot_cands = (None if b.get('rotation_candidates') is None
+                     else _rotation_candidates(
+                         b['rotation_candidates'],
+                         f"blocks[{i}].rotation_candidates"))
         zone_rect = b.get('zone')
         blocks.append(Zone(
             name=name,
@@ -738,6 +821,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             refs=_str_tuple(b.get('refs'), f"blocks[{i}].refs"),
             exclusive=bool(b.get('exclusive', False)),
             tolerance_mm=b.get('tolerance_mm'),
+            rotation=rot,
+            rotation_candidates=rot_cands,
             note=b.get('note', '') or '',
             context=b.get('context') or {},
         ))
@@ -1420,6 +1505,38 @@ def zone_covered_by_keepout(zone, keepouts, member_sides=None,
             if keepouts_for_ref((k,), ref, sides):
                 return str(k.get('name') or '<unnamed>')
     return None
+
+
+def rotations_for_ref(intent: Intent, blocks: Dict[str, List[str]]
+                      ) -> Dict[str, Tuple[Optional[float],
+                                           Optional[Tuple[float, ...]]]]:
+    """{ref: (declared rotation, declared candidates)} over ALREADY-RESOLVED blocks.
+
+    Iterates `intent.blocks`, not `zone_entries`: that one yields only blocks
+    carrying a `rect`, and a block may declare a rotation with no zone at all
+    ("U1 faces the USB socket" is not a coordinate claim).
+
+    A ref in two blocks that declare DIFFERENT angles is a contradiction the
+    author has to resolve, so it raises rather than picking one. Two blocks
+    declaring the SAME angle is not a contradiction and is allowed -- globs
+    overlap legitimately (`U*` and `U1`).
+    """
+    out: Dict[str, Tuple[Optional[float], Optional[Tuple[float, ...]]]] = {}
+    owner: Dict[str, str] = {}
+    for z in intent.blocks:
+        if z.rotation is None and z.rotation_candidates is None:
+            continue
+        claim = (z.rotation, z.rotation_candidates)
+        for ref in blocks.get(z.name, ()):
+            prev = out.get(ref)
+            if prev is not None and prev != claim:
+                raise IntentError(
+                    f"{ref} is claimed by blocks {owner[ref]!r} and {z.name!r} "
+                    f"with different rotations ({prev} vs {claim}). A part has "
+                    f"one angle; resolve the overlap")
+            out[ref] = claim
+            owner[ref] = z.name
+    return out
 
 
 def zone_entries(intent: Intent, blocks: Dict[str, List[str]]) -> Tuple[Dict, ...]:
