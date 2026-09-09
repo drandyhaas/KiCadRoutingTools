@@ -628,6 +628,17 @@ Examples:
     print(f"Seeded {len(result['placements'])} part(s); "
           f"{len(result['unseated'])} unseated; "
           f"{len(result['lock_refs'])} to lock")
+    # #893. A DECLARED rotation that could not be seated is a different fact
+    # from a part that merely found no pose, and it is the one the author can
+    # act on -- their claim is the reason. Without this the operator saw a
+    # generic "no legal pose within any cap" and had no way to know which
+    # declaration caused it.
+    _rot_unseated = result.get('rotation_unseated') or {}
+    if _rot_unseated:
+        print(f"  {len(_rot_unseated)} declared rotation(s) could not be "
+              f"seated -- the angle is the claim, not a fallback:")
+        for _r in sorted(_rot_unseated):
+            print(f"    {_r}: declared {_rot_unseated[_r]}")
 
     write_placed_output(args.input_file, args.output_file,
                         result['placements'])
@@ -803,6 +814,10 @@ Examples:
                # NAMES, not just a count. #629's complaint is that a verdict
                # you cannot act on is a dead end, and a count names nobody.
                'unseated_refs': list(result['unseated']),
+               # #893: WHICH declared angle was refused, by ref. A caller that
+               # sees only `unseated_refs` cannot tell a declaration it must
+               # revisit from a board that is simply full.
+               'rotation_unseated': result.get('rotation_unseated') or {},
                'no_pose_blockers': result.get('no_pose_blockers') or {},
                # WHY each of them has no pose, not just who is nearby (#699).
                # "nothing is near it" and "everything near it is locked" were

@@ -304,6 +304,58 @@ def test_every_seating_stage_honours_the_declaration():
 TESTS.append(test_every_seating_stage_honours_the_declaration)
 
 
+def test_a_declared_rotation_survives_the_quench():
+    """The seeder honouring it once is not enough -- the next step must too.
+
+    `place_seed` is followed by `place_optimize` / `place_route_loop` in every
+    chain, and the quench turns unlocked parts freely. Before this the module
+    docstring told authors to declare a rotation INSTEAD of locking the part,
+    while locking was the only thing that had ever protected the angle -- so
+    the replacement was strictly WEAKER than the advice it replaced, against
+    the very U3 case it cites. Found in pre-push review.
+
+    The declaration reaches the quench through the intent gate, so this drives
+    the real `resolve_intent_gate` rather than hand-building a map.
+    """
+    from kicad_parser import parse_kicad_pcb
+    from placement import floorplan
+    from placement.quench import quench, _candidate_rotations, QuenchState
+
+    path = run_utils.evidence(os.path.join(ROOT, 'kicad_files', BOARD), 'board')
+    pcb = parse_kicad_pcb(path)
+    intent = _intent([{'name': 'r', 'refs': ['R*'], 'rotation': 90}])
+    gate, _problems = floorplan.resolve_intent_gate(intent, pcb,
+                                                    ('kicad', 'sheet'))
+    assert gate.get('rotations'), (
+        'resolve_intent_gate carried no rotations, so the quench cannot see '
+        'the declaration however well it handles one')
+
+    st = QuenchState(pcb, path, 0.2, 0.55, 30.0, 0.5, 0.15, 2.0, 2.0, 2.0,
+                     0.1, 0.3, declared_rotations=gate['rotations'])
+    declared = [r for r in sorted(st.parts) if r in gate['rotations']]
+    assert declared, 'no part on %s matched R*, so nothing is declared' % BOARD
+    for ref in declared:
+        got = _candidate_rotations(st.parts[ref], True,
+                                   st.declared_rotations.get(ref))
+        assert got == [90.0], (
+            '%s: the quench offers %r, so it can still turn a part whose '
+            'rotation was declared' % (ref, got))
+    # And an UNDECLARED part must keep its full lattice, or this has broken
+    # the optimizer for every board that declares nothing.
+    other = [r for r in sorted(st.parts) if r not in gate['rotations']]
+    assert other, 'every part is declared; cannot check the undeclared arm'
+    free = _candidate_rotations(st.parts[other[0]], True,
+                                st.declared_rotations.get(other[0]))
+    assert len(free) >= 4, (
+        '%s is undeclared but was offered only %r -- the declaration leaked '
+        'onto parts nobody claimed' % (other[0], free))
+    print('  %d declared part(s) pinned to 90 deg; %s keeps %d rotations'
+          % (len(declared), other[0], len(free)))
+
+
+TESTS.append(test_a_declared_rotation_survives_the_quench)
+
+
 def test_every_try_place_site_passes_a_rotation_ladder():
     """A STANDING gate: no seating site may quietly use the fallback.
 

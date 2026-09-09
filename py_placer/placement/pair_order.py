@@ -124,10 +124,12 @@ def _scoring_net_ids(state):
     `pair_metrics` intersected against a freshly built `set(state.net_refs)` on
     EVERY call -- the whole board's net-id set, rebuilt once per partner per
     pose. It is pose-invariant: `net_refs` is assigned once in
-    `QuenchState.__init__` (quench.py:988) and never mutated afterwards, and
-    `part.nets` is filtered earlier in that same constructor (:825), so both are
-    frozen by the time anything here runs. Measured on ulx3s, that one
-    expression was 735 of 1782 us per `ref_inversions` call.
+    `QuenchState.__init__` and never mutated afterwards, and `part.nets` is
+    filtered earlier in that same constructor, so both are frozen by the time
+    anything here runs. (Deliberately no line numbers: the first draft of this
+    docstring cited two, and this commit's own edits to `quench.py` moved both
+    before it was pushed.) Measured on ulx3s, that one expression was 735 of
+    1782 us per `ref_inversions` call.
     """
     ids = getattr(state, '_pair_order_net_ids', None)
     if ids is None:
@@ -282,7 +284,14 @@ def ref_inversions(state, ref: str,
         # rejected majority IS the hot path. This cannot change a result: it
         # reproduces `pair_metrics`' own `len(shared) < 2` test against the
         # same cached sets it would build.
-        if len(own_nets & _part_net_set(state, other, state.parts[other])) < 2:
+        other_part = state.parts.get(other)
+        if other_part is None:
+            # `pair_metrics` returns None for a ref outside `state.parts`, and
+            # the early-out must not turn that skip into a KeyError. Unreachable
+            # for a real QuenchState (`net_refs` is built FROM `parts`), but
+            # this function accepts any duck-typed state.
+            continue
+        if len(own_nets & _part_net_set(state, other, other_part)) < 2:
             continue
         m = (pair_metrics(state, ref, other, pose_a=pose, pads_a=pads)
              if ref < other

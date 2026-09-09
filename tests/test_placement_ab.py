@@ -521,8 +521,17 @@ def _inversions(pcb_data, board_path):
 
     `pair_inversions` counts each unordered pair once (summing `ref_inversions`
     over every ref would double every pair, once from each end). None rather
-    than 0 when the state cannot be built: `record_for` refuses a measurement
-    missing a compared key, and a 0 here would read as a perfect board.
+    than 0 when the state cannot be built, because a 0 here would read as a
+    perfect board.
+
+    WHAT ACTUALLY CATCHES A None, since an earlier draft of this docstring
+    named the wrong guard: `record_for` refuses a measurement missing the KEY,
+    and its own docstring says a key present and None is fine. The instrument
+    that notices is `compare_baseline`'s `(c is None) != (e is None)` DRIFT
+    arm -- and only if the baseline was recorded non-None. If a board ever
+    failed on BOTH arms and were baselined that way, this column would die
+    quietly, which is the `health_blocks_displaced` failure this file exists
+    to prevent. The print below is the only live signal; treat it as one.
     """
     try:
         import pose_score

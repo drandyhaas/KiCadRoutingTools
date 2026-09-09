@@ -128,9 +128,14 @@ EDGE_BAND_SANITY_MM = 5.0
 #: `seeder._try_place` has always been free to turn a part whose rotation was
 #: load-bearing. Its docstring said so and told the author to lock the part
 #: instead, which freezes its POSITION too. Declarable, and it changes a
-#: verdict twice over -- the seeder honours it and REFUSES rather than falling
-#: back to the 90-degree lattice, and `rule_rotation` grades it -- so the rule
-#: above mandates the bump. Contrast `blocks[].side`, which is declarable and
+#: verdict: the seeder honours it and REFUSES rather than falling back to the
+#: 90-degree lattice, and the quench's gate pins the part to it instead of
+#: offering the lattice -- so the rule above mandates the bump.
+#: There is deliberately NO `rule_rotation` in `RULES`: a declared rotation is
+#: ENFORCED (the seat search is given a one-angle ladder), so a grade rule
+#: would be checking an invariant the search cannot violate. An earlier draft
+#: of this comment claimed such a rule existed; it never did, and a
+#: justification naming a grader nobody wrote is worse than a shorter one. Contrast `blocks[].side`, which is declarable and
 #: whose rule docs/floorplan-intent.md calls "vacuous, not conservative"
 #: because no search move carries a side: rotation is carried by every nudge.
 READER_VERSION = 5
@@ -1608,7 +1613,14 @@ def resolve_intent_gate(intent: Intent, pcb_data,
         lock.update(fnmatch.filter(sorted(pcb_data.footprints), pat))
     lock.update(str(c['ref']) for c in intent.edge_claims()
                 if c.get('ref') in pcb_data.footprints)
-    return ({'zones': zones,
+    # #893. The declared ROTATION travels with the gate, so the quench can
+    # enforce what the seeder honoured. Without it the feature was strictly
+    # WEAKER than the advice it replaced: locking a part DID protect its angle
+    # from the quench (one boolean covers position and rotation), so
+    # `place_seed` -> `place_optimize` would have turned a declared part
+    # straight back -- against the very U3 case the seeder docstring cites.
+    return ({'rotations': rotations_for_ref(intent, blocks),
+             'zones': zones,
              'keepouts': tuple(intent.keepouts),
              'lock_refs': tuple(sorted(lock))}, problems)
 

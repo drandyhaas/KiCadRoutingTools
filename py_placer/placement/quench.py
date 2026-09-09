@@ -776,7 +776,12 @@ class QuenchState:
                  # positional-binding reason as the #548 block above, and 0.0
                  # by default: see `_facing_cost` for why the default is a
                  # measurement question and not timidity.
-                 facing_weight: float = 0.0):
+                 facing_weight: float = 0.0,
+                 # --- #893 declared rotations, from the intent gate. APPENDED
+                 # for the same positional-binding reason as the #548 block
+                 # above, and empty by default so an undeclared board keeps the
+                 # full lattice and is bit-identical.
+                 declared_rotations: Optional[Dict] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -814,6 +819,11 @@ class QuenchState:
         # below yields None and `_Part` keeps its own ladder.
         self.body_model = bool(body_model)
         self.facing_weight = facing_weight
+        #: #893. {ref: (rotation, candidates)} from the intent gate. Empty when
+        #: nothing is declared, and every consumer falls back to the lattice --
+        #: so a board with no declaration is bit-identical.
+        self.declared_rotations: Dict[str, object] = dict(
+            declared_rotations or {})
         body_locals: Dict[str, object] = {}
         if self.body_model:
             from placement import body as _body
@@ -1203,7 +1213,8 @@ class QuenchState:
             d = self.align_radius
         return self.align_weight * d * d
 
-    def _facing_cost(self, ref, x=None, y=None, rot=None) -> float:
+    def _facing_cost(self, ref, x=None, y=None, rot=None,
+                     exclude: Optional[Set[str]] = None) -> float:
         """Price the pin-ORDER a pose forces (#893). Off at weight 0.0.
 
         `pair_order.ref_inversions` -- the SAME lower bound
@@ -1239,6 +1250,29 @@ class QuenchState:
         touching anything at weight 0, so a default run pays nothing.
         """
         if self.facing_weight <= 0.0:
+            return 0.0
+        if exclude:
+            # NUDGE ONLY, and this is a correctness bound rather than a
+            # simplification. Inversions are a PAIR quantity evaluated against
+            # the partner's LIVE pose, so the two multi-part evaluators cannot
+            # price it:
+            #
+            # * the SWAP passes `exclude={partner}` to each half and adds the
+            #   a-b halo and align pairs back at the candidate poses (see the
+            #   add-back below the swap loop). There is no such add-back for a
+            #   term that needs BOTH parts moved at once, and scoring `a` at
+            #   its candidate against `b` still at its PRE-swap pose is simply
+            #   the wrong geometry.
+            # * the GROUP translate passes `exclude=members - {r}` precisely
+            #   because intra-group geometry is invariant under a rigid move.
+            #   Facing is not: `r` would be displaced while its in-group
+            #   partners are not, turning an invariant into a bias on block
+            #   moves.
+            #
+            # `exclude` is non-empty only on those two paths, so returning 0.0
+            # here leaves the single-part nudge -- where `ref_inversions` IS
+            # the exact delta -- as the only consumer, and leaves the group and
+            # swap objectives bit-identical to their unarmed selves.
             return 0.0
         return self.facing_weight * ref_inversions(self, ref, x, y, rot)
 
@@ -1487,7 +1521,7 @@ class QuenchState:
         # nudge's own rotation loop then reverts every rotation the phase makes
         # (its candidate list always contains the current angle), so `moves`
         # never reaches 0 and `improved` sums two currencies.
-        pen += self._facing_cost(ref, x, y, rot)
+        pen += self._facing_cost(ref, x, y, rot, exclude)
         return pen
 
     def violation(self, ref, x=None, y=None, rot=None,
@@ -2650,7 +2684,8 @@ def _candidate_positions(part: _Part, max_disp: float, step: float,
     return out
 
 
-def _candidate_rotations(part: _Part, allow_rotations: bool) -> List[float]:
+def _candidate_rotations(part: _Part, allow_rotations: bool,
+                         declared=None) -> List[float]:
     """Rotation candidates for a nudge move.
 
     The 90-degree lattice through the part's CURRENT angle, plus the lattice
@@ -2670,6 +2705,18 @@ def _candidate_rotations(part: _Part, allow_rotations: bool) -> List[float]:
     """
     if not allow_rotations:
         return [part.rot]
+    if declared is not None:
+        # #893. A DECLARED rotation outranks the lattice. `[angle]` for a
+        # decision -- the move loop then has no rotation to choose and the
+        # part keeps the angle the seeder was told to give it -- and the
+        # author's SET, order preserved, for `rotation_candidates`. This is
+        # what makes the declaration survive `place_seed -> place_optimize`;
+        # without it the intent was honoured once and undone by the next step,
+        # which is weaker than the locking it replaced.
+        rot, cands = declared
+        if rot is not None:
+            return [rot % 360]
+        return [c % 360 for c in cands]
     bases = [part.rot % 90]
     if part.orig_rot % 90 != bases[0]:
         bases.append(part.orig_rot % 90)
@@ -2822,6 +2869,7 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         corridor_specs=corridor_specs,
                         keepouts=(intent_gate or {}).get('keepouts'),
                         intent_zones=(intent_gate or {}).get('zones'),
+                        declared_rotations=(intent_gate or {}).get('rotations'),
                         body_model=body_model,
                         facing_weight=facing_weight)
     # #708: the lattice candidate OFFSETS are multiples of. The board's own
@@ -2975,7 +3023,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 return net_cost + geo_cost
 
             current_cost = eval_at(part.x, part.y, part.rot)
-            rotations = _candidate_rotations(part, allow_rotations)
+            rotations = _candidate_rotations(
+                part, allow_rotations, state.declared_rotations.get(ref))
             for rot in rotations:
                 # A swap can hand a part an angle from ANOTHER seed's lattice,
                 # in a group holding two different non-orthogonal seeds. Add
