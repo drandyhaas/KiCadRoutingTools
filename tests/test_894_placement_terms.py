@@ -112,9 +112,38 @@ def _intent_from_brief(tmp):
 
 
 def test_the_terms_call_board_context_rather_than_mirroring_it():
-    """`pair_length` must be board_context's own `span_mm`, row for row."""
-    from kicad_parser import parse_kicad_pcb
+    """The pin-order terms must READ board_context, not hold a copy.
+
+    Asserted by SUBSTITUTION, not by agreement. An earlier version of this
+    check compared the term's rows to board_context's on the same board, and
+    a hardcoded literal for that board passed it -- a same-board agreement
+    check cannot tell a call from a copy. Patching the source and watching the
+    answer follow can.
+    """
     import board_context
+    from kicad_parser import parse_kicad_pcb
+    sentinel = {'error': None, 'rows': [
+        {'a': 'ZZ1', 'b': 'ZZ2', 'scope': 'pair /FAKE_P//FAKE_N', 'nets': 2,
+         'inversions': 0, 'lis': 2, 'ties': 0, 'verdict': 'AGREES',
+         'span_mm': 42.5},
+        {'a': 'ZZ1', 'b': 'ZZ2', 'scope': 'interface', 'nets': 2,
+         'inversions': 7, 'lis': 1, 'ties': 0, 'verdict': 'CROSSED',
+         'span_mm': 42.5}]}
+    real = board_context.pin_order_rows
+    board_context.pin_order_rows = lambda *a, **k: sentinel
+    try:
+        pcb = parse_kicad_pcb(PLACED)
+        doc = ps.placement_terms(pcb, PLACED)
+    finally:
+        board_context.pin_order_rows = real
+    check('pair_length follows board_context, not a copy',
+          doc['terms']['pair_length']['value'] == 42.5,
+          str(doc['terms']['pair_length']['value']))
+    check('pin_order_crossings follows it too',
+          doc['terms']['pin_order_crossings']['value'] == 1,
+          str(doc['terms']['pin_order_crossings']['value']))
+    # ...and, separately, that on a REAL board the rows it publishes are the
+    # grader's own rather than a re-derivation.
     from list_nets import board_floor_knobs
     pcb = parse_kicad_pcb(PLACED)
     clr = board_floor_knobs(PLACED, clearance=None)[0]
@@ -126,11 +155,8 @@ def test_the_terms_call_board_context_rather_than_mirroring_it():
                   and isinstance(r.get('span_mm'), (int, float)))
     got = sorted((p['a'], p['b'], p['scope'], p['span_mm'])
                  for p in mine['pairs'])
-    check('pair rows are board_context.pin_order_rows\' own, element for '
-          'element', got == want, f'{len(got)} row(s)')
-    check('...and the value is the worst of them',
-          mine['value'] == round(max(s for _a, _b, _s, s in want), 3),
-          f"value={mine['value']}")
+    check('the published rows are the grader\'s own, element for element',
+          got == want, f'{len(got)} row(s)')
 
 
 def test_the_committed_pair_numbers_are_reproduced():
@@ -216,6 +242,141 @@ def test_undetermined_rows_are_not_counted_as_agreement():
     check('with one real row it counts 1 crossing and reports the tie apart',
           r['value'] == 1 and r['undetermined'] == 1,
           f"value={r['value']} undetermined={r['undetermined']}")
+
+
+def test_plane_cut_credits_the_crossing_and_grows_with_the_blocker():
+    """The three defects an adversarial review measured in the first version.
+
+    It credited the WHOLE chord rather than the part inside the body, so an
+    80mm net grazing 0.01mm of a part scored 5.3x worse than a 15mm net
+    straight through it; it skipped any net with an endpoint INSIDE the body,
+    which made a bigger blocker obstruct LESS (growing one part 1mm a side
+    took the total DOWN 13% and then saturated); and it counted GND, which on
+    two layers IS the reference copper the term claims to be about.
+    """
+    from kicad_parser import parse_kicad_pcb
+    from placement import floorplan as fp
+    R = (0.0, 0.0, 10.0, 10.0)
+    for name, a, b, want in (
+            ('a chord straight through', (-5, 5), (15, 5), 10.0),
+            ('an endpoint inside the body', (5, 5), (100, 5), 5.0),
+            ('both endpoints inside', (2, 2), (8, 8), 8.485),
+            ('a long net entirely clear of it', (-50, 50), (50, 50), 0.0)):
+        got = ps._clip_len(a, b, R)
+        check(f'clip: {name}', abs(got - want) < 0.01, f'{got} vs {want}')
+    # A GRAZE must not outscore a CUT, which is what crediting the whole
+    # chord did.
+    graze = ps._clip_len((-40, 9.999), (40, 9.999), R)
+    cut = ps._clip_len((-2.5, 5), (12.5, 5), R)
+    check('an 80mm graze scores below a 15mm cut', graze < cut,
+          f'graze {graze:.3f} vs cut {cut:.3f}')
+
+    pcb = parse_kicad_pcb(PLACED)
+    real = fp.drawn_body_rect
+    vals = []
+    try:
+        for grow in (0.0, 0.5, 1.0, 3.0):
+            def patched(geom, fpo, _g=grow, _r=real):
+                r, s = _r(geom, fpo)
+                return ((None, s) if r is None
+                        else ((r[0] - _g, r[1] - _g, r[2] + _g, r[3] + _g), s))
+            fp.drawn_body_rect = patched
+            vals.append(ps.plane_cut_proxy(pcb, PLACED)['value'])
+    finally:
+        fp.drawn_body_rect = real
+    check('a bigger blocker obstructs MORE, monotonically',
+          all(x < y for x, y in zip(vals, vals[1:])), str(vals))
+    t = ps.plane_cut_proxy(pcb, PLACED)
+    check('the reference nets are excluded and named',
+          any('GND' in n for n in (t.get('excluded_nets') or [])),
+          str(t.get('excluded_nets')))
+    check('...and no reported row is a reference net',
+          all('GND' not in (r.get('net') or '') for r in (t.get('rows') or [])),
+          str([r.get('net') for r in (t.get('rows') or [])][:6]))
+
+
+def test_balance_weighs_copper_and_not_mask():
+    """NPTH pads carry no copper: their `size` is the mask opening. Weighing
+    them biases the result by more than the signal this term must resolve."""
+    from kicad_parser import parse_kicad_pcb
+    pcb = parse_kicad_pcb(PLACED)
+    t = ps.pad_area_balance(pcb)
+    npth = [p for f in pcb.footprints.values() for p in (f.pads or ())
+            if getattr(p, 'pad_type', '') == 'np_thru_hole']
+    check('the board has NPTH pads to exclude, so this is not vacuous',
+          len(npth) > 0, f'{len(npth)} NPTH pad(s)')
+    check('...and the term excluded exactly them',
+          t['npth_pads_excluded'] == len(npth),
+          f"excluded={t['npth_pads_excluded']} of {len(npth)}")
+    check('the axis is the long one', t['axis'] == 'x'
+          and t['span_mm'] >= 20, f"axis={t['axis']} span={t['span_mm']}")
+    check('the value is a fraction of span in [0, 0.5]',
+          0.0 <= t['value'] <= 0.5, str(t['value']))
+    # And the abstention is REACHABLE -- a term whose skip arm no board takes
+    # is a claim no test checks.
+    class _Sq:
+        board_info = type('B', (), {'board_bounds': (0.0, 0.0, 20.0, 20.0),
+                                    'copper_layers': ['F.Cu', 'B.Cu']})()
+        footprints = {}
+    r = ps.pad_area_balance(_Sq())
+    check('a square board abstains rather than picking an axis',
+          r['ran'] is False and r['value'] is None
+          and 'square' in (r['reason'] or ''), repr(r['reason']))
+
+
+def test_every_terms_skip_path_is_reachable():
+    """The sweep over real boards takes the `ran: True` arm every time, so the
+    refusal shapes are asserted directly. A skip arm no test reaches is a
+    claim about the code that nothing checks."""
+    class _NoOutline:
+        board_info = type('B', (), {'board_bounds': None,
+                                    'copper_layers': ['F.Cu', 'B.Cu']})()
+        footprints = {}
+        nets = {}
+        segments = []
+    class _FourLayer(_NoOutline):
+        board_info = type('B', (), {
+            'board_bounds': (0.0, 0.0, 30.0, 10.0),
+            'copper_layers': ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']})()
+    for name, fn, arg, want in (
+            ('balance without an outline', ps.pad_area_balance, _NoOutline(),
+             'outline'),
+            ('plane_cut on a 4-layer board', ps.plane_cut_proxy, _FourLayer(),
+             'layer'),
+            ('cluster_to_pin with nothing declared or elected',
+             lambda p: ps.cluster_to_pin(p, None), _NoOutline(), 'proximity')):
+        r = fn(arg) if not isinstance(fn, type(lambda: 0)) or True else None
+        check(f'{name} refuses with a reason, value None',
+              r['ran'] is False and r['value'] is None
+              and want in (r['reason'] or ''), repr((r['reason'] or '')[:90]))
+
+
+def test_an_unresolved_claim_is_not_a_clean_number():
+    """`proximity_measured` records nothing for a claim the grader could not
+    resolve, so reading only the measured rows turned "your intent names a
+    part that is not on the board" into a clean maximum over whatever else
+    happened to resolve."""
+    from placement import floorplan as fp
+    with tempfile.TemporaryDirectory(prefix='t894u_') as tmp:
+        p = os.path.join(tmp, 'intent.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump({'schema': 1, 'kind': fp.KIND, 'units': 'mm',
+                       'proximity': [
+                           {'ref': 'U404', 'near': 'U1', 'max_mm': 2.0},
+                           {'ref': 'Y1', 'near': 'U1', 'max_mm': 2.0,
+                            'pads': {'Y1': ['77']}}]}, fh)
+        doc = terms(PLACED, intent=p)
+    t = doc['terms']['cluster_to_pin']
+    check('the unresolved claims are counted, not discarded',
+          t.get('unresolved', 0) >= 2, f"unresolved={t.get('unresolved')}")
+    check('...and named, so the author can fix the file',
+          bool(t.get('unresolved_claims')),
+          str((t.get('unresolved_claims') or [])[:1]))
+    check('nothing declared resolved, so the term refuses rather than '
+          'reporting a maximum over what happened to survive',
+          t['ran'] is False and t['value'] is None
+          and 'failed to resolve' in (t['reason'] or ''),
+          f"ran={t['ran']} value={t['value']!r} reason={(t['reason'] or '')[:70]!r}")
 
 
 def test_compare_is_pareto_and_never_a_scalar():

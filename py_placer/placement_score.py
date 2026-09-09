@@ -154,7 +154,15 @@ def pin_order_crossings(pin_order_doc) -> dict:
             f'all {len(iface)} row(s) tie on the channel axis, so every '
             f'inversion count is one the tie-break invented rather than one '
             f'the geometry has', unit, rows=len(iface), undetermined=len(undet))
-    return _term(len(crossed), unit, rows=len(iface),
+    # BASIS: the DETERMINABLE rows. Undetermined rows are excluded from the
+    # count, so the count is taken over a population that moves: measured on
+    # the tracked lineage, one board has 2 undetermined of 21 interface rows
+    # and another has 0, so `6` is a count over 19 rows and `10` over 21. A
+    # delta of 4 across that pair is partly a change in what could be judged.
+    return _term(len(crossed), unit,
+                 basis=sorted(f"{r['a']}~{r['b']}" for r in iface
+                              if r not in undet),
+                 rows=len(iface),
                  undetermined=len(undet),
                  inversions=sum(r.get('inversions') or 0 for r in crossed),
                  pairs=[{'a': r['a'], 'b': r['b'], 'nets': r.get('nets'),
@@ -186,6 +194,13 @@ def pair_length(pin_order_doc) -> dict:
     spans = [(r['span_mm'], r) for r in rows
              if isinstance(r.get('span_mm'), (int, float))]
     if not spans:
+        # TWO different answers, and they must not share a reason: no pair was
+        # FOUND, versus pairs were found but none carried a span.
+        if rows:
+            return _skip(
+                f'{len(rows)} differential-pair row(s) were found, but none '
+                f'carries a span_mm, so the pair length was not measured',
+                unit, pair_rows=len(rows))
         return _skip(
             'list_nets.find_differential_pairs found no differential pair on '
             'this board (it is name-based, and 2-terminal resonators are '
@@ -220,7 +235,7 @@ def cluster_to_pin(pcb_data, pcb_file, *, intent=None, clearance=None) -> dict:
     against a USB socket.
     """
     unit = 'mm'
-    rows, declared_n = [], 0
+    rows, unresolved, declared_claims = [], [], set()
     if intent is not None:
         try:
             from placement import floorplan as fp
@@ -228,12 +243,28 @@ def cluster_to_pin(pcb_data, pcb_file, *, intent=None, clearance=None) -> dict:
             for r in (res.proximity_measured or []):
                 rows.append({'ref': r['ref'], 'near': r['near'],
                              'gap_mm': r['gap_mm'], 'limit_mm': r.get('limit_mm'),
-                             'passes': r.get('passes'), 'basis': r.get('basis'),
+                             'passes': r.get('passes'), 'geom': r.get('basis'),
                              'source': 'declared', 'claim': r.get('claim')})
-            declared_n = len(rows)
+                declared_claims.add(r.get('claim'))
+            # A claim the grader could NOT resolve -- a ref that is not on the
+            # board, a pad number the part does not have -- measures nothing,
+            # and `proximity_measured` records nothing for it. Reading only
+            # the measured rows therefore turned "your intent named a part
+            # that does not exist" into a clean number taken over whatever
+            # else happened to resolve. The grader says so; this reads it.
+            unresolved = [v.message for v in res.violations
+                          if v.rule == 'proximity_unresolved']
         except Exception as exc:                             # noqa: BLE001
             return _skip(f'floorplan.grade could not measure the declared '
                          f'proximity claims: {type(exc).__name__}: {exc}', unit)
+    declared_n = len(rows)
+    if intent is not None and unresolved and not rows:
+        return _skip(
+            f'every declared proximity claim failed to resolve, so nothing '
+            f'was measured: {unresolved[0]}'
+            + (f' (and {len(unresolved) - 1} more)' if len(unresolved) > 1
+               else ''), unit, declared=0, unresolved=len(unresolved),
+            unresolved_claims=unresolved[:8])
     inferred = {}
     try:
         import board_context
@@ -245,26 +276,82 @@ def cluster_to_pin(pcb_data, pcb_file, *, intent=None, clearance=None) -> dict:
         if (cap, ic) in named:
             continue
         rows.append({'ref': cap, 'near': ic, 'gap_mm': round(float(dist), 4),
-                     'limit_mm': None, 'passes': None, 'basis': 'centre',
+                     'limit_mm': None, 'passes': None, 'geom': 'centre',
                      'source': 'inferred', 'claim': None})
     if not rows:
         return _skip(
             'the intent declares no proximity claims and no capacitor sits '
             'within the decap election radius of an elected IC, so nothing '
             'says which part serves which pin', unit,
-            declared=0, inferred=0)
-    worst = max(rows, key=lambda r: r['gap_mm'])
-    # BASIS: which pairs were measured at all. A lap that declares one more
-    # proximity claim, or whose election reaches one more capacitor, is taking
-    # a maximum over a different population.
-    return _term(round(float(worst['gap_mm']), 4), unit,
-                 basis=sorted(f"{r['ref']}~{r['near']}" for r in rows),
+            declared=0, inferred=0, unresolved=len(unresolved))
+    # THE VALUE COMES FROM THE DECLARED ROWS when there are any, and the basis
+    # is the declared CLAIM IDs -- not the measured pair list.
+    #
+    # The pair list was the wrong basis and the reason is sharp: the inferred
+    # half is the decap election CLIPPED at `groups.DECAP_RADIUS_MM`, so
+    # pushing a capacitor past that radius -- the worst thing this term is
+    # supposed to name -- drops the pair out of the population entirely. The
+    # basis then "moves", the comparison is refused, and the reported max
+    # FALLS. Measured on the tracked lineage: a capacitor was re-elected from
+    # one IC to another by part motion alone, with no claim added. A basis
+    # derived from the poses being compared cannot judge those poses.
+    #
+    # Declared claim ids come from the intent, which does not move when a part
+    # does, so a declared clause getting worse is a VALUE change and is judged.
+    scored = [r for r in rows if r['source'] == 'declared'] or rows
+    basis = (sorted(c for c in declared_claims if c) if declared_n
+             else sorted(f"{r['ref']}~{r['near']}" for r in rows))
+    worst = max(scored, key=lambda r: r['gap_mm'])
+    return _term(round(float(worst['gap_mm']), 4), unit, basis=basis,
+                 scored=('declared' if declared_n else 'inferred'),
                  declared=declared_n, inferred=len(rows) - declared_n,
+                 unresolved=len(unresolved),
+                 unresolved_claims=unresolved[:8],
                  worst_pair=f"{worst['ref']}~{worst['near']}",
                  rows=sorted(rows, key=lambda r: -r['gap_mm']))
 
 
 # ---------------------------------------------------------- plane cut proxy
+
+def _clip_len(a, b, rect) -> float:
+    """Length of segment `a`-`b` lying inside axis-aligned `rect`, in mm.
+
+    Liang-Barsky. Replaces a boundary-crossing TEST, which was wrong three
+    ways at once: it credited the whole chord rather than the part it removes,
+    it discarded any segment with an endpoint inside the rect (so a bigger
+    blocker obstructed LESS), and being a proper-intersection test it missed a
+    chord lying exactly along an edge -- not exotic on a grid-snapped board
+    whose blocker rects come from pad bounding boxes.
+
+    The rect is CLOSED, so a segment lying exactly along an edge counts for
+    its full length rather than 0. That is a choice, stated because it is one:
+    a track running along a part's boundary is under its shadow as much as one
+    a micron inside, and the alternative makes the answer depend on whether a
+    grid-snapped pad centre landed on the boundary or just off it. A segment
+    entirely inside returns its own length; one entirely outside returns 0.0.
+    """
+    (x0, y0), (x1, y1) = a, b
+    dx, dy = x1 - x0, y1 - y0
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x0 - rect[0]), (dx, rect[2] - x0),
+                 (-dy, y0 - rect[1]), (dy, rect[3] - y0)):
+        if p == 0:
+            if q < 0:
+                return 0.0        # parallel to this edge and outside it
+            continue
+        t = q / p
+        if p < 0:
+            if t > t1:
+                return 0.0
+            t0 = max(t0, t)
+        else:
+            if t < t0:
+                return 0.0
+            t1 = min(t1, t)
+    if t1 <= t0:
+        return 0.0
+    return math.hypot(dx, dy) * (t1 - t0)
+
 
 def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
     """Total straight-line length of nets forced around a locked part, in mm.
@@ -339,7 +426,14 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
         return _skip('every locked or mechanical part answers body source '
                      '"none", so none of them has geometry to be forced '
                      'around', unit, blockers=len(blockers))
-    # Diameter pair per net, over pads NOT belonging to the blocker itself.
+    # The REFERENCE nets are excluded. On two layers the ground pour IS the
+    # reference copper, so it cannot "remove reference copper" by passing a
+    # part -- and it is the single largest contributor if left in (measured:
+    # 28.6 of 101.4mm on the run-25 placed board came from GND alone, over a
+    # 17-pad "diameter pair" that is an artifact of pad ordering rather than
+    # any route anyone will draw).
+    from net_queries import is_ground_net_name, is_power_net_name
+    skipped_nets = []
     pads_by_net = {}
     for ref, fpo in (pcb_data.footprints or {}).items():
         for pad in (fpo.pads or ()):
@@ -351,6 +445,14 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
     for nid, pads in sorted(pads_by_net.items()):
         if len(pads) < 2:
             continue
+        net = pcb_data.nets.get(nid)
+        name = getattr(net, 'name', '') or ''
+        if is_ground_net_name(name) or is_power_net_name(name):
+            skipped_nets.append(name)
+            continue
+        # The DIAMETER PAIR, and the whole net's obstruction is taken over
+        # every blocker it clips -- the clipped regions are disjoint, so they
+        # add without double-counting.
         best, pa, pb = -1.0, None, None
         for i, p in enumerate(pads):
             for q in pads[i + 1:]:
@@ -358,35 +460,37 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
                 if d > best:
                     best, pa, pb = d, p, q
         a, b = (pa[1], pa[2]), (pb[1], pb[2])
-        for ref, (rect, src) in rects.items():
+        for ref, (rect, src) in sorted(rects.items()):
             if ref in (pa[0], pb[0]):
                 continue          # its own net is not forced around it
-            x0, y0, x1, y1 = rect
-            # "Opposite sides" means the chord CROSSES the body: an endpoint
-            # inside the rect is a pad under the part, not a net forced past
-            # it.
-            if (x0 <= a[0] <= x1 and y0 <= a[1] <= y1) or \
-               (x0 <= b[0] <= x1 and y0 <= b[1] <= y1):
-                continue
-            edges = (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)),
-                     ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0)))
-            if any(segments_intersect_tuple(a, b, e[0], e[1]) for e in edges):
-                length = math.hypot(b[0] - a[0], b[1] - a[1])
-                total += length
-                hits.append({'net_id': nid,
-                             'net': (pcb_data.nets.get(nid).name
-                                     if pcb_data.nets.get(nid) else None),
+            # THE LENGTH INSIDE THE BODY, not the whole chord. The docstring's
+            # authority is about "reference-plane copper the CROSSING
+            # removes", and crediting the full span measured something else
+            # entirely: an 80mm net grazing 0.01mm of a part scored 5.3x worse
+            # than a 15mm net straight through its middle. A clip is also what
+            # makes an endpoint UNDER the part count -- a pad under a locked
+            # can is precisely a net forced past it, and skipping those made
+            # the term NON-MONOTONIC in blocker size (measured: growing one
+            # part by 1mm a side took the total DOWN 13% and then saturated).
+            inside = _clip_len(a, b, rect)
+            if inside > 1e-9:
+                total += inside
+                hits.append({'net_id': nid, 'net': name or None,
                              'blocker': ref, 'body_source': src,
-                             'length_mm': round(length, 3)})
-                break             # once per net, against its worst blocker
+                             'inside_mm': round(inside, 3),
+                             'chord_mm': round(math.hypot(b[0] - a[0],
+                                                          b[1] - a[1]), 3)})
     # BASIS: the blocker set. Which parts are locked is an operator decision
     # that changes between laps -- measured, 3 -> 11 -> 3 over four laps of
     # one board -- and the total moves with it for reasons the arrangement did
     # not cause. Two laps that froze different parts are not comparable here.
     return _term(round(total, 3), unit, basis=sorted(rects),
-                 nets=len(hits), blockers=len(rects),
-                 definition='diameter pair per net; counted once per net',
-                 rows=sorted(hits, key=lambda r: -r['length_mm'])[:20])
+                 nets=len({h['net_id'] for h in hits}), blockers=len(rects),
+                 definition='length of each net\'s diameter chord lying INSIDE '
+                            'a locked part\'s drawn body, summed over parts; '
+                            'ground and power nets excluded',
+                 excluded_nets=sorted(set(skipped_nets)),
+                 rows=sorted(hits, key=lambda r: -r['inside_mm'])[:20])
 
 
 # ------------------------------------------------------------------ balance
@@ -426,8 +530,19 @@ def pad_area_balance(pcb_data) -> dict:
     centre = ((x0 + x1) / 2.0) if axis == 'x' else ((y0 + y1) / 2.0)
     num = area = 0.0
     n = 0
+    npth = 0
     for fpo in (pcb_data.footprints or {}).values():
         for pad in (fpo.pads or ()):
+            # NPTH pads carry NO COPPER even when `layers` lists *.Cu -- their
+            # `size` is the mask opening (CLAUDE.md). Weighing them puts mask
+            # where the term claims to put copper. Measured on the run-25
+            # lineage: two such pads bias the result by 0.0035 of span, which
+            # is 1.7x the lap3-to-lap5 signal this term is the only one able
+            # to resolve. It cancels there because the part is locked in all
+            # three; it will not cancel on a board that moves one.
+            if getattr(pad, 'pad_type', '') == 'np_thru_hole':
+                npth += 1
+                continue
             try:
                 a = leg.rect_area(leg.pad_rect(pad))
             except Exception:                                # noqa: BLE001
@@ -446,7 +561,7 @@ def pad_area_balance(pcb_data) -> dict:
                  axis=axis, span_mm=round(span, 3),
                  centroid_mm=round(centroid, 3), centre_mm=round(centre, 3),
                  weight='pad_copper_area', pad_area_mm2=round(area, 3),
-                 pads=n)
+                 pads=n, npth_pads_excluded=npth)
 
 
 # ------------------------------------------------------------- the document
@@ -508,10 +623,16 @@ def term_deltas(old_terms, new_terms) -> list:
             row['delta'] = None
             row['judgement'] = 'not-comparable'
             row['why'] = 'the basis moved'
-            row['basis_added'] = sorted(set(b.get('basis') or ())
-                                        - set(a.get('basis') or ()))
-            row['basis_removed'] = sorted(set(a.get('basis') or ())
-                                          - set(b.get('basis') or ()))
+            # MULTISET differences, not set differences. A basis may legally
+            # contain a repeat -- a declared proximity claim reports one row
+            # per subject pad, so a two-legged crystal contributes its pair
+            # twice -- and with set arithmetic one leg becoming unmeasurable
+            # produced `added: [] removed: []`: the refusal fired and named
+            # nothing, which is the exact failure the comment above forbids.
+            from collections import Counter
+            ca, cb = Counter(a.get('basis') or ()), Counter(b.get('basis') or ())
+            row['basis_added'] = sorted((cb - ca).elements())
+            row['basis_removed'] = sorted((ca - cb).elements())
         elif comparable:
             row['delta'] = round(bv - av, 6)
             row['judgement'] = ('same' if row['delta'] == 0
@@ -523,7 +644,14 @@ def term_deltas(old_terms, new_terms) -> list:
             # `_score_key` already refuses for `blocking`.
             row['delta'] = None
             row['judgement'] = 'not-comparable'
-            row['why'] = 'measured on one lap only'
+            # THREE reasons, not one. "Neither lap measured it" is a fact
+            # about the board or the flags; "one lap measured it" is a fact
+            # about what changed between them, and a reader chasing a term
+            # that vanished must not be told the wrong one.
+            row['why'] = ('neither lap measured it' if av is None and bv is None
+                          else 'measured on one lap only')
+            row['measured_on'] = ([] if av is None and bv is None
+                                  else ['old'] if bv is None else ['new'])
         out.append(row)
     return out
 
@@ -552,14 +680,29 @@ def compare_terms(old_terms, new_terms):
 
 
 def format_delta(detail) -> str:
-    """One line per comparable term, for a human. Never a total."""
+    """One line per term, for a human. Never a total.
+
+    A NOT-COMPARABLE term is printed too, with why. It used to be skipped,
+    which made this -- the only human-readable channel -- say that one term
+    improved and nothing else happened, on a lap whose cluster distance had
+    gone 2.0 to 9.9mm behind a moved basis. `term_deltas` records the refusal
+    so a reader "can see WHY it was not judged"; a printer that drops it makes
+    that comment false.
+    """
     bits = []
     for r in detail:
         if r['judgement'] == 'not-comparable':
-            continue
-        bits.append(f"{r['term']} {r['old']} -> {r['new']} "
-                    f"({r['delta']:+g}, {r['judgement']})")
-    return '; '.join(bits) or 'no term was measured on both laps'
+            why = r.get('why') or 'not comparable'
+            moved = ''
+            if r.get('basis_added') or r.get('basis_removed'):
+                moved = (f" [+{','.join(r.get('basis_added') or []) or '-'}"
+                         f" -{','.join(r.get('basis_removed') or []) or '-'}]")
+            bits.append(f"{r['term']} {r['old']} -> {r['new']} "
+                        f"(NOT JUDGED: {why}{moved})")
+        else:
+            bits.append(f"{r['term']} {r['old']} -> {r['new']} "
+                        f"({r['delta']:+g}, {r['judgement']})")
+    return '; '.join(bits) or 'no term was measured on either lap'
 
 
 # ---------------------------------------------------------------------- CLI
