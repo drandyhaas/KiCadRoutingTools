@@ -16,6 +16,8 @@ Two keys, and they mean different things on purpose:
 
 Run: python3 -X utf8 tests/test_893_declared_rotation.py
 """
+import ast
+import io
 import os
 import sys
 
@@ -300,6 +302,49 @@ def test_every_seating_stage_honours_the_declaration():
 
 
 TESTS.append(test_every_seating_stage_honours_the_declaration)
+
+
+def test_every_try_place_site_passes_a_rotation_ladder():
+    """A STANDING gate: no seating site may quietly use the fallback.
+
+    The behavioural tests above can only cover the stages a fixture happens to
+    reach, and that is exactly how this was missed twice -- first 2 of 13 sites
+    were threaded, then 8 of 13, and both times the suite was green because no
+    intent in it declared a lock, a decap rule, or an eviction. A new stage
+    added next year would repeat it.
+
+    So this reads the SOURCE and requires every `_try_place` call to pass
+    `rotations=`. It is a shape assertion, not a grep for a comment: it parses
+    the file and checks the keyword is present in each call's arguments, so a
+    mention in prose cannot satisfy it.
+    """
+    import ast
+    src_path = os.path.join(ROOT, 'py_placer', 'placement', 'seeder.py')
+    src = io.open(src_path, encoding='utf-8').read()
+    tree = ast.parse(src)
+    missing = []
+    total = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Name) and fn.id == '_try_place'):
+            continue
+        total += 1
+        if not any(kw.arg == 'rotations' for kw in node.keywords):
+            missing.append(node.lineno)
+    assert total >= 10, (
+        'only %d `_try_place` call(s) found in seeder.py -- this gate is not '
+        'looking at what it thinks it is' % total)
+    assert not missing, (
+        '%d of %d `_try_place` call(s) do not pass `rotations=`, at line(s) %r. '
+        'A seating site that omits it uses the FALLBACK ladder and can turn a '
+        'part whose rotation was DECLARED -- silently, which is the failure '
+        '#893 exists to remove.' % (len(missing), total, missing))
+    print('  all %d _try_place call sites pass a rotation ladder' % total)
+
+
+TESTS.append(test_every_try_place_site_passes_a_rotation_ladder)
 
 
 def test_no_declaration_leaves_the_seeder_unchanged():
