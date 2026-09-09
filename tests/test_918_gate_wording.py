@@ -13,20 +13,22 @@ reason the stale formula below survived for as long as the term did.
    "pad intersections". A gate written against it passes a board that is
    unbuildable through the other four.
 
-   Note what this does NOT flag, and why #918's literal acceptance
-   (`grep -rn "blocking == 0"` returns nothing) cannot be met as written: about
-   thirty sites in these directories say `blocking == 0` about **board_score's**
-   `blocking`, which is a nine-component total and where the phrase is exactly
-   right. So the check is scoped: a `blocking == 0` is flagged only when
-   `check_assembly` is named within a few lines of it AND the sentence reads as
-   a gate.
+   This IS #918's acceptance, which asks for `grep -rn "blocking == 0"` over
+   the three skill dirs to return "nothing **that is a gate**" -- the last
+   three words are load-bearing and an earlier draft of this file dropped
+   them. Zero occurrences was never the ask, and could not be: of the 30
+   occurrences in those directories, 24 are about **board_score's** `blocking`,
+   a nine-component total, where the phrase is exactly right. So the check
+   resolves each hit's SUBJECT -- a `blocking == 0` is flagged only when
+   `check_assembly` is named within a line of it AND the sentence reads as a
+   gate.
 
 2. **Every stated `blocking` FORMULA lists the nine components board_score
-   sums.** Measured at the time this was written: the combined SKILL.md and
-   evidence-map.md each stated seven (no `assembly`, no `net_widths`),
-   loop_driver.py stated six in three places, and review-routed-board's sample
-   line showed five -- while board_score's own docstring and the 9.1 table were
-   right. Three places correct, five wrong.
+   sums.** Measured at the time this was written, SEVEN sites were stale: the
+   combined SKILL.md and evidence-map.md each stated seven members (no
+   `assembly`, no `net_widths`), loop_driver.py stated six in FOUR places, and
+   review-routed-board's sample line showed five -- while board_score's own
+   docstring and the 9.1 table were right.
 
 Run: python3 -X utf8 tests/test_918_gate_wording.py
 """

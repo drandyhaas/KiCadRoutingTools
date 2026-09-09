@@ -21,12 +21,21 @@ signals into one mark means no reader can say which of its inputs moved. Laps
 are compared by `compare_terms`, which is PARETO -- better on every term it can
 compare, worse on every term, or `mixed` with both sides named.
 
-Every term CALLS the implementation that already exists rather than mirroring
-it (`board_context.pin_order_rows` for pin order and pair span,
-`floorplan.grade`'s measured proximity rows for cluster distance,
-`board_context.serves_map` for the undeclared half, `legality.pad_rect` /
-`rect_area` for pad geometry). A re-implementation of a grader in this repo has
+THREE of the five terms CALL an existing grader rather than mirroring it:
+`pair_length` and `pin_order_crossings` read `board_context.pin_order_rows`,
+and `cluster_to_pin` reads `floorplan.grade`'s measured proximity rows plus
+`board_context.serves_map`. A re-implementation of a grader in this repo has
 already been measured disagreeing with it 83 times, worst 0.234mm.
+
+The other TWO deliberately do not, and each says why at its definition: the
+nearest existing implementation measures a DIFFERENT QUANTITY.
+`plane_cut_proxy` does not call `routability.corridor_cut_mm` (it needs a
+declared corridor, and its chord is position-invariant along the lane, so it
+cannot rank two placements that differ by a nudge); `balance` does not call
+`check_pockets.census_scalars` (courtyard-area weighted, a hypot of both axes,
+per-side). Both build on geometry primitives -- `legality.pad_rect`,
+`rect_area`, `part_class.mechanical_parts`, `placement.body` -- rather than on
+a second copy of a grader.
 
 Vacuity
 -------

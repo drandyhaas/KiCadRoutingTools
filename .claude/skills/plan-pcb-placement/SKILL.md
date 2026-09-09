@@ -163,7 +163,8 @@ re-emit if in doubt.
    corpus boards; never run them on a user's board.
 3. A part the file marks `(locked yes)` is never yours to move, whatever an
    intent says.
-4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's blocking pairs.
+4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's `buildable`
+   verdict — NOT `blocking == 0`, which is 1 of its 5 conjuncts (#918).
    REPORT `crossings` and aggregate courtyard overlap; never gate on them --
    both correlate POSITIVELY with **distance-to-truth**, which is the dependent
    variable that evidence was measured against. Against routed `blocking`,
