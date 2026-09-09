@@ -348,6 +348,98 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
             'open': sorted(open_nets)}
 
 
+#: check_assembly's five `not_buildable` conjuncts, by the JSON key each one
+#: publishes (check_assembly.py:508-510). `blocking` -- pad INTERSECTIONS -- is
+#: the first of them and is the only one this component used to read (#918).
+#:
+#: `courtyard_blocking_gating` is None here BY CONSTRUCTION: it is the
+#: moved-vs-baseline subset of the courtyard census, and board_score passes no
+#: --baseline, so check_assembly publishes null rather than 0. That is reported
+#: as unmeasured, never counted as clean.
+ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
+                      'containment_blocking', 'courtyard_blocking_gating')
+
+
+def assembly_component(doc: dict, rc: int) -> dict:
+    """check_assembly's VERDICT, not one of its five conjuncts (#918).
+
+    `not_buildable` is `blocking or locked_contact or stack_groups or
+    containment_blocking or courtyard_gating`. This component read `blocking`
+    ALONE and accepted rc 4, so a board unbuildable through any of the other
+    four contributed 0 to `blocking` -- the headline the whole loop ranks and
+    stops on. check_assembly publishes `buildable` and `verdict` for exactly
+    this reader, and the comment above them names this defect verbatim, so the
+    verdict is READ here and the disjunction is never re-derived.
+
+    `count` stays `blocking` on a buildable board -- every ledger row ever
+    recorded means that number by it -- and becomes `blocking` plus the other
+    MEASURED conjuncts, floored at 1, when the verdict says NOT BUILDABLE. The
+    floor is not decoration: conjunct 5 publishes null without a --baseline, so
+    a real NOT BUILDABLE verdict can arrive with every published magnitude at
+    0, and a component that then returned 0 would reproduce the whole bug.
+    `count_basis` names the terms that went in, so the number is falsifiable
+    from its own payload.
+
+    Two refusals rather than a quiet answer:
+
+      * no `buildable` key -- an older check_assembly is a DIFFERENT
+        instrument, and re-deriving the conjunction from whatever keys it did
+        publish is the exact thing this change removes;
+      * the exit code and the verdict DISAGREE (rc 4 with buildable true, rc 0
+        with buildable false) -- the instrument contradicting itself, which is
+        never a number to report. This is the self-check
+        tests/test_board_score_floorplan_severity.py ends on, from the other
+        side: there the scorer had to agree with the grader, here the grader
+        has to agree with itself before the scorer will read it.
+
+    Pure, so both arms are unit-testable without a board.
+    """
+    buildable = doc.get('buildable')
+    if not isinstance(buildable, bool):
+        return skipped(
+            "check_assembly published no `buildable` key: `blocking` alone is "
+            "1 of its 5 not_buildable conjuncts (check_assembly.py:508-510), "
+            "and this component will not re-derive the other four")
+    if (rc == 4) != (not buildable):
+        return skipped(
+            f"check_assembly contradicts itself: exit {rc} with "
+            f"buildable={buildable!r} (it exits 4 exactly when the verdict is "
+            f"NOT BUILDABLE). Reporting either number would be reporting an "
+            f"instrument that disagrees with itself")
+    conjuncts = {k: doc.get(k) for k in ASSEMBLY_CONJUNCTS}
+    measured = {k: v for k, v in conjuncts.items()
+                if isinstance(v, int) and not isinstance(v, bool)}
+    unmeasured = sorted(k for k in conjuncts if k not in measured)
+    total = sum(measured.values())
+    if buildable:
+        count, basis = int(doc.get('blocking') or 0), 'blocking (buildable)'
+    else:
+        count = max(total, 1)
+        basis = ('sum of measured conjuncts (' +
+                 ', '.join(f'{k}={v}' for k, v in sorted(measured.items())) +
+                 ')' + ('' if total else ', floored at 1: every measured '
+                        'conjunct is 0, so the verdict rests on one this '
+                        'scorer cannot see'))
+    return {'ran': True, 'count': count, 'count_basis': basis,
+            'buildable': buildable, 'verdict': doc.get('verdict'),
+            'conjuncts': conjuncts,
+            'conjuncts_unmeasured': unmeasured,
+            # NAMED, not just counted: `courtyard_blocking_gating` is null on
+            # every board this scorer grades, and "not measured" must never
+            # read as "measured clean".
+            'courtyard_gating_armed': False,
+            'courtyard_gating_reason':
+                'board_score passes check_assembly no --baseline, so its fifth '
+                'conjunct (moved-vs-baseline courtyard interpenetration) is '
+                'structurally unarmed here and publishes null',
+            'advisory_pairs': int(doc.get('advisory') or 0),
+            'waived_pairs': int(doc.get('waived') or 0),
+            'pairs': doc.get('blocking_pairs') or [],
+            'locked_contact_pairs': doc.get('locked_contact_pairs') or [],
+            'coincident_origin_groups': doc.get('coincident_origin_groups') or [],
+            'containments': doc.get('containments') or []}
+
+
 def score_assembly(root: str, board: str, intent: str, tmp: str,
                    clearance=None) -> dict:
     """Blocking BODY pairs (run-6): two footprints' pad copper in the same
@@ -355,7 +447,9 @@ def score_assembly(root: str, board: str, intent: str, tmp: str,
     shipped C14-on-R14 stack). Runs check_assembly.py, which needs NO
     intent to be meaningful (--intent only adds authored waivers), so this
     component ALWAYS grades -- the floorplan path can be vacuous by
-    self-blessed budget; this one cannot."""
+    self-blessed budget; this one cannot.
+
+    Runs the tool; `assembly_component` reads its document (#918)."""
     out = os.path.join(tmp, 'assembly.json')
     args = [board, '--json', out]
     if intent:
@@ -378,10 +472,7 @@ def score_assembly(root: str, board: str, intent: str, tmp: str,
             doc = json.load(f)
     except Exception as exc:
         return skipped(f'check_assembly json unreadable: {exc}')
-    return {'ran': True, 'count': int(doc.get('blocking') or 0),
-            'advisory_pairs': int(doc.get('advisory') or 0),
-            'waived_pairs': int(doc.get('waived') or 0),
-            'pairs': doc.get('blocking_pairs') or []}
+    return assembly_component(doc, rc)
 
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:

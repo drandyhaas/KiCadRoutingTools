@@ -1110,8 +1110,9 @@ def l2(a):
 
     # SHAPE, BEFORE CONTENT. `blocking` exists in BOTH check_assembly's report
     # and board_score's, with completely different meanings -- a
-    # pad-intersection-PAIR count vs a six-component TOTAL over unrouted +
-    # broken + drc + undersized + floorplan + assembly -- while
+    # pad-intersection-PAIR count vs a NINE-component TOTAL over unrouted +
+    # broken + drc + undersized + floorplan + assembly + impedance + length +
+    # net_widths -- while
     # buildable/verdict/locked_contacts/oob_pad_count exist only in
     # check_assembly's. Measured on run 10: handing board_score's JSON here
     # silently disabled three of the four checks below (their keys are simply
@@ -1132,7 +1133,8 @@ def l2(a):
                 "`check_assembly.py`'s. They share the field name `blocking` "
                 "and mean different things by it: board_score's is a total "
                 "over unrouted + broken + drc + undersized + floorplan + "
-                "assembly, check_assembly's is a count of pad-intersection "
+                "assembly + impedance + length + net_widths, check_assembly's "
+                "is a count of pad-intersection "
                 "PAIRS. board_score grades the ROUTE; this gate grades the "
                 "PLACEMENT.")
         return err(
@@ -3012,7 +3014,7 @@ def _self_test():
         # document missing any of them is refused on SHAPE before any of its
         # content is looked at (see L2_CHECKS). That refusal is the change
         # detector: run 10 fed this gate `board_score`'s JSON, which shares the
-        # field name `blocking` and means a six-component total by it, and
+        # field name `blocking` and means a nine-component total by it, and
         # three of the four checks silently did not run.
         _asm = {'buildable': True, 'verdict': 'buildable (blocking 0)',
                 'locked_contacts': 0, 'oob_pad_count': 0}
@@ -4087,7 +4089,7 @@ def _self_test():
                           ).startswith('<error>'),
              '...and the L2 placement vocabulary does not waive it')
         # PIN: the placement close-out must be check_assembly's document.
-        # board_score publishes `blocking` too and means a six-component total.
+        # board_score publishes `blocking` too and means a nine-component total.
         out = STAGES['L2'](_args(['--board', _b, '--placement-report', _w(
             {'kind': 'board-score', 'blocking': 57,
              'blocking_by': {'unrouted': 57}}, 'bs.json')]))

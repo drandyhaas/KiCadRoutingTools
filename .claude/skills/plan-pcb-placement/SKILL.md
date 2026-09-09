@@ -174,7 +174,11 @@ re-emit if in doubt.
    the routed-blocking evidence is arm-dependent
    (`docs/placement-predictors.md`).
    WHICH pad-pad channel: the pad-INTERSECTION count, which is
-   `check_assembly`'s `blocking` and the routing loop's L2 refusal. The
+   `check_assembly`'s `blocking` and the routing loop's L2 refusal. **Gate on
+   `buildable`, not on that count** (#918): `blocking` is ONE of five
+   `not_buildable` conjuncts, so a board unbuildable through a locked contact,
+   a coincident-origin stack, a containment or a moved-vs-baseline courtyard
+   gate reads `blocking == 0` and is not buildable at all. The
    clearance-GRAZE count (`pad_conflicts`) is reported and not gated -- #788
    measured it as redundant with that refusal, not as unimportant, and the
    reason is written beside the gate in `loop_driver.py`.
@@ -593,7 +597,7 @@ Each lap:
    and a routing failure later classified placement-shaped RE-ENTERS this loop —
    until the verifier passes.
 
-4. **Repeat** until: `check_assembly` blocking == 0 AND no undispositioned
+4. **Repeat** until: `check_assembly` reports `buildable: true` AND no undispositioned
    NEW-vs-baseline advisory pair AND bare `check_drc` == 0 — or a lap reports a
    finding **measured-unfixable** (locked pair, no legal slot), which stops the loop
    with the named pairs and reasons, never with "done". Cap: 5 laps (each is

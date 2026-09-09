@@ -670,7 +670,10 @@ success message.
 Three rules about that number:
 
 - **`blocking` must reach 0 before a board is deliverable.** It is
-  `unrouted + broken + drc + undersized + floorplan + impedance + length`.
+  `unrouted + broken + drc + undersized + floorplan + assembly + impedance +
+  length + net_widths` -- NINE components, which is what `board_score.py`'s
+  `parts` dict sums (#918: this line said seven for as long as `assembly` and
+  `net_widths` had existed).
   `quality` (vias, copper length) is a **tie-break only**, compared once
   `blocking` is 0 — otherwise a router buys off a disconnected net with a lower
   via count.
@@ -1160,7 +1163,9 @@ What it checks, each with the artifact that decides:
    with no names in the lever text is a FAIL (the whack-a-mole rule above).
 5. **Assembly-clean** (run 6; placement-phase and fix-loop boundaries) —
    the verifier additionally receives the fresh `check_assembly` JSON and
-   the render JSON, and FAILS unless `blocking == 0`, the checklist's
+   the render JSON, and FAILS unless the JSON's `buildable` is `true`
+   (NOT `blocking == 0` -- that is 1 of its 5 not_buildable conjuncts,
+   #918), the checklist's
    `b_body_overlap_pairs` is empty, and every NEW-vs-baseline advisory
    pair is either fixed or dispositioned in the entry. A claim of
    "placement done" with no attached `check_assembly` JSON is itself a

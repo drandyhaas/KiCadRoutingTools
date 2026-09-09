@@ -195,11 +195,13 @@ on this page describes what a step *claims*; this describes what the board *is*.
 
 | key | decision |
 |---|---|
-| `blocking` | **must reach 0 before the board is deliverable.** `unrouted + broken + drc + undersized + floorplan + impedance + length` |
+| `blocking` | **must reach 0 before the board is deliverable.** `unrouted + broken + drc + undersized + floorplan + assembly + impedance + length + net_widths` -- NINE, re-derived from `board_score.py`'s own `parts` dict by `tests/test_918_gate_wording.py` |
 | `blocking_by.<component>` | names WHERE the blocking sits. **The largest entry is NOT automatically the lever** -- that rule wrecked a run. Choose by the connectivity-first ladder (unrouted -> broken -> widths -> floorplan -> drc); an entry's size ranks within a rung, never across rungs |
 | `quality` = `{vias, copper_mm, segments}` | tie-break **only** at `blocking == 0`. Comparing it earlier lets a router trade a disconnected net for a lower via count |
 | `ungraded` | components nothing examined (no `--intent`, no `--impedance-nets`, no `--length-groups`). **Report as unexamined, never as clean** |
 | `unknown` | a component that was asked for and could not run. `blocking` is `null`, not 0 — the loop must not stop here |
+| `components.assembly.buildable` / `.verdict` | **`check_assembly`'s OWN verdict, over all FIVE `not_buildable` conjuncts.** Its `blocking` is one of the five, so a board unbuildable through a locked contact, a coincident-origin stack, a containment or a moved-vs-baseline courtyard gate carries `blocking == 0` and is still NOT BUILDABLE (#918). `buildable: false` is not deliverable at any `blocking` |
+| `components.assembly.conjuncts` / `.count_basis` | the five conjunct counts as published, and which of them `count` was built from. `courtyard_blocking_gating` is **`null` here by construction** — board_score passes no `--baseline`, so the fifth conjunct is structurally unarmed; `conjuncts_unmeasured` names it. Not measured is **not** measured clean |
 | `components.drc.graded_at` | the clearance actually graded at. Confirm it is the routed floor; stricter invents violations, looser hides them |
 | `components.drc.by_type` | `segment-segment`, `pad-segment`, … — clearance conflicts |
 | `components.undersized.by_type` | `track-width`, `via-size`, `via-drill-size` — **sub-spec copper**, graded separately per floor. Note what this cannot see: diameter and drill are tested independently, so a via whose ring is zero (a 0.3/0.3 via) passes both — removing such vias earns no credit here; state it in the ledger |

@@ -116,16 +116,35 @@ def _gates(board, clearance):
             # which is still truthy for the `> 0` gate but cannot be mistaken
             # for a measured count if this is ever read quantitatively.
             nv = -1
-    asm = subprocess.run(
-        [sys.executable, '-X', 'utf8', os.path.join(ROOT, 'py_tools', 'check_assembly.py'),
-         board, '--clearance', str(clearance)],
-        capture_output=True, text=True)
-    blocking = 0
-    for line in asm.stdout.splitlines():
-        s = line.strip()
-        if s.startswith('blocking '):
-            blocking = int(s.split()[1])
-            break
+    # READ THE JSON, do not scrape stdout (#918). `blocking` is ONE of
+    # check_assembly's five `not_buildable` conjuncts (check_assembly.py's
+    # :508-510), so a board unbuildable through a locked contact, a
+    # coincident-origin stack, a containment or a moved-vs-baseline courtyard
+    # gate prints `blocking 0` and qualified as a stress subject. The producer
+    # publishes `buildable` precisely so no reader re-derives the disjunction;
+    # this was the second consumer that still did, and it derived it from
+    # PRINTED TEXT, which the verdict line does not even appear in.
+    with tempfile.TemporaryDirectory(prefix='qualify_asm_') as _t:
+        _j = os.path.join(_t, 'assembly.json')
+        subprocess.run(
+            [sys.executable, '-X', 'utf8',
+             os.path.join(ROOT, 'py_tools', 'check_assembly.py'),
+             board, '--clearance', str(clearance), '--json', _j],
+            capture_output=True, text=True)
+        doc = {}
+        if os.path.isfile(_j):
+            try:
+                with open(_j, encoding='utf-8') as fh:
+                    doc = json.load(fh)
+            except Exception:                               # noqa: BLE001
+                doc = {}
+    if not isinstance(doc.get('buildable'), bool):
+        # -1 is "unknown", exactly as the DRC arm above uses it: still truthy
+        # for the `> 0` gate, and impossible to mistake for a measured count.
+        return nv, -1
+    blocking = int(doc.get('blocking') or 0)
+    if not doc['buildable']:
+        blocking = max(blocking, 1)
     return nv, blocking
 
 

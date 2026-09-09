@@ -50,6 +50,7 @@ T799 = os.path.join(_TESTS, 'test_799_zone_pose_feasibility.py')
 T702 = os.path.join(_TESTS, 'test_702_quench_intent_gate.py')
 T549S = os.path.join(_TESTS, 'test_549_floorplan_schema.py')
 TBS = os.path.join(_TESTS, 'test_board_score_floorplan_severity.py')
+T918 = os.path.join(_TESTS, 'test_918_assembly_verdict.py')
 
 ROWS = [
     # ---- #799: the four false-ERROR guards --------------------------------
@@ -208,6 +209,24 @@ ROWS = [
      "    return {'ran': True, 'count': len(errors),\n",
      "    return {'ran': True, 'count': len(viols),\n",
      (TBS,), 'KILLED'),
+
+    # ---- #918: the VERDICT, not one of its five conjuncts ------------------
+    # The exact regression: `blocking` is check_assembly's pad-intersection
+    # count and is the FIRST of five `not_buildable` conjuncts, so a board
+    # unbuildable through any of the other four scored 0 against the headline
+    # the whole loop ranks and stops on.
+    ('assembly-reads-blocking-alone-again', 'bs',
+     "        count = max(total, 1)\n",
+     "        count = int(doc.get('blocking') or 0)\n",
+     (T918,), 'KILLED'),
+
+    # ...and the self-check that refuses an instrument disagreeing with
+    # itself. Without it a check_assembly that exits 4 while publishing
+    # `buildable: true` gets reported as a measurement.
+    ('assembly-trusts-a-self-contradicting-instrument', 'bs',
+     "    if (rc == 4) != (not buildable):\n",
+     "    if False:\n",
+     (T918,), 'KILLED'),
 ]
 
 # Every anchor must match its target exactly once BEFORE anything is
