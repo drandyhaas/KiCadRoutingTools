@@ -362,10 +362,15 @@ ROWS = [
     # of the four boards -- ulx3s 41 -> 38, orangecrab 16 -> 14, watchy 5 -> 4,
     # esp_prog 4 -> 4 -- so the body model does exactly what #916 says it does:
     # the search stops seating parts whose real bodies collide. What sank it is
-    # the GUARDS: `crossings` and `hpwl` worsen on esp_prog, ulx3s and
-    # orangecrab, because an `occupancy_local` box only ever GROWS and a more
-    # constrained search finds fewer moves. Measured on esp_prog: the OFF arm
-    # moved 11 footprints, the ON arm 3.
+    # the GUARDS, and they are not uniform: `crossings` worsens on all three of
+    # esp_prog, ulx3s and orangecrab, while `hpwl` worsens on ulx3s and
+    # orangecrab only -- on esp_prog it IMPROVES (262.75 -> 258.84). An earlier
+    # draft of this paragraph said both worsened on all three; a fact-check
+    # caught it against this table's own baseline, which is the point of
+    # recording numbers in the baseline rather than in prose.
+    #
+    # The mechanism is that an `occupancy_local` box only ever GROWS, so a more
+    # constrained search finds fewer moves.
     #
     # So this is a real TRADE and not a failure of the mechanism: less body
     # overlap, bought with wirelength and crossings. Whether that is worth it
@@ -403,7 +408,7 @@ ROWS = [
         'guard': ('body_blocking', 'crossings', 'hpwl'),
         'expect': 'regress',
         'rejected': True,
-        'why': ('MEASURED: signal NEUTRAL (4 -> 4) and `crossings` 35 -> 43. The board #896 was filed from and the clearest freeze evidence: OFF moved 11 footprints, ON moved 3, because 0 of its 21 footprints draw a courtyard so every seat box grows at once.'),
+        'why': ('MECHANISM: the board #896 was filed from -- 0 of its 21 footprints draw a courtyard, so every seat box grows at once and the search is the most constrained it can be. Its numbers are in the baseline; an earlier draft of this string quoted them here, which is what CLAUDE.md forbids.'),
     },
     {
         'name': 'body-ulx3s',
@@ -415,7 +420,7 @@ ROWS = [
         'guard': ('body_blocking', 'crossings', 'hpwl'),
         'expect': 'regress',
         'rejected': True,
-        'why': ('MEASURED: signal IMPROVED 41 -> 38, but `crossings` 2418 -> 2437, `hpwl` 7476.69 -> 7509.09 and zone_containment 3 -> 4. The largest board, and the clearest statement of the trade.'),
+        'why': ('MECHANISM: the largest board where #916 measured growth, and the one whose two incumbent rows make an OFF arm directly comparable to the rest of the table. Both guards and zone_containment move against the signal here -- the trade in its clearest form.'),
     },
     {
         'name': 'body-orangecrab',
@@ -427,7 +432,7 @@ ROWS = [
         'guard': ('body_blocking', 'crossings', 'hpwl'),
         'expect': 'regress',
         'rejected': True,
-        'why': ('MEASURED: signal IMPROVED 16 -> 14, `crossings` 1087 -> 1121, `hpwl` 2121.92 -> 2147.78. Same trade as ulx3s.'),
+        'why': ('MECHANISM: named by #916, and it carries a container footprint (U8) -- the class whose waiver behaviour changes when a body crosses CONTAINER_RATIO. Same shape of trade as ulx3s.'),
     },
     {
         'name': 'body-watchy',
@@ -438,7 +443,7 @@ ROWS = [
         'guard': ('body_blocking', 'crossings', 'hpwl'),
         'expect': 'improve',
         'rejected': True,
-        'why': ('MEASURED: the board where the trade goes the OTHER way -- signal 5 -> 4 AND both guards improve (crossings 149 -> 147, hpwl 777.13 -> 765.26). Kept because it is the row that disagrees with the other three, and deleting it is how a finding becomes folklore.'),
+        'why': ('MECHANISM: the board candidate_valid names as the one where nearly every part starts in violation, so it is the most sensitive to a seat box that only grows -- and the one board where the trade goes the OTHER way, signal and both guards together. Kept because it DISAGREES with the other three, and deleting the dissenting row is how a finding becomes folklore.'),
     },
 ]
 

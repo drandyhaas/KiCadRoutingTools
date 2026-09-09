@@ -749,6 +749,18 @@ it in the engine, which keeps both properties at once:
   not modified, and a default `place_optimize.py` run is bit-identical with
   the portfolio in the tree.
 
+- Randomness is scoped, never ambient: candidate i draws from
+  `random.Random(f"{seed}:{i}:{strategy}")`, so the portfolio is a pure
+  function of (board, knobs, seed) and any single candidate replays alone
+  via `--only i`. `tests/test_portfolio_determinism.py` pins this across
+  PYTHONHASHSEED values, test_457-style.
+- Ranking is a lexicographic tuple of numbers this document already
+  establishes as trustworthy — crossings, the inversion lower bound, hpwl,
+  the floorplan health signals, displacement — and the top candidates are
+  probe-ROUTED (`--route-top`, default 2), because proxies propose and the
+  router disposes applies to a slate exactly as it applies to a single
+  repair.
+
 ### The same bound as an objective term (#893)
 
 `--facing-weight` puts `pair_order`'s inversion count into `quench.total_cost`
@@ -770,18 +782,6 @@ quenches each with an unmodified objective, so a rotation that would only pay
 off after the quench settles is never proposed; the weight makes the ordinary
 move loop able to turn a part mid-descent. They are complementary, and the
 portfolio remains the cheaper first thing to try.
-- Randomness is scoped, never ambient: candidate i draws from
-  `random.Random(f"{seed}:{i}:{strategy}")`, so the portfolio is a pure
-  function of (board, knobs, seed) and any single candidate replays alone
-  via `--only i`. `tests/test_portfolio_determinism.py` pins this across
-  PYTHONHASHSEED values, test_457-style.
-- Ranking is a lexicographic tuple of numbers this document already
-  establishes as trustworthy — crossings, the inversion lower bound, hpwl,
-  the floorplan health signals, displacement — and the top candidates are
-  probe-ROUTED (`--route-top`, default 2), because proxies propose and the
-  router disposes applies to a slate exactly as it applies to a single
-  repair.
-
 The perturb-then-descend shape is classical basin hopping (Wales & Doye) —
 the "extend the scorer to evaluate a perturbation" note in the SA section
 above, finally built, with the acceptance step replaced by an explicit

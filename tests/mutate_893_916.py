@@ -49,8 +49,18 @@ KILLED = 'KILLED'
 #: whatever was convenient to quote (#877).
 ROWS = [
     # ---- #893 pair_order hot path ------------------------------------------
-    # The 6.7x-faster WRONG draft, reproduced exactly: hand the queried ref's
-    # pads to side A regardless of which slot it occupies.
+    # The SLOT is load-bearing: `pair_metrics` builds `order_a` from the FIRST
+    # ref's pads and takes its channel axis as `b - a`, so handing the queried
+    # ref's pads to the wrong side changes both the axis sign and the
+    # `(projection, nid)` tie-break.
+    #
+    # NOT the 6.7x draft "reproduced exactly", which an earlier version of this
+    # comment claimed and a fact-check disproved: that draft ALSO skipped the
+    # `ref < other` swap, so it reported ulx3s U2 as 358 against a truth of 26.
+    # This row keeps the swap and only mis-slots the pads, which measures 7 --
+    # a milder wrong, and it does the same work so it is not faster at all.
+    # A milder mutation is a STRONGER test (it is closer to correct and still
+    # caught); the overclaim was the problem, not the row.
     ('pair-order-pads-always-side-a', 'po',
      """        m = (pair_metrics(state, ref, other, pose_a=pose, pads_a=pads)
              if ref < other
@@ -90,7 +100,8 @@ ROWS = [
      """        if self.facing_weight <= 0.0:
             return 0.0
         if exclude:""",
-     """        if False:
+     """        if self.facing_weight < 0.0:
+            return 0.0
         if exclude:""",
      (T_FACING,), KILLED),
 

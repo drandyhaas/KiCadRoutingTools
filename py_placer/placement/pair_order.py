@@ -88,6 +88,16 @@ def part_pad_globals(part, pose=None):
     hoists in this module together take `ref_inversions` from ~1430 us to the
     low hundreds. The list is materialised because callers iterate it many
     times; `pad_globals` may be a generator.
+
+    ON THE SPEED-UP FIGURES, because they are machine-dependent and were nearly
+    reported as if they were not: measured here as 1.35x / 1.11x / 1.34x on
+    esp_prog / tigard / ulx3s, and independently on another box as 1.25x /
+    1.75x / 2.53x -- same direction, different magnitudes, and a different
+    per-board ORDER. What is NOT machine-dependent, and is what
+    `tests/test_893_pair_order_equivalence.py` actually pins, is that the
+    inversion counts are unchanged: 16 / 384 / 1138 on those three boards
+    before and after. Trust the equivalence; treat any single speed-up number
+    as an anecdote from one machine.
     """
     x, y, rot = pose if pose is not None else (part.x, part.y, part.rot)
     return list(part.pad_globals(x, y, rot))
