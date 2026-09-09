@@ -238,6 +238,42 @@ def mating_faces(pcb_data, pcb_file: str, clearance: float):
     return out
 
 
+def serves_map(pcb_data) -> dict:
+    """`{cap_ref: (ic_ref, distance_mm)}` -- what each passive SERVES.
+
+    The decap tether election RESTRICTED to the module's own radius
+    (`groups.DECAP_RADIUS_MM`), which is what `parts[].serves` publishes and
+    what makes the column honest. The raw election is radius-free and always
+    names SOMETHING: on the run-25 fixture it puts a bulk capacitor 17.24mm
+    from the USB socket, which is not a fact about what that capacitor serves.
+
+    Extracted from `build_context` (#894) so a scoring pass can have this one
+    column without paying for the whole sheet -- `build_context` builds a
+    QuenchState TWICE and reads the board file three more times for bodies.
+    One implementation, two callers.
+
+    KNOWN INCOMPLETE, and the incompleteness is the reason #894's
+    `cluster_to_pin` does not rest on it alone: the election is syntactic (a
+    ref starting `C` bridging exactly two nets) and its target must carry
+    `groups.DECAP_MIN_IC_PADS` = 4 copper pads, so a 3-pad SOT89 regulator can
+    never be elected at any radius and its own bulk capacitors are unservable
+    by construction. The DECLARED channel (#902's `proximity` claims) is what
+    reaches those; this is what covers the parts nobody declared.
+
+    Never raises: an unreadable board yields `{}`, which the caller must treat
+    as "not measured" and not as "nothing serves anything".
+    """
+    tethers = {}
+    try:
+        from placement.groups import DECAP_RADIUS_MM
+        for cap, ic, dist in _elect(pcb_data):
+            if ic and dist is not None and dist <= DECAP_RADIUS_MM:
+                tethers[cap] = (ic, dist)
+    except Exception:                                        # noqa: BLE001
+        tethers = {}
+    return tethers
+
+
 def build_context(pcb_data, pcb_file: str, *, clearance: float,
                   track_width: float, brief=None) -> Dict[str, object]:
     """The whole document, as data. `format_md` renders it."""
@@ -264,21 +300,7 @@ def build_context(pcb_data, pcb_file: str, *, clearance: float,
         pairs = list_nets.find_differential_pairs(pcb_data)
     except Exception:                                        # noqa: BLE001
         pairs = {}
-    # `serves` is the tether election RESTRICTED to the near population.
-    # The raw election is radius-free and always names SOMETHING: on esp_prog
-    # it puts C1 17.24mm from the USB socket, which is not a fact about what
-    # C1 serves. #902 is the issue for the election itself (a 3-pad regulator
-    # can never be a target, `DECAP_MIN_IC_PADS = 4`); until then this column
-    # reports only what is within the module's own radius and says nothing
-    # otherwise.
-    tethers = {}
-    try:
-        from placement.groups import DECAP_RADIUS_MM
-        for cap, ic, dist in _elect(pcb_data):
-            if ic and dist is not None and dist <= DECAP_RADIUS_MM:
-                tethers[cap] = (ic, dist)
-    except Exception:                                        # noqa: BLE001
-        tethers = {}
+    tethers = serves_map(pcb_data)
 
     declared_roles = {}
     if brief is not None:
