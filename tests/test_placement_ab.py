@@ -60,10 +60,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOARDS = os.path.join(ROOT, 'kicad_files')
 
-# Fourteen full quenches (7 rows x off/on) over four distinct boards. 233-340 s
-# of row time for the first three rows; the #702 rows add roughly as much
-# again. Declared with headroom so a slower box reports FAIL, not TIME.
-RUN_ALL_TIMEOUT = 1800
+# Twenty-two full quenches (11 rows x off/on) over six distinct boards.
+# 233-340 s of row time for the first three rows; the #702 rows add roughly as
+# much again, and #916's four `body-*` rows add two large boards (ulx3s,
+# orangecrab) plus two cheap ones (esp_prog 21 parts, watchy 86). Declared with
+# headroom so a slower box reports FAIL, not TIME.
+RUN_ALL_TIMEOUT = 3600
 
 DEFAULT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'placement_ab_baseline.json')
@@ -85,6 +87,7 @@ GROUP_SOURCES = ('kicad', 'sheet')
 # "0.0 -> 806.84" is not a regression, it is a comparison that was never made,
 # and recording it as evidence would pin a fiction.
 BASELINE_INT_KEYS = ('crossings', 'health_bus_foreign_crossings',
+                     'inversions', 'body_blocking', 'body_advisory',
                      'intent_errors', 'intent_errors_enforced',
                      'intent_errors_other')
 BASELINE_FLOAT_KEYS = ('hpwl', 'health_block_displacement_max_mm')
@@ -344,6 +347,80 @@ ROWS = [
                 'four is not a term, and deleting the dissenting row is how '
                 'that becomes folklore.'),
     },
+    # --- #916: the SEARCH's body currency -------------------------------
+    #
+    # ON TRIAL, deliberately. #916's acceptance asks for this table "run as a
+    # GATE: three trial boards, paired and directional", so these rows carry
+    # no `expect` and `gate()` judges them by the N-1 rule. The alternative --
+    # pinning them, the way #834's currency change moved every row and added
+    # none -- would record what happened without ever letting it fail.
+    #
+    # FOUR boards, and they are not the table's usual four. #916 measured
+    # WHERE bodies actually change: ulx3s 9 parts, watchy 5, esp_prog 5,
+    # orangecrab_ext_pll 4, out of 23 growing parts on 4 of 22 corpus boards.
+    # Two of the incumbent four (coldfire, rp2350) are not among them, so a
+    # row there would be inert -- and under the trial rule a neutral board
+    # counts in N while never counting as an improvement, i.e. it can only
+    # hurt. esp_prog and watchy are added for that reason and no other.
+    #
+    # SIGNAL `body_advisory`, not the quench's own `overlap_area`: see
+    # `_body_overlap`. The seat boxes GROW under this flag, so any metric
+    # measured in the search's own currency rises mechanically. The signal is
+    # re-derived from the written board with the same ruler on both arms.
+    #
+    # esp_prog and watchy emit ZERO blocks (no kicad/sheet groups), so
+    # `intent_errors*` is 0 on both arms there and
+    # `health_bus_foreign_crossings` is None. That is fine for these rows --
+    # their signal and guards are all block-independent -- but it is why they
+    # could not have used the `intent-*` rows' signal.
+    {
+        'name': 'body-esp_prog',
+        'board': 'esp_prog.kicad_pcb',
+        'corridors': [],
+        'quench_on': {'body_model': True},
+        'signal': 'body_advisory',
+        'guard': ('body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: the board #896 was filed from -- 0 of its 21 '
+                'footprints draw a courtyard, so every part is seated against '
+                'a pad box today while every grader sees a drawn body. '
+                'Measured: 5 parts grow, 0 shrink, largest U2 by 4.7x.'),
+    },
+    {
+        'name': 'body-ulx3s',
+        'board': 'ulx3s.kicad_pcb',
+        'corridors': [],
+        'ignore_nets': ['GND', '+3V3', '+5V', 'VCC*'],
+        'quench_on': {'body_model': True},
+        'signal': 'body_advisory',
+        'guard': ('body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: the largest board where #916 measured growth (9 '
+                'parts), and the one whose two incumbent rows make an OFF arm '
+                'directly comparable to the rest of the table.'),
+    },
+    {
+        'name': 'body-orangecrab',
+        'board': 'orangecrab_ext_pll.kicad_pcb',
+        'corridors': [],
+        'ignore_nets': ['GND', '+3V3', '+1V1', 'VCC*'],
+        'quench_on': {'body_model': True},
+        'signal': 'body_advisory',
+        'guard': ('body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: named by #916 (4 parts grow), and it carries a '
+                'container footprint (U8), which is the class whose waiver '
+                'behaviour changes when a body crosses CONTAINER_RATIO.'),
+    },
+    {
+        'name': 'body-watchy',
+        'board': 'watchy.kicad_pcb',
+        'corridors': [],
+        'quench_on': {'body_model': True},
+        'signal': 'body_advisory',
+        'guard': ('body_blocking', 'crossings', 'hpwl'),
+        'why': ('MECHANISM: named by #916 (5 parts grow), and the board '
+                'candidate_valid names as the one where nearly every part '
+                'starts in violation -- so it is the most sensitive to a seat '
+                'box that only ever grows.'),
+    },
 ]
 
 QUENCH_BASE = dict(
@@ -390,6 +467,53 @@ def _intent_for(board_path, corridors, workdir, zone_flags=None):
     with open(path, 'w') as fh:
         json.dump(doc, fh, indent=2)
     return floorplan.load_intent(path)
+
+
+def _body_overlap(pcb_data, board_path, clearance):
+    """`legality.grade_body_overlap` on the WRITTEN board -> (blocking, advisory).
+
+    THE CURRENCY IS FIXED ACROSS ARMS, and that is the whole point. The
+    quench's own `legality_metrics()['overlap_area']` is measured with the
+    state's own rects, so under `body_model=True` it rises mechanically
+    because the boxes grew -- comparing that between arms compares two
+    different rulers and would report the #916 fix as a large regression.
+    `grade_body_overlap` re-derives bodies from the file through
+    `placement.body` regardless of what the search was seated on, so both arms
+    are measured with the same ruler and a difference means the PLACEMENT
+    moved, not the yardstick.
+
+    `advisory` is the body channel (unwaived fab/courtyard pairs) and is what a
+    seat-geometry change should move; `blocking` is the pad-intersection hard
+    channel, carried as a guard.
+    """
+    try:
+        from placement import legality
+        doc = legality.grade_body_overlap(pcb_data, clearance,
+                                          pcb_file=board_path)
+        return int(doc.get('blocking') or 0), int(doc.get('advisory') or 0)
+    except Exception as exc:                       # pragma: no cover - evidence
+        print('    body overlap unmeasurable: %s: %s'
+              % (type(exc).__name__, exc))
+        return None, None
+
+
+def _inversions(pcb_data, board_path):
+    """Total pin-order inversions on a written board, or None if unmeasurable.
+
+    `pair_inversions` counts each unordered pair once (summing `ref_inversions`
+    over every ref would double every pair, once from each end). None rather
+    than 0 when the state cannot be built: `record_for` refuses a measurement
+    missing a compared key, and a 0 here would read as a perfect board.
+    """
+    try:
+        import pose_score
+        from placement.pair_order import pair_inversions
+        st = pose_score.make_state(pcb_data, board_path)
+        return int(sum(m['inversions'] for m in pair_inversions(st).values()))
+    except Exception as exc:                       # pragma: no cover - evidence
+        print('    inversions unmeasurable: %s: %s'
+              % (type(exc).__name__, exc))
+        return None
 
 
 def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES):
@@ -446,6 +570,7 @@ def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES):
     enforced = sum(n for r, n in by_rule.items()
                    if r in INTENT_ENFORCED_RULES)
     gate = metrics.get('intent_gate')
+    _bb, _ba = _body_overlap(graded, out_path, quench_kw.get('clearance', 0.2))
     return {
         'seconds': round(time.time() - t0, 1),
         'crossings': after.get('crossings'),
@@ -465,6 +590,27 @@ def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES):
         # threshold-free and always live.
         'health_block_displacement_max_mm':
             summary.get('health_block_displacement_max_mm'),
+        # #893/#916. Pin-order inversions over the WRITTEN board -- the same
+        # lower bound `placement_score.pin_order_crossings` reads, summed over
+        # unordered pairs by `pair_inversions` so each physical pair counts
+        # once. Re-derived here from the final poses, like every other column
+        # in this dict, rather than read out of the optimizer's own state.
+        #
+        # ON THE CIRCULARITY, STATED RATHER THAN HIDDEN: for a row whose ON arm
+        # arms `facing_weight`, this is the quantity the search minimises, so
+        # "it improved" is nearly tautological and the GUARDS are what carry
+        # the row. It is not circular for the `body-*` rows, which change the
+        # seat geometry and not the objective. The honest use is as evidence a
+        # rotation actually moved, paired with `crossings`/`hpwl` guards that
+        # the term does not optimise.
+        'inversions': _inversions(graded, out_path),
+        # #916. The body channel, in a currency fixed across arms -- see
+        # `_body_overlap`. `body_advisory` is what a seat-geometry change is
+        # expected to move; `body_blocking` is the pad-intersection hard
+        # channel, carried as a guard so a row cannot buy advisory pairs with
+        # real shorts.
+        'body_blocking': _bb,
+        'body_advisory': _ba,
         'intent_errors': summary.get('errors'),
         'intent_errors_by_rule': by_rule,
         'intent_errors_enforced': enforced,
@@ -912,6 +1058,7 @@ def _self_test():
             'health_bus_foreign_crossings': 62,
             'health_block_displacement_max_mm': 17.95,
             'intent_errors': 14,
+            'inversions': 40, 'body_blocking': 2, 'body_advisory': 9,
             'intent_errors_enforced': 4, 'intent_errors_other': 10,
             'intent_gate_rejected': None,
             'intent_errors_by_rule': {'block_unresolved': 10,
@@ -920,6 +1067,7 @@ def _self_test():
            'health_bus_foreign_crossings': 55,
            'health_block_displacement_max_mm': 18.09,
            'intent_errors': 17,
+           'inversions': 38, 'body_blocking': 2, 'body_advisory': 7,
            'intent_errors_enforced': 7, 'intent_errors_other': 10,
            'intent_gate_rejected': None,
            'intent_errors_by_rule': {'block_unresolved': 10,
