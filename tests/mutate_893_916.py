@@ -40,6 +40,13 @@ T_BODY = os.path.join(_TESTS, 'test_916_search_body_model.py')
 
 KILLED = 'KILLED'
 
+#: FOUR rows were RE-ANCHORED after the pre-push review changed the very lines
+#: they quote (`_facing_cost` gained an `exclude` branch, the seeder ladder
+#: became `_ladder_rots`, the early-out went through `other_part`). The
+#: pre-flight caught all four as STALE before the battery ran, which is the
+#: whole point of it: a stale row mutates nothing and every gate it names
+#: passes for free. Each still expresses the SAME mutation, never widened to
+#: whatever was convenient to quote (#877).
 ROWS = [
     # ---- #893 pair_order hot path ------------------------------------------
     # The 6.7x-faster WRONG draft, reproduced exactly: hand the queried ref's
@@ -56,8 +63,8 @@ ROWS = [
     # The early-out must reproduce pair_metrics' own test. Off by one and it
     # drops real scoring pairs.
     ('pair-order-early-out-drops-two-net-pairs', 'po',
-     "        if len(own_nets & _part_net_set(state, other, state.parts[other])) < 2:",
-     "        if len(own_nets & _part_net_set(state, other, state.parts[other])) < 3:",
+     "        if len(own_nets & _part_net_set(state, other, other_part)) < 2:",
+     "        if len(own_nets & _part_net_set(state, other, other_part)) < 3:",
      (T_EQUIV,), KILLED),
 
     # SURVIVED, and the row is kept because the SURVIVAL is the finding: the
@@ -82,8 +89,9 @@ ROWS = [
     ('facing-no-early-return-at-zero', 'q',
      """        if self.facing_weight <= 0.0:
             return 0.0
-        return self.facing_weight * ref_inversions(self, ref, x, y, rot)""",
-     """        return self.facing_weight * ref_inversions(self, ref, x, y, rot)""",
+        if exclude:""",
+     """        if False:
+        if exclude:""",
      (T_FACING,), KILLED),
 
     # The real bug from the first draft: per-ref summation double-counts.
@@ -99,7 +107,7 @@ ROWS = [
 
     # Dropping the term from the objective entirely.
     ('facing-not-in-part-geometry-cost', 'q',
-     "        pen += self._facing_cost(ref, x, y, rot)\n",
+     "        pen += self._facing_cost(ref, x, y, rot, exclude)\n",
      "",
      (T_FACING,), KILLED),
 
@@ -166,11 +174,11 @@ ROWS = [
 
     # The declared ladder must reach the seat search, or the claim is inert.
     ('rotation-ladder-not-honoured', 'sd',
-     """            for rot in (list(rotations) if rotations is not None
-                        else [part.rot] + [(part.rot + d) % 360
-                                           for d in (90.0, 180.0, 270.0)]):""",
-     """            for rot in [part.rot] + [(part.rot + d) % 360
-                                     for d in (90.0, 180.0, 270.0)]:""",
+     """            _ladder_rots = (list(rotations) if rotations is not None
+                            else [part.rot] + [(part.rot + d) % 360
+                                               for d in (90.0, 180.0, 270.0)])""",
+     """            _ladder_rots = ([part.rot] + [(part.rot + d) % 360
+                                          for d in (90.0, 180.0, 270.0)])""",
      (T_ROT,), KILLED),
 
     # A SECOND seating stage. The first version of this work threaded the
