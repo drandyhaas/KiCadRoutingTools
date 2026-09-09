@@ -308,10 +308,17 @@ the order worth taking them, each with what is known.
    (8 passes, the last ships) and SA9 is never planned -- its menu is
    banned away. A net whose menu is exhausted gets its achieved berth
    back as a menu entry ("freeze what worked"); measure K41 / K51.
-8. **Try the packing** (take4's `pack_lanes` / `relax_attract`: a
-   follow-the-neighbour force pulling each lane to `pitch` from the
-   nearest packed lane on its layer). Tidier rivers for the same grade
-   at K28, and packed rivers leave room for the swimmers and their vias.
+8. **The packing -- BUILT 2026-09-09 (`pack.py`, opt-in `BRAID_PACK=1`;
+   the section "The pack: every lane a taut string against its
+   neighbour"). Every lane, vias included, relaxed as one taut string
+   against the board as it stands and re-emitted octilinear where a
+   build clears; from the roomy side of the corridor inward. 0 open 0
+   DRC at K28/35/41 with the vias unchanged; K28 1574 -> 1012
+   segments and the rivers read as a hand would draw them, K41 2258 ->
+   1992; K35 1435 -> 1620 (its base was already clean and spread, and
+   packing it round the swimmers' vias makes every lane copy the wrap).
+   Pack 4.7 / 7.5 / 10.0 s. Not a default: the K35 row and the wavy
+   wraps (below) first.**
 9. **A better routing order.** Lanes are laid sequentially -- pages in
    target order, then swimmers largest displacement first, refused
    lanes boosted next attempt -- and every refusal the rip repairs is a
@@ -1392,6 +1399,255 @@ chain 2 min 24 s, the machine otherwise idle.
 Left: `blocking_analysis._NET_CELLS_MEMO`, production, ~85 MB by the end
 of the rip phase; and the taut memo in the fanout stage (K41: 244
 shards, ~140 MB resident at the compact ratio).
+
+### The pack: every lane a taut string against its neighbour (2026-09-09)
+
+`pack.py`, TODO 8, opt-in with `BRAID_PACK=1` and run by `write_out`
+after the production smoother. The idea, and the whole of it: after a
+corridor's lanes are laid, each lane's copper -- every run on either
+layer and every via joining them -- is ONE polyline from tooth to
+landing, and it is relaxed as a taut string between its two ends
+(which never move) against the board AS IT STANDS: curve shortening
+against every obstacle on its layer (pads, foreign copper, the other
+lanes, vias, the board edge -- capsules inflated by the clearance and
+half a track, so contact IS the clearance; a via point against both
+layers at the via's own radius), plus a FOLLOW force that snaps each
+track point into the tube of the settled copper on its layer wherever
+the string runs alongside it, on the packing side, in plain sight. A
+via moves with its lane: nothing pulls it directly, the string does.
+The relaxed string is emitted run by run as octilinear copper where a
+build clears, validated piece by piece at the true radii, and a lane
+whose copper fails keeps the router's -- legal by construction beside
+the packed ones, because every lane packed against the others as they
+stood.
+
+The order across the corridor is the plan's target slots, **from the
+outer lane with more room on its outer side, inward**: the first lane
+hugs whatever settled copper stands beside it and otherwise goes
+taut; every next lane hugs the one packed just before it that has
+copper on its layer (a page lane on the back has nothing to hug in a
+front lane's copper -- the predecessor and the hug side are per
+layer), on the roomy side, and its elbows bulge into the room that
+lane vacated. A bundle of router staircases across a corridor becomes
+nested elbows only in this order, each lane moving before the lane it
+would cross. Measured on K28 with the same emitter: from the wall
+inward 23/53 runs octilinear and 1429 segments (it hugs the ragged
+static copper and never has the room); the centre outward 28/52 and
+1226 (the centre stays a staircase every hug copies); the roomy side
+inward 29/51 and 949.
+
+The emitter reads the string's own structure. The settled copper on
+the layer is chained and simplified at 0.03 mm into CHORDS (a router
+staircase of 0.05 mm pieces is one chord; a packed lane's grid legs
+are their own), and every maximal group of points hugging one chord
+at one distance becomes ONE line in that chord's direction -- snapped
+to the grid only when the snap moves the line's far end by under 10
+um (a 2-degree snap moves the end of a 6 mm hug by 0.2 mm, into the
+neighbour) -- at the distance the string settled at; every free group
+becomes the grid legs of its chords (a chord within 2 degrees of a
+grid direction is one line; any other the two legs that span it, the
+corner that clears). The lines are met at their intersections
+(parallel neighbours merged under 60 um of offset, else joined by a
+45-degree jog; a leg that reverses or falls under 50 um drops its
+line and the rest are met again). A leg that still cuts the model is
+REPAIRED alone -- replaced by the string's own chords between its
+ends, at the 12 um the true-radius validation allows -- so a run is
+any-angle only where a leg had no room: an arc round a via between
+two hug lines. The whole run falls back to the string's chords only
+when the build itself fails (two lines running opposite ways).
+
+What lost on the way (all measured on K28; the session memory has the
+list): the string steering the router inside a tube (the router
+refused the exact pitch); a per-piece octilinear shove of the
+router's copper (nothing moves in a staircase of a hundred pieces);
+strings per run with the vias frozen; a relaxation coarser than the
+capsules; the centre re-laid first in a world without the other
+lanes (they lay across it); a chord-by-chord octilinearisation of the
+string (a sawtooth); a fan pre-pass that re-laid every run across the
+corridor as lead + 45-degree leg + run before the pack (inert once
+the order was right: 467 against 475 lane pieces); and packing modes
+before the last call.
+
+The numbers, 2026-09-09 (`tmp/pk_braid.sh TAG 1 K`, the braid alone
+on the pk0 fanout boards; base = the same braid with the pack off):
+
+| K  | lanes packed (taut, no follow) | runs octilinear | segments base -> packed | lane mm | pack s | braid s |
+|----|-------------------------------|-----------------|-------------------------|---------|--------|---------|
+| 28 | 28 / 28 (7) | 31 / 54 | 1574 -> 898 | 518 -> 528 | 3.9 | 17 -> 21 |
+| 35 | 35 / 35 (0) | 33 / 80 | 1435 -> 1641 | 727 -> 720 | 7.2 | 21 -> 28 |
+| 41 | 41 / 41 (3) | 48 / 125 | 2258 -> 2012 | 949 -> 944 | 9.9 | 84 -> 92 |
+
+0 open, 0 DRC and the via count unchanged at every K (36 / 61 / 112);
+every lane packs. K35 and K41 come out SHORTER than the router's
+copper now. (Tag `tp`, 2026-09-09 late; the rows before the "five
+oddities" round below were K28 977, K35 1782, K41 2028 with K41's SA9
+and K35's SDQM0 unpacked.)
+
+**The five oddities (2026-09-09 late), each run to its mechanism with a
+probe that relaxes one lane alone against the board
+(`tmp/lane_probe.py`, `tmp/replay_probe.py` on a `BRAID_PACK_DUMP`
+string, `BRAID_PACK_TRACE` on named points):**
+
+- *A hat over a via cluster* (SDQ6): a legitimate wrap over SDQ15's via
+  and tracks, 45 / 0 / 45 degrees. Not a defect; gone anyway once the
+  lanes round it moved.
+- *A spike into a pad gap* (SA9): the follow's pulls toward a track a
+  millimetre above were correctly refused by plain sight, but the two
+  points at the spike's base were still MARKED hugging, and hug points
+  anchor the straightening, so the spike's flanks were a stretch whose
+  only shortcut cut the pads. A refused pull is not a hug.
+- *An any-angle corner on the outer ride* (SA0) and *near-grid chords
+  at 10 and 102 degrees* (SA13, SCKE0): the repair patches an unclear
+  leg with the string's chords at 12 um and then re-checked every leg
+  at the 5 um octilinear tolerance, so the patch failed its own check
+  and the whole run fell to coarse any-angle chords. Judged at its own
+  tolerance now. The residue -- corners the router laid at exactly 0.100
+  mm, 13 um inside the packer's inflated model and boxed in -- is
+  handled by judging a leg against the string's own depth there (a leg
+  may cut as deep as the string does) and by tightening the patch to
+  the string where it is that deep.
+- *A free apex* (SCS0) and the spike above: the relaxation had not
+  converged. The sum of the movement over a lane's 500 points hid one
+  vertex collapsing at 0.1 mm a round. Convergence now also needs every
+  point's move ACROSS the string, net over two rounds, under 10 um
+  (along-string drift is the smoothing evening the spacing, harmless).
+  That alone sent thirteen K41 lanes to the round cap: points
+  ping-ponging by the full step between a snap toward the tube and a
+  push out of an obstacle. A point whose move reverses between rounds
+  has its pull gain halved. One lane at the cap now, K41 pack 9.9 s.
+- The patch also used to step back to the string point nearest a leg's
+  end when it lay behind it, leaving 40 um spurs that check_drc flags
+  as same-net soft joints (K35 shipped one). Only points that project
+  inside the leg are used, and every emitted run is despiked.
+
+**And the straightening was re-done (the SCKE0 ride, 2026-09-09
+late).** With the above, SCKE0's back-layer ride ran 3 mm up the
+board's edge and back down a 26-degree diagonal, 45.5 mm where 42 had
+been possible. Its starting string had that detour from the router;
+nothing hugged anything up there; the shortcut across was blocked by
+SA6's ride and a pad; and the old straightening -- the farthest clear
+chord found by HALVING the index range -- landed on the index midpoint
+of the stretch, the detour's own apex, accepted the chord to it, then
+the chord from it, and re-laid the same two chords every 25 rounds. The
+straightening is now the TAUT PATH over the stretch's own vertices:
+its Douglas-Peucker corners plus a vertex every 0.5 mm along a long
+straight piece (from the foot of the east leg every chord grazed SA6's
+end by a micron; from 0.3 mm up it was free), every pair tested for a
+clear chord in one sparse call, the string's own arc between
+consecutive vertices always an edge (a chord across a contact arc never
+clears), and the shortest path through that graph re-laid straight
+where it took a chord. One straightening takes SCKE0 from 46.0 to 39.4
+mm; the ride is a 45-degree leg and a horizontal.
+
+**The six oddities (2026-09-09, later; tag `cs`).** A spike on SA0's
+top ride, a hook on SA15, a W on SDQ7 and a Z on SCKE1 were all lanes
+packed EARLY (SA13 sixth, SA0 tenth of 41) against neighbours still at
+their router positions: each went taut round copper that then moved,
+and nothing revisits an early lane. Re-relaxed alone against the final
+board every one of them vanished. A SECOND PASS over all lanes takes
+them out and packs tighter (median 0.47 -> 0.32 mm) but measured worse
+on the emission (K41 1948 -> 2272 segments, 45 -> 49 long any-angle
+pieces) at twice the time -- every wrap it tightens is one more arc --
+so it is opt-in (`BRAID_PACK_PASS2=1`) until the emission earns it.
+The arc round SA0's east corner and SA13's step were the wrap problem
+itself, so the emitter now draws WRAPS AS CHAMFERS: a free stretch
+whose points sit on one disc's inflated circle (or a capsule end's),
+turning 30 degrees or more, becomes the tangent lines at the grid
+directions whose tangent point lies 15 degrees or more inside the arc
+(a tangent nearer the arc's end ran a millimetre before the exit chord
+met it -- SODT1's V), and the line meeting gives the octagon's corners,
+8 % of the radius outside the circle. That room exists because the
+lane packed before this one hugged the same chamfer; where it does not
+(a neighbour still an arc), the corner lands inside the model and is
+SNAPPED to the nearest string point before the repair -- the repair
+keeps a leg's ends, and a leg that starts inside an obstacle stays
+unclear however it is patched (fallbacks 22 -> 2 at K41 from that
+alone). And the hug SIDE is now read off the predecessor's copper first
+and the plan's lines only when the copper says nothing: SRST's plan
+line lay on one side of SA0's, its ride on the other, so it never
+hugged and shipped an 8 mm chord 4 degrees off; SA9 hugged that.
+
+| K  | lanes | runs octilinear | segments base -> packed | lane mm | off-grid > 1 mm, before -> after | pack s |
+|----|-------|-----------------|-------------------------|---------|----------------------------------|--------|
+| 28 | 28 / 28 | 24 / 54 | 1574 -> 1036 | 518 -> 536 | 12 -> 9 | 3.9 |
+| 35 | 34 / 35 | 34 / 78 | 1435 -> 1510 | 727 -> 721 | 24 -> 6 | 7.0 |
+| 41 | 41 / 41 | 66 / 125 | 2258 -> 1991 | 949 -> 948 | 28 -> 21 | 9.8 |
+
+("off-grid > 1 mm": routed-net pieces over 1 mm more than 3 degrees
+from a grid direction, the proxy for what the eye calls colinearity.)
+What is left at K41: SCS1's 8 mm chord at 7 degrees and SCKE1's 6 mm
+one, each a lane converging on a neighbour it does not reach within
+the window, and the chords round the source's south row.
+
+**A fold is alongside nothing, and a via feels its two stretches
+(2026-09-09, the circled via).** K41's SA12 had a via wedged between
+R4's two pads under the resistor body, with a hairpin on F: north 0.15
+mm from the via, then back south past it. The slot was open straight
+below the via (the map of legal via centres in `tmp/sa12_probe.py`), the
+string had every reason to slide it down, and 150 rounds moved it 40 um.
+Not a wedge: the FOLLOW held it. A long F track of another net runs one
+pitch north of the hairpin's tip, and at a hairpin the tangent (the
+chord between a point's two neighbours) is degenerate, so the tip passed
+the alongside test by accident and the follow snapped it onto that
+track's tube every round, against the tension. A point whose two
+neighbours are closer than `FOLD` (1.2 steps) is now alongside nothing,
+in the relaxation and in the emitter's hug. With that, the hairpin
+collapsed in one round and the via crept down the slot -- at 17 um a
+round, because a via's smoothing pull came from neighbours 0.08 mm away
+on a nearly straight string, and the convergence test then stopped the
+relaxation at round 30 with the via still in the slot. So a via's pull
+now comes from `VIA_SPAN` (5) points away on either side -- the joint
+feels the angle between its two stretches -- and a round that moves a
+via more than `VIA_EXIT` (2 um) is not a converged one. SA12's via
+travels 1.41 mm to the end of its B ride, the lane is 1.3 mm shorter,
+and K41 packs every lane. A wedged point also SLIDES now: the move less
+its component into the nearest wall, kept when the projection converges
+from there (`relax_lane`), which is the projected-gradient step for a
+point pressed against a wall; it was not what held SA12, but it is
+right. The price is K35 (1620 -> 1782 segments): more of its vias move,
+and each move re-emits the arcs round it.
+
+**A lane the follow would lengthen goes taut instead.** The first
+version rejected 3-5 lanes per K as "longer" (a tenth plus 0.3 mm over
+the router's length) and kept their staircases, which every later hug
+then copied. The follow window was not the cause -- at 6, 3 and 2 mm
+the same number of lanes were rejected -- the ORDER is: packing toward
+the roomy side pulls an inner lane out onto the outer lane's longer
+arc, with 85 % of its points hugging. So such a lane is relaxed again
+with no follow at all: taut against the board, re-emitted clean, and
+what packs after it hugs a line. Every lane is now packed at K28 and
+K35. The wall-inward order was re-measured with this emitter for the
+same reason (it shortens: K41 -1.6 % against +1.7 %), and lost on the
+renders: every lane copies the ragged static copper it packs against
+and the river reads as a wave (K28 1484 segments against 952).
+
+**Speed (2026-09-09, K28 9.6 -> 4.7 s, K41 19.9 -> 10.0 s, copper
+identical).** The profile (`BRAID_PACK_PROFILE=file` round the pack
+in `write_out`) put 8 of 9.6 s in the relaxation, and 7 of those in
+two dense point-against-every-obstacle matrices per round: the
+plain-sight test of each pull (4.6 s) and the projection (2.6 s). Both
+now run on the (point, obstacle) pairs whose boxes overlap only
+(`_box_pairs`; a pull segment meets a handful of the lane's hundreds
+of capsules), discs and capsules merged into one array per lane with
+its boxes computed once (`Caps`), and the emitter's chord test goes
+the same way. What is left is numpy call overhead: 25,000 pair tests
+at 80 us, and the nearest-segment query per round (0.9 s at K28),
+which needs the true nearest and stays dense.
+
+What the renders say (`tmp/pk_render.sh`): K28's bottom river, a fan
+of staircases before, is horizontal lanes with 45-degree jogs after,
+and the diagonal group from the source's east teeth is a clean set of
+parallels; K41 likewise. K35 is the row to read before this becomes a
+default: its base was already clean -- long 45-degree lanes, loosely
+spread -- and packing them into rivers round the swimmers' vias makes
+every lane copy the wrap of the lane before it, so the river reads as
+nested S-bends and the piece count goes UP (786 -> 1086 lane pieces).
+The wrap itself is the open problem: a free stretch round a via emits
+as an arc (repair chords) because the octilinear chamfer of a circle
+stands 8 % of the radius outside it, into a neighbour at exact pitch.
+Also open: the taut lanes (6 at K28) sit in the river unpacked -- a
+hand router would either pack them and accept the length or leave the
+gap where it is, and the packer now does the latter.
 
 ### The sidecar describes the board it sits beside (2026-09-07)
 

@@ -154,6 +154,7 @@ SLOPE_PITCH = True             # slot pitch scaled by the lane's angle to
                                # checked before it is switched on
 VIA_NEED = VIA_SIZE / 2 + CLEAR + TRACK / 2 + 0.03   # a via's room to a
                                # neighbouring track centre, plus a cell
+PACK_MODE = int(os.environ.get('BRAID_PACK', '0') or 0)  # pack.py at write time (opt-in)
 W_GATE = 0.33                  # narrowest swap column the gated schedule
                                # gets: every clean gated K on the bench
                                # had W >= 0.343 (K21, W=0.322, needed
@@ -3845,9 +3846,29 @@ def write_out(a, ctx, corridors, names, log):
         for _k, _l in sorted(_vm0.items()):
             log('        vmmap before: ' + _l)
         _tm.start(1)
+    _res_list = [{'new_segments': list(out_segs[nm])} for nm in names]
     _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
-        [{'new_segments': list(out_segs[nm])} for nm in names],
-        pcb, kids, clearance=0.1, keep_input_copper=True)
+        _res_list, pcb, kids, clearance=0.1, keep_input_copper=True)
+    if PACK_MODE:
+        # PACK (README TODO 8) at write time: every corridor's smoothed
+        # lanes packed into rivers (pack.py, opt-in: BRAID_PACK=1)
+        import pack as pk
+        _prof = None
+        if os.environ.get('BRAID_PACK_PROFILE'):
+            import cProfile
+            _prof = cProfile.Profile()
+            _prof.enable()
+        for c in corridors:
+            for k, nm in enumerate(names):
+                if nm in c.members:
+                    c.out_segs[nm] = list(_res_list[k]['new_segments'])
+            pk.pack_corridor(c, log)
+        if _prof is not None:
+            _prof.disable()
+            _prof.dump_stats(os.environ['BRAID_PACK_PROFILE'])
+        # the pack moves vias: the dicts read at the top are stale
+        out_segs = {nm: c.out_segs[nm] for c in corridors for nm in c.members}
+        out_vias = {nm: c.out_vias[nm] for c in corridors for nm in c.members}
     for nm in names:
         nid, _ = byname[nm]
         final_segs[nm] = [s for s in pcb.segments if s.net_id == nid]
