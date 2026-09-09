@@ -1543,6 +1543,71 @@ def _declaration(rows, half):
     return None if found is None else (found, live)
 
 
+def placement_terms(score):
+    """The `placement.terms` block of a score, or None. #894."""
+    if not isinstance(score, dict):
+        return None
+    p = score.get('placement')
+    if not isinstance(p, dict):
+        return None
+    t = p.get('terms')
+    return t if isinstance(t, dict) else None
+
+
+def _placement_movement(runs_pairs):
+    """`(verdict, hint)` over a window's commensurable runs, or None.
+
+    Compares each run's LAST lap against its FIRST -- the same baseline
+    `min(r) < r[0]` uses one tier up, and for the same measured reason: "has
+    this half improved across its own last `flat` laps", never "has it beaten
+    the best lap ever seen", which one large early improvement pins forever.
+
+    Returns the strongest movement found: `better` if any run improved by
+    Pareto, else `mixed` if any run traded, else None. Delegates the
+    comparison to `placement_score.compare_terms` -- there is no ordering rule
+    here, and no weight anywhere.
+    """
+    try:
+        import placement_score as ps
+    except Exception:                                        # noqa: BLE001
+        return None
+    best = None
+    for run in runs_pairs:
+        first = placement_terms(run[0][1])
+        last = placement_terms(run[-1][1])
+        if not first or not last:
+            continue
+        verdict, detail = ps.compare_terms(first, last)
+        if verdict in ('better', 'mixed'):
+            hint = ps.format_delta(detail)
+            if verdict == 'better':
+                return 'better', hint
+            best = best or ('mixed', hint)
+    return best
+
+
+def parent_score(rows, row):
+    """The score of the row this one was recorded against, or None.
+
+    `cmd_record` has written `parent_sha` on every ledger row since the ledger
+    existed, and NOTHING has ever read it back. This is the read side.
+
+    Returns None when there is no parent, when no row carries that
+    `result_sha`, or when MORE THAN ONE does -- a re-recorded board is not a
+    parent, and "I could not tell which" must not become an answer.
+    """
+    if not isinstance(row, dict):
+        return None
+    sha = row.get('parent_sha')
+    if not sha:
+        return None
+    hits = [r for r in rows
+            if isinstance(r, dict) and r.get('result_sha') == sha]
+    if len(hits) != 1:
+        return None
+    return hits[0].get('score')
+
+
 def _half_state(rows, half, flat):
     """Can this half still improve? -- with the evidence it was decided from.
 
@@ -1667,7 +1732,8 @@ def _half_state(rows, half, flat):
             cur = []
         cur.append((k, s))
     runs.append(cur)
-    runs = [[k for k, _s in r] for r in runs if len(r) >= 2]
+    runs_pairs = [r for r in runs if len(r) >= 2]
+    runs = [[k for k, _s in r] for r in runs_pairs]
     # An ACCEPTED lap that recorded no `blocking` is unjudged, and a plateau
     # asserted over unjudged laps is the "reported clean because unexamined"
     # error this toolchain names everywhere else. An improvement, by contrast,
@@ -1677,10 +1743,30 @@ def _half_state(rows, half, flat):
     # unjudged -- the rejection is itself the measurement.
     unjudged_its = [i for i, acc, k, _s in window if acc and k is None]
     unjudged = len(unjudged_its)
+    _place = _placement_movement(runs_pairs) if half == 'placement' else None
     if any(min(r) < r[0] for r in runs):
         out.update(flat=False, why='improving')
+    elif _place and _place[0] == 'better':
+        # THE PLACEMENT TIER (#894). Reachable only when `blocking` and
+        # `quality` have ALREADY tied across the run -- which on a copper-free
+        # board is every lap, because `quality` is (0, 0.0, 0) for every
+        # placement of every board. So this can turn `plateau` into
+        # `improving` and NOTHING else: it cannot make an improving half
+        # plateau, cannot touch `no-comparison`, and cannot reach the routing
+        # half at all (the `half ==` guard above).
+        #
+        # PARETO, not a score. `placement_score.compare_terms` says `better`
+        # only when no measured term regressed, so a lap that traded pair
+        # length for balance is NOT credited -- it reports `plateau` with
+        # `placement_traded` naming both sides. #694 is why there is no weight
+        # here: a corridor term's measured sign reversed while an aggregate
+        # verdict kept printing PASS, because a collapsed mark cannot say
+        # which of its inputs moved.
+        out.update(flat=False, why='improving', placement_improved=_place[1])
     elif runs and not unjudged:
         out.update(flat=True, why='plateau')
+        if _place and _place[0] == 'mixed':
+            out['placement_traded'] = _place[1]
     else:
         # Answerable again after one more comparable lap, after `flat`
         # rejections, or by declaring the half exhausted on the record. NAME
@@ -1965,7 +2051,39 @@ def cmd_status(a):
     # where the systemic NOTE already lives.
     _unlevered = [e for e in rows if not str(e.get('lever') or '').strip()]
     c['unlevered'] = len(_unlevered)
+    # #894: the placement terms per lap, and each lap's movement against the
+    # row it was recorded against. Additive, inside the one JSON document --
+    # this stdout is an API that callers json.loads() whole, which is why
+    # `unlevered` above is set the same way.
+    _place = []
+    for e in rows:
+        t = placement_terms(e.get('score'))
+        if not t:
+            continue
+        row = {'iteration': e.get('iteration'), 'kind': e.get('kind'),
+               'accepted': bool(e.get('accepted')),
+               'terms': {k: v.get('value') for k, v in t.items()}}
+        pt = placement_terms(parent_score(rows, e))
+        if pt:
+            try:
+                import placement_score as ps
+                verdict, detail = ps.compare_terms(pt, t)
+                row['vs_parent'] = verdict
+                # The ACCEPT RULE #894 asks converge status to print: "the
+                # named finding is gone AND no placement term regressed". The
+                # second conjunct is what this can see, so it is what it says.
+                row['no_term_regressed'] = verdict in ('better', 'same')
+                row['delta'] = ps.format_delta(detail)
+            except Exception:                                # noqa: BLE001
+                pass
+        _place.append(row)
+    if _place:
+        c['placement_terms'] = _place
     print(json.dumps(c, indent=1, sort_keys=True))
+    for r in _place:
+        if r.get('vs_parent') and not r.get('no_term_regressed'):
+            print(f"  i{r['iteration']}  placement {r['vs_parent']}: "
+                  f"{r.get('delta')}", file=sys.stderr)
     # ITEMISE THE UNLEVERED ROWS, unconditionally -- not only when the systemic
     # warning below fires. #904's inherited item is "an --exhausted row prints
     # blank, and its reason lives in exhausted.reason": that is true of an
