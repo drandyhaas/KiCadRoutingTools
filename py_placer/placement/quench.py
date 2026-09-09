@@ -581,7 +581,8 @@ class _Part:
                  'nets', 'halo', 'footprint_name', 'orig_rot',
                  'side', 'has_tht', 'sides', 'tht_by_rot')
 
-    def __init__(self, ref, fp, courtyard_sides, locked, halo_base, halo_coef):
+    def __init__(self, ref, fp, courtyard_sides, locked, halo_base, halo_coef,
+                 body_local=None):
         self.ref = ref
         self.footprint_name = fp.footprint_name
         self.pads_local = [(p.local_x, p.local_y, p.net_id)
@@ -592,9 +593,27 @@ class _Part:
         self.side = footprint_side(fp)
         self.has_tht = footprint_has_through_pads(fp)
         self.sides = sides_occupied(self.side, self.has_tht)
-        lb = courtyard_for_side(courtyard_sides.get(ref), self.side)
+        # #916. `body_local` is `placement.body`'s `occupancy_local` for this
+        # ref, supplied by QuenchState under `body_model=True`. None keeps the
+        # inlined ladder below, which is what every caller got before #916 and
+        # what the default still gets -- so the OFF arm of the A/B is this
+        # file unchanged, not a re-derivation that happens to agree.
+        #
+        # OCCUPANCY, not the bare body, and not the drawn body: this rect is
+        # what `pose_ok`/`candidate_valid` seat against, i.e. "what does this
+        # part occupy". `legality.part_local_bounds` already answers the same
+        # question with `occupancy_local` (legality.py:1213-1216), so before
+        # this the GRADER and the ENFORCER measured different rectangles for
+        # the same part -- the grader courtyard-union-pads, the search bare
+        # courtyard or a pad box. `QuenchState.fab_rect` deliberately does NOT
+        # move: containment is a different question with a fab-only
+        # calibration, and its own docstring calls a courtyard-based
+        # containment test a false-veto machine.
+        lb = body_local
         if lb is None:
-            lb = compute_footprint_bbox_local(fp)
+            lb = courtyard_for_side(courtyard_sides.get(ref), self.side)
+            if lb is None:
+                lb = compute_footprint_bbox_local(fp)
         self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
         tlb = through_pad_bounds_local(fp) if self.has_tht else None
         self.tht_by_rot = ({r: _rotate_local_bounds(*tlb, r) for r in ROTATIONS}
@@ -739,7 +758,19 @@ class QuenchState:
                  # same empty-by-default bit-identity, and the quench itself
                  # never passes it -- its zone_exclusive enforcement stays
                  # where #702 put it, in `intent_ok`.
-                 exclusive_zones: Optional[Sequence[Dict]] = None):
+                 exclusive_zones: Optional[Sequence[Dict]] = None,
+                 # --- #916. The SEARCH's body currency. APPENDED for the same
+                 # positional-binding reason as the #548 block above, and False
+                 # by default so this commit moves NO number: at False every
+                 # part takes the inlined courtyard-or-pad-box ladder it took
+                 # before, so the A/B's OFF arm is the old code rather than a
+                 # re-derivation that happens to agree. #896 wired every
+                 # GRADING consumer to `placement.body` and deliberately left
+                 # the search behind, because `pose_ok` reads these baked
+                 # bounds and so the change moves which BASIN the anneal lands
+                 # in -- an engine change owing its own A/B, which is what
+                 # flipping this default is gated on.
+                 body_model: bool = False):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -771,6 +802,17 @@ class QuenchState:
         self._fab_cache = {}
 
         courtyards = extract_courtyard_sides(pcb_file)
+        # #916. One read for the whole board when armed, never per part:
+        # `board_bodies` makes three regex passes over the file, and the
+        # seeder builds states repeatedly. `{}` when off, so `.get(ref)`
+        # below yields None and `_Part` keeps its own ladder.
+        self.body_model = bool(body_model)
+        body_locals: Dict[str, object] = {}
+        if self.body_model:
+            from placement import body as _body
+            for _ref, _geom in _body.board_bodies(pcb_data, pcb_file).items():
+                if _geom.occupancy_local is not None:
+                    body_locals[_ref] = _geom.occupancy_local
         locked_refs = set(extract_locked_refs(pcb_file))
         if extra_locked_refs:
             locked_refs |= extra_locked_refs
@@ -788,7 +830,8 @@ class QuenchState:
                 # obstacles; without one there is no geometry to respect.
                 if ref in courtyards:
                     self.parts[ref] = _Part(ref, fp, courtyards, True,
-                                            halo_base, halo_coef)
+                                            halo_base, halo_coef,
+                                            body_locals.get(ref))
                 continue
             # #829: a footprint that draws part of the BOARD's own boundary is
             # never this tool's to move -- its pose transforms that Edge.Cuts
@@ -814,7 +857,8 @@ class QuenchState:
             if ref not in courtyards:
                 no_courtyard.append(ref)
             self.parts[ref] = _Part(ref, fp, courtyards, locked,
-                                    halo_base, halo_coef)
+                                    halo_base, halo_coef,
+                                    body_locals.get(ref))
             # A part with NO connected pins (mounting hole, NPTH, fiducial) is
             # invisible to the airwire cost -- only halo/edge decide where it
             # goes, which is how holes wander. Frozen by default; the caller
@@ -2602,7 +2646,11 @@ def quench(pcb_data: PCBData, pcb_file: str,
            corridor_specs: Optional[Sequence[Dict]] = None,
            intent_gate: Optional[Dict[str, object]] = None,
            cancel_check=None,
-           progress_callback=None) -> List[Dict]:
+           progress_callback=None,
+           # #916: the SEARCH's body currency. Appended, and False by default
+           # -- see QuenchState.__init__. Flipping it is an engine change
+           # gated on tests/test_placement_ab.py, not a tidy-up.
+           body_model: bool = False) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
     align_weight / align_radius / align_span, orient_weight: the #548 tidiness
@@ -2706,7 +2754,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         corridor_weight=corridor_weight,
                         corridor_specs=corridor_specs,
                         keepouts=(intent_gate or {}).get('keepouts'),
-                        intent_zones=(intent_gate or {}).get('zones'))
+                        intent_zones=(intent_gate or {}).get('zones'),
+                        body_model=body_model)
     # #708: the lattice candidate OFFSETS are multiples of. The board's own
     # pitch when one can be read off it, the `grid_step` raster otherwise.
     # There is deliberately no flag: the fallback IS the off state and the
