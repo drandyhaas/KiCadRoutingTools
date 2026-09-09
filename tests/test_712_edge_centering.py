@@ -414,15 +414,19 @@ def test_the_loader_refuses_every_malformed_along_edge_claim():
     # need a reader that knows them. The second is the change detector: a
     # hand-stated literal that fires when the vocabulary grows, so the bump is
     # re-stated deliberately rather than absorbed. It was 2 before #837 added
-    # `assembly.sides`, and 3 before #902 added `proximity[]` -- "these two
-    # named parts, this far apart", the one class of constraint the netlist
-    # implies and no instrument here could read.
+    # `assembly.sides`, 3 before #902 added `proximity[]` -- "these two named
+    # parts, this far apart", the one class of constraint the netlist implies
+    # and no instrument here could read -- and 4 before #893 added
+    # `blocks[].rotation` and `blocks[].rotation_candidates`, the ANGLE a part
+    # is placed at: the one placement decision a board file cannot hold AS a
+    # decision, since `(at x y rot)` records the angle a part HAS and nothing
+    # distinguishes a chosen one from a generator default.
     assert fp.READER_VERSION >= 2, (
         f"{fp.READER_VERSION}: #712's fields need a reader that knows them")
-    assert fp.READER_VERSION == 4, (
+    assert fp.READER_VERSION == 5, (
         f"{fp.READER_VERSION}: the field vocabulary grew. Re-state this "
-        f"literal and say which field arrived, the way #712, #837 and #902 "
-        f"did")
+        f"literal and say which field arrived, the way #712, #837, #902 and "
+        f"#893 did")
     # What this pair checks is the GATE -- a document may demand at most what
     # this build can serve. Written against `READER_VERSION` rather than a
     # literal 2/3, because the change-detector duty is already carried by the
