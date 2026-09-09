@@ -3826,6 +3826,25 @@ def write_out(a, ctx, corridors, names, log):
     from pcb_modification import smooth_octolinear_chains
     pre_len = {nm: sum(math.hypot(s.end_x - s.start_x, s.end_y - s.start_y)
                        for s in out_segs[nm]) for nm in names}
+    if os.environ.get('MEM_TRACE') == '1':
+        import resource as _res
+        import subprocess as _sp
+        import tracemalloc as _tm
+
+        def _vm():
+            r = _sp.run(['vmmap', '--summary', str(os.getpid())],
+                        capture_output=True, text=True).stdout
+            return {l.split()[0] if not l.startswith('MALLOC') else ' '.join(l.split()[:2]): l
+                    for l in r.splitlines()
+                    if l.startswith(('MALLOC', 'VM_ALLOCATE', 'TOTAL', '__DATA', 'mapped', 'IOAccel', 'Stack', '__TEXT', 'shared'))}
+        _cur = int(_sp.run(['ps', '-o', 'rss=', '-p', str(os.getpid())],
+                           capture_output=True, text=True).stdout or 0) // 1024
+        log(f'      mem before smoother: rss {_cur} MB, peak '
+            f'{_res.getrusage(_res.RUSAGE_SELF).ru_maxrss / 1048576:.0f} MB')
+        _vm0 = _vm()
+        for _k, _l in sorted(_vm0.items()):
+            log('        vmmap before: ' + _l)
+        _tm.start(1)
     _n, _nets, _rm, _addl, stt = smooth_octolinear_chains(
         [{'new_segments': list(out_segs[nm])} for nm in names],
         pcb, kids, clearance=0.1, keep_input_copper=True)
@@ -3835,6 +3854,20 @@ def write_out(a, ctx, corridors, names, log):
     post_len = {nm: sum(math.hypot(s.end_x - s.start_x,
                                    s.end_y - s.start_y)
                         for s in final_segs[nm]) for nm in names}
+    if os.environ.get('MEM_TRACE') == '1':
+        _tc, _tp = _tm.get_traced_memory()
+        _snap = _tm.take_snapshot()
+        _tm.stop()
+        _cur = int(_sp.run(['ps', '-o', 'rss=', '-p', str(os.getpid())],
+                           capture_output=True, text=True).stdout or 0) // 1024
+        log(f'      mem after smoother: rss {_cur} MB, peak '
+            f'{_res.getrusage(_res.RUSAGE_SELF).ru_maxrss / 1048576:.0f} MB; '
+            f'python traced in the smoother: current {_tc / 1048576:.0f} MB, peak {_tp / 1048576:.0f} MB')
+        for _st in _snap.statistics('lineno')[:8]:
+            _fr = _st.traceback[0]
+            log(f'        still held: {_st.size / 1048576:6.1f} MB {_st.count:8d}  {_fr.filename.split("/")[-1]}:{_fr.lineno}')
+        for _k, _l in sorted(_vm().items()):
+            log('        vmmap after:  ' + _l)
     log(f'\nsmooth_octolinear_chains (#536): '
         f'{stt.get("spans", 0)} spans on {_nets} nets, '
         f'-{stt.get("saved_mm", 0):.2f} mm; segments '
