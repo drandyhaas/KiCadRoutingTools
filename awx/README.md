@@ -1421,6 +1421,30 @@ whose copper fails keeps the router's -- legal by construction beside
 the packed ones, because every lane packed against the others as they
 stood.
 
+![K28 before the pack: the braid's copper, every river a fan of staircases](img/pack_k28_before.png)
+
+*K28 as the braid leaves it (`BRAID_PACK` off): 1574 segments; the
+bottom river is a fan of router staircases, the diagonal group from
+the source's east teeth a spread of them.*
+
+![K28 after the pack: horizontal lanes with 45-degree jogs, the diagonals packed](img/pack_k28_after.png)
+
+*K28 packed (`pack_board.py`, 4 s): 875 segments, every lane, 0 open,
+0 DRC, the vias where they were. The bottom river is horizontal lanes
+with 45-degree jogs; the rides at the top are straight.*
+
+![K41 before the pack](img/pack_k41_before.png)
+
+*K41 as the braid leaves it: 2258 segments.*
+
+![K41 after the pack](img/pack_k41_after.png)
+
+*K41 packed (10 s): 1843 segments, 41 of 41 lanes, 0 open, 0 DRC. The
+far-face rides round the top and east are grid legs, the source's
+wraps nested chamfers; what is left off the grid is the 6-degree fan
+from the source's south row into the bottom river and two coupled
+corners at the passives (the section's end).*
+
 The order across the corridor is the plan's target slots, **from the
 outer lane with more room on its outer side, inward**: the first lane
 hugs whatever settled copper stands beside it and otherwise goes
