@@ -45,6 +45,7 @@ from connectivity import compute_mst_edges
 from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
+from placement.pair_order import pair_inversions, ref_inversions
 from placement.board_grid import (describe as describe_lattice,
                                   resolve_snap_lattice)
 from placement import legality
@@ -770,7 +771,12 @@ class QuenchState:
                  # bounds and so the change moves which BASIN the anneal lands
                  # in -- an engine change owing its own A/B, which is what
                  # flipping this default is gated on.
-                 body_model: bool = False):
+                 body_model: bool = False,
+                 # --- #893 pin-order facing term. APPENDED for the same
+                 # positional-binding reason as the #548 block above, and 0.0
+                 # by default: see `_facing_cost` for why the default is a
+                 # measurement question and not timidity.
+                 facing_weight: float = 0.0):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -807,6 +813,7 @@ class QuenchState:
         # seeder builds states repeatedly. `{}` when off, so `.get(ref)`
         # below yields None and `_Part` keeps its own ladder.
         self.body_model = bool(body_model)
+        self.facing_weight = facing_weight
         body_locals: Dict[str, object] = {}
         if self.body_model:
             from placement import body as _body
@@ -1196,6 +1203,45 @@ class QuenchState:
             d = self.align_radius
         return self.align_weight * d * d
 
+    def _facing_cost(self, ref, x=None, y=None, rot=None) -> float:
+        """Price the pin-ORDER a pose forces (#893). Off at weight 0.0.
+
+        `pair_order.ref_inversions` -- the SAME lower bound
+        `placement_score.pin_order_crossings` reports, called rather than
+        re-derived. For each partner sharing >= 2 scoring nets, project both
+        parts' escape pads onto the channel cross-section and count order
+        inversions: in a two-sided channel each inverted pair must cross at
+        least once, so this is a floor on the crossings any router must pay.
+
+        WHY THIS IS NOT `_orient_cost`, which already "rewards a pose whose
+        pads FACE the nets they serve": that term is a DIRECTION, summed per
+        pad against a net centroid, and it is blind to ORDER. Two parts can
+        point their pads straight at each other and still have every net
+        crossed -- which is exactly run 5's U3, where rotating 180 degrees took
+        the same nets from 4/7 routed to 7/7 while the airwire lengths barely
+        moved. `_orient_cost` cannot see that; this can. They are complementary
+        and both are off by default.
+
+        WHY IT IS OFF BY DEFAULT, and why that is not timidity:
+        `pair_order`'s own header records the standing decision that these
+        metrics "deliberately do NOT join quench.total_cost", and
+        `docs/placement-optimization.md` is a file-length negative result about
+        adding proxies to this objective -- "proxy-routability correlation is
+        weak", "proxies propose, the router disposes". A lower bound is a
+        better citizen than a correlational proxy (improving it cannot be
+        gamed), but "better citizen" is an argument, not a measurement. The
+        weight is the way to MEASURE it; `tests/test_placement_ab.py` is the
+        way to decide it.
+
+        Cost: `ref_inversions` is ~150-800 us/call depending on the board even
+        after the #893 hot-path work, so this is the most expensive term in
+        `part_geometry_cost` by an order of magnitude. It returns before
+        touching anything at weight 0, so a default run pays nothing.
+        """
+        if self.facing_weight <= 0.0:
+            return 0.0
+        return self.facing_weight * ref_inversions(self, ref, x, y, rot)
+
     def _align_cost(self, ref, rect, exclude: Optional[Set[str]] = None
                     ) -> float:
         if self.align_weight <= 0.0:
@@ -1434,6 +1480,14 @@ class QuenchState:
         # so a default run is bit-identical and pays nothing.
         pen += self._align_cost(ref, rect, exclude)
         pen += self._orient_cost(ref, x, y, rot)
+        # #893. Same hook, same contract: 0.0 before touching geometry when the
+        # weight is 0, so a default run is bit-identical. Deliberately NOT a
+        # separate move phase -- a phase minimising `nets+geo+facing` while the
+        # nudge minimises `nets+geo` gives the loop two objectives, and the
+        # nudge's own rotation loop then reverts every rotation the phase makes
+        # (its candidate list always contains the current angle), so `moves`
+        # never reaches 0 and `improved` sums two currencies.
+        pen += self._facing_cost(ref, x, y, rot)
         return pen
 
     def violation(self, ref, x=None, y=None, rot=None,
@@ -2173,12 +2227,23 @@ class QuenchState:
                     align += self._align_pair_penalty(pa, rect_a, pb, pb.rect())
         cut = (_corridor_cut_np(all_aw, self._corridor_boxes)
                if self._corridor_boxes else 0.0)
+        # #893. Counted over UNORDERED pairs, like `halo` and `align` above and
+        # for the same reason: `ref_inversions` sums a symmetric PAIR quantity
+        # from one part's side, so summing it over every ref would count each
+        # physical pair twice. `part_geometry_cost` does sum from one side --
+        # that is the factor of 2 the evaluators need, and it cancels between
+        # candidates -- but a REPORT must show each pair once.
+        facing = (self.facing_weight
+                  * sum(m['inversions']
+                        for m in pair_inversions(self).values())
+                  if self.facing_weight > 0.0 else 0.0)
         total = (self.length_weight * length
                  + self.crossing_penalty * w_crossings + halo + edge
-                 + align + orient + self.corridor_weight * cut)
+                 + align + orient + facing + self.corridor_weight * cut)
         return {'total': total, 'length': length, 'crossings': crossings,
                 'halo': halo, 'edge': edge, 'hpwl': self.hpwl(),
-                'align': align, 'orient': orient, 'corridor_cut': cut}
+                'align': align, 'orient': orient, 'facing': facing,
+                'corridor_cut': cut}
 
     def hpwl(self, nets=None):
         """Half-perimeter wirelength: sum over nets of the pad bbox's width plus
@@ -2650,7 +2715,9 @@ def quench(pcb_data: PCBData, pcb_file: str,
            # #916: the SEARCH's body currency. Appended, and False by default
            # -- see QuenchState.__init__. Flipping it is an engine change
            # gated on tests/test_placement_ab.py, not a tidy-up.
-           body_model: bool = False) -> List[Dict]:
+           body_model: bool = False,
+           # #893: the pin-order facing term. Appended, 0.0 by default.
+           facing_weight: float = 0.0) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
     align_weight / align_radius / align_span, orient_weight: the #548 tidiness
@@ -2755,7 +2822,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         corridor_specs=corridor_specs,
                         keepouts=(intent_gate or {}).get('keepouts'),
                         intent_zones=(intent_gate or {}).get('zones'),
-                        body_model=body_model)
+                        body_model=body_model,
+                        facing_weight=facing_weight)
     # #708: the lattice candidate OFFSETS are multiples of. The board's own
     # pitch when one can be read off it, the `grid_step` raster otherwise.
     # There is deliberately no flag: the fallback IS the off state and the
