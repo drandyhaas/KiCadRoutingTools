@@ -1569,8 +1569,15 @@ def _placement_movement(runs_pairs):
     """
     try:
         import placement_score as ps
-    except Exception:                                        # noqa: BLE001
-        return None
+    except Exception as exc:                                 # noqa: BLE001
+        # NOT silently None. `None` here means "the terms did not move", and
+        # a half whose comparator could not even load would then report
+        # `plateau` -- the exact defect this tier exists to fix, arriving
+        # through the tier itself. `placement_score`'s own Vacuity rule is
+        # that an unmeasurable thing reports a REASON.
+        return 'unmeasured', (f'placement_score could not be imported, so the '
+                              f'terms were not compared: '
+                              f'{type(exc).__name__}: {exc}')
     best = None
     for run in runs_pairs:
         first = placement_terms(run[0][1])
@@ -1590,7 +1597,9 @@ def parent_score(rows, row):
     """The score of the row this one was recorded against, or None.
 
     `cmd_record` has written `parent_sha` on every ledger row since the ledger
-    existed, and NOTHING has ever read it back. This is the read side.
+    existed. `tests/stress/harvest_predictor_rows.py` walks it as a lineage
+    graph and `py_tools/make_film.py` names it, but nothing in converge itself
+    ever resolved it back to the parent's SCORE. This is that read side.
 
     Returns None when there is no parent, when no row carries that
     `result_sha`, or when MORE THAN ONE does -- a re-recorded board is not a
@@ -1746,14 +1755,24 @@ def _half_state(rows, half, flat):
     _place = _placement_movement(runs_pairs) if half == 'placement' else None
     if any(min(r) < r[0] for r in runs):
         out.update(flat=False, why='improving')
-    elif _place and _place[0] == 'better':
+    elif _place and _place[0] == 'better' and not unjudged:
         # THE PLACEMENT TIER (#894). Reachable only when `blocking` and
         # `quality` have ALREADY tied across the run -- which on a copper-free
         # board is every lap, because `quality` is (0, 0.0, 0) for every
-        # placement of every board. So this can turn `plateau` into
-        # `improving` and NOTHING else: it cannot make an improving half
-        # plateau, cannot touch `no-comparison`, and cannot reach the routing
-        # half at all (the `half ==` guard above).
+        # placement of every board. So this turns `plateau` into `improving`
+        # and NOTHING else: it cannot make an improving half plateau, cannot
+        # reach the routing half (the `half ==` guard above), and `not
+        # unjudged` is what keeps it out of `no-comparison`.
+        #
+        # That last condition is LOAD-BEARING and was missing in the first
+        # version of this branch. Without it the tier also caught the window
+        # shape "some laps compare, and at least one ACCEPTED lap carries no
+        # `blocking`", which `no-comparison` owns: a review measured a
+        # five-lap window flipping from `no-comparison` to `improving` with
+        # `unjudged`, `blocked` and `unjudged_iterations` silently dropped --
+        # the exact diagnostic those keys exist to carry, and the shape
+        # test_904_not_a_lap.py pins. An unjudged lap is not evidence that a
+        # half improved, whatever the laps around it did on their terms.
         #
         # PARETO, not a score. `placement_score.compare_terms` says `better`
         # only when no measured term regressed, so a lap that traded pair
@@ -1767,6 +1786,10 @@ def _half_state(rows, half, flat):
         out.update(flat=True, why='plateau')
         if _place and _place[0] == 'mixed':
             out['placement_traded'] = _place[1]
+        elif _place and _place[0] == 'unmeasured':
+            # A plateau asserted while the placement comparator was broken is
+            # a plateau over something nobody measured. Say so on the record.
+            out['placement_unmeasured'] = _place[1]
     else:
         # Answerable again after one more comparable lap, after `flat`
         # rejections, or by declaring the half exhausted on the record. NAME

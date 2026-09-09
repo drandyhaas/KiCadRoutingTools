@@ -503,8 +503,14 @@ def score_assembly(root: str, board: str, intent: str, tmp: str,
     space -- physically unbuildable, invisible to every copper checker (the
     shipped C14-on-R14 stack). Runs check_assembly.py, which needs NO
     intent to be meaningful (--intent only adds authored waivers), so this
-    component ALWAYS grades -- the floorplan path can be vacuous by
-    self-blessed budget; this one cannot.
+    component grades on every board that the tool can read -- the floorplan
+    path can be vacuous by self-blessed budget; this one cannot.
+
+    It is no longer unconditional, and the exception is deliberate: an older
+    check_assembly that publishes no `buildable`, or one whose exit code and
+    verdict disagree, is REFUSED by `assembly_component` and lands in
+    `ungraded`. A different instrument reporting a number this scorer would
+    have to re-derive is not a measurement (#918).
 
     Runs the tool; `assembly_component` reads its document (#918)."""
     out = os.path.join(tmp, 'assembly.json')
@@ -1189,8 +1195,12 @@ def main():
             if _pt.get(k, {}).get('value') is not None)
         _ungraded = [k for k in (placement.get('term_order') or [])
                      if _pt.get(k, {}).get('ran') is False]
-        print(f"PLACEMENT (report-only, not blocking): {_bits or 'nothing '
-              'measured'}")
+        # A plain variable, not a multi-line expression inside the f-string:
+        # that spelling is PEP 701 and a SyntaxError before Python 3.12, and
+        # README.md says 3.9+. It would have broken the whole scorer at import
+        # on a supported interpreter.
+        _summary = _bits or 'nothing measured'
+        print(f"PLACEMENT (report-only, not blocking): {_summary}")
         if _ungraded:
             print(f"  placement terms UNGRADED (not scored, not passed): "
                   f"{', '.join(_ungraded)}")

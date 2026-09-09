@@ -14,8 +14,10 @@ this work, so the battery is a record of what went wrong as much as a gate:
     blocker, so an 80mm graze outscored a 15mm cut 5.3 to 1;
   * it skipped nets with an endpoint inside the blocker, which made a BIGGER
     part obstruct LESS (measured: -13% for +1mm a side, then saturation);
-  * it counted the ground net, which on two layers IS the reference copper --
-    28.6 of 101.4mm on one board;
+  * it counted the ground and rail nets, which on two layers ARE the
+    reference copper (with the filter off today they are 24.4 of 46.7mm on
+    one board -- the figures below are of the DEFECT, measured before the
+    clip landed, and are not what the term reports now);
   * `balance` weighed NPTH pads, whose `size` is a mask opening and not
     copper, biasing the result by 1.7x the signal it is the only term able to
     resolve;

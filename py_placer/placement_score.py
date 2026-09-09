@@ -86,10 +86,10 @@ def _term(value, unit, basis=None, **extra):
     reporting a change the placement did not cause.
 
     Measured, and the reason this exists: `plane_cut_proxy` counts nets forced
-    around LOCKED parts, and across four laps of one board the blocker set
-    went 3 -> 11 -> 3 as parts were frozen. Its value went 6.8 -> 101.4 -> 0.0
-    with it. Most of that is bookkeeping about what the operator locked, not a
-    fact about the arrangement.
+    around LOCKED parts, and the blocker set is whatever the operator froze.
+    Over the four tracked laps of one board it is 3, 11, 3, 3 -- and the value
+    goes 0.822, 22.324, 0.0, 0.0 with it. Most of that swing is bookkeeping
+    about what was locked, not a fact about the arrangement.
     """
     out = {'ran': True, 'reason': None, 'value': value, 'unit': unit,
            'direction': _DIRECTION, 'basis': basis}
@@ -287,6 +287,13 @@ def cluster_to_pin(pcb_data, pcb_file, *, intent=None, clearance=None) -> dict:
     # THE VALUE COMES FROM THE DECLARED ROWS when there are any, and the basis
     # is the declared CLAIM IDs -- not the measured pair list.
     #
+    # WHEN A CLAIM IS DECLARED. With no intent there is nothing but the
+    # inferred half, and its basis is the elected pair list -- which does move
+    # with the poses, so two laps that re-elect are not comparable on this
+    # term. That is a real limitation of the no-intent path and the reason
+    # #902 exists: the way to make this term judge a moving board is to
+    # DECLARE the claims.
+    #
     # The pair list was the wrong basis and the reason is sharp: the inferred
     # half is the decap election CLIPPED at `groups.DECAP_RADIUS_MM`, so
     # pushing a capacitor past that radius -- the worst thing this term is
@@ -390,7 +397,6 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
         from placement import part_class
         from placement import body as body_mod
         from placement import floorplan as fp
-        from geometry_utils import segments_intersect_tuple
         from placement import parser as kparser
     except Exception as exc:                                 # noqa: BLE001
         return _skip(f'could not import the geometry this term calls: '
@@ -426,12 +432,14 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
         return _skip('every locked or mechanical part answers body source '
                      '"none", so none of them has geometry to be forced '
                      'around', unit, blockers=len(blockers))
-    # The REFERENCE nets are excluded. On two layers the ground pour IS the
-    # reference copper, so it cannot "remove reference copper" by passing a
-    # part -- and it is the single largest contributor if left in (measured:
-    # 28.6 of 101.4mm on the run-25 placed board came from GND alone, over a
-    # 17-pad "diameter pair" that is an artifact of pad ordering rather than
-    # any route anyone will draw).
+    # The REFERENCE nets are excluded. On two layers the ground pour and the
+    # rails ARE the reference copper, so they cannot "remove reference copper"
+    # by passing a part -- and between them they dominate the number if left
+    # in. Measured on the run-25 placed board with the filter off: 46.702mm
+    # total, of which `/+3.3V` is 12.227 and `GND` 12.150 -- 52% of it, over
+    # a 17-pad "diameter pair" that is an artifact of pad ordering rather
+    # than any route anyone will draw. With the filter on the total is
+    # 22.324mm.
     from net_queries import is_ground_net_name, is_power_net_name
     skipped_nets = []
     pads_by_net = {}
@@ -451,8 +459,13 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
             skipped_nets.append(name)
             continue
         # The DIAMETER PAIR, and the whole net's obstruction is taken over
-        # every blocker it clips -- the clipped regions are disjoint, so they
-        # add without double-counting.
+        # every blocker it clips. Blocker rects are USUALLY disjoint, so the
+        # clipped lengths usually add without double-counting -- but they are
+        # not guaranteed to be, and on the run-25 placed board two of the 11
+        # overlap by 1.0mm2. No net's chord crosses both today, so this is
+        # latent rather than live; a net that did would have that overlap
+        # counted twice. Stated rather than asserted, because `check_assembly`
+        # has a whole containment channel for bodies that sit inside bodies.
         best, pa, pb = -1.0, None, None
         for i, p in enumerate(pads):
             for q in pads[i + 1:]:
@@ -481,9 +494,10 @@ def plane_cut_proxy(pcb_data, pcb_file=None) -> dict:
                              'chord_mm': round(math.hypot(b[0] - a[0],
                                                           b[1] - a[1]), 3)})
     # BASIS: the blocker set. Which parts are locked is an operator decision
-    # that changes between laps -- measured, 3 -> 11 -> 3 over four laps of
-    # one board -- and the total moves with it for reasons the arrangement did
-    # not cause. Two laps that froze different parts are not comparable here.
+    # that changes between laps -- measured, 3 / 11 / 3 / 3 over the four
+    # tracked laps of one board -- and the total moves with it for reasons the
+    # arrangement did not cause. Two laps that froze different parts are not
+    # comparable here.
     return _term(round(total, 3), unit, basis=sorted(rects),
                  nets=len({h['net_id'] for h in hits}), blockers=len(rects),
                  definition='length of each net\'s diameter chord lying INSIDE '
@@ -506,9 +520,20 @@ def pad_area_balance(pcb_data) -> dict:
     long-axis notion, and per-side with a headline side -- and it costs a
     `congestion_bins` grid pass.
 
-    Never call either number "the centroid" without its weight. The two
-    disagree: on the run-25 fixture the count-weighted control reads 13.4% of
-    span where the courtyard-area form reads 2.7%.
+    The weight is the pad's axis-aligned BOUNDING RECT area, not its true
+    copper area -- `legality.pad_rect` is a bbox, so a round pad weighs d^2
+    rather than pi*d^2/4. Published as `weight: pad_bbox_area` so nobody
+    quotes it as copper. The 4/pi over-weighting is uniform across round pads
+    and therefore mostly cancels in a centroid; it would not on a board whose
+    round pads cluster at one end.
+
+    Never call any of these "the centroid" without its weight -- they
+    disagree. Measured over the four tracked laps of one board:
+
+                                    tracked  placed   lap3    lap5
+        pad-bbox-area (this term)   0.0930  0.0723  0.0703  0.0724
+        pad-count control           0.0577  0.0557  0.0550  0.0557
+        footprint-count control     0.0910  0.0582  0.0578  0.0582
     """
     unit = 'fraction of span'
     bounds = getattr(pcb_data.board_info, 'board_bounds', None)
@@ -560,7 +585,7 @@ def pad_area_balance(pcb_data) -> dict:
     return _term(round(abs(centroid - centre) / span, 4), unit,
                  axis=axis, span_mm=round(span, 3),
                  centroid_mm=round(centroid, 3), centre_mm=round(centre, 3),
-                 weight='pad_copper_area', pad_area_mm2=round(area, 3),
+                 weight='pad_bbox_area', pad_area_mm2=round(area, 3),
                  pads=n, npth_pads_excluded=npth)
 
 
@@ -623,12 +648,15 @@ def term_deltas(old_terms, new_terms) -> list:
             row['delta'] = None
             row['judgement'] = 'not-comparable'
             row['why'] = 'the basis moved'
-            # MULTISET differences, not set differences. A basis may legally
-            # contain a repeat -- a declared proximity claim reports one row
-            # per subject pad, so a two-legged crystal contributes its pair
-            # twice -- and with set arithmetic one leg becoming unmeasurable
-            # produced `added: [] removed: []`: the refusal fired and named
-            # nothing, which is the exact failure the comment above forbids.
+            # MULTISET differences, not set differences. No basis this
+            # module builds today can contain a repeat (declared claims are a
+            # set; the other three are one row per key), so this is currently
+            # equivalent to set arithmetic -- but `basis` is a published
+            # contract any term may implement, and an earlier per-pad basis
+            # here DID repeat: a two-legged crystal contributed its pair
+            # twice, and set arithmetic then reported `added: [] removed: []`
+            # when one leg became unmeasurable. The refusal fired and named
+            # nothing, which is the failure the comment above forbids.
             from collections import Counter
             ca, cb = Counter(a.get('basis') or ()), Counter(b.get('basis') or ())
             row['basis_added'] = sorted((cb - ca).elements())

@@ -270,6 +270,41 @@ happened to score. `JSON_SUMMARY.plane_score` records which.
 python py_placer/plane_score.py board.kicad_pcb --plane-nets GND 3V3:F.Cu
 ```
 
+## Placement Quality Terms (`placement_score.py`)
+
+Five terms a COPPER-FREE placement lap can be ranked by, because nothing else
+can rank one: `blocking` on such a board is the unrouted count (the routing
+half's number, identical on every lap) and `quality` is `(0, 0.0, 0)` for every
+placement of every board.
+
+```bash
+python3 -X utf8 py_placer/placement_score.py board.kicad_pcb --json wk/terms.json
+python3 -X utf8 py_placer/placement_score.py board.kicad_pcb --intent floorplan.json
+```
+
+| term | what it measures |
+|---|---|
+| `pair_length` | worst straight-line span of a declared differential pair, mm |
+| `pin_order_crossings` | part pairs whose pad order CROSSES, so a router must pay a via or a detour |
+| `cluster_to_pin` | worst distance from a passive to the pin it serves, mm — declared `proximity` claims first, the decap election for the rest |
+| `plane_cut_proxy` | length of each net's chord lying INSIDE a locked part's body, summed. Two-layer boards only; ground and rails excluded |
+| `balance` | pad-area first moment along the board's long axis, as a fraction of span |
+
+**There is no aggregate and no weight.** Laps are compared by `compare_terms`,
+which is PARETO: `better` only when no measured term regressed, `mixed` naming
+both sides when two terms trade. A term that could not be measured reports
+`ran: false` with a reason and `value: null` — never 0.
+
+Each term publishes a `basis` when its population is not fixed by the board
+(which parts are locked, which claims were declared). When that basis moves
+between laps the term is **not judged**: a total over a different population is
+not a larger or smaller version of the first.
+
+`board_score.py --placement-terms` embeds this document at a top-level
+`placement` key, report-only — it never enters `blocking` and never changes the
+exit code. `converge status` prints each lap's terms and its movement against
+the row it was recorded against.
+
 ## Capacity Options (`check_capacity.py`)
 
 Answers "can this board hold its parts, and if not, what are the levers?" with

@@ -21,9 +21,9 @@ a lap can be ranked by. This file pins three things about them:
    different terms are `mixed` with both named -- no weight, because #694's
    corridor inversion is what a collapsed verdict hides. And a term whose
    POPULATION changed is not judged at all: measured on the run-25 lineage,
-   `plane_cut_proxy`'s blocker set went 3 -> 11 -> 3 as parts were frozen and
-   its value went 6.8 -> 101.4 -> 0.0 with it. Most of that is bookkeeping
-   about what the operator locked.
+   `plane_cut_proxy`'s blocker set reads 3 / 11 / 3 / 3 over the four tracked
+   laps of one board as parts are frozen, and its value 0.8 / 22.3 / 0.0 / 0.0
+   with it. Most of that is bookkeeping about what the operator locked.
 
 Two committed cross-checks, quoted from the tree rather than measured by hand:
 the pair span is **8.10 mm** on lap5 (`references/boundary-criteria.md`, pinned
@@ -358,7 +358,7 @@ def test_every_terms_skip_path_is_reachable():
              'layer'),
             ('cluster_to_pin with nothing declared or elected',
              lambda p: ps.cluster_to_pin(p, None), _NoOutline(), 'proximity')):
-        r = fn(arg) if not isinstance(fn, type(lambda: 0)) or True else None
+        r = fn(arg)
         check(f'{name} refuses with a reason, value None',
               r['ran'] is False and r['value'] is None
               and want in (r['reason'] or ''), repr((r['reason'] or '')[:90]))
@@ -428,8 +428,7 @@ def test_a_moved_basis_is_refused_rather_than_judged():
     got, detail = ps.compare_terms(
         {'plane_cut_proxy': t(101.4, ['Q1', 'U1', 'U2'])},
         {'plane_cut_proxy': t(0.0, ['Q1'])})
-    row = detail[TERM := [i for i, r in enumerate(detail)
-                          if r['term'] == 'plane_cut_proxy'][0]]
+    row = [r for r in detail if r['term'] == 'plane_cut_proxy'][0]
     check('a 101.4 -> 0.0 drop over a SMALLER basis is not an improvement',
           got == 'no-common-terms' and row['judgement'] == 'not-comparable'
           and row.get('why') == 'the basis moved', f"{got} / {row}")

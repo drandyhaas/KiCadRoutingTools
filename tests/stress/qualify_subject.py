@@ -114,10 +114,10 @@ def _gates(board, clearance):
         else:
             # No recognisable summary: do not invent a number. -1 is
             # "unknown" -- it cannot be mistaken for a measured count if this
-            # is ever read quantitatively, and the caller tests `!= 0` so it
-            # fires the gate. (This comment used to claim -1 was "still truthy
-            # for the `> 0` gate". It is not: -1 > 0 is False, and an
-            # unmeasurable board therefore read as one whose gates were clean.)
+            # is ever read quantitatively, and the caller counts it as
+            # neither fired nor clean. (This comment used to claim -1 was
+            # "still truthy for the `> 0` gate". It is not: -1 > 0 is False,
+            # so an unmeasurable board read as one whose gates were clean.)
             nv = -1
     # READ THE JSON, do not scrape stdout (#918). `blocking` is ONE of
     # check_assembly's five `not_buildable` conjuncts (check_assembly.py's
@@ -143,8 +143,8 @@ def _gates(board, clearance):
                 doc = {}
     if not isinstance(doc.get('buildable'), bool):
         # -1 is "unknown", exactly as the DRC arm above uses it: impossible
-        # to mistake for a measured count, and the caller's `!= 0` test makes
-        # it FIRE the gate rather than pass it.
+        # to mistake for a measured count, and counted by the caller as
+        # neither fired nor clean.
         return nv, -1
     blocking = int(doc.get('blocking') or 0)
     if not doc['buildable']:
@@ -169,6 +169,7 @@ def qualify(board, draws=5, seed=None):
     clearance = _board_clearance(board)
     tmp = tempfile.mkdtemp(prefix='qualify_')
     landed, fired, applied, blocked = 0, 0, [], []
+    unmeasured = 0
     try:
         for _ in range(draws):
             kind = rng.choice(DOSED_KINDS)
@@ -187,13 +188,17 @@ def qualify(board, draws=5, seed=None):
                 landed += 1
                 nv, blk = _gates(out, clearance)
                 blocked.append((nv, blk))
-                # `!= 0`, not `> 0`. Both gates use -1 for "could not be
+                # THREE states, not two. Both gates use -1 for "could not be
                 # measured", and `-1 > 0` is False -- so an unmeasurable
-                # result counted as A GATE THAT DID NOT FIRE, which is the
+                # result counted as A GATE THAT DID NOT FIRE, the
                 # measured-clean-because-unexamined error this whole file is
-                # about. Both sentinels' comments claimed -1 was "still truthy
-                # for the `> 0` gate"; it never was.
-                if nv != 0 or blk != 0:
+                # about. Counting it as FIRED is the mirror of that error: it
+                # inflates `fire_rate`, and a board whose gates could not be
+                # measured would grade GOOD on the strength of it. So an
+                # unmeasurable draw is neither, and is reported.
+                if nv < 0 or blk < 0:
+                    unmeasured += 1
+                elif nv > 0 or blk > 0:
                     fired += 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -224,6 +229,10 @@ def qualify(board, draws=5, seed=None):
             % (landed, draws, fired))
     return {'board': board, 'verdict': verdict, 'reason': reason,
             'draws': draws, 'landed': landed, 'gates_fired': fired,
+            # Neither fired nor clean: the gates could not be read at
+            # all. Reported so `gates_fired` never silently mixes a
+            # measured fire with an unmeasurable one.
+            'gates_unmeasured': unmeasured,
             'land_rate': round(land_rate, 3), 'fire_rate': round(fire_rate, 3),
             'applied_mm_median': round(statistics.median(applied), 3) if applied else None,
             'applied_mm_min': round(min(applied), 3) if applied else None,

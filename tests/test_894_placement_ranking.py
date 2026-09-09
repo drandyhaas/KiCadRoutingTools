@@ -145,6 +145,24 @@ def test_the_tier_cannot_reach_anything_but_a_tied_placement_window():
     check('an unjudged window still says no-comparison',
           st['why'] == 'no-comparison' and st.get('blocked') == 'unjudged',
           f"{st['why']}/{st.get('blocked')}")
+    # 4. THE MIXED WINDOW -- some laps compare, one accepted lap carries no
+    #    `blocking`. This is the shape the first version of the tier stole
+    #    from `no-comparison`, dropping the very keys that name which rows
+    #    could not be judged. The control above cannot reach it: popping
+    #    `blocking` from ALL rows leaves nothing to compare, so the tier is
+    #    never consulted.
+    mixed = _rows([_score(pair=8.5 - 0.1 * i) for i in range(5)])
+    mixed[4]['score'].pop('blocking')
+    st = C._half_state(mixed, 'placement', 5)
+    check('a window with ONE unjudged lap stays no-comparison',
+          st['why'] == 'no-comparison', str(st['why']))
+    check('...and still names which rows it could not judge',
+          st.get('blocked') == 'unjudged' and st.get('unjudged') == 1
+          and st.get('unjudged_iterations') == [4],
+          f"blocked={st.get('blocked')} unjudged={st.get('unjudged')} "
+          f"its={st.get('unjudged_iterations')}")
+    check('...and does not claim a placement improvement',
+          'placement_improved' not in st, str(sorted(st)))
 
 
 def test_parent_score_reads_the_sha_nothing_ever_read():

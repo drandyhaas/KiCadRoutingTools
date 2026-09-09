@@ -425,7 +425,10 @@ python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_scor
 the lap cannot be ranked against the one before it:
 
 ```bash
-python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py     placed.kicad_pcb --intent floorplan.json     --placement-terms --parent-score wk/score_lap2.json     --json wk/score_lap3.json
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py \
+    placed.kicad_pcb --intent floorplan.json \
+    --placement-terms --parent-score wk/score_lap2.json \
+    --json wk/score_lap3.json
 ```
 
 `placement` is REPORT-ONLY: it never enters `blocking`, never changes the exit
