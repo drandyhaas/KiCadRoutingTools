@@ -147,6 +147,39 @@ def test_it_sees_order_where_orient_weight_cannot():
 TESTS.append(test_it_sees_order_where_orient_weight_cannot)
 
 
+def test_part_geometry_cost_carries_the_term():
+    """The hook the MOVE LOOP reads, which `total_cost` does not prove.
+
+    A mutation that deleted `pen += self._facing_cost(...)` from
+    `part_geometry_cost` SURVIVED the first run of this file: `total_cost`
+    computes its own facing component from `pair_inversions`, and
+    `_facing_cost` was only ever called directly. So every assertion here
+    passed while the term reached no move the optimizer actually makes -- the
+    term would have been inert exactly where it is supposed to act.
+    """
+    off = _state()
+    on = _state(facing_weight=1.0)
+    moved = []
+    for ref in sorted(off.parts):
+        a = off.part_geometry_cost(ref)
+        b = on.part_geometry_cost(ref)
+        if abs(a - b) > 1e-9:
+            moved.append(ref)
+    assert moved, (
+        'no part geometry cost changed with facing_weight=1.0, so the term '
+        'does not reach part_geometry_cost -- the one function the nudge, '
+        'group and swap evaluators all call')
+    for ref in moved:
+        gap = on.part_geometry_cost(ref) - off.part_geometry_cost(ref)
+        assert abs(gap - on._facing_cost(ref)) < 1e-9, (
+            '%s: part_geometry_cost moved by %r but _facing_cost is %r'
+            % (ref, gap, on._facing_cost(ref)))
+    print('  part_geometry_cost carries the term on %d part(s)' % len(moved))
+
+
+TESTS.append(test_part_geometry_cost_carries_the_term)
+
+
 def test_total_cost_counts_each_pair_once():
     """`ref_inversions` summed over refs would double every pair.
 

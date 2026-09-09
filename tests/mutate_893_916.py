@@ -60,11 +60,21 @@ ROWS = [
      "        if len(own_nets & _part_net_set(state, other, state.parts[other])) < 3:",
      (T_EQUIV,), KILLED),
 
-    # The cached scoring-net set must be intersected, not ignored.
+    # SURVIVED, and the row is kept because the SURVIVAL is the finding: the
+    # intersection is a NO-OP by construction. `net_refs` is built FROM every
+    # part's nets (quench.py:985-989) and `part.nets` is filtered by
+    # `ignore_net_ids` earlier in that same constructor, so `part.nets` is
+    # always a subset of `net_refs`. Measured on esp_prog, tigard and ulx3s:
+    # 0 parts of 333 hold a net outside `net_refs`. The original expression
+    # this replaced -- `set(pa.nets) & set(pb.nets) & set(state.net_refs)` --
+    # was therefore doing a whole-board set build per call for nothing. The
+    # intersection is KEPT anyway, because `pair_metrics` accepts any
+    # duck-typed state and a caller's stand-in need not honour the invariant;
+    # the row records that no test can tell the difference on a real board.
     ('pair-order-part-net-set-ignores-scoring-nets', 'po',
      "        got = set(part.nets) & _scoring_net_ids(state)",
      "        got = set(part.nets)",
-     (T_EQUIV,), KILLED),
+     (T_EQUIV,), 'SURVIVED'),
 
     # ---- #893 facing term --------------------------------------------------
     # The early return is what makes a default run pay nothing AND keeps the

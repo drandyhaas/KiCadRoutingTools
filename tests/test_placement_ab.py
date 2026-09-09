@@ -349,11 +349,32 @@ ROWS = [
     },
     # --- #916: the SEARCH's body currency -------------------------------
     #
-    # ON TRIAL, deliberately. #916's acceptance asks for this table "run as a
-    # GATE: three trial boards, paired and directional", so these rows carry
-    # no `expect` and `gate()` judges them by the N-1 rule. The alternative --
-    # pinning them, the way #834's currency change moved every row and added
-    # none -- would record what happened without ever letting it fail.
+    # RUN AS A GATE, AND THE GATE SAID NO. #916's acceptance asked for this
+    # table "run as a GATE: three trial boards, paired and directional". It was
+    # run that way -- four boards, no `expect` -- and it FAILED: improved 1 of
+    # 4, regressed 3, against a rule of improve >= N-1 and regress == 0. The
+    # rows are now pinned to what was MEASURED and marked `rejected`, which is
+    # what this table does with a term that did not earn its default; the flag
+    # stays off.
+    #
+    # READ THE COLUMNS, NOT THE MARK. The mark is an aggregate and #694 is the
+    # standing warning about that. The signal `body_advisory` IMPROVED on three
+    # of the four boards -- ulx3s 41 -> 38, orangecrab 16 -> 14, watchy 5 -> 4,
+    # esp_prog 4 -> 4 -- so the body model does exactly what #916 says it does:
+    # the search stops seating parts whose real bodies collide. What sank it is
+    # the GUARDS: `crossings` and `hpwl` worsen on esp_prog, ulx3s and
+    # orangecrab, because an `occupancy_local` box only ever GROWS and a more
+    # constrained search finds fewer moves. Measured on esp_prog: the OFF arm
+    # moved 11 footprints, the ON arm 3.
+    #
+    # So this is a real TRADE and not a failure of the mechanism: less body
+    # overlap, bought with wirelength and crossings. Whether that is worth it
+    # is a judgement about what a placement is FOR, and this table is not the
+    # instrument that settles it -- `crossings` and `hpwl` are the proxies
+    # docs/placement-optimization.md measured as weakly correlated with
+    # routability in the first place. The honest state is: implemented, wired,
+    # measured, OFF, with the numbers recorded so the decision can be made on
+    # evidence rather than re-run from scratch.
     #
     # FOUR boards, and they are not the table's usual four. #916 measured
     # WHERE bodies actually change: ulx3s 9 parts, watchy 5, esp_prog 5,
@@ -380,10 +401,9 @@ ROWS = [
         'quench_on': {'body_model': True},
         'signal': 'body_advisory',
         'guard': ('body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: the board #896 was filed from -- 0 of its 21 '
-                'footprints draw a courtyard, so every part is seated against '
-                'a pad box today while every grader sees a drawn body. '
-                'Measured: 5 parts grow, 0 shrink, largest U2 by 4.7x.'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MEASURED: signal NEUTRAL (4 -> 4) and `crossings` 35 -> 43. The board #896 was filed from and the clearest freeze evidence: OFF moved 11 footprints, ON moved 3, because 0 of its 21 footprints draw a courtyard so every seat box grows at once.'),
     },
     {
         'name': 'body-ulx3s',
@@ -393,9 +413,9 @@ ROWS = [
         'quench_on': {'body_model': True},
         'signal': 'body_advisory',
         'guard': ('body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: the largest board where #916 measured growth (9 '
-                'parts), and the one whose two incumbent rows make an OFF arm '
-                'directly comparable to the rest of the table.'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MEASURED: signal IMPROVED 41 -> 38, but `crossings` 2418 -> 2437, `hpwl` 7476.69 -> 7509.09 and zone_containment 3 -> 4. The largest board, and the clearest statement of the trade.'),
     },
     {
         'name': 'body-orangecrab',
@@ -405,9 +425,9 @@ ROWS = [
         'quench_on': {'body_model': True},
         'signal': 'body_advisory',
         'guard': ('body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: named by #916 (4 parts grow), and it carries a '
-                'container footprint (U8), which is the class whose waiver '
-                'behaviour changes when a body crosses CONTAINER_RATIO.'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MEASURED: signal IMPROVED 16 -> 14, `crossings` 1087 -> 1121, `hpwl` 2121.92 -> 2147.78. Same trade as ulx3s.'),
     },
     {
         'name': 'body-watchy',
@@ -416,10 +436,9 @@ ROWS = [
         'quench_on': {'body_model': True},
         'signal': 'body_advisory',
         'guard': ('body_blocking', 'crossings', 'hpwl'),
-        'why': ('MECHANISM: named by #916 (5 parts grow), and the board '
-                'candidate_valid names as the one where nearly every part '
-                'starts in violation -- so it is the most sensitive to a seat '
-                'box that only ever grows.'),
+        'expect': 'improve',
+        'rejected': True,
+        'why': ('MEASURED: the board where the trade goes the OTHER way -- signal 5 -> 4 AND both guards improve (crossings 149 -> 147, hpwl 777.13 -> 765.26). Kept because it is the row that disagrees with the other three, and deleting it is how a finding becomes folklore.'),
     },
 ]
 
