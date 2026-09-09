@@ -1,8 +1,136 @@
 {
+ "body-esp_prog": {
+  "board": "esp_prog.kicad_pcb",
+  "mark": "regress",
+  "off": {
+   "body_advisory": 4,
+   "body_blocking": 0,
+   "crossings": 35,
+   "health_block_displacement_max_mm": null,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 262.75,
+   "intent_errors": 0,
+   "intent_errors_by_rule": {},
+   "intent_errors_enforced": 0,
+   "intent_errors_other": 0,
+   "inversions": 10
+  },
+  "on": {
+   "body_advisory": 4,
+   "body_blocking": 0,
+   "crossings": 43,
+   "health_block_displacement_max_mm": null,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 258.84,
+   "intent_errors": 0,
+   "intent_errors_by_rule": {},
+   "intent_errors_enforced": 0,
+   "intent_errors_other": 0,
+   "inversions": 8
+  }
+ },
+ "body-orangecrab": {
+  "board": "orangecrab_ext_pll.kicad_pcb",
+  "mark": "regress",
+  "off": {
+   "body_advisory": 16,
+   "body_blocking": 0,
+   "crossings": 1087,
+   "health_block_displacement_max_mm": 18.1954,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 2121.92,
+   "intent_errors": 1,
+   "intent_errors_by_rule": {
+    "zone_containment": 1
+   },
+   "intent_errors_enforced": 1,
+   "intent_errors_other": 0,
+   "inversions": 626
+  },
+  "on": {
+   "body_advisory": 14,
+   "body_blocking": 0,
+   "crossings": 1121,
+   "health_block_displacement_max_mm": 17.1986,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 2147.78,
+   "intent_errors": 0,
+   "intent_errors_by_rule": {},
+   "intent_errors_enforced": 0,
+   "intent_errors_other": 0,
+   "inversions": 637
+  }
+ },
+ "body-ulx3s": {
+  "board": "ulx3s.kicad_pcb",
+  "mark": "regress",
+  "off": {
+   "body_advisory": 41,
+   "body_blocking": 0,
+   "crossings": 2418,
+   "health_block_displacement_max_mm": 18.9597,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 7476.69,
+   "intent_errors": 3,
+   "intent_errors_by_rule": {
+    "zone_containment": 3
+   },
+   "intent_errors_enforced": 3,
+   "intent_errors_other": 0,
+   "inversions": 722
+  },
+  "on": {
+   "body_advisory": 38,
+   "body_blocking": 0,
+   "crossings": 2437,
+   "health_block_displacement_max_mm": 18.9597,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 7509.09,
+   "intent_errors": 4,
+   "intent_errors_by_rule": {
+    "zone_containment": 4
+   },
+   "intent_errors_enforced": 4,
+   "intent_errors_other": 0,
+   "inversions": 718
+  }
+ },
+ "body-watchy": {
+  "board": "watchy.kicad_pcb",
+  "mark": "improve",
+  "off": {
+   "body_advisory": 5,
+   "body_blocking": 0,
+   "crossings": 149,
+   "health_block_displacement_max_mm": null,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 777.13,
+   "intent_errors": 0,
+   "intent_errors_by_rule": {},
+   "intent_errors_enforced": 0,
+   "intent_errors_other": 0,
+   "inversions": 77
+  },
+  "on": {
+   "body_advisory": 4,
+   "body_blocking": 0,
+   "crossings": 147,
+   "health_block_displacement_max_mm": null,
+   "health_bus_foreign_crossings": null,
+   "hpwl": 765.26,
+   "intent_errors": 0,
+   "intent_errors_by_rule": {},
+   "intent_errors_enforced": 0,
+   "intent_errors_other": 0,
+   "inversions": 82
+  }
+ },
  "corridor-coldfire": {
   "board": "kit-dev-coldfire-xilinx_5213.kicad_pcb",
   "mark": "improve",
   "off": {
+   "body_advisory": 0,
+   "body_blocking": 0,
    "crossings": 1384,
    "health_block_displacement_max_mm": 56.3849,
    "health_bus_foreign_crossings": 147,
@@ -10,9 +138,12 @@
    "intent_errors": 0,
    "intent_errors_by_rule": {},
    "intent_errors_enforced": 0,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 1392
   },
   "on": {
+   "body_advisory": 0,
+   "body_blocking": 0,
    "crossings": 1372,
    "health_block_displacement_max_mm": 55.4249,
    "health_bus_foreign_crossings": 144,
@@ -20,13 +151,16 @@
    "intent_errors": 0,
    "intent_errors_by_rule": {},
    "intent_errors_enforced": 0,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 1390
   }
  },
  "corridor-orangecrab": {
   "board": "orangecrab_ext_pll.kicad_pcb",
   "mark": "improve",
   "off": {
+   "body_advisory": 16,
+   "body_blocking": 0,
    "crossings": 1087,
    "health_block_displacement_max_mm": 18.1954,
    "health_bus_foreign_crossings": 33,
@@ -36,9 +170,12 @@
     "zone_containment": 1
    },
    "intent_errors_enforced": 1,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 626
   },
   "on": {
+   "body_advisory": 15,
+   "body_blocking": 0,
    "crossings": 1074,
    "health_block_displacement_max_mm": 18.1954,
    "health_bus_foreign_crossings": 31,
@@ -48,13 +185,16 @@
     "zone_containment": 1
    },
    "intent_errors_enforced": 1,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 638
   }
  },
  "corridor-ulx3s": {
   "board": "ulx3s.kicad_pcb",
   "mark": "regress",
   "off": {
+   "body_advisory": 41,
+   "body_blocking": 0,
    "crossings": 2418,
    "health_block_displacement_max_mm": 18.9597,
    "health_bus_foreign_crossings": 62,
@@ -64,9 +204,12 @@
     "zone_containment": 3
    },
    "intent_errors_enforced": 3,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 722
   },
   "on": {
+   "body_advisory": 46,
+   "body_blocking": 0,
    "crossings": 2438,
    "health_block_displacement_max_mm": 19.9557,
    "health_bus_foreign_crossings": 65,
@@ -76,13 +219,16 @@
     "zone_containment": 3
    },
    "intent_errors_enforced": 3,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 717
   }
  },
  "intent-exclusive-coldfire": {
   "board": "kit-dev-coldfire-xilinx_5213.kicad_pcb",
   "mark": "regress",
   "off": {
+   "body_advisory": 0,
+   "body_blocking": 0,
    "crossings": 1384,
    "health_block_displacement_max_mm": 56.3849,
    "health_bus_foreign_crossings": null,
@@ -92,9 +238,12 @@
     "zone_exclusive": 5
    },
    "intent_errors_enforced": 5,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 1392
   },
   "on": {
+   "body_advisory": 0,
+   "body_blocking": 0,
    "crossings": 1383,
    "health_block_displacement_max_mm": 55.4372,
    "health_bus_foreign_crossings": null,
@@ -104,13 +253,16 @@
     "zone_exclusive": 6
    },
    "intent_errors_enforced": 6,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 1392
   }
  },
  "intent-orangecrab": {
   "board": "orangecrab_ext_pll.kicad_pcb",
   "mark": "regress",
   "off": {
+   "body_advisory": 16,
+   "body_blocking": 0,
    "crossings": 1087,
    "health_block_displacement_max_mm": 18.1954,
    "health_bus_foreign_crossings": null,
@@ -120,9 +272,12 @@
     "zone_containment": 1
    },
    "intent_errors_enforced": 1,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 626
   },
   "on": {
+   "body_advisory": 15,
+   "body_blocking": 0,
    "crossings": 1065,
    "health_block_displacement_max_mm": 18.1954,
    "health_bus_foreign_crossings": null,
@@ -130,13 +285,16 @@
    "intent_errors": 0,
    "intent_errors_by_rule": {},
    "intent_errors_enforced": 0,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 651
   }
  },
  "intent-rp2350": {
   "board": "rp2350_fpga_eensy_prePlane.kicad_pcb",
   "mark": "improve",
   "off": {
+   "body_advisory": 7,
+   "body_blocking": 0,
    "crossings": 421,
    "health_block_displacement_max_mm": 11.286,
    "health_bus_foreign_crossings": null,
@@ -146,9 +304,12 @@
     "zone_containment": 3
    },
    "intent_errors_enforced": 3,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 355
   },
   "on": {
+   "body_advisory": 8,
+   "body_blocking": 0,
    "crossings": 416,
    "health_block_displacement_max_mm": 11.8051,
    "health_bus_foreign_crossings": null,
@@ -158,13 +319,16 @@
     "zone_containment": 1
    },
    "intent_errors_enforced": 1,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 347
   }
  },
  "intent-ulx3s": {
   "board": "ulx3s.kicad_pcb",
   "mark": "regress",
   "off": {
+   "body_advisory": 41,
+   "body_blocking": 0,
    "crossings": 2418,
    "health_block_displacement_max_mm": 18.9597,
    "health_bus_foreign_crossings": null,
@@ -174,9 +338,12 @@
     "zone_containment": 3
    },
    "intent_errors_enforced": 3,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 722
   },
   "on": {
+   "body_advisory": 42,
+   "body_blocking": 0,
    "crossings": 2438,
    "health_block_displacement_max_mm": 20.9521,
    "health_bus_foreign_crossings": null,
@@ -184,7 +351,8 @@
    "intent_errors": 0,
    "intent_errors_by_rule": {},
    "intent_errors_enforced": 0,
-   "intent_errors_other": 0
+   "intent_errors_other": 0,
+   "inversions": 721
   }
  }
 }
