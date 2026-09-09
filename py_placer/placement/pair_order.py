@@ -69,14 +69,38 @@ def _lis_length(seq: List[int]) -> int:
     return len(tails)
 
 
-def _escape_pads(part, nets, toward_xy, pose=None) -> Dict[int, Tuple[float, float]]:
+def part_pad_globals(part, pose=None):
+    """`part.pad_globals` at `pose` (or the live pose), as a LIST.
+
+    Hoisted out of `_escape_pads` because the transform does not depend on the
+    partner while the SELECTION does: `ref_inversions` asks about one part
+    against every partner it shares a net with, and the unhoisted version
+    re-transformed that part's whole pad list once per partner. Measured on
+    ulx3s (226 parts, ~150 partners for the FPGA after ignored nets), the two
+    hoists in this module together take `ref_inversions` from ~1430 us to the
+    low hundreds. The list is materialised because callers iterate it many
+    times; `pad_globals` may be a generator.
+    """
+    x, y, rot = pose if pose is not None else (part.x, part.y, part.rot)
+    return list(part.pad_globals(x, y, rot))
+
+
+def _escape_pads(part, nets, toward_xy, pose=None,
+                 pads=None) -> Dict[int, Tuple[float, float]]:
     """One representative pad per shared net: the pad nearest the partner
     (the one that would actually escape into the channel). Deterministic
-    tie-break by (x, y). `pose` overrides the part's live (x, y, rot)."""
-    x, y, rot = pose if pose is not None else (part.x, part.y, part.rot)
+    tie-break by (x, y). `pose` overrides the part's live (x, y, rot).
+
+    `pads` is `part_pad_globals(part, pose)` computed by the caller. It is an
+    optimisation ONLY: passing it must not change any number, which
+    `tests/test_893_pair_order_equivalence.py` asserts per ref rather than in
+    aggregate.
+    """
+    if pads is None:
+        pads = part_pad_globals(part, pose)
     tx, ty = toward_xy
     best: Dict[int, Tuple[float, float, float]] = {}
-    for gx, gy, nid in part.pad_globals(x, y, rot):
+    for gx, gy, nid in pads:
         if nid not in nets:
             continue
         d = (gx - tx) ** 2 + (gy - ty) ** 2
@@ -86,10 +110,47 @@ def _escape_pads(part, nets, toward_xy, pose=None) -> Dict[int, Tuple[float, flo
     return {nid: (gx, gy) for nid, (_, gx, gy) in best.items()}
 
 
+def _scoring_net_ids(state):
+    """`set(state.net_refs)`, cached on the state.
+
+    `pair_metrics` intersected against a freshly built `set(state.net_refs)` on
+    EVERY call -- the whole board's net-id set, rebuilt once per partner per
+    pose. It is pose-invariant: `net_refs` is assigned once in
+    `QuenchState.__init__` (quench.py:988) and never mutated afterwards, and
+    `part.nets` is filtered earlier in that same constructor (:825), so both are
+    frozen by the time anything here runs. Measured on ulx3s, that one
+    expression was 735 of 1782 us per `ref_inversions` call.
+    """
+    ids = getattr(state, '_pair_order_net_ids', None)
+    if ids is None:
+        ids = set(state.net_refs)
+        try:
+            state._pair_order_net_ids = ids
+        except AttributeError:        # a caller's stand-in state with __slots__
+            pass
+    return ids
+
+
+def _part_net_set(state, ref, part):
+    """`set(part.nets)` intersected with the scoring nets, cached per ref."""
+    cache = getattr(state, '_pair_order_part_nets', None)
+    if cache is None:
+        cache = {}
+        try:
+            state._pair_order_part_nets = cache
+        except AttributeError:
+            return set(part.nets) & _scoring_net_ids(state)
+    got = cache.get(ref)
+    if got is None:
+        got = set(part.nets) & _scoring_net_ids(state)
+        cache[ref] = got
+    return got
+
+
 def pair_metrics(state, ref_a: str, ref_b: str,
                  pose_a: Optional[Tuple[float, float, float]] = None,
                  pose_b: Optional[Tuple[float, float, float]] = None,
-                 only_nets=None) -> Optional[Dict]:
+                 only_nets=None, pads_a=None, pads_b=None) -> Optional[Dict]:
     """{'inversions', 'lis', 'nets'} for one part pair, or None when they share
     fewer than 2 scoring nets (one net cannot be out of order).
 
@@ -110,7 +171,8 @@ def pair_metrics(state, ref_a: str, ref_b: str,
     pa, pb = state.parts.get(ref_a), state.parts.get(ref_b)
     if pa is None or pb is None:
         return None
-    shared = sorted(set(pa.nets) & set(pb.nets) & set(state.net_refs))
+    shared = sorted(_part_net_set(state, ref_a, pa)
+                    & _part_net_set(state, ref_b, pb))
     if only_nets is not None:
         keep = set(only_nets)
         shared = [n for n in shared if n in keep]
@@ -124,8 +186,8 @@ def pair_metrics(state, ref_a: str, ref_b: str,
         return None                      # coincident parts: no channel axis
     # Cross-section axis of the channel between the parts.
     vx, vy = -uy / n, ux / n
-    ea = _escape_pads(pa, set(shared), (bx, by), pose_a)
-    eb = _escape_pads(pb, set(shared), (ax, ay), pose_b)
+    ea = _escape_pads(pa, set(shared), (bx, by), pose_a, pads=pads_a)
+    eb = _escape_pads(pb, set(shared), (ax, ay), pose_b, pads=pads_b)
     common = [nid for nid in shared if nid in ea and nid in eb]
     if len(common) < 2:
         return None
@@ -195,9 +257,28 @@ def ref_inversions(state, ref: str,
         partners.update(state.net_refs.get(nid, ()))
     partners.discard(ref)
     total = 0
+    # Transformed ONCE, then handed to whichever slot this ref occupies. The
+    # slot matters and is not cosmetic: `pair_metrics` builds `order_a` from
+    # the FIRST ref's escape pads and ranks the second against it, and the
+    # channel axis is `b - a`, so passing the pads to the wrong side changes
+    # the tie-break and the axis sign. A draft that always treated `ref` as A
+    # was 6.7x faster and reported ulx3s U2 as 358 inversions instead of 26.
+    pads = part_pad_globals(part, pose)
+    own_nets = _part_net_set(state, ref, part)
     for other in sorted(partners):
-        m = (pair_metrics(state, ref, other, pose_a=pose) if ref < other
-             else pair_metrics(state, other, ref, pose_b=pose))
+        # Early-out BEFORE the call. `pair_metrics` returns None for a pair
+        # sharing fewer than two scoring nets, and `ref_inversions` then skips
+        # it -- but only after paying the call plus two set intersections. On
+        # a board where one part has hundreds of partners and a handful of
+        # scoring pairs (ulx3s: 226 parts, 209 scoring pairs on tigard), that
+        # rejected majority IS the hot path. This cannot change a result: it
+        # reproduces `pair_metrics`' own `len(shared) < 2` test against the
+        # same cached sets it would build.
+        if len(own_nets & _part_net_set(state, other, state.parts[other])) < 2:
+            continue
+        m = (pair_metrics(state, ref, other, pose_a=pose, pads_a=pads)
+             if ref < other
+             else pair_metrics(state, other, ref, pose_b=pose, pads_b=pads))
         if m is not None:
             total += m['inversions']
     return total
