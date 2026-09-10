@@ -197,7 +197,7 @@ one was supposed to produce.
 
 ```bash
 D=.claude/skills/plan-pcb-placement/scripts/placement_driver.py
-python3 -X utf8 $D --list                                  # the eight stages
+python3 -X utf8 $D --list                                  # every stage, from the registry
 python3 -X utf8 $D --stage P0 --board board.kicad_pcb      # always start here
 ```
 

@@ -66,7 +66,7 @@ def err(text):
 
 def p_brief(a):
     """Read what was DECLARED before measuring what is there (#711)."""
-    return f'''<stage_instructions stage="P-brief" name="what the board is FOR" of="8">
+    return f'''<stage_instructions stage="P-brief" name="what the board is FOR" of="{len(STAGES)}">
 Every other stage here MEASURES the board. This one asks what the board is
 supposed to be, because the two most consequential placement facts -- which
 edge a connector belongs on, and where along it -- are not in the board file
@@ -124,7 +124,7 @@ Next: python3 -X utf8 {sys.argv[0]} --stage P0 --board {a.board}
 
 def p0(a):
     """Decide whether to touch the placement at all."""
-    return f'''<stage_instructions stage="P0" name="gate" of="7">
+    return f'''<stage_instructions stage="P0" name="gate" of="{len(STAGES)}">
 MEASURE this board's placement, then decide. Do not decide first.
 
 The measurement is two commands and it is never optional. Skipping it is how a
@@ -177,7 +177,7 @@ Next: python3 -X utf8 {sys.argv[0]} --stage <P1|P2|P4|P5> --board {a.board} \\
 
 
 def p1(a):
-    return f'''<stage_instructions stage="P1" name="unplaced" of="7">
+    return f'''<stage_instructions stage="P1" name="unplaced" of="{len(STAGES)}">
 The board has no placement to repair. Do not test this with an exit code -- one
 placement tool exits 0 and gives advice on a board with every part at its
 generator default. Test positively:
@@ -209,7 +209,7 @@ def p2(a):
     ok, why = _guard_damage(a)
     if not ok:
         return err(why)
-    return f'''<stage_instructions stage="P2" name="mechanical facts" of="7">
+    return f'''<stage_instructions stage="P2" name="mechanical facts" of="{len(STAGES)}">
 Before any search runs, separate the parts whose position is NOT a netlist
 question. Each is placed by a determinant you can name, and an optimizer that
 moves them is destroying information.
@@ -304,7 +304,7 @@ def p3(a):
                           _wf, indent=1, sort_keys=True)
         except OSError:
             _wp = None
-    return f'''<stage_instructions stage="P3" name="reconstruct" of="7">
+    return f'''<stage_instructions stage="P3" name="reconstruct" of="{len(STAGES)}">
 The board is placed WRONG, not merely rough, so the quench is the wrong tool:
 it is a local search on a continuous lattice, and what you have is a structural
 error. Escalate, do not compose. Each rung has an applicability test; run the
@@ -391,7 +391,7 @@ def p4(a):
     _ok, _why = _guard_render(a)
     if not _ok:
         return err(_why)
-    return f'''<stage_instructions stage="P4" name="fix loop" of="7">
+    return f'''<stage_instructions stage="P4" name="fix loop" of="{len(STAGES)}">
 One lap = measure, ONE targeted change, verify. Cap: 5 laps. Anything still
 broken at the cap is NAMED with its measurement, not carried silently.
 
@@ -488,7 +488,7 @@ Next: --stage P5 (a slate) or --stage P6 (declare and grade), then P-close.
 
 
 def p5(a):
-    return f'''<stage_instructions stage="P5" name="options" of="7">
+    return f'''<stage_instructions stage="P5" name="options" of="{len(STAGES)}">
 Use this when the question is "which arrangement", not "is this one legal".
 
   python3 -X utf8 py_placer/place_portfolio.py {a.board} --out-dir wk/slate \\
@@ -518,7 +518,7 @@ def p6(a):
     _ok, _why = _guard_render(a)
     if not _ok:
         return err(_why)
-    return f'''<stage_instructions stage="P6" name="declare the intent" of="7">
+    return f'''<stage_instructions stage="P6" name="declare the intent" of="{len(STAGES)}">
 An intent turns "it looks right" into something gradable.
 
   python3 -X utf8 py_tools/check_floorplan.py {a.board} --emit-intent wk/intent.json
@@ -799,7 +799,7 @@ def p_close(a):
     _cok, _cwhy = _guard_congestion(a)
     if not _cok:
         return err(_cwhy)
-    return f'''<stage_instructions stage="P-close" name="close out" of="7">
+    return f'''<stage_instructions stage="P-close" name="close out" of="{len(STAGES)}">
 Prove the placement, then hand it on.
 
   DECLARED SPEC: {_cov_read}
@@ -1422,7 +1422,14 @@ def _args(argv=None):
 def main(argv=None):
     a = _args(argv)
     if a.list:
-        for key in ('P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P-close'):
+        # FROM THE REGISTRY, never a second hand-written tuple. The
+        # tuple that used to live here omitted P-brief, so one
+        # procedure had four stage counts -- STAGES 9, --list 8,
+        # P-brief's own tag of="8" and the other eight of="7" -- and
+        # the stage nobody could find is the only one that records a
+        # design fact (#711). The driver's own refusals send a stuck
+        # reader here to find the stages, so this list IS the index.
+        for key in STAGES:
             print(f'  {key:8s} {TITLES[key]}')
         return 0
     if a.dump_all:
@@ -1474,7 +1481,7 @@ def _dump_all():
     """Every stage's REAL body, guards satisfied.
 
     This used to pass filenames that do not exist, so P2, P3 and P4 dumped
-    their REFUSALS -- three of eight stages, including the two that carry the
+    their REFUSALS -- three of the nine, including the two that carry the
     most commands. Anything auditing the driver through --dump-all (a flag
     checker, a reviewer, a person) was reading error text and seeing no
     commands to be wrong. Guard evidence is cheap to fabricate HERE, where the
@@ -1902,6 +1909,9 @@ def _dump_refusals():
 
 def _self_test():
     """Every stage emits; every guard refuses without its evidence."""
+    import contextlib
+    import io
+    import re
     import tempfile
     bad = []
 
@@ -1922,6 +1932,24 @@ def _self_test():
              f'{key} says what comes next')
         # Instructions must fit in a reading, not a scroll.
         want(len(out.splitlines()) <= 80, f'{key} stays under 80 lines')
+        # The `of=` count is the model's own sense of how far along it is, and
+        # it is TEXT -- so it is derived from the registry and checked against
+        # it here. Eight stages used to say of="7" and P-brief of="8", over a
+        # registry of nine.
+        _m = re.search(r'\bof="(\d+)">', out)
+        want(_m is None or int(_m.group(1)) == len(STAGES),
+             f'{key} counts the stages the registry has')
+
+    # --list is the index the refusals send a stuck reader to, so it is read
+    # back from the PRINTER rather than re-derived from STAGES -- re-deriving
+    # would pass on a --list that prints nothing at all.
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        main(['--list'])
+    _listed = {ln.split()[0] for ln in _buf.getvalue().splitlines() if ln.strip()}
+    want(_listed == set(STAGES),
+         f'--list names every stage ({sorted(set(STAGES) - _listed)} missing, '
+         f'{sorted(_listed - set(STAGES))} invented)')
 
     # Guards refuse without evidence.
     want(STAGES['P3'](_args(['--board', 'b'])).startswith('<error>'),
