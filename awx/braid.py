@@ -126,6 +126,17 @@ W_XING = 0.02                  # two-page: pitch of a column with no layer
 SLOPE_W = 0.02                 # extra band half-width per unit |do/ds|:
                                # a steep diagonal's +-0.03 tube holds no
                                # connected cell path on the 0.025 grid
+# PROBE knobs (replan.py, 2026-09-10): a local re-braid of a few nets on a
+# frozen board is a SCREEN -- a refusal there is unjudged whatever the
+# budget -- and its cost is failing searches repeated: three identical
+# attempts (nothing changes between them when the refused set repeats)
+# and last-call searches at 1.6 M iterations for a net that will not
+# route. BRAID_ATTEMPTS caps the attempt ladder, BRAID_BUDGET_X the
+# rescue / last-call budget multiplier. Defaults = the braid as it was
+# (measured: one attempt gives the same board 22% faster; a halved
+# budget loses nets, so the probe keeps the full one).
+ATTEMPTS = int(os.environ.get('BRAID_ATTEMPTS', '6'))
+BUDGET_X = int(os.environ.get('BRAID_BUDGET_X', '4'))
 SWIM_TUBE = 1.2                # ribbon swimmer's band half-width: it
                                # WEAVES through the page lattice, so
                                # the neighbour-pinch band is wrong for
@@ -2482,7 +2493,7 @@ class Corridor:
         # call re-lays that attempt's refusals in that attempt's world.
         best = None
         stale = 0
-        for attempt in range(6):
+        for attempt in range(ATTEMPTS):
             sched = plan_at(ly_floor)
             log(f'  attempt {attempt}: need {self.layout_need:.2f} of '
                 f'{self.L_free - RESERVE:.2f} mm, W={self.W:.3f}, launch pitch >= '
@@ -2527,7 +2538,7 @@ class Corridor:
                     import copy as _copy
                     cfg0 = ctx.cfg
                     big = _copy.copy(cfg0)
-                    big.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
+                    big.max_iterations = BUDGET_X * max(cfg0.max_iterations, 50_000)
                     ctx.cfg = big
                     # the retry also WIDENS a free swimmer's window:
                     # the sm ladder measured window size as the
@@ -2652,7 +2663,7 @@ class Corridor:
             import copy as _copy
             cfg0 = ctx.cfg
             big = _copy.copy(cfg0)
-            big.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
+            big.max_iterations = BUDGET_X * max(cfg0.max_iterations, 50_000)
             ctx.cfg = big
             try:
                 still = list(self.refused)
@@ -2705,7 +2716,7 @@ class Corridor:
         import copy as _copy
         cfg0 = ctx.cfg
         big2 = _copy.copy(cfg0)
-        big2.max_iterations = 4 * max(cfg0.max_iterations, 50_000)
+        big2.max_iterations = BUDGET_X * max(cfg0.max_iterations, 50_000)
         ctx.cfg = big2
         try:
             # ECON_MIN_VIAS: the cheapest lane worth trying to

@@ -59,6 +59,8 @@ class Move:
     vias: int
     legs: List[Tuple[Pt, Pt, str]] = field(default_factory=list)
     site: Optional[Pt] = None       # via location, if any
+    climb: int = 0                  # rows/columns the run travels ALONG the
+                                    # array before leaving (enumerate_moves climb=)
 
     def __repr__(self) -> str:
         s = (f'{self.kind}/{self.direction}/{self.layer[0]} '
@@ -92,7 +94,7 @@ DIRS = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
 def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     clear: Callable[[Pt, Pt, str], bool],
                     via_clear: Callable[[Pt, str], bool] = None,
-                    margin: float = 0.0) -> List[Move]:
+                    margin: float = 0.0, climb: int = 0) -> List[Move]:
     """Every escape move this pad has. `clear(p, q, layer)` says whether
     a track from p to q on `layer` is free of foreign copper;
     `via_clear(p, layer)` whether a via barrel fits at p (checked on
@@ -173,6 +175,79 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     out.append(Move(net, 'dogbone', d, L, e, 1,
                                     [((px, py), site, home),
                                      (site, e, L)], site=site))
+
+    # --- CLIMB (2026-09-10): a dog-bone or via-in-pad whose run on the
+    # other layer first travels ALONG the array -- up a column gap for a
+    # left/right exit, along a row gap for up/down -- and leaves the face
+    # at a CHOSEN row or column, up to `climb` pitches from its own. The
+    # layer it runs on has no pads under a BGA, only via barrels to
+    # clear, which is why the human's riders can do it: on allwinner's K51
+    # eight of the eleven north riders dive beside the ball, run 3-4 mm
+    # north along a column gap on B and leave the east face nested at
+    # rows 5-10 mm from their own (measured 2026-09-10: SA11 2.7 mm at
+    # x 125.78, SA12 4.0 at 126.86, SA15 3.1 at 126.07, SBA1 4.2 at
+    # 127.14). Off at climb=0: the menu is then byte-identical.
+    if climb > 0:
+        starts = []      # (kind, site, first legs): where the run begins
+        for (sx, sy) in ((-1, -1), (-1, 1), (1, -1), (1, 1)):
+            site = (px + sx * hx, py + sy * hy)
+            if not (x0 < site[0] < x1 and y0 < site[1] < y1):
+                continue
+            if via_clear and not all(via_clear(site, lay) for lay in layers):
+                continue
+            if not clear((px, py), site, home):
+                continue
+            starts.append(('dogbone', site, [((px, py), site, home)]))
+        if not (via_clear and not all(via_clear((px, py), lay)
+                                      for lay in layers)):
+            starts.append(('via_in_pad', (px, py), []))
+        for kind, site, legs0 in starts:
+            for L in others:
+                for d, (dx, dy) in DIRS.items():
+                    e0 = edge(d)
+                    # the gaps the run may climb along: a dog-bone's site
+                    # is already in one; a via-in-pad steps half a pitch
+                    # into the gap on either side first
+                    if kind == 'dogbone':
+                        gaps = [(site, [])]
+                    elif dx:
+                        gaps = [((px + g * hx, py), [((px, py), (px + g * hx, py), L)])
+                                for g in (-1, 1) if x0 < px + g * hx < x1]
+                    else:
+                        gaps = [((px, py + g * hy), [((px, py), (px, py + g * hy), L)])
+                                for g in (-1, 1) if y0 < py + g * hy < y1]
+                    for (gx, gy), legs_in in gaps:
+                        if any(not clear(a, b, l) for a, b, l in legs_in):
+                            continue
+                        for s in (-1, 1):
+                            # HALF-pitch steps: the run layer has no pads
+                            # under the array (a BGA's back), so the run may
+                            # leave along a row LINE as well as a gap midline
+                            # -- on a face carrying two teeth per pitch every
+                            # gap midline is taken and the row lines between
+                            # them are the free exits (the human's nested
+                            # riders at K51 leave at half-pitch spacing)
+                            for h in range(1, 2 * climb + 1):
+                                k = (h + 1) // 2
+                                if dx:
+                                    ey = gy + s * h * hy
+                                    if not (y0 < ey < y1):
+                                        break       # beyond the outer row
+                                    turn, e = (gx, ey), (e0[0], ey)
+                                else:
+                                    ex = gx + s * h * hx
+                                    if not (x0 < ex < x1):
+                                        break
+                                    turn, e = (ex, gy), (ex, e0[1])
+                                if not clear((gx, gy), turn, L):
+                                    break           # the gap is blocked from here on
+                                if not clear(turn, e, L):
+                                    continue        # this row's exit is; the next may not be
+                                out.append(Move(net, kind, d, L, e, 1,
+                                                legs0 + legs_in
+                                                + [((gx, gy), turn, L), (turn, e, L)],
+                                                site=(site if kind == 'dogbone' else (px, py)),
+                                                climb=k))
     return out
 
 

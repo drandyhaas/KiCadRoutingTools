@@ -50,6 +50,15 @@ def plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses, chi: int 
                        fr.layers(tooth_layer), buses)
 
 
+# THE LEARNED PRICE (replan.py, 2026-09-10): a per-net offset on the
+# model's prediction, set from the PREVIOUS ROUTE -- real vias minus the
+# model's prediction on the plan that was routed -- so the next plan is
+# judged with what each net actually cost the braid rather than the flat
+# swimmer price (measured at K51: the flat price ranks plans at Spearman
+# 0.2 against the braid). Empty by default: every judge unchanged.
+RESIDUAL = {}
+
+
 def _plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
     """The PAGES the braid will route on, decided here with the braid's
     own schedule code (schedule.Schedule) on the plan's launch and exit
@@ -88,6 +97,9 @@ def _plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
                 pred[n] = ((1 if tooth_layer.get(n, 'F.Cu') != pg else 0)
                            + (1 if dst_choice[n].layer != pg else 0)
                            + dst_choice[n].vias)
+    if RESIDUAL:
+        for n in pred:
+            pred[n] += RESIDUAL.get(n, 0)
     return pages, pred
 
 
@@ -121,6 +133,9 @@ def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
             arrive = 1 if m.layer != pg else 0
         pred[n] = (tv + (1 if tooth_layer.get(n, 'F.Cu') != pg else 0)
                    + arrive + m.vias)
+    if RESIDUAL:
+        for n in pred:
+            pred[n] += RESIDUAL.get(n, 0)
     return pred
 
 
