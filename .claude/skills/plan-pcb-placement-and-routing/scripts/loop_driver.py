@@ -2804,6 +2804,12 @@ def _args(argv=None):
                          'NOT the `agreement` token.')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--dump-all', action='store_true')
+    ap.add_argument('--dump-refusals', action='store_true',
+                    help='every REFUSAL this driver can print, guards '
+                         'unsatisfied. --dump-all shows the '
+                         'instructions; this shows the other branch, '
+                         'which is where a stuck reader gets their next '
+                         'command (#923).')
     ap.add_argument('--self-test', action='store_true')
     return ap.parse_args(argv)
 
@@ -2950,6 +2956,11 @@ def main(argv=None):
                   f'instructions: {", ".join(refused)}')
             return 1
         return 0
+    if a.dump_refusals:
+        # Before _log_invocation / _write_prompt, exactly as --dump-all is: a
+        # dump renders text, it does not run a stage, and it must not leave a
+        # log row or a teammate prompt behind.
+        return _dump_refusals()
     if not a.stage:
         print('loop_driver: --stage is required (see --list)', file=sys.stderr)
         return 2
@@ -2964,6 +2975,390 @@ def main(argv=None):
     _write_prompt(a, a.stage, out)
     print(out)
     return code
+
+
+# --------------------------------------------------------------------------
+# the REFUSALS (#923) -- the other half of --dump-all
+# --------------------------------------------------------------------------
+# The same shape as placement_driver's, and duplicated for the same reason
+# `err`, `_load` and `_self_test` already are: a skill's scripts/ directory is
+# self-contained, and neither driver imports the other.
+#: Helpers that COMPOSE a refusal instead of returning it: they hand text back
+#: as `(False, text)` for a stage to wrap in `err()`, so a third of this file's
+#: refusal strings sit nowhere near an `err(` call site.
+_REFUSAL_HELPERS = ('_load', '_guard_', '_metrics_of')
+
+
+def _refusal_sites(path=None):
+    """Every place this file can refuse, read off its own AST.
+
+    ENUMERATED, never listed by hand -- a hand-kept list of branches is a list
+    that stops covering the ones added after it.
+
+    Returns {first_line: (function, kind, last_line)}.
+    """
+    import ast
+    path = path or os.path.abspath(__file__)
+    with open(path, encoding='utf-8') as fh:
+        tree = ast.parse(fh.read())
+    sites = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        composes = fn.name.startswith(_REFUSAL_HELPERS)
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == 'err'):
+                sites[node.lineno] = (fn.name, 'err', node.end_lineno)
+            elif (composes and isinstance(node, ast.Return)
+                    and isinstance(node.value, ast.Tuple)
+                    and len(node.value.elts) == 2):
+                head, text = node.value.elts
+                falsy = (isinstance(head, ast.Constant)
+                         and head.value in (False, None))
+                blank = (isinstance(text, ast.Constant)
+                         and text.value in (None, ''))
+                if falsy and not blank:
+                    sites[node.lineno] = (fn.name, 'guard', node.end_lineno)
+    return sites
+
+
+def _refusal_scenarios(tmp):
+    """Evidence-STARVED namespaces: one per guard branch, each labelled.
+
+    The mirror of `--dump-all`'s single satisfied namespace. No row is
+    load-bearing on its own -- `_dump_refusals` measures which branches the set
+    reached and names the ones it did not.
+    """
+    sys.path.insert(0, ROOT)
+    from board_store import sha256_file as _sha_of
+
+    def wrote(name, doc):
+        p = os.path.join(tmp, name)
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(doc, fh)
+        return p
+
+    board = os.path.join(tmp, 'b.kicad_pcb')
+    other = os.path.join(tmp, 'other.kicad_pcb')
+    open(board, 'w', encoding='utf-8').close()
+    with open(other, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb)\n')
+    missing = os.path.join(tmp, 'nope.json')
+    unreadable = os.path.join(tmp, 'truncated.json')
+    with open(unreadable, 'w', encoding='utf-8') as fh:
+        fh.write('{"blocking": 2')            # a real half-written artifact
+    sha = _sha_of(board)
+
+    def ledger(name, rows):
+        p = os.path.join(tmp, name)
+        with open(p, 'w', encoding='utf-8') as fh:
+            for i, r in enumerate(rows):
+                fh.write(json.dumps(dict(r, iteration=i)) + '\n')
+        return p
+
+    row = {'kind': 'completion', 'accepted': True, 'result_sha': sha,
+           'score': {'blocking': 0, 'quality': {}}}
+    led = ledger('ledger.jsonl', [row])
+    flat = ledger('flat.jsonl',
+                  [dict(row, kind='placement')] * 6 + [row] * 6)
+    _REPORT = {'blocking': 0, 'oob_pad_count': 0, 'buildable': True,
+               'verdict': 'buildable (blocking 0)', 'locked_contacts': 0,
+               'pad_conflicts': 0, 'hole_conflicts': 0, 'clearance': 0.2,
+               'clearance_source': 'board netclass', 'board': board}
+    report = wrote('p.json', dict(_REPORT))
+
+    def bent(name, **kw):
+        """The satisfying close-out with one field bent, so each row below
+        trips ONE gate and reaches the next -- a report bent in two places
+        only ever renders the first refusal."""
+        doc = dict(_REPORT, **kw)
+        return wrote(name, {k: v for k, v in doc.items() if v is not None})
+
+    def congestion(name, **metrics):
+        m = {'halo': 50.0, 'crossings': 50.0, 'hpwl': 500.0}
+        m.update(metrics)
+        return wrote(name, {'metrics': m})
+
+    def wrote_text(name, text):
+        p = os.path.join(tmp, name)
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write(text + '\n')
+        return p
+    render = wrote('rj.json', {
+        'instrument': {'board': board, 'summary_json': 'wk/summary.json'},
+        'checklist': {'d_moved': {'match': None}}})
+    score = wrote('s.json', {'blocking': 2})
+    _CLOSE = {'schema': 1, 'kind': 'board-complete', 'board': board,
+              'score': {'blocking': 0},
+              'components': {'orphan_stubs': {'ran': True}},
+              'fab_floors': {'ran': True, 'relaxed': []},
+              'verdict': 'DONE', 'reason': 'fixture', 'ungraded': []}
+    close = wrote('c.json', dict(_CLOSE))
+
+    def bent_close(name, **kw):
+        return wrote(name, dict(_CLOSE, **kw))
+
+    base = ['--board', board, '--ledger', led]
+    full = base + ['--score', score, '--placement-report', report,
+                   '--render-json', render, '--shape', 'placement']
+    return [
+        ('no evidence at all', ['--board', board]),
+        ('a board that is not there', ['--board', os.path.join(
+            tmp, 'nope.kicad_pcb'), '--ledger', led]),
+        ('a ledger that is not there', ['--board', board,
+                                        '--ledger', missing]),
+        ('an empty ledger', ['--board', board,
+                             '--ledger', ledger('empty.jsonl', [])]),
+        ('a ledger whose rows name no board', ['--board', board, '--ledger',
+         ledger('nosha.jsonl', [{'kind': 'completion', 'accepted': True,
+                                 'score': {'blocking': 0}}])]),
+        ('a ledger of a DIFFERENT board', ['--board', board, '--ledger',
+         ledger('othersha.jsonl', [dict(row, result_sha=_sha_of(other))])]),
+        ('a score that is not there', base + ['--score', missing]),
+        ('a score that does not parse', base + ['--score', unreadable]),
+        ('a score of a different board', base + ['--score', wrote(
+            's_other.json', {'blocking': 2, 'board': other})]),
+        ('a placement report that is not there', base
+         + ['--score', score, '--placement-report', missing]),
+        ('a placement report missing its verdict', base
+         + ['--score', score, '--placement-report', wrote(
+             'p_bare.json', {'blocking': 0})]),
+        ('a render that is not there', full[:-4] + ['--render-json', missing,
+                                                    '--shape', 'placement']),
+        ('a render with no route summary', base + [
+            '--score', score, '--placement-report', report, '--shape',
+            'placement', '--render-json', wrote('rj_nosum.json', {
+                'instrument': {'board': board},
+                'checklist': {'d_moved': {'match': None}}})]),
+        ('a render of a different board', base + [
+            '--score', score, '--placement-report', report, '--shape',
+            'placement', '--render-json', wrote('rj_other.json', {
+                'instrument': {'board': other,
+                               'summary_json': 'wk/summary.json'},
+                'checklist': {'d_moved': {'match': None}}})]),
+        ('a congestion read that is not there', full
+         + ['--congestion-json', missing]),
+        ('a congestion baseline that is not there', full
+         + ['--congestion-json', wrote('cj.json', {'metrics': {'halo': 10.0}}),
+            '--congestion-baseline', missing]),
+        ('a close-out that is not there', full
+         + ['--ledger', flat, '--routing-close', missing]),
+        ('a close-out of a different board', full + ['--ledger', flat,
+         '--routing-close', wrote('c_other.json', {
+             'schema': 1, 'kind': 'board-complete', 'board': other,
+             'score': {'blocking': 0}, 'verdict': 'DONE',
+             'components': {}, 'fab_floors': {'ran': True, 'relaxed': []},
+             'reason': 'fixture', 'ungraded': []})]),
+        ('a close-out that contradicts the ledger', full + ['--ledger', flat,
+         '--routing-close', wrote('c_bad.json', {
+             'schema': 1, 'kind': 'board-complete', 'board': board,
+             'score': {'blocking': 4}, 'verdict': 'INCOMPLETE',
+             'components': {'orphan_stubs': {'ran': True}},
+             'fab_floors': {'ran': True, 'relaxed': []},
+             'reason': 'fixture', 'ungraded': []})]),
+        ('a close-out with the ledger flat', full + ['--ledger', flat,
+                                                     '--routing-close', close]),
+        # L2's residue flag, and the four counts it reads out of the close-out
+        ('--accept-residue naming a check that does not exist', full
+         + ['--accept-residue', 'everything']),
+        ('a close-out grading a different board', base
+         + ['--score', score, '--placement-report', bent(
+             'p_other.json', board=other)]),
+        ('a board its own instrument calls NOT BUILDABLE', base
+         + ['--score', score, '--placement-report', bent(
+             'p_nb.json', buildable=False,
+             verdict='NOT BUILDABLE (blocking 2)')]),
+        ('locked_contacts that is not a number', base
+         + ['--score', score, '--placement-report', bent(
+             'p_lcx.json', locked_contacts='two')]),
+        ('a part in contact with a LOCKED part', base
+         + ['--score', score, '--placement-report', bent(
+             'p_lc.json', locked_contacts=2)]),
+        ('a blocking count that is not a number', base
+         + ['--score', score, '--placement-report', bent(
+             'p_bx.json', blocking='seven')]),
+        ('a close-out with no blocking count at all', base
+         + ['--score', score, '--placement-report', bent(
+             'p_nb2.json', blocking=None)]),
+        ('a blocking pair handed to routing', base
+         + ['--score', score, '--placement-report', bent(
+             'p_b.json', blocking=3)]),
+        ('an oob_pad_count that is not a number', base
+         + ['--score', score, '--placement-report', bent(
+             'p_ox.json', oob_pad_count='five')]),
+        ('pad copper off the board', base
+         + ['--score', score, '--placement-report', bent(
+             'p_oob.json', oob_pad_count=5)]),
+        # the recording spine: a board no ledger row names
+        ('a board no ledger row records', ['--board', other, '--ledger', led,
+         '--score', wrote('s_o.json', {'blocking': 2}),
+         '--placement-report', bent('p_o.json', board=other),
+         '--render-json', wrote('rj_o.json', {
+             'instrument': {'board': other,
+                            'summary_json': 'wk/summary.json'},
+             'checklist': {'d_moved': {'match': None}}}),
+         '--shape', 'placement']),
+        # _guard_route_render, one row per way a render fails to be evidence
+        ('a render with no instrument.board', full[:-4]
+         + ['--shape', 'parameter', '--render-json', wrote('rj_nob.json', {
+             'instrument': {'summary_json': 'wk/summary.json'},
+             'checklist': {'d_moved': {'match': None}}})]),
+        ('a render with no checklist', full[:-4]
+         + ['--shape', 'parameter', '--render-json', wrote('rj_nochk.json', {
+             'instrument': {'board': board,
+                            'summary_json': 'wk/summary.json'}})]),
+        ('a render whose own moved list contradicts it', full[:-4]
+         + ['--shape', 'parameter', '--render-json', wrote('rj_moved.json', {
+             'instrument': {'board': board, 'before': other,
+                            'summary_json': 'wk/summary.json'},
+             'moved_refs': [{'reference': 'R1', 'dist': 1.0}],
+             'checklist': {'d_moved': {'moved': 1, 'expected': 0,
+                                       'match': False}}})]),
+        # _guard_congestion, which L4's `parameter` re-entry spends
+        ('a parameter re-entry with no congestion read', full
+         + ['--shape', 'parameter']),
+        ('a congestion read that does not parse', full
+         + ['--shape', 'parameter', '--congestion-json', unreadable]),
+        ('a congestion read carrying no numbers', full
+         + ['--shape', 'parameter',
+            '--congestion-json', wrote('cj_bare.json', {'metrics': {}})]),
+        ('a congestion read with no baseline', full
+         + ['--shape', 'parameter', '--congestion-json', congestion('cj.json')]),
+        ('a congestion baseline that does not parse', full
+         + ['--shape', 'parameter', '--congestion-json', congestion('cj2.json'),
+            '--congestion-baseline', unreadable]),
+        ('a congestion baseline carrying no numbers', full
+         + ['--shape', 'parameter', '--congestion-json', congestion('cj3.json'),
+            '--congestion-baseline', wrote('cb_bare.json', {'metrics': {}})]),
+        ('a re-entry that leaves the board as tangled as it found it', full
+         + ['--shape', 'parameter',
+            '--congestion-json', congestion('cj4.json', halo=100.0),
+            '--congestion-baseline', congestion('cb4.json', halo=100.0)]),
+        # L5's own evidence
+        ('a board that is not there to close out', ['--board', os.path.join(
+            tmp, 'gone.kicad_pcb'), '--ledger', flat, '--score', score]),
+        ('a score taken on a different board', ['--board', board, '--ledger',
+         flat, '--score', wrote('s_sha.json', {'blocking': 0,
+                                               'board_sha': 'deadbeef' * 8})]),
+        ('a close-out with no score at all', ['--board', board,
+                                              '--ledger', flat]),
+        ('a run with no ledger at all', ['--board', board, '--ledger', missing,
+                                         '--score', score]),
+        # the close-out document itself
+        ('--accept-unclosed naming a check that does not exist', full
+         + ['--ledger', flat, '--routing-close', close,
+            '--accept-unclosed', 'everything']),
+        ('a close-out that is board_score.py output', full + ['--ledger', flat,
+         '--routing-close', wrote('c_score.json', {
+             'kind': 'board-score', 'blocking': 0, 'blocking_by': {},
+             'board': board})]),
+        ('a close-out of a board that has since been rewritten', full
+         + ['--ledger', flat, '--routing-close', bent_close(
+             'c_sha.json', board_sha='deadbeef' * 8)]),
+        ('a close-out that examined no instruments', full + ['--ledger', flat,
+         '--routing-close', bent_close('c_skip.json', components={})]),
+        ('a close-out that could not check the fab floors', full
+         + ['--ledger', flat, '--routing-close', bent_close(
+             'c_ff.json', fab_floors={'ran': False, 'reason': 'no --authored-from'})]),
+        ('a close-out shipping ungraded components', full + ['--ledger', flat,
+         '--routing-close', bent_close('c_ung.json',
+                                       ungraded=['impedance', 'length'])]),
+        ('a verifier verdict the record never carries', full
+         + ['--ledger', flat, '--routing-close', close,
+            '--verifier-verdict', wrote_text('v.txt',
+                                             'VERDICT=FAIL lens=connectivity')]),
+        ('a close-out with `blocking` written as null', base
+         + ['--score', score, '--placement-report', wrote(
+             'p_null.json', dict(_REPORT, blocking=None))]),
+        ('a score with `blocking` written as null', base
+         + ['--score', wrote('s_null.json', {'blocking': None}),
+            '--placement-report', report]),
+        ('a shipping board no lap recorded', ['--board', other,
+         '--ledger', flat, '--score', wrote('s_ship.json', {'blocking': 0}),
+         '--routing-close', bent_close('c_ship.json', board=other,
+                                       board_sha=_sha_of(other))]),
+        # `_close_out` is called only on a TERMINAL branch, and L5 refuses on a
+        # missing ledger before it gets there -- so this text is unreachable
+        # through a stage and would be invisible to the scan for the same
+        # reason every refusal was before #923. Rendered by calling the gate
+        # itself: the point is that the text a reader would be handed is
+        # checked, not that a stage can be talked into printing it.
+        ('a ship gate with no ledger at all',
+         ['--board', board, '--ledger', missing, '--score', score,
+          '--routing-close', close],
+         lambda a: _close_out(a, 'DONE-EXHAUSTED') or ''),
+    ]
+
+
+def _dump_refusals():
+    """Every refusal this driver can print, with its guards UNSATISFIED.
+
+    `--dump-all` fabricates PASSING evidence deliberately -- its job is to show
+    the instructions -- so no refusal is ever rendered through it, and the
+    commands inside refusals are the strings a STUCK reader runs next. #923.
+
+    Coverage is MEASURED, not asserted: the scenarios run under a line trace and
+    any site in `_refusal_sites()` nothing reached is named here and makes this
+    exit 1.
+    """
+    import tempfile
+    sites = _refusal_sites()
+    src = os.path.normcase(os.path.abspath(__file__))
+    seen, crashed, executed = {}, [], set()
+
+    def _trace(frame, event, arg):
+        if os.path.normcase(frame.f_code.co_filename) != src:
+            return None
+        if event == 'line':
+            executed.add(frame.f_lineno)
+        return _trace
+
+    with tempfile.TemporaryDirectory() as tmp:
+        scenarios = _refusal_scenarios(tmp)
+        sys.settrace(_trace)
+        try:
+            for row in scenarios:
+                label, argv = row[0], row[1]
+                a = _args(argv)
+                # A row may name the gate to call. `_close_out`'s own
+                # missing-ledger refusal is unreachable through a stage (L5
+                # refuses earlier), and a text nothing renders is a command
+                # nothing checks -- which is the whole finding behind #923.
+                calls = ([('(gate)', row[2])] if len(row) > 2
+                         else [(k, STAGES[k]) for k in sorted(STAGES)])
+                for key, fn in calls:
+                    try:
+                        out = fn(a)
+                    except Exception as exc:                # noqa: BLE001
+                        crashed.append((key, label,
+                                        f'{type(exc).__name__}: {exc}'))
+                        continue
+                    if out.startswith('<error>') and out not in seen:
+                        seen[out] = (key, label)
+        finally:
+            sys.settrace(None)
+
+    for out, (key, label) in seen.items():
+        print(f'===== {key} refuses: {label} =====')
+        print(out)
+
+    missed = sorted(ln for ln, (_f, _k, end) in sites.items()
+                    if not any(n in executed
+                               for n in range(ln, (end or ln) + 1)))
+    print(f'\n{len(seen)} distinct refusal(s) from {len(scenarios)} '
+          f'scenario(s); {len(sites) - len(missed)} of {len(sites)} refusal '
+          f'site(s) reached.')
+    for ln in missed:
+        fn, kind, _end = sites[ln]
+        print(f'!! line {ln} ({fn}, {kind}): a refusal no scenario renders')
+    for key, label, why in crashed:
+        print(f'!! {key} raised instead of refusing on {label!r}: {why}')
+    if missed or crashed:
+        print('\nAdd a row to _refusal_scenarios, or delete the dead branch: '
+              'a refusal nothing renders is a command nothing checks.')
+        return 1
+    return 0
 
 
 def _self_test():

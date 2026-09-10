@@ -22,6 +22,7 @@ SKIP is satisfied most cheaply by skipping, and the thing being skipped is the
 check that catches stacked parts.
 """
 
+import functools
 import importlib.util
 import os
 import re
@@ -38,6 +39,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # whole point of this gate is that NO skill file drifts from the real parsers --
 # so every one is a source, and the assertions below say which file must carry
 # which rule.
+#: CACHED because the two scans below ask for every source once per
+#: TOOL, and a driver source costs two subprocess runs. Sound because
+#: nothing in this file writes to a source between reads -- and
+#: without it the refusal dump multiplied a 143 s gate by ~40.
+@functools.lru_cache(maxsize=None)
 def source_text(rel):
     """What the executor actually reads for this source.
 
@@ -46,20 +52,42 @@ def source_text(rel):
     source scan sees `--json` at the end of a line whose value is on the next
     one and reports a defect that does not exist -- while missing that the
     emitted text is what the executor runs. Ask the driver.
+
+    BOTH DUMPS (#923). `--dump-all` fabricates PASSING evidence for every guard,
+    so it renders one branch per stage -- the instructions -- and no refusal
+    ever. That left the commands inside refusals unscanned, which is the worst
+    place in the file for a broken one: a refusal is what a STUCK reader is
+    handed next. Measured: P3's refusal spelled `place_optimize.py
+    --suggest-locks --json wk/locks.json`, a flag that tool does not have, exit
+    2, thirty lines below the branch that spells it correctly -- and this gate
+    passed on it for as long as it existed. `--dump-refusals` renders the other
+    branch and audits its own coverage against the driver's refusal sites.
     """
     path = os.path.join(ROOT, rel)
     if not os.path.isfile(path):
         return ''
     if rel.endswith('_driver.py'):
         env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
-        p = subprocess.run([sys.executable, '-X', 'utf8', path, '--dump-all'],
-                           capture_output=True, text=True, encoding='utf-8',
-                           errors='replace', cwd=ROOT, timeout=300, env=env)
-        out = (p.stdout or '') + (p.stderr or '')
+
+        def ask(flag):
+            p = subprocess.run([sys.executable, '-X', 'utf8', path, flag],
+                               capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', cwd=ROOT, timeout=300, env=env)
+            return (p.stdout or '') + (p.stderr or ''), p.returncode
+
+        out, rc = ask('--dump-all')
         assert '=====' in out, f'{rel} --dump-all emitted nothing:\n{out[:400]}'
-        assert p.returncode == 0, \
-            f'{rel} --dump-all exited {p.returncode}; a stage refused:\n{out[-600:]}'
-        return out
+        assert rc == 0, \
+            f'{rel} --dump-all exited {rc}; a stage refused:\n{out[-600:]}'
+        ref, ref_rc = ask('--dump-refusals')
+        assert '<error>' in ref, \
+            f'{rel} --dump-refusals rendered no refusal:\n{ref[:400]}'
+        # Non-zero means a refusal site nothing renders -- so a refusal exists
+        # that this gate cannot see, which is exactly the hole it is here to
+        # close. The driver names the line.
+        assert ref_rc == 0, \
+            f'{rel} --dump-refusals exited {ref_rc}:\n{ref[-800:]}'
+        return out + '\n' + ref
     return open(path, encoding='utf-8', errors='replace').read()
 
 
@@ -428,8 +456,48 @@ def test_driver_commands_supply_required_options_and_values():
     assert not problems, (
         'driver commands that die at argparse:\n'
         + '\n'.join(f'  {s}:  {t}  {w}' for s, t, w in sorted(set(problems))))
-    assert checked >= 10, f'only {checked} driver command(s) scanned'
+    # 111 measured at the commit that added the refusal dump (64 before it).
+    # The old floor of 10 was 6% of what the scan really finds, so it could
+    # only catch the scanner breaking COMPLETELY -- not one of the two dumps
+    # dropping out, which is the failure that actually happens here.
+    assert checked >= 60, f'only {checked} driver command(s) scanned'
     print(f'  PASS: {checked} driver command spans, all runnable')
+
+
+def test_the_refusal_branches_are_scanned():
+    """The refusals, specifically -- not "the drivers, mostly" (#923).
+
+    `--dump-all` fabricates passing evidence, so for as long as this gate read
+    only that, every command inside an `err(...)` was unscanned. The global
+    floors above cannot see that half disappearing again: they are satisfied
+    many times over by the instruction branches alone. So this asserts what the
+    addition is FOR -- each driver's refusal dump reaches every refusal site it
+    has, and the commands in it reach this gate's argparse check.
+    """
+    env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
+    for rel in DRIVERS:
+        path = os.path.join(ROOT, rel)
+        p = subprocess.run([sys.executable, '-X', 'utf8', path,
+                            '--dump-refusals'], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace', cwd=ROOT,
+                           timeout=300, env=env)
+        out = (p.stdout or '') + (p.stderr or '')
+        assert p.returncode == 0, f'{rel} --dump-refusals exited ' \
+                                  f'{p.returncode}:\n{out[-800:]}'
+        m = re.search(r'(\d+) of (\d+) refusal site\(s\) reached', out)
+        assert m, f'{rel} --dump-refusals printed no coverage line:\n{out[-400:]}'
+        reached, total = int(m.group(1)), int(m.group(2))
+        assert reached == total, f'{rel}: {reached} of {total} sites reached'
+        assert total >= 20, f'{rel}: only {total} refusal site(s) enumerated ' \
+                            f'-- the AST scan stopped matching?'
+        cited = {(t, f) for t in TOOLS
+                 for b in _continued_blocks(out, t)
+                 for f in _cited_flags(b, t)}
+        assert len(cited) >= 5, \
+            f'{rel}: only {len(cited)} flag citation(s) inside refusals -- ' \
+            f'this gate is back to reading the instruction branch alone'
+        print(f'  PASS: {rel.rsplit("/", 1)[-1]}: {total} refusal sites, all '
+              f'rendered; {len(cited)} flag citation(s) in them')
 
 
 def test_every_documented_flag_exists():
@@ -468,7 +536,10 @@ def test_every_documented_flag_exists():
     # A gate that checks nothing passes for the wrong reason. The docs cite well
     # over a dozen flags across these tools; if this trips, the block/flag
     # scanner stopped matching rather than the docs becoming clean.
-    assert checked >= 15, f"only {checked} flag citations found -- scanner broken?"
+    # 703 measured at the commit that added the refusal dump (574
+    # before it). 15 was the floor when the scan found ~20; left there,
+    # it stopped being able to tell a working scan from a crippled one.
+    assert checked >= 400, f"only {checked} flag citations found -- scanner broken?"
     print(f"  PASS: {checked} flag citations, all real")
 
 
@@ -693,6 +764,7 @@ def test_routed_board_lenses_exist_and_reenter_the_loop():
 TESTS = [
     test_every_documented_flag_exists,
     test_driver_commands_supply_required_options_and_values,
+    test_the_refusal_branches_are_scanned,
     test_the_score_is_the_gate_and_the_router_is_not_the_judge,
     test_routed_board_lenses_exist_and_reenter_the_loop,
     test_the_placement_tools_are_actually_mentioned,
