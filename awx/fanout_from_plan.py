@@ -38,6 +38,13 @@ import plan_ends as pe  # noqa: E402
 import source_realize as sr  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
 
+# SRC_CLIMB=k (2026-09-10): the SOURCE menu also offers CLIMBS -- a dog-bone
+# or via-in-pad whose run first travels up to k pitches along a gap under
+# the array and leaves the face at a chosen row or column (the human's
+# north riders at K51; escape_moves.enumerate_moves climb=). 0 = off, the
+# menu byte-identical. replan.py runs with 14.
+SRC_CLIMB = int(os.environ.get('SRC_CLIMB', '0'))
+
 DIRS = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
 LAYERS = ('F.Cu', 'B.Cu')
 
@@ -76,12 +83,13 @@ def plan_state(pcb, names, banned=frozenset()):
                                             layer)
         return cache[key]
 
-    def menu(pad, grid, nid, own_only=False):
+    def menu(pad, grid, nid, own_only=False, climb=0):
         return em.enumerate_moves(
             pad, grid, LAYERS,
             lambda p, q, L, _n=nid: obs(_n, L, own_only).seg_clear(p, q),
             lambda p, L, _n=nid: not (obs(_n, L, own_only).point_violation(
-                p, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0])
+                p, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0],
+            climb=climb)
     dmenu, launch, src_pad, dst_pad = {}, {}, {}, {}
     for nm in names:
         nid, net = byname[nm]
@@ -109,7 +117,7 @@ def plan_state(pcb, names, banned=frozenset()):
         p = src_pad[nm]
         if p is None or p.component_ref != sref:
             continue
-        smenu[nm] = [m for m in menu(p, sgrid, byname[nm][0], own_only=True)
+        smenu[nm] = [m for m in menu(p, sgrid, byname[nm][0], own_only=True, climb=SRC_CLIMB)
                      if (nm, sr.move_sig(m)) not in banned]
     tooth0 = {}
     tooth_vias = {}
@@ -149,6 +157,22 @@ def plan_state(pcb, names, banned=frozenset()):
             'dgrid': dgrid, 'buses': buses, 'obs': obs, 'pcb': pcb,
             'pads_of': {ref: [(p.global_x, p.global_y) for p in fp.pads]
                         for ref, fp in pcb.footprints.items()}}
+
+
+def _menu_match(menu, g, tol=0.35):
+    """The menu move of the ACHIEVED berth's class (kind, face, layer)
+    nearest to its stub end along the face, within `tol`; None when the
+    engine laid something the menu does not name."""
+    if not g or g.get('direction') not in DIRS:
+        return None
+    ax = 0 if g['direction'] in ('up', 'down') else 1
+    best = None
+    for m in menu:
+        if m.kind == g['kind'] and m.direction == g['direction'] and m.layer == g['layer']:
+            d = abs(m.exit_pt[ax] - g['tooth'][ax])
+            if d <= tol and (best is None or d < best[0]):
+                best = (d, m)
+    return best[1] if best else None
 
 
 def planned_buses(st, choice):
@@ -452,13 +476,65 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
     return 0 if ok_l else 1
 
 
-def fanout_once(out_path, names, choice, dst_pad, dref, byname, board):
+def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
+                relay=None, already=(), face_asks=None):
     """One destination fanout to `choice`, written to out_path and audited.
+    `relay` None: every net of the run is fanned out from `board` (the
+    source board, its destination bare). Otherwise an INCREMENTAL pass
+    (2026-09-09): the previous pass's board (out_path as it stands) is the
+    base, only the `relay` nets' destination copper is stripped and they
+    alone are re-fanned against everything else's -- a berth the engine
+    laid exactly is copper the next pass cannot displace. Re-fanning the
+    whole array from bare each pass laid a neighbour's new ask ahead of a
+    frozen berth (the engine claims deepest first) and the loop then
+    banned the frozen berth's class: K41 misses 7/6/7/4/3/1/1/2, K51
+    9/4/3/1/2/1/1/1, nearly every late miss a berth exact the pass before.
+    `already`: nets with destination copper from earlier passes.
+    `face_asks` {net: face}: a net asked for a FACE only (the engine's bare
+    hint -- its own search picks the gap, layer and kind on that face), for a
+    net whose menu of straight escapes is empty on an occupied board
+    (reberth.py); measured like an unplanned net, not audited.
     Returns (laid nets, audit dict, clean-and-complete)."""
+    if relay is None:
+        targets = list(names)
+        pcb = parse_kicad_pcb(board)
+        src_file = board
+    else:
+        targets = list(relay)
+        prev = out_path[:-len('.kicad_pcb')] + '.prev.kicad_pcb'
+        shutil.copy(out_path, prev)
+        pcb = parse_kicad_pcb(prev)
+        n2n = {i: n.name for i, n in pcb.nets.items()}
+        x0, y0, x1, y1 = em.grid_of(pcb.footprints[dref]).bbox
+        x0, y0, x1, y1 = x0 - 2.0, y0 - 2.0, x1 + 2.0, y1 + 2.0
+        nids = {byname[nm][0] for nm in targets}
+        segs = [s for s in pcb.segments if s.net_id in nids
+                and x0 <= min(s.start_x, s.end_x) and max(s.start_x, s.end_x) <= x1
+                and y0 <= min(s.start_y, s.end_y) and max(s.start_y, s.end_y) <= y1]
+        vias = [v for v in pcb.vias if v.net_id in nids
+                and x0 <= v.x <= x1 and y0 <= v.y <= y1]
+        content = open(prev, encoding='utf-8').read()
+        content, n_s = sr.remove_segments_from_content(content, segs, n2n)
+        content, n_v = sr.remove_vias_from_content(content, vias, n2n)
+        if n_s != len(segs) or n_v != len(vias):
+            print(f'  destination re-lay: WARNING strip matched {n_s}/{len(segs)} '
+                  f'segments, {n_v}/{len(vias)} vias')
+        # the engine's own view: those nets bare at the destination (their
+        # source stubs, 7 mm away, are the same net and no obstacle)
+        rm_s, rm_v = set(map(id, segs)), set(map(id, vias))
+        pcb.segments = [s for s in pcb.segments if id(s) not in rm_s]
+        pcb.vias = [v for v in pcb.vias if id(v) not in rm_v]
+        src_file = out_path[:-len('.kicad_pcb')] + '.stripped.tmp'
+        with open(src_file, 'w', encoding='utf-8') as f:
+            f.write(content)
     hints = {}
-    for nm, m in choice.items():
-        p = dst_pad[nm]
-        hints[(round(p.global_x, 3), round(p.global_y, 3))] = sr.full_move(m)
+    for nm in targets:
+        if nm in choice:
+            p = dst_pad[nm]
+            hints[(round(p.global_x, 3), round(p.global_y, 3))] = sr.full_move(choice[nm])
+        elif face_asks and nm in face_asks:
+            p = dst_pad[nm]
+            hints[(round(p.global_x, 3), round(p.global_y, 3))] = face_asks[nm]
     # the production engine, following the FULL planned moves (face, exit
     # gap, layer, kind), with the VIA the plan priced its moves with (the
     # braid's 0.25/0.15; a 0.45 via cannot sit in a 0.65 mm pitch gap).
@@ -468,19 +544,20 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board):
     # caps under the array, a defect of that pass, not of anything here).
     # No placement step follows this chain, so every foreign pad is one a
     # via must clear.
-    pcb = parse_kicad_pcb(board)
     pcb._fanout_all_foreign_immovable = True
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-        pcb.footprints[dref], pcb, net_filter=names, layers=list(LAYERS),
+        pcb.footprints[dref], pcb, net_filter=targets, layers=list(LAYERS),
         track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
         exit_margin=0.5, escape_method='underpad', plane_drop='off',
         escape_dir_hints=hints)
     if tracks:
         add_tracks_and_vias_to_pcb(
-            board, out_path, tracks, vias_add, vias_rm,
+            src_file, out_path, tracks, vias_add, vias_rm,
             net_id_to_name={i: n.name for i, n in pcb.nets.items()})
     else:
-        shutil.copy(board, out_path)
+        shutil.copy(src_file, out_path)
+    if relay is not None:
+        os.remove(src_file)
     copy_pro(board, out_path)
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
@@ -492,10 +569,17 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board):
     # ORDER, measured off the written board (source_realize.audit)
     pcb_out = parse_kicad_pcb(out_path)
     got = {t['net_id'] for t in tracks}
-    laid = [nm for nm in choice if byname[nm][0] in got]
+    have = (set(already) - set(targets)) | {nm for nm in names if byname[nm][0] in got}
+    laid = [nm for nm in choice if nm in have]
     achieved = {nm: sr.measure_tooth(pcb_out, nm, dst_pad[nm], byname, dest_ref=dref)
                 for nm in laid}
     audit_d, _counts = sr.audit(choice, achieved, None, laid, print, 'berth')
+    # the berth of a net the plan left UNPLACED, laid by the engine's own
+    # choice: measured too, so the loop can keep it (the audit above is
+    # over the asked berths only)
+    for nm in names:
+        if nm not in choice and nm in have and nm in dst_pad:
+            achieved[nm] = sr.measure_tooth(pcb_out, nm, dst_pad[nm], byname, dest_ref=dref)
     fanout_once.achieved = achieved
     print(f'\nwrote {out_path}: {len(tracks)} tracks, {len(vias_add)} '
           f'vias, {len(set(failed))} failed nets, '

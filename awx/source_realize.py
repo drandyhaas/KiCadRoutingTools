@@ -60,15 +60,24 @@ def snap_dir(dx, dy):
                + (DIRS[k][1] - dy / h) ** 2)
 
 
-def measure_tooth(pcb, nm, pad, byname, dest_ref=None):
+def measure_tooth(pcb, nm, pad, byname, dest_ref=None, which=None):
     """What the board says about this net's escape at the array `pad`
     belongs to: the free end, the layer that end is on, the vias near the
     ball, and the kind/face that copper amounts to. `dest_ref` names the
     destination array when both ends are fanned out (te.endpoints then
-    attributes the two free ends by walking the copper)."""
+    attributes the two free ends by walking the copper); the DESTINATION
+    end is measured then, unless `which='src'` asks for the source end
+    of that same attribution (replan.py measures both ends of a board
+    fanned out at both). A net with no free end -- bare, or fully
+    routed -- measures as None: the callers print '(bare)' and audit it
+    as 'no copper' (replan.py re-fans a net it stripped to nothing)."""
     nid = byname[nm][0]
-    ends = te.endpoints(pcb, [nm], byname, dest_ref=dest_ref)
-    tooth = ends[nm][1] if dest_ref is not None else ends[nm][0]
+    try:
+        ends = te.endpoints(pcb, [nm], byname, dest_ref=dest_ref)
+    except AssertionError:
+        return None
+    tooth = (ends[nm][1] if dest_ref is not None and which != 'src'
+             else ends[nm][0])
     last = next((s for s in pcb.segments if s.net_id == nid
                  and (abs(s.start_x - tooth[0]) + abs(s.start_y - tooth[1]) < 0.005
                       or abs(s.end_x - tooth[0]) + abs(s.end_y - tooth[1]) < 0.005)),

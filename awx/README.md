@@ -227,7 +227,37 @@ the order worth taking them, each with what is known.
 
 1. **Vias, and the K51 open.** The ladder with every rule of 2026-09-08
    is 16 / 36 / 61 / 112 vias and K51 one open (SBA1 on this draw),
-   against the human's 22 / 46 / 58 / 70 / 85. Two moves are known:
+   against the human's 22 / 46 / 58 / 70 / 85. **2026-09-09 (fourth
+   session): the SIDES the plan hands the braid are the lever -- the
+   human's DU1 sides pinned (`PLAN_FORCE_DST`), nothing else changed,
+   K41 112 -> 91 (0 open, 0 DRC); the section "The human's K41, and the
+   sides the plan hands the braid" has the census, the wave model and
+   the three steps that follow (side chooser, source basin move, single
+   dive for the DQ class).** **K51 diagnosed 2026-09-09 (fifth session; the
+   section "K51: why the passes never converge, and what the human does
+   there"): the human's win is a JOINT order at both ends (its source
+   order with our berths is worse than our own), eight of its eleven north
+   riders climb 5-10 mm under U1 on B to exit at a chosen row -- the move
+   we lack -- and the chooser's flat swimmer price bought seats with
+   whole-bundle diagonals (SA10 open). Build the source exit-row move
+   first, then price swimmers by their crossings.** **Sixth session
+   (2026-09-10, the section "The re-berth loop, the boxed end, and the
+   climb"): the re-berth loop is built (`reberth.py`, `REBERTH=1`) and
+   finds the boxed end is the TOOTH at K51 (pocket 2.6 mm against 24);
+   its pad-to-pad backstop closes one of two opens per K51 board at a
+   price; the climb move exists in the menu (`SRC_CLIMB=k`) and the plan
+   picks climbs, but one at a time, and the braid grades it worse (4
+   open); the chooser on the first round only gives K41 88 vias in 2:20.
+   What is left is the JOINT source move: a group generator for climbs,
+   the co-move (source menu against a bare array), and pruning for time.**
+   **Seventh session (2026-09-10, the section "The braid's verdict
+   re-plans the ends"): the route itself is the judge -- `replan.py`
+   reads the braid's verdict, re-plans the nets it paid for at either end
+   (climbs with half-pitch exits, co-moved berths), probes each move with
+   the real router on the routed board, audits what the fanout laid, and
+   keeps the probes' board: K51 0 open, 0 DRC, 107 vias, the best complete
+   K51 so far. Left: a judge for the hard swimmers (SA11/SA4 refuse in
+   every local group) and the round time.** The two moves below are still known:
    - **A re-berth AND a re-fan move for trapped stubs.** The rip stops
      at "walled by static copper -- a fanout matter". Take4's negotiator
      answered that by re-berthing (`negotiate_stubs`, `relay_net.py
@@ -304,6 +334,12 @@ the order worth taking them, each with what is known.
    in band -- 11 lanes at the last call (A4 A6 DQ9 DQ8 DQ14 RAS CKE DQ3
    DQ1 A5 DQ10). The leg rules were tuned on one bench. `wall_probe.py`
    takes `DEST=U2` now; probe those eleven; run K34 / 40 / 44.
+   **2026-09-09: the article no longer runs through `chain_k.sh` -- the
+   flow frame's quarter turn (FK=1 about (109.3, -103.2)) fails its own
+   verification (`TURN FAILED: pad C139.1 extents; pad C139.2 extents;
+   segment`), so every stage is skipped. Fix `flow_frame.py turn` for a
+   board with rotated / off-grid parts before the zynq numbers can be
+   re-measured (the berth chooser was not measured on it for this).**
 7. **Fanout non-convergence.** K41's destination passes never converge
    (8 passes, the last ships) and SA9 is never planned -- its menu is
    banned away. A net whose menu is exhausted gets its achieved berth
@@ -1432,6 +1468,794 @@ chain 2 min 24 s, the machine otherwise idle.
 Left: `blocking_analysis._NET_CELLS_MEMO`, production, ~85 MB by the end
 of the rip phase; and the taut memo in the fanout stage (K41: 244
 shards, ~140 MB resident at the compact ratio).
+
+### The human's K41, and the sides the plan hands the braid (2026-09-09, fourth session)
+
+*Status (2026-09-10 evening): the code of this section was NOT committed -- reverted when the seventh session's loop landed (only what the 107-via board used was kept); it is in `awx/tmp/handoff_0910b/all_uncommitted_0910b.patch` (with `reberth.py`, `wave.py` and the full `fanout_from_plan.py` / `select_moves.py` beside it).*
+
+
+**The human's 70 vias, measured** (`tmp/net_table.py`, `tmp/swim_anatomy.py`,
+`tmp/corridor_census.py` on `boards_set24/allwinner_h3_ddr3`, the same 41
+nets): 38 of 41 nets carry exactly 2 vias, one under U1 or just past its
+tooth and one beside the DU1 ball; the corridor itself changes layer 9
+times. The structure is two pages with NO weaving: page B is the nine
+SE-corner address nets (SA8 SA11 SA15 SA12 SBA1 SA1 SA0 SA2 SA4) plus the
+three outermost south riders, page F everything else. The nine dive AT
+their balls, climb under U1's own field on B (column gaps, then a 45-degree
+run) so they reach the corridor already in the nested order the north ride
+needs, cross the whole F bundle for free, ride DU1's north flank nested and
+descend into the field each in its own column gap -- the back layer under
+BOTH fields is free 2-D room, which is why the human's ends cost nothing.
+The five DQ nets that must cross their F neighbours dive ONCE, and the
+dive is timed: SDQ0 first (its B run goes back west of the others' dives),
+the down-movers after -- two phases along s, B riders then DQ divers.
+Ours on the same nets: 112 = source 17 / corridor 35 / destination 60
+(human 11 / 9 / 50), 21 swimmers at 3-5 corridor vias each.
+
+**The wave schedule** (`wave.py`, opt-in `BRAID_WAVE=1`, `WAVE_BEAM`,
+`WAVE_SLOPE`): every lane moves once, launch offset to target offset, on
+one layer, in ordered waves; a move is legal when every lane it passes
+over is on the other layer at that moment; a lane that cannot move that
+way weaves (the old swimmer, transparent to the movers, priced by its
+alternations + `WEAVE_EXTRA`). A beam over move sequences, with the
+two-page schedule as a second candidate so the result is never dearer
+than the braid's own. On the human's copper orders it reproduces the
+human exactly: 9 corridor vias, 3 waves, 0 weavers (wave 0 the B riders
+and the F holders, wave 1 SDQ0, wave 2 the DQ down-divers). On the
+BRAID'S orders it is no help: the base K41 permutation has a two-chain
+cover of 23 (18 lanes must swim by construction; 332 inversions against
+the human's 74) and the two-page candidate wins everywhere (K28 36 = base,
+K35 61 = base, byte-identical -- the first schedule of a plan pass is the
+two-page one so the pitch relaxation is the base's). Where the beam wins
+(K28 first call, 20 v / 4 waves; the forced K41 board, 53 v / 23 weavers)
+the EXECUTION loses: waves squeezed into the 4.5 mm region at 0.32 of
+their slope need, the forced K41 board 2 open 116 v where the two-page
+braid on the same berths routes 86. The wave model is a faithful judge of
+copper-like orders and a poor one of the braid's abstract orders, which
+over-count crossings the copper resolves in 2-D (join legs, tails, the
+basins). Not a default, kept as the judge it is.
+
+**The sides are the lever, measured.** `PLAN_FORCE_DST=file.json`
+({net: {direction, layer}}) restricts a net's destination menu to that
+class (`fanout_from_plan._force`; a pinned net the greedy cannot place gets
+its whole menu back and the selection reruns, `select_dst`), and
+`tmp/human_sides.py` reads the human's class per net off its copper. With
+the human's DU1 sides and NOTHING else changed (same braid, flag off):
+
+| arm | open | DRC | vias | source / corridor / destination | note |
+|---|---|---|---|---|---|
+| base | 0 | 0 | 112 | 17 / 35 / 60 | 21 swimmers |
+| hf (sides, 5 nets unplaced by the menu's channel model, routed to the bare balls) | 0 | 0 | **86** | 16 / 19 / 51 | 17 swimmers |
+| hf2 (sides, fallback: 41 placed) | 0 | 0 | **91** | 12 / 30 / 49 | 15 swimmers, chain 101 s |
+| hf3 (hf2 + the human's U1 sides) | 0 | 0 | 91 | = hf2 | round 0 kept: the source force never reached the board |
+| human | | | 70 | 11 / 9 / 50 | |
+
+The plan's own via model already prefers the human's sides -- predicted
+95 (base) vs 75 (hf2) -- with the ride term a wash (~92 via-equivalents
+both); what is missing is a SEARCH over sides (`select` is greedy on its
+own move cost and the plan loop only judges what it produced). The
+residual over the human on hf2: the DQ B-divers +13 (SDQ9 6, SDQ14 5,
+SDQ15 4, SDQ11 4: they weave where the human dives once, timed), the B
+riders +12 (SBA1 6, SA4 6, SA8 4, SA11 4: they cross EACH OTHER because
+their launch order is the row order, not the nested one the source basin
+gives the human), SCKE1 +2.
+
+What follows, in order (TODO 1):
+1. **A side chooser.** Search over (direction, layer) classes per net,
+   judged by the plan model's predicted vias (`vias_from_pages` through
+   the braid's planner; the ride as a tie-break, not a term), on the warm
+   planner (`WarmPlan` in `tmp/handoff_0909c/all_uncommitted_0909.patch`,
+   134 lines: classify / offsets / Schedule per candidate on spines built
+   once). The reverted `refine_dest` is the generator; its objective
+   (swimmer count) was the wrong one.
+2. **The source basin move.** A dogbone escape whose B run under the
+   field goes to a CHOSEN exit row through free column / row gaps, so a
+   set of riders can be handed to the corridor in nested order -- the
+   human's SA8 (ball W18) exits at the top of the face. `escape_moves`
+   enumerates it, `select_moves._lane_span` must price a two-gap path.
+3. **The single dive for the DQ class:** a swimmer whose crossings sort
+   (B-page lanes before F-page lanes along its line) dives once, at the
+   boundary; the free weave only for the rest.
+
+### The berth chooser: side and layer together, judged by the braid's plan model (2026-09-09, fourth session, later)
+
+*Status (2026-09-10 evening): the code of this section was NOT committed -- reverted when the seventh session's loop landed (only what the 107-via board used was kept); it is in `awx/tmp/handoff_0910b/all_uncommitted_0910b.patch` (with `reberth.py`, `wave.py` and the full `fanout_from_plan.py` / `select_moves.py` beside it).*
+
+
+`select_moves.select` fixes a side per taut-path bus by cut capacity and
+copper (at K41: the 16-net bus refused left and right, "9 slots for 16
+nets", and sent down whole), prices a dog-bone's via at three surface
+moves, aligns layers last, and the plan loop only JUDGES what it
+produced. The human decides layer and side per net by what the lane must
+cross, and its DU1 sides pinned on our plan routed K41 at 91 (above).
+`fanout_from_plan.refine_sides` (opt-in `PLAN_SIDES=1`; `SIDES_ROUNDS`,
+`SIDES_SWIM`, `SIDES_CONFIRM`, `SIDES_GROW`, `SIDES_EVERY_ROUND`) is the
+search that reaches such assignments, after `select` at the first source
+round and at every destination pass:
+
+- **The judge is the braid's own plan model, warm.** `braid.WarmPlan`
+  (setup and spines once; per candidate the corridor's classify, offsets
+  and Schedule on the SAME code paths run() takes) gives pages and each
+  flank block's leg layer in 5 ms -- the screen -- and with `full=True`
+  lays the lanes (`lay_lanes`: exit legs placed, their economics decided
+  along s) for every page lane's layer changes, which is `plan_braid`'s
+  own number to the via (77 = 77, 74 = 74 on the two K41 assignments) in
+  0.1 s -- what a move is accepted on. Price = `plan_ends.vias_from_pages`
+  with those changes, a swimmer at what it PAYS (`SIDES_SWIM` 3.5: K41
+  base 78 vias over 21 swimmers, the human's sides 53 over 15 -- the
+  model's 2 is its dive and surface), the ride at `VIA_MM` per via, an
+  unplaced net as a swimmer plus its two vias. The pages-only price could
+  not tell select's assignment from the human's (158 vs 157); with the
+  changes it tracks the routed boards.
+- **Three generators, because a single berth moved from the greedy's
+  start looks worse until a whole block has turned** (the valley the
+  swimmer-count refinement of the previous session sat in): one net to
+  another (side, layer) class -- its cheapest conflict-free move, with an
+  exchange when the lane is held by exactly one other net -- one full
+  confirm per net; a whole flank block to the other layer at once; a
+  GROUP grown in launch order from a seed moved to a class, its launch
+  neighbours pulled to the same class while the screened cost holds, the
+  best prefix confirmed. Capacity is the menu's channel model throughout.
+- **Freeze what worked** (TODO 7): a berth the fanout engine laid exactly
+  as asked keeps that move through the destination passes that follow
+  (`plan_state(pin=)`), so a pass re-chooses only the misses. Without it
+  every pass re-planned all 41 from scratch and banned 10-16 more (the
+  first run: 55 bans, 3 open, 1 DRC, 7 min); with it K41 converged at
+  pass 4, "every berth laid as planned". It rides with `PLAN_SIDES` (the
+  flag-off K51 chain with it graded 5 open where the record says 1; its
+  own A/B is owed).
+- **An approach test per candidate berth** (`approachable`): a straight
+  run of 0.9 mm outward from the exit point on the move's layer, clear of
+  the static copper (the caps under the array, which the menu's channel
+  model never sees) and of every other chosen berth's via site.
+- **Realized as planned, verified** (`tmp/berth_check.py`, independent of
+  the chain's audit): on the refined K41 board every one of the 41 stub
+  ends is within 0.05 mm of the sidecar's, on its layer, on its face, and
+  the face counts (down 18 / left 5 / up 12 / right 6) are the pass line's;
+  the base's shipped board had 2 of 41 off by more than a millimetre (its
+  last pass shipped 4 misses). The sidecar records the ACHIEVED berth, so
+  the asked-vs-laid proof is the audit (41/41 exact) plus those counts.
+- **What the chooser cannot see: a pocket with one entrance.** K15 with
+  the chooser leaves SA9 OPEN (12 vias, base 16 clean): SA9's berth is
+  the base's own (down/F at the SE corner), but SA7 moved from the north
+  face to the adjacent down/F berth, and its B ride's corner via plus its
+  stub took the one approach the pocket has (balls above, the cap bank
+  east); the approach test passes it (0.8 mm apart) and the base routed
+  SA9 at the last call with SA7 elsewhere. The braid's frontier says
+  "walled by static copper". The fix is the braid-level RE-BERTH loop
+  (TODO 1's first bullet): a refused lane feeds back to the plan, that
+  net takes another class, the fanout re-lays, the braid re-runs.
+
+Measured on the bench, one rung at a time, flag off (`lb`) and on (`ls`),
+chain wall time in brackets (the table is filled from `tmp/ladder_*.out`):
+
+| K | flag off | chooser, first source round | chooser, every round (2 rounds) | chooser, every round (3 rounds) | human |
+|---|---|---|---|---|---|
+| 15 | 16 [0:17] | 12, **1 open** [0:20] | 12 [0:22] | 16 [1:10] | 22 |
+| 28 | 36 [0:31] | 40 [1:15] | 40 [1:27] | 34 [2:24] | 46 |
+| 35 | 61 [1:00] | 56 [2:19] | 56 [2:22] | 60 [5:12] | 58 |
+| 41 | 112 [2:20] | 108 [4:16] | 91 [5:33] | 94 [5:14] | 70 |
+| 51 | 129, **1 open** [3:10] | 103, **2 open** [5:46] | 152, **1 open** [10:08] | 132, **1 open**, 3 DRC [10:52] | 85 |
+
+Read the table with the edicts: the chooser is clearly better at K41 in
+every configuration (112 -> 91 / 94 / 108; 91 is the pinned-human-sides
+experiment's number, reached with no human input) and at K35 (61 -> 56 /
+60), a coin flip at K15 and K28 (two rounds: 12 and 40; three rounds: 16
+and 34), and WORSE at K51 in every configuration (the knife edge: two
+rounds 152 v with 1 open, three rounds 132 v with 1 open and 3 DRC, first
+round only 103 v with 2 open; the base 129 v with 1 open). Every rung
+costs 1-3 minutes more than the base (the refinement is ~13 s a call at
+K41). NOT a default: a mixed ladder, over the time budget, and the K51
+regression says the search's berths are harder for the braid at scale
+in a way the plan model does not price.
+
+The zynq article could not be measured: its flow-frame turn fails (TODO 6).
+
+### K51: why the passes never converge, and what the human does there (2026-09-09, fifth session)
+
+Measured on the chooser session's ladder boards -- `tmp/lb_k51` (flag off:
+129 vias, SBA1 open, 3:10) and `tmp/le_k51` (chooser every round: 152
+vias, SA10 open, 10:08) -- against the human's `allwinner_h3_ddr3` on the
+same 47 DU1 nets (81 vias; the 48th net, SZQ, has no DU1 ball: its other
+pad is R6 on the back, 0.09 mm from the U1 ball, one via). Tools:
+`tmp/corridor_census.py`, `tmp/net_table.py`, `tmp/swim_anatomy.py`,
+`tmp/entry_faces.py`, `tmp/human_sides.py`, `tmp/judge_vs_actual.py`,
+renders by `tmp/render_eco.py` (whole pair, the north riders at U1, DU1).
+
+**The non-convergence, mechanically.** The source loop runs its nine
+rounds with 1-3 nets unplaced every round (the channel model has no
+conflict-free move for them) and keeps round 2 on the judged floor. The
+destination loop then misses 12 / 7 / 7 / 3 / 3 / 2 / 4 / 3 berths over
+eight passes, 38 bans; the chooser re-chooses 10 berths at pass 0, 3 at
+pass 1, then 0 / 0 / 0 / 0 / 2 / 0, so passes 2-7 are in effect the base's
+own ban loop (shipped boards of 396 / 324 / 352 / 394 / 381 / 384 tracks:
+no progress). SA12 is banned four times, SZQ three (a "berth" on a resistor
+the BGA engine can never lay -- pure waste), SBA0 and SWE three. Unplaced
+at the end: SA9 (R3, the SE corner, the chronic one since K41) and SDQ5
+(H7), fanned by the engine's own choice. The braid then gets orders whose
+two-page schedule seats 17 F + 8 B and leaves 22 swimmers (base 19 F / 9
+B / 19), spends 64 rip re-lays (base 29), and SA10 stays open after three
+rescues and six rips.
+
+**Where the vias go, and what the judge saw.** `judge_vs_actual`: the
+chooser's plan model predicted 97 vias for its choice and the board
+routed 152 (swimmers 59 -> 89, page-F lanes 14 -> 34); the base's model
+said 110 and routed 129. `swim_anatomy`: le's 21 swimmers carry 84 vias
+over 341 crossings (SCKE0 31 crossings, SA4 28, SBA1 23, SRST 23, SDQ0
+22), lb's 18 carry 58 over 280. The judge prices every swimmer at the
+flat `SIDES_SWIM` 3.5, so it bought page seats with swimmers that cross
+the whole bundle. SA10 is the type case: its tooth is at (127.0, 69.5),
+the SOUTH end of U1's east face (the bench's own escape from ball P19 at
+y 65.9 runs 3.5 mm south inside the field before leaving), and the
+chooser gave it `surface/up/F` on DU1's NORTH face -- the human's own
+class for SA10 -- an 8.5 mm diagonal across 46 lanes that nothing can
+lay. Source round 4 had moved that tooth to its own row
+(`dogbone/right/B` at 65.56) and was discarded for round 2 on a judged
+floor that cannot see the difference.
+
+**The permutation, decomposed** (`corridor_census`: y-order at the first
+and last corridor stations, the two-page cover of the permutation):
+
+| source order -> destination order | inversions | LIS | two-page cover | swim |
+|---|---|---|---|---|
+| human -> human | 89 | 30 | 41 of 47 | 6 |
+| lb -> lb | 113 | 23 | 36 of 46 | 10 |
+| le -> le | 152 | 22 | 34 of 46 | 12 |
+| human source, le berths | 304 | 17 | 29 | 17 |
+| le teeth, human berths | 291 | 18 | 28 | 18 |
+| human source, lb berths | 331 | 16 | 25 | 21 |
+| lb teeth, human berths | 363 | 18 | 26 | 20 |
+| `hd51`: human DU1 sides PINNED on our teeth (`PLAN_FORCE_DST=tmp/force_h51_dst.json`, chooser off) | 101 | 25 | 35 of 47 | 12 |
+
+The human's orders are matched to EACH OTHER: its source order with our
+berths, or our teeth with its berths, is worse than either of our boards.
+The pinned experiment is the direct test of the destination half alone:
+with the human's DU1 classes forced (36 of 47 nets land on the human's
+side AND layer; the source loop kept the bench's own teeth) the chain
+grades **0 open, 0 DRC, 135 vias in 3:32** -- complete where both the
+base (129, SBA1 open) and the chooser (152, SA10 open) ship an open net,
+but on 20 swimmers (base 19, chooser 22) carrying 83 vias, and the plan
+model again under-prices its swimmers (predicted 52, routed 83). The
+human's sides buy completion at K51, not the human's corridor: the
+inversions fall from 113 to 101 against the human's 89, and the source
+order still differs from the human's by 175 pair swaps (le 250, lb 324).
+So the chooser, which searches the destination against OUR teeth, is
+right to refuse the human's sides at K51 (it agrees with the human on
+direction for 29 of 45 nets, on layer for 20, on both for 11), and no
+destination-only search can reach the human's corridor. The lever is
+joint, and its source half is a move we do not have.
+
+**What the human does.** 40 of the 47 nets carry exactly 2 vias, 7 carry
+none; the corridor changes layer 11 times over 11 nets (ours 28-40 over
+20). Three blocks, each nested at both ends and each on a constant layer:
+
+- **North, 11 nets, all on B from the U1 ball to the DU1 ball** (SA8 SA14
+  SA11 SA15 SA10 SA12 SBA1 SA1 SA0 SA2 SA4). Eight of them dogbone AT the
+  ball and climb north-east under U1's own field on B, between the balls
+  at 45 degrees (SA8 10.2 mm, the rest 5-6 mm), and leave the east face
+  at y 58.9-62.1 in the nested order the north flank needs; SA0 SA2 SA4
+  leave at their own rows (y 67-68.5) and climb on B in the corridor's
+  first 2.7 mm, done by x 130.3 -- BEFORE the first DQ dive (x 129.4 to
+  132.5): the wave. They ride DU1's north flank at y 56.8-60.0 (ten
+  tracks in 3.2 mm), descend on B through the north band's column gaps
+  into the 3.2 mm middle street (rows 7 and 3 both border it) and surface
+  beside the ball.
+- **Middle, the 18 DQ nets on F, straight at DU1's west half**: 7 with no
+  via at all, 8 diving ONCE at x 129.4-132.5 and surfacing at the ball,
+  entering left 9 (5 F / 4 B), up 3, down 6.
+- **South, 18 nets**: 13 on F entering the south face in column gaps, 5 on
+  B (SCS1 SCS0 SCAS SA7 SRST) diving at U1 and surfacing south or east of
+  DU1 (SA7 and SRST enter R2 and T2 from the east face).
+- DU1 classes: down/B 13, up/B 8, right/F 7, left/F 5, up/F 5, down/F 5,
+  left/B 4 -- 25 B / 22 F. Ours: le 10 B / 35 F (with our orders the B
+  page holds 8 nets, so a B berth costs a change and the chooser fled
+  B), lb 24 / 23.
+- U1 exits: right/F 23, right/B 13 (the eleven riders and two more),
+  down/F 11 -- and NO along-row B escape: everything that is not riding
+  leaves on F, so the back layer under U1's east half is free room for
+  the climb (47.7 mm of the human's K51 copper under U1 is on B, over 14
+  nets, all of it climbs and dives). Our source fanout puts along-row B
+  escapes under U1 running EAST (`dogbone/right/B`, `via_in_pad/right/B`):
+  8 nets on the bench itself, 14 after the plan's source rounds -- in the
+  way of any climb.
+
+**The moves we do not have, in the order the evidence ranks them:**
+
+1. **The source exit-ROW choice** (TODO 1 step 2): a dogbone or
+   via-in-pad whose back-layer run under the field goes to a CHOSEN point
+   on the face. `escape_moves` enumerates kind x direction x layer, but a
+   move's exit point is its ball's own row or column; the human's eight
+   climbers exit 5-10 mm from their row. It comes with a joint source
+   LAYER assignment (the non-riders stay on F under the field, or the
+   climb has no room), which is what `refine_source` would have to
+   choose; today it moves teeth one at a time within the same semantics
+   and every source round keeps every face's rank order.
+2. **A judge that prices a swimmer by what it crosses** and refuses one
+   whose launch-to-target gap the corridor cannot carry, instead of the
+   flat 3.5: the chooser under-priced its own K51 choice by 55 vias and
+   let SA10's diagonal through; the base's model was off by 19.
+3. **The timed single dive** (wave 0 the riders, then the DQ divers):
+   `wave.py` exists and is inert on our orders; with copper-like orders
+   from 1 it is the schedule the human's corridor has.
+4. **A re-fan of a refused lane's SOURCE tooth** at the plan (SA10), not
+   another rip at the braid.
+5. Hygiene: SZQ (no DU1 ball) out of the destination loop; stop the ban
+   loop when the chooser makes no move and the miss set repeats.
+
+### The destination loop converges: class bans, adopted gaps, frozen berths, incremental passes (2026-09-09, fifth session)
+
+*Status (2026-09-10 evening): the code of this section was NOT committed -- reverted when the seventh session's loop landed (only what the 107-via board used was kept); it is in `awx/tmp/handoff_0910b/all_uncommitted_0910b.patch` (with `reberth.py`, `wave.py` and the full `fanout_from_plan.py` / `select_moves.py` beside it).*
+
+
+Graded on the FANOUT STAGE's own terms before any braid ran (`tmp/fo_ladder.sh`
+runs `fanout_from_plan.py` alone; `tmp/fo_sum.py` reads any fanout log):
+passes, misses per pass, whether "every berth laid as planned" was reached,
+exact berths at the shipped pass, unplaced nets, DRC, the plan model's
+predicted vias and swimmers, wall time.
+
+**What the misses were** (K51, every pass, `tmp/conflict_probe.py` reproduces
+pass 0's choice to the ask): the base's 62 misses over eight passes were
+33 "other face" (the engine walked six gaps either side on both layers
+and kinds and left by another face: the plan had asked a north-band ball
+to run through the street and the whole south band, or a 7 mm back-layer
+row run past three via-in-pads), 13 layer/kind, 12 gap slides, 4
+refused (3 of them SZQ, whose far pad is a resistor on the back, 0.09 mm
+from its U1 ball -- no BGA berth exists). A crossing-aware conflict
+model flags 10 of the 11 misses but also 17 of the 33 exact berths, and
+the human's classes pinned lay 46 of 47 exact at pass 0: no geometric
+proxy separates them, the engine is the only authority. The loop's job
+is to USE its verdicts well, and it did not: one move signature banned
+per miss (a class of a dozen gaps banned one gap a pass), nothing frozen
+unless `PLAN_SIDES`, and every pass re-fanning the whole array from bare.
+
+**The loop now (`DST_LOOP=class`, the default; `DST_LOOP=old` is the loop
+above, byte-identical to the recorded control):**
+
+- **Ban by class.** An "other face" verdict bans every move of that net on
+  the asked face; a layer miss bans the asked (face, layer); a kind miss
+  the asked (face, layer, kind).
+- **Adopt a slid gap** (`GAP_ADOPT` 1.0 mm): a berth laid on the asked face,
+  layer and kind but along the face from the asked gap becomes the plan's
+  (the menu move of that class nearest the laid stub end is pinned).
+- **Freeze what worked, every arm**: a berth laid exactly keeps its move;
+  a net the plan left unplaced keeps what the engine laid when the menu
+  names it. Frozen nets are `trusted` in `select_moves.select`: placed
+  without the model's conflict test, whose false positives (a via-in-pad's
+  back run past a neighbour's via, two legs the A* weaves apart) would
+  otherwise leave one of a frozen pair unplaced every pass.
+- **Incremental passes.** Pass 0 fans the array from bare; every later pass
+  keeps the previous pass's board, strips the destination copper of the
+  re-chosen nets only (a 2 mm window round the array; the source stubs
+  stay) and re-fans those against everything else's copper. Measured
+  before this, with the three rules above alone, K41 missed 7/6/7/4/3/1/1/2
+  and K51 9/4/3/1/2/1/1/1 -- nearly every late miss a berth laid EXACTLY
+  the pass before, displaced when the whole array was re-fanned and a
+  neighbour's new ask was laid ahead of it (the engine claims deepest
+  first), and then banned for it.
+- **Off-array nets** (SZQ) are not planned at the destination; the braid
+  reads them off the board (a partial sidecar is the plan for the nets it
+  names).
+
+| K | old loop (control) | class bans + freeze | + incremental passes | + chooser (`PLAN_SIDES=1 SIDES_EVERY_ROUND=1`) |
+|---|---|---|---|---|
+| 28 | 2 passes, converged, 28/28; 3 swimmers, 38 model vias; 13 s | same | same | 3, converged, 27/27 (1 unplaced); 5 / 35; 49 s |
+| 35 | 8 passes, **never**, 34/35; 13 / 65; 38 s | 3, converged, 35/35; 12 / 65; 20 s | 4, converged, 35/35; 13 / 66; 21 s | 3, converged, 34/34 (1 unplaced); 7 / 51; 73 s |
+| 41 | 8, **never**, 37/41, 1 unplaced; 21 / 95; 58 s | 8, never, 38/40, 2 unplaced; 21 / 85; 65 s | 4, **converged**, 40/40, 1 unplaced; 13 / 79; 39 s | 5, converged, 37/37, 4 unplaced; 12 / 67; 191 s |
+| 51 | 8, **never**, 42/47, 3 unplaced; 19 / 105; 76 s | 8, never, 43/44, 2 unplaced; 18 / 86; 158 s | 4, **converged**, 45/45, 2 unplaced; 18 / 80; 37 s | (below) |
+
+Every rung now converges, in three or four passes, faster than the
+control (the incremental passes re-fan 9, 5, 2 nets instead of 47), with
+every asked berth exact and DRC clean; the plan model's own swimmers at
+K41 fall from 21 to 13 and its vias 95 -> 79 (K51 105 -> 80) with no
+chooser. What is left at the plan stage: the one or two UNPLACED nets
+per rung (a net whose classes were banned away and whose remaining menu
+conflicts with frozen neighbours in the model -- laid by the engine's own
+choice and kept, absent from the sidecar) and the chooser's cost in time
+(its every-round refinement, ~13 s a call) and in unplaced nets (4 at
+K41: its exchanges leave more nets without a model-clean move).
+
+| K | chooser + incremental passes, K51 (`dis`) |
+|---|---|
+| 51 | 5 passes, converged, 45/45, 2 unplaced; 17 swimmers / 91 model vias; 318 s |
+
+**The braid on the converged boards** (`tmp/braid_fo.sh`, braid.py + grade
+on the fanout board as it stands; the control is the recorded `lb` chain):
+
+| K | control | converged plan (`di`) | converged plan + chooser (`dis`) |
+|---|---|---|---|
+| 35 | 0 open, 61 vias, 13 swimmers | 0 open, **66**, 13 swimmers, 0 rips, 50 s | -- |
+| 41 | 0 open, 112, 21 swimmers | 0 open, **107**, 14 swimmers, 24 rips, 121 s | 0 open, **97**, 14 swimmers, 18 rips, 107 s |
+| 51 | **1 open** (SBA1), 129, 19 swimmers | **2 open** (SA11 SA14), 108, 19 swimmers, 15 rips, 95 s | **3 open** (SDQ11 SDQ3 SDQ9), 139, 17 swimmers, 37 rips, 204 s |
+
+Mixed, as the braid grades it (K41 better by 5 and 15 vias, K35 worse by
+5, K51 loses completion): a plan converged to berths the ENGINE lays is
+not yet a plan converged to berths the BRAID reaches. Every net left open
+is a swimmer refused at the last call after three rescues and a
+blocker-directed rip -- its berth exact and frozen, its lane walled -- and
+the class bans drove two of them to far berths the model priced cheaply
+(SDQ3, a south-band ball, asked left, refused, then given a 7.6 mm
+back-layer run east to the far face because the whole west face was
+banned; SA11, a north-band ball, given the south face through the street
+and the south band). And **the plan model cannot see which swimmers the
+braid will refuse**: counting swimmers by their launch-to-target index gap
+(>= 10 places of 45) gives the control 13, `di` 10, `dis` 14 -- and the
+pinned-human-sides arm, the one board that completes, 16 (gap sum 345,
+the largest). The refusals are walls of copper, not order.
+
+So the next mechanism is the braid-level RE-BERTH loop (TODO 1's first
+bullet), now that a destination pass costs seconds: a lane refused at the
+last call bans its berth class at the plan, an incremental pass re-fans
+that net alone against the routed board's copper, and the net is routed
+alone against the frozen copper (take4's `negotiate_stubs`); and, for the
+plan's own choice, the source exit-row move, which is what keeps the
+human's swimmers short in the first place. A cheaper first probe: the
+chooser with `SIDES_EVERY_ROUND=0` on the incremental loop (its every-round
+refinement is 150-250 s of the K41/K51 fanout stage).
+
+
+### The re-berth loop, the boxed end, and the climb (2026-09-10, sixth session)
+
+*Status (2026-09-10 evening): the code of this section was NOT committed -- reverted when the seventh session's loop landed (only what the 107-via board used was kept: the CLIMB move in the source menu, `SRC_CLIMB`, stayed; the re-berth loop and the source chooser did not); it is in `awx/tmp/handoff_0910b/all_uncommitted_0910b.patch` (with `reberth.py`, `wave.py` and the full `fanout_from_plan.py` / `select_moves.py` beside it).*
+
+
+Three moves were on the table at the end of the fifth session, in the
+order the evidence ranked them: a braid-level RE-BERTH loop (a refused lane
+bans its berth class, an incremental pass re-fans that net alone, the net
+is routed alone against the frozen copper), the SOURCE EXIT-ROW move (the
+human's climb under U1 on the back layer), and a cheap probe first (the
+chooser with `SIDES_EVERY_ROUND=0` on the incremental loop). All three
+were run; the measurements below are what each turned out to be.
+
+**The cheap probe** (`PLAN_SIDES=1 SIDES_EVERY_ROUND=0 ./chain_k.sh dis0`,
+the chooser on the first source round only, on the converging destination
+loop): **K41 0 open, 0 DRC, 88 vias in 2:20** (fanout 73 s, braid 67 s) --
+the best K41 the chain has produced (flag off 112, incremental loop alone
+107, chooser every round 97 at 5-7 min) and inside the time budget. K51:
+2 open (SDQ12 SDQ3), 0 DRC, 120 vias, 6:36 (the fanout stage 3:39: the
+first-round refinement over 47 nets). A clear K41 win; no K51 completion. The whole ladder, both arms timed
+back to back on a quiet machine (`tmp/ladder_0910.log`):
+
+| K | flag off (the converging loop, `ctl0`) | probe (`dis0`) |
+|---|---|---|
+| 28 | 0 open, 36 v, 1:02 | 0 open, 36 v, 1:40 |
+| 35 | 0 open, 66 v, 2:00 | **1 open** (SDQ10), 54 v, 2:34 |
+| 41 | 0 open, 107 v, 4:23 | 0 open, **88** v, 2:20 |
+| 51 | 2 open, 108 v | 2 open, 120 v, 6:36 |
+
+One rung up, one rung down (a net lost at K35): not a default (edict 3);
+`PLAN_SIDES=1` stays opt-in.
+
+**The re-berth loop** (`reberth.py TAG K`, a driver that runs AFTER the
+braid on the routed board, `REBERTH=1` in `chain_k.sh`): per refused net,
+the berth it has is measured off the board and its (face, layer) class
+banned; a new berth is chosen for that net alone -- its menu enumerated
+against the routed board's copper, every other net pinned to the berth
+it was laid to (`_menu_match` on the fanout board), the selector's costs
+deciding -- re-fanned by `fanout_once`'s incremental pass against the
+routed copper, and routed alone by a one-net `braid.py` run (every other
+lane static; ~3 s; its refusal record says why). Two things it found
+before landing anything:
+
+- **The plan state must be read off a SOURCE VIEW of the fanout board**
+  (its destination copper stripped, `reberth.source_view`): `plan_state`
+  reads the ends with no `dest_ref`, and on a board fanned out at both
+  ends that attributes the berth tip as the source end of half the nets
+  (28 of 47 berths "not in the menu" until this was fixed).
+- **On a routed board the berth menu is EMPTY.** With every neighbour's
+  berth and lane as copper, no straight escape of SA11's or SA14's is
+  clear on any face or layer, so the loop asks the ENGINE for a face
+  instead (`fanout_once(face_asks=)`: a bare-face hint, the engine's own
+  search choosing gap, layer and kind). It lays berths; the braid then
+  refuses every one of them, because:
+
+**The boxed end is the TOOTH.** The refusal record now says where a
+walled lane is walled (`braid.Corridor._note_wall`, from `connect`'s
+forward and backward frontiers kept apart, `report['blocked_fwd'/'_bwd']`):
+each end's pocket reach in mm, and a verdict -- the end whose pocket is
+under a third of the other's is the boxed one (`WALL_POCKET_RATIO`), two
+pockets under `WALL_POCKET_MM` 2.5 is boxed at both ends, two comparable
+pockets a wall across the corridor. On the recorded K51 (`di`): SA11's
+pocket round the tooth reaches 2.6 mm (384 cells) and round the berth 24 mm
+(10,000 cells, the cap); SA14 5.2 / 28 mm. Both are boxed at U1's east
+face, where the fifth session's diagnosis put the human's climb -- and a
+destination re-berth cannot answer that. So the loop's other move is
+**pad to pad**: the net stripped to its two balls and routed by the
+production router (`route.py --nets`) against the board as it stands, the
+engine that re-fans an end AND routes in one search, up a ladder of
+(the chain's 0.127 width, no rips) -> (0.10, the 2-layer advanced tier,
+disclosed) -> (0.127, 3 rips) -> (0.10, 3 rips), the first rung whose
+whole-run grade is no worse (the net closed, no other net opened, no DRC)
+shipping. Measured:
+
+| K51 board | braid | after `reberth.py` | what landed |
+|---|---|---|---|
+| `di` (incremental loop) | 2 open (SA11 SA14), 108 v | **1 open**, 112 v, 39 s | SA11 pad to pad at 0.10 mm, no rip: 5 vias, 49 segments -- round U1's WEST side and over the top of the whole bundle to DU1's north-east corner (~50 mm; `tmp/di_rb_k51_SA11.png`). SA14: no path on any rung. |
+| `dis0` (probe) | 2 open (SDQ12 SDQ3), 120 v | **1 open**, 132 v, 51 s | SDQ12 pad to pad at 0.127 with 3 rips: a short corridor swimmer with one dive (4 vias), three neighbours re-laid at +8 vias (`tmp/dis0_rb_k51_SDQ12.png`). SDQ3: no path on any rung. |
+
+Completion first, so on the chain's own scale both boards improve; the
+copper is the copper of a last resort (SA11's detour is nothing a
+designer ships), and the second open on each board has NO path with the
+others frozen, even with three rips. Opt-in (`REBERTH=1`), not a default.
+
+**The climb** (`escape_moves.enumerate_moves(climb=k)`, `SRC_CLIMB=k` on
+the source menu; `Move.climb`; the selector's conflict test over every
+gap stretch a move takes, `_lane_spans`; the mirrored frame carries it;
+`SRC_CLIMB=0` byte-identical, verified: the flag-off K51 fanout stage
+reproduces the recorded one to the pass). Measured on the human's board
+first: SA11's tooth is a dog-bone via beside the ball, a short 45-degree
+leg on B into a COLUMN GAP, 2.7 mm straight north along it (x 125.78) and
+out of the east face at y 61.7; SA12 4.0 mm at 126.86, SA15 3.1 at 126.07,
+SBA1 4.2 at 127.14 -- the back layer under a BGA has no pads, only via
+barrels. The move: a dog-bone or via-in-pad whose run first travels up to
+k pitches along a gap and leaves the face at a chosen row (left/right) or
+column (up/down); a via-in-pad steps half a pitch into the gap first. On
+the K51 bench it adds 1062 climbs to 199 plain moves (SA11 17, SBA1 31,
+SA15 58; SA10 and SDQ3 none: boxed). The plan with `SRC_CLIMB=8`
+converged (44/44 exact, 3 unplaced), model swimmers 18 -> 14 but model
+vias 80 -> 91, and took 209 s against 30 s (`plan_ends._refine_source`
+judges every candidate move by the full plan cost). It chose nine climbs
+-- SA15 9 pitches north on B, SDQ8/SDQ15 (DQ nets), SA10, SBA1 3 pitches
+SOUTH, SBA2 out the WEST face -- not the human's pattern (its eleven
+north riders all climb north on B into one nested order), and the braid
+graded **4 open, 97 vias, 16 swimmers** against the control's 2 open /
+108 / 19: worse. The source refinement moves one net at a time, and a
+single climb pays only when the whole group climbs together -- the
+chooser session's finding at the destination ("a single berth moved from
+the greedy's start looks worse until a block turns"), now at the source.
+
+**The upper bound, both ends human** (`tmp/human_src_realize.py`): the
+human's U1 teeth read off its board (face, layer, kind and the row) and
+laid on the bench by our own `source_realize` with the climb menu
+(`--climb=16`): 29 nets matched a class, the engine laid all 29, 22 at
+the human's row (SBA1, SA12, SA10's rows were unreachable in the menu --
+neighbours' current escapes block those climbs, the co-move problem --
+and the engine's negotiation slid seven). The chain from that bench, our
+destination plan (`hs`) and the human's DU1 sides pinned too (`hh`):
+
+| arm (K51) | open | vias | time | note |
+|---|---|---|---|---|
+| `di`, the recorded incremental loop (control) | 2 (SA11 SA14) | 108 | 2:12 | |
+| `hd51`, human DU1 sides pinned on our teeth (fifth session) | 0 | 135 | 3:32 | the one complete board |
+| `hs`: human-like teeth (22/47 exact) + our destination plan | 1 (SDQM0) | 136 | 4:52 | the source loop moved the teeth again (kept round 5) |
+| `hh`: human-like teeth + human DU1 sides pinned | **7** | 125 | 3:38 | the sides that complete on OUR teeth strand seven on the approximation |
+
+The human's source order is not reachable with our engine's menu on this
+bench -- 18 nets had no move of the human's class at all, 7 more could not
+reach its row -- so this is not the human's board and not an upper bound
+of the climb; it says that a PARTIAL copy of the human's teeth is worse
+than either whole, which is what the fifth session's permutation
+decomposition predicted (human source + our berths: 304 inversions
+against 113 / 89 for the two wholes).
+
+**The source chooser, built and measured** (`refine_climbs`, `PLAN_CLIMB=1`
+with `SRC_CLIMB=k`; `WarmPlan` gained tooth overrides, the symmetric of its
+berth overrides): each tooth's face, layer and row chosen together, judged
+by the braid's plan model, with a per-net generator over each class's rows,
+the group grown in launch order, and the co-move as an exchange with the one
+neighbour whose copper alone closes a class. Two menu readings, both at K51,
+three source rounds:
+
+| arm | menu | plan on paper | engine laid as asked | fanout stage | braid |
+|---|---|---|---|---|---|
+| control (`di`) | -- | 18 swimmers | -- | 30 s | 2 open, 108 v, 19 swimmers |
+| `cl` | bare array (every run net's copper excluded) | swimmers 19 -> 7 -> 5 -> 3, 22 teeth a round | 13-16 of 22 (asks for runs across the field to the far faces) | 393 s | 2 open, **172** v, 19 swimmers, 45 rips |
+| `cl2` | honest (legs clear of every other net's copper; exchange with a sole blocker) | 19 -> 12 -> 15 -> 12, 12 / 7 / 6 teeth | 9/12, 6/7, 5/6 | 483 s | **4 open**, 134 v, 18 swimmers, 73 rips |
+
+The paper swimmers fall every round and the braid routes the same 18-19.
+So the judge was calibrated (`tmp/judge_calib.py`): over the 16 K51 boards
+with both a fanout and a routed board, the plan model's prediction against
+the routed vias (+3 per open net), swimmers priced flat (`SWIM_VIAS`) and
+priced by the layer changes their crossings with the page lanes force
+(`Corridor.swim_profile`, `SWIM_CROSS=1`, opt-in, byte-identical off):
+
+| | Spearman vs routed | mean abs error |
+|---|---|---|
+| flat swimmers | 0.20 | 44 vias |
+| crossing-priced swimmers | 0.36 | 40 vias |
+
+A rank agreement of 0.2-0.4 on a spread of 97-172 routed vias: the plan
+model does not rank K51 plans, with either swimmer price, and every chooser
+judged by it (the destination chooser of the fifth session, both source
+choosers here) came out worse at the braid for that reason. The
+crossing-priced swimmer over-counts twice over (a straight line's forced
+changes, 6.5 per swimmer, against the 3.2 the router pays), and neither
+price models completion at all, which is where the arms differ most.
+
+**Where this leaves the list.** The destination loop is converged, the
+braid's refusals are located, the climb is in the menu and a source
+chooser exists -- and the JUDGE is the wall: at K51 the plan model ranks
+plans at 0.2-0.4 rank agreement with the braid, so no search over it can
+be trusted there, and the fast judge that could (the router itself on the
+swimmers, against the page lanes' real copper rather than their lines --
+the 0909 swimmer planner's lesson) is the next thing to build before any
+chooser is run at K51 again. Two things that ARE settled: the probe
+config's K41 (88 vias in 2:20), and the re-berth loop as the backstop for
+whatever a plan leaves open. Tools: `reberth.py`, `tmp/human_src_realize.py`,
+`tmp/fo_ladder.sh`, `tmp/braid_fo.sh`, `tmp/render_eco.py`.
+
+### The braid's verdict re-plans the ends: `replan.py` (2026-09-10, seventh session)
+
+The sixth session ended at the judge: the plan model ranks K51 plans at
+0.2-0.4 rank agreement with the braid, so no chooser judged by it can win
+there. This session takes the other road (Andy's): **use the route itself
+as the judge and the previous route as the price** -- run the real braid,
+read what it did to each net, re-plan the nets it paid for, realize them,
+route again, and iterate; and verify at every step that the plan, and
+then the new plan, are what the fanout LAID on each side, rather than
+judging on completion and via counts alone. `replan.py TAG K` is that
+loop, on a fanout board F (both ends laid, its plan sidecar beside it)
+and its routed board R:
+
+1. **The verdict** off R: each net's class in the braid's own schedule
+   (page F / page B / swimmer), its real vias (the board's, the ends'
+   taken off), refused and the boxed end, its ranks, and the braid's
+   OWN CENSUS of what walled it -- the lanes on its blocked frontier and
+   the min-cut probe's crossing set, which the braid already prints per
+   rip. The plan model's prediction for the plan F carries is recomputed
+   and `real - predicted` per net becomes `plan_ends.RESIDUAL`, the
+   learned price every judge below runs with (empty by default: byte-
+   identical everywhere else). Measured on the recorded K51 (`di`): the
+   plan's pages match the braid's (18 swimmers on paper, 19 routed); the
+   error is all in the swimmers' price (+19 vias over 19 swimmers, +4 on
+   each page), and SA1 and SA3 are not in the sidecar at all.
+2. **The bad nets**: the refused, then every net whose lane costs three
+   vias or more (`--worst` of them a round), and the **gatekeepers** --
+   good nets the census names in the way of two or more bad ones
+   (`--gate-min`), carried across rounds. They are not frozen: their
+   lanes are re-laid in the bad nets' probes and they are re-planned
+   themselves in a second phase.
+3. **Candidates** per bad net at each end the verdict allows: the
+   destination menu on the bare array with the berths in its way named as
+   a CO-MOVE set (re-fanned with it, the engine negotiating; at most
+   `MAX_COMOVE`), the source menu with climbs (`SRC_CLIMB` 14; the honest
+   menu, legs clear of every other net's copper), ranked by the judged
+   cost with everyone else as the board carries them.
+4. **The probe**: the real router on R. The net is stripped to its tooth,
+   the lanes in the way of the new end (geometrically, and by the census)
+   are stripped with their teeth and berths kept, the asked end is laid
+   by the production engine and AUDITED (face, gap, layer, kind, the
+   climb's row), and the group is braided together against the frozen
+   rest, graded whole (`grade_k`). A candidate stands only when its own
+   net routed and the board grades better (opens, then vias, no DRC); a
+   refusal -- its own or a re-laid neighbour's -- is UNJUDGED, not a
+   verdict, because the full braid rips what the local one cannot.
+5. **Apply**: the standing moves (pairwise non-conflicting) realized on F
+   -- teeth by `source_realize`, berths by `fanout_once`'s incremental
+   pass, both audited, with the co-moved berths asked for exactly where
+   the probe's engine LAID them -- the unmoved ends checked unchanged off
+   the board, the sidecar rewritten from the board it sits beside. In the
+   default `--mode=incremental` the probes' board, whose changed ends are
+   checked against the fanout board's (same face and layer, gap within
+   0.5 mm), IS the round's routed board; `--mode=rebraid` runs the full
+   braid on the new F instead and keeps it only when better AND every
+   move was laid in its asked class.
+
+**Results, K51 (the recorded `di` chain: 2 open, 108 vias).** Every
+board below grades 0 DRC with `grade_k` (check_connected + check_drc at
+the routed floor), and every move in it was audited as laid in its asked
+class with the other ends unchanged:
+
+| run | mode | what moved | open | vias | time |
+|---|---|---|---|---|---|
+| `rp2` round 2 | rebraid | SA6's tooth up one row on B (climb 1), SA12's tooth out U1's SOUTH face on B | **0** | 119 | 548 s for 4 rounds (two full braids) |
+| `rp2` round 3 | rebraid | + SA8's tooth out the south face on F (probe: 119 -> 115) | 0 | 135 | the full braid re-laid everything: a knife edge, rejected |
+| `rp3` round 1 | incremental, census | SA8's south-face tooth | 0 | 115 | 228 s (18 probes) |
+| `rp3` round 2 | incremental, census | SA12's berth to DU1's EAST face on F, SA1 and SA14 co-moved | 0 | 111 | (the process was killed for memory after its apply; the pair is `tmp/rp3b_k51`) |
+| `rp5` round 1 | + joint pairs, substitutes | SCS0's berth as the engine's substitute (via-in-pad on B, DU1's south face), SCS1 co-moved | 0 | 109 | 394 s / 2 rounds |
+| `rp6b` round 1 | + engine screen, synthesized asks | SBA2's tooth as the engine's own south-face surface escape | 0 | **107** | 515 s / 2 rounds |
+
+The chain's previous complete K51 boards were 121 (the plan search of
+09-04) and 135 (the human's DU1 sides pinned); 107 is the best complete
+K51 the chain has produced, from general moves the real router chose --
+the address nets born at the south end of U1's east face leave by the
+south face and ride the corridor's bottom, which is the human's
+"climb" turned the other way. Renders: `tmp/rp2_r2_{all,u1,du1}.png`
+(the 119 board; SA12's south exit and SA6's dogbone one row up are where
+the loop said).
+
+**Three more things the runs asked for (Andy's three notes, in order):**
+move MORE bad nets a round and do not freeze the good ones in their way --
+every net whose lane costs three vias or more is a bad net, the braid's own
+blocker census names the good nets in the way of two or more of them
+(the GATEKEEPERS: SCS1 blocked SA11, SCS0 and SA4; SBA1 and SBA0 two each),
+their lanes are re-laid in the bad nets' probes and they are re-planned
+themselves in a second phase, and the census is written beside every
+board the loop keeps (`<board>.census.json`) so a continuation run
+inherits it; consider a TOOTH AND A BERTH together -- joint pairs are
+ranked by the judged cost with both applied and probed beside the single
+ends (`--joint`, on by default); and make the plan's moves REALISTIC --
+the engine itself screens every candidate in a dry run on the parsed
+fanout board (`engine_lays`: the end's copper taken off in memory, the
+production fanout asked for the move, its laid end measured; 0.03-0.65 s
+against 10-20 s a probe), a move it lays in another class goes forward as
+that SUBSTITUTE (menu-matched, or synthesized from the laid end when the
+menu cannot name it: SBA2's south-face surface escape six gaps west of any
+menu move), and the asked class is banned. Measured on the 109-via board
+the screen reproduces every probe verdict: SBA2's five moves all refused,
+SCS0's south berth substituted by the via-in-pad the probe had kept, every
+SA11 and SA14 climb exact. `rp5` (joint pairs, substitutes): 111 -> **109**
+(SCS0's substitute berth, 394 s for two rounds); `rp6b` (the screen,
+synthesized substitutes, run under `nohup` after the harness's low-memory
+guard had stopped two runs): 109 -> **107** (SBA2's tooth as the engine's
+own surface escape on the south face, six gaps west of any menu move;
+515 s for two rounds). `tmp/rp6b_rp_k51{,_fo}.kicad_pcb` is the pair to
+continue from; renders `tmp/rp6b_{all,u1}.png`.
+
+**Where the time goes (profiled on the 107 board, one probe of a 4-net
+group, `tmp/rp_prof.py`):** the Board build 0.9 s, the rankings 0.1 s,
+the engine screen 0.6 s, the strip 0.05 s, the re-fan with its DRC 0.6 s,
+the grade 0.8 s -- and the LOCAL BRAID 8.6 s (21 s with the machine
+loaded), all of it in `connect`: FAILING searches, repeated. The attempt
+ladder re-ran three identical attempts (the same 226k-, 351k- and
+410k-iteration refusals for SA12 and SA11, nothing changing between
+them), then the last call searched 0.9-1.6 M iterations for SA11, which
+does not route. `BRAID_ATTEMPTS` and `BRAID_BUDGET_X` (opt-in, defaults =
+the braid as it was) let the probe run one attempt: 8.6 -> 6.7 s with the
+SAME board; the halved budget (3.8 s) loses SA11, so the probe keeps the
+full budget. A round is 18-21 such probes (`--worst=6`, three per net
+with the joint pair, plus the gatekeepers): 250-265 s. What is left to
+cut: the census groups (a bad net re-laid with 8-12 census lanes takes
+20-27 s; `--census` is 4 now), and running different nets' probes in
+PARALLEL on the round's base board (two workers on this 8 GB machine),
+which the sequential incremental board does not allow as written.
+
+**What the faithfulness checks found (the reason this session was
+worth its time):**
+
+- **The plan's honest source menu names 30 of the 47 teeth the fanout
+  laid** (two F tracks share one 0.65 mm gap; the menu offers one lane
+  per gap). `_menu_match` is None for those; their class is read off the
+  board (`measure_tooth`, which now tolerates a bare or fully routed net
+  and can read the SOURCE end of a doubly-fanned board, `which='src'`).
+- **The engine lays every climb the menu offers, exactly** -- SA14 at
+  1..8 rows in both gaps, SA12's 101 moves -- on the fanout board's source
+  view. The 0910 session's "climb infeasible even alone" was the ROUTED
+  board: another net's lane already leaves the face at the climb's row.
+  The selector's strict lane test (a dog-bone via in the column gap)
+  refused every climb the engine threads past; it is not applied at the
+  source here.
+- **The east face is full at every gap midline**: with two teeth per pitch
+  and the braid's rule that two teeth cannot share an exit point (any
+  layer), a climb's only free exits were the four rows north of SA0.
+  `escape_moves` climbs now step by HALF a pitch on the run layer -- a
+  BGA's back has no pads, so a B run may leave along a row LINE as well as
+  a gap midline (the human's nested riders leave at half-pitch spacing);
+  measured laid exactly (SA14 at 61.98, SA11 at 63.93).
+- **The destination menu is drawn on a bare array**, so it offers a
+  dog-bone site the other berths' vias block (SA6: 'exact move infeasible
+  even alone', the original re-laid) and surface runs seven rows deep the
+  plan-follow never lays (SA12). The berths in a move's way are its
+  co-move set; surface berths deeper than three rows are dropped.
+- **A surface leg across another surface leg on the same layer** (SA6's
+  south-face column run across SA9/SA13/SA7's east-face rows) is in the
+  selector's non-strict menu and not layable: `legs_cross` filters it.
+- **A slot exchange the engine negotiates on the routed board it refuses
+  on the fanout board**: SA6 asked for SA8's east-face slot; on R the
+  plan-follow slid SA8 0.4 mm and laid both, on F its deepest-first order
+  laid SA8 exact first and its rule (a negotiation is kept only when the
+  exact count rises) dropped SA6 to `via_in_pad/up/B`. So the apply step
+  asks for the co-moved berths exactly where the probe's engine laid them
+  (`comove_got`, menu-matched), and two standing moves may not conflict
+  (SA11 and SA6 once both stood on one slot: neither laid as asked).
+- **A co-moved berth grazes a lane routed against the old one** (SA4 <->
+  SA1): the DRC pair names the lane, which is re-laid with the group.
+- **A probe's "better" must be the net's own**: SA11's berth once "stood"
+  at 107 vias with SA11 still refused, the saving being SA4 and SA8
+  re-laid cheaper.
+- **The local judge cannot judge the hard swimmers**: SA11 and SA4 refuse
+  in every group they are re-laid in (they route only under the full
+  braid's rip-assist over every lane), so every move that needs them
+  re-laid -- SCS1's, SBA1's, SA11's own climb, which routes SA11 at 5-6
+  vias from 10 -- is unjudged. And the full braid is a knife edge: SA8's
+  local win (119 -> 115) re-braided to 135.
+
+Traps: zsh does not split `$v` (a `set -- $v` loop hands `--view` no
+argument) and `echo =====` looks a command up; a running `replan.py`
+keeps the code it loaded (its braid and fanout SUBPROCESSES pick up an
+edit); the machine has 8 GB and the loop was killed for memory once (its
+peak RSS is now printed per round). Tools: `replan.py`, `tmp/rp_check.py`
+(verdict + model-vs-real table + candidates, no probes), `tmp/rp_probe2.py`
+(one probe), `tmp/rp_climb_bisect.py` (every climb of a net realized).
 
 ### The pack: every lane a taut string against its neighbour (2026-09-09)
 

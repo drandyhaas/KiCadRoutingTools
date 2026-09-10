@@ -44,6 +44,24 @@ def _lane_span(m: Move) -> Tuple[Tuple, float, float]:
     return key, min(a, b), max(a, b)
 
 
+def _lane_spans(m: Move) -> List[Tuple[Tuple, float, float]]:
+    """Every gap stretch a move occupies: a plain move's one lane
+    (_lane_span); a CLIMB's (escape_moves climb=) axis-aligned runs on its
+    run layer -- the gap it climbs along and the row or column it leaves
+    by -- so the conflict test prices what the copper will take."""
+    if not getattr(m, 'climb', 0):
+        return [_lane_span(m)]
+    out = []
+    for (p, q, L) in m.legs:
+        if L != m.layer:
+            continue
+        if abs(p[0] - q[0]) < 1e-6 and abs(p[1] - q[1]) > 1e-6:
+            out.append((('col', round(p[0], 3), L), min(p[1], q[1]), max(p[1], q[1])))
+        elif abs(p[1] - q[1]) < 1e-6 and abs(p[0] - q[0]) > 1e-6:
+            out.append((('row', round(p[1], 3), L), min(p[0], q[0]), max(p[0], q[0])))
+    return out or [_lane_span(m)]
+
+
 def _length(m: Move) -> float:
     return sum(math.hypot(q[0] - p[0], q[1] - p[1])
                for (p, q, _L) in m.legs)
@@ -521,15 +539,16 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
     SDQ0 from the south face to the west, split the corridor in two and
     left 5 lanes open (2026-08-30, measured after the fact: the ladder
     had been run on fanout boards recorded before the change)."""
-    key, a, b = _lane_span(m)
-    ok, oa, ob = _lane_span(om)
-    if strict:
-        same_lane = (ok[0] == key[0] and ok[2] == key[2]
-                     and abs(ok[1] - key[1]) < tol)
-    else:
-        same_lane = ok == key
-    if same_lane and a < ob and oa < b:
-        return True
+    spans, ospans = _lane_spans(m), _lane_spans(om)
+    for key, a, b in spans:
+        for ok, oa, ob in ospans:
+            if strict:
+                same_lane = (ok[0] == key[0] and ok[2] == key[2]
+                             and abs(ok[1] - key[1]) < tol)
+            else:
+                same_lane = ok == key
+            if same_lane and a < ob and oa < b:
+                return True
     if m.site is not None and _site_key(om) == _site_key(m):
         return True
     # a dog-bone's via spans every layer: if it sits in the other
@@ -537,7 +556,8 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
     # cannot both be laid whatever their layers (K28: SODT0's site in
     # SCKE0's column gap, SDQ0's in SDQ14's row gap -- the fanout, which
     # now lays the plan's moves exactly, refused the second of each pair)
-    if _site_in_lane(om, key, a, b) or _site_in_lane(m, ok, oa, ob):
+    if any(_site_in_lane(om, key, a, b) for key, a, b in spans) \
+            or any(_site_in_lane(m, ok, oa, ob) for ok, oa, ob in ospans):
         return True
     # two teeth cannot share one exit point, whatever their layers: the
     # braid orders lanes by their offset at the array, and two lanes at
@@ -766,14 +786,18 @@ def menu_order(m: Move, ball: Pt, layers=('F.Cu', 'B.Cu')) -> tuple:
     k = _KIND_ORDER.get(m.kind, 3)
     if k == 0:
         return (0, d, round(along, 6))
+    # a climb (escape_moves climb=) shares its kind's key with the plain
+    # move from the same site: the exit's coordinate along the face
+    # splits the tie (a plain move is alone in its group, so its order
+    # is unchanged)
     if k == 1:
-        return (1, L, d)
+        return (1, L, d, round(along, 6))
 
     def sgn(v):
         return -1 if v < -1e-6 else (1 if v > 1e-6 else 0)
     sx = sgn(m.site[0] - ball[0]) if m.site else 0
     sy = sgn(m.site[1] - ball[1]) if m.site else 0
-    return (2, sx, sy, d, L)
+    return (2, sx, sy, d, L, round(along, 6))
 
 
 def frame_line(launch, keep_out, pads=None) -> float:
@@ -830,7 +854,8 @@ class PairFrame:
                       direction=_FLIP_FACE.get(m.direction, m.direction),
                       layer=self.layer(m.layer), exit_pt=self.pt(m.exit_pt), vias=m.vias,
                       legs=[(self.pt(a), self.pt(b), self.layer(L)) for (a, b, L) in m.legs],
-                      site=None if m.site is None else self.pt(m.site))
+                      site=None if m.site is None else self.pt(m.site),
+                      climb=getattr(m, 'climb', 0))
             self._fwd[id(m)] = mm
             self._back[id(mm)] = m
         return mm
