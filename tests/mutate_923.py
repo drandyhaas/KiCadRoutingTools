@@ -19,11 +19,19 @@ it means.
 Refuses to start on a dirty target tree, because it restores the ORIGINAL text
 from disk and would write committed text over uncommitted work.
 
-Four of the thirteen rows mutate the GATES rather than the things they guard.
-That is deliberate: the controls inside `test_923_output_key_claims` and the
-exit-code analyser in `test_431_skill_commands` are the only reason those two
-gates cannot pass on an empty scan, so a battery that never breaks them would
-be reporting on a claim nobody tested.
+Five of the sixteen rows mutate the GATES rather than the things they guard.
+That is deliberate: the controls inside `test_923_output_key_claims`, the site
+enumeration in the drivers and the exit-code analyser in
+`test_431_skill_commands` are the only reason those gates cannot pass on an
+empty scan, so a battery that never breaks them would be reporting on a claim
+nobody tested.
+
+Four rows SURVIVED on the run that mattered, and every one was a real finding
+rather than a rejected row: two showed the flag scan could not see a command
+that spells its tool by bare basename (which the drivers do, four times), one
+showed a scenario deletion only bites when that scenario is the sole renderer
+of a checkable text, and one was a mutation that renamed a label and changed
+nothing. The gates were fixed; the rows now kill.
 """
 import argparse
 import os
@@ -77,8 +85,8 @@ ROWS = [
     # row covers the same refusal and the mutation survives -- measured, as a
     # row of this battery that disagreed with its own expectation.
     ('loop-scenario-dropped', 'ld',
-     "        ('a count that is not finite', base\n",
-     "        ('this row is deleted, not dropped', base\n",
+     "             'p_nan.json', dict(_REPORT, blocking=float('nan')))]),",
+     "             'p_nan.json', dict(_REPORT, blocking=2))]),",
      (T431,), KILLED),
     # ...and the enumeration the audit compares against. If the AST scan stops
     # finding `err(` sites, "all sites reached" becomes a claim about nothing.
@@ -126,11 +134,13 @@ ROWS = [
      "| `--heuristic-weight 1.9` | 1.9 |",
      (T431,), KILLED),
     # The exit-code claim that was true only as a string.
+    # SINGLE-LINE on purpose: this target is CRLF, and a multi-line anchor
+    # resolves differently depending on how the file is read -- which
+    # `mutation_anchors.py` reports as NEWLINE_SENSITIVE, because the batteries
+    # do not all read it the same way.
     ('exit-3-claim-returns', 'ps',
-     "# Is the board even placed? (report-only, writes nothing -- and it answers on\n"
-     "# ANY board: --suggest-locks returns before the board-state gate, so read the\n"
      "# ADVICE, never the exit code)",
-     "# Is the board even placed? (report-only, writes nothing, exits 3 if not)",
+     "# ADVICE, never the exit code -- and it exits 3 if the board is not placed)",
      (T431,), KILLED),
     # The analyser behind it: if it stops seeing the early return, every
     # exit-code claim reads as fine.
@@ -165,6 +175,15 @@ ROWS = [
      "    if not text:\n        return None",
      (T923,), KILLED),
 ]
+
+
+# The shared pre-flight (#877): refuses in ONE SECOND on an anchor that matches
+# anything other than exactly once, instead of reporting BROKEN forty minutes
+# later. Two of this battery's anchors went stale against edits in the same
+# branch and only the standing gate noticed.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mutation_anchors import preflight                       # noqa: E402
+preflight(__file__)
 
 
 def _dirty():

@@ -1486,7 +1486,7 @@ chosen by you, because every gate after this opens the files; none of them
 reads your message.
 
   routed board : {_routed}
-  score        : {_score}          board_score.py --json
+  score        : {_score}          board_score.py <board> --json {_score}
   route log    : {_log}           the one carrying JSON_SUMMARY
   close-out    : {_close}
                  python3 -X utf8 check_complete.py {_routed} \\

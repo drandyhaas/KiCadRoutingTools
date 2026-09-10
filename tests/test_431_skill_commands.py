@@ -375,7 +375,17 @@ def _cited_flags(block, tool):
 
 
 def _continued_blocks(text, tool):
-    """Whole shell commands (handling trailing backslashes) that run `tool`."""
+    """Whole shell commands (handling trailing backslashes) that run `tool`.
+
+    A tool is matched by its PATH or by its bare basename, because the drivers
+    spell it both ways -- `check_assembly.py` appears ten times in loop_driver
+    and only six of them carry `py_tools/`. Matching the path alone left a
+    command spelled the other way unscanned: a battery row put
+    `check_drc.py <board> --totally-bogus-flag x` inside a refusal and this
+    gate reported ALL PASS. The span walk below already resolves a bare name
+    to its TOOLS entry, so only the block selection was missing it.
+    """
+    base = os.path.basename(tool)
     blocks, cur = [], None
     for line in text.splitlines():
         if cur is not None:
@@ -384,7 +394,7 @@ def _continued_blocks(text, tool):
                 blocks.append('\n'.join(cur))
                 cur = None
             continue
-        if tool in line and not line.lstrip().startswith('#'):
+        if (tool in line or base in line) and not line.lstrip().startswith('#'):
             cur = [line]
             if not line.rstrip().endswith('\\'):
                 blocks.append('\n'.join(cur))
