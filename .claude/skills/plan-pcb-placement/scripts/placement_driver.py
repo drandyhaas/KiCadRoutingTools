@@ -171,8 +171,14 @@ Then classify by what you MEASURED, and say which row you are in:
   violations, or a mechanically-fixed part where mechanics forbid  -> P2
   rough/imported, all legal   -> P5 (a slate), or P4 for local violations only
 
-Next: python3 -X utf8 {sys.argv[0]} --stage <P1|P2|P4|P5> --board {a.board} \\
+Next: python3 -X utf8 {sys.argv[0]} --stage <P1|P2|P5> --board {a.board} \\
           --drc-json wk/drc0.json --assembly-json wk/assembly0.json
+
+Next, for P4 only: it grades DELTAS, so it also needs the pair. It refuses
+without both -- an absolute threshold is what made two of its gates unusable.
+  python3 -X utf8 {sys.argv[0]} --stage P4 --board {a.board} \\
+      --drc-json wk/drc0.json --before <the board this one came from> \\
+      --render-json wk/render0.json
 </stage_instructions>'''
 
 
@@ -201,7 +207,10 @@ Walk the ladder in order and say which rung applies:
 3. Neither -> say so and STOP. This toolchain does not invent a placement, and
    inventing mechanical geometry is what every rule here forbids.
 
-Next: --stage P4 (legalize the seed) or --stage P6 (declare the intent first).
+Next: P4 legalizes the seed, P6 declares the intent first. Both FOLLOW a move,
+so both refuse without the render of the seed against the board it came from:
+  python3 -X utf8 {sys.argv[0]} --stage <P4|P6> --board seed.kicad_pcb \\
+      --before {a.board} --render-json wk/render_seed.json
 </stage_instructions>'''
 
 
@@ -326,8 +335,13 @@ R2  Does the BOARD determine a position? A family whose pattern is
 R3  Apply with the repair tools, never the from-scratch seeder:
       python3 -X utf8 py_placer/place_seed.py {a.board} r.kicad_pcb --intent fp.json --repair
       python3 -X utf8 py_placer/place_reconstruct.py {a.board} r.kicad_pcb [--intent fp.json]
-    Both take --dry-run and report what they WOULD do, and both take
-    NO STEP HAS A WALL-CLOCK BUDGET -- `--deadline` was removed everywhere (no result may depend on timing), so passing it is an argparse error. A harness timeout SIGTERMs the tool, its shutdown never runs, and you get exit 143 with no partial board and no summary. 143 and 124 are the SHELL's codes, not a tool's. Run long steps DETACHED, and bound them by scope rather than by a clock.
+    Both take --dry-run, --intent, --clearance and --grid-step.
+
+    NO STEP HAS A WALL-CLOCK BUDGET: `--deadline` was removed everywhere (no
+    result may depend on timing), so passing it is an argparse error. A harness
+    timeout SIGTERMs the tool -- shutdown never runs, exit 143, no partial board
+    and no summary. 143 and 124 are the SHELL's codes, not a tool's. Bound long
+    steps by SCOPE and run them detached.
 R3b A part whose pad CENTRES are off the outline is not repairable by a
     minimal-move sweep, whatever cap you give it: every repair search starts
     from the part's current pose, and that pose carries no information once
@@ -483,7 +497,11 @@ will not tell you -- 46 -> 46 can be nine fixed and nine new somewhere else.
 
 Record it: converge.py record ... --render-json wk/render_lapN.json
 
-Next: --stage P5 (a slate) or --stage P6 (declare and grade), then P-close.
+Next: P5 for a slate, P6 to declare and grade; then P-close. P6 follows a move,
+so it refuses without the render this lap already produced:
+  python3 -X utf8 {sys.argv[0]} --stage <P5|P6> --board {a.board} \\
+      --before <the board this lap started from> \\
+      --render-json wk/render_lapN.json
 </stage_instructions>'''
 
 
@@ -508,7 +526,9 @@ Adopt one deliberately, say why in writing, and re-run P4 on the adopted board.
 Adoption is a decision, not a step -- it is not replayable, so it belongs in
 the record.
 
-Next: --stage P4 --board <adopted> --before {a.board}
+Next: render the adopted board against this one, then re-run the fix loop on it:
+  python3 -X utf8 {sys.argv[0]} --stage P4 --board <adopted> \\
+      --before {a.board} --render-json <the adopted board's render>
 </stage_instructions>'''
 
 
@@ -539,7 +559,9 @@ Two traps, both measured:
 A zone that cannot contain a part's courtyard at any rotation is graded on the
 part's anchor point instead, and the tool says so.
 
-Next: --stage P4 --board {a.board} --before <the board before any change>
+Next: python3 -X utf8 {sys.argv[0]} --stage P4 --board {a.board} \\
+          --before <the board before any change> \\
+          --render-json <this board's render, against that one>
 </stage_instructions>'''
 
 
@@ -1477,6 +1499,97 @@ def _fake_render(board, halo=100.0, crossings=100.0, hpwl=1000.0, moved=3):
     }
 
 
+def _next_line_fixture(tmp):
+    """Fabricated evidence for every guard, as flag -> path.
+
+    The same shape `_dump_all` builds, exposed so the self-test can re-point a
+    printed `Next:` command's flags at real files and find out whether the flag
+    SET the line names is enough to reach the stage it names.
+    """
+    import json as _json
+
+    def wrote(name, doc):
+        p = os.path.join(tmp, name)
+        with open(p, 'w', encoding='utf-8') as fh:
+            _json.dump(doc, fh)
+        return p
+
+    board = os.path.join(tmp, 'b.kicad_pcb')
+    before = os.path.join(tmp, 'a.kicad_pcb')
+    for p in (board, before):
+        open(p, 'w', encoding='utf-8').close()
+    return {
+        'board': board,
+        'flags': {
+            '--board': board,
+            '--before': before,
+            '--drc-json': wrote('d.json', {'violations': 3}),
+            '--locks-json': wrote('l.json', {'findings': [],
+                                             'lock_patterns': []}),
+            '--assembly-json': wrote('as.json', {'blocking': 1}),
+            '--render-json': wrote('r.json', _fake_render(
+                board, halo=50.0, crossings=60.0, hpwl=800.0)),
+            '--congestion-before': wrote('cb.json', _fake_render(
+                before, halo=100.0, crossings=100.0, hpwl=1000.0)),
+            '--intent-json': wrote('i.json', {
+                'rules_run': ['envelope'], 'parts_covered': 7,
+                'violations': [],
+                'brief_coverage': {'brief': None, 'clauses': [], 'graded': 0,
+                                   'uncovered': 0, 'abstained': 0,
+                                   'complete': True}}),
+        },
+    }
+
+
+def _render_for_next(key, fix):
+    """One stage's body under complete evidence, for reading its Next: lines."""
+    argv = ['--waive', 'X:checked']
+    for flag, path in fix['flags'].items():
+        argv += [flag, path]
+    return STAGES[key](_args(argv))
+
+
+def _next_commands(body):
+    """[(stages, flags)] for every `Next:` handoff in a rendered stage body.
+
+    `stages` is a list because a handoff may offer a choice (`<P4|P6>`); every
+    branch of it has to reach its stage, not just the first. Flags are taken
+    with their names only -- the printed VALUES are placeholders a reader
+    fills in, and whether `<adopted>` exists is not what is being tested.
+    """
+    import re as _re
+    out, lines = [], body.splitlines()
+    for i, line in enumerate(lines):
+        # `^Next\b`, not `Next:` -- rewording one handoff to "Next, for P4
+        # only:" made this arm stop seeing it while every other label still
+        # printed PASS. A parser keyed on punctuation is a gate a rewrite can
+        # switch off by accident.
+        if not _re.match(r'Next\b', line):
+            continue
+        # A handoff runs to the end of its paragraph: it may be one line, or
+        # prose over several lines introducing an indented continued command.
+        # Stop at a blank line or the closing tag, never at the first line --
+        # stopping early is how two of these went unchecked while the arm
+        # reported PASS for the rest.
+        block, j = [line], i
+        while j + 1 < len(lines) and lines[j + 1].strip() \
+                and not lines[j + 1].startswith('</'):
+            j += 1
+            block.append(lines[j])
+        text = ' '.join(b.rstrip('\\').strip() for b in block)
+        flags = [f for f in _re.findall(r'(?<![\w-])(--[a-z][a-z-]+)', text)
+                 if f != '--stage']
+        # EVERY `--stage` in the block, not the first. Folding a second target
+        # into one paragraph once made this arm drop that target silently
+        # while still printing PASS for the rest -- caught by re-reading the
+        # printed labels, which is the only reason it is spelled this way.
+        for m in _re.finditer(r'--stage\s+(\S+)', text):
+            raw = m.group(1)
+            out.append(([s for s in raw.strip('<>').split('|')]
+                        if raw.startswith('<') else [raw], flags))
+    return out
+
+
 def _dump_all():
     """Every stage's REAL body, guards satisfied.
 
@@ -1950,6 +2063,43 @@ def _self_test():
     want(_listed == set(STAGES),
          f'--list names every stage ({sorted(set(STAGES) - _listed)} missing, '
          f'{sorted(_listed - set(STAGES))} invented)')
+
+    # EVERY `Next:` LINE REACHES ITS STAGE.
+    #
+    # Four of them named a stage without the flags that stage hard-requires --
+    # P4 and P6 both refuse without --render-json -- so a reader following the
+    # handoff exactly as printed got exit 4 and a refusal instead of the next
+    # step. P3's Next: line carried the flag all along, which is what made it
+    # an oversight rather than a policy.
+    #
+    # This checks the FLAG SET, not the placeholder paths: each flag on the
+    # printed command is re-pointed at fabricated evidence and the named stage
+    # is called with exactly that. A stage that then refuses is refusing for a
+    # flag the Next: line did not name.
+    with tempfile.TemporaryDirectory() as _tmp:
+        _fix = _next_line_fixture(_tmp)
+        _checked = 0
+        for key in sorted(STAGES):
+            for _cmd in _next_commands(_render_for_next(key, _fix)):
+                _target, _flags = _cmd
+                for _t in _target:
+                    _argv = ['--stage', _t]
+                    for _f in _flags:
+                        _argv += [_f, _fix['flags'].get(_f, _fix['board'])]
+                    _out = STAGES[_t](_args(_argv)) if _t in STAGES else '<error>'
+                    _checked += 1
+                    want(not _out.startswith('<error>'),
+                         f"{key}'s Next: reaches {_t} "
+                         f"({' '.join(_flags) or 'no flags'})"
+                         + ('' if not _out.startswith('<error>') else
+                            ' -- ' + ' '.join(_out.splitlines()[1:2])))
+        # Vacuity: a parser that stops finding Next: commands would pass every
+        # arm above by checking nothing.
+        # Pinned near the measured 13, not at a token value: this arm has
+        # twice stopped seeing a handoff while printing PASS for the others
+        # (a block parser that stopped at the first line, and a label reworded
+        # from `Next:` to `Next,`). A floor is what turns that into a failure.
+        want(_checked >= 12, f'{_checked} Next: handoff(s) checked')
 
     # Guards refuse without evidence.
     want(STAGES['P3'](_args(['--board', 'b'])).startswith('<error>'),
