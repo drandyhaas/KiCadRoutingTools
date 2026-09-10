@@ -2897,6 +2897,21 @@ def main(argv=None):
                 if body.startswith('<error>'):
                     refused.append(f'{k}/delegated')
             loose.delegate = False
+            # ...and the INLINE arm, which the comment above claimed was the
+            # one being dumped and was not: delegation is the default, so
+            # `--dump-all` rendered DELEGATING four times and INLINE never.
+            # That is the branch `--no-delegate` gets -- the self-test, the
+            # parity gates and any headless CI -- and every command in it was
+            # unscanned. Measured with a battery row: `--stage-bogus L2` inside
+            # it shipped past test_431 (#923).
+            loose.no_delegate = True
+            for k in ('L1', 'L2'):
+                print(f'===== {k} (inline) =====')
+                body = STAGES[k](loose)
+                print(body)
+                if body.startswith('<error>'):
+                    refused.append(f'{k}/inline')
+            loose.no_delegate = False
 
             # L5 has FOUR outcomes and the dump above shows one of them. The
             # other three carry the commands that close a run out -- the
