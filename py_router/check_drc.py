@@ -675,20 +675,46 @@ _GRAPHIC_EFFECTIVE_NETS = None  # set per check run by _build_graphic_unificatio
 
 
 def _build_graphic_unification(pcb_data):
-    """KiCad derives a copper GRAPHIC's net from CONNECTIVITY, unifying every
+    """Set the module-level map `check_drc` reads. See `graphic_effective_nets`."""
+    global _GRAPHIC_EFFECTIVE_NETS, _GRAPHIC_OWN_PAD_NETS
+    _GRAPHIC_EFFECTIVE_NETS = graphic_effective_nets(pcb_data)
+    _GRAPHIC_OWN_PAD_NETS = graphic_own_pad_nets(pcb_data)
+
+
+def graphic_effective_nets(pcb_data, include_mutable=True):
+    """`{id(graphic_segment): frozenset(net_ids)}` -- KiCad's own answer to
+    "what net is this copper GRAPHIC on?".
+
+    KiCad derives a copper GRAPHIC's net from CONNECTIVITY, unifying every
     net whose copper physically touches the art (#337). Cluster touching
     graphics (flood over edge-contact), then record each cluster's EFFECTIVE
     net set = the file attributes plus every net whose segment/via/pad touches
     the cluster. Pair checks treat a graphic as same-net with any effective
     net -- eurorack's jack art carries a stale +12V attribute yet is soldered
     into the OUT nets, so its 68um "grazes" are internal spacing of one
-    electrical net, which KiCad correctly ignores."""
+    electrical net, which KiCad correctly ignores.
+
+    `include_mutable` (#908) is the one thing a GENERATOR must get right:
+
+      * True  -- attributes + pads + tracks + vias. check_drc's answer, and
+        the right one for a CHECKER, which grades the board in front of it.
+      * False -- attributes + PADS ONLY. The right one for the obstacle map,
+        because tracks and vias move during a route: a rip can delete the very
+        track that granted net X after the router has already used that
+        permission, and check_drc on the output would then flag copper the
+        router thought was allowed.
+
+    Pads never move or vanish mid-route, so the False answer is a SUBSET of
+    the True answer at every instant -- the generator can therefore never be
+    more permissive than the checker, which is the only direction that
+    matters. Do not "simplify" the obstacle side onto the full answer;
+    tests/test_908_own_pad_lift.py asserts the subset relation.
+    """
     import math as _m
-    global _GRAPHIC_EFFECTIVE_NETS
-    _GRAPHIC_EFFECTIVE_NETS = {}
+    out = {}
     graphics = [sg for sg in pcb_data.segments if getattr(sg, 'graphic', False)]
     if not graphics:
-        return
+        return out
 
     def seg_seg_touch(a, b):
         if a.layer != b.layer:
@@ -744,16 +770,17 @@ def _build_graphic_unification(pcb_data):
         eff = {g.net_id for g in members}
         for g in members:
             hw = g.width / 2.0
-            # touching routed/input segments
-            for sg in pcb_data.segments:
-                if getattr(sg, 'graphic', False) or sg.layer != g.layer:
-                    continue
-                if _seg_seg_distance(g, sg) <= hw + sg.width / 2.0 + 1e-6:
-                    eff.add(sg.net_id)
-            # touching vias (barrel spans all layers)
-            for v in pcb_data.vias:
-                if _pt_seg_d(v.x, v.y, g) <= hw + (v.size or 0.5) / 2.0 + 1e-6:
-                    eff.add(v.net_id)
+            if include_mutable:
+                # touching routed/input segments
+                for sg in pcb_data.segments:
+                    if getattr(sg, 'graphic', False) or sg.layer != g.layer:
+                        continue
+                    if _seg_seg_distance(g, sg) <= hw + sg.width / 2.0 + 1e-6:
+                        eff.add(sg.net_id)
+                # touching vias (barrel spans all layers)
+                for v in pcb_data.vias:
+                    if _pt_seg_d(v.x, v.y, g) <= hw + (v.size or 0.5) / 2.0 + 1e-6:
+                        eff.add(v.net_id)
             # touching pads (on the graphic's layer)
             for pads in pcb_data.pads_by_net.values():
                 for pd in pads:
@@ -764,8 +791,108 @@ def _build_graphic_unification(pcb_data):
                                 point_to_pad_distance(g.end_x, g.end_y, pd))
                     if mid_d <= hw + 1e-6:
                         eff.add(pd.net_id)
+        eff = frozenset(eff)
         for g in members:
-            _GRAPHIC_EFFECTIVE_NETS[id(g)] = eff
+            out[id(g)] = eff
+    return out
+
+
+def graphic_own_pad_nets(pcb_data):
+    """`{id(graphic_segment): frozenset(net_ids)}` -- for each piece of copper
+    a FOOTPRINT draws, the nets of that same footprint's pads it touches.
+
+    #908, the obstacle side. A footprint's own copper is net-0 foreign copper
+    to every net, so stamping it whole would SEAL the pad it was drawn around:
+    esp_prog's U2 tab notches around pad 2 (`Net-(C1-Pad1)`), whose west edge
+    is coincident with the poly's, and the router could no longer reach it --
+    the failure mode of sibling #907, manufactured by the fix for #908.
+
+    Deliberately PER SEGMENT and OWN FOOTPRINT ONLY, not per cluster. The
+    whole-cluster answer (`graphic_effective_nets`) is what the CHECKER uses
+    and it is much wider: watchy's twelve antenna polys are one connected
+    cluster touching both the feed pad and a GND pad, so a cluster-wide lift
+    would let a GND route cross the entire antenna -- graded clean by that
+    same reasoning, and a destroyed part. Lifting only the edges that actually
+    touch the pad opens the pocket and leaves the rest of the shape blocking:
+    on esp_prog exactly the three notch edges around pad 2 lift, and the five
+    outer tab edges keep blocking.
+
+    Subset chain, asserted in tests/test_908_own_pad_lift.py:
+        own-pad  subset-of  effective(include_mutable=False)
+                 subset-of  effective(include_mutable=True)   [the checker]
+    so the generator can never permit copper the checker will flag.
+
+    Endpoint distance, matching `graphic_effective_nets`' own pad arm -- the
+    two must not disagree about what "touches" means, and erring narrow lifts
+    less, which is the safe direction for a generator.
+    """
+    out = {}
+    fps = getattr(pcb_data, 'footprints', None) or {}
+    for g in pcb_data.segments:
+        if not getattr(g, 'graphic', False):
+            continue
+        owner = getattr(g, 'owner_ref', '')
+        fp = fps.get(owner) if owner else None
+        if fp is None:
+            continue
+        hw = g.width / 2.0
+        nets = set()
+        for pd in fp.pads:
+            if not pd.net_id:
+                continue
+            lys = pd.layers or []
+            if g.layer not in lys and '*.Cu' not in lys:
+                continue
+            if min(point_to_pad_distance(g.start_x, g.start_y, pd),
+                   point_to_pad_distance(g.end_x, g.end_y, pd)) <= hw + 1e-6:
+                nets.add(pd.net_id)
+        if nets:
+            out[id(g)] = frozenset(nets)
+    return out
+
+
+_GRAPHIC_OWN_PAD_NETS = {}  # set per check run beside _GRAPHIC_EFFECTIVE_NETS
+
+
+def _graphic_own_pad_pair(seg_a, seg_b, net_a, net_b) -> bool:
+    """Is this pair "a footprint's own copper and its own pad's net"? (#908)
+
+    Unlike `_graphic_pair_is_same_net` this cannot be satisfied by the item
+    being tested: the map is built from the owning FOOTPRINT'S PADS, so a
+    foreign track that merely touches the art never appears in it.
+    """
+    for g, other in ((seg_a, net_b), (seg_b, net_a)):
+        if getattr(g, 'graphic', False) and                 other in _GRAPHIC_OWN_PAD_NETS.get(id(g), ()):
+            return True
+    return False
+
+
+def _fmt_item(v, key) -> str:
+    """Printer-side: ` [Polygon(U2)]` when a violation carries that label."""
+    lbl = v.get(key)
+    return f' [{lbl}]' if lbl else ''
+
+
+def graphic_item_label(seg) -> str:
+    """How to NAME a piece of copper in a violation, KiCad's way (#908).
+
+    A routed track is named by its net and that is enough. A copper GRAPHIC
+    carries no net, so it reported as the anonymous `net_0` -- true, but it
+    names no object on the board and a reader cannot find it. KiCad says
+    "Polygon [<no net>] of U2 on F.Cu"; this says `Polygon(U2)`.
+
+    Returns '' for anything that is not a graphic, so a caller can append it
+    unconditionally.
+    """
+    if not getattr(seg, 'graphic', False):
+        return ''
+    owner = getattr(seg, 'owner_ref', '')
+    return f'Polygon({owner})' if owner else 'Graphic'
+
+
+def _label_suffix(seg) -> str:
+    lbl = graphic_item_label(seg)
+    return f' [{lbl}]' if lbl else ''
 
 
 def _graphic_pair_is_same_net(seg_a, seg_b, net_a, net_b):
@@ -2249,6 +2376,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                              else 'segment-segment'),
                     'net1': net1_str,
                     'net2': net2_str,
+                    'item1': graphic_item_label(seg1),
+                    'item2': graphic_item_label(seg2),
+                    'no_net': net1 == 0 or net2 == 0,
                     'layer': seg1.layer,
                     'overlap_mm': overlap,
                     'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
@@ -2264,6 +2394,17 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
 
             # Also check for segment crossings (different nets)
             crosses, cross_point = segments_cross(seg1, seg2)
+            if crosses and _graphic_own_pad_pair(seg1, seg2, net1, net2):
+                # #908: a net's own track crossing its own footprint's copper
+                # -- the whole point of a SOT89 tab -- is not a violation. The
+                # exemption deliberately uses the OWN-PAD map, not
+                # `_graphic_pair_is_same_net`: the connectivity unification
+                # adds the net of every track that touches the art, so a
+                # FOREIGN track grazing it would exempt ITSELF and the
+                # crossing would go unreported. The own-pad map is derived
+                # from the owning footprint's pads alone and cannot be
+                # self-justified by the item under test.
+                crosses = False
             if crosses:
                 net1_name = pcb_data.nets.get(net1, None)
                 net2_name = pcb_data.nets.get(net2, None)
@@ -2273,6 +2414,9 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'type': 'segment-crossing',
                     'net1': net1_str,
                     'net2': net2_str,
+                    'item1': graphic_item_label(seg1),
+                    'item2': graphic_item_label(seg2),
+                    'no_net': net1 == 0 or net2 == 0,
                     'layer': seg1.layer,
                     'cross_point': cross_point,
                     'loc1': (seg1.start_x, seg1.start_y, seg1.end_x, seg1.end_y),
@@ -2422,6 +2566,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
                     violations.append(_mark_required({
                         'type': 'via-segment',
+                        'item2': graphic_item_label(seg),
                         'net1': via_net_str,
                         'net2': seg_net_str,
                         'layer': seg.layer,
@@ -2512,6 +2657,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 seg_net_str = seg_net_name.name if seg_net_name else f"net_{seg_net}"
                 violations.append(_mark_required({
                     'type': 'pad-segment',
+                    'item2': graphic_item_label(seg),
+                    'no_net': pad_net == 0 or seg_net == 0,
                     'net1': pad_net_str,
                     'net2': seg_net_str,
                     'layer': seg.layer,
@@ -3034,6 +3181,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if s_edge != "off-board" and use_poly and _seg_edge_all_in_pads(seg):
                 _accepted_edge.append({
                     'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
+                    'item1': graphic_item_label(seg),
                     'layer': seg.layer, 'overlap_mm': s_overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                     'accepted': 'edge-exempt-pad',
@@ -3046,6 +3194,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             if s_edge == "off-board" or s_overlap > _grade_tol(effective_board_edge_clearance, clearance_margin):
                 violations.append({
                     'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
+                    'item1': graphic_item_label(seg),
                     'layer': seg.layer, 'overlap_mm': s_overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                 })
@@ -3058,6 +3207,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 # publish-don't-drop contract as the pad-covered class above).
                 _accepted_edge.append({
                     'type': 'segment-board-edge', 'net1': net_str, 'edge': s_edge,
+                    'item1': graphic_item_label(seg),
                     'layer': seg.layer, 'overlap_mm': s_overlap,
                     'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
                     'accepted': 'quantization-margin',
@@ -3187,6 +3337,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     net_str = net_name.name if net_name else f"net_{seg.net_id}"
                     _v = {
                         'type': 'segment-board-edge', 'net1': net_str,
+                        'item1': graphic_item_label(seg),
                         'edge': 'npth-slot', 'layer': seg.layer,
                         'overlap_mm': float(_ovl[_k]), 'slot_ref': _slot_ref,
                         'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
@@ -3417,14 +3568,16 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 print("-" * 40)
                 for v in vlist[:limit]:  # Show first `limit` of each type
                     if vtype in ('segment-segment', 'segment-segment-track-rule'):
-                        print(f"  {v['net1']} <-> {v['net2']}")
+                        print(f"  {v['net1']}{_fmt_item(v, 'item1')} <-> "
+                              f"{v['net2']}{_fmt_item(v, 'item2')}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         if v.get('track_rule'):
                             print(f"    Track rule: '{v['track_rule']}' (floor-governed pair)")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
                     elif vtype == 'via-segment':
-                        print(f"  Via:{v['net1']} <-> Seg:{v['net2']}")
+                        print(f"  Via:{v['net1']} <-> "
+                              f"Seg:{v['net2']}{_fmt_item(v, 'item2')}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
@@ -3434,7 +3587,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Via1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})")
                         print(f"    Via2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})")
                     elif vtype in ('segment-crossing', 'segment-crossing-same-net'):
-                        print(f"  {v['net1']} <-> {v['net2']}")
+                        print(f"  {v['net1']}{_fmt_item(v, 'item1')} <-> "
+                              f"{v['net2']}{_fmt_item(v, 'item2')}")
                         print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
@@ -3445,7 +3599,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Ends: ({v['loc1'][0]:.3f},{v['loc1'][1]:.3f}) <-> "
                               f"({v['loc2'][0]:.3f},{v['loc2'][1]:.3f})")
                     elif vtype == 'pad-segment':
-                        print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> Seg:{v['net2']}")
+                        print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> "
+                              f"Seg:{v['net2']}{_fmt_item(v, 'item2')}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
@@ -3484,7 +3639,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Via: ({v['via_loc'][0]:.2f},{v['via_loc'][1]:.2f})")
                     elif vtype == 'segment-board-edge':
                         where = _edge_phrase(v['edge'])
-                        print(f"  {v['net1']} {where}")
+                        print(f"  {v['net1']}{_fmt_item(v, 'item1')} {where}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")
                     elif vtype == 'via-board-edge':

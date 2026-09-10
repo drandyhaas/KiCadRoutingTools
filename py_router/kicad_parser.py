@@ -4037,6 +4037,14 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         ew = w if w > 0 else defaults.TRACK_WIDTH
         seq = pts + [pts[0]] if closed else pts
         for a, b in zip(seq, seq[1:]):
+            if a == b:
+                # A poly whose vertex list already REPEATS its first point --
+                # KiCad writes many that way (every one of watchy's twelve
+                # antenna polys) -- would close onto itself and yield a
+                # zero-length "segment". That models no copper and each one
+                # becomes a duplicate DRC row a human has to dismiss: watchy
+                # graded 12 board-edge violations where the truth is 9.
+                continue
             segments.append(Segment(
                 start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
                 width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True))
@@ -4078,19 +4086,27 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         m = re.search(r'\(' + name + r'\s+([-\d.]+)\s+([-\d.]+)\)', blk)
         return (float(m.group(1)), float(m.group(2))) if m else None
 
+    # A custom pad draws its copper with gr_* PRIMITIVES, in PAD-LOCAL
+    # coordinates. Real KiCad writes those without a `(layer ...)`, so
+    # `_blk_fields` drops them -- but that immunity is INCIDENTAL, and a
+    # primitive that does carry a copper layer lands as phantom copper
+    # hundreds of millimetres from the pad. Mask them, which is the structural
+    # answer the other board-level gr_* scans already use. Length-preserving,
+    # so the footprint spans below still line up.
+    _gcontent = _mask_pad_primitives(content)
     for tag in ('gr_line', 'gr_arc', 'gr_poly', 'gr_rect', 'gr_circle'):
         needle = '(' + tag
         pos = 0
         while True:
-            i = content.find(needle, pos)
+            i = _gcontent.find(needle, pos)
             if i < 0:
                 break
-            nxt = content[i + len(needle): i + len(needle) + 1]
+            nxt = _gcontent[i + len(needle): i + len(needle) + 1]
             if nxt and (nxt.isalnum() or nxt == '_'):
                 pos = i + len(needle)
                 continue
-            j = find_matching_paren(content, i)
-            blk = content[i:j]
+            j = find_matching_paren(_gcontent, i)
+            blk = _gcontent[i:j]
             pos = j
             layers, w, nid, uuid = _blk_fields(blk)
             if not layers:
@@ -4149,8 +4165,12 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
     # (verified against pcbnew GraphicalItems on a flipped rot-180 part, see
     # the #304 note in `_collect_footprint_edge_segments_by_ref`).
     if '(fp_' in content:
+        # Spans come from the UNMASKED text so the memo is shared with the
+        # other three callers; the slice comes from the masked text, which is
+        # the same length, so a layered pad primitive cannot leak in here
+        # either.
         for _fstart, _fend, _fkey in _footprint_blocks_by_key(content):
-            fp_text = content[_fstart:_fend]
+            fp_text = _gcontent[_fstart:_fend]
             if not _FP_SHAPE_RE.search(fp_text):
                 continue
             # A pad-LESS footprint is a logo the writer relocates to silk
@@ -5602,6 +5622,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 def _emit_outline_b(pts, ew):
                     seq = list(pts) + [pts[0]]
                     for _a, _b in zip(seq, seq[1:]):
+                        if _a == _b:
+                            continue        # see _emit_outline (text path)
                         segments.append(Segment(
                             start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
                             width=ew, layer=_ln, net_id=_nid, graphic=True,

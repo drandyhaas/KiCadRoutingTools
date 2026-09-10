@@ -76,6 +76,10 @@ class _StaticStampProxy:
         return getattr(self._real, name)
 
 
+#: Shared empty set for the #908 own-pad lift lookup, so the hot segment
+#: loop allocates nothing per row.
+_EMPTY_NETS = frozenset()
+
 def _obstacle_progress_reporter(progress_callback):
     """Throttled sub-phase progress for the base obstacle build (#556).
 
@@ -210,11 +214,30 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Use actual segment width for obstacle, and layer-specific width for routing track
     _seg_cell_batch: Dict[int, list] = {}
     _seg_via_batch: list = []
+    # #908: copper a FOOTPRINT draws (an SOT89 tab, a solder-jumper bridge, a
+    # PCB antenna) carries no net, so it is foreign copper to every net --
+    # including the net of the pad it was drawn around. Stamped whole, U2's tab
+    # SEALS esp_prog pad 2, which is #907's failure mode manufactured by #908's
+    # fix. The lift is per SEGMENT and own-footprint only: the edges that
+    # actually touch the pad stop blocking that pad's net, the rest of the
+    # shape keeps blocking everything. Never the whole cluster -- see
+    # check_drc.graphic_own_pad_nets for why (watchy's antenna).
+    _own_pad_nets = {}
+    if any(getattr(s, 'graphic', False) and getattr(s, 'owner_ref', '')
+           for s in pcb_data.segments):
+        try:
+            from check_drc import graphic_own_pad_nets
+            _own_pad_nets = graphic_own_pad_nets(pcb_data)
+        except Exception:
+            _own_pad_nets = {}      # never let a diagnosis break a build
     _n_segs = len(pcb_data.segments)
     for _seg_i, seg in enumerate(pcb_data.segments):
         if (_seg_i & 511) == 0:
             _report("copper", _seg_i, _n_segs)
         if seg.net_id in nets_to_route_set:
+            continue
+        if _own_pad_nets and (nets_to_route_set
+                              & _own_pad_nets.get(id(seg), _EMPTY_NETS)):
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
