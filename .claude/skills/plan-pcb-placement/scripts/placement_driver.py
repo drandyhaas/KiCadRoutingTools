@@ -1532,10 +1532,14 @@ def _dump_all():
 # --------------------------------------------------------------------------
 # the REFUSALS (#923) -- the other half of --dump-all
 # --------------------------------------------------------------------------
-#: The shortest literal worth checking. Fragments ('\n\n', ': ') appear
-#: everywhere and would make coverage trivially satisfied; 40 characters is a
-#: sentence, and a sentence is what a reader is handed.
-_CHUNK = 40
+#: The shortest literal worth checking. MEASURED rather than chosen: at 40
+#: characters six placement sites and three loop sites carried nothing long
+#: enough to check and counted as rendered without being looked at -- one of
+#: them `_load`'s "unreadable" branch, whose longest literal is
+#: `': unreadable ('`. At 12 every site that carries a literal at all becomes
+#: checkable, and what is left is only the pass-throughs (`err(why)`), whose
+#: text belongs to the guard that composed it and is checked there.
+_CHUNK = 12
 
 
 def _refusal_sites(path=None):
@@ -1597,6 +1601,37 @@ def _refusal_sites(path=None):
                     owner.get(id(node), '<module>'), 'guard', got)
     return sites
 
+
+
+def _passthrough_count(path=None):
+    """Refusal sites that carry NO literal of their own: `err(why)`.
+
+    Reported beside the coverage number so it is read for what it is. Their
+    text was composed by a guard, which is a site of its own and is checked
+    there; counting them as covered without saying so is how "N of N" starts
+    meaning less than it looks.
+    """
+    import ast
+    path = path or os.path.abspath(__file__)
+    with open(path, encoding='utf-8') as fh:
+        tree = ast.parse(fh.read())
+    n = 0
+    for node in ast.walk(tree):
+        target = None
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'err'):
+            target = node
+        elif (isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
+                and len(node.value.elts) == 2):
+            head = node.value.elts[0]
+            if isinstance(head, ast.Constant) and head.value in (False, None):
+                target = node.value.elts[1]
+        if target is None:
+            continue
+        if not any(isinstance(s, ast.Constant) and isinstance(s.value, str)
+                   for s in ast.walk(target)):
+            n += 1
+    return n
 
 def _refusal_scenarios(tmp):
     """Evidence-STARVED namespaces: one per guard branch, each labelled.
@@ -1838,7 +1873,9 @@ def _dump_refusals():
     total_chunks = sum(len(v[2]) for v in sites.values())
     print(f'\n{len(seen)} distinct refusal(s) from {len(scenarios)} '
           f'scenario(s); {len(sites) - len(missed)} of {len(sites)} refusal '
-          f'text(s) fully rendered, over {total_chunks} literal chunk(s).')
+          f'text(s) fully rendered, over {total_chunks} literal chunk(s); '
+          f'{_passthrough_count()} pass-through(s) print a text composed '
+          f'elsewhere and are checked there.')
     for line, fn, kind, total, gone in missed:
         print(f'!! line {line} ({fn}, {kind}): {len(gone)} of {total} chunk(s) '
               f'no scenario renders')

@@ -83,9 +83,9 @@ ROWS = [
     # ...and the enumeration the audit compares against. If the AST scan stops
     # finding `err(` sites, "all sites reached" becomes a claim about nothing.
     ('site-enumeration-blinded', 'pd',
-     "        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)\n"
-     "                and node.func.id == 'err'):",
-     "        if False:",
+     "            sites[(node.lineno, node.col_offset)] = (\n"
+     "                owner.get(id(node), '<module>'), 'err', chunks(node))",
+     "            pass",
      (T431,), KILLED),
     # The two holes a verifier proved end to end against the FIRST version of
     # this work: a refusal composed in a function whose name did not look like
@@ -160,8 +160,9 @@ ROWS = [
     # The filter that keeps file names out of the key scan. Without it
     # `route.py` reads as a key claim and the control says so.
     ('path-filter-dropped', 'ru',
-     "    if text.lower().endswith(_PATH_NOT_A_KEY):\n        return None",
-     "    if False:\n        return None",
+     "    if not text or text.lower().endswith(_PATH_NOT_A_KEY):\n"
+     "        return None",
+     "    if not text:\n        return None",
      (T923,), KILLED),
 ]
 
