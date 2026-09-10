@@ -137,7 +137,7 @@ def test_a_poured_net_is_routed_to_the_plane_repair(tmpdir=None):
 
     route.py cannot tap a pour, so a stranded plane pad handed to it is work that
     cannot succeed -- measured, `broken` sat at 14 across two iterations of
-    route.py calls and fell to 11 in ONE route_disconnected_planes call. The
+    route.py calls and fell to 11 in ONE repair_planes.py call. The
     classification must therefore be read off the board's zones, not guessed.
     """
     import tempfile
@@ -154,7 +154,7 @@ def test_a_poured_net_is_routed_to_the_plane_repair(tmpdir=None):
 
     assert conn['poured_nets'] == ['GND'], \
         f"a zone naming its net as (net \"GND\") must be seen, got {conn['poured_nets']}"
-    assert conn['broken_detail']['GND']['handler'] == 'route_disconnected_planes'
+    assert conn['broken_detail']['GND']['handler'] == 'repair_planes'
     assert conn['broken_detail']['FLASH_CS']['handler'] == 'route'
     print('  PASS: poured nets go to the plane repair, the rest to route.py')
 
@@ -242,7 +242,7 @@ def test_poured_nets_is_spelled_the_way_the_board_spells_it():
 
 
 def test_poured_nets_carries_its_meaning_in_the_payload():
-    """It means "the handler is route_disconnected_planes", NOT "this is a
+    """It means "the handler is repair_planes", NOT "this is a
     plane". A consumer read it the second way and removed 332 of 545 pads
     (72%) from its own analysis. The sentence has to travel WITH the list --
     a comment in board_score.py is invisible to whoever reads the JSON."""

@@ -181,7 +181,7 @@ def _unescape_net_name(s: str) -> str:
 # reading the JSON, and that is who got this wrong.
 POURED_NETS_MEANING = (
     'nets with at least one zone on the board, i.e. a broken one of these is '
-    "route_disconnected_planes' job rather than route.py's. This is NOT a list "
+    "repair_planes.py's job rather than route.py's. This is NOT a list "
     'of plane/power nets and is NOT a safe --ignore-nets population: a board '
     'that pours signal nets puts them in here too (measured: 332 of 545 pads).')
 
@@ -229,7 +229,7 @@ def score_connectivity(root: str, board: str) -> dict:
     #
     # The pad REF matters as much as the count. A break whose stranded pad sits on
     # a do-not-fit part is not a functional defect and must not be chased forever;
-    # a break on a plane net wants route_disconnected_planes, not route.py. The
+    # a break on a plane net wants repair_planes.py, not route.py. The
     # ref is what lets the caller tell those apart.
     detail, cur = {}, None
     for line in out.splitlines():
@@ -249,10 +249,10 @@ def score_connectivity(root: str, board: str) -> dict:
     # NAME THE TOOL, not just the defect. Which step fixes a break is decided by
     # ONE fact the board already carries: is the net POURED? A stranded pad on a
     # plane net cannot be reached by route.py at all -- it needs a tap via, which
-    # is route_disconnected_planes' job -- and a run that reaches for route.py on
+    # is repair_planes.py's job -- and a run that reaches for route.py on
     # everything watches the count sit still. Measured: `broken` held at 14 across
     # two iterations of route.py calls, then fell to 11 in ONE
-    # route_disconnected_planes call once the plane nets were separated out.
+    # repair_planes.py call once the plane nets were separated out.
     #
     # Poured-ness is read off the board's own zones, so this is a fact and not a
     # guess. Everything else is `route`; the DNF case stays a human call, which is
@@ -292,7 +292,7 @@ def score_connectivity(root: str, board: str) -> dict:
     except OSError:
         pass
     for name, v in detail.items():
-        v['handler'] = ('route_disconnected_planes' if name in poured
+        v['handler'] = ('repair_planes' if name in poured
                         else 'route')
 
     return {'ran': True, 'count': int(m.group(1)), 'unrouted': unrouted,
