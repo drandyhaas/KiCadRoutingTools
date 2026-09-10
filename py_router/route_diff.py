@@ -456,7 +456,25 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
               "--impedance <ohms> to route as a coplanar waveguide.")
     if impedance is not None:
         if not pcb_data.board_info.stackup:
+            # #909: "no stackup" is true and tells the reader nothing about
+            # whether authoring one would have helped. The repo's own solvers
+            # answer that against a NOMINAL stack, in one call, with numbers.
             print("WARNING: No stackup found in PCB file. Using fixed track width.")
+            try:
+                from impedance import (achievability_note, tightest_pin_gap,
+                                       _impedance_scope_net_ids)
+                _ly = (layers[0] if layers else 'F.Cu')
+                _note, _ = achievability_note(
+                    pcb_data, _ly, impedance,
+                    is_differential=True,
+                    spacing=diff_pair_gap or 0.0,
+                    min_pitch_gap=tightest_pin_gap(
+                        pcb_data, _impedance_scope_net_ids(pcb_data,
+                                                           net_names)))
+                if _note:
+                    print("  " + _note)
+            except Exception:
+                pass
         else:
             print(f"\nCalculating trace widths for {impedance}Ω differential impedance...")
             print(f"Using diff pair spacing: {diff_pair_gap}mm ({diff_pair_gap * 39.3701:.2f} mil)")
