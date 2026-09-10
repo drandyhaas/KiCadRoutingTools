@@ -355,7 +355,19 @@ def _cited_flags(block, tool):
     # talks about OTHER tools by name ("`converge.py where ...` -- pass
     # `--summary-json` on the render"). Scanning the whole line hands the
     # render's flags to converge. One span, one command.
-    spans = re.findall(r'`([^`]+)`', block) or [block]
+    spans = re.findall(r'`([^`]+)`', block)
+    # ...and what is NOT in backticks, when a command lives there. A refusal
+    # says things like "The close-out reports `blocking` as str" and then
+    # prints its recipe unquoted: scanning only the backticked spans dropped
+    # the recipe entirely, which a battery row proved by shipping
+    # `check_assembly.py <board> --totally-bogus x` past this gate. Keeping the
+    # two apart is what stops a sentence's `--flag` being read as the
+    # neighbouring tool's.
+    outside = re.sub(r'`[^`]+`', ' ', block)
+    if '.py' in outside:
+        spans.append(outside)
+    if not spans:
+        spans = [block]
 
     out = set()
     for span in spans:
