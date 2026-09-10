@@ -5543,10 +5543,29 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # Parity with the text parser's gr_line/gr_arc pass: PCB_SHAPE lines/arcs
     # on copper layers render as real copper (obstacles + DRC), tagged
     # graphic=True (immutable input art -- never ripped/pruned/stripped).
+    # #908: and the same for copper drawn INSIDE a footprint. `GetDrawings()`
+    # excludes footprint children, so this path was blind to an SOT89 tab or a
+    # PCB antenna exactly as the text path was. One emitter, two feeders --
+    # board drawings and `fp.GraphicalItems()` -- because the alternative is a
+    # second hand-written copy that drifts (the tree already carries four
+    # disagreeing answers to the same question for Edge.Cuts).
     try:
         import pcbnew as _pcbnew_g
-        for _d in board.GetDrawings():
-            if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
+        _fp_shapes = []
+        try:
+            for _ofp, _okey in zip(_live_fps, _live_keys):
+                if not footprint_copper_is_functional(len(_ofp.Pads())):
+                    continue        # pad-less logo footprint: see the text path
+                for _g in _ofp.GraphicalItems():
+                    _fp_shapes.append((_g, _okey))
+        except Exception:
+            pass                    # older pcbnew: no GraphicalItems()
+        for _d, _owner in ([(_x, "") for _x in board.GetDrawings()]
+                           + _fp_shapes):
+            # FP_SHAPE is KiCad 6/7's class for a footprint-embedded shape;
+            # KiCad 8+ unified them onto PCB_SHAPE. `GraphicalItems()` also
+            # yields text, which this pass must not touch.
+            if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT", "FP_SHAPE"):
                 continue
             # EVERY copper layer of the shape, not just GetLayer() (#659
             # follow-up): KiCad writes a multi-layer graphic as the plural
@@ -5585,7 +5604,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     for _a, _b in zip(seq, seq[1:]):
                         segments.append(Segment(
                             start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
-                            width=ew, layer=_ln, net_id=_nid, graphic=True))
+                            width=ew, layer=_ln, net_id=_nid, graphic=True,
+                            owner_ref=_owner))
 
                 if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
                     if _w <= 0:
@@ -5593,7 +5613,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     segments.append(Segment(
                         start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
                         end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
-                        width=_w, layer=_ln, net_id=_nid, graphic=True))
+                        width=_w, layer=_ln, net_id=_nid, graphic=True,
+                        owner_ref=_owner))
                 elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
                     if _w <= 0:
                         continue
@@ -5606,7 +5627,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
                         segments.append(Segment(
                             start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
-                            width=_w, layer=_ln, net_id=_nid, graphic=True))
+                            width=_w, layer=_ln, net_id=_nid, graphic=True,
+                            owner_ref=_owner))
                 elif _shape in (_POLY, _RECT, _CIRC):
                     # FILLED copper areas (#337): outline as graphic segments (parity
                     # with the text parser). Filled shapes may have 0 stroke width.
