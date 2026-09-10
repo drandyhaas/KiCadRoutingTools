@@ -1019,6 +1019,42 @@ def _evict_trade(state, ref: str, blockers: Sequence[str],
             'reason': reason}
 
 
+def _materialise_rotation(part, rot: float) -> float:
+    """Make `part.bounds_by_rot` (and `tht_by_rot`) hold an entry for `rot`.
+
+    Returns the normalised angle, which is the key `_Part.rect` looks up.
+
+    A DECLARED angle need not lie on the part's 90-degree lattice, and
+    `_Part.rect` silently falls back to `bounds_by_rot[0.0]` for an angle it
+    has no entry for -- so a declared 45 on a part seeded at 0 would be judged
+    for overlap, halo and containment on the UNROTATED box and then written
+    out at 45. The quench's nudge loop materialises the entry before using it
+    for exactly this reason; every seat search must too.
+
+    KEYED BY THE NORMALISED ANGLE, which is what `_Part.rect` looks up
+    (`bounds_by_rot.get(rot % 360)`). `_try_place` keeps an inline copy that
+    keys by the RAW angle instead, so a part whose board spells its rotation
+    -45 gets an entry at -45 that `rect` never reads and is judged on the
+    unrotated box anyway. That is a real bug and it is deliberately NOT fixed
+    here: 14 of 40 corpus boards spell a rotation outside [0, 360), fixing it
+    moves placement on them, and it is measurable -- with `_try_place` routed
+    through this function, `mutate_711`'s `both-along-edge-forms-allowed` row
+    flips from KILLED to SURVIVED. It owes its own change and its own A/B.
+    Declared angles reach here already normalised (`floorplan._rotation`), so
+    the two callers cannot disagree on anything a declaration can express.
+    """
+    rot = rot % 360.0
+    if rot not in part.bounds_by_rot:
+        from placement.legality import rotate_local_bounds
+        part.bounds_by_rot[rot] = rotate_local_bounds(
+            *part.bounds_by_rot[0.0], rot)
+    if part.tht_by_rot is not None and rot not in part.tht_by_rot:
+        from placement.legality import rotate_local_bounds
+        part.tht_by_rot[rot] = rotate_local_bounds(
+            *part.tht_by_rot[0.0], rot)
+    return rot
+
+
 def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                constraint=None, tol: float = 0.5,
                max_disp: Optional[float] = None,
@@ -1089,15 +1125,7 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
             _ladder_rots = (list(rotations) if rotations is not None
                             else [part.rot] + [(part.rot + d) % 360
                                                for d in (90.0, 180.0, 270.0)])
-            # #893. A DECLARED angle need not lie on the part's 90-degree
-            # lattice, and `_Part.rect` silently falls back to
-            # `bounds_by_rot[0.0]` for an angle it has no entry for -- so a
-            # declared 45 on a part seeded at 0 would be seated against the
-            # UNROTATED courtyard box and then written out at 45, with overlap,
-            # halo and edge containment all judged on the wrong rectangle. The
-            # quench's own nudge loop materialises the entry before using it
-            # for exactly this reason; the seat search must too. No-op for the
-            # fallback ladder, whose angles are always present by construction.
+            # #893 (PR932 form, VERBATIM -- see the commit message).
             for _r in _ladder_rots:
                 if _r not in part.bounds_by_rot:
                     from placement.legality import rotate_local_bounds
@@ -1516,7 +1544,13 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
     stage-1 geometry (`_edge_pose` + `_edge_correct`); the along-edge
     position starts at the part's CURRENT projection (minimal move) and
     slides outward until the seat is pad/hole-conflict-free against every
-    other part. Board-only; the band comes from the intent."""
+    other part. Board-only; the band comes from the intent.
+
+    `rotations` is the DECLARED ladder (#893), or None. When it is given it
+    REPLACES the part's incoming angle rather than backing it up: the seat is
+    tried at each declared angle in the author's order and the part is refused
+    by name if none of them seats. The part's own angle is a candidate only
+    when the author declared it."""
     part = state.parts[ref]
     edge = entry['edge']
     band = entry.get('overhang_mm') or {}
@@ -1700,6 +1734,63 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         finally:
             part.rot = saved
 
+    # #893, the REPAIR half, and it has to run before the minimal-move seat
+    # below rather than after it. Wiring `rotations` into the #706 fallback
+    # ladder alone left the declaration unreachable in the ordinary case: the
+    # seat at `part.rot` succeeds, this function returns True, and the ladder
+    # is never consulted. Measured on splitflap_driver with an angle declared
+    # 90deg off the board's: 17 of 17 J-refs seated at the INPUT angle and the
+    # claim was dropped in silence -- the fourth time #893's ladder reached
+    # some seating sites and not others, and the one shape the `_try_place`
+    # AST gate cannot see, because `_seat_edge` is not a `_try_place` site.
+    #
+    # The part's own angle is NOT a fallback here. `rotation` is a decision and
+    # `rotation_candidates` a set; an angle outside either is a pose the author
+    # said they did not want, so a part that seats at no declared angle is
+    # refused and named, exactly as the seed path refuses it into
+    # `rotation_unseated`. That also makes repair agree with `_try_place`,
+    # which has replaced the ladder outright since #893 -- before this, a
+    # declared NON-edge part was corrected by repair and a declared EDGE part
+    # was not.
+    #
+    # The three #706 gates below do not apply and are deliberately skipped: all
+    # three exist because "nothing in this tree knows which way a mating face
+    # must point". A declared rotation is precisely that knowledge, stated by
+    # the author, so the guards protecting an UNDECLARED orientation have
+    # nothing left to protect.
+    if rotations is not None:
+        was_rot = part.rot
+        ladder = []
+        for _r in rotations:
+            _r = _materialise_rotation(part, _r)
+            if _r not in ladder:      # author order; see `_rotation_candidates`
+                ladder.append(_r)
+        for rot in ladder:
+            seat = try_rot(rot)
+            if seat is None:
+                continue
+            state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), rot)
+            if abs((rot - was_rot) % 360.0) > 1e-9:
+                notes.append(
+                    f"{ref}: seated on the declared {edge} edge at the "
+                    f"DECLARED rotation {rot:g}deg; it arrived at "
+                    f"{was_rot:g}deg. Unlike a rotation this tool chooses, "
+                    f"this one is the author's claim -- fix the declaration, "
+                    f"not the board, if it is wrong")
+            return True
+        if refused:
+            notes.append(f"{ref}: every position on the declared {edge} edge "
+                         f"band is refused by "
+                         + ', '.join(sorted(set(refused)))
+                         + " -- move the keep-out, or add this ref to its "
+                           "`allow`")
+        notes.append(
+            f"{ref}: no seat exists on the declared {edge} edge at any "
+            f"declared rotation ({', '.join(f'{r:g}' for r in ladder)}deg) "
+            f"-- NOT turned to an undeclared angle. Revisit the declaration "
+            f"or the edge band")
+        return False
+
     seat = try_rot(part.rot)
     if seat is not None:
         state.apply_move(ref, round(seat[0], 3), round(seat[1], 3), part.rot)
@@ -1736,19 +1827,12 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         # reading it afterwards reports the new angle as the old one and the
         # note says "at its own rotation 90deg; seated at 90deg".
         was_rot = part.rot
-        # #893. A DECLARED rotation outranks this ladder: the whole argument
-        # for (3) above is that turning a connector "is only defensible where a
-        # human declared where it belongs". Where the human ALSO declared which
-        # way it points, that is the answer, and trying `+90k` past it would
-        # override the more specific claim with the less specific one. A
-        # declared angle already applied leaves this loop with nothing to try,
-        # which is correct: the seat either exists at the declared angle or the
-        # part is reported.
-        _decl_rots = ([r % 360 for r in rotations if r % 360 != was_rot % 360]
-                      if rotations is not None else None)
-        for rot in (_decl_rots if _decl_rots is not None
-                    else ((was_rot + 90) % 360, (was_rot + 180) % 360,
-                          (was_rot + 270) % 360)):
+        # #893 handles a DECLARED rotation above and returns, so this ladder
+        # is reached only for a part whose angle nobody declared -- which is
+        # what its three gates assume. The first fix put the declared ladder
+        # HERE, where the early return above meant it almost never ran.
+        for rot in ((was_rot + 90) % 360, (was_rot + 180) % 360,
+                    (was_rot + 270) % 360):
             seat = try_rot(rot)
             if seat is None:
                 continue

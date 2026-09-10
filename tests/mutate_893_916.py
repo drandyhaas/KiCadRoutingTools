@@ -206,6 +206,23 @@ ROWS = [
                          constraint=rect, tol=tol, info=info)""",
      (T_ROT,), KILLED),
 
+    # A THIRD time, and the one an AST gate cannot catch: `_seat_edge` is not
+    # a `_try_place` site, so the standing gate is blind to it. The parameter
+    # WAS threaded -- into the #706 fallback ladder, which is reached only
+    # when no seat exists at the part's own angle -- so the ordinary case
+    # returned True from the minimal-move seat and dropped the claim in
+    # silence. This row restores that shape exactly: put the declared ladder
+    # back where it cannot run. Measured before the fix: 17 of 17
+    # splitflap_driver connectors seated at the INPUT angle.
+    ('seat-edge-declared-ladder-behind-the-minimal-move-seat', 'sd',
+     """    if rotations is not None:
+        was_rot = part.rot
+        ladder = []""",
+     """    if rotations is not None and try_rot(part.rot) is None:
+        was_rot = part.rot
+        ladder = []""",
+     (T_ROT,), KILLED),
+
     # The candidate ORDER is load-bearing: the search keeps the first that fits.
     ('rotation-candidate-order-sorted-away', 'fp',
      '''            f"{where}: rotation_candidates has repeated angles {out!r}")

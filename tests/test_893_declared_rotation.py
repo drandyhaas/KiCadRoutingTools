@@ -415,6 +415,151 @@ def test_no_declaration_leaves_the_seeder_unchanged():
 TESTS.append(test_no_declaration_leaves_the_seeder_unchanged)
 
 
+def _edge_seat_probe(board_name, declared_delta, ladder=None):
+    """Drive `_seat_edge` directly on every unlocked connector of a board.
+
+    Returns [(ref, edge, seated?, angle it ended at, angle(s) declared)].
+
+    Direct rather than through `repair_placement` because repair only reaches
+    `_seat_edge` for a ref its own violator census picks, and that census is
+    the thing most likely to change underneath this test -- a fixture that
+    stops reaching the code under test reports PASS for the wrong reason.
+    """
+    from kicad_parser import parse_kicad_pcb
+    import pose_score
+    from placement import seeder
+
+    path = os.path.join(ROOT, 'kicad_files', board_name)
+    pcb = parse_kicad_pcb(path)
+    st = pose_score.make_state(pcb, path)
+    out = []
+    for ref in sorted(st.parts):
+        if not ref.startswith('J') or st.parts[ref].locked:
+            continue
+        part = st.parts[ref]
+        for edge in ('north', 'south', 'east', 'west'):
+            x0, y0, rot0 = part.x, part.y, part.rot
+            rots = (ladder if ladder is not None
+                    else [(rot0 + declared_delta) % 360.0])
+            ok = seeder._seat_edge(
+                st, ref, {'ref': ref, 'edge': edge, 'class': 'edge_receptacle'},
+                set(), [], rotations=rots)
+            out.append((ref, edge, ok, st.parts[ref].rot % 360.0,
+                        tuple(r % 360.0 for r in rots)))
+            st.apply_move(ref, x0, y0, rot0)
+    return out
+
+
+def test_seat_edge_never_ships_an_undeclared_angle():
+    """The repair path's `_seat_edge` must not seat at the INPUT angle.
+
+    THE BUG THIS PINS, because it is invisible from the call site: `_seat_edge`
+    took a `rotations=` argument and threaded it into the #706 fallback ladder
+    -- which is reached only when no seat exists at the part's own angle. In
+    the ordinary case `seat = try_rot(part.rot)` succeeded first and the
+    function returned True, so the declaration was dropped in silence.
+    Measured on splitflap_driver with an angle declared 90deg off the board's:
+    17 of 17 connectors seated at the input angle, 0 honoured.
+
+    `_try_place` had it right (the ladder REPLACES the fallback), so before
+    this a declared NON-edge part was corrected by repair and a declared EDGE
+    part was not -- which is why this asserts on BOTH arms of the same board
+    rather than on a count.
+    """
+    rows = _edge_seat_probe('splitflap_driver.kicad_pcb', 90.0)
+    assert len(rows) >= 20, (
+        'only %d probe row(s) -- this gate is not looking at what it thinks '
+        'it is' % len(rows))
+    seated = [r for r in rows if r[2]]
+    assert seated, 'no row seated at all; the probe proves nothing'
+    bad = [(ref, edge, got, want) for ref, edge, ok, got, want in rows
+           if ok and abs((got - want[0]) % 360.0) > 1e-6]
+    assert not bad, (
+        '%d of %d seated row(s) shipped an UNDECLARED angle, e.g. %r. A seat '
+        'at the part\'s incoming rotation is exactly the silent drop #893 '
+        'exists to remove.' % (len(bad), len(seated), bad[:3]))
+    print('  %d seated row(s), all at the declared angle (%d refused rather '
+          'than turned)' % (len(seated), len(rows) - len(seated)))
+
+
+TESTS.append(test_seat_edge_never_ships_an_undeclared_angle)
+
+
+def test_seat_edge_keeps_a_declared_angle_it_already_has():
+    """The NEGATIVE control: declaring the angle the part already has must
+    seat it, unchanged. Without this arm the assertion above is satisfied by
+    an implementation that refuses everything."""
+    rows = _edge_seat_probe('splitflap_driver.kicad_pcb', 0.0)
+    seated = [r for r in rows if r[2]]
+    assert len(seated) >= 20, (
+        'only %d of %d row(s) seated at the angle the part ALREADY has -- a '
+        'declared ladder must not make an in-place seat harder'
+        % (len(seated), len(rows)))
+    bad = [r for r in seated if abs((r[3] - r[4][0]) % 360.0) > 1e-6]
+    assert not bad, bad[:3]
+    print('  %d row(s) seated unchanged at their own declared angle'
+          % len(seated))
+
+
+TESTS.append(test_seat_edge_keeps_a_declared_angle_it_already_has)
+
+
+def test_seat_edge_walks_a_candidate_set_in_author_order():
+    """`rotation_candidates` is a SET, and the FIRST that seats wins.
+
+    Order is the assertion: a ladder that sorted, or that fell back to the
+    part's own angle, would still land on a legal pose and pass a
+    "did it seat" check.
+    """
+    rows = _edge_seat_probe('splitflap_driver.kicad_pcb', None,
+                            ladder=[45.0, 90.0, 0.0])
+    seated = [r for r in rows if r[2]]
+    assert seated, 'no row seated; the probe proves nothing'
+    bad = [r for r in seated if r[3] not in (45.0, 90.0, 0.0)]
+    assert not bad, 'seated outside the declared candidate set: %r' % bad[:3]
+    first = [r for r in seated if abs(r[3] - 45.0) < 1e-6]
+    assert first, (
+        'no row took the FIRST candidate (45deg) -- a ladder that reordered '
+        'the author\'s set would look like this')
+    print('  %d seated row(s) inside the candidate set, %d on the first '
+          'candidate' % (len(seated), len(first)))
+
+
+TESTS.append(test_seat_edge_walks_a_candidate_set_in_author_order)
+
+
+def test_seat_edge_is_unchanged_without_a_declaration():
+    """`rotations=None` must reproduce the pre-#893 `_seat_edge` exactly:
+    minimal move, at the part's own angle."""
+    from kicad_parser import parse_kicad_pcb
+    import pose_score
+    from placement import seeder
+
+    path = os.path.join(ROOT, 'kicad_files', 'splitflap_driver.kicad_pcb')
+    pcb = parse_kicad_pcb(path)
+    st = pose_score.make_state(pcb, path)
+    n = 0
+    for ref in sorted(st.parts):
+        if not ref.startswith('J') or st.parts[ref].locked:
+            continue
+        part = st.parts[ref]
+        x0, y0, rot0 = part.x, part.y, part.rot
+        ok = seeder._seat_edge(
+            st, ref, {'ref': ref, 'edge': 'south', 'class': 'edge_receptacle'},
+            set(), [], rotations=None)
+        if ok:
+            n += 1
+            assert abs((st.parts[ref].rot - rot0) % 360.0) < 1e-6, (
+                '%s turned with no declaration: %g -> %g'
+                % (ref, rot0, st.parts[ref].rot))
+        st.apply_move(ref, x0, y0, rot0)
+    assert n >= 5, 'only %d undeclared row(s) seated' % n
+    print('  %d undeclared row(s) seated at their own angle, none turned' % n)
+
+
+TESTS.append(test_seat_edge_is_unchanged_without_a_declaration)
+
+
 def main():
     failures = 0
     for fn in TESTS:
