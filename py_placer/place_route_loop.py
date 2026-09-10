@@ -1226,6 +1226,7 @@ def main():
             align_radius=args.align_radius,
             align_span=args.align_span,
             orient_weight=args.orient_weight,
+            facing_weight=args.facing_weight,
             metrics_out=ratsnest,
             groups=blocks,
             verbose=args.verbose,

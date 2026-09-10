@@ -23,13 +23,23 @@ What each intent construct becomes, in placement order:
                            drag everything to the board middle) -- which is
                            also what lands a decap next to its IC.
 
-Rotations: the input rotation is tried IN FULL first and kept when it fits;
-a part with no contained legal pose at it falls back to its 90-degree
-lattice, and the note names the change. The intent schema cannot express a
-rotation, so a part whose rotation is a DECISION (pin order, the U3 rot-180
-case) must be locked -- an unlocked load-bearing rotation was never
-protected from the quench either. Explore rotations deliberately with
-place_portfolio's `poses` strategy.
+Rotations: UNDECLARED, the input rotation is tried IN FULL first and kept
+when it fits; a part with no contained legal pose at it falls back to its
+90-degree lattice, and the note names the change.
+
+Since #893 the intent CAN express a rotation, which is what a part whose
+rotation is a DECISION (pin order, the U3 rot-180 case) should use.
+`blocks[].rotation` is honoured exactly -- a part that does not fit at it is
+reported UNSEATED in `rotation_unseated`, never quietly turned -- and
+`blocks[].rotation_candidates` narrows the ladder to the author's set, in the
+author's order, because this search keeps the FIRST pose that fits.
+
+Note what a declared rotation deliberately does NOT do: it does not lock the
+part. The advice this paragraph used to give -- lock it -- costs the part its
+POSITION too, because `_Part.locked` is one boolean covering both, and
+`place_seed` stamps it into the board. The angle is held by handing
+`_try_place` a one-element ladder instead. `place_portfolio`'s `poses`
+strategy is still how you EXPLORE rotations; this is how you FIX one.
 
 Determinism: the only randomness is ``random.Random(f"{seed}")`` -- it breaks
 ties in the packing order and jitters non-spec targets, so different seeds
@@ -824,7 +834,8 @@ def _seated_violations(state, seated: Set[str]) -> Tuple[int, float]:
 def _evict_trade(state, ref: str, blockers: Sequence[str],
                  tx: float, ty: float, constraint, tol: float,
                  blocker_zones: Sequence[Tuple[Any, float]],
-                 placed: Set[str], unplaced: Set[str]) -> Dict:
+                 placed: Set[str], unplaced: Set[str],
+                 rot_ladder=None) -> Dict:
     """Lift every ref in `blockers`, seat `ref` at the target it was refused
     at, put the blockers back; keep the trade only under the rule below, else
     restore all of them.
@@ -886,8 +897,16 @@ def _evict_trade(state, ref: str, blockers: Sequence[str],
         unplaced.add(b)
         placed.discard(b)
     lifted = set(blockers)
+    # #893. A declared rotation binds the EVICTED part and every blocker
+    # put back after it, not just the parts the ordinary stages seat. Without
+    # this the rung is a hole in the claim: a trade that turns a declared part
+    # keeps it, silently, and the note the stages emit is not even printed
+    # here. `rot_ladder` is `seed_from_intent._rot_ladder`; None (every other
+    # caller) keeps the fallback ladder exactly.
+    _ladder = rot_ladder if rot_ladder is not None else (lambda _r: None)
     clr_ref = _try_place(state, ref, tx, ty, pile | lifted,
-                         constraint=constraint, tol=tol)
+                         constraint=constraint, tol=tol,
+                         rotations=_ladder(ref))
     clr_back: Dict[str, Optional[float]] = {b: None for b in blockers}
     tried: List[str] = []
     if clr_ref is not None:
@@ -900,7 +919,8 @@ def _evict_trade(state, ref: str, blockers: Sequence[str],
             bx, by, _brot = snapshot[b]
             bz, btol = zones.get(b, (None, 0.5))
             clr_back[b] = _try_place(state, b, bx, by, pile | lifted,
-                                     constraint=bz, tol=btol)
+                                     constraint=bz, tol=btol,
+                                     rotations=_ladder(b))
             if clr_back[b] is None:
                 break
     ok = clr_ref is not None and all(c is not None
@@ -1002,7 +1022,8 @@ def _evict_trade(state, ref: str, blockers: Sequence[str],
 def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                constraint=None, tol: float = 0.5,
                max_disp: Optional[float] = None,
-               info: Optional[Dict] = None) -> Optional[float]:
+               info: Optional[Dict] = None,
+               rotations: Optional[Sequence[float]] = None) -> Optional[float]:
     """Nearest FULLY-CONTAINED legal pose to (tx, ty); applies the move and
     returns True.
 
@@ -1022,9 +1043,15 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
     90-degree lattice: an unplaced pile's rotation is a generator default,
     not a decision, and a large part can have NO contained legal pose at it
     while fitting fine turned 90 (measured: the same LDO, 0 poses at rot 0
-    against 3 at rot 90 on a packed 51x21 board). A part whose rotation IS a
-    decision must be locked -- an unlocked "load-bearing rotation" was never
-    protected from the quench either (the U3 lesson). The caller can see a
+    against 3 at rot 90 on a packed 51x21 board).
+
+    `rotations` REPLACES that ladder with a declared one (#893) -- a single
+    angle for `blocks[].rotation`, the author's set for
+    `rotation_candidates` -- so a part whose rotation is a decision is seated
+    at it or not at all, and the quench's gate pins it there afterwards. This
+    paragraph used to end "a part whose rotation IS a decision must be locked";
+    that advice froze the part's POSITION as well, which is exactly what the
+    declaration exists to avoid. The caller can see a
     fallback fired by comparing the part's rot before and after.
 
     Returns the courtyard clearance the pose was found at, or None. The full
@@ -1053,8 +1080,35 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
             # cache is keyed on it implicitly, so clear it on every change.
             state.clearance = clr
             state._inc_violation.clear()
-            for rot in [part.rot] + [(part.rot + d) % 360
-                                     for d in (90.0, 180.0, 270.0)]:
+            # #893. `rotations` is the DECLARED ladder when an intent gave
+            # this ref one -- a single angle for `blocks[].rotation`, the
+            # author's set for `rotation_candidates` -- in the author's order,
+            # because this search keeps the FIRST pose that fits and a
+            # reordered ladder changes which angle wins. None keeps the
+            # fallback ladder every caller had before #893, byte for byte.
+            _ladder_rots = (list(rotations) if rotations is not None
+                            else [part.rot] + [(part.rot + d) % 360
+                                               for d in (90.0, 180.0, 270.0)])
+            # #893. A DECLARED angle need not lie on the part's 90-degree
+            # lattice, and `_Part.rect` silently falls back to
+            # `bounds_by_rot[0.0]` for an angle it has no entry for -- so a
+            # declared 45 on a part seeded at 0 would be seated against the
+            # UNROTATED courtyard box and then written out at 45, with overlap,
+            # halo and edge containment all judged on the wrong rectangle. The
+            # quench's own nudge loop materialises the entry before using it
+            # for exactly this reason; the seat search must too. No-op for the
+            # fallback ladder, whose angles are always present by construction.
+            for _r in _ladder_rots:
+                if _r not in part.bounds_by_rot:
+                    from placement.legality import rotate_local_bounds
+                    part.bounds_by_rot[_r] = rotate_local_bounds(
+                        *part.bounds_by_rot[0.0], _r)
+                if (part.tht_by_rot is not None
+                        and _r not in part.tht_by_rot):
+                    from placement.legality import rotate_local_bounds
+                    part.tht_by_rot[_r] = rotate_local_bounds(
+                        *part.tht_by_rot[0.0], _r)
+            for rot in _ladder_rots:
                 xfine = max(0.05, getattr(state, 'grid_step', 0.1) or 0.1)
                 for radius, step in ((SEARCH_RADIUS_MM, SEARCH_STEP_MM),
                                      (SEARCH_FINE_RADIUS_MM,
@@ -1452,7 +1506,8 @@ def _already_on_its_edge(state, part) -> bool:
 
 
 def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
-               notes: List[str], target=None, exclude=None) -> bool:
+               notes: List[str], target=None, exclude=None,
+               rotations=None) -> bool:
     """Seat a DECLARED edge part on its edge band, minimal-move (run-4 B-6).
 
     Repair could never do this: `_try_place._ok` demands full containment,
@@ -1681,8 +1736,19 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
         # reading it afterwards reports the new angle as the old one and the
         # note says "at its own rotation 90deg; seated at 90deg".
         was_rot = part.rot
-        for rot in ((was_rot + 90) % 360, (was_rot + 180) % 360,
-                    (was_rot + 270) % 360):
+        # #893. A DECLARED rotation outranks this ladder: the whole argument
+        # for (3) above is that turning a connector "is only defensible where a
+        # human declared where it belongs". Where the human ALSO declared which
+        # way it points, that is the answer, and trying `+90k` past it would
+        # override the more specific claim with the less specific one. A
+        # declared angle already applied leaves this loop with nothing to try,
+        # which is correct: the seat either exists at the declared angle or the
+        # part is reported.
+        _decl_rots = ([r % 360 for r in rotations if r % 360 != was_rot % 360]
+                      if rotations is not None else None)
+        for rot in (_decl_rots if _decl_rots is not None
+                    else ((was_rot + 90) % 360, (was_rot + 180) % 360,
+                          (was_rot + 270) % 360)):
             seat = try_rot(rot)
             if seat is None:
                 continue
@@ -1749,7 +1815,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      anchor_rounds: int = 1,
                      evict_depth: int = 0,
                      decap_owner_chips: bool = False,
-                     immovable_extra: Sequence[str] = ()) -> Dict:
+                     immovable_extra: Sequence[str] = (),
+                     body_model: bool = False) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
@@ -1804,7 +1871,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         # nothing asked whether the region it was aiming at belonged to
         # somebody else.
         exclusive_zones=(floorplan.zone_entries(intent, blocks)
-                         if intent else ()))
+                         if intent else ()),
+        # #916. Reaches `pose_ok` through the state, which is the search
+        # this issue is actually about. False by default.
+        body_model=body_model)
     bounds = state.board
     refs_all = sorted(pcb_data.footprints)
     notes: List[str] = []
@@ -1815,6 +1885,23 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
 
     lock_refs: List[str] = sorted({
         r for pat in intent.must_lock for r in fnmatch.filter(refs_all, pat)})
+    # #893. {ref: (declared rotation, declared candidates)}. NOTE these refs
+    # are deliberately NOT added to `lock_refs`: that flag becomes
+    # `_Part.locked`, one boolean covering position AND rotation, and
+    # `place_seed` stamps it into the board -- so locking a part to hold its
+    # angle would also freeze wherever the seeder first dropped it, which is
+    # the very trade `_try_place`'s docstring told authors to accept for want
+    # of anything better. The angle is held by handing `_try_place` a
+    # one-element ladder instead.
+    declared_rot = floorplan.rotations_for_ref(intent, blocks) if intent else {}
+
+    def _rot_ladder(ref):
+        """The declared ladder for `ref`, or None for the fallback one."""
+        claim = declared_rot.get(ref)
+        if claim is None:
+            return None
+        rot, cands = claim
+        return [rot] if rot is not None else list(cands)
 
     placed: Set[str] = set()
     unplaced: Set[str] = {r for r, p in state.parts.items()}
@@ -1937,6 +2024,30 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                     continue
                 f_lo, f_hi = _n_lo, _n_hi
             frac = min(f_hi, max(f_lo, frac))
+            # #893. An edge connector is the class whose rotation is most often
+            # a DECISION, and stage 1 never turns a part -- it seats at
+            # `part.rot`. So without this a declared angle was simply ignored
+            # here: not turned away silently, but seated at the INPUT angle,
+            # which is the same broken promise wearing a different face. Set it
+            # first, so `_edge_pose` and `_edge_correct` compute the overhang
+            # and the correction for the geometry that will actually be
+            # written. A candidate SET is not applied here (the edge ladder has
+            # no cost to choose by); the later stages resolve those.
+            _edge_decl = declared_rot.get(ref)
+            if _edge_decl is not None and _edge_decl[0] is not None:
+                _want = _edge_decl[0] % 360.0
+                if abs((part.rot % 360.0) - _want) > 1e-9:
+                    if _want not in part.bounds_by_rot:
+                        from placement.legality import rotate_local_bounds
+                        part.bounds_by_rot[_want] = rotate_local_bounds(
+                            *part.bounds_by_rot[0.0], _want)
+                        if part.tht_by_rot is not None:
+                            part.tht_by_rot[_want] = rotate_local_bounds(
+                                *part.tht_by_rot[0.0], _want)
+                    notes.append(
+                        f"edge connector {ref}: seated at the declared "
+                        f"rotation {_want:g}deg (input was {part.rot:g}deg)")
+                    state.apply_move(ref, part.x, part.y, _want)
             # #701: SLIDE along the edge when a declared keep-out refuses the
             # even-distribution position, using the same ladder `_seat_edge`
             # already uses. Without it, one keep-out over the middle of an
@@ -2050,12 +2161,14 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         tol = intent.zone_tolerance(z) if z is not None else 0.5
         info: Dict = {}
         clr = _try_place(state, ref, part.x, part.y, unplaced - {ref},
-                         constraint=rect, tol=tol, info=info)
+                         constraint=rect, tol=tol, info=info,
+                         rotations=_rot_ladder(ref))
         if clr is None and z is not None:
             zx = (z.rect[0] + z.rect[2]) / 2.0
             zy = (z.rect[1] + z.rect[3]) / 2.0
             clr = _try_place(state, ref, zx, zy, unplaced - {ref},
-                             constraint=rect, tol=tol, info=info)
+                             constraint=rect, tol=tol, info=info,
+                             rotations=_rot_ladder(ref))
         if clr is not None:
             placed.add(ref)
             unplaced.discard(ref)
@@ -2147,6 +2260,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             rot_before = state.parts[ref].rot
             zinfo: Dict = {}
             clr = _try_place(state, ref, cx + jx, cy + jy, unplaced - {ref},
+                             rotations=_rot_ladder(ref),
                              constraint=z.rect, tol=tol, info=zinfo)
             if clr is not None:
                 placed.add(ref)
@@ -2239,9 +2353,11 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
 
         def _seat(ref, tx, ty, owner, pn, constraint=None, tol=0.5):
             clr = _try_place(state, ref, tx, ty, unplaced - {ref},
-                             constraint=constraint, tol=tol)
+                             constraint=constraint, tol=tol,
+                             rotations=_rot_ladder(ref))
             if clr is None and constraint is not None:
-                clr = _try_place(state, ref, tx, ty, unplaced - {ref})
+                clr = _try_place(state, ref, tx, ty, unplaced - {ref},
+                                 rotations=_rot_ladder(ref))
             if clr is None:
                 return False
             avail.remove(ref)
@@ -2364,7 +2480,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             clr = _try_place(state, ref, round((zx0 + zx1) / 2.0, 3),
                              round((zy0 + zy1) / 2.0, 3), unplaced - {ref},
                              constraint=z.rect,
-                             tol=intent.zone_tolerance(z))
+                             tol=intent.zone_tolerance(z),
+                             rotations=_rot_ladder(ref))
             if clr is None:
                 notes.append(f"{ref}: the pin stage declined it and its zone "
                              f"{z.name!r} has no legal pose either -- falls "
@@ -2404,7 +2521,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
         jx, jy = _jitter()
         rot_before = state.parts[ref].rot
         clr = _try_place(state, ref, target[0] + jx, target[1] + jy,
-                         unplaced - {ref})
+                         unplaced - {ref},
+                         rotations=_rot_ladder(ref))
         if clr is not None:
             placed.add(ref)
             unplaced.discard(ref)
@@ -2658,7 +2776,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                     (bz.rect if bz is not None else None,
                      intent.zone_tolerance(bz) if bz is not None else 0.5))
             rec = _evict_trade(state, ref, chosen, tx, ty, constraint, tol,
-                               zinfo, placed, unplaced)
+                               zinfo, placed, unplaced,
+                               rot_ladder=_rot_ladder)
             rec.update({'poses_freed': chosen_freed, 'poses_before': baseline,
                         'depth': len(chosen)})
             evictions.append(rec)
@@ -2719,7 +2838,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                     continue
                 ox, oy = state.parts[ref].x, state.parts[ref].y
                 if _try_place(state, ref, target[0], target[1],
-                              set()) is not None:
+                              set(),
+                              rotations=_rot_ladder(ref)) is not None:
                     if math.hypot(state.parts[ref].x - ox,
                                   state.parts[ref].y - oy) > 1e-6:
                         moved_n += 1
@@ -2762,6 +2882,17 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             # reached them by -- including the neighbours and pairs it did
             # NOT census, so a cap can never read as a complete sweep.
             'no_pose_verdict': no_pose_verdict,
+            # #893. Declared rotations that could NOT be seated, by ref and
+            # angle. The refusal is structural rather than a check: a declared
+            # ladder has only the declared angle in it, so a part that does not
+            # fit at it reaches `unseated` instead of being quietly turned --
+            # which is what happened before, with a note nobody gated on. This
+            # key exists so a caller can say WHICH claim it could not meet
+            # rather than reporting a bare unseated ref.
+            'rotation_unseated': {
+                r: (declared_rot[r][0] if declared_rot[r][0] is not None
+                    else list(declared_rot[r][1]))
+                for r in unseated if r in declared_rot},
             'no_pose_census': no_pose_census}
 
 
@@ -2917,6 +3048,18 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     # `ref_zone` join below reads the same `blocks`.
     blocks, _probs = floorplan.resolve_blocks(intent, pcb_data, group_sources) \
         if intent else ({}, [])
+    # #893. A repair must honour a declared rotation for the same reason a seed
+    # must: the claim is about the BOARD, not about which entry point touched
+    # it last. Without this, `place_optimize --repair` would quietly undo an
+    # angle `place_seed` had just been told to hold.
+    _declared_rot = floorplan.rotations_for_ref(intent, blocks) if intent else {}
+
+    def _rot_ladder(ref):
+        claim = _declared_rot.get(ref)
+        if claim is None:
+            return None
+        rot, cands = claim
+        return [rot] if rot is not None else list(cands)
     state = pose_score.make_state(
         pcb_data, pcb_file, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
@@ -3252,7 +3395,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             if zt is not None and zt.rect is not None:
                 tgt = ((zt.rect[0] + zt.rect[2]) / 2.0,
                        (zt.rect[1] + zt.rect[3]) / 2.0)
-            ok = _seat_edge(state, ref, ec, must_lock, notes, target=tgt)
+            ok = _seat_edge(state, ref, ec, must_lock, notes, target=tgt,
+                            rotations=_rot_ladder(ref))
             if ok:
                 d = math.hypot(part.x - part.seed_x, part.y - part.seed_y)
                 moves.append({'reference': ref, 'new_x': part.x,
@@ -3273,7 +3417,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         placed_at = None
         for cap in caps:
             info: Dict = {}
-            clr = _try_place(state, ref, ox, oy, set(), constraint=rect,
+            clr = _try_place(state, ref, ox, oy, set(),
+                             rotations=_rot_ladder(ref), constraint=rect,
                              tol=tol, max_disp=cap, info=info)
             if clr is not None:
                 placed_at = cap
@@ -3286,7 +3431,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
             zx = (z.rect[0] + z.rect[2]) / 2.0
             zy = (z.rect[1] + z.rect[3]) / 2.0
             clr = _try_place(state, ref, zx, zy, set(), constraint=rect,
-                             tol=tol)
+                             tol=tol, rotations=_rot_ladder(ref))
             if clr is not None:
                 placed_at = 'zone'
         part.locked = was_locked
@@ -3302,7 +3447,8 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
                 pox, poy, porot = pp.x, pp.y, pp.rot
                 for cap in caps:
                     if _try_place(state, partner, pox, poy, set(),
-                                  max_disp=cap) is not None:
+                                  max_disp=cap,
+                                  rotations=_rot_ladder(partner)) is not None:
                         pd = math.hypot(pp.x - pox, pp.y - poy)
                         if pd > 1e-9:
                             seated_partner = (partner, pd)

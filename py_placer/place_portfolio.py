@@ -237,6 +237,7 @@ def _quench_kw(args, intent=None, intent_gate=None):
         lock_refs=args.lock, align_weight=args.align_weight,
         align_radius=args.align_radius, align_span=args.align_span,
         orient_weight=args.orient_weight,
+        facing_weight=args.facing_weight,
         corridor_weight=args.corridor_weight,
         corridor_specs=corridor_specs, intent_gate=intent_gate)
 

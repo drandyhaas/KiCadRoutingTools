@@ -748,6 +748,7 @@ it in the engine, which keeps both properties at once:
 - Every candidate is then quenched by the ORDINARY engine — `quench.py` is
   not modified, and a default `place_optimize.py` run is bit-identical with
   the portfolio in the tree.
+
 - Randomness is scoped, never ambient: candidate i draws from
   `random.Random(f"{seed}:{i}:{strategy}")`, so the portfolio is a pure
   function of (board, knobs, seed) and any single candidate replays alone
@@ -760,6 +761,27 @@ it in the engine, which keeps both properties at once:
   router disposes applies to a slate exactly as it applies to a single
   repair.
 
+### The same bound as an objective term (#893)
+
+`--facing-weight` puts `pair_order`'s inversion count into `quench.total_cost`
+directly, instead of using it only to prune seeds as `poses` does above. It is
+**0.0 by default**, and this document is why: everything below says a proxy
+added to this objective has repeatedly failed to translate. A lower bound is a
+better citizen than a correlational proxy — improving it cannot be gamed — but
+that is an argument for measuring, not a measurement.
+
+What it buys over `--orient-weight`, the other rotation-aware term: that one
+scores DIRECTION (pads pointing at a net's centroid) and is blind to ORDER. Two
+parts can point their pads straight at each other with every net crossed, which
+is exactly run 5's U3 — a 180° rotation took the same nets from 4/7 routed to
+7/7 while airwire lengths barely moved.
+
+What it buys over `place_portfolio --strategies poses`, which already explores
+rotations pruned by this bound: the portfolio prunes CANDIDATE SEEDS and then
+quenches each with an unmodified objective, so a rotation that would only pay
+off after the quench settles is never proposed; the weight makes the ordinary
+move loop able to turn a part mid-descent. They are complementary, and the
+portfolio remains the cheaper first thing to try.
 The perturb-then-descend shape is classical basin hopping (Wales & Doye) —
 the "extend the scorer to evaluate a perturbation" note in the SA section
 above, finally built, with the acceptance step replaced by an explicit

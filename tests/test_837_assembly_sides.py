@@ -508,11 +508,14 @@ def main():
     # 3 when #837 added `assembly.sides`; 4 since #902 added `proximity[]`.
     # Re-stated rather than loosened to `>= 3`: the literal IS the detector,
     # and this is the fourth one that bump had to move -- the others live in
-    # test_712_edge_centering, mutate_711 and mutate_837. It is also the only
+    # test_712_edge_centering, mutate_711 and mutate_837. (#893 took it to 5
+    # and had to move all four again, plus mutate_797, whose anchor a nearby
+    # insertion staled -- the pins are doing their job, which is to make a
+    # vocabulary change deliberate rather than absorbed.) It is also the only
     # one `run_all.py --fast` cannot see, because this file is classified
     # integration, so a red here reads as a green suite.
     check("reader version names the field it learned",
-          fp.READER_VERSION == 4, fp.READER_VERSION)
+          fp.READER_VERSION == 5, fp.READER_VERSION)
 
     check("graded every fixture", graded == len(EXPECT), f"{graded}")
     print(f"\n{'FAIL' if FAILURES else 'PASS'}: #837 census over {graded} "
