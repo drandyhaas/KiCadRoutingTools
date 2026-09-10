@@ -1533,9 +1533,13 @@ def _footprint_blocks_by_key(content: str):
     worth the memory.
     """
     try:
-        return _footprint_blocks_by_key_cached(content)
-    except TypeError:                                            # unhashable
+        hash(content)
+    except TypeError:              # not a str: cannot be memoised
         return _footprint_blocks_by_key_uncached(content)
+    # Deliberately NOT a try/except around the cached call: that would also
+    # catch a TypeError raised INSIDE the scan, re-run the whole whole-file
+    # walk, and hide the real bug behind a slow success.
+    return _footprint_blocks_by_key_cached(content)
 
 
 def _footprint_blocks_by_key_uncached(content: str):
@@ -1576,10 +1580,14 @@ def iter_footprint_shapes(fp_text: str, tags=_FP_SHAPE_TAGS):
     a flat field-ordered pattern either misses the layer or runs out of one
     shape into the next.
 
-    Custom-pad `(primitives ...)` are excluded FOR FREE because KiCad spells
-    those shapes `gr_*`, not `fp_*` -- do not widen this to "any shape inside a
-    footprint block", or urchin's 136 pad primitives arrive as phantom copper
-    at PAD-LOCAL coordinates.
+    Custom-pad `(primitives ...)` must never reach this. KiCad spells those
+    shapes `gr_*`, so the tag list alone happens to exclude them -- but that
+    is a spelling coincidence, not a guarantee, and the caller therefore feeds
+    this the `_mask_pad_primitives` text. A primitive that leaks in is not
+    merely phantom copper: its coordinates are PAD-local, so the footprint
+    pose places it millimetres from where it belongs (measured: 3.5mm off on
+    a synthetic 45-degree part) -- a false obstacle AND missing copper at
+    once. Do not widen this to "any shape inside a footprint block".
     """
     for tag in tags:
         needle = '(' + tag
@@ -1600,24 +1608,66 @@ def iter_footprint_shapes(fp_text: str, tags=_FP_SHAPE_TAGS):
 def footprint_pose(fp_text: str):
     """`(x, y, rotation_deg)` of one footprint block, or None.
 
-    The FIRST `(at ...)` in a footprint block is the footprint's own pose in
-    every KiCad dialect this parser reads; `_footprint_edge_points_by_ref` has
-    always resolved it this way and both callers must agree, or the Edge.Cuts
-    and copper scans would place the same shape differently.
+    The footprint's own `(at ...)` is the one at the block's TOP LEVEL. Taking
+    the textually first one instead is wrong twice over, and #908 raised the
+    stakes from a bounds point to a copper obstacle at the wrong place:
+
+      * a child's `(at ...)` -- a property's, a pad's -- can precede it, and
+        the shape then lands relative to the child instead of the part;
+      * an `(at ...)` inside a QUOTED STRING (a `(descr "trap (at 99 99 45)")`)
+        is not markup at all. `find_matching_paren` was taught to skip quoted
+        strings for exactly this class of bug (#113, the footprint named
+        `"TCR2EF115,LM(CT"`); a regex here would re-introduce it on the same
+        file.
+
+    Neither shape is what KiCad writes today -- this agrees with pcbnew's
+    `GetPosition()`/`GetOrientationDegrees()` on all 1349 corpus footprints --
+    so both are latent. They are also free to rule out.
     """
-    m = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', fp_text)
-    if not m:
-        return None
-    return (float(m.group(1)), float(m.group(2)),
-            float(m.group(3)) if m.group(3) else 0.0)
+    depth = 0
+    i, n = 0, len(fp_text)
+    while i < n:
+        c = fp_text[i]
+        if c == '"':                        # skip the whole string literal
+            i += 1
+            while i < n:
+                if fp_text[i] == '\\':
+                    i += 2
+                    continue
+                if fp_text[i] == '"':
+                    break
+                i += 1
+            i += 1
+            continue
+        if c == '(':
+            depth += 1
+            if depth == 2 and fp_text.startswith('(at', i):
+                m = re.match(r'\(at\s+([\d.-]+)\s+([\d.-]+)'
+                             r'(?:\s+([\d.-]+))?\s*\)', fp_text[i:])
+                if m:
+                    return (float(m.group(1)), float(m.group(2)),
+                            float(m.group(3)) if m.group(3) else 0.0)
+        elif c == ')':
+            depth -= 1
+        i += 1
+    return None
 
 
-_FP_PAD_RE = re.compile(r'\(pad\s')
+_FP_PAD_RE = re.compile(r'\(pad\s+("(?:[^"\\]|\\.)*"|\S+)\s+(\w+)')
 
 
 def footprint_pad_count(fp_text: str) -> int:
-    """Number of `(pad ...)` entries in one footprint block's TEXT."""
-    return len(_FP_PAD_RE.findall(fp_text))
+    """Number of pads with COPPER in one footprint block's TEXT.
+
+    NPTH pads are excluded: CLAUDE.md's own rule is that they have no copper
+    even when `layers` lists `*.Cu` (the size is the mask opening), so a
+    footprint whose only "pad" is a net-tied mounting hole owns no land
+    pattern and its copper artwork is decoration like any other logo's.
+    Without this a decorative footprint carrying one mounting hole would be
+    modelled AND kept on copper by the writer.
+    """
+    return sum(1 for _num, _type in _FP_PAD_RE.findall(fp_text)
+               if _type != 'np_thru_hole')
 
 
 def footprint_copper_is_functional(pad_count: int) -> bool:
@@ -5571,17 +5621,49 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # disagreeing answers to the same question for Edge.Cuts).
     try:
         import pcbnew as _pcbnew_g
-        _fp_shapes = []
+        # The CAPABILITY probe is what may legitimately fail on an older
+        # pcbnew; wrapping the whole walk instead would turn a real bug at
+        # footprint #5 into "this board has no footprint copper", silently, on
+        # the GUI's parse path -- copper vanishing from the obstacle model
+        # with no diagnostic is the one failure this pass must not have.
+        _fp_graphics_ok = True
         try:
+            if _live_fps:
+                _live_fps[0].GraphicalItems()
+                _live_fps[0].Pads()
+        except Exception:
+            _fp_graphics_ok = False     # older pcbnew: no GraphicalItems()
+        # A generator, not a list: on a big board this walk visits every
+        # graphical item of every pad-bearing footprint, and materialising the
+        # pairs first only adds allocation on top of the SWIG enumeration that
+        # is the real cost. That cost is inherent -- copper graphics cannot be
+        # found without looking at them -- and it is MEASURED, not waved away:
+        # +16..24% on watchy/esp_prog, within noise on glasgow_revC and ulx3s
+        # (11 reps, two paired passes, KiCad 10.0.0 python). The text path had
+        # a duplicate whole-file walk to reclaim with a memo; this path has
+        # none, so the cost stands.
+        def _fp_shapes():
+            if not _fp_graphics_ok:
+                return
             for _ofp, _okey in zip(_live_fps, _live_keys):
-                if not footprint_copper_is_functional(len(_ofp.Pads())):
+                # NPTH pads are not copper (see footprint_pad_count), so the
+                # two parse paths must count pads the same way or a mounting
+                # hole would make a logo "functional" on one side only.
+                _npads = 0
+                for _pd in _ofp.Pads():
+                    try:
+                        if _pd.GetAttribute() == _pcbnew_g.PAD_ATTRIB_NPTH:
+                            continue
+                    except Exception:
+                        pass
+                    _npads += 1
+                if not footprint_copper_is_functional(_npads):
                     continue        # pad-less logo footprint: see the text path
                 for _g in _ofp.GraphicalItems():
-                    _fp_shapes.append((_g, _okey))
-        except Exception:
-            pass                    # older pcbnew: no GraphicalItems()
-        for _d, _owner in ([(_x, "") for _x in board.GetDrawings()]
-                           + _fp_shapes):
+                    yield _g, _okey
+        import itertools as _it
+        for _d, _owner in _it.chain(((_x, "") for _x in board.GetDrawings()),
+                                    _fp_shapes()):
             # FP_SHAPE is KiCad 6/7's class for a footprint-embedded shape;
             # KiCad 8+ unified them onto PCB_SHAPE. `GraphicalItems()` also
             # yields text, which this pass must not touch.
@@ -6549,7 +6631,13 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 # KiCad RECOMPUTES a copper graphic's net from connectivity on
                 # load (openstint: file attribute /A-, pcbnew says GND for the
                 # same art). Same copper either way -- compare geometry only.
-                return (ends, _q(s.width), s.layer, '<graphic>')
+                # `owner_ref` IS compared (#908): it is not recomputed by
+                # KiCad, both paths derive it from the same disambiguator, and
+                # it is what scopes the own-pad obstacle lift -- so the two
+                # fronts disagreeing about it is exactly the drift this
+                # comparator exists to catch.
+                return (ends, _q(s.width), s.layer, '<graphic>',
+                        getattr(s, 'owner_ref', ''))
             return (ends, _q(s.width), s.layer, _net_label(pcb, s.net_id))
         return _seg_sig
 
