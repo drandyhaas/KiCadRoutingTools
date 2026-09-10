@@ -241,46 +241,72 @@ _PATH_NOT_A_KEY = ('.py', '.md', '.json', '.jsonl', '.txt', '.log', '.sh',
                    '.kicad_prl', '.kicad_dru', '.sexp')
 #: Characters that mean this is prose, a command, a path or an expression --
 #: not a key. `<` and `>` are legal, as the placeholder in `sides[<layer>]`.
-_PATH_REJECT_CHARS = set(' \t/\\:`"\'()=,;|*&%$#!?+')
+_PATH_REJECT_CHARS = set(' \t/\\:`"\'()=,;|&%$#!?+')
+#: Descend one LIST element (`rows[]`, `windows[0]`).
+LIST_STEP = '[]'
+#: Descend one value of a dict the DOCUMENT keys (`sides[<layer>]`,
+#: `blocking_by.<component>`). Kept apart from LIST_STEP because collapsing
+#: them lets `checklist[].mm` resolve against `checklist.b_body_seam.mm` --
+#: a path with a segment missing, reported as correct.
+ANY_STEP = '[*]'
 
 
 def parse_json_path(text):
     """Segments for `text`, or None when it is not a key path at all.
 
-    A segment is a name; a bracket group -- `[]`, `[0]`, `[<layer>]` -- becomes
-    the marker `[]` and means "descend one level", whether the level is a list
-    or a dict keyed by something the document decides (a layer name, a ref).
+    Grammar, all four forms taken from how the skills actually spell keys:
+
+      * `a.b`            -- plain
+      * `rows[]`, `[0]`  -- LIST_STEP, descend one list element
+      * `sides[<layer>]`, `<component>` -- ANY_STEP, descend one value of a
+        dict whose keys are data (a layer, a ref, a component name)
+      * `state_*`, `oob_*` -- a PREFIX family, `('pre', 'state_')`
 
     Returns None for the things a naive `word.word` regex sweeps in: a file
-    name, a path, a `module.Symbol`, a layer (`F.Cu`), anything carrying
-    whitespace or quoting. Deciding that HERE keeps the callers' failure lists
-    readable -- a gate that reports forty library modules as unresolved keys is
-    a gate nobody reads. Segments are lowercase because every key these tools
-    emit is: `F.Cu`, `Default.clearance` and `board_store.Ledger` are all real
-    strings in the skills and none of them is an output key.
+    name, a path, an expression, anything carrying whitespace or quoting.
+    Deciding that HERE keeps the callers' failure lists readable -- a gate that
+    reports forty library modules as unresolved keys is a gate nobody reads.
+
+    A trailing `: value` is stripped (`no_outline: true` is a claim about the
+    key `no_outline`), and a leading `.` is left to the caller: in a table it
+    is a CONTINUATION of the row above (`outline.cutouts` / `.edge_contours`),
+    which only the caller knows the prefix for.
     """
     if not text or not isinstance(text, str):
         return None
     text = text.strip()
-    if text.lower().endswith(_PATH_NOT_A_KEY):
+    if ':' in text:
+        text = text.split(':', 1)[0].strip()      # `unplaced: true`
+    if not text or text.lower().endswith(_PATH_NOT_A_KEY):
         return None
     if _PATH_REJECT_CHARS & set(text):
         return None
     if text.count('<') != text.count('>'):
         return None
+    if text.startswith('.') or text.endswith('.'):
+        return None
     out = []
     for raw in text.split('.'):
         if not raw:
             return None
+        if raw.startswith('<') and raw.endswith('>'):
+            out.append(ANY_STEP)                  # `blocking_by.<component>`
+            continue
         brackets = _PATH_BRACKET.findall(raw)
         name = _PATH_BRACKET.sub('', raw)
-        if name:
+        if name.endswith('*'):
+            stem = name[:-1]
+            if not stem or not _PATH_SEGMENT.match(stem.rstrip('_') or 'x'):
+                return None
+            out.append(('pre', stem))
+        elif name:
             if not _PATH_SEGMENT.match(name):
                 return None
             out.append(name)
         elif not brackets:
             return None
-        out.extend('[]' for _ in brackets)
+        for b in brackets:
+            out.append(ANY_STEP if '<' in b else LIST_STEP)
     return out or None
 
 
@@ -288,19 +314,29 @@ def resolve_json_path(doc, segments):
     """Does `doc` actually carry the path `segments` names?
 
     Every branch is followed, so `parts[].body_mm` is satisfied when ANY
-    element carries it -- which is what a doc means when it writes `[]`. A
-    `[]` also matches a dict's values, because a document keyed by layer or by
-    ref is the same "descend one level" for a reader.
+    element carries it -- which is what a doc means when it writes `[]`.
+    LIST_STEP descends only lists and ANY_STEP only dict values (plus lists,
+    since `rows[<n>]` is legal prose for a list): a `[]` that also descended a
+    dict made `checklist[].mm` resolve against `checklist.b_body_seam.mm`, so a
+    path with a segment MISSING read as correct.
     """
     nodes = [doc]
     for seg in segments:
         nxt = []
         for node in nodes:
-            if seg == '[]':
+            if seg == LIST_STEP:
                 if isinstance(node, list):
                     nxt.extend(node)
-                elif isinstance(node, dict):
+            elif seg == ANY_STEP:
+                if isinstance(node, dict):
                     nxt.extend(node.values())
+                elif isinstance(node, list):
+                    nxt.extend(node)
+            elif isinstance(seg, tuple):          # ('pre', 'state_')
+                if isinstance(node, dict):
+                    nxt.extend(v for k, v in node.items()
+                               if isinstance(k, str) and k.startswith(seg[1])
+                               and k != seg[1])
             elif isinstance(node, dict) and seg in node:
                 nxt.append(node[seg])
         if not nxt:

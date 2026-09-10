@@ -468,7 +468,7 @@ of every chain: check `impedance.nets_analyzed` equals the number of nets you
 named, exactly as you assert `ran == true`. A vacuity discovered at iteration
 9 invalidates every earlier score.
 
-Also **read `net_widths.patterns_matching_no_routed_net`.** A width clause on a
+Also **read `components.net_widths.patterns_matching_no_routed_net`.** A width clause on a
 net with NO copper never appears in `net_widths` — the component only walks nets
 that HAVE segments — so an unrouted net's width requirement lands in that list
 and nowhere else.
@@ -535,7 +535,7 @@ you can see what each entry is worth. **Sort by it** — above, GND alone is 4 o
 the 14, and seven single-join nets are worth 1 each.
 
 **`handler` names the step, and it is a FACT off the board, not a guess:** it is
-`repair_planes` when the net has a zone (see `broken.poured_nets`,
+`repair_planes` when the net has a zone (see `components.broken.poured_nets`,
 read from the board's own `(zone (net "…"))` blocks) and `route` otherwise.
 `route.py` cannot tap a pour, so a stranded plane pad handed to it is work that
 cannot succeed. Measured: `broken` sat at **14 across two iterations** of
@@ -548,7 +548,7 @@ has at least one zone", which on a board that pours signal nets includes them:
 measured on neo6502, its 61 nets covered **332 of 545 pads (72%)**, all of
 `/A0`–`/A15` among them. A run read it as "the planes, ignore those" and removed
 most of the board from its own render. The field publishes this sentence itself,
-as `broken.poured_nets_meaning` — read it there rather than inferring from the
+as `components.broken.poured_nets_meaning` — read it there rather than inferring from the
 name. Every net name `board_score` publishes is now checked against the board
 (`net_name_audit`); a non-zero `unknown_count` is a bug in the instrument, not a
 finding about the board.

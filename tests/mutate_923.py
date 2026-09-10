@@ -73,18 +73,38 @@ ROWS = [
      "        ('a JSON file that does not parse', base + ['--drc-json', unreadable]),\n",
      "",
      (T431,), KILLED),
+    # The deleted scenario has to be the ONLY renderer of its text, or another
+    # row covers the same refusal and the mutation survives -- measured, as a
+    # row of this battery that disagreed with its own expectation.
     ('loop-scenario-dropped', 'ld',
-     "        ('a score that is not there', base + ['--score', missing]),\n",
-     "",
+     "        ('a count that is not finite', base\n",
+     "        ('this row is deleted, not dropped', base\n",
      (T431,), KILLED),
     # ...and the enumeration the audit compares against. If the AST scan stops
     # finding `err(` sites, "all sites reached" becomes a claim about nothing.
     ('site-enumeration-blinded', 'pd',
-     "            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)\n"
-     "                    and node.func.id == 'err'):\n"
-     "                sites[node.lineno] = (fn.name, 'err', node.end_lineno)",
-     "            if False:\n"
-     "                sites[node.lineno] = (fn.name, 'err', node.end_lineno)",
+     "        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)\n"
+     "                and node.func.id == 'err'):",
+     "        if False:",
+     (T431,), KILLED),
+    # The two holes a verifier proved end to end against the FIRST version of
+    # this work: a refusal composed in a function whose name did not look like
+    # a guard's, and one ARM of a refusal that has four. Each shipped a command
+    # with a nonexistent flag past this gate while it reported 100% coverage.
+    ('bogus-flag-in-a-nested-guard', 'ld',
+     "                f'Re-produce the close-out with check_assembly --json.')",
+     "                f'Re-produce it: check_assembly.py b --totally-bogus x')",
+     (T431,), KILLED),
+    ('bogus-flag-in-an-unrendered-arm', 'pd',
+     "'UNRECOGNISED -- this gate does not know this state'",
+     "'UNRECOGNISED -- check_drc.py b --totally-bogus-flag x'",
+     (T431,), KILLED),
+    # loop_driver spells its own re-entry as `{sys.argv[0]}`, an ABSOLUTE path
+    # the tool regex cannot match, so its own flags were unchecked until the
+    # dump was normalised to the repo-relative spelling.
+    ('loop-driver-own-flag', 'ld',
+     "--stage L2 --board <placed board>",
+     "--stage-bogus L2 --board <placed board>",
      (T431,), KILLED),
     # The wiring: read only the instruction branch again and the citation
     # floor must notice the refusal half has gone.

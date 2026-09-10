@@ -234,9 +234,13 @@ cannot: **where is the board empty**, ranked by contiguous area, and **does the
 part mass sit where the demand sits** (per quadrant, with the centroid weighted
 by courtyard area — the count-weighted form is printed as a control and
 disagrees on most boards). Pass it the net set the route step will carry. It
-also prints a ready-made `place_seed --reseat-region` command for its largest
-cold region; read the `aim:` line before running it, because a re-seat lands
-each part at its own net centroid and does not move anything INTO the region.
+also names its largest cold region as a DESTINATION, not a scope: a cold band
+holds no part by construction, so `--reseat-region` over it resolves to an
+empty scope on every board (#709 deleted the command it used to print, and
+the `aim:` line with it). Declare the region as an intent block `zone` -- the
+one thing in the stack that aims a re-seat at a rectangle -- and take the
+SCOPE from the parts the tool names as bounding the pocket, or from a CROWDED
+rectangle.
 
 Shared doctrine lives with the routing skill and applies here unchanged --
 read it when the step below points at it:
