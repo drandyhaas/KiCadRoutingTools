@@ -694,21 +694,30 @@ def graphic_effective_nets(pcb_data, include_mutable=True):
     into the OUT nets, so its 68um "grazes" are internal spacing of one
     electrical net, which KiCad correctly ignores.
 
-    `include_mutable` (#908) is the one thing a GENERATOR must get right:
+    `include_mutable` (#908):
 
-      * True  -- attributes + pads + tracks + vias. check_drc's answer, and
-        the right one for a CHECKER, which grades the board in front of it.
-      * False -- attributes + PADS ONLY. The right one for the obstacle map,
-        because tracks and vias move during a route: a rip can delete the very
-        track that granted net X after the router has already used that
-        permission, and check_drc on the output would then flag copper the
-        router thought was allowed.
+      * True  -- attributes + pads + tracks + vias. THE ONLY VALUE PRODUCTION
+        PASSES. It is check_drc's own answer, and the right one for a CHECKER,
+        which grades the board in front of it.
+      * False -- attributes + PADS ONLY. **No production caller.** It exists
+        as the STABLE middle term of the subset proof below, and
+        tests/test_908_own_pad_lift.py is what exercises it.
 
-    Pads never move or vanish mid-route, so the False answer is a SUBSET of
-    the True answer at every instant -- the generator can therefore never be
-    more permissive than the checker, which is the only direction that
-    matters. Do not "simplify" the obstacle side onto the full answer;
-    tests/test_908_own_pad_lift.py asserts the subset relation.
+    Why a stable term is needed at all: tracks and vias MOVE during a route,
+    so a permission derived from them can be withdrawn after the router has
+    used it -- a rip deletes the track that granted net X, and check_drc on
+    the output then flags copper the router thought was allowed. Pads do not
+    move. So, with the obstacle map's own answer being the narrowest of the
+    three:
+
+        graphic_own_pad_nets                (what obstacle_map.py:229 uses)
+          subset-of  graphic_effective_nets(include_mutable=False)
+          subset-of  graphic_effective_nets(include_mutable=True)   [checker]
+
+    the generator can never be more permissive than the checker -- the only
+    direction that matters. Do not "simplify" the obstacle side onto the full
+    answer, and do not delete the False arm because nothing calls it: it is
+    the term that makes the chain checkable.
     """
     import math as _m
     out = {}
@@ -814,8 +823,9 @@ def graphic_own_pad_nets(pcb_data):
     would let a GND route cross the entire antenna -- graded clean by that
     same reasoning, and a destroyed part. Lifting only the edges that actually
     touch the pad opens the pocket and leaves the rest of the shape blocking:
-    on esp_prog exactly the three notch edges around pad 2 lift, and the five
-    outer tab edges keep blocking.
+    on esp_prog **5 of the 8 tab edges lift** (the three around pad 2's notch
+    plus the two diagonals whose inner corner also lands within a half-width
+    of the pad), and the 3 outer tab edges keep blocking. On watchy 6 of 48.
 
     Subset chain, asserted in tests/test_908_own_pad_lift.py:
         own-pad  subset-of  effective(include_mutable=False)

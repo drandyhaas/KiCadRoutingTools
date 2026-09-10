@@ -5638,10 +5638,13 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         # pairs first only adds allocation on top of the SWIG enumeration that
         # is the real cost. That cost is inherent -- copper graphics cannot be
         # found without looking at them -- and it is MEASURED, not waved away:
-        # +16..24% on watchy/esp_prog, within noise on glasgow_revC and ulx3s
-        # (11 reps, two paired passes, KiCad 10.0.0 python). The text path had
-        # a duplicate whole-file walk to reclaim with a memo; this path has
-        # none, so the cost stands.
+        # +14.5..57% median across esp_prog / splitflap_driver / tigard /
+        # watchy, two independent paired passes with a fresh process per
+        # parse and the arms alternated (KiCad 10.0.0 python). The direction
+        # is robust; the magnitude is not tight, and the biggest number is on
+        # the smallest board, where the fixed cost dominates. The text path
+        # had a duplicate whole-file walk to reclaim with a memo; this path
+        # has none, so the cost stands.
         def _fp_shapes():
             if not _fp_graphics_ok:
                 return

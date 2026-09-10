@@ -75,9 +75,20 @@ def main():
             pcb = parse_kicad_pcb(path)
         check('esp_prog really declares no stackup (the premise)',
               not pcb.board_info.stackup)
+        # The pin gap is DERIVED from the board for the pair's own net scope,
+        # not hardcoded: a gate that supplies its own 0.325 pins the solver
+        # and nothing else, and the number is scope-dependent (over the whole
+        # board the tightest gap is 0.125mm, i.e. 19.3x, not 7.4x).
+        usb = _impedance_scope_net_ids(pcb, ['/D_P', '/D_N'])
+        gap = tightest_pin_gap(pcb, usb)
+        check("the USB pair's own pin gap is derived as 0.325mm",
+              abs(gap - 0.325) < 1e-6, f'{gap}')
+        check('and the WHOLE-BOARD scope gives a different, tighter answer',
+              abs(tightest_pin_gap(pcb, _impedance_scope_net_ids(pcb, None))
+                  - 0.125) < 1e-6)
         text, detail = achievability_note(pcb, 'F.Cu', 90.0,
                                           is_differential=True, spacing=0.15,
-                                          min_pitch_gap=0.325)
+                                          min_pitch_gap=gap)
         # The issue measured 1.133mm at zdiff 89.7 and 2.42mm for the pair.
         check('90 ohm differential leg = 1.133mm (the issue\'s own figure)',
               detail and abs(detail['width_mm'] - 1.133) < 0.002,
