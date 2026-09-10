@@ -202,6 +202,7 @@ pads owns a land pattern (modelled, kept on copper), a pad-less one is a logo
 (relocated to silk by the writer, as #146 has always done, and therefore not
 modelled). Only the **perimeter** is modelled, never the interior fill, which
 is the same limit board-level graphics have.
+
 ### `Zone`
 
 | Field | Type | Meaning |

@@ -193,6 +193,14 @@ BOOL_FLAGS = {
     # #489 section 9: now on every step that writes pad/via copper (route,
     # route_diff, route_planes, route_disconnected_planes, bga/qfn fanout).
     '--add-teardrops': 'add_teardrops',
+    # #910: route.py's opt-in delivery fill. Registered not because the GUI
+    # has a control for it (it does not -- the GUI mutates a live board KiCad
+    # fills itself), but because an UNREGISTERED bare flag falls through to
+    # the unknown-flag branch, whose value loop does not stop at a
+    # `.kicad_pcb` -- so `route.py in.kicad_pcb --write-fill out.kicad_pcb`
+    # would swallow the OUTPUT path out of the step's `_files`, which pruning
+    # reads. Mapping it to a param keeps the file list intact.
+    '--write-fill': 'write_fill',
     # #487: route_planes' default-on thermal-via arrays; the NEGATIVE flag
     # must survive conversion or a replay re-enables what the run disabled
     # (ai_plan's no_thermal_vias alias unchecks the planes checkbox).

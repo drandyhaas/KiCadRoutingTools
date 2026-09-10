@@ -167,6 +167,61 @@ def main():
                   free_count(foreign) < len(corridor),
                   f'{free_count(foreign)}/{len(corridor)} free')
 
+            # ...INCLUDING when both nets are in the same batch. The base map
+            # is built for a whole call, so a lift keyed on "is the own net
+            # anywhere in nets_to_route" drops the copper for EVERY net in the
+            # run: measured on route.py's default all-nets call, tigard 4/4
+            # and ulx3s 24/24 footprint-copper edges went unmodelled. Routing
+            # the two nets SEPARATELY cannot see that, which is why this row
+            # exists.
+            # Compared against the SAME batch with the lift disabled, not
+            # against a foreign-only run: routing the own net also stops its
+            # PADS being stamped, which moves the corridor for reasons that
+            # have nothing to do with this feature.
+            batch = [pad.net_id] + foreign
+            both = free_count(batch)
+            try:
+                _cd.graphic_own_pad_nets = lambda _p: {}
+                both_nolift = free_count(batch)
+            finally:
+                _cd.graphic_own_pad_nets = real
+            check('a batch containing the own net does NOT lift it in the '
+                  'base map',
+                  both == both_nolift,
+                  f'batch={both} same-batch-without-the-lift={both_nolift}')
+
+        # ...and the per-net lift still reaches the own net inside a batch,
+        # through prepare_obstacles_inplace rather than the base map. This is
+        # the arm that proves the batch fix actually delivers the lift; a
+        # skipped version of it would assert nothing.
+        from routing_context import (prepare_obstacles_inplace,
+                                     restore_obstacles_inplace)
+        from obstacle_map import build_layer_map
+        import numpy as _np
+        batch = [pad.net_id] + (foreign or [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            obs = build_base_obstacle_map(pcb2, cfg, batch)
+        blocked_before = sum(1 for x, y in corridor if obs.is_blocked(x, y, 0))
+        cache = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            _snv, _ = prepare_obstacles_inplace(
+                obs, pcb2, cfg, pad.net_id, batch, [], {},
+                build_layer_map(cfg.layers), cache)
+        prepared = sum(0 if obs.is_blocked(x, y, 0) else 1
+                       for x, y in corridor)
+        check('inside a batch, prepare lifts it for the OWN net',
+              prepared == len(corridor), f'{prepared}/{len(corridor)}')
+        with contextlib.redirect_stdout(io.StringIO()):
+            restore_obstacles_inplace(
+                obs, pad.net_id, cache,
+                _snv if isinstance(_snv, _np.ndarray)
+                else _np.empty((0, 2), dtype=_np.int32))
+        check('and restore puts every lifted row back',
+              sum(1 for x, y in corridor
+                  if obs.is_blocked(x, y, 0)) == blocked_before,
+              f'after={sum(1 for x, y in corridor if obs.is_blocked(x, y, 0))} '
+              f'before={blocked_before}')
+
     # --- 6: naming ---------------------------------------------------------
     check('a graphic with an owner is named Polygon(owner)',
           graphic_item_label(art) == 'Polygon(U1)')

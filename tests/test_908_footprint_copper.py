@@ -24,9 +24,11 @@ is the sibling this is modelled on, including its anti-vacuity idiom):
   7. The plural `(layers "F.Cu" "F.Mask")` form is read, and `F&B.Cu`
      emits on both copper sides -- the same answers the `gr_*` table gives.
   8. A vertex list that already repeats its first point emits N-1 segments,
-     not N with a zero-length one (every watchy antenna poly is written that
-     way, and the duplicates graded as 12 board-edge violations where the
-     truth is 9).
+     not N with a zero-length one. Every watchy antenna poly is written that
+     way, so the duplicates doubled three of its board-edge findings (12
+     reported where the geometry gives 9; those nine are now published as the
+     `immutable-graphic` accepted class rather than counted, but a degenerate
+     segment would still double them there).
   9. `owner_ref` names the DISAMBIGUATED footprint key, so a board that
      spells one reference twice attributes copper to the right block.
  10. The real corpus: esp_prog 8, tigard 4, ulx3s 24, watchy 48 graphic

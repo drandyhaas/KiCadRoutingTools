@@ -52,12 +52,16 @@ def suggest_route_adjustments(failed: int, total: int,
     # one names a rule that may have closed the last via site.
     snpc = _g(config, 'same_net_pad_clearance')
     if snpc is not None and snpc > 0:
+        # The control is the 'Allow via-in-pad' CHECKBOX, ticked by default;
+        # UNticking it is what arms this clearance. Name it as the user sees
+        # it, and in the direction they must move it.
         suggestions.append(
-            f"Untick 'via-in-pad forbidden' / set Same-net pad clearance "
-            f"(currently {snpc:g} mm) to 0 - it bans every via within "
+            f"Tick 'Allow via-in-pad' (or set Same-net pad clearance, "
+            f"currently {snpc:g} mm, to 0) - it bans every via within "
             f"{snpc:g} mm of the net's OWN SMD pads, and an SMD pad boxed in "
             f"closer than that on every side has no legal via site at all. "
-            f"The run log names any pad this actually sealed."
+            f"When a net fails with no rippable blockers, the run log names "
+            f"any pad this actually sealed."
         )
 
     # Rip-up is the single highest-leverage fix for "blocker" failures.
@@ -662,7 +666,6 @@ def same_net_pad_seal_hint(pcb_data, config, net_id, net_name=None,
         return _ret('')
     try:
         from obstacle_map import (same_net_pad_via_keepout_cells, GridCoord,
-                                  _mirror_rungs_add, _mirror_rungs_remove,
                                   _rung_small_armed)
         import numpy as _np
         import env_knobs
@@ -702,25 +705,37 @@ def same_net_pad_seal_hint(pcb_data, config, net_id, net_name=None,
         if _free_site(pad):
             continue               # a legal site exists: the flag sealed nothing
         arr = _np.asarray(cells, dtype=_np.int32)
+        # REMOVE EXACTLY WHAT THE STAMP ADDED, and nothing else. The snpc
+        # keep-out is stamped by routing_context as `add_blocked_vias_batch`
+        # plus the #568 SMALL mirror -- never into the per-net RUNG maps. And
+        # `remove_blocked_vias_rung_batch` SATURATES at zero (an absent key is
+        # a no-op), so touching the rungs here would remove nothing and then
+        # STAMP them on the way back: measured, a rung count of 1 became 4 and
+        # the cell stayed blocked for the rest of the run, silently
+        # over-blocking rung via placement on the failure path -- exactly when
+        # the router is already struggling.
+        _small = _rung_small_armed()
+        _removed = False
         try:
             obstacles.remove_blocked_vias_batch(arr)
-            if _rung_small_armed():
+            if _small:
                 obstacles.remove_blocked_vias_small_batch(arr)
-            _mirror_rungs_remove(obstacles, arr)
+            _removed = True
             freed = _free_site(pad)
         except Exception:
             continue
         finally:
-            # Exactly balanced on a refcounted map -- a cell blocked by this
-            # flag AND by something else keeps its other reference and stays
-            # blocked, which is the right answer.
-            try:
-                obstacles.add_blocked_vias_batch(arr)
-                if _rung_small_armed():
-                    obstacles.add_blocked_vias_small_batch(arr)
-                _mirror_rungs_add(obstacles, arr)
-            except Exception:
-                pass
+            # Balanced on a refcounted map -- a cell blocked by this flag AND
+            # by something else keeps its other reference and stays blocked,
+            # which is the right answer. Re-added ONLY if the removal actually
+            # happened, so a throw part-way through cannot leak a stamp.
+            if _removed:
+                try:
+                    obstacles.add_blocked_vias_batch(arr)
+                    if _small:
+                        obstacles.add_blocked_vias_small_batch(arr)
+                except Exception:
+                    pass
         if not freed:
             continue               # something else seals it; not this flag
         where = f"{pad.component_ref}.{pad.pad_number}"

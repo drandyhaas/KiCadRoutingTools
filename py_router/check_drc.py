@@ -877,6 +877,16 @@ def _graphic_own_pad_pair(seg_a, seg_b, net_a, net_b) -> bool:
     return False
 
 
+def _no_net_note(v) -> str:
+    """`  (no net: a clearance issue, not a short)` when one side is netless.
+
+    The `no_net` key follows the pad-pad idiom (a pad with no net cannot
+    electrically short a net); without a printer arm it would be written and
+    read by nothing, which is how a key becomes decoration.
+    """
+    return '  (no net: a clearance issue, not a short)' if v.get('no_net') else ''
+
+
 def _fmt_item(v, key) -> str:
     """Printer-side: ` [Polygon(U2)]` when a violation carries that label."""
     lbl = v.get(key)
@@ -898,11 +908,6 @@ def graphic_item_label(seg) -> str:
         return ''
     owner = getattr(seg, 'owner_ref', '')
     return f'Polygon({owner})' if owner else 'Graphic'
-
-
-def _label_suffix(seg) -> str:
-    lbl = graphic_item_label(seg)
-    return f' [{lbl}]' if lbl else ''
 
 
 def _graphic_pair_is_same_net(seg_a, seg_b, net_a, net_b):
@@ -3197,6 +3202,23 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                     'accepted': 'edge-exempt-pad',
                 })
                 continue
+            if getattr(seg, 'graphic', False):
+                # #908: a GRAPHIC near the board edge is the board author's
+                # own library art -- watchy's PCB antenna runs 0.218mm into
+                # its own edge zone. No routing pass can fix it (moving a
+                # part's copper is precisely what #908 forbids), so counting
+                # it would put a permanent, unactionable regression into every
+                # corpus A/B and every review-routed-board sign-off. PUBLISHED
+                # as an accepted class, not dropped -- the same
+                # publish-don't-drop contract as the pad-covered class above.
+                _accepted_edge.append({
+                    'type': 'segment-board-edge', 'net1': net_str,
+                    'edge': s_edge, 'item1': graphic_item_label(seg),
+                    'layer': seg.layer, 'overlap_mm': s_overlap,
+                    'seg_loc': (seg.start_x, seg.start_y, seg.end_x, seg.end_y),
+                    'accepted': 'immutable-graphic',
+                })
+                continue
             # not exempt -> real only if it clears the grid-quantization margin.
             # Derived from the STRICT result already computed above (identical
             # distances, only the tolerance differs) -- re-running the check at
@@ -3579,7 +3601,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 for v in vlist[:limit]:  # Show first `limit` of each type
                     if vtype in ('segment-segment', 'segment-segment-track-rule'):
                         print(f"  {v['net1']}{_fmt_item(v, 'item1')} <-> "
-                              f"{v['net2']}{_fmt_item(v, 'item2')}")
+                              f"{v['net2']}{_fmt_item(v, 'item2')}"
+                              + _no_net_note(v))
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         if v.get('track_rule'):
                             print(f"    Track rule: '{v['track_rule']}' (floor-governed pair)")
@@ -3598,7 +3621,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"    Via2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})")
                     elif vtype in ('segment-crossing', 'segment-crossing-same-net'):
                         print(f"  {v['net1']}{_fmt_item(v, 'item1')} <-> "
-                              f"{v['net2']}{_fmt_item(v, 'item2')}")
+                              f"{v['net2']}{_fmt_item(v, 'item2')}"
+                              + _no_net_note(v))
                         print(f"    Layer: {v['layer']}, Cross at: ({v['cross_point'][0]:.3f},{v['cross_point'][1]:.3f})")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
@@ -3610,7 +3634,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                               f"({v['loc2'][0]:.3f},{v['loc2'][1]:.3f})")
                     elif vtype == 'pad-segment':
                         print(f"  Pad:{v['net1']} ({v['pad_ref']}) <-> "
-                              f"Seg:{v['net2']}{_fmt_item(v, 'item2')}")
+                              f"Seg:{v['net2']}{_fmt_item(v, 'item2')}"
+                              + _no_net_note(v))
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         print(f"    Pad: ({v['pad_loc'][0]:.2f},{v['pad_loc'][1]:.2f})")
                         print(f"    Seg: ({v['seg_loc'][0]:.2f},{v['seg_loc'][1]:.2f})-({v['seg_loc'][2]:.2f},{v['seg_loc'][3]:.2f})")

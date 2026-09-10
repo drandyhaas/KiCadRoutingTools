@@ -594,7 +594,20 @@ def move_copper_graphics_to_silkscreen_board(board):
         # pattern. The loop already holds the owning FOOTPRINT, so the pad
         # count is read here rather than through a parent lookup (board-level
         # drawings have no parent to look up).
-        if footprint_copper_is_functional(len(footprint.Pads())):
+        # NPTH pads are not copper, so they cannot make a footprint
+        # "functional" -- the text writer and BOTH parse paths exclude them by
+        # name, and counting them here is how the one front that shares the
+        # predicate still answers differently (a logo footprint carrying a
+        # mounting hole would be kept on copper here and modelled nowhere).
+        _npads = 0
+        for _pd in footprint.Pads():
+            try:
+                if _pd.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH:
+                    continue
+            except Exception:
+                pass
+            _npads += 1
+        if footprint_copper_is_functional(_npads):
             continue
         for item in footprint.GraphicalItems():
             _relocate(item)

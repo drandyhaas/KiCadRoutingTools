@@ -104,6 +104,13 @@ def move_copper_text_to_silkscreen(content: str) -> str:
 # cannot see that, because a footprint shape cannot carry a `(net ...)` in
 # KiCad at all. The tags stay listed -- they are still handled -- but the
 # DECISION is now owner-aware: see `footprint_copper_is_functional`.
+#: The footprint tags the PARSER models as copper (kicad_parser._FP_SHAPE_TAGS).
+#: The keep decision below is scoped to exactly these: `fp_curve` is in the tag
+#: list above but the parser emits nothing for it, so keeping one on copper
+#: would leave it UNMODELLED there -- strictly worse than #146's relocation,
+#: and reported to the user as successfully "kept". Keep the two lists in step.
+_FP_MODELLED_TAGS = ('fp_poly', 'fp_line', 'fp_arc', 'fp_rect', 'fp_circle')
+
 _COPPER_GRAPHIC_TAGS = (
     'fp_poly', 'gr_poly', 'fp_line', 'gr_line', 'fp_circle', 'gr_circle',
     'fp_arc', 'gr_arc', 'fp_rect', 'gr_rect', 'fp_curve', 'gr_curve',
@@ -230,10 +237,18 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
     parser; a footprint with NO pads is a logo, which keeps #146's treatment
     exactly. Board-level `gr_*` is untouched by this change.
     """
-    _keep_spans = _functional_footprint_spans(content)
     kept = 0
     count = 0
     for tag in _COPPER_GRAPHIC_TAGS:
+        # RECOMPUTED per tag pass, not hoisted: this loop rewrites `content`
+        # at the end of every iteration and each relocation grows the text by
+        # 3 bytes (F.Cu -> F.SilkS), so spans taken once from the original
+        # text drift out of alignment from the second tag onward. Measured:
+        # past ~33 relocated board-level logos a pad-bearing footprint's own
+        # land-pattern copper was relocated anyway -- the exact deletion this
+        # gate exists to stop, and silently, because the "Kept ..." line
+        # drifts away with it.
+        _keep_spans = _functional_footprint_spans(content)
         token = '(' + tag
         tlen = len(token)
         result_parts = []
@@ -275,7 +290,7 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
             if not net_tied:
                 name_match = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', block)
                 net_tied = bool(name_match and name_match.group(1) != '')
-            if (layer_match and not net_tied and tag.startswith('fp_')
+            if (layer_match and not net_tied and tag in _FP_MODELLED_TAGS
                     and _in_any_span(start, _keep_spans)):
                 # #908: this footprint has pads, so its copper is the part's
                 # own land pattern, not decoration. Leave it on copper -- the

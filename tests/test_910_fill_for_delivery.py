@@ -42,7 +42,11 @@ from run_utils import check, evidence, tool
 from kicad_exact_fill import write_filled_board, find_kicad_python
 from kicad_parser import find_matching_paren
 
-RUN_ALL_TIMEOUT = 1200
+#: Four `kicad-cli pcb drc` invocations (two here, two inside the CLI),
+#: each capped at 600 s, plus two KiCad ZONE_FILLER subprocesses.
+#: Measured ~90 s wall on this machine; declared with headroom for a
+#: slower one rather than at the measurement.
+RUN_ALL_TIMEOUT = 3000
 SKIP_EXIT = 77
 
 BOARD = os.path.join(ROOT_DIR, 'kicad_files',
@@ -147,6 +151,54 @@ def main():
            got is not None and {'Default', 'HighSpeed'} <= got, f'{got}')
         ck('the CLI reported the unconnected delta',
            'unconnected (no --refill-zones)' in (r.stdout or ''))
+        # ...and the destination project is the INPUT's, byte for byte. The
+        # class-set check alone is nearly true by construction (the fill runs
+        # on a staged copy in a temp dir, so it CANNOT reach this file) --
+        # this says the delivered board is graded against the rules it came
+        # with, which is the property that actually matters.
+        with open(pro_src, encoding='utf-8') as _a:
+            _want_pro = _a.read()
+        with open(os.path.splitext(out2)[0] + '.kicad_pro',
+                  encoding='utf-8') as _b:
+            _got_pro = _b.read()
+        ck('the destination project is the input project verbatim',
+           _want_pro == _got_pro)
+
+        # --- 5: the refusal arm, which had no arm at all ------------------
+        # Simulate the trap actually firing: the delivered project comes back
+        # missing a class. The CLI must exit 1 and leave NOTHING behind --
+        # board and siblings -- because a board graded against rules it no
+        # longer carries is worse than no board.
+        out3 = os.path.join(tmp, 'lossy.kicad_pcb')
+        drop = os.path.join(tmp, 'drop_class.py')
+        _lines = [
+            "import os, sys",
+            "sys.argv = ['fill_for_delivery.py', %r, '-o', %r]" % (nofill, out3),
+            "sys.path.insert(0, %r)" % os.path.join(ROOT_DIR, 'py_tools'),
+            "import fill_for_delivery as F",
+            "_real = F._netclass_names",
+            "def _fake(p):",
+            "    n = _real(p)",
+            "    if n and os.path.abspath(p) == os.path.abspath(%r):" % out3,
+            "        return {'Default'}",
+            "    return n",
+            "F._netclass_names = _fake",
+            "sys.exit(F.main())",
+        ]
+        with open(drop, 'w', encoding='utf-8') as fh:
+            fh.write(chr(10).join(_lines) + chr(10))
+        r3 = check([sys.executable, drop], code=1, timeout=900,
+                   refuse='REFUSING')
+        ck('the refusal leaves no board behind', not os.path.exists(out3))
+        ck('the refusal leaves no orphan project behind',
+           not os.path.exists(os.path.splitext(out3)[0] + '.kicad_pro'))
+
+        # --- the same-file guard -------------------------------------------
+        r4 = check([sys.executable, tool('fill_for_delivery.py'),
+                    nofill, '-o', nofill], code=1, timeout=300,
+                   refuse='names the input file')
+        ck('filling onto the input refuses instead of raising',
+           'SameFileError' not in (r4.stdout or '') + (r4.stderr or ''))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

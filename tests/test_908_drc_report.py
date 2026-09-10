@@ -92,10 +92,20 @@ def main():
           bool(hits) and any('Polygon(U1)' in str(h.get('item1', ''))
                              + str(h.get('item2', '')) for h in hits),
           f'{[ (h.get("item1"), h.get("item2")) for h in hits ]}')
+    # NOT filtered to a type list: the fixture produces `segment-crossing`,
+    # so a filter naming only segment-segment/pad-segment made this `all([])`
+    # -- vacuous, and it SURVIVED replacing every no_net computation with the
+    # constant False. Assert over the hits themselves, and assert the printed
+    # note too, so the key cannot go back to being written and read by nothing.
     check('the netless side is marked no_net (a clearance issue, not a short)',
-          bool(hits) and all(h.get('no_net') for h in hits
-                             if h['type'] in ('segment-segment',
-                                              'pad-segment')))
+          bool(hits) and all(h.get('no_net') for h in hits),
+          f'{[(h["type"], h.get("no_net")) for h in hits]}')
+    import contextlib as _cl, io as _io
+    _buf = _io.StringIO()
+    with _cl.redirect_stdout(_buf):
+        _run(TRACK % ('F.Cu', 2))
+    check('and the report SAYS so',
+          'no net: a clearance issue, not a short' in _buf.getvalue())
 
     # --- 2: the same track on the other side is NOT caught -----------------
     vs_b = _run(TRACK % ('B.Cu', 2))

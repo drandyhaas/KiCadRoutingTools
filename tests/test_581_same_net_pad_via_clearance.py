@@ -26,6 +26,7 @@ Run:
 """
 
 import json
+import numpy as np
 import os
 import sys
 import tempfile
@@ -244,6 +245,39 @@ def main():
     # be far worse than no diagnosis.
     check("the probe restores the map exactly",
           obs7.is_via_blocked(gx, gy) and obs7b.is_via_blocked(_gx, _gy))
+
+    # ...and restores means restores: nothing may BECOME blocked either, in
+    # any per-net RUNG map. `remove_blocked_vias_rung_batch` saturates at zero
+    # (an absent key is a no-op), so a probe that removed from the rungs would
+    # remove nothing and then STAMP them on the way back -- silently
+    # over-blocking rung via placement for the rest of the run. A bare
+    # GridObstacleMap has no rungs, so this arm builds one that does.
+    obs7c = GridObstacleMap(2)
+    add_same_net_via_clearance(obs7c, pcb, 1, cfg_on)
+    _keep2 = {(int(a), int(b)) for a, b in
+              same_net_pad_via_keepout_cells(pcb, 1, cfg_on)}
+    _sp2 = int(round((0.5 + 1.0) / cfg_on.grid_step)) + 2
+    for _dx in range(-_sp2, _sp2 + 1):
+        for _dy in range(-_sp2, _sp2 + 1):
+            _c3 = (_gx + _dx, _gy + _dy)
+            if _c3 not in _keep2:
+                obs7c.add_blocked_via(*_c3)
+    # Rungs are created on first use, and rung 1 is the #568 SMALL map's own
+    # slot -- per-net rungs start at 2. Touch rung 3 so rung_count becomes 4
+    # and _per_net_rungs is [2, 3], i.e. the helpers are live rather than
+    # no-ops on a bare map (which carries rung_count 1 and no per-net rungs
+    # at all, so an earlier version of this row could not fail).
+    obs7c.add_blocked_vias_rung_batch(3, np.array([[_gx + 500, _gy + 500]],
+                                                  dtype=np.int32))
+    from obstacle_map import _per_net_rungs
+    _rungs = list(_per_net_rungs(obs7c))
+    check(f"the rung fixture is live (per-net rungs {_rungs})",
+          len(_rungs) >= 1)
+    _len_before = {r: obs7c.rung_len(r) for r in _rungs}
+    same_net_pad_seal_hint(pcb, cfg_on, 1, 'N1', obstacles=obs7c)
+    _len_after = {r: obs7c.rung_len(r) for r in _rungs}
+    check(f"the probe stamps nothing into a per-net rung map "
+          f"({_len_before} -> {_len_after})", _len_before == _len_after)
 
     print()
     if fails:

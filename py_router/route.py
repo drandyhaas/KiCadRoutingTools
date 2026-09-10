@@ -7184,7 +7184,8 @@ For differential pair routing, use route_diff.py:
         try:
             from kicad_exact_fill import write_filled_board
             _fst = write_filled_board(args.output_file, args.output_file,
-                                      verbose=True)
+                                      verbose=True,
+                                      project_from=args.input_file)
             if _fst.ok:
                 with open(args.output_file, encoding='utf-8',
                           errors='replace') as _fh:

@@ -440,7 +440,7 @@ def get_net_history_summary(state: RoutingState, net_id: int, pcb_data: 'PCBData
                 f"[{seq}] Pad {details.get('pad', '?')} sealed by "
                 f"--same-net-pad-clearance "
                 f"{details.get('same_net_pad_clearance', '?')}: every via "
-                f"site within {details.get('searched_mm', '?')}mm is banned "
+                f"site within {details.get('escape_reach_mm', '?')}mm is banned "
                 f"by that flag alone (needs "
                 f"{details.get('required_surround_mm', '?')}mm of clear pad "
                 f"surround)")

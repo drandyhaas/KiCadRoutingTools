@@ -1556,10 +1556,12 @@ def route_single_ended_nets(
                 if not _cells301:
                     _cells301 = list(locals().get('blocked_cells') or [])
                 # #907: say WHY nothing is rippable when the answer is "a
-                # FLAG THIS RUN SET closed the last via site". First in the
-                # cascade because it is the only one whose remedy is a
-                # command-line change the caller already controls -- and
-                # because nothing else in the report names the flag at all.
+                # FLAG THIS RUN SET closed the last via site". Ahead of the
+                # #652 and #301 hints (the static-boxin verdict above is
+                # printed by the `no rippable blockers` line itself) because
+                # it is the only cause whose remedy is a command-line change
+                # the caller already controls -- and because nothing else in
+                # the report names the flag at all.
                 try:
                     from routing_diagnostics import same_net_pad_seal_hint
                     _h907, _v907 = same_net_pad_seal_hint(

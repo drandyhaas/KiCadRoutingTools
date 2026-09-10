@@ -9,15 +9,25 @@ opens that are not real. Measured on run 25's `routed.kicad_pcb`: 5 unconnected
 (all GND) without the flag, 0 with it.
 
 This is the opt-in delivery step. It runs KiCad's own ZONE_FILLER through the
-bundled interpreter and saves with `aSkipSettings=True`, so the sibling
-`.kicad_pro` -- and every non-Default net class in it -- survives.
+bundled interpreter, on a STAGED copy in a temp dir, and saves with
+`aSkipSettings=True` (a plain `SaveBoard` rewrites the project from KiCad's
+in-memory view, deleting every non-Default net class, and aborts outright on a
+pre-KiCad-10 project). The destination's `.kicad_pro` is written here by
+`copy_board` and is never in the fill's reach -- and this tool AUDITS that
+afterwards rather than asserting it, refusing if a class went missing.
 
 Usage:
     python3 py_tools/fill_for_delivery.py routed.kicad_pcb -o delivered.kicad_pcb
 
 Exit codes:
     0  filled, net classes intact
-    1  the fill did not run, or a net class went missing (nothing shipped)
+    1  the fill did not run, or a net class went missing
+
+On exit 1 the destination holds the board and its siblings COPIED but not
+filled -- that copy is useful (grade it with `kicad-cli pcb drc
+--refill-zones`, or press B in KiCad) and the run says so -- except on the
+net-class refusal, where the destination is removed entirely, because a board
+graded against rules it no longer carries is worse than no board.
 """
 from __future__ import annotations
 
@@ -99,6 +109,12 @@ def main() -> int:
     if not os.path.isfile(args.input_file):
         print(f"error: no such board: {args.input_file}")
         return 0 if args.exit_zero else 1
+    if os.path.abspath(args.input_file) == os.path.abspath(args.output):
+        # A natural thing to try, and copy_board would raise SameFileError at
+        # the user. `route.py --write-fill` is the in-place form.
+        print("error: -o names the input file. Use `route.py --write-fill` to "
+              "fill a board in place, or give a different -o.")
+        return 0 if args.exit_zero else 1
 
     from copy_board import copy_board
     from kicad_exact_fill import write_filled_board, EXACT_FILL_TIMEOUT
@@ -112,7 +128,8 @@ def main() -> int:
     copy_board(args.input_file, args.output)
 
     st = write_filled_board(args.input_file, args.output, verbose=True,
-                            timeout=args.timeout or EXACT_FILL_TIMEOUT)
+                            timeout=args.timeout or EXACT_FILL_TIMEOUT,
+                            project_from=args.input_file)
     if not st.ok:
         print(f"FILL NOT WRITTEN: {st.reason}"
               + (f" ({st.detail})" if st.detail else ''))
@@ -127,10 +144,15 @@ def main() -> int:
         lost = sorted(want - got)
         print(f"REFUSING: net class(es) lost in the filled output: "
               f"{', '.join(lost)}")
-        try:
-            os.unlink(args.output)
-        except OSError:
-            pass
+        # The SIBLINGS go too: a `.kicad_pro` / `.kicad_dru` left behind with
+        # no board is debris a later step can pick up as a DRC floor.
+        from copy_board import SIBLING_EXTS
+        _stem = os.path.splitext(args.output)[0]
+        for _ext in ('.kicad_pcb',) + tuple(SIBLING_EXTS):
+            try:
+                os.unlink(_stem + _ext)
+            except OSError:
+                pass
         return 0 if args.exit_zero else 1
 
     after = _unconnected(args.output)

@@ -4230,6 +4230,11 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 continue
             _pose = footprint_pose(fp_text)
             if _pose is None:
+                # Copper dropped in silence is the failure mode this whole
+                # pass exists to end, so say it rather than `continue`.
+                print(f"  WARNING: footprint {_fkey} draws copper but has no "
+                      f"readable (at x y) pose; its copper is NOT modelled "
+                      f"(#908)")
                 continue
             _fx, _fy, _frot = _pose
 
@@ -5621,11 +5626,14 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # disagreeing answers to the same question for Edge.Cuts).
     try:
         import pcbnew as _pcbnew_g
-        # The CAPABILITY probe is what may legitimately fail on an older
-        # pcbnew; wrapping the whole walk instead would turn a real bug at
-        # footprint #5 into "this board has no footprint copper", silently, on
-        # the GUI's parse path -- copper vanishing from the obstacle model
-        # with no diagnostic is the one failure this pass must not have.
+        # The CAPABILITY probe is scoped to itself, so a real bug in the walk
+        # is not mistaken for "older pcbnew". Note the honest limit: the
+        # board-level #337 pass this shares still has its own
+        # `except Exception: pass` at the end (best-effort on old APIs), so a
+        # raise inside the walk is caught THERE and the board comes back with
+        # no graphic copper. Narrowing that outer guard is a #337 change, not
+        # a #908 one; what is fixed here is the guard that was three lines
+        # wide and swallowed the footprint walk on its own.
         _fp_graphics_ok = True
         try:
             if _live_fps:

@@ -631,12 +631,16 @@ def write_filled_board(board_file: str, dst_file: str,
 
     Same machinery as `refill_islands_ex` -- KiCad's own ZONE_FILLER through
     its bundled python -- except that the filled board is the PRODUCT rather
-    than a temp file the reader is parsed out of and deleted. The save is
-    `aSkipSettings=True`, which is what keeps the sibling `.kicad_pro` intact:
+    than a temp file the reader is parsed out of and deleted.
+
+    The save is `aSkipSettings=True`, for the reason `headless_plan` documents:
     a plain `pcbnew.SaveBoard` rewrites the project from KiCad's in-memory
-    (pre-stamp, possibly pre-migration) view and silently deletes every
-    non-Default net class, and on pre-KiCad-10 projects aborts the process
-    outright. `headless_plan` documents that trap; this must not re-open it.
+    (pre-stamp, possibly pre-migration) view -- deleting every non-Default net
+    class -- and aborts the process outright on a pre-KiCad-10 project. Note
+    what that does NOT do here: the fill runs in a temp dir on a STAGED copy,
+    so the caller's destination `.kicad_pro` is never in reach either way.
+    The caller's own net-class audit is the check that this stayed true, not a
+    restatement of it.
 
     The caller is responsible for the sibling files at `dst_file` (use
     `copy_board.copy_board` first); this writes ONLY the board.

@@ -222,23 +222,31 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # actually touch the pad stop blocking that pad's net, the rest of the
     # shape keeps blocking everything. Never the whole cluster -- see
     # check_drc.graphic_own_pad_nets for why (watchy's antenna).
+    #
+    # It is PER NET, and the base map is built for a whole BATCH: skipping the
+    # stamp when the lift net is anywhere in `nets_to_route_set` would drop the
+    # copper for EVERY net in the run -- measured, on `route.py`'s default
+    # all-nets call: tigard 4/4 and ulx3s 24/24 footprint-copper edges
+    # unmodelled, i.e. #908 nullified on the shipping path. So the segment is
+    # always stamped and its rows are RECORDED per net, for the single-net
+    # shortcut below and for `prepare_obstacles_inplace` to lift and restore
+    # exactly the way the net-tie corridor lift already does.
     _own_pad_nets = {}
     if any(getattr(s, 'graphic', False) and getattr(s, 'owner_ref', '')
            for s in pcb_data.segments):
-        try:
-            from check_drc import graphic_own_pad_nets
-            _own_pad_nets = graphic_own_pad_nets(pcb_data)
-        except Exception:
-            _own_pad_nets = {}      # never let a diagnosis break a build
+        from check_drc import graphic_own_pad_nets
+        # NOT wrapped: this decides whether a pad is REACHABLE, not what gets
+        # printed. Losing it silently reinstates the seal it exists to prevent,
+        # indistinguishable from a routing failure.
+        _own_pad_nets = graphic_own_pad_nets(pcb_data)
+    _own_pad_rows: Dict[int, list] = {}
     _n_segs = len(pcb_data.segments)
     for _seg_i, seg in enumerate(pcb_data.segments):
         if (_seg_i & 511) == 0:
             _report("copper", _seg_i, _n_segs)
         if seg.net_id in nets_to_route_set:
             continue
-        if _own_pad_nets and (nets_to_route_set
-                              & _own_pad_nets.get(id(seg), _EMPTY_NETS)):
-            continue
+        _lift_nets = _own_pad_nets.get(id(seg)) if _own_pad_nets else None
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             # Copper on a layer OUTSIDE config.layers (a 6/8-layer board routed
@@ -289,6 +297,16 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             expansion_mm, coord.grid_step)
         if len(cells_arr):
             _seg_cell_batch.setdefault(layer_idx, []).append(cells_arr)
+            if _lift_nets:
+                # The exact rows this segment contributes, in the 4-column
+                # (span + layer) form the flush below uses, so the lift is a
+                # balanced remove/re-add of THIS copper's own stamp and can
+                # never desync a refcount.
+                _rows = np.empty((len(cells_arr), 4), dtype=np.int32)
+                _rows[:, :3] = cells_arr
+                _rows[:, 3] = layer_idx
+                for _ln in _lift_nets:
+                    _own_pad_rows.setdefault(_ln, []).append(_rows)
         vias_arr = segment_blocked_spans(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y,
             via_block_mm, coord.grid_step)
@@ -391,6 +409,19 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         for _arr in pcb_data._net_tie_lift.get(next(iter(nets_to_route_set)), []):
             if len(_arr):
                 obstacles.remove_blocked_cells_batch(_arr)
+
+    # #908 own-pad lift, same shape as the net-tie one above: per net, applied
+    # here when the map IS this net's map, and left to
+    # `prepare_obstacles_inplace` (which removes and restores it around each
+    # net's own route) when the map serves a whole batch.
+    pcb_data._graphic_own_pad_lift = {
+        _nid: np.ascontiguousarray(np.concatenate(_rws))
+        for _nid, _rws in _own_pad_rows.items() if _rws}
+    if len(nets_to_route_set) == 1:
+        _arr = pcb_data._graphic_own_pad_lift.get(
+            next(iter(nets_to_route_set)))
+        if _arr is not None and len(_arr):
+            obstacles.remove_blocked_cell_spans_batch(_arr)
 
     # Add board edge clearance
     _report("board edge", 0, 0, force=True)
