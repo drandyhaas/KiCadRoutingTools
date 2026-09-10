@@ -2983,43 +2983,69 @@ def main(argv=None):
 # The same shape as placement_driver's, and duplicated for the same reason
 # `err`, `_load` and `_self_test` already are: a skill's scripts/ directory is
 # self-contained, and neither driver imports the other.
-#: Helpers that COMPOSE a refusal instead of returning it: they hand text back
-#: as `(False, text)` for a stage to wrap in `err()`, so a third of this file's
-#: refusal strings sit nowhere near an `err(` call site.
-_REFUSAL_HELPERS = ('_load', '_guard_', '_metrics_of')
+#: The shortest literal worth checking. Fragments ('\n\n', ': ') appear
+#: everywhere and would make coverage trivially satisfied; 40 characters is a
+#: sentence, and a sentence is what a reader is handed.
+_CHUNK = 40
 
 
 def _refusal_sites(path=None):
-    """Every place this file can refuse, read off its own AST.
+    """Every place this file can refuse, and the TEXT each one prints.
 
-    ENUMERATED, never listed by hand -- a hand-kept list of branches is a list
-    that stops covering the ones added after it.
+    Two shapes: an `err(...)` call, and a `return <False|None>, '<text>'` that
+    a caller wraps in `err()`.
 
-    Returns {first_line: (function, kind, last_line)}.
+    NEITHER IS FILTERED BY FUNCTION NAME. The first version asked whether the
+    enclosing function was called `_guard_*` / `_load` / `_metrics_of` -- and
+    in the sibling driver `_count`, nested inside a stage, composes three
+    refusals that matched none of those, so its texts were not sites at all
+    while the dump reported 100% coverage. A hand-written prefix is the
+    hand-written list this whole mechanism exists to stop trusting.
+
+    Coverage is measured on the TEXT, not on the line: one `err(...)` can carry
+    four arms (a `_bucket(...)` per clause state, a ternary's two halves), and a
+    line-granular check calls the whole call rendered when one arm ran. Each
+    site therefore carries every string literal it can print of at least
+    `_CHUNK` characters, and it counts as rendered only when the dump contains
+    all of them.
+
+    Returns {(line, col): (function, kind, [chunks])}.
     """
     import ast
     path = path or os.path.abspath(__file__)
     with open(path, encoding='utf-8') as fh:
         tree = ast.parse(fh.read())
-    sites = {}
+
+    def chunks(node):
+        return [sub.value for sub in ast.walk(node)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                and len(sub.value.strip()) >= _CHUNK]
+
+    owner = {}
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef):
-            continue
-        composes = fn.name.startswith(_REFUSAL_HELPERS)
-        for node in ast.walk(fn):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == 'err'):
-                sites[node.lineno] = (fn.name, 'err', node.end_lineno)
-            elif (composes and isinstance(node, ast.Return)
-                    and isinstance(node.value, ast.Tuple)
-                    and len(node.value.elts) == 2):
-                head, text = node.value.elts
-                falsy = (isinstance(head, ast.Constant)
-                         and head.value in (False, None))
-                blank = (isinstance(text, ast.Constant)
-                         and text.value in (None, ''))
-                if falsy and not blank:
-                    sites[node.lineno] = (fn.name, 'guard', node.end_lineno)
+        if isinstance(fn, ast.FunctionDef):
+            for sub in ast.walk(fn):
+                owner[id(sub)] = fn.name
+
+    sites = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'err'):
+            sites[(node.lineno, node.col_offset)] = (
+                owner.get(id(node), '<module>'), 'err', chunks(node))
+        elif (isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Tuple)
+                and len(node.value.elts) == 2):
+            head, text = node.value.elts
+            # A refusal is a falsy first element with TEXT beside it.
+            # `return True, ''` and `return json.load(fh), None` are the
+            # SUCCESS shapes of the same helpers.
+            falsy = (isinstance(head, ast.Constant)
+                     and head.value in (False, None))
+            got = chunks(text)
+            if falsy and got:
+                sites[(node.lineno, node.col_offset)] = (
+                    owner.get(id(node), '<module>'), 'guard', got)
     return sites
 
 
@@ -3271,6 +3297,28 @@ def _refusal_scenarios(tmp):
         ('a close-out with `blocking` written as null', base
          + ['--score', score, '--placement-report', wrote(
              'p_null.json', dict(_REPORT, blocking=None))]),
+        # The OTHER arm of each of these refusals. A line-granular coverage
+        # check called the site rendered when either half ran, so the bare-flag
+        # halves -- the ones carrying the run-10 finding and the "one
+        # load-bearing check" finding -- had never been printed.
+        ('--accept-residue with no check named', base
+         + ['--score', score, '--placement-report', report,
+            '--accept-residue']),
+        ('--accept-unclosed with no check named', full + ['--ledger', flat,
+         '--routing-close', close, '--accept-unclosed']),
+        # ...and `_count`'s two arithmetic refusals, which were not even
+        # enumerated as sites while the dump reported 100% coverage: the site
+        # scan asked whether the enclosing function's NAME looked like a guard,
+        # and `_count` is nested inside the stage.
+        ('a count that is not finite', base
+         + ['--score', score, '--placement-report', wrote(
+             'p_nan.json', dict(_REPORT, blocking=float('nan')))]),
+        ('a count that is negative', base
+         + ['--score', score, '--placement-report', wrote(
+             'p_neg.json', dict(_REPORT, blocking=-2))]),
+        # The delegation guard's own text, which no stage had ever been asked
+        # for with --no-delegate.
+        ('a half that was told to run here', full + ['--no-delegate']),
         ('a score with `blocking` written as null', base
          + ['--score', wrote('s_null.json', {'blocking': None}),
             '--placement-report', report]),
@@ -3298,65 +3346,73 @@ def _dump_refusals():
     the instructions -- so no refusal is ever rendered through it, and the
     commands inside refusals are the strings a STUCK reader runs next. #923.
 
-    Coverage is MEASURED, not asserted: the scenarios run under a line trace and
-    any site in `_refusal_sites()` nothing reached is named here and makes this
-    exit 1.
+    Coverage is MEASURED, not asserted: every literal a refusal can print is
+    looked for IN THE DUMP, and any that never appears is named here and makes
+    this exit 1. A refusal added without a scenario is a failure, not a gap --
+    and so is one arm of a refusal that has four.
     """
     import tempfile
     sites = _refusal_sites()
-    src = os.path.normcase(os.path.abspath(__file__))
-    seen, crashed, executed = {}, [], set()
-
-    def _trace(frame, event, arg):
-        if os.path.normcase(frame.f_code.co_filename) != src:
-            return None
-        if event == 'line':
-            executed.add(frame.f_lineno)
-        return _trace
+    seen, crashed, produced = {}, [], []
 
     with tempfile.TemporaryDirectory() as tmp:
         scenarios = _refusal_scenarios(tmp)
-        sys.settrace(_trace)
-        try:
-            for row in scenarios:
-                label, argv = row[0], row[1]
-                a = _args(argv)
-                # A row may name the gate to call. `_close_out`'s own
-                # missing-ledger refusal is unreachable through a stage (L5
-                # refuses earlier), and a text nothing renders is a command
-                # nothing checks -- which is the whole finding behind #923.
-                calls = ([('(gate)', row[2])] if len(row) > 2
-                         else [(k, STAGES[k]) for k in sorted(STAGES)])
-                for key, fn in calls:
-                    try:
-                        out = fn(a)
-                    except Exception as exc:                # noqa: BLE001
-                        crashed.append((key, label,
-                                        f'{type(exc).__name__}: {exc}'))
-                        continue
-                    if out.startswith('<error>') and out not in seen:
-                        seen[out] = (key, label)
-        finally:
-            sys.settrace(None)
+        for row in scenarios:
+            label, argv = row[0], row[1]
+            a = _args(argv)
+            # A row may name the gate to call. `_close_out`'s own
+            # missing-ledger refusal is unreachable through a stage (L5 refuses
+            # earlier on the same condition), and a text nothing renders is a
+            # command nothing checks -- which is the whole finding behind #923.
+            calls = ([('(gate)', row[2])] if len(row) > 2
+                     else [(k, STAGES[k]) for k in sorted(STAGES)])
+            for key, fn in calls:
+                try:
+                    out = fn(a)
+                except Exception as exc:                    # noqa: BLE001
+                    crashed.append((key, label,
+                                    f'{type(exc).__name__}: {exc}'))
+                    continue
+                # EVERY body feeds the coverage check, and only the
+                # refusals are printed. `_delegation` returns
+                # `(False, '--no-delegate was passed...')`, which is a REPORT
+                # inside a stage body rather than a refusal -- mechanically
+                # indistinguishable from a guard's `(False, text)` without
+                # tracing where the text flows, so the honest question is "is
+                # this text ever produced", not "is it produced inside
+                # `<error>`".
+                produced.append(out)
+                if out.startswith('<error>') and out not in seen:
+                    seen[out] = (key, label)
 
+    rendered = []
     for out, (key, label) in seen.items():
         print(f'===== {key} refuses: {label} =====')
         print(out)
+        rendered.append(out)
+    dump = '\n'.join(produced)
 
-    missed = sorted(ln for ln, (_f, _k, end) in sites.items()
-                    if not any(n in executed
-                               for n in range(ln, (end or ln) + 1)))
+    missed = []
+    for (line, _col), (fn, kind, chunks) in sorted(sites.items()):
+        gone = [c for c in chunks if c not in dump]
+        if gone:
+            missed.append((line, fn, kind, len(chunks), gone))
+    total_chunks = sum(len(v[2]) for v in sites.values())
     print(f'\n{len(seen)} distinct refusal(s) from {len(scenarios)} '
           f'scenario(s); {len(sites) - len(missed)} of {len(sites)} refusal '
-          f'site(s) reached.')
-    for ln in missed:
-        fn, kind, _end = sites[ln]
-        print(f'!! line {ln} ({fn}, {kind}): a refusal no scenario renders')
+          f'text(s) fully rendered, over {total_chunks} literal chunk(s).')
+    for line, fn, kind, total, gone in missed:
+        print(f'!! line {line} ({fn}, {kind}): {len(gone)} of {total} chunk(s) '
+              f'no scenario renders')
+        for chunk in gone[:2]:
+            print(f'     {chunk.strip()[:100]!r}')
     for key, label, why in crashed:
         print(f'!! {key} raised instead of refusing on {label!r}: {why}')
     if missed or crashed:
         print('\nAdd a row to _refusal_scenarios, or delete the dead branch: '
-              'a refusal nothing renders is a command nothing checks.')
+              'a refusal nothing renders is a command nothing checks. (A tool '
+              'a stage shells out to being absent looks the same from here -- '
+              'check that first if several unrelated texts went missing.)')
         return 1
     return 0
 

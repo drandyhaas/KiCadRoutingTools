@@ -1532,49 +1532,69 @@ def _dump_all():
 # --------------------------------------------------------------------------
 # the REFUSALS (#923) -- the other half of --dump-all
 # --------------------------------------------------------------------------
-#: Helpers that COMPOSE a refusal instead of returning it. `_guard_*`, `_load`
-#: and `_metrics_of` hand their text back as `(False, text)` for a stage to
-#: wrap in `err()`, so a third of this file's refusal strings sit nowhere near
-#: an `err(` call site and an `err(`-only scan would report them as covered.
-_REFUSAL_HELPERS = ('_load', '_guard_', '_metrics_of')
+#: The shortest literal worth checking. Fragments ('\n\n', ': ') appear
+#: everywhere and would make coverage trivially satisfied; 40 characters is a
+#: sentence, and a sentence is what a reader is handed.
+_CHUNK = 40
 
 
 def _refusal_sites(path=None):
-    """Every place this file can refuse, read off its own AST.
+    """Every place this file can refuse, and the TEXT each one prints.
 
-    ENUMERATED, never listed by hand: a hand-kept list of branches is what the
-    `--list` tuple in this same file already became -- it lost `P-brief` and
-    disagreed with `STAGES` for as long as nobody re-read it.
+    Two shapes: an `err(...)` call, and a `return <False|None>, '<text>'` that
+    a caller wraps in `err()`.
 
-    Returns {first_line: (function, kind, last_line)}.
+    NEITHER IS FILTERED BY FUNCTION NAME. The first version asked whether the
+    enclosing function was called `_guard_*` / `_load` / `_metrics_of` -- and
+    in the sibling driver `_count`, nested inside a stage, composes three
+    refusals that matched none of those, so its texts were not sites at all
+    while the dump reported 100% coverage. A hand-written prefix is the
+    hand-written list this whole mechanism exists to stop trusting.
+
+    Coverage is measured on the TEXT, not on the line: one `err(...)` can carry
+    four arms (a `_bucket(...)` per clause state, a ternary's two halves), and a
+    line-granular check calls the whole call rendered when one arm ran. Each
+    site therefore carries every string literal it can print of at least
+    `_CHUNK` characters, and it counts as rendered only when the dump contains
+    all of them.
+
+    Returns {(line, col): (function, kind, [chunks])}.
     """
     import ast
     path = path or os.path.abspath(__file__)
     with open(path, encoding='utf-8') as fh:
         tree = ast.parse(fh.read())
-    sites = {}
+
+    def chunks(node):
+        return [sub.value for sub in ast.walk(node)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                and len(sub.value.strip()) >= _CHUNK]
+
+    owner = {}
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef):
-            continue
-        composes = fn.name.startswith(_REFUSAL_HELPERS)
-        for node in ast.walk(fn):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == 'err'):
-                sites[node.lineno] = (fn.name, 'err', node.end_lineno)
-            elif (composes and isinstance(node, ast.Return)
-                    and isinstance(node.value, ast.Tuple)
-                    and len(node.value.elts) == 2):
-                head, text = node.value.elts
-                # A refusal is a falsy first element with TEXT beside it.
-                # `return True, ''`, `return None, None` and
-                # `return json.load(fh), None` are the SUCCESS shapes of the
-                # same three helpers.
-                falsy = (isinstance(head, ast.Constant)
-                         and head.value in (False, None))
-                blank = (isinstance(text, ast.Constant)
-                         and text.value in (None, ''))
-                if falsy and not blank:
-                    sites[node.lineno] = (fn.name, 'guard', node.end_lineno)
+        if isinstance(fn, ast.FunctionDef):
+            for sub in ast.walk(fn):
+                owner[id(sub)] = fn.name
+
+    sites = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'err'):
+            sites[(node.lineno, node.col_offset)] = (
+                owner.get(id(node), '<module>'), 'err', chunks(node))
+        elif (isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Tuple)
+                and len(node.value.elts) == 2):
+            head, text = node.value.elts
+            # A refusal is a falsy first element with TEXT beside it.
+            # `return True, ''` and `return json.load(fh), None` are the
+            # SUCCESS shapes of the same helpers.
+            falsy = (isinstance(head, ast.Constant)
+                     and head.value in (False, None))
+            got = chunks(text)
+            if falsy and got:
+                sites[(node.lineno, node.col_offset)] = (
+                    owner.get(id(node), '<module>'), 'guard', got)
     return sites
 
 
@@ -1700,6 +1720,17 @@ def _refusal_scenarios(tmp):
          + ['--waive', 'brief-clause:nosuch.clause:because']),
         ('a clause nothing graded', with_before + good_render
          + clause_intent('i_open.json')),
+        # ...and the other three buckets of the same refusal. A line-granular
+        # coverage check called this site rendered once ANY of them ran, and
+        # three of the four texts a reader can be handed here had never been
+        # printed -- including the catch-all whose own comment says it exists so
+        # the list can never come out blank.
+        ('a clause the author declared unknown', with_before + good_render
+         + clause_intent('i_abst.json', state='abstained')),
+        ('a clause graded against the wrong number', with_before + good_render
+         + clause_intent('i_drift.json', state='graded', drifted=True)),
+        ('a clause state this gate has never seen', with_before + good_render
+         + clause_intent('i_unk.json', state='ungraded')),
         # _guard_congestion
         ('no before-render to compare against', with_before + good_render
          + graded_intent),
@@ -1760,58 +1791,66 @@ def _dump_refusals():
     catch exactly that (`tests/test_431_skill_commands.py`) reads this driver
     through `--dump-all` and so could not see it (#923).
 
-    Coverage is MEASURED, not asserted: the scenarios run under a line trace and
-    any site in `_refusal_sites()` that nothing reached is named here and makes
-    this exit 1. A refusal added without a scenario is a failure, not a gap.
+    Coverage is MEASURED, not asserted: every literal a refusal can print is
+    looked for IN THE DUMP, and any that never appears is named here and makes
+    this exit 1. A refusal added without a scenario is a failure, not a gap --
+    and so is one arm of a refusal that has four.
     """
     import tempfile
     sites = _refusal_sites()
-    src = os.path.normcase(os.path.abspath(__file__))
-    seen, crashed, executed = {}, [], set()
-
-    def _trace(frame, event, arg):
-        if os.path.normcase(frame.f_code.co_filename) != src:
-            return None
-        if event == 'line':
-            executed.add(frame.f_lineno)
-        return _trace
+    seen, crashed, produced = {}, [], []
 
     with tempfile.TemporaryDirectory() as tmp:
         scenarios = _refusal_scenarios(tmp)
-        sys.settrace(_trace)
-        try:
-            for label, argv in scenarios:
-                a = _args(argv)
-                for key in sorted(STAGES):
-                    try:
-                        out = STAGES[key](a)
-                    except Exception as exc:                # noqa: BLE001
-                        crashed.append((key, label,
-                                        f'{type(exc).__name__}: {exc}'))
-                        continue
-                    if out.startswith('<error>') and out not in seen:
-                        seen[out] = (key, label)
-        finally:
-            sys.settrace(None)
+        for label, argv in scenarios:
+            a = _args(argv)
+            for key in sorted(STAGES):
+                try:
+                    out = STAGES[key](a)
+                except Exception as exc:                    # noqa: BLE001
+                    crashed.append((key, label,
+                                    f'{type(exc).__name__}: {exc}'))
+                    continue
+                # EVERY body feeds the coverage check, and only the
+                # refusals are printed. `_delegation` returns
+                # `(False, '--no-delegate was passed...')`, which is a REPORT
+                # inside a stage body rather than a refusal -- mechanically
+                # indistinguishable from a guard's `(False, text)` without
+                # tracing where the text flows, so the honest question is "is
+                # this text ever produced", not "is it produced inside
+                # `<error>`".
+                produced.append(out)
+                if out.startswith('<error>') and out not in seen:
+                    seen[out] = (key, label)
 
+    rendered = []
     for out, (key, label) in seen.items():
         print(f'===== {key} refuses: {label} =====')
         print(out)
+        rendered.append(out)
+    dump = '\n'.join(produced)
 
-    missed = sorted(ln for ln, (_f, _k, end) in sites.items()
-                    if not any(n in executed
-                               for n in range(ln, (end or ln) + 1)))
+    missed = []
+    for (line, _col), (fn, kind, chunks) in sorted(sites.items()):
+        gone = [c for c in chunks if c not in dump]
+        if gone:
+            missed.append((line, fn, kind, len(chunks), gone))
+    total_chunks = sum(len(v[2]) for v in sites.values())
     print(f'\n{len(seen)} distinct refusal(s) from {len(scenarios)} '
           f'scenario(s); {len(sites) - len(missed)} of {len(sites)} refusal '
-          f'site(s) reached.')
-    for ln in missed:
-        fn, kind, _end = sites[ln]
-        print(f'!! line {ln} ({fn}, {kind}): a refusal no scenario renders')
+          f'text(s) fully rendered, over {total_chunks} literal chunk(s).')
+    for line, fn, kind, total, gone in missed:
+        print(f'!! line {line} ({fn}, {kind}): {len(gone)} of {total} chunk(s) '
+              f'no scenario renders')
+        for chunk in gone[:2]:
+            print(f'     {chunk.strip()[:100]!r}')
     for key, label, why in crashed:
         print(f'!! {key} raised instead of refusing on {label!r}: {why}')
     if missed or crashed:
         print('\nAdd a row to _refusal_scenarios, or delete the dead branch: '
-              'a refusal nothing renders is a command nothing checks.')
+              'a refusal nothing renders is a command nothing checks. (A tool '
+              'a stage shells out to being absent looks the same from here -- '
+              'check that first if several unrelated texts went missing.)')
         return 1
     return 0
 

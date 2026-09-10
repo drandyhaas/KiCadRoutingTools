@@ -74,6 +74,29 @@ RUN_ALL_TIMEOUT = 900
 # whole point of this gate is that NO skill file drifts from the real parsers --
 # so every one is a source, and the assertions below say which file must carry
 # which rule.
+@functools.lru_cache(maxsize=None)
+def driver_dump(rel, flag):
+    """(text, exit code) for one of a driver's dumps, run once per flag.
+
+    The driver's own path is rewritten to the repo-relative one, because a
+    re-entry line is `python3 -X utf8 {sys.argv[0]} --stage ...` and
+    `sys.argv[0]` is ABSOLUTE -- which `_TOOL_RE` cannot match, a drive
+    letter's colon not being in its character class. loop_driver, whose
+    refusals are mostly re-entry commands, was therefore not in TOOLS at all
+    and its own flags went unchecked: a `--stage-bogus L5` shipped past this
+    gate in a verifier's negative control.
+    """
+    path = os.path.join(ROOT, rel)
+    env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
+    p = subprocess.run([sys.executable, '-X', 'utf8', path, flag],
+                       capture_output=True, text=True, encoding='utf-8',
+                       errors='replace', cwd=ROOT, timeout=300, env=env)
+    text = (p.stdout or '') + (p.stderr or '')
+    for spelling in (path, path.replace(os.sep, '/')):
+        text = text.replace(spelling, rel)
+    return text, p.returncode
+
+
 #: CACHED because the two scans below ask for every source once per
 #: TOOL, and a driver source costs two subprocess runs. Sound because
 #: nothing in this file writes to a source between reads -- and
@@ -102,19 +125,11 @@ def source_text(rel):
     if not os.path.isfile(path):
         return ''
     if rel.endswith('_driver.py'):
-        env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
-
-        def ask(flag):
-            p = subprocess.run([sys.executable, '-X', 'utf8', path, flag],
-                               capture_output=True, text=True, encoding='utf-8',
-                               errors='replace', cwd=ROOT, timeout=300, env=env)
-            return (p.stdout or '') + (p.stderr or ''), p.returncode
-
-        out, rc = ask('--dump-all')
+        out, rc = driver_dump(rel, '--dump-all')
         assert '=====' in out, f'{rel} --dump-all emitted nothing:\n{out[:400]}'
         assert rc == 0, \
             f'{rel} --dump-all exited {rc}; a stage refused:\n{out[-600:]}'
-        ref, ref_rc = ask('--dump-refusals')
+        ref, ref_rc = driver_dump(rel, '--dump-refusals')
         assert '<error>' in ref, \
             f'{rel} --dump-refusals rendered no refusal:\n{ref[:400]}'
         # Non-zero means a refusal site nothing renders -- so a refusal exists
@@ -183,13 +198,18 @@ _TOOL_RE = re.compile(
 
 
 def discovered_tools():
-    """Every repo tool the skills tell the executor to run."""
+    """Every repo tool the skills tell the executor to run.
+
+    Read through `source_text`, so a DRIVER is discovered from what it EMITS.
+    Reading its Python source instead missed every tool it names only in an
+    f-string -- including itself, spelled `{sys.argv[0]}`.
+    """
     found = set()
     for rel in SOURCES:
         path = os.path.join(ROOT, rel)
         if not os.path.isfile(path):
             continue
-        text = open(path, encoding='utf-8', errors='replace').read()
+        text = source_text(rel)
         for m in _TOOL_RE.finditer(text):
             name = m.group(1).replace('\\', '/')
             # A test is not a tool: it has no flag contract for the executor,
@@ -497,11 +517,11 @@ def test_driver_commands_supply_required_options_and_values():
     assert not problems, (
         'driver commands that die at argparse:\n'
         + '\n'.join(f'  {s}:  {t}  {w}' for s, t, w in sorted(set(problems))))
-    # 111 measured at the commit that added the refusal dump (64 before it).
-    # The old floor of 10 was 6% of what the scan really finds, so it could
-    # only catch the scanner breaking COMPLETELY -- not one of the two dumps
-    # dropping out, which is the failure that actually happens here.
-    assert checked >= 60, f'only {checked} driver command(s) scanned'
+    # ABOVE the pre-commit value, which is the whole point: 64 spans were
+    # found when only the instruction branch was read, so a floor of 60 passed
+    # with the refusal half gone -- measured, as a battery row that SURVIVED.
+    # Measured after: 111.
+    assert checked >= 90, f'only {checked} driver command(s) scanned'
     print(f'  PASS: {checked} driver command spans, all runnable')
 
 
@@ -515,30 +535,32 @@ def test_the_refusal_branches_are_scanned():
     addition is FOR -- each driver's refusal dump reaches every refusal site it
     has, and the commands in it reach this gate's argparse check.
     """
-    env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
     for rel in DRIVERS:
-        path = os.path.join(ROOT, rel)
-        p = subprocess.run([sys.executable, '-X', 'utf8', path,
-                            '--dump-refusals'], capture_output=True, text=True,
-                           encoding='utf-8', errors='replace', cwd=ROOT,
-                           timeout=300, env=env)
-        out = (p.stdout or '') + (p.stderr or '')
-        assert p.returncode == 0, f'{rel} --dump-refusals exited ' \
-                                  f'{p.returncode}:\n{out[-800:]}'
-        m = re.search(r'(\d+) of (\d+) refusal site\(s\) reached', out)
+        out, rc = driver_dump(rel, '--dump-refusals')
+        assert rc == 0, f'{rel} --dump-refusals exited {rc}:\n{out[-800:]}'
+        m = re.search(r'(\d+) of (\d+) refusal text\(s\) fully rendered, '
+                      r'over (\d+) literal chunk', out)
         assert m, f'{rel} --dump-refusals printed no coverage line:\n{out[-400:]}'
-        reached, total = int(m.group(1)), int(m.group(2))
-        assert reached == total, f'{rel}: {reached} of {total} sites reached'
-        assert total >= 20, f'{rel}: only {total} refusal site(s) enumerated ' \
+        reached, total, chunks = (int(m.group(1)), int(m.group(2)),
+                                  int(m.group(3)))
+        assert reached == total, f'{rel}: {reached} of {total} texts rendered'
+        # 42 and 51 measured. The floor is what catches the ENUMERATION
+        # breaking rather than the dump: a verifier renamed one guard helper
+        # and the site count fell 48 -> 41 with no other signal, under a floor
+        # of 20 that could not notice.
+        assert total >= 40, f'{rel}: only {total} refusal text(s) enumerated ' \
                             f'-- the AST scan stopped matching?'
+        assert chunks >= total, f'{rel}: {chunks} literal chunk(s) over ' \
+                                f'{total} texts -- the text scan is empty'
         cited = {(t, f) for t in TOOLS
                  for b in _continued_blocks(out, t)
                  for f in _cited_flags(b, t)}
-        assert len(cited) >= 5, \
+        assert len(cited) >= 10, \
             f'{rel}: only {len(cited)} flag citation(s) inside refusals -- ' \
             f'this gate is back to reading the instruction branch alone'
-        print(f'  PASS: {rel.rsplit("/", 1)[-1]}: {total} refusal sites, all '
-              f'rendered; {len(cited)} flag citation(s) in them')
+        print(f'  PASS: {rel.rsplit("/", 1)[-1]}: {total} refusal texts, all '
+              f'rendered ({chunks} chunks); {len(cited)} flag citation(s) '
+              f'in them')
 
 
 #: The LAST number in a Default cell, so the rows that spell the real rule --
@@ -547,6 +569,46 @@ def test_the_refusal_branches_are_scanned():
 _DEFAULT_CELL = re.compile(r'([0-9][0-9.]*[0-9]|[0-9])(?![0-9.])')
 _DEFAULT_PROSE = re.compile(r'default[:\s]+`?([0-9][0-9.]*)`?')
 _FLAG_IN = re.compile(r'(--[a-z][a-z0-9-]+)')
+
+
+@functools.lru_cache(maxsize=None)
+def _help_blocks(tool):
+    """{flag: the help paragraph it heads}, straight out of `tool --help`.
+
+    THE PARSER IS NOT ALWAYS REACHABLE. `route.py` builds its parser under
+    `if __name__ == '__main__'` with no `main()` to intercept, so
+    `_parser_obj` raises for it -- and the defaults check below silently
+    skipped every flag it owns, `--heuristic-weight` included. Measured: the
+    battery row that moves `HEURISTIC_WEIGHT` SURVIVED, which is #923's own
+    acceptance criterion failing quietly. argparse prints `(default: X)`
+    whenever the help string asks for it, and that is the same authority the
+    parser would have been.
+    """
+    text, _rc = _help_text(tool)
+    blocks, current = {}, []
+    for line in text.splitlines():
+        if re.match(r'\s{1,4}-', line):
+            # The option NAMES, which argparse separates from the help text by
+            # two spaces -- and the line's own indent is two spaces, so the
+            # split has to happen after stripping it or every block comes out
+            # empty (measured: 0 blocks over a 26 KB --help).
+            head = line.strip().split('  ', 1)[0]
+            current = re.findall(r'(--[a-z][a-z0-9-]+)', head)
+            for f in current:
+                blocks.setdefault(f, [])
+        for f in current:
+            blocks[f].append(line)
+    return {f: '\n'.join(v) for f, v in blocks.items()}
+
+
+@functools.lru_cache(maxsize=None)
+def _help_text(tool):
+    env = dict(os.environ, COLUMNS='200', KRT_NO_BANNER='1')
+    p = subprocess.run([sys.executable, '-X', 'utf8',
+                        os.path.join(ROOT, tool), '--help'],
+                       capture_output=True, text=True, encoding='utf-8',
+                       errors='replace', cwd=ROOT, timeout=180, env=env)
+    return (p.stdout or '') + (p.stderr or ''), p.returncode
 
 
 def _all_actions(parser):
@@ -568,13 +630,20 @@ def _all_actions(parser):
 
 
 def _owning_tools(flag, text, before):
-    """Tools that define `flag`, nearest INVOCATION in this file first.
+    """(tool, default, help text) for every tool that defines `flag`.
 
     A flag name alone does not say whose it is -- `--grid-step` belongs to five
-    tools -- so the file's own nearest preceding `python3 ... tool.py` decides,
-    and everything that defines it is the fallback. Returning a LIST rather
-    than one tool matters: where several own it and they disagree, that is
-    worth saying instead of picking one.
+    tools -- so the file's own nearest preceding `python3 ... tool.py` orders
+    the list, and everything that defines it stays in it. Returning them ALL
+    matters: where several own it and they disagree, that is worth saying
+    instead of picking one.
+
+    TWO SOURCES, because one is not enough. The parser is the better authority
+    and is unreachable for the tools that build it under
+    `if __name__ == '__main__'` -- `route.py` among them -- so a flag nobody's
+    parser could be built for is read from `--help`, where argparse prints the
+    same default. Without that, every default `route.py` documents went
+    unchecked and the battery row that moves `HEURISTIC_WEIGHT` survived.
     """
     owners = []
     for tool in TOOLS:
@@ -584,19 +653,31 @@ def _owning_tools(flag, text, before):
             continue
         for action in _all_actions(parser):
             if flag in action.option_strings:
-                owners.append((tool, action))
+                owners.append((tool, action.default, action.help or ''))
                 break
+    if not owners:
+        for tool in TOOLS:
+            try:
+                _parser_obj(tool)
+                continue                     # its parser answered above
+            except Exception:                                # noqa: BLE001
+                pass
+            block = _help_blocks(tool).get(flag)
+            if not block:
+                continue
+            m = re.search(r'\(default:\s*([^)]*)\)', block)
+            owners.append((tool, (m.group(1).strip() if m else None), block))
     if not owners:
         return []
     seen = [m.group(1) for m in _TOOL_RE.finditer(text[:before])]
     for name in reversed(seen):
-        hit = [(t, a) for t, a in owners
-               if t == name or t.endswith('/' + name)
-               or os.path.basename(t) == os.path.basename(name)]
+        hit = [row for row in owners
+               if row[0] == name or row[0].endswith('/' + name)
+               or os.path.basename(row[0]) == os.path.basename(name)]
         if hit:
             # Nearest first, everything else behind it: the order is for the
             # failure message, and the check itself reads them all.
-            return hit + [pair for pair in owners if pair not in hit]
+            return hit + [row for row in owners if row not in hit]
     return owners
 
 
@@ -682,17 +763,22 @@ def test_the_defaults_the_skills_quote_are_the_real_defaults():
                 continue
             checked += 1
             reals = {}
-            for tool, action in owners:
-                reals.setdefault(repr(action.default), []).append(tool)
+            for tool, default, _help in owners:
+                reals.setdefault(repr(default), []).append(tool)
             try:
                 want = float(quoted)
             except ValueError:
                 continue
 
-            def _agrees(pairs):
-                return any(isinstance(a.default, (int, float))
-                           and not isinstance(a.default, bool)
-                           and float(a.default) == want for _t, a in pairs)
+            def _number(value):
+                if isinstance(value, bool) or value is None:
+                    return None
+                if isinstance(value, (int, float)):
+                    return float(value)
+                try:
+                    return float(str(value).strip())
+                except ValueError:
+                    return None
 
             # ANY owner agreeing is enough. A flag name does not say whose it
             # is -- `--flat` is a plateau count on `converge.py` and a boolean
@@ -700,7 +786,7 @@ def test_the_defaults_the_skills_quote_are_the_real_defaults():
             # picked the wrong one -- so accusing the doc on one tool's default
             # reports a defect that is not there. What this gate is for is a
             # number that matches NOTHING, which is what a moved default is.
-            ok = _agrees(owners)
+            ok = any(_number(d) == want for _t, d, _h in owners)
             if not ok:
                 # A `default=None` flag whose help says "the board's own
                 # constraint, else X" is not undocumented -- X is the real
@@ -709,8 +795,8 @@ def test_the_defaults_the_skills_quote_are_the_real_defaults():
                 # with digit boundaries, or 0.2 would be satisfied by 0.25.
                 pat = re.compile(r'(?<![0-9.])' + re.escape(quoted)
                                  + r'(?![0-9])')
-                ok = any(a.default is None and pat.search(a.help or '')
-                         for _t, a in owners)
+                ok = any(_number(d) is None and pat.search(h or '')
+                         for _t, d, h in owners)
             if not ok:
                 problems.append(
                     (where, flag, quoted,
@@ -765,10 +851,10 @@ def test_every_documented_flag_exists():
     # A gate that checks nothing passes for the wrong reason. The docs cite well
     # over a dozen flags across these tools; if this trips, the block/flag
     # scanner stopped matching rather than the docs becoming clean.
-    # 703 measured at the commit that added the refusal dump (574
-    # before it). 15 was the floor when the scan found ~20; left there,
-    # it stopped being able to tell a working scan from a crippled one.
-    assert checked >= 400, f"only {checked} flag citations found -- scanner broken?"
+    # ABOVE the pre-commit value for the same reason as the span floor: the
+    # instruction branch alone yields 574, so 400 could not see the refusal
+    # half disappear. Measured after: 703.
+    assert checked >= 650, f"only {checked} flag citations found -- scanner broken?"
     print(f"  PASS: {checked} flag citations, all real")
 
 

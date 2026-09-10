@@ -156,8 +156,19 @@ def _dirty():
 def run_row(row, keep=False):
     name, target, old, new, tests, _expect = row
     path = TARGETS[target]
-    with open(path, encoding='utf-8') as fh:
+    # newline='' on BOTH sides: read with universal newlines and write with
+    # none and every CRLF file comes back LF, so a row that RESTORED its target
+    # still left the tree dirty. Measured on three .md targets.
+    with open(path, encoding='utf-8', newline='') as fh:
         original = fh.read()
+    if '\r\n' in original:
+        # ...and the anchors are written with '\n', so they are translated to
+        # the file's own ending rather than the file being normalised to
+        # theirs. A multi-line anchor otherwise matches nothing in a CRLF file
+        # and the row is reported BROKEN, which is the right answer to the
+        # wrong question.
+        old = old.replace('\n', '\r\n')
+        new = new.replace('\n', '\r\n')
     if original.count(old) != 1:
         return BROKEN, f'anchor matched {original.count(old)} time(s)'
     try:
