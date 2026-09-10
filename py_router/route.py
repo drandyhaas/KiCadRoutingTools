@@ -3907,6 +3907,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     blockers_report = []
     boxed_in_report = []
     fanout_dropped_report = []
+    sealed_by_snpc_report = []
     try:
         _final_failed_ids = list(dict.fromkeys(
             failed_single_ids + [m['net_id'] for m in failed_multipoint]))
@@ -3962,12 +3963,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _fd = _ev.get('details') or _fd
             if _fd:
                 fanout_dropped_report.append(dict(_fd, net=_name))
+            # #907: and the fourth cause -- a FLAG THIS RUN SET closed the
+            # last legal via site. Its own key for the same reason as the
+            # three above: it answers a different question, and it is the only
+            # one whose remedy is a command-line change the caller already
+            # controls. Nothing else in the summary names the flag.
+            _sn = None
+            for _ev in (state.net_history.get(_nid) or []):
+                if _ev.get('event') == 'sealed_by_snpc':
+                    _sn = _ev.get('details') or _sn
+            if _sn:
+                sealed_by_snpc_report.append(dict(_sn, net=_name))
         if blockers_report:
             summary['blockers'] = blockers_report
         if boxed_in_report:
             summary['boxed_in'] = boxed_in_report
         if fanout_dropped_report:
             summary['fanout_dropped'] = fanout_dropped_report
+        if sealed_by_snpc_report:
+            summary['sealed_by_snpc'] = sealed_by_snpc_report
     except Exception:
         blockers_report = []
     # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected

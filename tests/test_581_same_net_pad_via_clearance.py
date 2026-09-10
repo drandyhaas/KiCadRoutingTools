@@ -15,6 +15,11 @@ Invariants:
      caller leaves the parameter unset (repair/finalize path), and an explicit
      caller 0 keeps its legacy meaning.
   6. add_same_net_via_clearance stamps the pad keep-out (Phase 3 path).
+  7. #907: the flag DISCLOSES itself. `same_net_pad_seal_hint` names the flag
+     and the pad when this flag alone closed every via site around it, stays
+     silent when a legal site exists or when something ELSE is also in the
+     way, and `same_net_pad_via_keepout_cells(pads=[one])` answers for a
+     single pad without rebuilding or mutating the map.
 
 Run:
     python3 tests/test_581_same_net_pad_via_clearance.py
@@ -172,6 +177,73 @@ def main():
     obs2 = GridObstacleMap(2)
     add_same_net_via_clearance(obs2, pcb, 1, cfg_off)
     check("inactive: pad centre open", not obs2.is_via_blocked(gx, gy))
+
+    # -- 7: #907 disclosure ---------------------------------------------------
+    print("7: the flag names itself when it seals a pad")
+    from routing_diagnostics import same_net_pad_seal_hint
+
+    # per-pad scoping: two pads, one asked about
+    pcb2 = _pcb([_pad(5, 5), _pad(12, 12)])
+    both = same_net_pad_via_keepout_cells(pcb2, 1, cfg_on)
+    one = same_net_pad_via_keepout_cells(pcb2, 1, cfg_on,
+                                         pads=[pcb2.pads_by_net[1][0]])
+    check("pads= scopes the keep-out to one pad",
+          len(one) and len(one) < len(both))
+
+    # A map carrying ONLY this flag's cells: every site around the pad is
+    # banned, and nothing else is in the way -> the hint must fire and name it.
+    # The real shape of the failure (run 25's esp_prog): OTHER copper boxes
+    # the pad in beyond the flag's own ring, and the flag takes the last
+    # sites -- the ones ON the pad. Removing the flag's cells must free one.
+    obs7 = GridObstacleMap(2)
+    add_same_net_via_clearance(obs7, pcb, 1, cfg_on)
+    _co = GridCoord(cfg_on.grid_step)
+    _pgx, _pgy = _co.to_grid(10.0, 10.0)
+    _keep = {(int(a), int(b)) for a, b in
+             same_net_pad_via_keepout_cells(pcb, 1, cfg_on)}
+    _sp = int(round((0.5 + 1.0) / cfg_on.grid_step)) + 2
+    for _dx in range(-_sp, _sp + 1):
+        for _dy in range(-_sp, _sp + 1):
+            _c2 = (_pgx + _dx, _pgy + _dy)
+            if _c2 not in _keep:
+                obs7.add_blocked_via(*_c2)
+    hint, verdict = same_net_pad_seal_hint(pcb, cfg_on, 1, 'N1',
+                                           obstacles=obs7,
+                                           return_verdict=True)
+    check("sealed pad: the hint fires", bool(hint))
+    check("sealed pad: the hint NAMES the flag",
+          'same-net-pad-clearance' in (hint or ''))
+    check("sealed pad: a structured verdict comes with it",
+          bool(verdict) and verdict.get('verdict') == 'sealed_by_snpc'
+          and verdict.get('pad') == 'U1.1')
+
+    # Same map, flag OFF on the config -> nothing to disclose.
+    hint_off = same_net_pad_seal_hint(pcb, cfg_off, 1, 'N1', obstacles=obs7)
+    check("flag inactive: silent", hint_off == '')
+
+    # An EMPTY map: a legal site exists, so the flag sealed nothing.
+    hint_free = same_net_pad_seal_hint(pcb, cfg_on, 1, 'N1',
+                                       obstacles=GridObstacleMap(2))
+    check("a legal via site exists: silent", hint_free == '')
+
+    # Sealed by something ELSE as well -> removing the flag's cells frees
+    # nothing, so this is not the flag's doing and it must stay silent.
+    obs7b = GridObstacleMap(2)
+    add_same_net_via_clearance(obs7b, pcb, 1, cfg_on)
+    _c = GridCoord(cfg_on.grid_step)
+    _gx, _gy = _c.to_grid(10.0, 10.0)
+    _span = int(round((0.5 + 1.0) / cfg_on.grid_step)) + 2
+    for _dx in range(-_span, _span + 1):
+        for _dy in range(-_span, _span + 1):
+            obs7b.add_blocked_via(_gx + _dx, _gy + _dy)
+    check("sealed by something else too: silent",
+          same_net_pad_seal_hint(pcb, cfg_on, 1, 'N1',
+                                 obstacles=obs7b) == '')
+    # ...and the probe RESTORED the map it borrowed: the pad centre is still
+    # blocked afterwards. A diagnosis that desyncs a refcounted via map would
+    # be far worse than no diagnosis.
+    check("the probe restores the map exactly",
+          obs7.is_via_blocked(gx, gy) and obs7b.is_via_blocked(_gx, _gy))
 
     print()
     if fails:

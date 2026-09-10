@@ -2677,14 +2677,20 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
 
 
 def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
-                                   config: GridRouteConfig) -> "np.ndarray":
+                                   config: GridRouteConfig,
+                                   pads=None) -> "np.ndarray":
     """#581: (N, 2) via-block cells over the net's own SMD pads when an active
     (> 0) same_net_pad_clearance is on the config; empty otherwise.
 
     Blocks VIA placement only (never tracks) at pad-edge + via/2 + clearance,
     mirroring plane_obstacle_builder._add_pad_via_obstacle's geometry.
     Through-hole pads are exempt (their barrel is the layer transition, and
-    the #581 concern is SMD reflow)."""
+    the #581 concern is SMD reflow).
+
+    `pads` restricts the answer to those pads (#907): the seal diagnosis needs
+    to know which cells around ONE pad this flag is responsible for, without
+    rebuilding or mutating the map. Defaults to every pad of the net, which is
+    what the stampers ask for."""
     snpc = getattr(config, 'same_net_pad_clearance', -1.0)
     if snpc is None or snpc <= 0:
         return np.empty((0, 2), dtype=np.int32)
@@ -2692,7 +2698,7 @@ def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
     coord = GridCoord(config.grid_step)
     margin = config.via_size / 2 + snpc + config.grid_step / 2
     chunks = []
-    for pad in pcb_data.pads_by_net.get(net_id, []):
+    for pad in (pcb_data.pads_by_net.get(net_id, []) if pads is None else pads):
         if getattr(pad, 'drill', 0):
             continue
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)

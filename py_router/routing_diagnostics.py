@@ -45,6 +45,21 @@ def suggest_route_adjustments(failed: int, total: int,
     via_size = _g(config, 'via_size')
     layers = _g(config, 'layers') or []
 
+    # #907: an ACTIVE same-net pad via clearance is the one suggestion whose
+    # cause is a control the user set on this very dialog, and it can make a
+    # boxed-in SMD pad unroutable outright rather than merely harder. It goes
+    # FIRST for that reason -- the others ask for a knob to be turned, this
+    # one names a rule that may have closed the last via site.
+    snpc = _g(config, 'same_net_pad_clearance')
+    if snpc is not None and snpc > 0:
+        suggestions.append(
+            f"Untick 'via-in-pad forbidden' / set Same-net pad clearance "
+            f"(currently {snpc:g} mm) to 0 - it bans every via within "
+            f"{snpc:g} mm of the net's OWN SMD pads, and an SMD pad boxed in "
+            f"closer than that on every side has no legal via site at all. "
+            f"The run log names any pad this actually sealed."
+        )
+
     # Rip-up is the single highest-leverage fix for "blocker" failures.
     if max_ripup is not None and max_ripup < 3:
         suggestions.append(
@@ -603,6 +618,129 @@ def fanout_dropped_ball_hint(pcb_data, config, net_id, net_name=None, *,
     return _ret(hint, {'verdict': 'fanout_dropped', 'pad': where,
                        'component': ref, 'plane_like': plane_like,
                        'pads': [f"{r}.{p.pad_number}" for p, r in bare[:6]]})
+
+
+def same_net_pad_seal_hint(pcb_data, config, net_id, net_name=None,
+                           obstacles=None, layer_count=None, *,
+                           return_verdict=False):
+    """`--same-net-pad-clearance` can make an SMD pad unroutable, silently (#907).
+
+    The flag bans VIA placement within pad-edge + via/2 + clearance + grid/2 of
+    the net's own SMD pads (`obstacle_map.same_net_pad_via_keepout_cells`). On
+    a pad boxed in on every side closer than that, the ban closes the last
+    legal via site and the net simply fails -- and NOTHING in the failure
+    report names the flag. The router's own diagnostic inspects the target
+    CELL ("backward cell ... ok, 0/8 neighbors blocked"), which is about TRACK
+    blocking and stays green while the via map is what is closed. Measured on
+    run 25's esp_prog: U2's tab pad became unroutable in the quality lap and
+    the cause was found by hand geometry, not by the tool.
+
+    The test is the A/B the router itself cannot do: for each of the net's
+    SMD pads, take the cells THIS FLAG contributes around that pad alone,
+    remove them from the via map, and ask again whether any site that could
+    serve the pad is legal. If one appears only with the flag's cells gone,
+    the flag is what closed it. The map is REFCOUNTED, so the removal and the
+    re-add are exactly balanced and the map is byte-for-byte what it was --
+    and the restore runs in a `finally`, because a diagnosis that corrupts the
+    obstacle map would be far worse than no diagnosis.
+
+    "A site that could serve the pad" is the pad's own cells plus the off-pad
+    escape-stub radius (`KICAD_ESCAPE_STUB_RADIUS`, 1.0 mm by default), which
+    is the actual fallback rung `_place_shrunk_via_in_pad` uses when this flag
+    forbids the in-pad arm -- so the question asked is the one the router
+    really answers.
+
+    Returns '' (or `('', None)`) whenever the flag is off, the net has no SMD
+    pad, or a legal site exists either way -- the common case, in which the
+    caller should print whatever it was going to print.
+    """
+    def _ret(hint, verdict=None):
+        return (hint, verdict) if return_verdict else hint
+
+    snpc = getattr(config, 'same_net_pad_clearance', -1.0)
+    if obstacles is None or pcb_data is None or not net_id             or snpc is None or snpc <= 0:
+        return _ret('')
+    try:
+        from obstacle_map import (same_net_pad_via_keepout_cells, GridCoord,
+                                  _mirror_rungs_add, _mirror_rungs_remove,
+                                  _rung_small_armed)
+        import numpy as _np
+        import env_knobs
+    except Exception:
+        return _ret('')
+    pads = [p for p in pcb_data.pads_by_net.get(net_id, [])
+            if not getattr(p, 'drill', 0)]
+    if not pads:
+        return _ret('')            # through-hole only: the flag exempts those
+    coord = GridCoord(config.grid_step)
+    rung = int(getattr(config, 'via_rung', 0) or 0)
+    reach_mm = max(0.0, env_knobs.ESCAPE_STUB_RADIUS)
+
+    def _free_site(pad):
+        """Is any via site that could serve `pad` legal right now?"""
+        pgx, pgy = coord.to_grid(pad.global_x, pad.global_y)
+        span = int(round((max(pad.size_x, pad.size_y) / 2 + reach_mm)
+                         / config.grid_step))
+        for gx in range(pgx - span, pgx + span + 1):
+            for gy in range(pgy - span, pgy + span + 1):
+                try:
+                    blocked = obstacles.is_via_blocked_rung(gx, gy, rung)
+                except Exception:
+                    blocked = obstacles.is_via_blocked(gx, gy)
+                if not blocked:
+                    return True
+        return False
+
+    for pad in pads:
+        try:
+            cells = same_net_pad_via_keepout_cells(pcb_data, net_id, config,
+                                                   pads=[pad])
+        except Exception:
+            continue
+        if not len(cells):
+            continue
+        if _free_site(pad):
+            continue               # a legal site exists: the flag sealed nothing
+        arr = _np.asarray(cells, dtype=_np.int32)
+        try:
+            obstacles.remove_blocked_vias_batch(arr)
+            if _rung_small_armed():
+                obstacles.remove_blocked_vias_small_batch(arr)
+            _mirror_rungs_remove(obstacles, arr)
+            freed = _free_site(pad)
+        except Exception:
+            continue
+        finally:
+            # Exactly balanced on a refcounted map -- a cell blocked by this
+            # flag AND by something else keeps its other reference and stays
+            # blocked, which is the right answer.
+            try:
+                obstacles.add_blocked_vias_batch(arr)
+                if _rung_small_armed():
+                    obstacles.add_blocked_vias_small_batch(arr)
+                _mirror_rungs_add(obstacles, arr)
+            except Exception:
+                pass
+        if not freed:
+            continue               # something else seals it; not this flag
+        where = f"{pad.component_ref}.{pad.pad_number}"
+        name = net_name or pad.net_name or f"net{net_id}"
+        need = config.via_size / 2 + snpc + config.grid_step / 2
+        hint = (f"Hint: pad {where} is sealed by --same-net-pad-clearance "
+                f"{snpc:g} -- with that flag's keep-out removed a legal via "
+                f"site appears, and with it there is none within the "
+                f"{reach_mm:g}mm escape-stub reach. It needs {need:.3f}mm of "
+                f"clear pad surround (via/2 {config.via_size / 2:.3f} + "
+                f"clearance {snpc:g} + grid/2 {config.grid_step / 2:.3f}), so "
+                f"{name} cannot change layer here. Re-run with "
+                f"--same-net-pad-clearance 0 to allow via-in-pad on this "
+                f"board, or widen the channel around {where} in placement.")
+        return _ret(hint, {'verdict': 'sealed_by_snpc', 'pad': where,
+                           'same_net_pad_clearance': float(snpc),
+                           'required_surround_mm': round(need, 4),
+                           'escape_reach_mm': round(reach_mm, 3),
+                           'net': name})
+    return _ret('')
 
 
 def static_boxin_hint(result, config, pcb_data=None, *, return_verdict=False):
