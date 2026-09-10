@@ -222,6 +222,76 @@ def main():
               f'after={sum(1 for x, y in corridor if obs.is_blocked(x, y, 0))} '
               f'before={blocked_before}')
 
+    # --- 7: the bake and prepare must not BOTH lift the same rows ---------
+    # `build_base_obstacle_map` BAKES the lift straight into the map when it
+    # was built for a single net, because the caller may use that map (or a
+    # clone of it) without ever calling prepare -- `net_rescue`'s pristine
+    # map, and `single_ended_loop`'s `build_single_ended_obstacles` fallback,
+    # both do. `prepare_obstacles_inplace` lifts it too. When BOTH happen --
+    # `route.py --nets '<one net>'`, where the base's net set is that one net
+    # and the loop then prepares it -- the same rows came off twice.
+    #
+    # Removing twice is NOT a no-op, because the map is refcounted: a cell
+    # that a pad also blocks goes 2 -> 0 instead of 2 -> 1, and the restore
+    # returns it at 1. Measured on esp_prog before the fix: 28 such cells.
+    # The routed copper did not change on that board, which is exactly why
+    # this needs a gate rather than a corpus A/B -- the damage is in the map,
+    # and the next thing to consult it is the one that pays.
+    #
+    # Asserted at the precise point of harm: no row the BAKE left blocked may
+    # be unblocked by prepare. A refcount-total comparison would not do --
+    # prepare legitimately blocks and unblocks plenty besides this.
+    if pcb2 is not None and pad is not None:
+        from routing_context import prepare_obstacles_inplace
+        from obstacle_map import build_layer_map
+
+        def _lift_cells(pcbx, net):
+            rows = (getattr(pcbx, '_graphic_own_pad_lift', None) or {}).get(net)
+            out = []
+            for r in (rows if rows is not None else []):
+                gx, lo, hi, layer = int(r[0]), int(r[1]), int(r[2]), int(r[3])
+                out.extend((gx, gy, layer) for gy in range(lo, hi + 1))
+            return out
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            solo = build_base_obstacle_map(pcb2, cfg, [pad.net_id])
+        baked = getattr(pcb2, '_graphic_own_pad_lift_baked', None)
+        check('a base built for ONE net records which net it baked',
+              baked == pad.net_id, f'baked={baked} want={pad.net_id}')
+
+        cells = _lift_cells(pcb2, pad.net_id)
+        check('the bake has rows to bake (otherwise this row proves nothing)',
+              len(cells) > 0, f'{len(cells)} cell(s)')
+        still = [c for c in cells if solo.is_blocked(*c)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            prepare_obstacles_inplace(
+                solo, pcb2, cfg, pad.net_id, [pad.net_id], [], {},
+                build_layer_map(cfg.layers), {})
+        lost = [c for c in still if not solo.is_blocked(*c)]
+        check('prepare does not lift rows the base already baked',
+              not lost,
+              f'{len(lost)} of {len(still)} baked-and-still-blocked cell(s) '
+              f'were unblocked a second time')
+
+        # The other direction, so the fix cannot be "never lift": a base built
+        # for a BATCH bakes nothing, and prepare must still deliver the lift.
+        with contextlib.redirect_stdout(io.StringIO()):
+            grp = build_base_obstacle_map(pcb2, cfg,
+                                          [pad.net_id] + (foreign or []))
+        check('a base built for a BATCH bakes nothing',
+              getattr(pcb2, '_graphic_own_pad_lift_baked', None) is None,
+              f'baked={getattr(pcb2, "_graphic_own_pad_lift_baked", None)}')
+        gcells = _lift_cells(pcb2, pad.net_id)
+        gblocked = [c for c in gcells if grp.is_blocked(*c)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            prepare_obstacles_inplace(
+                grp, pcb2, cfg, pad.net_id, [pad.net_id] + (foreign or []),
+                [], {}, build_layer_map(cfg.layers), {})
+        freed = [c for c in gblocked if not grp.is_blocked(*c)]
+        check('...and prepare still lifts when the base did not bake',
+              len(freed) > 0,
+              f'{len(freed)} of {len(gblocked)} freed')
+
     # --- 6: naming ---------------------------------------------------------
     check('a graphic with an owner is named Polygon(owner)',
           graphic_item_label(art) == 'Polygon(U1)')

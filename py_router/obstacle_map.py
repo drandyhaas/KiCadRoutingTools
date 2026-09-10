@@ -405,6 +405,12 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     pcb_data._net_tie_price = {
         nid: sorted(e['cells'] - e.get('safe_cells', set()))
         for nid, e in _tie_corridors.items()}
+    # NOTE (#908): this bake has NO `_baked` marker, unlike the own-pad lift
+    # below, so `prepare_obstacles_inplace` lifts the same rows a second time
+    # when a base built for ONE net is then prepared for that net. Left as it
+    # is deliberately -- fixing it changes routing on net-tie boards and is
+    # owed its own measurement -- but do NOT copy this shape onto a new lift,
+    # and do not "restore symmetry" by deleting the marker below.
     if len(nets_to_route_set) == 1:
         for _arr in pcb_data._net_tie_lift.get(next(iter(nets_to_route_set)), []):
             if len(_arr):
@@ -417,11 +423,36 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     pcb_data._graphic_own_pad_lift = {
         _nid: np.ascontiguousarray(np.concatenate(_rws))
         for _nid, _rws in _own_pad_rows.items() if _rws}
+    # WHICH net this build BAKED into the map it is about to return, so
+    # `prepare_obstacles_inplace` does not lift the same rows a SECOND time.
+    #
+    # It has to be recorded, because both consumers of this base map live in
+    # ONE loop and are chosen per net: `single_ended_loop` uses
+    # prepare/restore when it has a working map and a net cache, and falls
+    # back to `build_single_ended_obstacles` (a clone, no prepare) when it
+    # does not. So the bake cannot simply be dropped in favour of prepare --
+    # the fallback clone would then seal the pad -- and prepare cannot
+    # unconditionally lift either. Measured on esp_prog before this marker
+    # existed, via `route.py --nets 'Net-(C1-Pad1)'` (one net, so the bake
+    # fires AND prepare runs): the second removal took 28 cells that a pad
+    # also blocked from refcount 2 straight to 0, and the restore put them
+    # back at 1 -- copper unchanged on that board, but the map's refcounts no
+    # longer matched the copper they stood for, which is the desync the
+    # remove/re-add pairing exists to make impossible.
+    #
+    # Written UNCONDITIONALLY and immediately beside the dict it guards: the
+    # two are the same build's answer, so they can never describe different
+    # builds. That matters because a nested single-net build on this same
+    # pcb_data (`net_rescue._pristine_rescue_map` passes the run's own
+    # pcb_data) replaces the dict; the marker is replaced with it rather than
+    # surviving as a stale claim about rows that are gone.
+    pcb_data._graphic_own_pad_lift_baked = None
     if len(nets_to_route_set) == 1:
-        _arr = pcb_data._graphic_own_pad_lift.get(
-            next(iter(nets_to_route_set)))
+        _nid = next(iter(nets_to_route_set))
+        _arr = pcb_data._graphic_own_pad_lift.get(_nid)
         if _arr is not None and len(_arr):
             obstacles.remove_blocked_cell_spans_batch(_arr)
+            pcb_data._graphic_own_pad_lift_baked = _nid
 
     # Add board edge clearance
     _report("board edge", 0, 0, force=True)

@@ -496,9 +496,17 @@ def prepare_obstacles_inplace(
     # net whose pad it touches, and restore_obstacles_inplace puts them back.
     # Recorded rows, not recomputed geometry, so the remove/re-add is exactly
     # balanced and cannot desync a refcount.
+    # ... UNLESS the base build already baked this net's lift into the map
+    # this one was cloned from (it does that when it was built for a single
+    # net -- see obstacle_map's `_graphic_own_pad_lift_baked`). Lifting again
+    # is not a no-op: a cell two obstacles blocked goes 2 -> 0 instead of
+    # 2 -> 1, and the restore below returns it at 1, so the map stops
+    # matching the copper it stands for.
     _op_lift = (getattr(pcb_data, '_graphic_own_pad_lift', None)
                 or {}).get(net_id)
-    if _op_lift is not None and len(_op_lift):
+    if (_op_lift is not None and len(_op_lift)
+            and net_id != getattr(pcb_data,
+                                  '_graphic_own_pad_lift_baked', None)):
         working_obstacles.remove_blocked_cell_spans_batch(_op_lift)
         _OWNPAD_LIFTED[(id(working_obstacles), net_id)] = _op_lift
 
