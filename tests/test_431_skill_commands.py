@@ -542,7 +542,7 @@ def test_driver_commands_supply_required_options_and_values():
     # ABOVE the pre-commit value, which is the whole point: 64 spans were
     # found when only the instruction branch was read, so a floor of 60 passed
     # with the refusal half gone -- measured, as a battery row that SURVIVED.
-    # Measured after: 111.
+    # Measured after: 154.
     assert checked >= 90, f'only {checked} driver command(s) scanned'
     print(f'  PASS: {checked} driver command spans, all runnable')
 
@@ -566,11 +566,12 @@ def test_the_refusal_branches_are_scanned():
         reached, total, chunks = (int(m.group(1)), int(m.group(2)),
                                   int(m.group(3)))
         assert reached == total, f'{rel}: {reached} of {total} texts rendered'
-        # 42 and 51 measured. The floor is what catches the ENUMERATION
-        # breaking rather than the dump: a verifier renamed one guard helper
-        # and the site count fell 48 -> 41 with no other signal, under a floor
-        # of 20 that could not notice.
-        assert total >= 40, f'{rel}: only {total} refusal text(s) enumerated ' \
+        # 38 and 49 measured (an `err(why)` that carries no literal of its
+        # own is a pass-through, counted apart). The floor is what catches the
+        # ENUMERATION breaking rather than the dump: a verifier renamed one
+        # guard helper and the site count fell 48 -> 41 with no other signal,
+        # under a floor of 20 that could not notice.
+        assert total >= 34, f'{rel}: only {total} refusal text(s) enumerated ' \
                             f'-- the AST scan stopped matching?'
         assert chunks >= total, f'{rel}: {chunks} literal chunk(s) over ' \
                                 f'{total} texts -- the text scan is empty'
@@ -875,7 +876,7 @@ def test_every_documented_flag_exists():
     # scanner stopped matching rather than the docs becoming clean.
     # ABOVE the pre-commit value for the same reason as the span floor: the
     # instruction branch alone yields 574, so 400 could not see the refusal
-    # half disappear. Measured after: 703.
+    # half disappear. Measured after: 862.
     assert checked >= 650, f"only {checked} flag citations found -- scanner broken?"
     print(f"  PASS: {checked} flag citations, all real")
 

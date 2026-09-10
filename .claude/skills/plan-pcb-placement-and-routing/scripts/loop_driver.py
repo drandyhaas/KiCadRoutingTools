@@ -3050,8 +3050,15 @@ def _refusal_sites(path=None):
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == 'err'):
-            sites[(node.lineno, node.col_offset)] = (
-                owner.get(id(node), '<module>'), 'err', chunks(node))
+            # An `err(why)` carries no literal of its own: its text was
+            # composed by a guard, which is a site there. Registering it here
+            # with zero chunks made it "fully rendered" without anything being
+            # looked at -- eleven of them across the two drivers -- so it is
+            # counted as a pass-through instead.
+            got = chunks(node)
+            if got:
+                sites[(node.lineno, node.col_offset)] = (
+                    owner.get(id(node), '<module>'), 'err', got)
         elif (isinstance(node, ast.Return)
                 and isinstance(node.value, ast.Tuple)
                 and len(node.value.elts) == 2):
@@ -3095,6 +3102,7 @@ def _passthrough_count(path=None):
         if target is None:
             continue
         if not any(isinstance(s, ast.Constant) and isinstance(s.value, str)
+                   and len(s.value.strip()) >= _CHUNK
                    for s in ast.walk(target)):
             n += 1
     return n

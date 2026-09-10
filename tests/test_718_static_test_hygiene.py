@@ -136,6 +136,10 @@ _ROOT_JOIN_ARGV_OK = {
         'and not a bare basename. `run_utils.tool()` is the wrong resolver '
         'here: these are TEST files rather than shipped CLIs, and it looks '
         'only in the four tool directories #522 created.',
+    'mutate_923.py':
+        'same shape and same reason as mutate_902: its `tests` values are the '
+        'module-level T431/T923 constants, both directory-qualified literals, '
+        'so the join is over a relative path rather than a bare basename.',
 }
 
 
