@@ -4,6 +4,7 @@ Shared utilities for test scripts.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -223,3 +224,86 @@ def corpus_boards(pattern: str = 'kicad_files/*.kicad_pcb'):
     except Exception:                                            # noqa: BLE001
         pass
     return []
+
+
+#: A dotted key path as a SKILL spells one: `pin_order.rows[].span_mm`,
+#: `windows[0].ratio`, `arrangement.sides[<layer>].offset_mm`. Written here
+#: rather than in the one gate that needs it because the next gate that
+#: resolves a documented key against real output should not re-derive the
+#: grammar slightly differently -- `tests/test_895_boundary_criteria.py`
+#: already carries eight of these as hand-written lambdas.
+_PATH_SEGMENT = re.compile(r'^[a-z][a-z0-9_]*$')
+_PATH_BRACKET = re.compile(r'\[[^\]]*\]')
+#: Rejected outright: these are FILE NAMES, and `conn.txt` / `route.py` /
+#: `placed.kicad_pro` all parse as two-segment paths otherwise.
+_PATH_NOT_A_KEY = ('.py', '.md', '.json', '.jsonl', '.txt', '.log', '.sh',
+                   '.png', '.csv', '.gz', '.kicad_pcb', '.kicad_pro',
+                   '.kicad_prl', '.kicad_dru', '.sexp')
+#: Characters that mean this is prose, a command, a path or an expression --
+#: not a key. `<` and `>` are legal, as the placeholder in `sides[<layer>]`.
+_PATH_REJECT_CHARS = set(' \t/\\:`"\'()=,;|*&%$#!?+')
+
+
+def parse_json_path(text):
+    """Segments for `text`, or None when it is not a key path at all.
+
+    A segment is a name; a bracket group -- `[]`, `[0]`, `[<layer>]` -- becomes
+    the marker `[]` and means "descend one level", whether the level is a list
+    or a dict keyed by something the document decides (a layer name, a ref).
+
+    Returns None for the things a naive `word.word` regex sweeps in: a file
+    name, a path, a `module.Symbol`, a layer (`F.Cu`), anything carrying
+    whitespace or quoting. Deciding that HERE keeps the callers' failure lists
+    readable -- a gate that reports forty library modules as unresolved keys is
+    a gate nobody reads. Segments are lowercase because every key these tools
+    emit is: `F.Cu`, `Default.clearance` and `board_store.Ledger` are all real
+    strings in the skills and none of them is an output key.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    text = text.strip()
+    if text.lower().endswith(_PATH_NOT_A_KEY):
+        return None
+    if _PATH_REJECT_CHARS & set(text):
+        return None
+    if text.count('<') != text.count('>'):
+        return None
+    out = []
+    for raw in text.split('.'):
+        if not raw:
+            return None
+        brackets = _PATH_BRACKET.findall(raw)
+        name = _PATH_BRACKET.sub('', raw)
+        if name:
+            if not _PATH_SEGMENT.match(name):
+                return None
+            out.append(name)
+        elif not brackets:
+            return None
+        out.extend('[]' for _ in brackets)
+    return out or None
+
+
+def resolve_json_path(doc, segments):
+    """Does `doc` actually carry the path `segments` names?
+
+    Every branch is followed, so `parts[].body_mm` is satisfied when ANY
+    element carries it -- which is what a doc means when it writes `[]`. A
+    `[]` also matches a dict's values, because a document keyed by layer or by
+    ref is the same "descend one level" for a reader.
+    """
+    nodes = [doc]
+    for seg in segments:
+        nxt = []
+        for node in nodes:
+            if seg == '[]':
+                if isinstance(node, list):
+                    nxt.extend(node)
+                elif isinstance(node, dict):
+                    nxt.extend(node.values())
+            elif isinstance(node, dict) and seg in node:
+                nxt.append(node[seg])
+        if not nxt:
+            return False
+        nodes = nxt
+    return True
