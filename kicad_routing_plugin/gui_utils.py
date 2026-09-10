@@ -552,8 +552,15 @@ def move_copper_graphics_to_silkscreen_board(board):
     frequently a footprint fp_poly (e.g. the orangecrab OSHW logo). Footprint text
     and board text are handled separately by the copper-text mover, so only
     PCB_SHAPE items are touched here. Returns the number of shapes moved.
+
+    #908: the net guard cannot separate a logo from a part's own land-pattern
+    copper, because a footprint shape carries no net at all -- so a footprint
+    WITH pads is exempted here and its copper stays on copper, which the parser
+    now models. Same shared predicate as the CLI writer, so the two fronts
+    cannot answer this differently. Returns the number of shapes moved.
     """
     import pcbnew
+    from kicad_parser import footprint_copper_is_functional
 
     moved = 0
 
@@ -583,6 +590,12 @@ def move_copper_graphics_to_silkscreen_board(board):
     for drawing in board.GetDrawings():
         _relocate(drawing)
     for footprint in board.GetFootprints():
+        # #908: a pad-bearing footprint's copper is the part's own land
+        # pattern. The loop already holds the owning FOOTPRINT, so the pad
+        # count is read here rather than through a parent lookup (board-level
+        # drawings have no parent to look up).
+        if footprint_copper_is_functional(len(footprint.Pads())):
+            continue
         for item in footprint.GraphicalItems():
             _relocate(item)
     return moved

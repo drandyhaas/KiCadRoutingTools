@@ -107,6 +107,12 @@ REGISTRY = {
 # gui_utils.move_copper_graphics_to_silkscreen_board. Any new writer-level pass
 # needs the same treatment.
 #
+# #908 made that twin pair carry a DECISION as well as a walk (a footprint with
+# pads owns functional copper and is exempt from the move). Both fronts read the
+# one predicate kicad_parser.footprint_copper_is_functional rather than each
+# counting pads its own way, and tests/test_908_writer_owner_gate.py measures
+# the two fronts against each other on real boards.
+#
 # OPEN GAP (2026-07-28): kicad_writer.strip_zero_length_edge_cuts sits in exactly
 # that position -- wired into output_writer / plane_io / kicad_writer beside the
 # silkscreen movers -- and has NO GUI twin yet. Consequence: a board routed
