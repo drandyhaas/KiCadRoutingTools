@@ -2071,17 +2071,27 @@ def l5(a):
     name, doc, _code = got
     why = doc.get('reason', '')
 
-    # A score that EXISTS but cannot be read is not a stop verdict -- it is a
+    # A score that EXISTS but does not MEASURE is not a stop verdict -- it is a
     # missing measurement. This used to fall through to the terminal branch,
     # so an unparseable score file printed the full ship ceremony (including
     # `--final --stop-condition "NO-SCORE"`) instead of "re-score". Run-17
     # audit, D9.
+    #
+    # The wording was written for the unparseable case alone and said "could
+    # not be read". Since #936 D1 the same verdict also covers a score that
+    # PARSED perfectly and whose `blocking` is null -- so it says "is not a
+    # measurement" instead, and forwards converge's own reason rather than
+    # replacing it. Re-running board_score alone is NOT always the remedy: if
+    # a component ran and could not answer, that is what has to be fixed, and
+    # re-scoring reproduces the same null.
     if name == 'NO-SCORE':
         return err(
-            f'The score at {a.score} could not be read ({why or "unparseable"}), '
-            f'and L5 decides whether the loop is over FROM the score. An '
-            f'unreadable measurement is not a stop condition. Re-score the '
-            f'board, then come back:\n'
+            f'The score at {a.score} is not a measurement '
+            f'({why or "unparseable"}), and L5 decides whether the loop is '
+            f'over FROM the score. Something that measured nothing is not a '
+            f'stop condition.\n\nIf the reason above names a component, fix '
+            f'THAT first -- re-scoring an instrument that could not answer '
+            f'produces the same null. Then:\n'
             f'  python3 -X utf8 '
             f'.claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py '
             f'{a.board} --json wk/score_final.json\n'

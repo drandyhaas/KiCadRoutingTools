@@ -1863,49 +1863,79 @@ def cmd_verdict(a):
     """
     from board_store import Ledger
     rows = Ledger(a.ledger).entries()
-    score, err = None, None
+    score, err, given = None, None, False
     if a.score:
+        given = True
         try:
             with open(a.score, encoding='utf-8') as fh:
                 score = json.load(fh)
         except Exception as exc:                            # noqa: BLE001
             err = f'{type(exc).__name__}: {exc}'
-    if score is None:
-        print(json.dumps({'verdict': 'NO-SCORE', 'reason': (
-            err or '--score is required: the verdict is about a board, and '
-            'without its score there is nothing to be blocked or done ABOUT.'
-        )}, indent=1, sort_keys=True))
+
+    def _names(k):
+        """`score[k]` as a sorted list of names, whatever the document holds.
+
+        A malformed score is the whole subject of this branch, so reading it
+        must not be the thing that raises: `sorted(score.get(k) or [])` is a
+        TypeError on `{"ungraded": 5}` -- the same crash class this guard
+        exists to remove, which is why it is not spelled that way here.
+        """
+        v = score.get(k) if isinstance(score, dict) else None
+        if isinstance(v, (list, tuple, set)):
+            return sorted(str(x) for x in v)
+        return [] if v is None else [f'<not a list: {v!r}>']
+
+    def _no_score(reason):
+        # ONE shape for every NO-SCORE document, so a consumer reading
+        # `doc['ungraded']` does not KeyError on half of them.
+        print(json.dumps({'verdict': 'NO-SCORE', 'reason': reason,
+                          'ungraded': _names('ungraded'),
+                          'unknown': _names('unknown')},
+                         indent=1, sort_keys=True))
         return 2
+
+    if score is None:
+        return _no_score(
+            err or
+            ('the file named by --score holds the JSON document `null`, which '
+             'names no board and no measurement.' if given else
+             '--score is required: the verdict is about a board, and without '
+             'its score there is nothing to be blocked or done ABOUT.'))
 
     scored = [r for r in rows if _score_key(r.get('score')) is not None]
     key = _score_key(score)
     if key is None:
         # The `--score` caller has to filter None exactly like the ledger-row
         # caller on the line above -- and did not, so `key[0]` raised
-        # `TypeError: 'NoneType' object is not subscriptable` on the ONE input
-        # _score_key's docstring is written for. `blocking: null` is what
-        # board_score emits when a component that was ASKED for could not
-        # answer; it is neither 0 nor stuck, so it is not a verdict.
+        # `TypeError: 'NoneType' object is not subscriptable`.
         #
-        # A null-GUARD alone would be worse than the crash: execution falls
-        # past `elif blocking == 0` into the terminal branch and prints
-        # `STUCK: blocking == None and neither half improved`, which reads as
-        # a measurement of the board. NO-SCORE says what actually happened,
-        # and loop_driver's L5 already routes that verdict back to re-scoring
-        # instead of the ship ceremony.
-        print(json.dumps({'verdict': 'NO-SCORE', 'reason': (
-            'the score document is not shaped like a score (no `blocking` '
-            'key): a verdict is about a board, and this names none.'
-            if not isinstance(score, dict) else
-            'the score names `blocking: null` -- a component that was asked '
-            'for could not answer, so there is nothing to be blocked or done '
-            'ABOUT. Fix the component and re-score, then ask for a verdict.'),
-            'ungraded': sorted(score.get('ungraded') or [])
-            if isinstance(score, dict) else [],
-            'unknown': sorted(score.get('unknown') or [])
-            if isinstance(score, dict) else []},
-            indent=1, sort_keys=True))
-        return 2
+        # A null-GUARD alone would be worse than the crash: on a plateaued
+        # ledger execution falls past `elif blocking == 0` into the terminal
+        # branch and prints `STUCK: blocking == None and neither half
+        # improved`, which reads as a measurement of a board nothing measured.
+        # NO-SCORE says what actually happened, and loop_driver's L5 routes
+        # that verdict back to re-scoring instead of the ship ceremony.
+        #
+        # _score_key returns None for THREE distinct documents and they are
+        # not the same fact, so none of them borrows another's sentence -- and
+        # the "a component could not answer" cause is only asserted when the
+        # score itself names one in `unknown`. Reporting an unmeasured cause
+        # is the defect this whole issue is about.
+        if not isinstance(score, dict):
+            why = (f'the score document is a {type(score).__name__}, not an '
+                   f'object: a verdict is about a board, and this names none.')
+        elif 'blocking' not in score:
+            why = ('the score document has no `blocking` key at all, so there '
+                   'is nothing to be blocked or done ABOUT. If this came from '
+                   'board_score, it did not finish.')
+        elif _names('unknown'):
+            why = ('`blocking` is null because a component RAN and could not '
+                   'answer (' + ', '.join(_names('unknown')) + '). Fix the '
+                   'instrument and re-score, then ask for a verdict.')
+        else:
+            why = ('`blocking` is null -- nothing measured it, and null is '
+                   'not zero. Re-score, then ask for a verdict.')
+        return _no_score(why)
     blocking = key[0]
     st = {h: _half_state(rows, h, a.flat) for h in ('placement', 'routing')}
     flat_p, flat_r = st['placement']['flat'], st['routing']['flat']
