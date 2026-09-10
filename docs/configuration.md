@@ -276,7 +276,7 @@ See [Power Net Analysis](power-nets.md) for automatic detection, AI-powered anal
 | `--via-cost` | 50 | Via penalty in 0.1mm grid steps, i.e. 50 = 5mm of path; mm-equivalent at any `--grid-step` (effectively doubled for diff pairs since two vias are placed) |
 | `--max-iterations` | 200000 | A* iteration limit per route |
 | `--max-probe-iterations` | 5000 | Quick probe per direction to detect stuck routes |
-| `--heuristic-weight` | 1.9 | A* greediness (>1 = faster, <1 = more optimal) |
+| `--heuristic-weight` | 2.3 | A* greediness (>1 = faster, <1 = more optimal). 2.3 is the corpus dose-response peak (#586); 1.9 was the default before it |
 | `--turn-cost` | 1000 | Penalty for direction changes (encourages straighter paths) |
 | `--max-ripup` | 3 | Max blockers to rip up at once during rip-up and retry |
 | `--ripup-abandon-metric` | `stranded` | Keep-retry vs abandon rule for multipoint tap rip-ups (see [rip-up-reroute.md](rip-up-reroute.md#abandon-metrics)) |
@@ -553,10 +553,10 @@ The `GridRouteConfig` dataclass holds all routing parameters:
 @dataclass
 class GridRouteConfig:
     # Track geometry (see routing_defaults.py for values)
-    track_width: float = 0.3      # mm (default for non-power nets)
-    clearance: float = 0.25       # mm between tracks
-    via_size: float = 0.5         # mm via outer diameter
-    via_drill: float = 0.3        # mm via drill
+    track_width: float = 0.1      # mm (default for non-power nets)
+    clearance: float = 0.1       # mm between tracks
+    via_size: float = 0.3         # mm via outer diameter
+    via_drill: float = 0.2        # mm via drill
     power_net_widths: Dict[int, float] = {}  # net_id -> width for power nets
     power_tap_neckdown: bool = True   # retry failed wide power routes at default width
     neckdown_length: float = 2.5      # mm of narrow track from the pads on necked routes
@@ -566,10 +566,10 @@ class GridRouteConfig:
     grid_step: float = 0.1        # mm grid resolution
 
     # A* algorithm
-    via_cost: int = 50            # via penalty in 0.1mm grid steps = 5mm of path (diff pairs place 2 vias)
+    via_cost: int = 75            # via penalty in 0.1mm grid steps = 5mm of path (diff pairs place 2 vias)
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # quick probe per direction to detect stuck routes
-    heuristic_weight: float = 1.9
+    heuristic_weight: float = 2.3
     turn_cost: int = 1000         # penalty for direction changes (straighter paths)
     max_rip_up_count: int = 3     # max blockers to rip up at once (progressive N+1)
     ripup_abandon_metric: str = 'stranded'  # tap rip-up abandon rule (docs/rip-up-reroute.md)
@@ -577,7 +577,7 @@ class GridRouteConfig:
     routing_clearance_margin: float = 1.0  # multiplier on track-via clearance (1.0 = min DRC)
     hole_to_hole_clearance: float = 0.20  # mm - drill-to-drill fab floor
     board_edge_clearance: float = 0.0    # mm - clearance from board edge (0 = use clearance)
-    proximity_heuristic_factor: float = 0.02  # factor for proximity-aware heuristic (0 = disabled)
+    proximity_heuristic_factor: float = 0.0  # factor for proximity-aware heuristic (0 = disabled)
     ripped_route_avoidance_radius: float = 1.0  # mm - radius around ripped route corridors
     ripped_route_avoidance_cost: float = 0.1    # cost for routing through ripped corridors
 
@@ -660,7 +660,7 @@ Controls A* behavior:
 | Value | Effect |
 |-------|--------|
 | 1.0 | Optimal paths (slower) |
-| 1.9 (default) | Good balance of speed and quality |
+| 2.3 (default) | The corpus dose-response peak (#586) -- measured, not intuitive |
 | 2.5+ | Faster but may miss tight routes |
 
 ### Grid Step

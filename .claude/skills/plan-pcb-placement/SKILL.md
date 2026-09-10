@@ -260,7 +260,9 @@ board that measures dirty is repaired at the rung its damage calls for. What
 is never an answer is not looking.
 
 ```bash
-# Is the board even placed? (report-only, writes nothing, exits 3 if not)
+# Is the board even placed? (report-only, writes nothing -- and it answers on
+# ANY board: --suggest-locks returns before the board-state gate, so read the
+# ADVICE, never the exit code)
 python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
 ```
 

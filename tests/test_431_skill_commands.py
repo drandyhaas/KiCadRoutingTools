@@ -20,6 +20,35 @@ Note the design change (run 8): this file used to assert the skill said
 placement was "normally SKIPPED". That was the wrong invariant. A default of
 SKIP is satisfied most cheaply by skipping, and the thing being skipped is the
 check that catches stacked parts.
+
+THE THREE BLIND SPOTS (#923), named here so the next person who finds a class
+this gate misses knows which of the three they are looking at. A fact-checking
+pass found ~15 wrong claims in the skills and this file passed on every one:
+
+  1. IT CHECKED THAT A FLAG EXISTS, NEVER WHAT IT MEANS. A moved default, an
+     inverted meaning and a changed exit contract all read as fine.
+     Closed for two of those:
+     `test_the_defaults_the_skills_quote_are_the_real_defaults` resolves a
+     quoted default against the real parser (`--heuristic-weight` was taught
+     as 1.9 after #586 made it 2.3), and `test_exit_code_contract_is_documented`
+     no longer accepts the literal string `exits 3` as evidence -- it reads
+     whether the annotated flag can reach `gate_or_exit` at all. What is still
+     open: a flag whose MEANING moved without its default or exit code moving.
+
+  2. IT NEVER SAW A REFUSAL. `source_text` reads a driver through `--dump-all`,
+     which fabricates PASSING evidence for every guard, so the commands inside
+     `err(...)` -- what a STUCK reader runs next -- were unscanned. One of them
+     exited 2. Closed by `--dump-refusals` plus
+     `test_the_refusal_branches_are_scanned`, which requires every refusal site
+     in each driver to be rendered.
+
+  3. IT COULD NOT SEE A CLAIM ABOUT A TOOL'S OUTPUT. Every "read the `X` field"
+     instruction was invisible -- the class containing `hot[].ratio`, a key no
+     instrument emits. Closed in a sibling file,
+     `tests/test_923_output_key_claims.py`, which runs the five instruments the
+     skills quote and resolves their cited keys against the real documents.
+     What is still open, and that file says so: a key claim in prose that names
+     no instrument, and a claim about a tool it does not run.
 """
 
 import functools
@@ -32,6 +61,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+#: Measured 141 s: ~20 tools asked for their parser, plus four driver dumps.
+#: Declared rather than left to the 600 s global, because the refusal dumps
+#: made it grow and a gate killed by the runner's default budget reports the
+#: same "no result" as a broken one.
+RUN_ALL_TIMEOUT = 900
 
 # Files that instruct Claude or a human to run these tools.
 # The skill was split into three (run-8 S2): placement, routing, and the thin
@@ -364,8 +399,14 @@ def _tool_spans(block, tool):
     return spans
 
 
+@functools.lru_cache(maxsize=None)
 def _parser_obj(tool):
-    """The parser itself, for metadata a flag-name set cannot carry."""
+    """The parser itself, for metadata a flag-name set cannot carry.
+
+    CACHED: building one runs the module (and, for the tools that build their
+    parser inside `main()`, calls it), and three tests now ask for the same
+    parsers.
+    """
     path = os.path.join(ROOT, tool)
     spec = importlib.util.spec_from_file_location(
         os.path.basename(tool)[:-3] + '_meta', path)
@@ -500,6 +541,194 @@ def test_the_refusal_branches_are_scanned():
               f'rendered; {len(cited)} flag citation(s) in them')
 
 
+#: The LAST number in a Default cell, so the rows that spell the real rule --
+#: "board's Default class, else 0.25" -- stay checked instead of dropping out
+#: of the scan for being honest about where the value comes from.
+_DEFAULT_CELL = re.compile(r'([0-9][0-9.]*[0-9]|[0-9])(?![0-9.])')
+_DEFAULT_PROSE = re.compile(r'default[:\s]+`?([0-9][0-9.]*)`?')
+_FLAG_IN = re.compile(r'(--[a-z][a-z0-9-]+)')
+
+
+def _all_actions(parser):
+    """Every action, SUBCOMMANDS INCLUDED.
+
+    A verb-style tool keeps its real flags on the subparsers -- `converge.py
+    verdict --flat N` is not on the top-level parser at all -- and reading only
+    the top level attributes such a flag to whichever other tool happens to
+    define the same name. `_option_strings` already recurses for the flag-name
+    check; this is the same walk, keeping the actions.
+    """
+    import argparse
+    out = list(parser._actions)
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                out.extend(_all_actions(sub))
+    return out
+
+
+def _owning_tools(flag, text, before):
+    """Tools that define `flag`, nearest INVOCATION in this file first.
+
+    A flag name alone does not say whose it is -- `--grid-step` belongs to five
+    tools -- so the file's own nearest preceding `python3 ... tool.py` decides,
+    and everything that defines it is the fallback. Returning a LIST rather
+    than one tool matters: where several own it and they disagree, that is
+    worth saying instead of picking one.
+    """
+    owners = []
+    for tool in TOOLS:
+        try:
+            parser = _parser_obj(tool)
+        except Exception:                                    # noqa: BLE001
+            continue
+        for action in _all_actions(parser):
+            if flag in action.option_strings:
+                owners.append((tool, action))
+                break
+    if not owners:
+        return []
+    seen = [m.group(1) for m in _TOOL_RE.finditer(text[:before])]
+    for name in reversed(seen):
+        hit = [(t, a) for t, a in owners
+               if t == name or t.endswith('/' + name)
+               or os.path.basename(t) == os.path.basename(name)]
+        if hit:
+            # Nearest first, everything else behind it: the order is for the
+            # failure message, and the check itself reads them all.
+            return hit + [pair for pair in owners if pair not in hit]
+    return owners
+
+
+def _quoted_defaults(rel, text):
+    """(flag, quoted value, where) for every DEFAULT the text states.
+
+    Two forms, both structural -- no prose parsing:
+      * a markdown table with a `Default` column, which is how the routing
+        skill's parameter tables are written;
+      * `default: N` / `default N` within 120 characters after a flag.
+    """
+    out = []
+    header, default_col, off = None, None, 0
+    for lineno, line in enumerate(text.splitlines(), 1):
+        off += len(line) + 1
+        if line.startswith('|'):
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if header is None:
+                header = cells
+                default_col = next((i for i, c in enumerate(cells)
+                                    if c.lower().strip('* ') == 'default'), None)
+                continue
+            if set(''.join(cells)) <= set('-: '):
+                continue                          # the |---|---| rule line
+            if default_col is not None and len(cells) > default_col:
+                flag = _FLAG_IN.search(cells[0])
+                nums = _DEFAULT_CELL.findall(cells[default_col])
+                if flag and nums:
+                    out.append((flag.group(1), nums[-1],
+                                f'{rel}:{lineno}', off))
+            continue
+        header, default_col = None, None
+    for m in _DEFAULT_PROSE.finditer(text):
+        window = text[max(0, m.start() - 120):m.start()]
+        flag, at = None, None
+        for f in _FLAG_IN.finditer(window):
+            # A trailing hyphen is a WRAPPED flag (`--min-supply-` at a line
+            # end), and a trailing dot is the sentence's, not the number's.
+            flag, at = f.group(1).rstrip('-'), f.end()
+        # ...and the flag has to be the thing the default belongs to. The span
+        # between them may close the flag's own code span (`--flat N` counts
+        # RECORDED laps (default 5)) but not run through a SECOND backticked
+        # name or a sentence break: `--ignore-nets` sitting two clauses before
+        # "`health.max_fanout` is the backstop, default 20" is not a claim
+        # about --ignore-nets, and reading it as one is how a gate starts
+        # reporting defects that are not there.
+        between = window[at:] if at is not None else ''
+        if between.count('`') > 1 or ';' in between:
+            flag = None
+        if flag:
+            lineno = text.count('\n', 0, m.start()) + 1
+            out.append((flag, m.group(1).rstrip('.'),
+                        f'{rel}:{lineno}', m.start()))
+    return out
+
+
+def test_the_defaults_the_skills_quote_are_the_real_defaults():
+    """A flag that EXISTS can still be documented with a default that moved.
+
+    This gate has always checked that a cited flag is real and never what it
+    MEANS, so `--heuristic-weight` was taught as 1.9 for as long as it took
+    nobody to notice `routing_defaults.HEURISTIC_WEIGHT` had become 2.3 (#586).
+    A number a reader reasons from is a claim about the code exactly as a flag
+    name is, and it is resolved the same way: against the real parser.
+
+    Sibling of `tests/test_doc_constants.py`, which holds the constants a doc
+    quotes BY NAME. This holds the ones it quotes as a flag's default -- the
+    two live in different files because a default is the parser's, and this is
+    where the parsers are already built.
+    """
+    problems, checked, unresolved = [], 0, []
+    for rel in SOURCES:
+        if not rel.endswith('.md'):
+            continue
+        path = os.path.join(ROOT, rel)
+        if not os.path.isfile(path):
+            continue
+        text = open(path, encoding='utf-8', errors='replace').read()
+        for flag, quoted, where, off in _quoted_defaults(rel, text):
+            owners = _owning_tools(flag, text, off)
+            if not owners:
+                unresolved.append((where, flag))
+                continue
+            checked += 1
+            reals = {}
+            for tool, action in owners:
+                reals.setdefault(repr(action.default), []).append(tool)
+            try:
+                want = float(quoted)
+            except ValueError:
+                continue
+
+            def _agrees(pairs):
+                return any(isinstance(a.default, (int, float))
+                           and not isinstance(a.default, bool)
+                           and float(a.default) == want for _t, a in pairs)
+
+            # ANY owner agreeing is enough. A flag name does not say whose it
+            # is -- `--flat` is a plateau count on `converge.py` and a boolean
+            # on `render_placement.py`, and the nearest preceding invocation
+            # picked the wrong one -- so accusing the doc on one tool's default
+            # reports a defect that is not there. What this gate is for is a
+            # number that matches NOTHING, which is what a moved default is.
+            ok = _agrees(owners)
+            if not ok:
+                # A `default=None` flag whose help says "the board's own
+                # constraint, else X" is not undocumented -- X is the real
+                # fallback and the help string is BUILT from the constant, so
+                # it is the same authority as the default would be. Matched
+                # with digit boundaries, or 0.2 would be satisfied by 0.25.
+                pat = re.compile(r'(?<![0-9.])' + re.escape(quoted)
+                                 + r'(?![0-9])')
+                ok = any(a.default is None and pat.search(a.help or '')
+                         for _t, a in owners)
+            if not ok:
+                problems.append(
+                    (where, flag, quoted,
+                     ', '.join(f'{v} ({"/".join(t)})'
+                               for v, t in sorted(reals.items()))))
+    assert not problems, (
+        'documented defaults that are not the real ones:\n'
+        + '\n'.join(f'  {w}: {f} documented as {q}, parser says {r}'
+                    for w, f, q, r in sorted(problems)))
+    # The two parameter tables in the routing skill alone supply five rows, so
+    # a scan finding fewer than that has stopped matching rather than the
+    # skills having stopped quoting defaults.
+    assert checked >= 8, f'only {checked} documented default(s) resolved'
+    print(f'  PASS: {checked} documented defaults match their parser'
+          + (f' ({len(unresolved)} flag(s) no discovered tool defines)'
+             if unresolved else ''))
+
+
 def test_every_documented_flag_exists():
     problems = []
     checked = 0
@@ -552,14 +781,99 @@ def test_the_placement_tools_are_actually_mentioned():
         assert token in skill, f"{token} missing from the skill"
 
 
+def _returns_before_gate(tool, dest):
+    """Does `tool`'s main() return inside `if args.<dest>:` before it gates?
+
+    The board-state gate (`gate_or_exit`) is what makes exit 3 possible, so a
+    branch that returns above it cannot produce exit 3 whatever the doc says.
+    Read statically, because the alternative is running the tool on an
+    unplaced board and there is no unplaced board in the fixtures.
+    """
+    import ast
+    src = open(os.path.join(ROOT, tool), encoding='utf-8',
+               errors='replace').read()
+    tree = ast.parse(src)
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or fn.name != 'main':
+            continue
+        gate = None
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == 'gate_or_exit'):
+                gate = node.lineno if gate is None else min(gate, node.lineno)
+        if gate is None:
+            return False                 # no gate at all: nothing to precede
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.If) or node.lineno >= gate:
+                continue
+            names = {n.attr for n in ast.walk(node.test)
+                     if isinstance(n, ast.Attribute)}
+            if dest not in names:
+                continue
+            if any(isinstance(x, ast.Return) for x in ast.walk(node)):
+                return True
+    return False
+
+
 def test_exit_code_contract_is_documented():
-    """The skill tells Claude to branch on exit 3. If the constant moves and the
-    docs do not, the instruction silently becomes wrong."""
+    """The skill tells Claude to branch on exit 3, and every "exits 3" beside a
+    command is a claim about THAT command.
+
+    The substring check this used to be was satisfied by a false claim: the
+    placement skill annotated `place_optimize.py <board> --suggest-locks` with
+    "exits 3 if not [placed]", and `--suggest-locks` returns 0 from its own
+    branch above `gate_or_exit` -- measured exit 0 on a copper-carrying board,
+    and the same file says so 350 lines further down. That is blind spot 1 of
+    #923 in one line: the flag exists, the exit contract it is documented with
+    does not.
+    """
     from placement.placement_state import UNPLACED_EXIT
     assert UNPLACED_EXIT == 3
     skill = _all_skill_text()
     assert 'exit 3' in skill or 'exits 3' in skill, \
         "the skill must state the exit-3 contract it tells Claude to rely on"
+
+    # The positive control, and it is the real code rather than a fixture: the
+    # analyser must SEE place_optimize's --suggest-locks branch returning above
+    # the gate, and must not see one where there is none. Without this pair a
+    # broken analyser reports every claim as fine.
+    assert _returns_before_gate('py_placer/place_optimize.py',
+                                'suggest_locks'), \
+        'the analyser no longer sees the --suggest-locks early return; either ' \
+        'place_optimize changed or this check stopped working'
+    assert not _returns_before_gate('py_placer/place_optimize.py',
+                                    'allow_unplaced'), \
+        'the analyser reports a branch that does not return above the gate'
+
+    problems, checked = [], 0
+    for rel in SOURCES:
+        if not rel.endswith('.md'):
+            continue
+        path = os.path.join(ROOT, rel)
+        if not os.path.isfile(path):
+            continue
+        lines = open(path, encoding='utf-8', errors='replace').read().splitlines()
+        for i, line in enumerate(lines):
+            if 'exits 3' not in line and 'exit 3' not in line:
+                continue
+            if not line.lstrip().startswith('#'):
+                continue            # prose, not an annotation on a command
+            block = '\n'.join(lines[i + 1:i + 4])
+            for tool in TOOLS:
+                for b in _continued_blocks(block, tool):
+                    for flag in _cited_flags(b, tool):
+                        dest = flag.lstrip('-').replace('-', '_')
+                        checked += 1
+                        if _returns_before_gate(tool, dest):
+                            problems.append((f'{rel}:{i + 1}', tool, flag))
+    assert not problems, (
+        'commands annotated "exits 3" whose flag returns before the board-state '
+        'gate:\n' + '\n'.join(f'  {w}: {t} {f} answers and returns 0'
+                              for w, t, f in sorted(set(problems))))
+    print(f'  PASS: exit-3 contract; {checked} annotated flag(s) reach the gate'
+          if checked else
+          '  PASS: exit-3 contract; no command in the skills is annotated with '
+          'an exit code today, so the analyser control above is the live half')
 
 
 def test_skill_decides_placement_by_measurement_not_by_default():
@@ -765,6 +1079,7 @@ TESTS = [
     test_every_documented_flag_exists,
     test_driver_commands_supply_required_options_and_values,
     test_the_refusal_branches_are_scanned,
+    test_the_defaults_the_skills_quote_are_the_real_defaults,
     test_the_score_is_the_gate_and_the_router_is_not_the_judge,
     test_routed_board_lenses_exist_and_reenter_the_loop,
     test_the_placement_tools_are_actually_mentioned,
