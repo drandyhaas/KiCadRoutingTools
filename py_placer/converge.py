@@ -1879,6 +1879,33 @@ def cmd_verdict(a):
 
     scored = [r for r in rows if _score_key(r.get('score')) is not None]
     key = _score_key(score)
+    if key is None:
+        # The `--score` caller has to filter None exactly like the ledger-row
+        # caller on the line above -- and did not, so `key[0]` raised
+        # `TypeError: 'NoneType' object is not subscriptable` on the ONE input
+        # _score_key's docstring is written for. `blocking: null` is what
+        # board_score emits when a component that was ASKED for could not
+        # answer; it is neither 0 nor stuck, so it is not a verdict.
+        #
+        # A null-GUARD alone would be worse than the crash: execution falls
+        # past `elif blocking == 0` into the terminal branch and prints
+        # `STUCK: blocking == None and neither half improved`, which reads as
+        # a measurement of the board. NO-SCORE says what actually happened,
+        # and loop_driver's L5 already routes that verdict back to re-scoring
+        # instead of the ship ceremony.
+        print(json.dumps({'verdict': 'NO-SCORE', 'reason': (
+            'the score document is not shaped like a score (no `blocking` '
+            'key): a verdict is about a board, and this names none.'
+            if not isinstance(score, dict) else
+            'the score names `blocking: null` -- a component that was asked '
+            'for could not answer, so there is nothing to be blocked or done '
+            'ABOUT. Fix the component and re-score, then ask for a verdict.'),
+            'ungraded': sorted(score.get('ungraded') or [])
+            if isinstance(score, dict) else [],
+            'unknown': sorted(score.get('unknown') or [])
+            if isinstance(score, dict) else []},
+            indent=1, sort_keys=True))
+        return 2
     blocking = key[0]
     st = {h: _half_state(rows, h, a.flat) for h in ('placement', 'routing')}
     flat_p, flat_r = st['placement']['flat'], st['routing']['flat']

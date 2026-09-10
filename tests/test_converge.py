@@ -420,6 +420,75 @@ def test_a_half_can_declare_itself_exhausted_on_the_record():
           "later lap retracts it")
 
 
+def test_a_score_that_measured_nothing_is_reported_not_raised():
+    """#936 D1. `verdict --score` on a document whose `blocking` is null.
+
+    `_score_key` returns None for `blocking is None` deliberately -- its own
+    comment says an unmeasured lap must not rank as `inf`, because `inf >= inf`
+    made the plateau test TRUE and an unmeasured lap then read as a plateaued
+    one. It also says "the callers already filter None". The ledger-row caller
+    does; the `--score` caller did not, so `blocking = key[0]` raised
+    `TypeError: 'NoneType' object is not subscriptable` -- on exactly the input
+    the docstring is written for.
+
+    `blocking: null` is what board_score emits when a component that was ASKED
+    for could not answer. The two arms below are the whole point: the verdict
+    must name the missing measurement, and must NOT be a verdict about the
+    board. A bare null-guard passes the first arm and fails the second -- it
+    falls through to the terminal branch and prints
+    `STUCK: blocking == None and neither half improved`, which reads as a
+    measurement of a board nothing measured.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        assert _cv(['record', '--ledger', led, '--board', BOARD, '--kind',
+                    'placement', '--lever', 'lap 1',
+                    '--score', json.dumps({'blocking': 3, 'quality': {}})]
+                   ).returncode == 0
+
+        p = os.path.join(td, 'null.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'quality': {},
+                       'ungraded': ['length'], 'unknown': ['impedance']}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', p])
+        assert 'Traceback' not in r.stderr, r.stderr
+        assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+        doc = json.loads(r.stdout)
+        assert doc['verdict'] == 'NO-SCORE', doc
+        assert 'blocking: null' in doc['reason'], doc['reason']
+        assert doc['unknown'] == ['impedance'], doc
+        assert doc['ungraded'] == ['length'], doc
+        # The half that matters: it must not have graded the BOARD.
+        assert 'STUCK' not in r.stdout and 'DONE' not in r.stdout, r.stdout
+
+        # A document that is not shaped like a score at all takes the same
+        # exit, with a reason that says which of the two happened.
+        q = os.path.join(td, 'notascore.json')
+        with open(q, 'w', encoding='utf-8') as fh:
+            json.dump([1, 2], fh)
+        r = _cv(['verdict', '--ledger', led, '--score', q])
+        assert r.returncode == 2 and 'Traceback' not in r.stderr, r.stderr
+        assert json.loads(r.stdout)['verdict'] == 'NO-SCORE', r.stdout
+        assert 'not shaped like a score' in json.loads(r.stdout)['reason']
+
+        # ...and a score that DID measure still gets a real verdict, so the
+        # guard is not a blanket refusal.
+        ok = os.path.join(td, 'ok.json')
+        with open(ok, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 0, 'quality': {'vias': 1, 'copper_mm': 2,
+                                                  'segments': 3}}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', ok])
+        assert r.returncode in (converge.CONTINUE, converge.DONE,
+                                converge.STUCK, converge.BUDGET), r.returncode
+        assert json.loads(r.stdout)['verdict'] != 'NO-SCORE', r.stdout
+        # 2 is not one of the four verdict codes, so a caller switching on the
+        # exit cannot mistake "nothing measured" for a verdict about a board.
+        assert 2 not in (converge.CONTINUE, converge.DONE, converge.STUCK,
+                         converge.BUDGET)
+    print("  PASS: a null `blocking` is reported as NO-SCORE, not raised, "
+          "and not graded as STUCK")
+
+
 def test_two_scores_that_graded_different_components_do_not_compare():
     """D12. Two `blocking` totals over different component sets are not larger
     and smaller versions of each other.
