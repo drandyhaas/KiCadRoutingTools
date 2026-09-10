@@ -91,9 +91,8 @@ ROWS = [
     # ...and the enumeration the audit compares against. If the AST scan stops
     # finding `err(` sites, "all sites reached" becomes a claim about nothing.
     ('site-enumeration-blinded', 'pd',
-     "            sites[(node.lineno, node.col_offset)] = (\n"
-     "                owner.get(id(node), '<module>'), 'err', chunks(node))",
-     "            pass",
+     "            got = chunks(node)",
+     "            got = []",
      (T431,), KILLED),
     # The two holes a verifier proved end to end against the FIRST version of
     # this work: a refusal composed in a function whose name did not look like
