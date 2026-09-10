@@ -6522,6 +6522,15 @@ For differential pair routing, use route_diff.py:
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads and vias in output file")
+    parser.add_argument("--write-fill", action="store_true",
+                        help="After writing the board, fill its zones with "
+                             "KiCad's own ZONE_FILLER so the deliverable "
+                             "carries (filled_polygon ...) blocks (#910). "
+                             "Without it the board ships zone OUTLINES only, "
+                             "and a grade without --refill-zones reports "
+                             "plane opens that are not real. Needs KiCad's "
+                             "bundled python; the sibling .kicad_pro and its "
+                             "net classes are preserved.")
     parser.add_argument("--stats", action="store_true",
                         help="Collect and print A* search statistics for debugging heuristic efficiency")
 
@@ -7166,6 +7175,30 @@ For differential pair routing, use route_diff.py:
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+    # #910: OPT-IN delivery fill. Last, because it is the only step that wants
+    # the board AND its .kicad_pro already final -- the fill is graded against
+    # the project's real netclasses, and the floor writeback above is what
+    # puts them there. Guarded like the castellated-retract pass: nothing to
+    # fill if the run reverted, skipped routing, or wrote nothing.
+    if getattr(args, 'write_fill', False) and args.output_file             and not args.skip_routing and not _gate_reverted             and os.path.isfile(args.output_file):
+        try:
+            from kicad_exact_fill import write_filled_board
+            _fst = write_filled_board(args.output_file, args.output_file,
+                                      verbose=True)
+            if _fst.ok:
+                with open(args.output_file, encoding='utf-8',
+                          errors='replace') as _fh:
+                    _nfp = _fh.read().count('(filled_polygon')
+                print(f"  --write-fill: wrote {_nfp} filled_polygon block(s); "
+                      f"the deliverable no longer reads phantom plane opens "
+                      f"until refilled")
+            else:
+                print(f"  (--write-fill did not run: {_fst.reason}"
+                      + (f" ({_fst.detail})" if _fst.detail else '')
+                      + "; the board ships unfilled -- grade it with "
+                        "`kicad-cli pcb drc --refill-zones`)")
+        except Exception as _e:
+            print(f"  (--write-fill skipped: {_e})")
     # #857: --strict-sizes turns any delivery below a requested size, or any
     # fab-tier escalation, into a non-zero exit so a harness needs no grep.
     if getattr(args, 'strict_sizes', False):

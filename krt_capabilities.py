@@ -62,6 +62,11 @@ KNOWN_MODULES = (
     'check_impedance.py', 'check_orphan_stubs.py', 'check_pads.py',
     'check_pockets.py', 'place_seed.py',
     'kicad_unconnected.py', 'net_forensics.py', 'copy_board.py',
+    # #910. The opt-in DELIVERY step: a routed board ships zone
+    # outlines with no filled_polygon, so an unrefilled grade reports
+    # plane opens that are not real. A tool nobody can discover gets
+    # used by nobody.
+    'fill_for_delivery.py',
     'make_movie.py', 'render_placement.py', 'list_nets.py', 'route_summary.py',
     # The two pre-route placement instruments. `check_channels.py` is the
     # per-face lane ledger the placement skill tells an operator to run before

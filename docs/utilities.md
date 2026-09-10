@@ -1799,6 +1799,58 @@ python3 -X utf8 py_tools/check_pockets.py placed.kicad_pcb \
 python3 -X utf8 py_tools/check_pockets.py placed.kicad_pcb --bin 1.0 --top 16
 ```
 
+## Fill for Delivery (`fill_for_delivery.py`)
+
+A routed board ships zone **outlines** with no `(filled_polygon ...)`: the
+writer emits the `(fill yes ...)` properties, and nothing in the plane path
+ever writes a fill. Opened in KiCad before a refill — or graded by `kicad-cli
+pcb drc` **without** `--refill-zones` — such a board reports plane-net opens
+that are not real. Measured on `lvds_converter_dualclk_gnd` with its fills
+stripped: **54 unconnected without the flag, 42 with the fill written** — 12
+phantom opens that were never a routing defect.
+
+This is the opt-in delivery step (issue #910). It runs KiCad's own
+`ZONE_FILLER` through the bundled interpreter and saves with
+`aSkipSettings=True`, so the sibling `.kicad_pro` — and every non-Default net
+class in it — survives; the tool re-reads the classes afterwards and
+**refuses**, deleting its own output, if any went missing.
+
+### Usage
+
+```bash
+python3 py_tools/fill_for_delivery.py routed.kicad_pcb -o delivered.kicad_pcb
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-o, --output` | Destination board. Its siblings (`.kicad_pro`, `.kicad_prl`, `.kicad_dru`, design brief) are copied first, via `copy_board`. |
+| `--timeout N` | Seconds to allow the KiCad fill (default: the exact-fill budget). |
+| `--exit-zero` | Report problems but exit 0. |
+
+`route.py --write-fill` does the same thing in place, at the very end of a
+run, after the DRC-floor writeback — so the fill is graded against the
+project's real net classes.
+
+### Output
+
+```
+Filled: delivered.kicad_pcb
+  filled_polygon blocks: 1
+  net classes preserved: 2
+  unconnected (no --refill-zones): 54 -> 42
+```
+
+The before/after line is the record that the fill **revealed** connectivity
+rather than changing it.
+
+### Requirements and exit codes
+
+Needs KiCad's bundled python (`KICAD_PYTHON` overrides the search). Without
+it the step refuses with `no_kicad_python` and writes nothing — the copied
+board is simply unfilled, and `kicad-cli pcb drc --refill-zones` (or **B** in
+KiCad) still grades it correctly. Exit 0 when filled with classes intact,
+1 when the fill did not run or a class went missing.
+
 ## Common Workflows
 
 ### Route and Verify
