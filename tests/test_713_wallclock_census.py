@@ -66,6 +66,15 @@ REGISTRY = {
         'hang_detector',
         'kicad-cli DRC child. Expiry returns an explicit error string and the '
         'CLI exits 3 -- a refusal, never a clean verdict.'),
+    'py_tools/fill_for_delivery.py': (
+        'hang_detector',
+        'Two external children (#910): the kicad-cli DRC used for the '
+        'before/after unconnected line, and EXACT_FILL_TIMEOUT forwarded to '
+        "kicad_exact_fill's ZONE_FILLER child (`--timeout` overrides it). "
+        'Neither expiry can change the deliverable: the DRC one returns None '
+        'and the before/after line is simply not printed, and the fill one '
+        'returns RefillStatus(timeout), which is a REFUSAL -- the board is '
+        'not written and the run says so.'),
     'kicad_routing_plugin/deps_check.py': (
         'hang_detector',
         'pip/import probes of an external toolchain, plus a worker join.'),

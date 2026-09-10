@@ -100,7 +100,14 @@ def assess_placement(pcb_data, pcb_file: Optional[str] = None,
 
     fps = [fp for fp in (pcb_data.footprints or {}).values() if fp.pads]
     st.n_footprints = len(fps)
-    st.segments = len(pcb_data.segments or [])
+    # ROUTED copper only (#908). A footprint's own drawn copper -- a SOT89
+    # tab, a PCB antenna -- now parses as `graphic=True` Segments, and it is
+    # not something a placement run would strand: it MOVES WITH ITS PART.
+    # Counting it made watchy's 48 antenna edges read as a routed board, and
+    # every placement CLI refused an unrouted board with "moving a footprint
+    # would strand its tracks".
+    st.segments = len([s for s in (pcb_data.segments or [])
+                       if not getattr(s, 'graphic', False)])
     st.vias = len(pcb_data.vias or [])
     st.has_copper = (st.segments + st.vias) > 0
     if not fps:

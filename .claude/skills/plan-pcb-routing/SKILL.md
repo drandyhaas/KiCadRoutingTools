@@ -2615,11 +2615,12 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
 
    It solves against a NOMINAL FR4 stack (`impedance.nominal_stackup`) and
    says so; the detail dict carries `width_mm`, `channel_mm` and
-   `channel_over_pin_gap`. On esp_prog that reads: *90 Ω on a 2-layer 1.6 mm
-   FR4 stack needs a 1.133 mm differential leg (2.416 mm for the pair)
-   against a 0.325 mm pin gap — 7.4x. Not achievable here.* That is the line
-   the plan should carry. `route.py` and `route_diff.py` print it themselves
-   when `--impedance` is given on a stackup-less board.
+   `channel_over_pin_gap`. On a 2-layer 1.6 mm board with a USB pair leaving
+   0.65 mm-pitch pins it reads: *90 Ω needs a 1.13 mm differential leg
+   (2.42 mm for the pair) against a 0.33 mm pin gap — 7.4x. Not achievable
+   here.* That is the line the plan should carry. `route.py` and
+   `route_diff.py` print it themselves when `--impedance` is given on a
+   stackup-less board.
 
    **Do not author a stackup to make the numbers appear.** No tool in this
    repo writes one (the board's author owns it), and a written default would

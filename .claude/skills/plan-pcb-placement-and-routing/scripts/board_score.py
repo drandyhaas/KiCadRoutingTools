@@ -959,10 +959,18 @@ def quality(board: str) -> dict:
         from kicad_parser import parse_kicad_pcb
         import math
         pcb = parse_kicad_pcb(board)
+        # ROUTED copper only (#908). A footprint's own drawn copper -- a SOT89
+        # tab, a PCB antenna -- parses as `graphic=True` Segments, and it is
+        # identical in every candidate placement of the same board: counting
+        # it adds a constant to `copper_mm` and, worse, makes a copper-FREE
+        # board look like it has a quality key that can rank. A board carrying
+        # a meander antenna can reach dozens of such segments with not one
+        # routed track on it.
+        segs = [s for s in pcb.segments if not getattr(s, 'graphic', False)]
         mm = sum(math.dist((s.start_x, s.start_y), (s.end_x, s.end_y))
-                 for s in pcb.segments)
+                 for s in segs)
         return {'vias': len(pcb.vias), 'copper_mm': round(mm, 2),
-                'segments': len(pcb.segments)}
+                'segments': len(segs)}
     except Exception as e:
         return {'error': str(e)}
 

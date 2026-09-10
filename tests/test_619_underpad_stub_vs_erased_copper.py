@@ -240,10 +240,19 @@ def test_erasure_injection_and_control():
           "(tigard U3, QFN-64)")
     _gate('all')
     pcb = parse_kicad_pcb(TIGARD)
-    check("tigard carries ZERO vias and ZERO segments -- an injected obstacle "
-          "is the only one, so the baseline cannot be contaminated",
-          len(pcb.vias) == 0 and len(pcb.segments) == 0,
-          f"{len(pcb.vias)} vias, {len(pcb.segments)} segments")
+    # ROUTED copper, which is what "cannot be contaminated" is about. Since
+    # #908 the board also carries 4 `graphic=True` segments -- JP1's own
+    # solder-jumper bridge, drawn in the footprint, on B.Cu and nowhere near
+    # U3. They are part of the board's fixed geometry, identical in every arm
+    # of this test, so they cannot contaminate a baseline; counting them here
+    # would only make the premise unstateable.
+    _routed = [s for s in pcb.segments if not getattr(s, 'graphic', False)]
+    _art = len(pcb.segments) - len(_routed)
+    check("tigard carries ZERO vias and ZERO ROUTED segments -- an injected "
+          "obstacle is the only one, so the baseline cannot be contaminated",
+          len(pcb.vias) == 0 and len(_routed) == 0,
+          f"{len(pcb.vias)} vias, {len(_routed)} routed segments "
+          f"({_art} footprint-art segments, #908)")
 
     a, b = "/BD0", "/BD1"
     nid_a = next(n for n, net in pcb.nets.items() if net.name == a)
