@@ -61,6 +61,7 @@ PLACEMENT_SUPPORTED_BACKENDS = ("claude",)
 # Driver stage ids -> human progress text ("which type of work"), from the two
 # skills' driver --list output (placement_driver.py P*, loop_driver.py L*).
 STAGE_LABELS = {
+    "P-brief": "P-brief: what the board is FOR",
     "P0": "P0 gate: should placement be touched",
     "P1": "P1 seeding an unplaced board",
     "P2": "P2 locking mechanical parts",
@@ -77,7 +78,17 @@ STAGE_LABELS = {
 }
 
 # Tolerates --stage P4 / --stage=P4 / --stage "P4" spellings.
-_STAGE_RE = re.compile(r"--stage[=\s]+[\"']?(P-close|P[0-6]|L[1-5])\b")
+#
+# EVERY id the two drivers register, or the GUI reports "working..." for a
+# stage that is running. P-brief was missing here for the same reason it was
+# missing from placement_driver --list (#936 C2): it is the one id that is
+# neither P<digit> nor P-close, so a hand-written tuple and this pattern
+# skipped it alike -- and it is the stage that records the declared design
+# brief (#711). tests/test_placement_run.py derives the expected set by
+# importing both drivers, so a new stage id fails there rather than degrading
+# to "working..." in the GUI.
+_STAGE_RE = re.compile(
+    r"--stage[=\s]+[\"']?(P-brief|P-close|P[0-6]|L[1-5])\b")
 
 
 def create_workdir(board_filename, mode):
