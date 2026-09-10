@@ -254,6 +254,39 @@ Validate routed boards against the *real* spec, with the right checker — most
   both; `--net-clearances <json>` gives explicit per-net control). Grade multi-class
   boards at the netclasses that survived (`kicad_drc_compare._staged_copy`).
 
+- **The whole suite is `python3 tests/run_all.py`, and it fans out onto Modal.**
+  ~594 files, ~40 minutes of one laptop -- so on battery, or when you just want
+  the answer, use `modal run tests/stress/modal_suite/run_all_modal.py`
+  (default 50 shards, about the length of the slowest shard). `--shards N`,
+  `--filters "908 910"` for one family, `--fast` for the unit lane.
+  `run_all.py --shard I/N` does the splitting, so a local run and a 50-way
+  fan-out cover the SAME set -- the driver never globs `test_*.py` itself.
+  Three things that decide whether you can trust the result:
+  - **The verdict is each shard's own exit code, never the parsed counts.** A
+    container that OOMs prints no summary line at all, so a driver deciding on
+    counts would read that silence as zero failures. A shard that never
+    reported fails the run and is named.
+  - **The cloud image has NO KiCad**, so every pcbnew/wx test self-skips
+    (exit 77) into its own bucket and is NOT a pass -- and `tests/gui_parity/`
+    is not collected by `run_all` at all. Those still need a local
+    KiCad-python session (see the parity-gates list below).
+  - The image is a clean checkout of HEAD, so it is reproducible and you can
+    keep editing while it runs; `KICAD_SWEEP_DIRTY=1` ships the working tree
+    instead and stamps the provenance `+dirty` (use it to run the suite over
+    an uncommitted change).
+  - **When a cloud run fails tests that pass locally, suspect the IMAGE before
+    the code.** The first full run reported 15 such failures and not one was a
+    code defect: a missing git INDEX (`corpus_boards()` asks `git ls-files`, so
+    with no `.git` it returns `[]` and corpus tests grade an empty set instead
+    of skipping), missing Pillow, missing pytest, and a Python version
+    mismatch. The image now rebuilds the index from `git ls-files --force`
+    (never `git add -A`, which honours .gitignore and drops a
+    tracked-before-the-rule board), installs `requirements.txt`, and matches
+    the interpreter you launched with -- and it ASSERTS the board count against
+    the host at build time, so a short corpus fails the build rather than
+    quietly shrinking what the tests grade. See `tests/README.md` for the
+    table.
+
 ## What a placement run is FOR (read before grading one)
 
 **The objective is a board that ROUTES: parts arranged so they work together,

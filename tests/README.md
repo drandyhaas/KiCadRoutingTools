@@ -15,6 +15,80 @@ cd tests
 python3 test_fanout_and_route.py --all
 ```
 
+## Running the WHOLE suite
+
+```bash
+python3 tests/run_all.py                     # everything, 4 at a time, locally
+python3 tests/run_all.py --fast              # unit only (skip CLI/board tests)
+python3 tests/run_all.py 908                 # only files whose name contains "908"
+python3 tests/run_all.py --list              # what would run, and its classification
+```
+
+### ...on Modal, fanned out
+
+The suite is ~594 files and roughly 40 minutes of one laptop. `--shard I/N`
+splits it into N disjoint slices, and the Modal driver runs them in parallel
+containers, so a full run takes about as long as its slowest shard:
+
+```bash
+modal run tests/stress/modal_suite/run_all_modal.py               # 50 shards
+modal run tests/stress/modal_suite/run_all_modal.py --shards 25
+modal run tests/stress/modal_suite/run_all_modal.py --filters 908 # one family
+```
+
+Three things to know before you trust its output:
+
+- **`run_all.py --shard` does the splitting**, so discovery and classification
+  have ONE source of truth -- the driver never globs `test_*.py` itself. A
+  local run and a 50-way fan-out therefore cover the same set.
+- **The verdict is each shard's own exit code**, never the parsed counts. A
+  container that OOMs prints no summary line at all, and a driver that decided
+  on parsed counts would read that silence as zero failures. A shard that
+  never reported fails the run and is named.
+- **The cloud image has NO KiCad**, so every test needing pcbnew/wx self-skips
+  (exit 77). Those are reported in their own bucket and are *not* passes -- and
+  the wx/pcbnew parity gates in `tests/gui_parity/` are not collected by
+  `run_all` at all, so they still need a local KiCad-python session.
+
+The image is a clean checkout of HEAD (reproducible, and you can keep editing
+while it runs); `KICAD_SWEEP_DIRTY=1` ships the working tree instead and stamps
+the provenance `+dirty`.
+
+**The image has to be a FAITHFUL checkout, and that is harder than it looks.**
+The first full cloud run reported 15 failures that all pass locally. None was a
+code defect; every one was the image differing from a real working copy. They
+are listed here because each is a trap that will come back:
+
+| what was missing | what it broke |
+|---|---|
+| a git **index** | `run_utils.corpus_boards()` asks `git ls-files`, and `git archive` ships no `.git`, so it returned `[]` and 9 corpus-walking tests graded an EMPTY corpus instead of skipping |
+| `Pillow` | `startup_checks.check_render_dependencies` raised; 3 render tests died |
+| `pytest` | 2 tests import it for fixtures; it is a test-only dep, so it is correctly absent from `requirements.txt` |
+| the right **Python version** | 2 tests behave differently on 3.12 vs 3.13+ |
+
+Three of those deserve spelling out:
+
+- **Runtime deps come from `requirements.txt`**, never a hand-copied list. The
+  sweep and route images pin numpy/scipy/shapely because that is the whole
+  dependency set of the *routing* path; the suite is not that narrow.
+- **The index is rebuilt from `git ls-files`, with `--force`** -- NOT
+  `git add -A`. `add` honours `.gitignore`, and a file added before a matching
+  rule stays tracked forever, so `-A` silently drops
+  `kicad_files/interf_u_unrouted.kicad_pcb` and leaves 21 of 22 boards. The
+  build asserts the count against the one measured on the host, so a short
+  corpus fails the build instead of quietly shrinking what the tests grade.
+- **The container's Python matches the interpreter you launched with.** This
+  repo has already had a Python upgrade change *routing results* (`math.fsum`),
+  so grading on a different one is not grading your code. It also moves tests:
+  `test_run8_write_order` passes on 3.13+ and fails on 3.12 -- and the pass is
+  VACUOUS either way, because its assertion (`'early line' in the log`) is
+  satisfied by 3.13's traceback echoing the `python -c` source rather than by
+  the program running. Override with `KICAD_SUITE_PYTHON=3.12` if Modal has no
+  image for yours.
+
+The moral, which cost a full red run to learn: **when a cloud suite fails tests
+that pass locally, suspect the image before the code.**
+
 ## Test Scripts
 
 ### test_fanout_and_route.py - Full 5-Layer BGA Board Test
