@@ -654,7 +654,8 @@ order:
 1. **The repo has its own seeder** (a script that writes a starting floorplan
    and the outline from the spec): that is the placement step — run it, then
    treat its output as the "rough / generated placement" row of the table
-   above. If the seeder takes a `--seed`/`--variant` axis, that plus
+   above. `py_placer/place_seed.py` and `py_placer/place_portfolio.py` both
+   take `--seed` (there is no `--variant` flag on either), and that axis plus
    Step 0c-bis is how you offer the user OPTIONS instead of one take-it-or-
    leave-it arrangement — but rank the SEEDS first (`py_placer/compare_seeds.py`, next
    rung): the portfolio explores around ONE seed and cannot rank across

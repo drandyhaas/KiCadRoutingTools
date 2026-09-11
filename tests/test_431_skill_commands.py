@@ -161,6 +161,12 @@ SOURCES = [
     '.claude/skills/plan-pcb-placement-and-routing/references/evidence-map.md',
     '.claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md',
     '.claude/skills/plan-pcb-placement-and-routing/references/convergence.md',
+    # boundary-criteria.md was the one reference page in NO flag gate at
+    # all (#936): a command block added there shipped unchecked, which is
+    # precisely the hole the comment above names. It cites no flags today,
+    # so registering it costs nothing and closes the hole before the first
+    # command lands in it.
+    '.claude/skills/plan-pcb-placement-and-routing/references/boundary-criteria.md',
     # ...and so does the DRIVER that now emits the workflow. This is the same
     # hole one level down, and it opened exactly as the comment above predicts:
     # the stage bodies moved out of SKILL.md into scripts/*.py, the gate kept
