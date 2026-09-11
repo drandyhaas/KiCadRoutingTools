@@ -154,6 +154,72 @@ def test_a_script_does_NOT_inherit_another_CLIs_flags():
     print("  PASS: registrars are followed, other CLIs are not")
 
 
+def test_the_reported_version_is_the_real_one():
+    """`version` was `None` on every call this function ever made.
+
+    It read `routing_defaults.VERSION`, which that module has never defined,
+    inside a try/except that turned the AttributeError into the same `None`.
+    It shipped that way from the commit that introduced the module until #936
+    -- and the reason it survived is exactly this: eight test functions here,
+    and not one read the key. A capability report exists to answer "can THIS
+    clone do X", and a version that is always None answers nothing.
+
+    Asserted against /VERSION rather than a literal: pinning the number here
+    would make every release edit this test.
+    """
+    caps = capabilities()
+    with open(os.path.join(ROOT, 'VERSION'), encoding='utf-8') as fh:
+        want = fh.read().strip()
+    assert want, '/VERSION is empty -- the release triple is broken'
+    assert caps.get('version') == want, (
+        f"capabilities()['version'] is {caps.get('version')!r}, /VERSION "
+        f"says {want!r}")
+    print(f"  PASS: version reports {want}, the string /VERSION carries")
+
+
+def test_asking_what_this_clone_can_do_changes_nothing():
+    """A read-only question must not have a side effect on the asker.
+
+    `capabilities()` used to insert py_router/ on the CALLER's `sys.path` so
+    it could import `routing_defaults` for the version. The import is gone;
+    the insert outlived it. This module's own rule for flags -- "a consumer
+    asking 'can this clone do X' must not be able to trigger a side effect by
+    asking" -- is the same rule, and sys.path is a side effect.
+    """
+    before = list(sys.path)
+    capabilities()
+    assert sys.path == before, (
+        f'capabilities() mutated sys.path: '
+        f'{[p for p in sys.path if p not in before]}')
+    print("  PASS: capabilities() leaves sys.path alone")
+
+
+def test_the_pinnable_set_is_a_subset_of_the_real_catalogue():
+    """KNOWN_MODULES is the PINNABLE set; krt_registry is the catalogue.
+
+    What must hold between them: a name here that is neither a runnable tool
+    nor a real file is a name a consumer can pin and never get an answer
+    about. `route_summary.py` is the one member that is a library rather than
+    a CLI -- legitimate, since `modules` reports FILE PRESENCE -- and it is
+    asserted by name rather than left as a surprise for the next reader.
+    """
+    import krt_capabilities as kc
+    import krt_registry as reg
+    runnable = {os.path.basename(r['path']) for r in reg.registry(ROOT)}
+    known = set(kc.KNOWN_MODULES)
+    not_tools = sorted(known - runnable)
+    for name in not_tools:
+        assert os.path.isfile(_tool_path(ROOT, name)), (
+            f'{name} is pinnable but is neither a runnable tool nor a file '
+            f'in this clone')
+    assert not_tools == ['route_summary.py'], (
+        f'the set of pinnable non-CLI modules moved: {not_tools}. Each is a '
+        f'name a consumer can pin and get only file-presence for, so a new '
+        f'member is a deliberate decision, here.')
+    print(f"  PASS: {len(known)} pinnable, {len(known & runnable)} of them "
+          f"runnable tools; non-CLI: {not_tools}")
+
+
 if __name__ == '__main__':
     for k, v in sorted(globals().items()):
         if k.startswith('test_'):

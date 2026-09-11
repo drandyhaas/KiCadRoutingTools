@@ -18,6 +18,15 @@ So: publish the capability set and let the consumer assert against it.
 `--require` takes `module` or `module:--flag` tokens and exits non-zero listing
 everything missing, so a consumer's check is one line and its failure message
 names the gap instead of the symptom.
+
+NOT THE CATALOGUE. `KNOWN_MODULES` is the pinnable set -- the modules a
+consumer is likely to assert on -- and it is deliberately short and
+hand-maintained, because every name in it is answered on every call and this
+has to stay fast enough for `route.py --capabilities` to run before argparse.
+For "what tools exist in this clone at all, what is each for, and which door
+serves it", see `krt_registry.py`: it enumerates by BEHAVIOUR (`--help`
+answers with a usage line), covers every runnable tool rather than a chosen
+few, and is gated for completeness by `tests/test_937_tool_registry.py`.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -445,9 +454,10 @@ def capabilities(root=ROOT):
         'flags': flags,
     }
     try:                                    # best-effort, never fatal
-        _eng = os.path.join(root, 'py_router')
-        if os.path.isdir(_eng) and _eng not in sys.path:
-            sys.path.insert(0, _eng)        # #522 layout: the engine dir
+        # (This used to insert py_router/ on sys.path so `routing_defaults`
+        # could be imported for its VERSION. Nothing here imports any more, so
+        # the insert was dead residue that still mutated the CALLER's sys.path
+        # as a side effect of asking a read-only question.)
         # /VERSION is the release triple's own file (Cargo.toml +
         # /VERSION + metadata.json). This used to read
         # `routing_defaults.VERSION`, which that module has never
