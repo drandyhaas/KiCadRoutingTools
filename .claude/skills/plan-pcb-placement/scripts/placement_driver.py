@@ -1013,14 +1013,17 @@ def _guard_render(a):
     # THE CHANNEL MATTERS, and it is not the one the loop uses. l2 reads
     # `oob_pad_count` out of check_assembly's report, which is a part-level pad
     # AABB inflated by the grading clearance -- its own `oob_pad_basis` string
-    # says so and points here instead. Measured over the 22 tracked boards:
-    # that count is non-zero on three, and on two of them -- glasgow_revC (SW1,
-    # 0.03mm) and watchy (SW1-SW4, 0.17mm each), both human-designed reference
-    # boards with edge-mounted switches -- this per-PAD measure reports an
-    # EMPTY list. The AABB fires on the bounding box of an edge part; the pads
-    # are on the board. Gating on that count would refuse two human boards on a
-    # measurement artifact, which is why CLAUDE.md names this key and adds "a
-    # whole-board pass/fail verdict is the wrong channel for it".
+    # says so and points here instead. Measured over every tracked board: that
+    # count is non-zero on three, and on two of them -- both human-designed
+    # reference boards carrying edge-mounted switches, at 0.03mm and 0.17mm --
+    # this per-PAD measure reports an EMPTY list. The AABB fires on the
+    # bounding box of an edge part; the pads are on the board. Gating on that
+    # count would refuse two human boards on a measurement artifact, which is
+    # why CLAUDE.md names this key and adds "a whole-board pass/fail verdict is
+    # the wrong channel for it". (The boards are named in the PR that added
+    # this, not here: a skill that names corpus boards is what
+    # tests/test_run8_skills_generic.py refuses, because guidance written
+    # around one board stops being guidance.)
     #
     # So this gate binds on the per-pad list and NAMES THE PARTS, because a
     # count is not something you can act on and the refusal exists to be acted
