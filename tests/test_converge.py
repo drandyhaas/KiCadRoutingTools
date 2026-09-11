@@ -516,6 +516,41 @@ def test_a_score_that_measured_nothing_is_reported_not_raised():
         assert r.returncode == 2 and 'Traceback' not in r.stderr, r.stderr
         assert json.loads(r.stdout)['ungraded'] == ['<not a list: 5>'], r.stdout
 
+        # ...and the cause is claimed ONLY when the score names one as a LIST.
+        # `{"unknown": "impedance"}` is not a component that answered; saying
+        # so would be publishing an unmeasured cause.
+        us = os.path.join(td, 'unknown_str.json')
+        with open(us, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'unknown': 'impedance'}, fh)
+        why = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', us]).stdout)['reason']
+        assert 'could not answer' not in why, why
+
+        # `quality` IS NOT NECESSARILY A DICT. This raised AttributeError in
+        # _score_key -- the same crash class, in the same function, one line
+        # above the guard added for it -- and `record` accepts such a score, so
+        # the raising value lands in the LEDGER and every later verdict on that
+        # ledger tracebacks in the row comprehension whatever `--score` says.
+        ql = os.path.join(td, 'quality_list.json')
+        with open(ql, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 1, 'quality': [1, 2]}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', ql])
+        assert 'Traceback' not in r.stderr, r.stderr
+        assert json.loads(r.stdout)['verdict'] != 'NO-SCORE', r.stdout
+
+        poison = os.path.join(td, 'poison.jsonl')
+        assert _cv(['record', '--ledger', poison, '--board', BOARD, '--kind',
+                    'placement', '--lever', 'malformed quality',
+                    '--score', json.dumps({'blocking': 1, 'quality': [1, 2]})]
+                   ).returncode == 0, 'record accepts it, which is the problem'
+        good = os.path.join(td, 'good.json')
+        with open(good, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 0, 'quality': {'vias': 1, 'copper_mm': 2,
+                                                  'segments': 3}}, fh)
+        r = _cv(['verdict', '--ledger', poison, '--score', good])
+        assert 'Traceback' not in r.stderr, \
+            'one malformed ledger row must not break every later verdict'
+
         # ...and a score that DID measure still gets a real verdict, so the
         # guard is not a blanket refusal.
         ok = os.path.join(td, 'ok.json')

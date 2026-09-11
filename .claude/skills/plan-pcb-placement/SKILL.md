@@ -340,12 +340,18 @@ all: it is `quench.legality_metrics` (so `place_optimize`'s `JSON_SUMMARY`),
 grep this tool's output for it and conclude the quantity is unmeasured.
 
 The per-pair blocking COUNT is the gateable quantity. **A courtyard pair is not
-merely advisory:** it is the fifth `not_buildable` conjunct (rule 4 above, #918) and
-it FIRES whenever a member of the pair moved relative to `--baseline` — which is the
-flag this document tells you to pass. Without `--baseline` the whole courtyard
-census is report-only and the tool says REPORT-ONLY; with it, a courtyard pair alone
-can make a board unbuildable. FAB pairs really are advisory. `check_assembly` labels
-each pair with its waiver class either way.
+merely advisory:** it is the fifth `not_buildable` conjunct (rule 4 above, #918).
+It does NOT fire on every courtyard kiss. The pair must first survive
+`courtyard_blocking_pairs` (`py_placer/placement/legality.py`): unwaived (locked,
+marker-class and edge-class parts are exempt), area at or above
+`COURTYARD_BLOCKING_MIN_MM2` **or** `MIN_FRAC` of the courtyard, depth at or above
+`MIN_DEPTH_MM`, non-synthetic, and not silk-sourced — and only THEN does
+`check_assembly` gate it, and only for a pair whose member moved relative to
+`--baseline`. That is why the 5.375 mm2 of mount-hole kisses above ships: those are
+waived at the first step. Without `--baseline` the whole census is report-only and
+the tool says REPORT-ONLY; with it, a SURVIVING courtyard pair alone can make a
+board unbuildable. FAB pairs really are advisory. `check_assembly` labels each pair
+with its waiver class either way.
 
 **Then reconstruct, in this order. Each rung has an applicability test — run the test,
 and when it fails, say so and fall through to the next rung.** None of these invents

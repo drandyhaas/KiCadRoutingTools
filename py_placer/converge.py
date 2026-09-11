@@ -1500,7 +1500,17 @@ def _score_key(score):
     if not isinstance(score, dict):
         return None
     b = score.get('blocking')
-    q = score.get('quality') or {}
+    q = score.get('quality')
+    # `quality` IS NOT NECESSARILY A DICT. `record` accepts any JSON for it, so
+    # `{"quality": [1, 2]}` reaches here and `q.get` raised AttributeError --
+    # the same crash class as #936 D1, in the same function, one line above the
+    # guard added for it. Worse than a one-off: the raising value lands in the
+    # LEDGER, and thereafter every `verdict` on that ledger tracebacks in the
+    # row comprehension no matter how good its `--score` is, so L5 reports "the
+    # score is not a measurement" about the wrong artifact. A quality that is
+    # not a mapping is unmeasured quality, which is what `inf` below means.
+    if not isinstance(q, dict):
+        q = {}
     # A quality tuple carrying None (board_score.quality returns {'error': ...}
     # when the board will not parse) makes min() raise TypeError the moment two
     # rows tie on `blocking`. Untested until now because the self-tests use a
@@ -1875,10 +1885,12 @@ def cmd_verdict(a):
     def _names(k):
         """`score[k]` as a sorted list of names, whatever the document holds.
 
-        A malformed score is the whole subject of this branch, so reading it
-        must not be the thing that raises: `sorted(score.get(k) or [])` is a
-        TypeError on `{"ungraded": 5}` -- the same crash class this guard
-        exists to remove, which is why it is not spelled that way here.
+        A malformed score is the whole subject of this branch, so reading THIS
+        KEY must not be the thing that raises: `sorted(score.get(k) or [])` is
+        a TypeError on `{"ungraded": 5}` -- the same crash class this guard
+        exists to remove, which is why it is not spelled that way here. It says
+        nothing about the rest of the document; `_score_key` guards `quality`
+        separately, for the same reason and after the same kind of crash.
         """
         v = score.get(k) if isinstance(score, dict) else None
         if isinstance(v, (list, tuple, set)):
@@ -1928,7 +1940,12 @@ def cmd_verdict(a):
             why = ('the score document has no `blocking` key at all, so there '
                    'is nothing to be blocked or done ABOUT. If this came from '
                    'board_score, it did not finish.')
-        elif _names('unknown'):
+        elif isinstance(score.get('unknown'), (list, tuple, set)) \
+                and _names('unknown'):
+            # The LIST test, not just truthiness: `{"unknown": "impedance"}`
+            # renders as `<not a list: 'impedance'>`, and asserting "a component
+            # RAN and could not answer" over that is claiming a cause the score
+            # never named -- which is the defect this whole issue is about.
             why = ('`blocking` is null because a component RAN and could not '
                    'answer (' + ', '.join(_names('unknown')) + '). Fix the '
                    'instrument and re-score, then ask for a verdict.')

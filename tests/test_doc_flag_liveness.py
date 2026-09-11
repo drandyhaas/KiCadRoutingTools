@@ -211,10 +211,22 @@ def _composed_flags(text):
     nothing else". `render_placement.py --help` prints both `--ratsnest` and
     `--no-ratsnest`, and #936 is an issue about exactly that kind of sentence.
 
-    Resolved generally, not by a list of helper names: find any function whose
-    body calls `add_argument` with an f-string shaped `--<literal>{param}`,
-    then read the literal every caller in the same file passes at that
-    parameter's position.
+    Resolved by SHAPE, not by a list of helper names: find any function whose
+    body calls `add_argument` with an f-string of exactly two parts,
+    `--<literal>` then `{param}`, and read the literal every caller in the
+    same file passes at that parameter's position.
+
+    WHAT THAT SHAPE DOES NOT COVER, stated because an unstated limit is how
+    a gate is believed to cover more than it does. UNDER: an f-string of
+    three or more parts (`f'--{prefix}-{name}'`), and a keyword-only
+    parameter (`fn.args.args` excludes kwonly and posonly). OVER: a
+    registrar that reassigns its parameter before use yields the
+    pre-transform spelling; a same-named function in another scope
+    contributes its call sites; a call under `if False:` still counts.
+    Over-approximating is the dangerous direction here -- an invented flag
+    makes the gate blind to a real dead one -- so if a second registrar ever
+    appears, check it. `render_placement._bool_pair` is the only one in the
+    repo today, and all 18 flags it yields are real per `--help`.
     """
     try:
         tree = ast.parse(text)

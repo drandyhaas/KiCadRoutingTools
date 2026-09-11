@@ -196,11 +196,15 @@ VERDICT=FAIL:lens=drc;finding=8 vias below the 0.6 mm spec on B.Cu;
 
    THE GATE IS COMPLETION-ONLY, and deliberately so — it is a claim about the
    ROUTED BOARD (`py_placer/converge.py`, the `a.final and a.kind ==
-   'completion'` branch). A `--final --kind systemic` row is NOT refused, and
-   that is the row `loop_driver`'s L5 prescribes for the `--exhausted`
-   close-out: a half that stopped because no lever remains is not claiming its
-   lenses pass. Do not read "`--final` refuses" as unconditional — read the
-   kind.
+   'completion'` branch). A `--final --kind systemic` row is NOT refused.
+
+   That is a HOLE, not a route: nothing prescribes such a row. L5 emits
+   `--kind completion --final` for EVERY verdict name, `DONE-EXHAUSTED`
+   included, with all three `--lens-file` paths; and its `--exhausted`
+   declaration is a SEPARATE `--kind systemic` row carrying no `--final` at
+   all. So the only way to reach a `--final` row the gate does not check is
+   to hand-write one. Do not read "`--final` refuses" as unconditional —
+   read the kind.
 
    *(This used to say the record schema had no verdict field and to put it in
    free-text `--lever`. That was documenting a gap, not a design constraint —

@@ -127,8 +127,8 @@ ROWS = [
     # The subtler half: asserting a cause the score never named. `unknown` is
     # the only evidence that a component RAN and could not answer.
     ('verdict-cause-unmeasured', 'cv',
-     "        elif _names('unknown'):\n",
-     '        elif True:\n',
+     "        elif isinstance(score.get('unknown'), (list, tuple, set)) \\\n",
+     "        elif score.get('unknown') is not None \\\n",
      (T_CONVERGE,), KILLED),
 
     # ---- the registration holes, and what they were hiding ------------------

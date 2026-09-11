@@ -3540,14 +3540,29 @@ def _self_test():
         _arm = 'refusal' if out.startswith('<error>') else 'body'
         want(len(out.splitlines()) <= _CAP,
              f'{key} stays under {_CAP} lines ({_arm}, {len(out.splitlines())})')
-        # The `of=` count is text the model reads as its own sense of how far
-        # along it is, so it is derived from the registry and checked against
-        # it -- ten tags used to carry a hardcoded 5. The sibling driver had
-        # four different counts for one procedure (#936 C2); this one agreed
-        # with STAGES by luck, and nothing looked.
-        _m = re.search(r'\bof="(\d+)">', out)
-        want(_m is None or int(_m.group(1)) == len(STAGES),
-             f'{key} counts the stages the registry has')
+    # The `of=` count is text the model reads as its own sense of how far along
+    # it is, so it is derived from the registry and checked against it -- ten
+    # tags used to carry a hardcoded 5. The sibling driver had SIX different
+    # counts for one procedure (#936 C2); this one agreed with STAGES by luck,
+    # and nothing looked.
+    #
+    # READ OFF --dump-all, not off the loop above. Under that loop's cheap
+    # fixture L2, L3 and L5 refuse, and a refusal carries no `of=` tag, so a
+    # per-stage check there passed unconditionally for three of the five and
+    # covered 2 of the 10 tags -- which is the exact defect corrected in
+    # placement_driver and not carried down. --dump-all renders every body,
+    # including both delegated arms, so it reaches every tag.
+    _dbuf = io.StringIO()
+    with contextlib.redirect_stdout(_dbuf):
+        main(['--dump-all'])
+    _tags = re.findall(r'\bof="(\d+)">', _dbuf.getvalue())
+    _wrong = sorted({t for t in _tags if int(t) != len(STAGES)})
+    want(not _wrong,
+         f'every of= tag counts the stages the registry has '
+         f'({len(_tags)} tag(s); wrong: {_wrong or "none"})')
+    # Vacuity: a dump that rendered nothing would pass the line above.
+    want(len(_tags) >= len(STAGES),
+         f'--dump-all renders an of= tag for every stage ({len(_tags)})')
 
     # --list is read back from the PRINTER, not re-derived from STAGES:
     # re-deriving would pass on a --list that printed nothing at all.

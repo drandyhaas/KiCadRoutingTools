@@ -1606,16 +1606,27 @@ def _next_commands(body):
             if ln.startswith('</'):
                 break
             block.append(ln)
-        # Split the block into the commands it prints. A line invoking python3
-        # starts a new one; its backslash continuations belong to it. Text
-        # before the first invocation is its own segment, so a handoff written
-        # as bare prose is still read.
-        segs, cur = [], []
+        # Split the block into the commands it prints. A COMMAND is a line
+        # invoking python3 plus exactly its backslash continuations -- nothing
+        # else. Ending a command only at the next `python3` folded any prose
+        # AFTER it into the command, so a handoff could pass by mentioning a
+        # flag in a following sentence while its printed command omitted it:
+        # the same defeat as prose-before, from the other side, and the
+        # docstring above claimed immunity to both. Prose is still collected
+        # into its own segment, so a handoff written as bare prose is read.
+        segs, cur, cont = [], [], False
         for ln in block:
-            if 'python3' in ln and cur:
+            starts = 'python3' in ln
+            if cont:                       # a continuation of the command in cur
+                cur.append(ln)
+                cont = ln.rstrip().endswith('\\')
+                continue
+            if cur and (starts or any('python3' in c for c in cur)):
+                # A new invocation, or prose AFTER a command that has ended.
                 segs.append(cur)
                 cur = []
             cur.append(ln)
+            cont = starts and ln.rstrip().endswith('\\')
         segs.append(cur)
         for seg in segs:
             text = ' '.join(s.rstrip('\\').strip() for s in seg)
@@ -2076,11 +2087,12 @@ def _self_test():
 
     # EVERY `Next:` LINE REACHES ITS STAGE.
     #
-    # Four of them named a stage without the flags that stage hard-requires --
-    # P4 and P6 both refuse without --render-json -- so a reader following the
-    # handoff exactly as printed got exit 4 and a refusal instead of the next
-    # step. P3's Next: line carried the flag all along, which is what made it
-    # an oversight rather than a policy.
+    # SIX of them named a stage without the flags that stage hard-requires --
+    # P0->P4, P1->P4, P1->P6, P4->P6, P5->P4, P6->P4; P4 and P6 both refuse
+    # without --render-json, and P4 without --before too -- so a reader
+    # following the handoff exactly as printed got exit 4 and a refusal instead
+    # of the next step. P3's Next: line carried its flags all along, which is
+    # what made this an oversight rather than a policy.
     #
     # This checks the FLAG SET, not the placeholder paths: each flag on the
     # printed command is re-pointed at fabricated evidence and the named stage

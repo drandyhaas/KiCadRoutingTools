@@ -221,10 +221,15 @@ leave running and should be started at the beginning.
 Looking is not enough on its own, and that is measured too: run 25's boundary
 review followed the mandate above to the letter -- sheet built with stdout
 suppressed, viewed, observations written first, then reconciled -- and passed a
-layout a human rejects at a glance. A bridge IC 8.10 mm from its USB socket with the
-pair needing a hop, a header driving two resistors into a 0.133 mm body OVERLAP (not a seam --
-negative means the bodies interpenetrate), three
-nets forced onto the back. Both reviewers looked for what the list above names,
+layout a human rejects at a glance. The bridge IC and its USB receptacle put their
+differential pair across an **8.10 mm** span with the pair needing a hop; the bridge
+and the crystal sit at a **-0.133 mm** body seam, which is not a gap at all --
+negative means the SSOP body end intrudes into the can; three
+nets forced onto the back. (Both figures are `references/boundary-criteria.md`,
+rows 25 and 102, measured with the shipped instruments. The journal reported 9.3 mm
+and 0.183 mm for these, and NEITHER reproduced -- read the denominator off the same
+document, because a span between pin rows is not a distance between parts.)
+Both reviewers looked for what the list above names,
 because that is what the text told them to look for. The run-23 lesson repeated
 one level up: numbers gate legality, nothing gates LOOKING, and now the LOOK has
 a list and nothing gates JUDGING.
@@ -629,7 +634,7 @@ writing a script to answer a question, check whether one of them already does.
 | will this hand join fit, BEFORE committing it | `check_join.py BOARD NET x,y,layer ... via:x,y` | stages the candidate polyline+vias onto a copy of the board and diffs the REAL check_drc engine (netclasses, `.kicad_dru`, rotated pads, edge, hole-to-hole), plus missing-via and same-net-stack checks DRC omits. Exit 0 clean / 1 violations. Rung 8's condition 3 |
 | is this even the engine I pinned | `route.py --capabilities` / `krt_capabilities.py --require` | a chain can otherwise run green against a clone missing the module it depends on. **Spelling is `module:--flag`, WITH the dashes.** And ground-truth a PLANE-step flag with `--help`: `--require` scans imports one level to catch shared registrars, and both plane scripts import `route.py` — so they used to inherit its whole vocabulary and answer OK for flags argparse rejects with exit 2 (fixed, but the lesson stands: a capability gate is evidence, not proof) |
 | step back to iteration N | `converge.py step-back --ledger wk/ledger.jsonl --iteration N --out wk/iterN.kicad_pcb` | byte-exact, because the board is addressed by content instead of by a path three iterations overwrote |
-| re-run what iteration N did | `converge.py replay --iteration N` | replays the recorded argv. If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
+| re-run what iteration N did | `converge.py replay --ledger wk/ledger.jsonl --iteration N` | replays the recorded argv (`--ledger` is required; without it argparse exits 2). If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
 
 **Trust order when instruments disagree on connectivity: the KiCad oracle
 (`kicad_unconnected`) > `net_forensics` islands > `board_score` components >
@@ -1300,7 +1305,7 @@ with no documented route. Measured from `--help`:
 | `--budget N` | `converge.py verdict` **and** `loop_driver.py` (default 100) | the iteration budget stop condition 2 is measured against |
 | `--exhausted {placement,routing}` | `converge.py record` only, and it REQUIRES `--exhausted-reason` | the honest way out of a plateau you cannot break: declare the half exhausted, in writing, with the reason. A later lap in that half RETRACTS the declaration — no flag, no edit |
 | `--score-file PATH` | `converge.py record` only | the score as a FILE. Prefer it: `--score "$(cat ...)"` exceeds the OS argv limit around 32 kB |
-| `--congestion-json PATH` | `loop_driver.py` only | the congestion pair the close-out gate reads |
+| `--congestion-json PATH` (+ `--congestion-baseline PATH`) | `loop_driver.py` only | **L4, not the close-out.** `--shape parameter` is REFUSED without them: every placement test the classifier runs is per-NET, so global capacity is invisible to it, and the pair is the copper-free board the route ran on against the board placement started from. `--accept-congestion REASON` is the override |
 | `--verifier-verdict PATH` | `loop_driver.py` only | the on-disk verdict file L5 cross-checks against the ledger's live claim |
 
 `loop_driver` shells out to `converge verdict`, forwarding `--budget` and

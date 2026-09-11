@@ -1056,8 +1056,12 @@ def build_parser():
                         'USB pair, 0.4mm rails) is invisible to it. First '
                         'matching glob wins')
     p.add_argument('--length-groups', metavar='JSON',
-                   help='{"group": {"nets": [...], "tolerance_mm": 0.1, '
-                        '"mode": "pin_pair"}} -- enables the length component')
+                   help='JSON FILE of {"group": {"nets": [...], '
+                        '"tolerance_mm": 0.1, "mode": "pin_pair"}} -- enables '
+                        'the length component. A PATH, like --net-min-widths: '
+                        'anything that is not an existing file leaves length '
+                        'matching UNGRADED (ran: false) and the board scoring '
+                        'exit 0, which reads as a pass')
     p.add_argument('--placement-terms', action='store_true',
                    help='grade the PLACEMENT terms (#894): worst diff-pair '
                         'span, crossed pin orders, cluster distance, plane-cut '

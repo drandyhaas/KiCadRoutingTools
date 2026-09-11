@@ -424,12 +424,15 @@ def test_the_skills_key_what_the_instruments_emit():
     # extractor breaking is far likelier than the skills losing every claim.
     check('the evidence-map channel found rows', len(em_rows) >= 60,
           f'{len(em_rows)}')
-    # ...and the floor alone is not enough, because attribution is by TOOL NAME
-    # ON THE HEADING LINE: rename one heading so it drops the tool and every row
-    # beneath it silently stops being checked while the total stays over the
-    # floor. Measured when #936 split section E in two: the split is safe only
-    # because BOTH new headings kept the literal `check_floorplan.py`; dropping
-    # it from one would have un-gated ~18 rows and still printed PASS.
+    # ...and a floor alone is not the whole guard, because attribution is by
+    # TOOL NAME ON THE HEADING LINE: rename one heading so it drops the tool and
+    # every row beneath it silently stops being checked. Measured when #936
+    # split section E in two -- the split is safe only because BOTH new headings
+    # kept the literal `check_floorplan.py` -- dropping it takes the channel
+    # 73 -> 58 (E2) or 73 -> 59 (E1), i.e. 15 or 14 rows. At TODAY's population
+    # the raised floor above catches that too; this arm is what still holds when
+    # the population grows past 60 by other means, which is exactly when a lost
+    # section stops showing up in the total.
     #
     # `skipped` is the count of `##` headings naming no tool this file runs. It
     # is legitimate for a page to describe a tool this gate does not run, so the
