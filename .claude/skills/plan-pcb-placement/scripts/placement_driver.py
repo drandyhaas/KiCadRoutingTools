@@ -127,6 +127,69 @@ Next: python3 -X utf8 {sys.argv[0]} --stage P0 --board {a.board}
 </stage_instructions>'''
 
 
+def _p0_reading(a):
+    """What the two instruments SAY, once they have been produced (#937).
+
+    P0 asks the reader to "say which row you are in" over a five-row table
+    whose first and fourth rows are arithmetic on two numbers this stage's own
+    flags already name -- and P0 never opened either file. Judgement spent on
+    arithmetic is judgement not spent on the board, so the driver does the
+    arithmetic and the reader disposes.
+
+    WHAT IT DOES NOT DO IS PICK THE ROW. Two of the five -- `unplaced` and
+    `board carries copper` -- are not derivable from these documents at all
+    (P1's own text says an exit code does not test placedness, and neither
+    file carries a track or via count), so a driver that announced a row would
+    be announcing one it cannot see. It reports what each instrument reads and
+    NAMES what it cannot.
+
+    Returns '' when neither document was supplied -- the first-entry case,
+    where there is nothing to read yet.
+    """
+    if not a.drc_json and not a.assembly_json:
+        return ''
+    drc = _load(a.drc_json, 'drc')[0] if a.drc_json else None
+    asm = _load(a.assembly_json, 'assembly')[0] if a.assembly_json else None
+    rows, v, b = [], None, None
+    if a.drc_json:
+        v = _dig(drc, 'violations')
+        if v is None:
+            v = _dig(drc, 'total_violations')
+        if isinstance(v, list):
+            v = len(v)
+        rows.append('  check_drc       : ' + (
+            f'{v} violation(s) on the copper-free board'
+            if isinstance(v, int) else
+            f'NO violation count in {a.drc_json} -- that file answers nothing'))
+    if a.assembly_json:
+        # THE VERDICT, not `blocking`. Since #918 `blocking` is one of five
+        # not_buildable conjuncts, so a board unbuildable through a
+        # coincident-origin stack or a containment reads `blocking` 0 -- and
+        # one tracked board does exactly that.
+        b = _dig(asm, 'buildable')
+        rows.append('  check_assembly  : '
+                    + str(_dig(asm, 'verdict') or 'no verdict recorded')
+                    + (f'   [blocking {_dig(asm, "blocking")}, 1 of its 5 '
+                       f'conjuncts]' if _dig(asm, 'blocking') is not None
+                       else ''))
+        oob = _dig(asm, 'oob_pad_copper_count')
+        if isinstance(oob, int) and oob > 0:
+            rows.append(f'  ...and PAD COPPER OFF THE OUTLINE on {oob} '
+                        f'part(s) -- the top-priority placement defect, '
+                        f'because those nets cannot be routed at all')
+    clash = ''
+    if isinstance(v, int) and isinstance(b, bool) and (v == 0) != b:
+        clash = ('\nTHE TWO DISAGREE: one reads clean and the other does not. '
+                 'Say which you are acting on, and why, before you move a '
+                 'part.\n')
+    return ('\nWHAT THE INSTRUMENTS SAY about the files you named -- the row '
+            'is still yours to pick:\n\n' + '\n'.join(rows) + '\n' + clash +
+            '\nNeither document can tell you whether this board is UNPLACED '
+            'or whether it CARRIES COPPER: no pose census and no track count '
+            'is in either. Those two rows need py_tools/board_brief.py.\n\n'
+            'Name your row, and dispose of any disagreement above.\n')
+
+
 def p0(a):
     """Decide whether to touch the placement at all."""
     return f'''<stage_instructions stage="P0" name="gate" of="{len(STAGES)}">
@@ -161,6 +224,7 @@ the board declared nothing and the number is a fallback, not agreement.
 Every violation a COPPER-FREE board returns is a placement defect that no
 router can remove.
 
+{_p0_reading(a)}
 Then classify by what you MEASURED, and say which row you are in:
 
   both clean                  -> the placement is fit. Do not run a pass over
@@ -935,11 +999,25 @@ def _guard_damage(a):
             '--json wk/drc0.json')
     if isinstance(count, int) and count == 0:
         asm, _ = _load(a.assembly_json, 'assembly')
+        # THE VERDICT, not `blocking` (#937). `blocking` is ONE of
+        # check_assembly's five not_buildable conjuncts since #918, so a board
+        # unbuildable through a coincident-origin stack, a containment, copper
+        # on a locked part or a moved-vs-baseline courtyard gate reads
+        # `blocking` 0 -- and then this guard told the reader there was "no
+        # damage for this stage to repair" about a board its own instrument
+        # had just graded NOT BUILDABLE. One tracked board is exactly that
+        # case. `buildable` is the field that answers the question this guard
+        # is asking; `blocking` is the fallback for a document old enough not
+        # to carry it.
+        buildable = _dig(asm, 'buildable') if asm else None
         blocking = _dig(asm, 'blocking') if asm else None
-        if not blocking:
+        undamaged = (not blocking) if buildable is None else bool(buildable)
+        if undamaged:
             return False, (
-                'The copper-free board reports 0 violations and no blocking '
-                'assembly pair. There is no damage for this stage to repair, '
+                'The copper-free board reports 0 violations and '
+                + ('an assembly verdict of buildable'
+                   if buildable is not None else 'no blocking assembly pair')
+                + '. There is no damage for this stage to repair, '
                 'and running a placement search on a legal board makes it '
                 'worse (measured).\n\nIf you want a different ARRANGEMENT '
                 'rather than a repair, that is --stage P5. If you were '
@@ -1908,8 +1986,19 @@ def _refusal_scenarios(tmp):
         ('a DRC json that measures nothing', base
          + ['--drc-json', wrote('bare.json', {'schema': 1})]),
         ('a JSON file that does not parse', base + ['--drc-json', unreadable]),
+        # BOTH ARMS of the no-damage refusal (#937). The first has no
+        # assembly document at all, so the guard falls back to `blocking`;
+        # the second supplies a verdict, which is the field it now reads --
+        # `blocking` is 1 of check_assembly's 5 not_buildable conjuncts since
+        # #918, so a board can be NOT BUILDABLE at blocking 0 and this guard
+        # used to call that "no damage to repair".
         ('a board with no damage to repair', base
          + ['--drc-json', wrote('clean.json', {'violations': 0})]),
+        ('a board the assembly verdict calls buildable', base
+         + ['--drc-json', wrote('clean2.json', {'violations': 0}),
+            '--assembly-json', wrote('asm_ok.json',
+                                     {'buildable': True, 'blocking': 0,
+                                      'verdict': 'buildable (blocking 0)'})]),
         # P3's lock advice
         ('no lock advice', base + damaged),
         ('unlocked_high with nothing waived', base + damaged
