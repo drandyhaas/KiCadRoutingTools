@@ -131,13 +131,18 @@ half went to the instrument. A run once spent nine of eleven iterations on how t
 chain measures itself and finished with five nets carrying no copper — `status`
 says that out loud, and nothing else in the loop does.
 
-The shape below is what `record` ACTUALLY writes — one JSONL line per
-iteration (there is no wrapper object, no `convergence.json`; the ledger IS
-the `.jsonl` file):
+The shape below is the SUBSET of `record`'s line that carries weight — one
+JSONL line per iteration (there is no wrapper object, no `convergence.json`;
+the ledger IS the `.jsonl` file). A real row has **15** keys, not these 8:
+`accepted, defects, iteration, kind, lens_source, lenses, lever, lever_argv,
+parent_sha, renders, result_sha, scope_refs, score, shape, t` — measured by
+reading one back, which is the only way to know. `stop_condition` and
+`stop_reason` (#901, below) join them on a row that carries one. Read a row,
+do not trust a block:
 
 ```jsonc
 {"iteration": 3,                       // position in the ledger
- "kind": "completion",                 // or "systemic": budget went to the instrument
+ "kind": "completion",                 // completion | placement | systemic | classification
  "parent_sha": "9c41f0...",            // result_sha of the last ACCEPTED entry
  "result_sha": "2ab77e...",            // content hash; step-back checks it out byte-exact
  "lever": "rip lever: --rip-existing-nets GPIO7, width pinned",
@@ -149,7 +154,10 @@ the `.jsonl` file):
 Fields that carry weight:
 
 - **`parent_sha` / `result_sha`** — boards live in the content store, not at
-  paths; `converge.py step-back --to <sha>` checks one out byte-exact. The
+  paths; `converge.py step-back --ledger wk/ledger.jsonl --to <sha> --out
+  wk/stepback.kicad_pcb` checks one out byte-exact (`--ledger` and `--out`
+  are BOTH required; without them argparse exits 2 before anything runs).
+  The
   parent is the last *accepted* board, **not** iteration N−1 — it is what
   `render_placement --before` takes; using N−1 renders a delta that never
   existed.
@@ -216,8 +224,9 @@ python3 -X utf8 py_router/make_movie.py \
 
 - `.mp4` needs `imageio` + `imageio-ffmpeg` and silently falls back to a sibling
   `.gif`. Ask for `.gif` directly when you know they are missing.
-- Hand it over with `SendUserFile`. **Do not `Read` it** — show-without-reading,
-  and its frames would spend the ≤3-image budget for nothing.
+- Hand it over with `SendUserFile`. **Do not `Read` it** — show-without-reading.
+  Reading a movie pulls every frame into context to be looked at once, and
+  the frames are the panels the renders already reported in words.
 
 ## 5. What the final report must contain
 
