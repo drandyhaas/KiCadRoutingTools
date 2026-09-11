@@ -676,6 +676,27 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   on how the outline was spelled; and a round window's bounding-box CORNER
   escapes a round board while the circle does not. Both parse paths fill these,
   sharing one decision function (`kicad_parser.classify_outline_owners`).
+- **A footprint's own COPPER is copper (#908).** `fp_poly`/`fp_line`/`fp_arc`/
+  `fp_rect`/`fp_circle` on `F.Cu`/`B.Cu` inside a footprint block — a SOT89
+  tab, a PCB antenna, a solder-jumper bridge — parse as net-0
+  `Segment(graphic=True, owner_ref=<footprint key>)`, exactly like #337's
+  board-level `gr_*`, in BOTH parse paths. A footprint shape cannot carry a
+  `(net ...)` in KiCad, so #337's "net-tied is functional, net-less is a logo"
+  guard cannot split them: **`footprint_copper_is_functional(pad_count)` does,
+  and the writer's silkscreen mover reads the same predicate** — a footprint
+  with copper pads owns a land pattern (modelled, and NOT relocated to silk any
+  more; it used to be, on every write, on both fronts), a pad-less one is a
+  logo (relocated, as #146 has always done, and therefore not modelled). NPTH
+  pads do not count. Only the PERIMETER is modelled, never the interior fill.
+  **The obstacle map's own-pad lift is the half that is not free**: net-0
+  copper is foreign to every net including the pad it was drawn around, so
+  `check_drc.graphic_own_pad_nets` lifts the graphic segments that touch a pad
+  of their OWN footprint, per SEGMENT — never the whole cluster, or a GND route
+  would cross watchy's whole antenna. It is a subset of
+  `graphic_effective_nets(include_mutable=False)` (attrs + pads), which is a
+  subset of the checker's `include_mutable=True` answer, so **the generator can
+  never be more permissive than the checker**; do not "simplify" it onto the
+  full answer.
 - `footprint.ref_label` - Optional[RefLabel]: the Reference silkscreen text's
   geometry (#481): `at_x/at_y` (footprint-LOCAL mm), `rotation` (the stored
   angle, which is ABSOLUTE board angle — probed on KiCad 10, `% 360`

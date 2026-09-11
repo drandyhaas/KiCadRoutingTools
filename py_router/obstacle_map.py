@@ -76,6 +76,10 @@ class _StaticStampProxy:
         return getattr(self._real, name)
 
 
+#: Shared empty set for the #908 own-pad lift lookup, so the hot segment
+#: loop allocates nothing per row.
+_EMPTY_NETS = frozenset()
+
 def _obstacle_progress_reporter(progress_callback):
     """Throttled sub-phase progress for the base obstacle build (#556).
 
@@ -210,12 +214,39 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     # Use actual segment width for obstacle, and layer-specific width for routing track
     _seg_cell_batch: Dict[int, list] = {}
     _seg_via_batch: list = []
+    # #908: copper a FOOTPRINT draws (an SOT89 tab, a solder-jumper bridge, a
+    # PCB antenna) carries no net, so it is foreign copper to every net --
+    # including the net of the pad it was drawn around. Stamped whole, U2's tab
+    # SEALS esp_prog pad 2, which is #907's failure mode manufactured by #908's
+    # fix. The lift is per SEGMENT and own-footprint only: the edges that
+    # actually touch the pad stop blocking that pad's net, the rest of the
+    # shape keeps blocking everything. Never the whole cluster -- see
+    # check_drc.graphic_own_pad_nets for why (watchy's antenna).
+    #
+    # It is PER NET, and the base map is built for a whole BATCH: skipping the
+    # stamp when the lift net is anywhere in `nets_to_route_set` would drop the
+    # copper for EVERY net in the run -- measured, on `route.py`'s default
+    # all-nets call: tigard 4/4 and ulx3s 24/24 footprint-copper edges
+    # unmodelled, i.e. #908 nullified on the shipping path. So the segment is
+    # always stamped and its rows are RECORDED per net, for the single-net
+    # shortcut below and for `prepare_obstacles_inplace` to lift and restore
+    # exactly the way the net-tie corridor lift already does.
+    _own_pad_nets = {}
+    if any(getattr(s, 'graphic', False) and getattr(s, 'owner_ref', '')
+           for s in pcb_data.segments):
+        from check_drc import graphic_own_pad_nets
+        # NOT wrapped: this decides whether a pad is REACHABLE, not what gets
+        # printed. Losing it silently reinstates the seal it exists to prevent,
+        # indistinguishable from a routing failure.
+        _own_pad_nets = graphic_own_pad_nets(pcb_data)
+    _own_pad_rows: Dict[int, list] = {}
     _n_segs = len(pcb_data.segments)
     for _seg_i, seg in enumerate(pcb_data.segments):
         if (_seg_i & 511) == 0:
             _report("copper", _seg_i, _n_segs)
         if seg.net_id in nets_to_route_set:
             continue
+        _lift_nets = _own_pad_nets.get(id(seg)) if _own_pad_nets else None
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
             # Copper on a layer OUTSIDE config.layers (a 6/8-layer board routed
@@ -266,6 +297,16 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
             expansion_mm, coord.grid_step)
         if len(cells_arr):
             _seg_cell_batch.setdefault(layer_idx, []).append(cells_arr)
+            if _lift_nets:
+                # The exact rows this segment contributes, in the 4-column
+                # (span + layer) form the flush below uses, so the lift is a
+                # balanced remove/re-add of THIS copper's own stamp and can
+                # never desync a refcount.
+                _rows = np.empty((len(cells_arr), 4), dtype=np.int32)
+                _rows[:, :3] = cells_arr
+                _rows[:, 3] = layer_idx
+                for _ln in _lift_nets:
+                    _own_pad_rows.setdefault(_ln, []).append(_rows)
         vias_arr = segment_blocked_spans(
             seg.start_x, seg.start_y, seg.end_x, seg.end_y,
             via_block_mm, coord.grid_step)
@@ -364,10 +405,54 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
     pcb_data._net_tie_price = {
         nid: sorted(e['cells'] - e.get('safe_cells', set()))
         for nid, e in _tie_corridors.items()}
+    # NOTE (#908): this bake has NO `_baked` marker, unlike the own-pad lift
+    # below, so `prepare_obstacles_inplace` lifts the same rows a second time
+    # when a base built for ONE net is then prepared for that net. Left as it
+    # is deliberately -- fixing it changes routing on net-tie boards and is
+    # owed its own measurement -- but do NOT copy this shape onto a new lift,
+    # and do not "restore symmetry" by deleting the marker below.
     if len(nets_to_route_set) == 1:
         for _arr in pcb_data._net_tie_lift.get(next(iter(nets_to_route_set)), []):
             if len(_arr):
                 obstacles.remove_blocked_cells_batch(_arr)
+
+    # #908 own-pad lift, same shape as the net-tie one above: per net, applied
+    # here when the map IS this net's map, and left to
+    # `prepare_obstacles_inplace` (which removes and restores it around each
+    # net's own route) when the map serves a whole batch.
+    pcb_data._graphic_own_pad_lift = {
+        _nid: np.ascontiguousarray(np.concatenate(_rws))
+        for _nid, _rws in _own_pad_rows.items() if _rws}
+    # WHICH net this build BAKED into the map it is about to return, so
+    # `prepare_obstacles_inplace` does not lift the same rows a SECOND time.
+    #
+    # It has to be recorded, because both consumers of this base map live in
+    # ONE loop and are chosen per net: `single_ended_loop` uses
+    # prepare/restore when it has a working map and a net cache, and falls
+    # back to `build_single_ended_obstacles` (a clone, no prepare) when it
+    # does not. So the bake cannot simply be dropped in favour of prepare --
+    # the fallback clone would then seal the pad -- and prepare cannot
+    # unconditionally lift either. Measured on esp_prog before this marker
+    # existed, via `route.py --nets 'Net-(C1-Pad1)'` (one net, so the bake
+    # fires AND prepare runs): the second removal took 28 cells that a pad
+    # also blocked from refcount 2 straight to 0, and the restore put them
+    # back at 1 -- copper unchanged on that board, but the map's refcounts no
+    # longer matched the copper they stood for, which is the desync the
+    # remove/re-add pairing exists to make impossible.
+    #
+    # Written UNCONDITIONALLY and immediately beside the dict it guards: the
+    # two are the same build's answer, so they can never describe different
+    # builds. That matters because a nested single-net build on this same
+    # pcb_data (`net_rescue._pristine_rescue_map` passes the run's own
+    # pcb_data) replaces the dict; the marker is replaced with it rather than
+    # surviving as a stale claim about rows that are gone.
+    pcb_data._graphic_own_pad_lift_baked = None
+    if len(nets_to_route_set) == 1:
+        _nid = next(iter(nets_to_route_set))
+        _arr = pcb_data._graphic_own_pad_lift.get(_nid)
+        if _arr is not None and len(_arr):
+            obstacles.remove_blocked_cell_spans_batch(_arr)
+            pcb_data._graphic_own_pad_lift_baked = _nid
 
     # Add board edge clearance
     _report("board edge", 0, 0, force=True)
@@ -2654,14 +2739,20 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
 
 
 def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
-                                   config: GridRouteConfig) -> "np.ndarray":
+                                   config: GridRouteConfig,
+                                   pads=None) -> "np.ndarray":
     """#581: (N, 2) via-block cells over the net's own SMD pads when an active
     (> 0) same_net_pad_clearance is on the config; empty otherwise.
 
     Blocks VIA placement only (never tracks) at pad-edge + via/2 + clearance,
     mirroring plane_obstacle_builder._add_pad_via_obstacle's geometry.
     Through-hole pads are exempt (their barrel is the layer transition, and
-    the #581 concern is SMD reflow)."""
+    the #581 concern is SMD reflow).
+
+    `pads` restricts the answer to those pads (#907): the seal diagnosis needs
+    to know which cells around ONE pad this flag is responsible for, without
+    rebuilding or mutating the map. Defaults to every pad of the net, which is
+    what the stampers ask for."""
     snpc = getattr(config, 'same_net_pad_clearance', -1.0)
     if snpc is None or snpc <= 0:
         return np.empty((0, 2), dtype=np.int32)
@@ -2669,7 +2760,7 @@ def same_net_pad_via_keepout_cells(pcb_data: PCBData, net_id: int,
     coord = GridCoord(config.grid_step)
     margin = config.via_size / 2 + snpc + config.grid_step / 2
     chunks = []
-    for pad in pcb_data.pads_by_net.get(net_id, []):
+    for pad in (pcb_data.pads_by_net.get(net_id, []) if pads is None else pads):
         if getattr(pad, 'drill', 0):
             continue
         gx, gy = coord.to_grid(pad.global_x, pad.global_y)

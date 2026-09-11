@@ -493,6 +493,11 @@ python py_router/check_drc.py kicad_files/output.kicad_pcb
 # bogus zone-clearance errors from stale pours - see tests/README.md for details)
 kicad-cli pcb drc --refill-zones --format json -o drc.json kicad_files/output.kicad_pcb
 
+# ...because a routed board ships zone OUTLINES with no filled_polygon, so an
+# unrefilled grade reports plane opens that are not real (#910). To ship a
+# board that already carries its fills, add --write-fill to the route step, or:
+python py_tools/fill_for_delivery.py kicad_files/output.kicad_pcb -o delivered.kicad_pcb
+
 # Check connectivity (detects unrouted nets, broken routes, and T-junctions)
 python py_router/check_connected.py kicad_files/output.kicad_pcb
 

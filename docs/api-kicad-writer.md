@@ -323,6 +323,15 @@ logos/artwork (graphic polys, lines, arcs). The GUI plugin mirrors both moves on
 apply (via `kicad_routing_plugin/gui_utils.move_copper_graphics_to_silkscreen_board`)
 so its output matches the CLI writer (issue #146).
 
+**Board-level `gr_*` only, since #908.** A footprint shape cannot carry a
+`(net …)` in KiCad, so the "net-tied copper is functional, leave it" guard was
+a no-op for `fp_*` and every footprint copper shape was relocated on every
+write — including a part's own land-pattern copper. Both fronts now ask
+`kicad_parser.footprint_copper_is_functional(pad_count)`: a footprint **with**
+copper pads keeps its copper (the parser models it, so nothing routes over it
+any more), a **pad-less** one is a logo and is relocated exactly as before.
+The pass reports what it kept as well as what it moved.
+
 ```python
 add_teardrops_to_pads(content: str, best_length_ratio=0.5, max_length=1.0,
                       best_width_ratio=1.0, max_width=2.0,

@@ -1555,6 +1555,27 @@ def route_single_ended_nets(
                                  (result.get('blocked_cells_backward') or []))
                 if not _cells301:
                     _cells301 = list(locals().get('blocked_cells') or [])
+                # #907: say WHY nothing is rippable when the answer is "a
+                # FLAG THIS RUN SET closed the last via site". Ahead of the
+                # #652 and #301 hints (the static-boxin verdict above is
+                # printed by the `no rippable blockers` line itself) because
+                # it is the only cause whose remedy is a command-line change
+                # the caller already controls -- and because nothing else in
+                # the report names the flag at all.
+                try:
+                    from routing_diagnostics import same_net_pad_seal_hint
+                    _h907, _v907 = same_net_pad_seal_hint(
+                        pcb_data, config, net_id, net_name,
+                        obstacles=state.working_obstacles,
+                        return_verdict=True)
+                    if _h907:
+                        _c907 = condense_hint(_h907)
+                        if _c907:
+                            print(f"  {_c907}")
+                        record_net_event(state, net_id, "sealed_by_snpc",
+                                         _v907)
+                except Exception:
+                    pass
                 # #652: say WHY nothing is rippable when the answer is
                 # "this ball never got an escape". Placed before the #301 hint
                 # because it is the actionable one -- #301 names copper to rip,

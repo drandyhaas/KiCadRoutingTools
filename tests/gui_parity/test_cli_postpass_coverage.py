@@ -107,6 +107,12 @@ REGISTRY = {
 # gui_utils.move_copper_graphics_to_silkscreen_board. Any new writer-level pass
 # needs the same treatment.
 #
+# #908 made that twin pair carry a DECISION as well as a walk (a footprint with
+# pads owns functional copper and is exempt from the move). Both fronts read the
+# one predicate kicad_parser.footprint_copper_is_functional rather than each
+# counting pads its own way, and tests/test_908_writer_owner_gate.py measures
+# the two fronts against each other on real boards.
+#
 # OPEN GAP (2026-07-28): kicad_writer.strip_zero_length_edge_cuts sits in exactly
 # that position -- wired into output_writer / plane_io / kicad_writer beside the
 # silkscreen movers -- and has NO GUI twin yet. Consequence: a board routed
@@ -161,6 +167,14 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
 KNOWN_CLI_ONLY = {
     'run_drc': 'bga/qfn fanout post-engine DRC graze audit -> JSON_SUMMARY '
                'drc_grazes (report-only, no board mutation)',
+    # #910. OPT-IN (--write-fill) and CLI-only ON PURPOSE: it writes
+    # `filled_polygon` blocks into the DELIVERED FILE, and the GUI has no
+    # delivered file -- it applies copper to the user's open board, where
+    # KiCad fills live and pressing B is the same operation. A GUI twin would
+    # be a button that does what the application already does.
+    'write_filled_board': 'route.py --write-fill: fills the WRITTEN board for '
+                          'delivery; the GUI mutates a live board KiCad fills '
+                          'itself, so there is no file to fill',
 }
 
 

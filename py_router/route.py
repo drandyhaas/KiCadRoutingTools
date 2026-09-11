@@ -1028,7 +1028,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
               "--impedance <ohms> to route as a coplanar waveguide.")
     if impedance is not None:
         if not pcb_data.board_info.stackup:
+            # #909: "no stackup" is true and tells the reader nothing about
+            # whether authoring one would have helped. The repo's own solvers
+            # answer that against a NOMINAL stack, in one call, with numbers.
             print("WARNING: No stackup found in PCB file. Using fixed track width.")
+            try:
+                from impedance import (achievability_note, tightest_pin_gap,
+                                       _impedance_scope_net_ids)
+                _ly = (layers[0] if layers else 'F.Cu')
+                _note, _ = achievability_note(
+                    pcb_data, _ly, impedance,
+                    is_differential=False,
+                    spacing=0.0,
+                    min_pitch_gap=tightest_pin_gap(
+                        pcb_data, _impedance_scope_net_ids(pcb_data,
+                                                           net_names)))
+                if _note:
+                    print("  " + _note)
+            except Exception:
+                pass
         else:
             # #486: which nets run through a ground pour on their own layer?
             # An empty coplanar_nets with a gap set means "all of them", so the
@@ -3907,6 +3925,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     blockers_report = []
     boxed_in_report = []
     fanout_dropped_report = []
+    sealed_by_snpc_report = []
     try:
         _final_failed_ids = list(dict.fromkeys(
             failed_single_ids + [m['net_id'] for m in failed_multipoint]))
@@ -3962,12 +3981,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _fd = _ev.get('details') or _fd
             if _fd:
                 fanout_dropped_report.append(dict(_fd, net=_name))
+            # #907: and the fourth cause -- a FLAG THIS RUN SET closed the
+            # last legal via site. Its own key for the same reason as the
+            # three above: it answers a different question, and it is the only
+            # one whose remedy is a command-line change the caller already
+            # controls. Nothing else in the summary names the flag.
+            _sn = None
+            for _ev in (state.net_history.get(_nid) or []):
+                if _ev.get('event') == 'sealed_by_snpc':
+                    _sn = _ev.get('details') or _sn
+            if _sn:
+                sealed_by_snpc_report.append(dict(_sn, net=_name))
         if blockers_report:
             summary['blockers'] = blockers_report
         if boxed_in_report:
             summary['boxed_in'] = boxed_in_report
         if fanout_dropped_report:
             summary['fanout_dropped'] = fanout_dropped_report
+        if sealed_by_snpc_report:
+            summary['sealed_by_snpc'] = sealed_by_snpc_report
     except Exception:
         blockers_report = []
     # #409 follow-up: pad-pair routability tallies (PRR ingredients: connected
@@ -6490,6 +6522,15 @@ For differential pair routing, use route_diff.py:
                         help="Print memory usage statistics at key points during routing")
     parser.add_argument("--add-teardrops", action="store_true",
                         help="Add teardrop settings to all pads and vias in output file")
+    parser.add_argument("--write-fill", action="store_true",
+                        help="After writing the board, fill its zones with "
+                             "KiCad's own ZONE_FILLER so the deliverable "
+                             "carries (filled_polygon ...) blocks (#910). "
+                             "Without it the board ships zone OUTLINES only, "
+                             "and a grade without --refill-zones reports "
+                             "plane opens that are not real. Needs KiCad's "
+                             "bundled python; the sibling .kicad_pro and its "
+                             "net classes are preserved.")
     parser.add_argument("--stats", action="store_true",
                         help="Collect and print A* search statistics for debugging heuristic efficiency")
 
@@ -7134,6 +7175,31 @@ For differential pair routing, use route_diff.py:
                 persist_same_net_pad_clearance(_pro, args.same_net_pad_clearance)
         except Exception as e:
             print(f"  (skipped protected-nets record: {e})")
+    # #910: OPT-IN delivery fill. Last, because it is the only step that wants
+    # the board AND its .kicad_pro already final -- the fill is graded against
+    # the project's real netclasses, and the floor writeback above is what
+    # puts them there. Guarded like the castellated-retract pass: nothing to
+    # fill if the run reverted, skipped routing, or wrote nothing.
+    if getattr(args, 'write_fill', False) and args.output_file             and not args.skip_routing and not _gate_reverted             and os.path.isfile(args.output_file):
+        try:
+            from kicad_exact_fill import write_filled_board
+            _fst = write_filled_board(args.output_file, args.output_file,
+                                      verbose=True,
+                                      project_from=args.input_file)
+            if _fst.ok:
+                with open(args.output_file, encoding='utf-8',
+                          errors='replace') as _fh:
+                    _nfp = _fh.read().count('(filled_polygon')
+                print(f"  --write-fill: wrote {_nfp} filled_polygon block(s); "
+                      f"the deliverable no longer reads phantom plane opens "
+                      f"until refilled")
+            else:
+                print(f"  (--write-fill did not run: {_fst.reason}"
+                      + (f" ({_fst.detail})" if _fst.detail else '')
+                      + "; the board ships unfilled -- grade it with "
+                        "`kicad-cli pcb drc --refill-zones`)")
+        except Exception as _e:
+            print(f"  (--write-fill skipped: {_e})")
     # #857: --strict-sizes turns any delivery below a requested size, or any
     # fab-tier escalation, into a non-zero exit so a harness needs no grep.
     if getattr(args, 'strict_sizes', False):

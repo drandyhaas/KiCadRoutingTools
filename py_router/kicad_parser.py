@@ -343,6 +343,12 @@ class Segment:
     # net's copper when any of it is locked (#521 follow-up); locked copper was
     # already an obstacle (#150). Set by BOTH parse paths (text + pcbnew).
     locked: bool = False
+    # #908: for copper drawn INSIDE a footprint, the DISAMBIGUATED footprint
+    # key that owns it ('U2', 'TP4~2'); '' for board-level graphics and for
+    # every routed track. It is what lets a DRC report name the object the way
+    # KiCad does ("Polygon of U2 on F.Cu") instead of the anonymous `net_0`,
+    # and what scopes the own-pad obstacle lift to the owning part.
+    owner_ref: str = ""
 
 
 @dataclass
@@ -1504,7 +1510,39 @@ def _mask_pad_primitives(content: str) -> str:
     return ''.join(out)
 
 
+@functools.lru_cache(maxsize=2)
+def _footprint_blocks_by_key_cached(content: str):
+    return _footprint_blocks_by_key_uncached(content)
+
+
 def _footprint_blocks_by_key(content: str):
+    """Memoised wrapper. See `_footprint_blocks_by_key_uncached`.
+
+    ONE parse now asks this question four times -- `extract_board_bounds`,
+    `footprint_outline_owners` (#829), `_collect_footprint_edge_segments_by_ref`
+    (#550) and the #908 footprint-copper pass -- and each call is a
+    `find_matching_paren` walk over every footprint block on the board, i.e.
+    over the whole file. Uncached, the #908 pass alone cost +41% on ulx3s,
+    +47% on glasgow_revC (which carries NO footprint copper at all: the walk,
+    not the work) and +74% on watchy. Memoised, the #908 pass is free AND the
+    three older callers stop paying for their own repeats.
+
+    The returned list is treated as READ-ONLY by every caller; do not mutate
+    it. `maxsize=2` for the same reason `_footprint_edge_points_by_ref` uses
+    it: the only repeat caller is one parse, and caching board texts is not
+    worth the memory.
+    """
+    try:
+        hash(content)
+    except TypeError:              # not a str: cannot be memoised
+        return _footprint_blocks_by_key_uncached(content)
+    # Deliberately NOT a try/except around the cached call: that would also
+    # catch a TypeError raised INSIDE the scan, re-run the whole whole-file
+    # walk, and hide the real bug behind a slow success.
+    return _footprint_blocks_by_key_cached(content)
+
+
+def _footprint_blocks_by_key_uncached(content: str):
     """Ordered `(start, end, key)` for every `(footprint ...)` block, keyed the
     way `extract_footprints_and_pads` keys the footprints dict (#829).
 
@@ -1522,6 +1560,147 @@ def _footprint_blocks_by_key(content: str):
         raws.append(footprint_raw_reference(content[m.start():end]))
     return [(a, b, k) for (a, b), k in
             zip(spans, disambiguate_references(raws))]
+
+
+#: The footprint-embedded drawing primitives. `fp_curve` is deliberately absent
+#: from the COPPER scan (see `iter_footprint_shapes`): the Edge.Cuts scans
+#: linearize it for bounds, but no corpus board draws copper with one, and a
+#: bezier needs its own linearizer rather than a shared block reader.
+_FP_SHAPE_TAGS = ('fp_line', 'fp_arc', 'fp_poly', 'fp_rect', 'fp_circle')
+_FP_SHAPE_RE = re.compile(r'\(fp_(?:line|arc|poly|rect|circle)\b')
+
+
+def iter_footprint_shapes(fp_text: str, tags=_FP_SHAPE_TAGS):
+    """Yield `(tag, block)` for each `(fp_* ...)` shape in ONE footprint block,
+    every block read as a BALANCED sub-expression (#908).
+
+    Balanced, not regex-sliced, for the same reason the board-level `gr_*` scan
+    in `extract_segments` is block-based: an `fp_poly`'s vertices live in a
+    nested `(pts ...)` and its `(layer ...)` may sit on either side of them, so
+    a flat field-ordered pattern either misses the layer or runs out of one
+    shape into the next.
+
+    Custom-pad `(primitives ...)` must never reach this. KiCad spells those
+    shapes `gr_*`, so the tag list alone happens to exclude them -- but that
+    is a spelling coincidence, not a guarantee, and the caller therefore feeds
+    this the `_mask_pad_primitives` text. A primitive that leaks in is not
+    merely phantom copper: its coordinates are PAD-local, so the footprint
+    pose places it millimetres from where it belongs (measured: 3.5mm off on
+    a synthetic 45-degree part) -- a false obstacle AND missing copper at
+    once. Do not widen this to "any shape inside a footprint block".
+    """
+    for tag in tags:
+        needle = '(' + tag
+        pos = 0
+        while True:
+            i = fp_text.find(needle, pos)
+            if i < 0:
+                break
+            nxt = fp_text[i + len(needle): i + len(needle) + 1]
+            if nxt and (nxt.isalnum() or nxt == '_'):
+                pos = i + len(needle)      # token boundary: '(fp_linex'
+                continue
+            j = find_matching_paren(fp_text, i)
+            yield tag, fp_text[i:j]
+            pos = j
+
+
+def footprint_pose(fp_text: str):
+    """`(x, y, rotation_deg)` of one footprint block, or None.
+
+    The footprint's own `(at ...)` is the one at the block's TOP LEVEL. Taking
+    the textually first one instead is wrong twice over, and #908 raised the
+    stakes from a bounds point to a copper obstacle at the wrong place:
+
+      * a child's `(at ...)` -- a property's, a pad's -- can precede it, and
+        the shape then lands relative to the child instead of the part;
+      * an `(at ...)` inside a QUOTED STRING (a `(descr "trap (at 99 99 45)")`)
+        is not markup at all. `find_matching_paren` was taught to skip quoted
+        strings for exactly this class of bug (#113, the footprint named
+        `"TCR2EF115,LM(CT"`); a regex here would re-introduce it on the same
+        file.
+
+    Neither shape is what KiCad writes today -- this agrees with pcbnew's
+    `GetPosition()`/`GetOrientationDegrees()` on all 1349 corpus footprints --
+    so both are latent. They are also free to rule out.
+    """
+    depth = 0
+    i, n = 0, len(fp_text)
+    while i < n:
+        c = fp_text[i]
+        if c == '"':                        # skip the whole string literal
+            i += 1
+            while i < n:
+                if fp_text[i] == '\\':
+                    i += 2
+                    continue
+                if fp_text[i] == '"':
+                    break
+                i += 1
+            i += 1
+            continue
+        if c == '(':
+            depth += 1
+            if depth == 2 and fp_text.startswith('(at', i):
+                m = re.match(r'\(at\s+([\d.-]+)\s+([\d.-]+)'
+                             r'(?:\s+([\d.-]+))?\s*\)', fp_text[i:])
+                if m:
+                    return (float(m.group(1)), float(m.group(2)),
+                            float(m.group(3)) if m.group(3) else 0.0)
+        elif c == ')':
+            depth -= 1
+        i += 1
+    return None
+
+
+_FP_PAD_RE = re.compile(r'\(pad\s+("(?:[^"\\]|\\.)*"|\S+)\s+(\w+)')
+
+
+def footprint_pad_count(fp_text: str) -> int:
+    """Number of pads with COPPER in one footprint block's TEXT.
+
+    NPTH pads are excluded: CLAUDE.md's own rule is that they have no copper
+    even when `layers` lists `*.Cu` (the size is the mask opening), so a
+    footprint whose only "pad" is a net-tied mounting hole owns no land
+    pattern and its copper artwork is decoration like any other logo's.
+    Without this a decorative footprint carrying one mounting hole would be
+    modelled AND kept on copper by the writer.
+    """
+    return sum(1 for _num, _type in _FP_PAD_RE.findall(fp_text)
+               if _type != 'np_thru_hole')
+
+
+def footprint_copper_is_functional(pad_count: int) -> bool:
+    """Is copper drawn inside a footprint the PART's copper, or decoration?
+
+    #908. A footprint shape cannot carry a `(net ...)` in KiCad, so the #337
+    net guard -- "net-tied copper is functional, net-less copper is a logo" --
+    is a NO-OP for `fp_*` and cannot separate the two. The owning footprint's
+    PAD COUNT can, and does so exactly on the corpus:
+
+    | board              | ref                        | pads | copper polys | what it is          |
+    |--------------------|----------------------------|------|--------------|---------------------|
+    | esp_prog           | U2                         | 3    | 1            | SOT89 drawn tab     |
+    | watchy             | AE1                        | 2    | 12           | PCB meander antenna |
+    | tigard             | JP1                        | 2    | 1            | bridged jumper      |
+    | ulx3s              | RP1-3, D9, D51, D52        | 2    | 1 each       | NC jumpers          |
+    | orangecrab_ext_pll | `G***`, `G***~2`           | 0    | 1 + 3        | OSHW / LOGO art     |
+
+    kicad-cli 10.0.0 agrees independently: the pad-BEARING footprints produce
+    17 pad-vs-polygon `shorting_items` between them, the pad-LESS logo
+    footprints produce zero.
+
+    A part's land-pattern copper is therefore MODELLED (obstacle + DRC) and
+    never relocated to silkscreen; a logo footprint keeps #146's treatment
+    unchanged -- moved to silk by the writer, and for that reason not modelled
+    either, since modelling copper the writer is about to move off copper
+    would cost routing area for nothing.
+
+    Takes a scalar, not a footprint, precisely so the four fronts that ask it
+    (text parser, pcbnew parser, CLI writer, GUI writer) cannot drift: each
+    counts pads in its own idiom and there is nothing else to disagree about.
+    """
+    return pad_count > 0
 
 
 def _footprint_edge_points(content: str) -> List[Tuple[float, float]]:
@@ -3908,6 +4087,14 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         ew = w if w > 0 else defaults.TRACK_WIDTH
         seq = pts + [pts[0]] if closed else pts
         for a, b in zip(seq, seq[1:]):
+            if a == b:
+                # A poly whose vertex list already REPEATS its first point --
+                # KiCad writes many that way (every one of watchy's twelve
+                # antenna polys) -- would close onto itself and yield a
+                # zero-length "segment". That models no copper and each one
+                # becomes a duplicate DRC row a human has to dismiss: watchy
+                # graded 12 board-edge violations where the truth is 9.
+                continue
             segments.append(Segment(
                 start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
                 width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True))
@@ -3949,19 +4136,27 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
         m = re.search(r'\(' + name + r'\s+([-\d.]+)\s+([-\d.]+)\)', blk)
         return (float(m.group(1)), float(m.group(2))) if m else None
 
+    # A custom pad draws its copper with gr_* PRIMITIVES, in PAD-LOCAL
+    # coordinates. Real KiCad writes those without a `(layer ...)`, so
+    # `_blk_fields` drops them -- but that immunity is INCIDENTAL, and a
+    # primitive that does carry a copper layer lands as phantom copper
+    # hundreds of millimetres from the pad. Mask them, which is the structural
+    # answer the other board-level gr_* scans already use. Length-preserving,
+    # so the footprint spans below still line up.
+    _gcontent = _mask_pad_primitives(content)
     for tag in ('gr_line', 'gr_arc', 'gr_poly', 'gr_rect', 'gr_circle'):
         needle = '(' + tag
         pos = 0
         while True:
-            i = content.find(needle, pos)
+            i = _gcontent.find(needle, pos)
             if i < 0:
                 break
-            nxt = content[i + len(needle): i + len(needle) + 1]
+            nxt = _gcontent[i + len(needle): i + len(needle) + 1]
             if nxt and (nxt.isalnum() or nxt == '_'):
                 pos = i + len(needle)
                 continue
-            j = find_matching_paren(content, i)
-            blk = content[i:j]
+            j = find_matching_paren(_gcontent, i)
+            blk = _gcontent[i:j]
             pos = j
             layers, w, nid, uuid = _blk_fields(blk)
             if not layers:
@@ -3998,6 +4193,107 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                         _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
                                         c[1] + r * math.sin(k * math.pi / 8))
                                        for k in range(16)], w, layer, nid, uuid)
+
+    # #908: the same model for copper drawn INSIDE a footprint -- the drawn tab
+    # of a SOT89/DPAK, a PCB antenna, a solder-jumper bridge. The scan above
+    # walks `gr_*` only, so this copper was invisible to the obstacle builders
+    # and to check_drc, which reads this same parser: kicad-cli 10.0.0 reports
+    # a real short on esp_prog (U2 pad 2 against its own tab polygon) that
+    # check_drc graded clean, and a foreign track laid across the tab would
+    # have routed and graded clean here and shorted on the fab.
+    #
+    # Same emission as the board-level pass -- net-0 `graphic=True` outline
+    # Segments, sharing `_blk_fields`/`_xy`/`_emit_outline` so the two cannot
+    # describe the same primitive differently -- plus the ONE thing footprint
+    # shapes need: the owning footprint's pose. Points go through
+    # `local_to_global`, never a hand-rolled transform, because its
+    # integer-nanometre snap is what keeps the text and pcbnew parse paths
+    # bit-identical.
+    #
+    # B-side needs no mirror term: footprint child coordinates are stored
+    # already side-resolved and the shape carries its own `(layer "B.Cu")`
+    # (verified against pcbnew GraphicalItems on a flipped rot-180 part, see
+    # the #304 note in `_collect_footprint_edge_segments_by_ref`).
+    if '(fp_' in content:
+        # Spans come from the UNMASKED text so the memo is shared with the
+        # other three callers; the slice comes from the masked text, which is
+        # the same length, so a layered pad primitive cannot leak in here
+        # either.
+        for _fstart, _fend, _fkey in _footprint_blocks_by_key(content):
+            fp_text = _gcontent[_fstart:_fend]
+            if not _FP_SHAPE_RE.search(fp_text):
+                continue
+            # A pad-LESS footprint is a logo the writer relocates to silk
+            # (#146); modelling copper that is about to leave copper would
+            # cost routing area for nothing. See footprint_copper_is_functional.
+            if not footprint_copper_is_functional(footprint_pad_count(fp_text)):
+                continue
+            _pose = footprint_pose(fp_text)
+            if _pose is None:
+                # Copper dropped in silence is the failure mode this whole
+                # pass exists to end, so say it rather than `continue`.
+                print(f"  WARNING: footprint {_fkey} draws copper but has no "
+                      f"readable (at x y) pose; its copper is NOT modelled "
+                      f"(#908)")
+                continue
+            _fx, _fy, _frot = _pose
+
+            def _g(_x, _y, _ox=_fx, _oy=_fy, _or=_frot):
+                return local_to_global(_ox, _oy, _or, _x, _y)
+
+            _mark_from = len(segments)
+            for tag, blk in iter_footprint_shapes(fp_text):
+                layers, w, nid, uuid = _blk_fields(blk)
+                if not layers:
+                    continue
+                if tag in ('fp_line', 'fp_arc') and w <= 0:
+                    continue    # unstroked line/arc: no copper to model
+                for layer in layers:
+                    if tag == 'fp_line':
+                        a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                        if a and b:
+                            ga, gb = _g(*a), _g(*b)
+                            segments.append(Segment(
+                                start_x=ga[0], start_y=ga[1],
+                                end_x=gb[0], end_y=gb[1],
+                                width=w, layer=layer, net_id=nid,
+                                uuid=uuid, graphic=True))
+                    elif tag == 'fp_arc':
+                        a, mid, b = (_xy(blk, 'start'), _xy(blk, 'mid'),
+                                     _xy(blk, 'end'))
+                        if a and mid and b:
+                            for p0, p1 in _arc_to_segments(a, mid, b):
+                                g0, g1 = _g(*p0), _g(*p1)
+                                segments.append(Segment(
+                                    start_x=g0[0], start_y=g0[1],
+                                    end_x=g1[0], end_y=g1[1],
+                                    width=w, layer=layer, net_id=nid,
+                                    uuid=uuid, graphic=True))
+                    elif tag == 'fp_poly':
+                        pts = [_g(float(x), float(y)) for x, y in
+                               re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)',
+                                          blk)]
+                        _emit_outline(pts, w, layer, nid, uuid)
+                    elif tag == 'fp_rect':
+                        a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                        if a and b:
+                            # all four corners transformed: under rotation the
+                            # rect tilts, so start/end alone do not bound it
+                            _emit_outline([_g(a[0], a[1]), _g(b[0], a[1]),
+                                           _g(b[0], b[1]), _g(a[0], b[1])],
+                                          w, layer, nid, uuid)
+                    elif tag == 'fp_circle':
+                        c, e = _xy(blk, 'center'), _xy(blk, 'end')
+                        if c and e:
+                            r = math.hypot(e[0] - c[0], e[1] - c[1])
+                            _emit_outline(
+                                [_g(c[0] + r * math.cos(k * math.pi / 8),
+                                    c[1] + r * math.sin(k * math.pi / 8))
+                                 for k in range(16)], w, layer, nid, uuid)
+            # Tag afterwards rather than threading an owner through
+            # `_emit_outline`, whose signature the board-level pass shares.
+            for _s in segments[_mark_from:]:
+                _s.owner_ref = _fkey
 
     warn_net_tagged_graphics(segments, name_to_id)
     return segments
@@ -5322,10 +5618,67 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
     # Parity with the text parser's gr_line/gr_arc pass: PCB_SHAPE lines/arcs
     # on copper layers render as real copper (obstacles + DRC), tagged
     # graphic=True (immutable input art -- never ripped/pruned/stripped).
+    # #908: and the same for copper drawn INSIDE a footprint. `GetDrawings()`
+    # excludes footprint children, so this path was blind to an SOT89 tab or a
+    # PCB antenna exactly as the text path was. One emitter, two feeders --
+    # board drawings and `fp.GraphicalItems()` -- because the alternative is a
+    # second hand-written copy that drifts (the tree already carries four
+    # disagreeing answers to the same question for Edge.Cuts).
     try:
         import pcbnew as _pcbnew_g
-        for _d in board.GetDrawings():
-            if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
+        # The CAPABILITY probe is scoped to itself, so a real bug in the walk
+        # is not mistaken for "older pcbnew". Note the honest limit: the
+        # board-level #337 pass this shares still has its own
+        # `except Exception: pass` at the end (best-effort on old APIs), so a
+        # raise inside the walk is caught THERE and the board comes back with
+        # no graphic copper. Narrowing that outer guard is a #337 change, not
+        # a #908 one; what is fixed here is the guard that was three lines
+        # wide and swallowed the footprint walk on its own.
+        _fp_graphics_ok = True
+        try:
+            if _live_fps:
+                _live_fps[0].GraphicalItems()
+                _live_fps[0].Pads()
+        except Exception:
+            _fp_graphics_ok = False     # older pcbnew: no GraphicalItems()
+        # A generator, not a list: on a big board this walk visits every
+        # graphical item of every pad-bearing footprint, and materialising the
+        # pairs first only adds allocation on top of the SWIG enumeration that
+        # is the real cost. That cost is inherent -- copper graphics cannot be
+        # found without looking at them -- and it is MEASURED, not waved away:
+        # +14.5..57% median across esp_prog / splitflap_driver / tigard /
+        # watchy, two independent paired passes with a fresh process per
+        # parse and the arms alternated (KiCad 10.0.0 python). The direction
+        # is robust; the magnitude is not tight, and the biggest number is on
+        # the smallest board, where the fixed cost dominates. The text path
+        # had a duplicate whole-file walk to reclaim with a memo; this path
+        # has none, so the cost stands.
+        def _fp_shapes():
+            if not _fp_graphics_ok:
+                return
+            for _ofp, _okey in zip(_live_fps, _live_keys):
+                # NPTH pads are not copper (see footprint_pad_count), so the
+                # two parse paths must count pads the same way or a mounting
+                # hole would make a logo "functional" on one side only.
+                _npads = 0
+                for _pd in _ofp.Pads():
+                    try:
+                        if _pd.GetAttribute() == _pcbnew_g.PAD_ATTRIB_NPTH:
+                            continue
+                    except Exception:
+                        pass
+                    _npads += 1
+                if not footprint_copper_is_functional(_npads):
+                    continue        # pad-less logo footprint: see the text path
+                for _g in _ofp.GraphicalItems():
+                    yield _g, _okey
+        import itertools as _it
+        for _d, _owner in _it.chain(((_x, "") for _x in board.GetDrawings()),
+                                    _fp_shapes()):
+            # FP_SHAPE is KiCad 6/7's class for a footprint-embedded shape;
+            # KiCad 8+ unified them onto PCB_SHAPE. `GraphicalItems()` also
+            # yields text, which this pass must not touch.
+            if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT", "FP_SHAPE"):
                 continue
             # EVERY copper layer of the shape, not just GetLayer() (#659
             # follow-up): KiCad writes a multi-layer graphic as the plural
@@ -5362,9 +5715,12 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 def _emit_outline_b(pts, ew):
                     seq = list(pts) + [pts[0]]
                     for _a, _b in zip(seq, seq[1:]):
+                        if _a == _b:
+                            continue        # see _emit_outline (text path)
                         segments.append(Segment(
                             start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
-                            width=ew, layer=_ln, net_id=_nid, graphic=True))
+                            width=ew, layer=_ln, net_id=_nid, graphic=True,
+                            owner_ref=_owner))
 
                 if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
                     if _w <= 0:
@@ -5372,7 +5728,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     segments.append(Segment(
                         start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
                         end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
-                        width=_w, layer=_ln, net_id=_nid, graphic=True))
+                        width=_w, layer=_ln, net_id=_nid, graphic=True,
+                        owner_ref=_owner))
                 elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
                     if _w <= 0:
                         continue
@@ -5385,7 +5742,8 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                     for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
                         segments.append(Segment(
                             start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
-                            width=_w, layer=_ln, net_id=_nid, graphic=True))
+                            width=_w, layer=_ln, net_id=_nid, graphic=True,
+                            owner_ref=_owner))
                 elif _shape in (_POLY, _RECT, _CIRC):
                     # FILLED copper areas (#337): outline as graphic segments (parity
                     # with the text parser). Filled shapes may have 0 stroke width.
@@ -6284,7 +6642,13 @@ def compare_pcb_data(from_board: 'PCBData', from_file: 'PCBData', tolerance: flo
                 # KiCad RECOMPUTES a copper graphic's net from connectivity on
                 # load (openstint: file attribute /A-, pcbnew says GND for the
                 # same art). Same copper either way -- compare geometry only.
-                return (ends, _q(s.width), s.layer, '<graphic>')
+                # `owner_ref` IS compared (#908): it is not recomputed by
+                # KiCad, both paths derive it from the same disambiguator, and
+                # it is what scopes the own-pad obstacle lift -- so the two
+                # fronts disagreeing about it is exactly the drift this
+                # comparator exists to catch.
+                return (ends, _q(s.width), s.layer, '<graphic>',
+                        getattr(s, 'owner_ref', ''))
             return (ends, _q(s.width), s.layer, _net_label(pcb, s.net_id))
         return _seg_sig
 

@@ -53,7 +53,10 @@ for layer in pcb.board_info.stackup:  # List[StackupLayer], ordered top to botto
   speed detection in Step 4), lead the report with a clear warning: impedance and
   time-matching calculations will not match the user's fab, and `/recommend-stackup`
   should be run before impedance-controlled routing. Take plane-layer assignments from
-  its output when available.
+  its output when available. **Carry the achievability numbers with that warning**
+  (`impedance.achievability_note`, Step 10 rule 1) — on many 2-layer boards the honest
+  verdict is that the target is neither achievable nor needed, and that is a stronger
+  result than "skipped".
 - A 2-layer board with multiple differential pairs or planes-worth of power nets is
   itself worth flagging (no inner layers for reference planes).
 - If the stackup looks deliberate, say so in one line and move on.
@@ -2592,11 +2595,38 @@ the budget doctrine above.
 
 Lessons from a dry-run audit (an agent following this skill end-to-end):
 
-1. **No stackup ⇒ no impedance passes, period.** When the board has KiCad's
-   default stackup, SKIP every `--impedance` step (including the DDR SSTL
-   40Ω pass) and lead the plan with the /recommend-stackup warning. The
-   no-stackup rule OUTRANKS every interface-specific impedance
-   recommendation.
+1. **No stackup ⇒ STATE THE NUMBERS, then no impedance passes.** When the
+   board has KiCad's default stackup, SKIP every `--impedance` step
+   (including the DDR SSTL 40Ω pass) and lead the plan with the
+   /recommend-stackup warning. The no-stackup rule OUTRANKS every
+   interface-specific impedance recommendation.
+
+   But "skipped, no stackup" is not a verdict — it does not say whether
+   authoring a stackup would have helped, and #909 was filed because a run
+   skipped impedance correctly and reported nothing a reader could act on.
+   Compute the answer instead; it is one call, and it needs no stackup:
+
+   ```python
+   from impedance import achievability_note, tightest_pin_gap
+   note, detail = achievability_note(
+       pcb, 'F.Cu', 90.0, is_differential=True, spacing=0.15,
+       min_pitch_gap=tightest_pin_gap(pcb, [net_id, ...]))
+   ```
+
+   It solves against a NOMINAL FR4 stack (`impedance.nominal_stackup`) and
+   says so; the detail dict carries `width_mm`, `channel_mm` and
+   `channel_over_pin_gap`. On a 2-layer 1.6 mm board with a USB pair leaving
+   0.65 mm-pitch pins it reads: *90 Ω needs a 1.13 mm differential leg
+   (2.42 mm for the pair) against a 0.33 mm pin gap — 7.4x. Not achievable
+   here.* That is the line the plan should carry. `route.py` and
+   `route_diff.py` print it themselves when `--impedance` is given on a
+   stackup-less board.
+
+   **Do not author a stackup to make the numbers appear.** No tool in this
+   repo writes one (the board's author owns it), and a written default would
+   only make the width solver print 1.133 mm and clamp it straight back to
+   `--track-width` with a "this trace will be ~169 ohm, not 90" warning — a
+   stated non-goal turned into a clamp warning.
 2. **Populated-array escape:** `dogbone` supersedes the older
    "channel-infeasible → underpad" advice for populated BGAs; underpad is
    for WLCSP/inner-row cases where no inter-pad gap exists at all.

@@ -616,6 +616,84 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     return _out, _ok_status(_out, time.monotonic() - _t0)
 
 
+def write_filled_board(board_file: str, dst_file: str,
+                       timeout: int = EXACT_FILL_TIMEOUT,
+                       verbose: bool = False,
+                       project_from: str = None) -> RefillStatus:
+    """Write a FILLED copy of `board_file` to `dst_file` (#910).
+
+    The routed deliverable carries zone OUTLINES with no `(filled_polygon ...)`
+    -- `kicad_writer` writes the `(fill yes ...)` properties and nothing in the
+    plane path ever writes a fill. Opened in KiCad before a refill, or graded
+    by `kicad-cli pcb drc` WITHOUT `--refill-zones`, such a board reports
+    plane-net opens that are not real: measured on run 25's routed.kicad_pcb,
+    5 unconnected (all GND) without the flag and 0 with it.
+
+    Same machinery as `refill_islands_ex` -- KiCad's own ZONE_FILLER through
+    its bundled python -- except that the filled board is the PRODUCT rather
+    than a temp file the reader is parsed out of and deleted.
+
+    The save is `aSkipSettings=True`, for the reason `headless_plan` documents:
+    a plain `pcbnew.SaveBoard` rewrites the project from KiCad's in-memory
+    (pre-stamp, possibly pre-migration) view -- deleting every non-Default net
+    class -- and aborts the process outright on a pre-KiCad-10 project. Note
+    what that does NOT do here: the fill runs in a temp dir on a STAGED copy,
+    so the caller's destination `.kicad_pro` is never in reach either way.
+    The caller's own net-class audit is the check that this stayed true, not a
+    restatement of it.
+
+    The caller is responsible for the sibling files at `dst_file` (use
+    `copy_board.copy_board` first); this writes ONLY the board.
+
+    Returns a `RefillStatus`; `dst_file` is untouched unless `.ok`.
+    """
+    kpy = find_kicad_python()
+    if kpy is None:
+        return RefillStatus('no_kicad_python')
+    tmpdir = tempfile.mkdtemp(prefix='fill_delivery_')
+    _t0 = time.monotonic()
+    try:
+        stem = os.path.splitext(os.path.basename(board_file))[0]
+        staged = os.path.join(tmpdir, stem + '.kicad_pcb')
+        shutil.copyfile(board_file, staged)
+        sib_pro = os.path.splitext(board_file)[0] + '.kicad_pro'
+        if not os.path.isfile(sib_pro) and project_from:
+            sib_pro = os.path.splitext(project_from)[0] + '.kicad_pro'
+        if os.path.isfile(sib_pro):
+            shutil.copyfile(sib_pro, os.path.join(tmpdir,
+                                                  stem + '.kicad_pro'))
+        script = os.path.join(tmpdir, 'refill.py')
+        with open(script, 'w') as f:
+            f.write(_REFILL_SCRIPT)
+        filled = os.path.join(tmpdir, stem + '_filled.kicad_pcb')
+        r = subprocess.run([kpy, script, staged, filled,
+                            os.path.dirname(os.path.abspath(__file__))],
+                           capture_output=True, text=True, timeout=timeout)
+        if 'REFILL_OK' not in (r.stdout or '') or not os.path.isfile(filled):
+            _why = (r.stderr or '').strip()[-200:]
+            if verbose:
+                print(f"  (fill-for-delivery failed: rc={r.returncode} {_why})")
+            return RefillStatus('refill_failed',
+                                f'rc={r.returncode} {_why}'.strip(),
+                                time.monotonic() - _t0)
+        # Written only once the refill succeeded, so a failure never leaves a
+        # half-written deliverable behind.
+        shutil.copyfile(filled, dst_file)
+    except subprocess.TimeoutExpired:
+        _dt = time.monotonic() - _t0
+        if verbose:
+            print(f"  (fill-for-delivery timed out after {_dt:.0f}s)")
+        return RefillStatus('timeout', f'limit {timeout}s', _dt)
+    except Exception as e:
+        if verbose:
+            print(f"  (fill-for-delivery unavailable: {e})")
+        return RefillStatus('error', f'{type(e).__name__}: {e}',
+                            time.monotonic() - _t0)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return RefillStatus('ok', '', time.monotonic() - _t0)
+
+
 def parse_filled_islands(text: str
                          ) -> Dict[Tuple[str, str],
                                    List[List[Tuple[float, float]]]]:

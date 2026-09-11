@@ -2463,6 +2463,15 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     _allow_in_pad = getattr(config, 'same_net_pad_clearance', -1.0) <= 0
     _escape_radius = max(0.0, env_knobs.ESCAPE_STUB_RADIUS)
     if not _allow_in_pad and _escape_radius <= 0:
+        # #907 filed this as "no fallback by design". There IS a fallback --
+        # the off-pad escape-stub rung below -- and this is the one
+        # configuration that has none: the flag forbids the in-pad arm and
+        # KICAD_ESCAPE_STUB_RADIUS=0 turns off the compliant replacement. Say
+        # so; a bare `return None` here reads as "no site fits", which sends
+        # the reader looking at geometry instead of at two settings.
+        print("    (no via-in-pad rescue: --same-net-pad-clearance forbids "
+              "the in-pad arm and KICAD_ESCAPE_STUB_RADIUS=0 disables the "
+              "off-pad escape stub that replaces it)")
         return None
     if hasattr(pad_obj, 'layers') and '*.Cu' in pad_obj.layers:
         return None
