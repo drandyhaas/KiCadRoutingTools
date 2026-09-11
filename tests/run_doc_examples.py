@@ -62,9 +62,57 @@ def gridrouteconfig_undocumented_fields():
     return [f for f in fields if f not in documented]
 
 
+def gridrouteconfig_stale_values():
+    """#923: the VALUES `docs/configuration.md` shows for that same dataclass.
+
+    Its field-parity sibling above holds the NAMES, so a new knob cannot ship
+    undocumented -- and the doc went on quoting `heuristic_weight: float = 1.9`
+    after #586 made it 2.3, `via_cost: int = 50` after it became 75, and four
+    more, because nothing held the numbers. A reader reasons from the number,
+    not from the field's presence.
+
+    Returns [(field, documented, real)], empty when they agree.
+    """
+    src = open(os.path.join(REPO_ROOT, 'py_router', 'routing_config.py'),
+               encoding='utf-8').read()
+    real = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ClassDef) and node.name == 'GridRouteConfig':
+            for s in node.body:
+                if (isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)
+                        and s.value is not None):
+                    try:
+                        real[s.target.id] = ast.literal_eval(s.value)
+                    except (ValueError, SyntaxError):
+                        pass                 # a field_factory or an expression
+    doc = open(os.path.join(REPO_ROOT, 'docs/configuration.md'),
+               encoding='utf-8').read()
+    out = []
+    for m in re.finditer(r'^\s{4}([a-z_]+):\s*(?:int|float|bool|str)\s*='
+                         r'\s*([^\s#]+)', doc, re.M):
+        name, shown = m.group(1), m.group(2).rstrip(',')
+        if name not in real:
+            continue
+        try:
+            value = ast.literal_eval(shown)
+        except (ValueError, SyntaxError):
+            continue
+        if value != real[name]:
+            out.append((name, value, real[name]))
+    return out
+
+
 def main():
     failures = []
     ran = skipped = 0
+
+    stale = gridrouteconfig_stale_values()
+    if stale:
+        failures.append('GridRouteConfig value parity')
+        print('FAIL docs/configuration.md quotes stale defaults: '
+              + ', '.join(f'{n} = {d!r} (real {r!r})' for n, d, r in stale))
+    else:
+        print('PASS GridRouteConfig value parity (docs/configuration.md)')
 
     undoc = gridrouteconfig_undocumented_fields()
     if undoc:

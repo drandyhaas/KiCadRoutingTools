@@ -47,6 +47,20 @@ os.environ.setdefault('KRT_NO_BANNER', '1')
 import krt_capabilities as K                                   # noqa: E402
 
 #: The docs this gate holds to the engine's actual surface.
+#:
+#: `plan-pcb-placement/SKILL.md` is NOT here, and it was tried (#923). Two rows
+#: come back and neither is a defect: `--no-ratsnest` is registered as
+#: `f'--no-{name}'` (`py_tools/render_placement.py:1653`), which this gate's
+#: literal text scan cannot see although `--help` lists it and the flag parses;
+#: and `--seed`/`--variant` is prose about a seeder that MIGHT take such an
+#: axis, not a claim that the flag exists. Adding the file would ship two
+#: standing false positives, which is how a gate stops being read. What DOES
+#: cover it is `test_431_skill_commands`, which resolves its flags through the
+#: real parsers. `test_doc_constants` lists the file but currently derives
+#: NOTHING from it: that gate needs a `CONST (module.py) | value |` row and the
+#: placement skill has none, so it is listed for the day one appears, not
+#: because it grades anything today. Saying "its numeric claims are covered"
+#: would be the same unchecked coverage claim #923 is about.
 DOCS = (
     os.path.join('.claude', 'skills', 'plan-pcb-routing', 'SKILL.md'),
     os.path.join('.claude', 'skills', 'plan-pcb-placement-and-routing',

@@ -38,14 +38,22 @@ DOCS = (
     os.path.join('.claude', 'skills', 'plan-pcb-routing', 'SKILL.md'),
     os.path.join('.claude', 'skills', 'plan-pcb-placement-and-routing',
                  'SKILL.md'),
+    # The placement skill was in NO constant gate's list (#923), so a number it
+    # quotes by name was pinned nowhere -- the same hole the routing skill's
+    # timeout table had before this file existed.
+    os.path.join('.claude', 'skills', 'plan-pcb-placement', 'SKILL.md'),
     os.path.join('docs', 'api-routing-config.md'),
 )
 
-#: A doc row that quotes a module constant by value. The `s` unit is part of
-#: the pattern on purpose: it keeps the gate to quantities whose unit the doc
-#: states, rather than every integer that happens to sit in a table cell.
+#: A doc row that quotes a module constant by value. The unit is OPTIONAL and
+#: the value may be a float (#923): the pattern was written around the
+#: silent-timeout table's `<int> s`, and a constant quoted in any other shape --
+#: `HEURISTIC_WEIGHT` 2.3, a count, a millimetre -- fell out of the gate for
+#: being spelled differently rather than for being unimportant. What keeps this
+#: narrow is the `CONST (module.py)` half, which no ordinary table cell has.
 _ROW = re.compile(
-    r'\|\s*`([A-Z_][A-Z0-9_]*)`\s*\(\s*`([^`]+\.py)`\s*\)\s*\|\s*(\d+)\s*s\s*\|')
+    r'\|\s*`([A-Z_][A-Z0-9_]*)`\s*\(\s*`([^`]+\.py)`\s*\)\s*\|'
+    r'\s*(\d+(?:\.\d+)?)\s*(?:s\s*)?\|')
 
 #: The constant's definition in its own module, read from SOURCE rather than by
 #: importing: importing py_router modules pulls in the compiled router and the
@@ -56,10 +64,10 @@ def _defined_value(rel_module, const):
         return None, f'{rel_module} does not exist'
     with open(path, encoding='utf-8', errors='replace') as fh:
         src = fh.read()
-    m = re.search(r'^%s\s*=\s*(\d+)' % re.escape(const), src, re.M)
+    m = re.search(r'^%s\s*=\s*(\d+(?:\.\d+)?)' % re.escape(const), src, re.M)
     if not m:
         return None, f'{const} is not defined at module level in {rel_module}'
-    return int(m.group(1)), ''
+    return float(m.group(1)), ''
 
 
 FAILURES = []
@@ -93,9 +101,9 @@ def main():
             if actual is None:
                 check(f'{const} re-derives from {module}', False, why)
                 continue
-            check(f'{const} is {quoted} s in {module}',
-                  actual == int(quoted),
-                  f'the doc says {quoted} s; {module} defines {actual}. '
+            check(f'{const} is {quoted} in {module}',
+                  actual == float(quoted),
+                  f'the doc says {quoted}; {module} defines {actual}. '
                   f'Update the doc row, or the constant -- one of them is '
                   f'lying to the next reader, and this number is the only '
                   f'warning a silent fallback gives.')

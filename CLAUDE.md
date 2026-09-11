@@ -80,6 +80,33 @@ Validate routed boards against the *real* spec, with the right checker — most
   is missing tests nothing — and process substitution (`<(echo ...)`) is not a
   file on Windows. Measured: a negative control copied to a temp dir died on
   `ModuleNotFoundError` and was read as "the gate refused".
+- **A skill's claims are gated three ways, and each gate says what it cannot
+  see (#923).** `tests/test_431_skill_commands.py` holds every cited `--flag`
+  to the real argparse, every quoted DEFAULT to the real default (read from
+  `--help` where the parser is built under `if __name__ == '__main__'` and
+  cannot be imported), and every `exits N` annotation to whether that flag can
+  reach `gate_or_exit` at all. It reads a driver through BOTH dumps:
+  `--dump-all` shows the instructions with every guard satisfied, and
+  **`--dump-refusals` shows the other branch** -- the commands a STUCK reader
+  is handed, which were unscanned until it existed (one of them exited 2).
+  `--dump-refusals` audits itself: refusal sites come from the driver's own
+  AST, and every string literal of 12+ characters a refusal can print must
+  appear in the dump, so an unrendered ARM of a four-arm refusal fails too.
+  `tests/test_923_output_key_claims.py` is the third: it RUNS `board_context`,
+  `check_pockets`, `check_floorplan`, `render_placement` and `board_score` on a
+  tracked fixture and resolves every cited key against what they really wrote
+  (`hot[].ratio` was never an emitted key; `broken.poured_nets_meaning` is
+  written under `components.`). A claim about a tool it does not run, or one
+  in prose naming no instrument, is still invisible -- both files say so.
+- **A mutation battery calls `preflight(__file__)` from
+  `tests/mutation_anchors.py`, right after its `ROWS`.** A stale anchor then
+  refuses in one second instead of reporting BROKEN after the witnesses are
+  paid for -- and `mutation_anchors.py` run bare reports every battery's stale
+  and NEWLINE-SENSITIVE anchors. The newline case is real on Windows: a
+  multi-line anchor against a CRLF file resolves differently depending on how
+  the target is read, so prefer a SINGLE-LINE anchor for a `.md` target, and
+  read and write with `newline=''` on both sides or a restored file still
+  leaves the tree dirty.
 - **Read the failure buckets by their real definitions.** `failed_single` = "no
   result at all"; `open_single` = a KEPT result whose pads are still disconnected
   (non-multipoint only — a multipoint shortfall is already the pad deficit). A

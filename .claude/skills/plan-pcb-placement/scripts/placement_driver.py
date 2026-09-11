@@ -256,9 +256,14 @@ def p3(a):
         return err(why)
     locks, lerr = _load(a.locks_json, 'The lock advisor output (--locks-json)')
     if lerr:
+        # `--suggest-locks-json`, which is what P2 prints thirty lines up. The
+        # `--json` this used to say is not a place_optimize flag at all, so the
+        # command a STUCK reader is handed here died at argparse -- and nothing
+        # saw it, because --dump-all satisfies every guard and never renders a
+        # refusal (#923).
         return err(lerr + '\n\nP2 produces it:\n  python3 -X utf8 '
                           f'py_placer/place_optimize.py {a.board} --suggest-locks '
-                          '--json wk/locks.json')
+                          '--suggest-locks-json wk/locks.json')
     high = _dig(locks, 'unlocked_high')
     if isinstance(high, int) and high > 0:
         # --waive was used ONLY for its truthiness: the strings were never
@@ -1405,6 +1410,11 @@ def _args(argv=None):
     ap.add_argument('--waive', action='append', default=[], metavar='REF:reason')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--dump-all', action='store_true')
+    ap.add_argument('--dump-refusals', action='store_true',
+                    help='every REFUSAL this driver can print, guards '
+                         'unsatisfied. --dump-all shows the instructions; this '
+                         'shows the other branch, which is where a stuck '
+                         'reader gets their next command (#923).')
     ap.add_argument('--self-test', action='store_true')
     return ap.parse_args(argv)
 
@@ -1417,6 +1427,8 @@ def main(argv=None):
         return 0
     if a.dump_all:
         return _dump_all()
+    if a.dump_refusals:
+        return _dump_refusals()
     if a.self_test:
         return _self_test()
     if not a.stage:
@@ -1513,6 +1525,377 @@ def _dump_all():
         # Loud, because a silently-refusing dump is what hid this for a while.
         print(f'\n!! {len(refused)} stage(s) dumped a REFUSAL, not their '
               f'instructions: {", ".join(refused)}')
+        return 1
+    return 0
+
+
+# --------------------------------------------------------------------------
+# the REFUSALS (#923) -- the other half of --dump-all
+# --------------------------------------------------------------------------
+#: The shortest literal worth checking. MEASURED rather than chosen: at 40
+#: characters six placement sites and three loop sites carried nothing long
+#: enough to check and counted as rendered without being looked at -- one of
+#: them `_load`'s "unreadable" branch, whose longest literal is
+#: `': unreadable ('`. At 12 every site that carries a literal at all becomes
+#: checkable, and what is left is only the pass-throughs (`err(why)`), whose
+#: text belongs to the guard that composed it and is checked there.
+_CHUNK = 12
+
+
+def _refusal_sites(path=None):
+    """Every place this file can refuse, and the TEXT each one prints.
+
+    Two shapes: an `err(...)` call, and a `return <False|None>, '<text>'` that
+    a caller wraps in `err()`.
+
+    NEITHER IS FILTERED BY FUNCTION NAME. The first version asked whether the
+    enclosing function was called `_guard_*` / `_load` / `_metrics_of` -- and
+    in the sibling driver `_count`, nested inside a stage, composes three
+    refusals that matched none of those, so its texts were not sites at all
+    while the dump reported 100% coverage. A hand-written prefix is the
+    hand-written list this whole mechanism exists to stop trusting.
+
+    Coverage is measured on the TEXT, not on the line: one `err(...)` can carry
+    four arms (a `_bucket(...)` per clause state, a ternary's two halves), and a
+    line-granular check calls the whole call rendered when one arm ran. Each
+    site therefore carries every string literal it can print of at least
+    `_CHUNK` characters, and it counts as rendered only when the dump contains
+    all of them.
+
+    Returns {(line, col): (function, kind, [chunks])}.
+    """
+    import ast
+    path = path or os.path.abspath(__file__)
+    with open(path, encoding='utf-8') as fh:
+        tree = ast.parse(fh.read())
+
+    def chunks(node):
+        return [sub.value for sub in ast.walk(node)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                and len(sub.value.strip()) >= _CHUNK]
+
+    owner = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef):
+            for sub in ast.walk(fn):
+                owner[id(sub)] = fn.name
+
+    sites = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'err'):
+            # An `err(why)` carries no literal of its own: its text was
+            # composed by a guard, which is a site there. Registering it here
+            # with zero chunks made it "fully rendered" without anything being
+            # looked at -- eleven of them across the two drivers -- so it is
+            # counted as a pass-through instead.
+            got = chunks(node)
+            if got:
+                sites[(node.lineno, node.col_offset)] = (
+                    owner.get(id(node), '<module>'), 'err', got)
+        elif (isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Tuple)
+                and len(node.value.elts) == 2):
+            head, text = node.value.elts
+            # A refusal is a falsy first element with TEXT beside it.
+            # `return True, ''` and `return json.load(fh), None` are the
+            # SUCCESS shapes of the same helpers.
+            falsy = (isinstance(head, ast.Constant)
+                     and head.value in (False, None))
+            got = chunks(text)
+            if falsy and got:
+                sites[(node.lineno, node.col_offset)] = (
+                    owner.get(id(node), '<module>'), 'guard', got)
+    return sites
+
+
+
+def _passthrough_count(path=None):
+    """Refusal sites that carry NO literal of their own: `err(why)`.
+
+    Reported beside the coverage number so it is read for what it is. Their
+    text was composed by a guard, which is a site of its own and is checked
+    there; counting them as covered without saying so is how "N of N" starts
+    meaning less than it looks.
+    """
+    import ast
+    path = path or os.path.abspath(__file__)
+    with open(path, encoding='utf-8') as fh:
+        tree = ast.parse(fh.read())
+    n = 0
+    for node in ast.walk(tree):
+        target = None
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'err'):
+            target = node
+        elif (isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
+                and len(node.value.elts) == 2):
+            head = node.value.elts[0]
+            if isinstance(head, ast.Constant) and head.value in (False, None):
+                target = node.value.elts[1]
+        if target is None:
+            continue
+        if not any(isinstance(s, ast.Constant) and isinstance(s.value, str)
+                   and len(s.value.strip()) >= _CHUNK
+                   for s in ast.walk(target)):
+            n += 1
+    return n
+
+def _refusal_scenarios(tmp):
+    """Evidence-STARVED namespaces: one per guard branch, each labelled.
+
+    The mirror of `_dump_all`'s single satisfied namespace. No row is
+    load-bearing on its own -- `_dump_refusals` measures which branches the set
+    actually reached and names the ones it did not -- so this is a starting
+    point for the trace, not the definition of what gets covered.
+    """
+    def wrote(name, doc):
+        p = os.path.join(tmp, name)
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump(doc, fh)
+        return p
+
+    board = os.path.join(tmp, 'b.kicad_pcb')
+    before = os.path.join(tmp, 'a.kicad_pcb')
+    other = os.path.join(tmp, 'other.kicad_pcb')
+    for p in (board, before, other):
+        open(p, 'w', encoding='utf-8').close()
+    missing = os.path.join(tmp, 'nope.json')
+    unreadable = os.path.join(tmp, 'truncated.json')
+    with open(unreadable, 'w', encoding='utf-8') as fh:
+        fh.write('{"violations": 12')          # a real half-written artifact
+
+    def render(**kw):
+        """A `_fake_render` with one field bent, written out."""
+        name = kw.pop('name')
+        doc = _fake_render(kw.pop('of', board), **{
+            k: v for k, v in kw.items()
+            if k in ('halo', 'crossings', 'hpwl', 'moved')})
+        for k, v in kw.items():
+            if k in ('halo', 'crossings', 'hpwl', 'moved'):
+                continue
+            if v is _DROP:
+                doc.pop(k, None)
+            else:
+                doc[k] = v
+        return wrote(name, doc)
+
+    base = ['--board', board]
+    with_before = base + ['--before', before]
+    damaged = ['--drc-json', wrote('dmg.json', {'violations': 12})]
+    good_render = ['--render-json', render(name='r_ok.json')]
+    graded_intent = ['--intent-json', wrote('i_ok.json', {
+        'rules_run': ['envelope'], 'violations': [],
+        'brief_coverage': {'schema': 1, 'brief': None, 'clauses': [],
+                           'graded': 0, 'uncovered': 0, 'abstained': 0,
+                           'complete': True}})]
+
+    def clause_intent(name, **row):
+        r = {'id': 'proximity[0:Y1~U1].max_mm', 'state': 'uncovered'}
+        r.update(row)
+        return ['--intent-json', wrote(name, {
+            'rules_run': ['proximity'], 'violations': [],
+            'brief_coverage': {'schema': 1, 'clauses': [r]}})]
+
+    def coverage(name, cov):
+        return ['--intent-json', wrote(name, {'rules_run': ['envelope'],
+                                              'brief_coverage': cov})]
+
+    return [
+        # nothing at all -- every "not provided" text, and the --before gates
+        ('no evidence at all', base),
+        ('--before names nothing', base + ['--before', os.path.join(
+            tmp, 'nope.kicad_pcb')]),
+        # _guard_damage
+        ('a DRC json that measures nothing', base
+         + ['--drc-json', wrote('bare.json', {'schema': 1})]),
+        ('a JSON file that does not parse', base + ['--drc-json', unreadable]),
+        ('a board with no damage to repair', base
+         + ['--drc-json', wrote('clean.json', {'violations': 0})]),
+        # P3's lock advice
+        ('no lock advice', base + damaged),
+        ('unlocked_high with nothing waived', base + damaged
+         + ['--locks-json', wrote('locks.json', {'unlocked_high': 3})]),
+        ('a waiver that does not parse', base + damaged
+         + ['--locks-json', wrote('locks2.json', {'unlocked_high': 3}),
+            '--waive', 'R1']),
+        # _guard_render -- one row per way a render fails to be evidence
+        ('a render that is not there', with_before + ['--render-json', missing]),
+        ('a render with no instrument.board', with_before
+         + ['--render-json', render(name='r_noinst.json', instrument={})]),
+        ('a render of a different board', with_before
+         + ['--render-json', render(name='r_other.json', of=other)]),
+        ('a render with no checklist', with_before
+         + ['--render-json', render(name='r_nochk.json', checklist=_DROP)]),
+        ('a render that disagrees on the move count', with_before
+         + ['--render-json', render(name='r_moved.json', checklist={
+             'd_moved': {'moved': 9, 'expected': 3, 'match': False}})]),
+        ('a render asked for a sheet that was never written', with_before
+         + ['--render-json', render(name='r_sheet.json', review_sheet=None)]),
+        ('a render naming a sheet that is not there', with_before
+         + ['--render-json', render(name='r_sheet2.json',
+                                    review_sheet=os.path.join(tmp, 'no.md'))]),
+        # P-close's intent ladder
+        ('a close-out with no intent', with_before + good_render),
+        ('an intent waived with no reason', with_before + good_render
+         + ['--waive', 'intent:']),
+        ('an intent path that opens nothing', with_before + good_render
+         + ['--intent-json', missing]),
+        ('rules_run of a shape this gate cannot read', with_before + good_render
+         + ['--intent-json', wrote('i_shape.json', {'rules_run': 'six'})]),
+        ('an intent that graded nothing', with_before + good_render
+         + ['--intent-json', wrote('i_zero.json', {'rules_run': []})]),
+        ('a brief_coverage that is not an object', with_before + good_render
+         + coverage('i_cov.json', [])),
+        ('a brief_coverage of an unknown schema', with_before + good_render
+         + coverage('i_schema.json', {'schema': 9})),
+        ('brief_coverage.clauses that is not a list', with_before + good_render
+         + coverage('i_clauses.json', {'schema': 1, 'clauses': 3})),
+        ('an intent with no coverage block at all', with_before + good_render
+         + ['--intent-json', wrote('i_nocov.json', {'rules_run': ['envelope']})]),
+        ('a clauses entry that is not a clause', with_before + good_render
+         + coverage('i_junk.json', {'schema': 1, 'clauses': ['x']})),
+        ('a clause waiver with no reason', with_before + good_render
+         + clause_intent('i_wr.json')
+         + ['--waive', 'brief-clause:proximity[0:Y1~U1].max_mm:']),
+        ('a clause waiver naming nothing', with_before + good_render
+         + clause_intent('i_ph.json')
+         + ['--waive', 'brief-clause:nosuch.clause:because']),
+        ('a clause nothing graded', with_before + good_render
+         + clause_intent('i_open.json')),
+        # ...and the other three buckets of the same refusal. A line-granular
+        # coverage check called this site rendered once ANY of them ran, and
+        # three of the four texts a reader can be handed here had never been
+        # printed -- including the catch-all whose own comment says it exists so
+        # the list can never come out blank.
+        ('a clause the author declared unknown', with_before + good_render
+         + clause_intent('i_abst.json', state='abstained')),
+        ('a clause graded against the wrong number', with_before + good_render
+         + clause_intent('i_drift.json', state='graded', drifted=True)),
+        ('a clause state this gate has never seen', with_before + good_render
+         + clause_intent('i_unk.json', state='ungraded')),
+        # _guard_congestion
+        ('no before-render to compare against', with_before + good_render
+         + graded_intent),
+        ('congestion waived with no reason', with_before + good_render
+         + graded_intent + ['--waive', 'congestion:']),
+        ('collateral waived with no reason', with_before + good_render
+         + graded_intent + ['--waive', 'collateral:']),
+        ('a before-render carrying no metrics', with_before + good_render
+         + graded_intent + ['--congestion-before',
+                            render(name='cb_bare.json', of=before,
+                                   metrics=_DROP)]),
+        ('a before-render that is not there', with_before + good_render
+         + graded_intent + ['--congestion-before', missing]),
+        ('a close-out render carrying no metrics', with_before + graded_intent
+         + ['--render-json', render(name='r_nometrics.json', metrics=_DROP,
+                                    checklist={
+                                        'a_off_outline': {'pad_copper': [],
+                                                          'courtyard': []},
+                                        'd_moved': {'moved': 3,
+                                                    'expected': None,
+                                                    'match': None}}),
+            '--congestion-before', render(name='cb_ok.json', of=before)]),
+        # legality closed most of its gap, wirelength closed almost none
+        ('a repair the numbers cannot settle', with_before + graded_intent
+         + ['--render-json', render(name='r_disp.json', halo=50.0,
+                                    crossings=60.0, hpwl=999.0),
+            '--congestion-before', render(name='cb_disp.json', of=before,
+                                          halo=100.0, crossings=100.0,
+                                          hpwl=1000.0)]),
+        # far more of the board moved than anything complained about
+        ('a repair that moved far more than was complained about',
+         with_before + graded_intent
+         + ['--render-json', render(name='r_dist.json', halo=10.0,
+                                    crossings=10.0, hpwl=100.0, moved=10),
+            '--congestion-before', render(name='cb_dist.json', of=before,
+                                          halo=100.0, crossings=100.0,
+                                          hpwl=1000.0),
+            '--damage-json', wrote('damage.json', {
+                'blocking_pairs': [{'a': 'R1', 'b': 'R2'}]})]),
+    ]
+
+
+#: Sentinel for "delete this key from the fixture", so a scenario can build a
+#: render that is missing a block rather than one carrying an empty one -- the
+#: two are different documents and two different guards.
+_DROP = object()
+
+
+def _dump_refusals():
+    """Every refusal this driver can print, with its guards UNSATISFIED.
+
+    `--dump-all` fabricates PASSING evidence for every guard, deliberately: its
+    job is to show the instructions. The cost is that no refusal is ever
+    rendered, so the commands inside them -- the ones a STUCK reader runs next
+    -- were the least-checked strings in the file. One spelled a flag
+    `place_optimize.py` does not have and printed a command that exits 2, thirty
+    lines below the branch that spells it correctly, and the gate that exists to
+    catch exactly that (`tests/test_431_skill_commands.py`) reads this driver
+    through `--dump-all` and so could not see it (#923).
+
+    Coverage is MEASURED, not asserted: every literal a refusal can print is
+    looked for IN THE DUMP, and any that never appears is named here and makes
+    this exit 1. A refusal added without a scenario is a failure, not a gap --
+    and so is one arm of a refusal that has four.
+    """
+    import tempfile
+    sites = _refusal_sites()
+    seen, crashed, produced = {}, [], []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        scenarios = _refusal_scenarios(tmp)
+        for label, argv in scenarios:
+            a = _args(argv)
+            for key in sorted(STAGES):
+                try:
+                    out = STAGES[key](a)
+                except Exception as exc:                    # noqa: BLE001
+                    crashed.append((key, label,
+                                    f'{type(exc).__name__}: {exc}'))
+                    continue
+                # EVERY body feeds the coverage check, and only the
+                # refusals are printed. `_delegation` returns
+                # `(False, '--no-delegate was passed...')`, which is a REPORT
+                # inside a stage body rather than a refusal -- mechanically
+                # indistinguishable from a guard's `(False, text)` without
+                # tracing where the text flows, so the honest question is "is
+                # this text ever produced", not "is it produced inside
+                # `<error>`".
+                produced.append(out)
+                if out.startswith('<error>') and out not in seen:
+                    seen[out] = (key, label)
+
+    rendered = []
+    for out, (key, label) in seen.items():
+        print(f'===== {key} refuses: {label} =====')
+        print(out)
+        rendered.append(out)
+    dump = '\n'.join(produced)
+
+    missed = []
+    for (line, _col), (fn, kind, chunks) in sorted(sites.items()):
+        gone = [c for c in chunks if c not in dump]
+        if gone:
+            missed.append((line, fn, kind, len(chunks), gone))
+    total_chunks = sum(len(v[2]) for v in sites.values())
+    print(f'\n{len(seen)} distinct refusal(s) from {len(scenarios)} '
+          f'scenario(s); {len(sites) - len(missed)} of {len(sites)} refusal '
+          f'text(s) fully rendered, over {total_chunks} literal chunk(s); '
+          f'{_passthrough_count()} pass-through(s) print a text composed '
+          f'elsewhere and are checked there.')
+    for line, fn, kind, total, gone in missed:
+        print(f'!! line {line} ({fn}, {kind}): {len(gone)} of {total} chunk(s) '
+              f'no scenario renders')
+        for chunk in gone[:2]:
+            print(f'     {chunk.strip()[:100]!r}')
+    for key, label, why in crashed:
+        print(f'!! {key} raised instead of refusing on {label!r}: {why}')
+    if missed or crashed:
+        print('\nAdd a row to _refusal_scenarios, or delete the dead branch: '
+              'a refusal nothing renders is a command nothing checks. (A tool '
+              'a stage shells out to being absent looks the same from here -- '
+              'check that first if several unrelated texts went missing.)')
         return 1
     return 0
 

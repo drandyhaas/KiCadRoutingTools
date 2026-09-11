@@ -136,6 +136,10 @@ _ROOT_JOIN_ARGV_OK = {
         'and not a bare basename. `run_utils.tool()` is the wrong resolver '
         'here: these are TEST files rather than shipped CLIs, and it looks '
         'only in the four tool directories #522 created.',
+    'mutate_923.py':
+        'same shape and same reason as mutate_902: its `tests` values are the '
+        'module-level T431/T923 constants, both directory-qualified literals, '
+        'so the join is over a relative path rather than a bare basename.',
 }
 
 
@@ -955,7 +959,7 @@ _UNRESOLVABLE = {}
 #: exact shape of the defect #877 is about, reproduced in its own gate.
 #: 42 before #902 added `mutate_902.py`; 43 before #892 added `mutate_892.py`;
 #: 45 before #893/#916 added `mutate_893_916.py`.
-_BATTERY_COUNT = 46
+_BATTERY_COUNT = 47
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

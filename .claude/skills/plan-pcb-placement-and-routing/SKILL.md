@@ -468,7 +468,7 @@ of every chain: check `impedance.nets_analyzed` equals the number of nets you
 named, exactly as you assert `ran == true`. A vacuity discovered at iteration
 9 invalidates every earlier score.
 
-Also **read `net_widths.patterns_matching_no_routed_net`.** A width clause on a
+Also **read `components.net_widths.patterns_matching_no_routed_net`.** A width clause on a
 net with NO copper never appears in `net_widths` — the component only walks nets
 that HAVE segments — so an unrouted net's width requirement lands in that list
 and nowhere else.
@@ -535,7 +535,7 @@ you can see what each entry is worth. **Sort by it** — above, GND alone is 4 o
 the 14, and seven single-join nets are worth 1 each.
 
 **`handler` names the step, and it is a FACT off the board, not a guess:** it is
-`repair_planes` when the net has a zone (see `broken.poured_nets`,
+`repair_planes` when the net has a zone (see `components.broken.poured_nets`,
 read from the board's own `(zone (net "…"))` blocks) and `route` otherwise.
 `route.py` cannot tap a pour, so a stranded plane pad handed to it is work that
 cannot succeed. Measured: `broken` sat at **14 across two iterations** of
@@ -548,7 +548,7 @@ has at least one zone", which on a board that pours signal nets includes them:
 measured on neo6502, its 61 nets covered **332 of 545 pads (72%)**, all of
 `/A0`–`/A15` among them. A run read it as "the planes, ignore those" and removed
 most of the board from its own render. The field publishes this sentence itself,
-as `broken.poured_nets_meaning` — read it there rather than inferring from the
+as `components.broken.poured_nets_meaning` — read it there rather than inferring from the
 name. Every net name `board_score` publishes is now checked against the board
 (`net_name_audit`); a non-zero `unknown_count` is a bug in the instrument, not a
 finding about the board.
@@ -920,7 +920,7 @@ top blocker on the exact keys, not on impressions:
 | `check_floorplan` exits 4 with `zone_containment` | **intent violated** | fix the placement to match, or say why the intent changed. Do not quietly rewrite the intent to match the board |
 | a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the Step 5b ledger — not a placement problem at all |
 | `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
-| a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | 1.9 is inadmissible; it returns a path up to ~1.9× optimal. Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` (the #529 dynamic budget self-extends; do not pass `--max-iterations`), then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
+| a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | The default 2.3 is inadmissible: it returns a path up to ~2.3× optimal (#586 moved it from 1.9, and this row said 1.9 until #923 gave the gate a way to notice). Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` (the #529 dynamic budget self-extends; do not pass `--max-iterations`), then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
 | `--heuristic-weight 1.0` **on the net's own FIRST pass**, on a board carrying only what must precede it, did not change the length | **placement** | now the router genuinely had no shorter path. Signature: routed length far above the straight-line pad distance *and stable under an admissible search*. Go to `place_route_loop` — see the warning below, it needs BOTH `--target-nets` and `--accept-cmd` to see this at all. **A null measured on a SATURATED board proves nothing** — one run tested 1.0 at iteration 4, after fanout, USB and every signal were committed, got a byte-identical board, and recorded "no shorter path exists at this placement". Re-tested on the first pass that lays the net's copper, the same flag was worth 5.8× |
 | `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1c (or the Step 3 finalize / Step 5 repair), not placement |
 | the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
