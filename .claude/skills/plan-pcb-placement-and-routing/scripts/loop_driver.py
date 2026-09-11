@@ -2767,6 +2767,22 @@ def _close_out(a, name):
     return _cross_check(a, name, doc)
 
 
+#: Every POPULATED arm `--dump-all` renders, held where it was measured
+#: (#937). See the check at the end of the `--dump-all` block for why one
+#: shared number was never right here: `_CAP` grades whatever the cheap
+#: fixture returns, and every stage but L1 refuses there, so L2's 196-line
+#: delegated body and L5's three 161-line terminal arms had never been
+#: measured by anything.
+#:
+#: Ceilings against silent growth, not targets. An arm missing from this table
+#: FAILS, so a new one cannot arrive unmeasured.
+_ARM_CEILING = {
+    'L1': 90, 'L1 (delegated)': 90, 'L1 (inline)': 25,
+    'L2': 200, 'L2 (delegated)': 200, 'L2 (inline)': 95,
+    'L3': 75, 'L4': 45, 'L5': 40,
+    'L5 (DONE-EXHAUSTED)': 170, 'L5 (STUCK)': 170, 'L5 (BUDGET)': 170,
+}
+
 STAGES = {'L1': l1, 'L2': l2, 'L3': l3, 'L4': l4, 'L5': l5}
 TITLES = {'L1': 'place (inline or delegated)',
           'L2': 'freeze what placement decided, then route',
@@ -2910,6 +2926,7 @@ def main(argv=None):
         # opposite of what a dump is for.
         import tempfile
         refused = []
+        sizes = {}
         with tempfile.TemporaryDirectory() as tmp:
             def wrote(name, doc):
                 p = os.path.join(tmp, name)
@@ -2966,6 +2983,7 @@ def main(argv=None):
                 print(f'===== {k} =====')
                 body = STAGES[k](loose)
                 print(body)
+                sizes[k] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(k)
             # Both halves can delegate, and the teammate prompts are where the
@@ -2976,6 +2994,7 @@ def main(argv=None):
                 print(f'===== {k} (delegated) =====')
                 body = STAGES[k](loose)
                 print(body)
+                sizes[f'{k} (delegated)'] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(f'{k}/delegated')
             loose.delegate = False
@@ -2991,6 +3010,7 @@ def main(argv=None):
                 print(f'===== {k} (inline) =====')
                 body = STAGES[k](loose)
                 print(body)
+                sizes[f'{k} (inline)'] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(f'{k}/inline')
             loose.no_delegate = False
@@ -3046,11 +3066,37 @@ def main(argv=None):
                 print(f'===== L5 ({label}) =====')
                 body = STAGES['L5'](v)
                 print(body)
+                sizes[f'L5 ({label})'] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(f'L5/{label}')
+        # EVERY ARM'S SIZE, MEASURED AND HELD (#937). The `_CAP` assertion in
+        # `_self_test` measures whatever the CHEAP fixture returns, and every
+        # stage but L1 REFUSES there -- so it was grading 6-to-9-line refusals
+        # and calling them bodies. What that hid, measured here: L2 delegated
+        # is 196 lines and L5's three terminal arms are 161 each, against a
+        # "cap" of 90. Nothing in the suite had ever seen them.
+        #
+        # One number was never right for these: L2 delegates an entire half
+        # and carries its teammate's whole brief. So each arm is held where it
+        # is MEASURED, as a ceiling against silent growth rather than a target
+        # to shrink to -- and an arm with no declared ceiling fails, so a new
+        # one cannot arrive unmeasured.
+        print('\n----- populated arm sizes -----')
+        _over = []
+        for _k in sorted(sizes):
+            _ceil = _ARM_CEILING.get(_k)
+            _mark = 'ok ' if _ceil is not None and sizes[_k] <= _ceil else '!! '
+            print(f'  {_mark} {_k:<18} {sizes[_k]:>4} line(s)   ceiling '
+                  f'{_ceil if _ceil is not None else "UNDECLARED"}')
+            if _ceil is None or sizes[_k] > _ceil:
+                _over.append(f'{_k} ({sizes[_k]}, ceiling {_ceil})')
+        if _over:
+            print(f'\n!! {len(_over)} arm(s) over their ceiling or '
+                  f'undeclared: {", ".join(_over)}')
         if refused:
             print(f'\n!! {len(refused)} stage(s) dumped a REFUSAL, not their '
                   f'instructions: {", ".join(refused)}')
+        if refused or _over:
             return 1
         return 0
     if a.dump_refusals:

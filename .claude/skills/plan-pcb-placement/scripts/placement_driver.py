@@ -1507,6 +1507,21 @@ def _guard_congestion(a):
     return _tail()
 
 
+#: Every stage's POPULATED body, held where it was measured (#937).
+#:
+#: Not one shared number: the 80-line assertion in `_self_test` measures
+#: whatever the CHEAP fixture returns, so a stage that refuses there is
+#: measured as its 3-line refusal and its instructions were never seen at all.
+#: P4's 98 passed that way. These are the real figures, and they are ceilings
+#: rather than targets -- their job is to stop silent growth, and raising one
+#: is a deliberate edit here with a reason beside it.
+#:
+#: P4 is over the 80-line norm and pinned at what it is: the structural
+#: finding is that its body holds FIVE VERBS (measure, act, prove, record,
+#: loop), so the remedy is a split, not a trim.
+_BODY_CEILING = {'P-brief': 60, 'P0': 70, 'P1': 35, 'P2': 45, 'P3': 80,
+                 'P4': 100, 'P5': 45, 'P6': 30, 'P-close': 60}
+
 STAGES = {
     'P-brief': p_brief,
     'P0': p0, 'P1': p1, 'P2': p2, 'P3': p3, 'P4': p4, 'P5': p5, 'P6': p6,
@@ -2276,18 +2291,36 @@ def _self_test():
                  f'{_k} counts the stages the registry has '
                  f'({_m.group(1) if _m else "no of= tag in its body"})')
 
-        # THE BODY LENGTHS, out loud. The cap above measures whichever arm the
-        # cheap fixture produces, so for a stage that refuses there it has
-        # never seen the instructions at all. These are the real numbers; P4 is
-        # over the 80-line norm today and trimming it is an editorial job, not
-        # a fact fix, so this reports rather than refuses. Reported > silent:
-        # a number nobody prints is a number nobody argues with.
+        # THE BODY LENGTHS, out loud -- AND HELD (#937). The cap above
+        # measures whichever arm the CHEAP fixture produces, so for a stage
+        # that refuses there it has never seen the instructions at all: P4's
+        # 98 lines passed that assertion as a 3-line refusal, and P3 at 79 sits
+        # in the same blind spot one line under the line.
+        #
+        # Reporting alone was the previous answer and it is not enough: a
+        # number nobody can exceed is a number nobody has to argue with, and
+        # over this PR P0 grew by 10 with nothing to notice. So every stage is
+        # now held at a MEASURED ceiling rather than at one shared number.
+        #
+        # A ceiling, not a target: it exists to stop silent growth, and moving
+        # one is a deliberate edit here with a reason. P4 is over the 80-line
+        # norm and is pinned at what it is, because trimming it is an
+        # editorial job -- and the structural finding is that its 98 lines are
+        # FIVE VERBS (measure, act, prove, record, loop), so the fix is a split
+        # rather than a trim.
         _over = {k: len(v.splitlines()) for k, v in _bodies.items()}
         print('  NOTE  stage body lines: '
               + ', '.join(f'{k} {v}' for k, v in _over.items())
               + f" -- over the 80-line norm: "
               + (', '.join(f'{k} ({v})' for k, v in _over.items() if v > 80)
                  or 'none'))
+        for _k, _n in sorted(_over.items()):
+            _ceil = _BODY_CEILING.get(_k)
+            want(_ceil is not None,
+                 f'{_k} declares a body ceiling (a new stage must)')
+            if _ceil is not None:
+                want(_n <= _ceil,
+                     f'{_k} body is {_n} line(s), ceiling {_ceil}')
 
         _checked = 0
         for key, _body in _bodies.items():
