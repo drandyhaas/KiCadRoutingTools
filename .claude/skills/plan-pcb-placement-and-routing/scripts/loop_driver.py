@@ -1242,12 +1242,45 @@ def l2(a):
     if _ooberr:
         return err(_ooberr)
     if oob and oob > 0 and not _accept(a, 'oob_pad_count'):
+        # NAME WHICH CHANNEL, AND SHOW THE OTHER ONE (#937).
+        #
+        # This gate reads the part-level AABB inflated by the grading
+        # clearance, and it is right to: over 119 graded rows it refuses 24
+        # boards, 12 of them refusals `blocking` does not make. But the
+        # refusal it writes says "their nets cannot be routed at all", which
+        # is true of copper genuinely off the outline and NOT true of an
+        # edge-mounted part whose bounding box crosses an INFLATED outline
+        # while every pad stays on the board. Measured over the tracked
+        # corpus: of the three boards this fires on, two are exactly that --
+        # human reference boards with edge-mounted switches -- and a reader
+        # who saw only the count could not tell which they had.
+        #
+        # check_assembly carries both channels now, so print both and say
+        # which one is being refused on. The GATE is unchanged: same channel,
+        # same threshold, same waiver.
+        _exact = rep.get('oob_pad_copper_refs')
+        _exact = _exact if isinstance(_exact, list) else []
+        _named = ', '.join(f'{r} ({v}mm)' for r, v in _exact[:8]) or 'none'
+        if _exact:
+            _reading = ('Both channels agree: that copper really is off the '
+                        'board, and those nets cannot be routed at all.')
+        else:
+            _reading = ('THE TWO DISAGREE, and read that before you act: NO '
+                        'PAD crosses the real outline. The count above is the '
+                        'bounding box of an edge-mounted part against an '
+                        'outline inflated by the grading clearance. If that '
+                        'is what this board has, the overhang is probably BY '
+                        'DESIGN and the declaration below is the right answer '
+                        'rather than a placement re-entry.')
         return err(
             f'The placement close-out reports blocking = 0, but '
             f'oob_pad_count = {oob}: {oob} part(s) carry pad copper OFF the '
-            f'board. Those parts are assembly-clean precisely because nothing '
-            f'is out there to collide with, and their nets cannot be routed at '
-            f'all.\n\nThis is placement-shaped damage, and it is cheaper to '
+            f'board.\n\n'
+            f'    part AABB vs the inflated outline: {oob}\n'
+            f'    pad copper vs the REAL outline:    {len(_exact)}  '
+            f'[{_named}]\n\n'
+            f'{_reading}\n\nThis is placement-shaped damage, and it is '
+            f'cheaper to '
             f'fix now than to discover it as a routing failure and re-enter. '
             f'Go back to the placement half.\n\nIf the overhang is BY DESIGN '
             f'-- a card edge, a switch actuator, a castellated module -- '
@@ -3294,9 +3327,21 @@ def _refusal_scenarios(tmp):
         ('an oob_pad_count that is not a number', base
          + ['--score', score, '--placement-report', bent(
              'p_ox.json', oob_pad_count='five')]),
-        ('pad copper off the board', base
+        # BOTH ARMS of the off-outline refusal (#937). The first renders the
+        # DISAGREE reading (the AABB fires, no pad crosses the real outline --
+        # the edge-mounted-part case, which is 2 of the 3 boards this gate
+        # fires on across the tracked corpus); the second renders the AGREE
+        # reading. One row covered only the first, and `--dump-refusals` still
+        # reported 49 of 49 texts rendered, because the two readings are
+        # composed OUTSIDE the `err(...)` call and the site scanner only sees
+        # literals inside it. An arm nothing renders is the hole, not a gap.
+        ('pad copper off the board, and no pad actually crosses it', base
          + ['--score', score, '--placement-report', bent(
              'p_oob.json', oob_pad_count=5)]),
+        ('pad copper off the board, both channels agreeing', base
+         + ['--score', score, '--placement-report', bent(
+             'p_oob2.json', oob_pad_count=2,
+             oob_pad_copper_refs=[['U8', 0.8], ['J3', 1.25]])]),
         # the recording spine: a board no ledger row names
         ('a board no ledger row records', ['--board', other, '--ledger', led,
          '--score', wrote('s_o.json', {'blocking': 2}),

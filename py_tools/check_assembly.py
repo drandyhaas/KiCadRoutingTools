@@ -324,6 +324,25 @@ def main():
           f"{leg['hole_conflicts']} hole conflict(s), "
           f"{leg['oob_pad_count']} part(s) with pad copper off-board"
           + (": " + _clause if _clause else ""))
+    # BOTH off-outline channels, side by side, whenever either fires (#937).
+    # The line above is the part AABB inflated by the grading clearance; this
+    # is the per-PAD measure at margin 0, which is the one CLAUDE.md
+    # designates for the top-priority placement defect. Printed together
+    # because their DISAGREEMENT is the useful signal: a coarse hit with an
+    # empty precise list is the bounding box of an edge-mounted part, not
+    # copper in the air, and a reader who sees only the count cannot tell.
+    _exact = leg.get('oob_pad_copper_refs') or []
+    if leg['oob_pad_count'] or _exact:
+        if _exact:
+            print("    pad copper genuinely off the outline (per-pad, "
+                  "margin 0): "
+                  + ', '.join(f'{r} ({a}mm)' for r, a in _exact))
+        else:
+            print("    ...but NO PAD crosses the real outline (per-pad, "
+                  "margin 0, is empty). The count above is the part's "
+                  "bounding box against an outline inflated by the grading "
+                  "clearance -- an edge-mounted part reports a breach its "
+                  "copper does not make.")
     # ONE predicate, used verbatim at all three sites (verdict, JSON
     # `buildable`, exit code). Three re-derivations of `blocking or
     # locked_contact` is how the coincident-origin channel would have reached
@@ -596,6 +615,16 @@ def main():
             # as copper in the air. Both facts now travel with the number.
             'oob_pad_refs': leg.get('oob_pad_refs') or [],
             'oob_pad_basis': leg.get('oob_pad_basis'),
+            # The PER-PAD channel beside the AABB one (#937). The gate in
+            # loop_driver's L2 reads `oob_pad_count` and is right to -- it is
+            # justified over 119 graded rows -- but a consumer holding only
+            # this document could not tell a real off-outline pad from the
+            # bounding box of an edge part, and the refusal it writes says
+            # "their nets cannot be routed at all", which is true of one and
+            # not the other. Both keys travel; neither replaces the other.
+            'oob_pad_copper_count': leg.get('oob_pad_copper_count', 0),
+            'oob_pad_copper_refs': leg.get('oob_pad_copper_refs') or [],
+            'oob_pad_copper_basis': leg.get('oob_pad_copper_basis'),
             'locked_contact_pairs': [q._asdict() for q in locked_contact],
             # run-19: parts stacked at one origin, marker classes exonerated.
             # Groups, not fake N*(N-1)/2 pair entries -- a stack is one
