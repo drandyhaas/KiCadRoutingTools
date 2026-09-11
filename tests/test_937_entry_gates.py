@@ -171,7 +171,49 @@ def t_p0_without_evidence_still_just_asks_for_it():
     print('  PASS: with no evidence, P0 asks for it and reports nothing')
 
 
+def t_an_off_outline_crossing_by_design_has_a_way_past_the_gate():
+    """A castellated row, a card edge and a declared `edge_connectors` part
+    are MEANT to cross the outline, and the per-pad census has no exemption
+    for one -- so without an escape the refusal ordered a reader to drag a
+    mating connector inboard, and no flag could clear it.
+
+    Three arms, because the escape must not become a flag that makes the gate
+    disappear: refused with no waiver, refused with a REASONLESS waiver, and
+    cleared only by one carrying a reason.
+    """
+    import json
+    with tempfile.TemporaryDirectory() as tmp:
+        board = os.path.join(tmp, 'b.kicad_pcb')
+        before = os.path.join(tmp, 'a.kicad_pcb')
+        for p in (board, before):
+            open(p, 'w').write('(kicad_pcb)')
+        rj = os.path.join(tmp, 'r.json')
+        json.dump({'instrument': {'board': board},
+                   'checklist': {
+                       'a_off_outline': {'pad_copper': [{'reference': 'J9'}],
+                                         'courtyard': []},
+                       'd_moved': {'moved': 1, 'expected': None,
+                                   'match': None}},
+                   'metrics': {'hpwl': 1.0}}, open(rj, 'w'))
+        base = [sys.executable, '-X', 'utf8', DRIVER, '--stage', 'P6',
+                '--board', board, '--before', before, '--render-json', rj]
+        for extra, want, label in (
+                ([], 4, 'no waiver'),
+                (['--waive', 'off-outline:'], 4, 'a waiver with no reason'),
+                (['--waive', 'off-outline:castellated carrier, SMD-1.27 '
+                  'half-holes'], 0, 'a waiver with a reason')):
+            r = subprocess.run(base + extra, capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', cwd=ROOT,
+                               timeout=120)
+            assert r.returncode == want, (
+                f'{label}: expected exit {want}, got {r.returncode}: '
+                f'{r.stdout[:500]}')
+        print('  PASS: refused bare, refused reasonless, cleared with a '
+              'reason')
+
+
 TESTS = (t_the_routing_skill_has_the_sections_eight_sites_cite,
+         t_an_off_outline_crossing_by_design_has_a_way_past_the_gate,
          t_no_site_still_cites_a_routing_V1_V5_loop,
          t_a_board_that_is_not_buildable_at_blocking_zero_reaches_the_repair,
          t_a_genuinely_clean_board_is_still_refused,

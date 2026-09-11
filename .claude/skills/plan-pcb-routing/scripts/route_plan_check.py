@@ -470,32 +470,34 @@ def r_fanout_layers_exclude_planes(p):
 
 #: (id, what it checks, SKILL.md citation, fn). Order is the order printed.
 RULES = (
-    ('R01', 'the plan begins with an explicit cd', ':2554', r_starts_with_cd),
-    ('R02', 'no pipes', ':2640', r_no_pipes),
-    ('R03', 'verification is commented, not executable', ':2557',
+    ('R01', 'the plan begins with an explicit cd', 'Step 9', r_starts_with_cd),
+    ('R02', 'no pipes', 'Step 10 rule 5', r_no_pipes),
+    ('R03', 'verification is commented, not executable', 'Step 9',
      r_verification_is_commented),
-    ('R04', 'the chain ends on route.py', ':2282 :2562', r_ends_on_route),
-    ('R05', 'the three verification commands are present', ':1958',
+    ('R04', 'the chain ends on route.py', 'End every chain on route.py', r_ends_on_route),
+    ('R05', 'the three verification commands are present', 'Important Notes 4',
      r_checkers_are_present),
-    ('R06', 'diff-pair gap is not below clearance', ':571',
+    ('R06', 'diff-pair gap is not below clearance', 'Step 4 diff pairs',
      r_diff_gap_not_below_clearance),
-    ('R07', 'no teardrops, no thermal relief', ':1044',
+    ('R07', 'no teardrops, no thermal relief', 'Important Notes',
      r_no_teardrops_or_thermal),
-    ('R08', 'smoothing is left on', ':1377', r_no_smoothing_off),
-    ('R09', 'iterations are not capped', ':1971', r_no_max_iterations),
-    ('R10', 'max-ripup stays within bounds', ':2643',
+    ('R08', 'smoothing is left on', 'Octolinear smoothing is ON', r_no_smoothing_off),
+    ('R09', 'iterations are not capped', 'Important Notes 15', r_no_max_iterations),
+    ('R10', 'max-ripup stays within bounds', 'Step 10 rule 6',
      r_max_ripup_within_bounds),
-    ('R11', 'a cp carries the .kicad_pro', ':1462', r_cp_carries_the_project),
-    ('R12', 'one cap pass, after every fanout', ':993 :1137',
+    ('R11', 'a cp carries the .kicad_pro', 'Never cp a board without its .kicad_pro', r_cp_carries_the_project),
+    ('R12', 'one cap pass, after every fanout', 'Step 1c',
      r_one_cap_pass_after_fanout),
-    ('R13', 'the first pour is bare', ':976', r_first_pour_has_no_via_tail),
-    ('R14', 'net coverage reconciles (Step 5b)', ':952 :954',
+    ('R13', 'the first pour is bare', 'Step 1 bare pour', r_first_pour_has_no_via_tail),
+    ('R14', 'net coverage reconciles (Step 5b)', 'Step 5b',
      r_net_coverage_reconciles),
-    ('R15', 'gnd-via distance clears 3x(via+clearance)', ':690',
+    ('R15', 'gnd-via distance clears 3x(via+clearance)', 'Step 4 GND vias',
      r_gnd_via_distance),
-    ('R16', 'no impedance pass without a stackup [needs --board]', ':905',
+    ('R16', 'no impedance pass without a stackup [needs --board]',
+     'Step 10 rule 1',
      r_impedance_needs_a_stackup),
-    ('R17', 'fanout layers exclude poured layers [needs --board]', ':2635',
+    ('R17', 'fanout layers exclude poured layers [needs --board]',
+     'Step 10 rule 3',
      r_fanout_layers_exclude_planes),
 )
 
@@ -542,7 +544,7 @@ def main(argv=None):
     if a.list:
         print('rules checked here:')
         for rid, what, cite, _fn in RULES:
-            print(f'  {rid}  {what:<52} SKILL.md {cite}')
+            print(f'  {rid}  {what:<52} SKILL.md, {cite}')
         print('\nNOT checked here -- a plan cannot answer these; the tool '
               'that can:')
         for what, who in DELEGATED:
@@ -568,7 +570,7 @@ def main(argv=None):
         if (rid, what, cite) in [(s[0], s[1], s[2]) for s in skipped]:
             print(f'  SKIP  {rid}  {what}  -- pass --board to check it')
         elif hit:
-            print(f'  FAIL  {rid}  {what}   [SKILL.md {cite}]')
+            print(f'  FAIL  {rid}  {what}   [SKILL.md, {cite}]')
             for reason in hit[3]:
                 print(f'          {reason}')
         else:

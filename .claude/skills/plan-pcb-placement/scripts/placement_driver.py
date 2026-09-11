@@ -167,27 +167,62 @@ def _p0_reading(a):
         # coincident-origin stack or a containment reads `blocking` 0 -- and
         # one tracked board does exactly that.
         b = _dig(asm, 'buildable')
+        # "[blocking 0, 1 of its 5 conjuncts]" PARSED BACKWARDS: beside a count
+        # it reads as "one of the five fired". Worse on a healthy board, where
+        # check_assembly writes the verdict as the literal string "buildable
+        # (blocking 0)" -- the line became "buildable (blocking 0)  [blocking
+        # 0, 1 of its 5 conjuncts]", whose plain reading is "buildable BECAUSE
+        # blocking is 0", the exact inference #918 exists to kill.
         rows.append('  check_assembly  : '
                     + str(_dig(asm, 'verdict') or 'no verdict recorded')
-                    + (f'   [blocking {_dig(asm, "blocking")}, 1 of its 5 '
-                       f'conjuncts]' if _dig(asm, 'blocking') is not None
-                       else ''))
+                    + (f'   (blocking {_dig(asm, "blocking")} is only ONE of '
+                       f'the five conjuncts this verdict is made of -- act on '
+                       f'the verdict, never on the count)'
+                       if _dig(asm, 'blocking') is not None else ''))
         oob = _dig(asm, 'oob_pad_copper_count')
         if isinstance(oob, int) and oob > 0:
+            # NAME THE PARTS: a count is not something a reader can act on,
+            # which is the argument the off-outline refusal itself makes, and
+            # the refs sit one key away in the same document.
+            _refs = [r[0] if isinstance(r, (list, tuple)) else r
+                     for r in (_dig(asm, 'oob_pad_copper_refs') or [])]
             rows.append(f'  ...and PAD COPPER OFF THE OUTLINE on {oob} '
-                        f'part(s) -- the top-priority placement defect, '
-                        f'because those nets cannot be routed at all')
+                        f'part(s): '
+                        + (', '.join(str(r) for r in _refs[:8]) or
+                           'see oob_pad_copper_refs'))
+            # ...and give it a row. The five-row table below has none for this
+            # finding, so a board with drc 0 + buildable true + copper off the
+            # outline landed on "both clean -> hand it to routing and stop",
+            # carrying the defect that produces 100% of unrouted nets.
+            rows.append('                    This OUTRANKS every row below: '
+                        'those nets cannot be routed at all. Re-seat them '
+                        '(P2 -> P3) before you classify. If they are '
+                        'castellations or a declared card edge, the crossing '
+                        'is by design -- say so and carry on.')
     clash = ''
     if isinstance(v, int) and isinstance(b, bool) and (v == 0) != b:
-        clash = ('\nTHE TWO DISAGREE: one reads clean and the other does not. '
-                 'Say which you are acting on, and why, before you move a '
-                 'part.\n')
+        clash = (f'\nTHE TWO DISAGREE: check_drc reads {v} violation(s) and '
+                 f'check_assembly reads '
+                 f'{"buildable" if b else "NOT BUILDABLE"}. Say which you are '
+                 f'acting on, and why, before you move a part.\n')
+    elif a.assembly_json and b is None:
+        clash = ('\nThat assembly document carries no `buildable` field, so '
+                 'the two could not be compared. Treat the VERDICT string '
+                 'above as authoritative.\n')
+    # "dispose of any disagreement above" used to print even when nothing
+    # disagreed -- and a reader hunting for the disagreement they were told to
+    # dispose of finds `NOT BUILDABLE` beside `blocking 0` and "resolves" it by
+    # trusting the count. Only ask when there is something to ask about.
     return ('\nWHAT THE INSTRUMENTS SAY about the files you named -- the row '
             'is still yours to pick:\n\n' + '\n'.join(rows) + '\n' + clash +
-            '\nNeither document can tell you whether this board is UNPLACED '
-            'or whether it CARRIES COPPER: no pose census and no track count '
-            'is in either. Those two rows need py_tools/board_brief.py.\n\n'
-            'Name your row, and dispose of any disagreement above.\n')
+            '\nNeither document says whether this board is UNPLACED or '
+            'whether it CARRIES COPPER. Both are in one more command:\n'
+            '  python3 -X utf8 py_tools/board_brief.py ' + str(a.board) +
+            ' --json wk/brief0.json\n'
+            'Read `unplaced` / `partially_unplaced` for the first, and '
+            '`has_copper` / `segments` / `vias` for the second.\n\n'
+            + ('Name your row, and dispose of the disagreement above.\n'
+               if clash else 'Name your row.\n'))
 
 
 def p0(a):
@@ -1111,7 +1146,26 @@ def _guard_render(a):
     # So this gate binds on the per-pad list and NAMES THE PARTS, because a
     # count is not something you can act on and the refusal exists to be acted
     # on.
+    # THE BY-DESIGN ESCAPE (#937). This census is per-pad against the real
+    # outline with NO exemption for castellations, card edges or a declared
+    # `edge_connectors` band -- and this skill says elsewhere that a
+    # castellated pad is centred ON the outline and such parts are MEANT to
+    # cross it. Without an escape the refusal ordered a reader to drag a
+    # mating connector inboard, which breaks the thing the board exists to
+    # mate with, and no flag could clear it.
+    #
+    # A REASON IS REQUIRED, like every other waiver here: `--waive
+    # off-outline:` with nothing after it is refused rather than honoured,
+    # because a waiver with no reason is a flag that makes a gate disappear.
+    _oobw = _waiver_for(a, 'off-outline')
+    if _oobw == '':
+        return False, ('--waive off-outline needs a REASON after the colon: '
+                       'which refs are by design, and to what mating '
+                       'standard. A waiver with no reason is a flag that '
+                       'makes the gate disappear.')
     _oob = (chk.get('a_off_outline') or {}).get('pad_copper')
+    if _oobw:
+        _oob = None
     if isinstance(_oob, list) and _oob:
         _refs = []
         for _it in _oob:
@@ -1125,8 +1179,19 @@ def _guard_render(a):
             f'one-for-one into `unrouted` and `broken` -- measured, run 10: 11 '
             f'such parts produced ALL 13 unrouted nets and most of the 37 '
             f'broken ones. It is the top-priority placement defect, ahead of '
-            f'every clearance graze.\n\nMove those parts back inside the '
-            f'outline and re-render. The outline is not yours to change.\n\n'
+            f'every clearance graze.\n\nUNLESS THE CROSSING IS BY DESIGN. A '
+            f'castellated row, a card edge and a declared `edge_connectors` '
+            f'part are all MEANT to cross the boundary -- this census has no '
+            f'exemption for them, so it names them too. If that is what these '
+            f'are, declare them in the intent\'s `edge_connectors` and re-run '
+            f'this stage with --waive off-outline:<the refs and the mating '
+            f'standard>. Do not move a connector inboard to satisfy a gate; '
+            f'that breaks the thing the board exists to mate with.\n\n'
+            f'Otherwise RE-SEAT them -- by net centroid, not back to an old '
+            f'pose (the objective is a board that routes, not a board '
+            f'restored):\n  python3 -X utf8 py_placer/place_seed.py <board> '
+            f'<out> --intent <intent> --reseat --clearance <the floor>\n'
+            f'The outline itself is never yours to change.\n\n'
             f'This is the per-PAD measure, not check_assembly\'s '
             f'`oob_pad_count`, which is a part-level AABB inflated by the '
             f'clearance and reads non-zero on human boards whose pads are '
@@ -2035,6 +2100,16 @@ def _refusal_scenarios(tmp):
                                               {'reference': 'J2'}],
                                'courtyard': []},
              'd_moved': {'moved': 3, 'expected': None, 'match': None}})]),
+        # ...and the by-design escape WITHOUT its reason (#937). The waiver
+        # exists because a castellated row or a card edge is meant to cross
+        # the outline and this census has no exemption for one; a waiver with
+        # no reason is refused rather than honoured.
+        ('an off-outline waiver with no reason', with_before
+         + ['--waive', 'off-outline:',
+            '--render-json', render(name='r_oobw.json', checklist={
+                'a_off_outline': {'pad_copper': [{'reference': 'J9'}],
+                                  'courtyard': []},
+                'd_moved': {'moved': 1, 'expected': None, 'match': None}})]),
         # ...and the same list carrying no `reference`, which is the arm that
         # falls back to naming the key. Without this row that fallback is a
         # branch nothing renders -- exactly what --dump-refusals exists to say.

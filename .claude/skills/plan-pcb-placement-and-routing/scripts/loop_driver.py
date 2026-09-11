@@ -1482,8 +1482,7 @@ half, and a teammate that receives an unfrozen board cannot know which poses
 were deliberate.
 
 Then delegate the routing half to a TEAMMATE of the agent type named in the
-tag below, for the same reason L1 does: it HAS the Agent tool, and the routing
-skill fans out three verification subagents at close-out. This half produces
+tag below, for the same reason L1 does: this half produces
 the most output of anything in the loop -- a route log here runs to thousands
 of lines -- and a fork does not change that: context is inherited inward, its
 output still does not come back.
@@ -1567,7 +1566,11 @@ were handed is the last thing left to compare against.
 Return, and return ONLY:
   1. confirmation that each of the four paths above exists, or WHICH does not;
   2. the PATH of every lens verdict you wrote, and the board sha each one
-     graded. Your lenses are YOUR gate while you loop; this run's --final row
+     graded -- or `none`, which is the expected answer: the routing skill
+     does NOT dispatch verification lenses, and the run-closing lenses are
+     dispatched once, by L5, on the board this loop ships. Do not invent
+     verifications to fill this line.
+     Your lenses, if you ran any, are YOUR gate while you loop; this --final row
      is recorded against the board the OUTER loop ships, and a verdict taken
      on an earlier board is history, not evidence for that row;
   3. SHAPE=<parameter|placement|floorplan>, or `none` if nothing failed;
