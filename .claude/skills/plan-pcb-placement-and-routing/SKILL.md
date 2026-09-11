@@ -885,8 +885,11 @@ learn:
    does not extend to dru rules — a net routed under a staged/lifted dru
    cannot be re-made by any call that reads the full sibling dru (see stop
    condition 4's staged-sibling-dru bullet in §9.5 of THIS file — there is no
-   such bullet in the routing skill; "Step 5" there is the plane-repair step
-   #562 absorbed into the route step).
+   such bullet in the routing skill. The "Step 5" the old citation meant was
+   that skill's FORMER `### Step 5: Repair Disconnected Plane Regions`, which
+   #562 absorbed into the route step's in-run finalize. Do not follow it to the
+   `## Step 5` the routing skill still has — that one is "Review Power and
+   Ground Net Strategy", a live section that never carried this bullet).
 3. **One net per call.** Routing two nets together let the second rip the first —
    reported as `1/2 routed` twice running, a different net each time. Sequential
    single-net calls connected both.
