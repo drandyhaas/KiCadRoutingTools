@@ -1287,6 +1287,26 @@ after the token or in `--stop-reason`, never instead of it.
    the residue against the registered floor and report the clause as a
    requirement finding. The rest of the chain keeps the full dru.
 
+##### The flags that decide, and who owns them
+
+L5 refuses with *"fewer than the 5 this test needs ... Lowering `--flat` is not
+one of the options"* and names `converge.py record --exhausted` as the way out.
+Until now this page named none of those flags, so a reader met a hard refusal
+with no documented route. Measured from `--help`:
+
+| flag | lives on | what it does |
+|---|---|---|
+| `--flat N` | `converge.py verdict` **and** `loop_driver.py` (default 5) | how many RECORDED laps of a half must fail to improve before it counts as plateaued. **Lowering it to reach DONE is falsifying the measurement** — that is what the refusal is about |
+| `--budget N` | `converge.py verdict` **and** `loop_driver.py` (default 100) | the iteration budget stop condition 2 is measured against |
+| `--exhausted {placement,routing}` | `converge.py record` only, and it REQUIRES `--exhausted-reason` | the honest way out of a plateau you cannot break: declare the half exhausted, in writing, with the reason. A later lap in that half RETRACTS the declaration — no flag, no edit |
+| `--score-file PATH` | `converge.py record` only | the score as a FILE. Prefer it: `--score "$(cat ...)"` exceeds the OS argv limit around 32 kB |
+| `--congestion-json PATH` | `loop_driver.py` only | the congestion pair the close-out gate reads |
+| `--verifier-verdict PATH` | `loop_driver.py` only | the on-disk verdict file L5 cross-checks against the ledger's live claim |
+
+`loop_driver` shells out to `converge verdict`, forwarding `--budget` and
+`--flat`, which is why those two appear on both. The other four appear on exactly
+one tool each; asking the wrong one is an argparse error, not a silent default.
+
 ##### These are NOT stop conditions
 
 Stopping for any of these is a process failure, not an outcome. If one of them is

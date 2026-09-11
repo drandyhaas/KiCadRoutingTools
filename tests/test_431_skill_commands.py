@@ -1121,8 +1121,19 @@ def test_the_score_is_the_gate_and_the_router_is_not_the_judge():
     # board survives an 'improving' loop.
     assert 'not a quality verdict' in low, \
         "the skill must state that place_route_loop's ACCEPTED is not a verdict"
-    assert 'better()' in skill and 'place_route_loop.py:358' in skill, \
-        "cite where the router-self-report comparison actually lives"
+    # DERIVED, never a literal. This assertion used to hardcode
+    # `place_route_loop.py:358`; `def better` had moved to 564, and the gate
+    # pinned the stale citation in place -- so CORRECTING the skill failed the
+    # test whose job is keeping the skill correct (#936 B6). Same shape as
+    # test_broken_worklist holding `route_disconnected_planes` (#936 C1): a pin
+    # on a number nobody re-derives becomes a pin on the defect.
+    _lrp = os.path.join(ROOT, 'py_placer', 'place_route_loop.py')
+    with open(_lrp, encoding='utf-8') as _fh:
+        _better = next(i for i, ln in enumerate(_fh, 1)
+                       if ln.startswith('def better'))
+    assert 'better()' in skill and f'place_route_loop.py:{_better}' in skill, \
+        ('cite where the router-self-report comparison actually lives -- '
+         f'`def better` is at py_placer/place_route_loop.py:{_better}')
     # The loop has to be bounded, or 'keep going until fixed' is unbounded.
     assert '100 iterations per board' in low or '100 per board' in low, \
         "the convergence budget must be stated in the skill"
