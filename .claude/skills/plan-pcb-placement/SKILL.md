@@ -324,17 +324,28 @@ clearance channel is structurally blind to when the pads share a net (run 5 SHIP
 two 0402s stacked, C14 on R14, both pads +3V3: `check_drc` 0, every gate green, KiCad's
 own courtyard check gagged by the project writeback). Both land in `board_score`'s
 `blocking` (`drc` and `assembly`). The channel calibration that makes `check_assembly`
-gateable: its blocking count reads **0 on all 33 healthy in-repo boards** in both exact
-and AABB currencies.
+gateable: its blocking count reads **0 on every healthy board git tracks under
+`kicad_files/`** (22 of them; `ls` returns more on a working copy that has run the
+suite, and `tests/run_utils.py` refuses to pin a threshold on that glob for exactly
+that reason) in both exact and AABB currencies.
 
 **Do not gate on the AGGREGATE `overlap_area`** — it has a legitimate nonzero floor on
 human boards (one human-routed 2-layer board in the corpus carries 5.375 mm2 of
-mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2 measured it positively correlated with **distance-to-truth** — a
-different question from routed `blocking`, which nothing here has measured it
-against (`docs/placement-predictors.md`). The
-per-pair blocking COUNT is the gateable quantity; courtyard/fab pairs are ADVISORY
-(`check_assembly` labels each with its waiver class), fix targets for the placement
-loop below, never a gate alone.
+mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2
+measured it positively correlated with **distance-to-truth** — a different question
+from routed `blocking`, which nothing here has measured it against
+(`docs/placement-predictors.md`). `check_assembly` does NOT emit `overlap_area` at
+all: it is `quench.legality_metrics` (so `place_optimize`'s `JSON_SUMMARY`),
+`render_placement`'s `metrics`, `check_floorplan` and the portfolio that do. Do not
+grep this tool's output for it and conclude the quantity is unmeasured.
+
+The per-pair blocking COUNT is the gateable quantity. **A courtyard pair is not
+merely advisory:** it is the fifth `not_buildable` conjunct (rule 4 above, #918) and
+it FIRES whenever a member of the pair moved relative to `--baseline` — which is the
+flag this document tells you to pass. Without `--baseline` the whole courtyard
+census is report-only and the tool says REPORT-ONLY; with it, a courtyard pair alone
+can make a board unbuildable. FAB pairs really are advisory. `check_assembly` labels
+each pair with its waiver class either way.
 
 **Then reconstruct, in this order. Each rung has an applicability test — run the test,
 and when it fails, say so and fall through to the next rung.** None of these invents

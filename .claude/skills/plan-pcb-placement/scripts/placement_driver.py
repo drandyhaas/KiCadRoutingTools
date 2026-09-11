@@ -135,7 +135,7 @@ Run BOTH, on the board with its copper removed. Neither alone is enough: the
 first cannot see two parts stacked on the same net, the second is the channel
 that can.
 
-  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <the board's own floor>
+  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <the board's own floor> --json wk/drc0.json
   echo "EXIT=$?"
   python3 -X utf8 py_tools/check_assembly.py {a.board} --json wk/assembly0.json
   echo "EXIT=$?"
@@ -178,7 +178,7 @@ Next, for P4 only: it grades DELTAS, so it also needs the pair. It refuses
 without both -- an absolute threshold is what made two of its gates unusable.
   python3 -X utf8 {sys.argv[0]} --stage P4 --board {a.board} \\
       --drc-json wk/drc0.json --before <the board this one came from> \\
-      --render-json wk/render0.json
+      --render-json <that pair's render>
 </stage_instructions>'''
 
 
@@ -210,7 +210,7 @@ Walk the ladder in order and say which rung applies:
 Next: P4 legalizes the seed, P6 declares the intent first. Both FOLLOW a move,
 so both refuse without the render of the seed against the board it came from:
   python3 -X utf8 {sys.argv[0]} --stage <P4|P6> --board seed.kicad_pcb \\
-      --before {a.board} --render-json wk/render_seed.json
+      --before {a.board} --render-json <the seed's render>
 </stage_instructions>'''
 
 
@@ -389,7 +389,7 @@ command each) and DECLUTTER (the flags that clear the noise). Run one of the
 crops it hands you; that is the whole point of it handing them to you.
 
 Next: python3 -X utf8 {sys.argv[0]} --stage P4 --board r.kicad_pcb \\
-          --before {a.board} --drc-json wk/drc1.json \\
+          --before {a.board} --drc-json <a fresh copper-free DRC of r> \\
           --render-json wk/render_p3.json
 </stage_instructions>'''
 
@@ -1541,52 +1541,76 @@ def _next_line_fixture(tmp):
     }
 
 
-def _render_for_next(key, fix):
-    """One stage's body under complete evidence, for reading its Next: lines."""
-    argv = ['--waive', 'X:checked']
+def _fixture_argv(fix):
+    """`_next_line_fixture`'s flag map as an argv list."""
+    argv = []
     for flag, path in fix['flags'].items():
         argv += [flag, path]
-    return STAGES[key](_args(argv))
+    return argv
+
+
+def _render_for_next(key, fix):
+    """One stage's body under complete evidence, for reading its Next: lines."""
+    return STAGES[key](
+        _args(_fixture_argv(fix) + ['--waive', 'X:checked']))
 
 
 def _next_commands(body):
-    """[(stages, flags)] for every `Next:` handoff in a rendered stage body.
+    r"""[(stages, flags)] for every `Next:` handoff in a rendered stage body.
 
     `stages` is a list because a handoff may offer a choice (`<P4|P6>`); every
-    branch of it has to reach its stage, not just the first. Flags are taken
-    with their names only -- the printed VALUES are placeholders a reader
-    fills in, and whether `<adopted>` exists is not what is being tested.
+    branch of it has to reach its stage, not just the first.
+
+    THREE SHAPES HAVE SILENTLY DEFEATED THIS PARSER, each while the remaining
+    labels still printed PASS, so each is answered explicitly below:
+
+    * stopping the block at the first line missed a handoff whose command sat
+      two prose lines down;
+    * keying the label on `Next:` missed one reworded to `Next, for P4 only:`;
+    * ending the block at a blank line missed a label whose command was a
+      paragraph away.
+
+    A block therefore runs from one `Next` label to the NEXT one (or the
+    closing tag), the label match is `^\s*Next\b` so indentation cannot hide
+    it, and every `--stage` in the block is a handoff rather than only the
+    first.
+
+    Flags are scoped to the COMMAND that carries the `--stage`, never to the
+    whole paragraph: taking them paragraph-wide lets a handoff pass by
+    mentioning a flag in prose while the printed command omits it. Only the
+    flag NAMES are used -- the printed values are placeholders a reader fills
+    in, and whether `<adopted>` exists is not what is being tested.
     """
     import re as _re
-    out, lines = [], body.splitlines()
-    for i, line in enumerate(lines):
-        # `^Next\b`, not `Next:` -- rewording one handoff to "Next, for P4
-        # only:" made this arm stop seeing it while every other label still
-        # printed PASS. A parser keyed on punctuation is a gate a rewrite can
-        # switch off by accident.
-        if not _re.match(r'Next\b', line):
-            continue
-        # A handoff runs to the end of its paragraph: it may be one line, or
-        # prose over several lines introducing an indented continued command.
-        # Stop at a blank line or the closing tag, never at the first line --
-        # stopping early is how two of these went unchecked while the arm
-        # reported PASS for the rest.
-        block, j = [line], i
-        while j + 1 < len(lines) and lines[j + 1].strip() \
-                and not lines[j + 1].startswith('</'):
-            j += 1
-            block.append(lines[j])
-        text = ' '.join(b.rstrip('\\').strip() for b in block)
-        flags = [f for f in _re.findall(r'(?<![\w-])(--[a-z][a-z-]+)', text)
-                 if f != '--stage']
-        # EVERY `--stage` in the block, not the first. Folding a second target
-        # into one paragraph once made this arm drop that target silently
-        # while still printing PASS for the rest -- caught by re-reading the
-        # printed labels, which is the only reason it is spelled this way.
-        for m in _re.finditer(r'--stage\s+(\S+)', text):
-            raw = m.group(1)
-            out.append(([s for s in raw.strip('<>').split('|')]
-                        if raw.startswith('<') else [raw], flags))
+    lines = body.splitlines()
+    heads = [i for i, ln in enumerate(lines) if _re.match(r'\s*Next\b', ln)]
+    out = []
+    for n, i in enumerate(heads):
+        end = heads[n + 1] if n + 1 < len(heads) else len(lines)
+        block = []
+        for ln in lines[i:end]:
+            if ln.startswith('</'):
+                break
+            block.append(ln)
+        # Split the block into the commands it prints. A line invoking python3
+        # starts a new one; its backslash continuations belong to it. Text
+        # before the first invocation is its own segment, so a handoff written
+        # as bare prose is still read.
+        segs, cur = [], []
+        for ln in block:
+            if 'python3' in ln and cur:
+                segs.append(cur)
+                cur = []
+            cur.append(ln)
+        segs.append(cur)
+        for seg in segs:
+            text = ' '.join(s.rstrip('\\').strip() for s in seg)
+            flags = [f for f in _re.findall(r'(?<![\w-])(--[a-z][a-z-]+)', text)
+                     if f != '--stage']
+            for m in _re.finditer(r'--stage[=\s]+(\S+)', text):
+                raw = m.group(1).strip('`\'"')
+                out.append(([s for s in raw.strip('<>').split('|')]
+                            if raw.startswith('<') else [raw], flags))
     return out
 
 
@@ -1600,40 +1624,15 @@ def _dump_all():
     commands to be wrong. Guard evidence is cheap to fabricate HERE, where the
     point is to show the instructions rather than to act on them.
     """
-    import json as _json
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
-        def wrote(name, doc):
-            p = os.path.join(tmp, name)
-            with open(p, 'w', encoding='utf-8') as fh:
-                _json.dump(doc, fh)
-            return p
-
-        board = os.path.join(tmp, 'b.kicad_pcb')
-        before = os.path.join(tmp, 'a.kicad_pcb')
-        for p in (board, before):
-            open(p, 'w', encoding='utf-8').close()
-        loose = _args([
-            '--board', board, '--before', before,
-            '--drc-json', wrote('d.json', {'violations': 3}),
-            '--locks-json', wrote('l.json', {'findings': [],
-                                             'lock_patterns': []}),
-            '--assembly-json', wrote('as.json', {'blocking': 1}),
-            '--render-json', wrote('r.json', _fake_render(
-                board, halo=50.0, crossings=60.0, hpwl=800.0)),
-            # P-close's congestion gate needs a before/after pair, and the
-            # pair must PASS: halo closed 50% of its gap and crossings 40%, so
-            # the repair was proportionate. Fabricated here for the same reason
-            # every other guard's evidence is -- the point of --dump-all is to
-            # show the instructions, not to act on them.
-            '--congestion-before', wrote('cb.json', _fake_render(
-                before, halo=100.0, crossings=100.0, hpwl=1000.0)),
-            '--intent-json', wrote('i.json', {'rules_run': ['envelope'],
-                                              'parts_covered': 7,
-                                              'violations': [],
-                                              'brief_coverage': {'brief': None, 'clauses': [], 'graded': 0,
-                   'uncovered': 0, 'abstained': 0, 'complete': True}}),
-            '--waive', 'X:checked'])
+        # ONE fabrication, shared with the Next: arm of --self-test.
+        # It was copied there and the copy immediately drifted (a
+        # `--locks-json` missing `lock_patterns`), and nothing asserted
+        # the two agreed -- so a drift affecting one source stage would
+        # have landed as a quietly smaller count.
+        loose = _args(_fixture_argv(_next_line_fixture(tmp))
+                      + ['--waive', 'X:checked'])
         refused = []
         for key in sorted(STAGES):
             body = STAGES[key](loose)
@@ -2050,14 +2049,6 @@ def _self_test():
         _arm = 'refusal' if out.startswith('<error>') else 'body'
         want(len(out.splitlines()) <= 80,
              f'{key} stays under 80 lines ({_arm}, {len(out.splitlines())})')
-        # The `of=` count is the model's own sense of how far along it is, and
-        # it is TEXT -- so it is derived from the registry and checked against
-        # it here. Eight stages used to say of="7" and P-brief of="8", over a
-        # registry of nine.
-        _m = re.search(r'\bof="(\d+)">', out)
-        want(_m is None or int(_m.group(1)) == len(STAGES),
-             f'{key} counts the stages the registry has')
-
     # --list is the index the refusals send a stuck reader to, so it is read
     # back from the PRINTER rather than re-derived from STAGES -- re-deriving
     # would pass on a --list that prints nothing at all.
@@ -2083,6 +2074,24 @@ def _self_test():
     # flag the Next: line did not name.
     with tempfile.TemporaryDirectory() as _tmp:
         _fix = _next_line_fixture(_tmp)
+        _bodies = {k: _render_for_next(k, _fix) for k in sorted(STAGES)}
+
+        # The `of=` count is the model's own sense of how far along it is, and
+        # it is TEXT -- so it is derived from the registry and checked against
+        # it here. Eight stages used to say of="7" and P-brief of="8", over a
+        # registry of nine.
+        #
+        # MEASURED ON THE BODY. The first version of this arm ran on the cheap
+        # `--board/--before` render, where five of the nine stages refuse --
+        # and a refusal carries no `of=` tag, so `_m is None` passed it
+        # unconditionally for exactly those five. Hardcoding P4 back to of="7"
+        # printed PASS while `--dump-all` showed of="7" to a reader. The arm
+        # right above it had already been corrected for the same mistake.
+        for _k, _body in _bodies.items():
+            _m = re.search(r'\bof="(\d+)">', _body)
+            want(_m is not None and int(_m.group(1)) == len(STAGES),
+                 f'{_k} counts the stages the registry has '
+                 f'({_m.group(1) if _m else "no of= tag in its body"})')
 
         # THE BODY LENGTHS, out loud. The cap above measures whichever arm the
         # cheap fixture produces, so for a stage that refuses there it has
@@ -2090,8 +2099,7 @@ def _self_test():
         # over the 80-line norm today and trimming it is an editorial job, not
         # a fact fix, so this reports rather than refuses. Reported > silent:
         # a number nobody prints is a number nobody argues with.
-        _over = {k: len(_render_for_next(k, _fix).splitlines())
-                 for k in sorted(STAGES)}
+        _over = {k: len(v.splitlines()) for k, v in _bodies.items()}
         print('  NOTE  stage body lines: '
               + ', '.join(f'{k} {v}' for k, v in _over.items())
               + f" -- over the 80-line norm: "
@@ -2099,8 +2107,8 @@ def _self_test():
                  or 'none'))
 
         _checked = 0
-        for key in sorted(STAGES):
-            for _cmd in _next_commands(_render_for_next(key, _fix)):
+        for key, _body in _bodies.items():
+            for _cmd in _next_commands(_body):
                 _target, _flags = _cmd
                 for _t in _target:
                     _argv = ['--stage', _t]
@@ -2113,13 +2121,43 @@ def _self_test():
                          f"({' '.join(_flags) or 'no flags'})"
                          + ('' if not _out.startswith('<error>') else
                             ' -- ' + ' '.join(_out.splitlines()[1:2])))
+        # ...AND THE FILE IT NAMES IS ONE SOME STAGE WROTE.
+        #
+        # Reaching the stage is not enough. Two handoffs named `wk/render0.json`
+        # and `wk/render_seed.json`, which no stage body produces, so a reader
+        # following them literally still got exit 4 -- and the arm above cannot
+        # see it, because it re-points every flag at fabricated evidence and so
+        # tests the flag SET rather than the recipe. P3 and P4 render their own
+        # (`wk/render_p3.json`, `wk/render_lapN.json`) and hand those on, which
+        # is the shape that works. Anything not produced here is written as a
+        # `<placeholder>` instead, the way P5 and P6 do it.
+        # PRODUCED = mentioned outside the Next: blocks, i.e. the body told the
+        # reader how to get it. Deliberately not a list of output flags: an
+        # exempted name is where a guard fails, and no plausible list would
+        # have carried `--suggest-locks-json`, which is how wk/locks.json is
+        # written.
+        _wanted, _written = set(), set()
+        for _body in _bodies.values():
+            _blocks = re.findall(r'(?m)^\s*Next\b.*?(?=^\s*Next\b|\Z)',
+                                 _body, re.S)
+            for _b in _blocks:
+                _wanted |= set(re.findall(r'--[\w-]+[=\s]+(wk/[\w./-]+)', _b))
+            _rest = _body
+            for _b in _blocks:
+                _rest = _rest.replace(_b, '')
+            _written |= set(re.findall(r'(wk/[\w./-]+)', _rest))
+        _orphan = sorted(_wanted - _written)
+        want(not _orphan,
+             f'every wk/ file a Next: line names is written by some stage '
+             f'({", ".join(_orphan) or "none orphaned"})')
+
         # Vacuity: a parser that stops finding Next: commands would pass every
         # arm above by checking nothing.
         # Pinned near the measured 13, not at a token value: this arm has
         # twice stopped seeing a handoff while printing PASS for the others
         # (a block parser that stopped at the first line, and a label reworded
         # from `Next:` to `Next,`). A floor is what turns that into a failure.
-        want(_checked >= 12, f'{_checked} Next: handoff(s) checked')
+        want(_checked >= 13, f'{_checked} Next: handoff(s) checked')
 
     # Guards refuse without evidence.
     want(STAGES['P3'](_args(['--board', 'b'])).startswith('<error>'),
@@ -2556,35 +2594,13 @@ def _self_test():
     # because the only assertion that depended on a body -- the subagent-prompt
     # one -- happened to be satisfied by the one stage that had no such check.
     with tempfile.TemporaryDirectory() as tmp2:
-        _b = os.path.join(tmp2, 'b.kicad_pcb')
-        _a = os.path.join(tmp2, 'a.kicad_pcb')
-        for _p in (_b, _a):
-            open(_p, 'w', encoding='utf-8').close()
-
-        def _w(name, doc):
-            p = os.path.join(tmp2, name)
-            json.dump(doc, open(p, 'w', encoding='utf-8'))
-            return p
-
-        _ev = _args(['--board', _b, '--before', _a,
-                     '--drc-json', _w('d.json', {'violations': 3}),
-                     '--locks-json', _w('l.json', {'findings': []}),
-                     '--assembly-json', _w('as.json', {'blocking': 1}),
-                     '--render-json', _w('r.json', _fake_render(
-                         _b, halo=50.0, crossings=60.0, hpwl=800.0)),
-                     # A run that closed half its legality gap AND 40% of its
-                     # crossings gap -- proportionate, so `_guard_congestion`
-                     # lets it through. The fixture must pass the gate, not
-                     # dodge it: it carries a real `metrics` block on both
-                     # sides, so if the gate's arithmetic changes this notices.
-                     '--congestion-before', _w('cb.json', _fake_render(
-                         _a, halo=100.0, crossings=100.0, hpwl=1000.0)),
-                     '--intent-json', _w('i.json', {'rules_run': ['envelope'],
-                                                    'parts_covered': 7,
-                                                    'violations': [],
-                                                    'brief_coverage': {'brief': None, 'clauses': [], 'graded': 0,
-                   'uncovered': 0, 'abstained': 0, 'complete': True}}),
-                     '--waive', 'X:y'])
+        # The SAME fabrication --dump-all uses. The congestion pair it
+        # builds must PASS the gate rather than dodge it: it carries a
+        # real `metrics` block on both sides (halo closed 50% of its
+        # gap, crossings 40% -- proportionate), so a change to the
+        # gate's arithmetic is noticed here.
+        _ev = _args(_fixture_argv(_next_line_fixture(tmp2))
+                    + ['--waive', 'X:y'])
         bodies = {k: STAGES[k](_ev) for k in sorted(STAGES)}
         everything = '\n'.join(bodies.values())
     _refused = [k for k, v in bodies.items() if v.startswith('<error>')]

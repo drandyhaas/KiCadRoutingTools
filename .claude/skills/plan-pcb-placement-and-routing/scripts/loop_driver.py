@@ -970,7 +970,7 @@ def l1(a):
                 f'--authored-from baseline and the boards step-back and the '
                 f'film read by content hash. Do not write over them.\n')
     if delegate:
-        return f'''<stage_instructions stage="L1" name="place (delegated)" of="5">
+        return f'''<stage_instructions stage="L1" name="place (delegated)" of="{len(STAGES)}">
 DELEGATING: {why}.{_cycnote}{_clash}
 
 Delegate the placement half to a TEAMMATE of the agent type named in the tag
@@ -1039,7 +1039,7 @@ Next: python3 -X utf8 {sys.argv[0]} --stage L2 \\
           --ledger {a.ledger} \\
           --placement-report {_asm}
 </stage_instructions>'''
-    return f'''<stage_instructions stage="L1" name="place" of="5">
+    return f'''<stage_instructions stage="L1" name="place" of="{len(STAGES)}">
 INLINE: {why}.{_cycnote}{_clash}
 
 Place this board yourself, driven. Do not read the placement skill end to end:
@@ -1408,7 +1408,7 @@ saw the hash move under it, read that as corruption, reverted the file, and had
 to restore it from the content-addressed store. The placed board is that half's
 artifact and its ledger binding; leave it alone and hand on the new file.'''
     if delegate:
-        return f'''<stage_instructions stage="L2" name="freeze, then route (delegated)" of="5">
+        return f'''<stage_instructions stage="L2" name="freeze, then route (delegated)" of="{len(STAGES)}">
 DELEGATING: {why}.{_cycnote}{_clash}{_echo}
 
 {freeze}
@@ -1549,7 +1549,7 @@ Two rules that are only true HERE, where the halves meet:
 Next, on success: --stage L5. On a failure: --stage L3 --score <SCORE_JSON>
          --render-json <a --focus render; L3 will not open without one>
 </stage_instructions>'''
-    return f'''<stage_instructions stage="L2" name="freeze, then route" of="5">
+    return f'''<stage_instructions stage="L2" name="freeze, then route" of="{len(STAGES)}">
 INLINE: {why}.{_cycnote}{_clash}{_echo}
 
 {freeze}
@@ -1699,7 +1699,7 @@ Next: --stage L5 --board {a.board} --score {a.score} --ledger {a.ledger}
     _rok, _rwhy = _guard_route_render(a)
     if not _rok:
         return err(_rwhy)
-    return f'''<stage_instructions stage="L3" name="classify the failure" of="5">
+    return f'''<stage_instructions stage="L3" name="classify the failure" of="{len(STAGES)}">
 blocking = {blocking}. Name the SHAPE before choosing anything.
 
 You have the focus panels ({a.render_json}). Say in one line what they showed --
@@ -1785,7 +1785,7 @@ def l4(a):
         if not _cok:
             return err(_cwhy)
         _cread = f'\n{_cwhy}\n' if _cwhy else ''
-        return f'''<stage_instructions stage="L4" name="re-enter: parameter" of="5">
+        return f'''<stage_instructions stage="L4" name="re-enter: parameter" of="{len(STAGES)}">
 {_cread}
 Re-enter the FAILING ROUTING STEP with the parameter changed. Nothing before it
 is invalidated, and the routed board stands.
@@ -1811,7 +1811,7 @@ re-measure rather than trying a third.
 Next: --stage L3 --board {a.board} --score <new score>
 </stage_instructions>'''
     if a.shape == 'floorplan':
-        return f'''<stage_instructions stage="L4" name="re-enter: floorplan" of="5">
+        return f'''<stage_instructions stage="L4" name="re-enter: floorplan" of="{len(STAGES)}">
 No arrangement at this placement satisfies the clause, so neither a router
 parameter nor a local repair will reach it. Go for a different ARRANGEMENT:
 
@@ -1851,7 +1851,7 @@ Next: --stage L1 --board <the adopted arrangement> --ledger {a.ledger}
             f'{a.ledger} \\\n'
             '          --board <the routed board> --kind completion \\\n'
             '          --score-file <the score json> --argv <the command>')
-    return f'''<stage_instructions stage="L4" name="re-enter: placement" of="5">
+    return f'''<stage_instructions stage="L4" name="re-enter: placement" of="{len(STAGES)}">
 This is the expensive one, and the cost is the point: no router setting adds a
 lane, so every routed board produced from this placement is now stale.
 
@@ -2126,7 +2126,7 @@ def l5(a):
                      f'-- which is not the same as "it is still improving"')
         else:
             _head = 'a half has not answered yet'
-        return f'''<stage_instructions stage="L5" name="not done yet" of="5">
+        return f'''<stage_instructions stage="L5" name="not done yet" of="{len(STAGES)}">
 The loop is NOT over: {_head}.
 
 {why}
@@ -2169,7 +2169,7 @@ tell a finished run from a stalled one.
     # still the trap, so it does not exist.
     _cyc, P = _paths(a)
     work = _work(a)
-    return f'''<stage_instructions stage="L5" name="close out: {name}" of="5">
+    return f'''<stage_instructions stage="L5" name="close out: {name}" of="{len(STAGES)}">
 {headline.get(name, name)}.
 
 {why}
@@ -2827,7 +2827,10 @@ def _args(argv=None):
 def main(argv=None):
     a = _args(argv)
     if a.list:
-        for k in ('L1', 'L2', 'L3', 'L4', 'L5'):
+        # FROM THE REGISTRY. The sibling driver had this exact shape and
+        # its hand-written tuple had silently lost a stage (#936 C2);
+        # this one agreed with STAGES only by luck, and nothing checked.
+        for k in STAGES:
             print(f'  {k}  {TITLES[k]}')
         return 0
     if a.self_test:
@@ -3499,6 +3502,8 @@ def _dump_refusals():
 
 
 def _self_test():
+    import contextlib
+    import io
     import tempfile
     bad = []
 
@@ -3532,7 +3537,27 @@ def _self_test():
         # names no artifact that exists, so every existence-gated context row
         # is absent and it measures the CHEAPEST case -- the one #890 makes
         # cheapest. The populated arm below is what makes the cap real.
-        want(len(out.splitlines()) <= _CAP, f'{key} stays under {_CAP} lines')
+        _arm = 'refusal' if out.startswith('<error>') else 'body'
+        want(len(out.splitlines()) <= _CAP,
+             f'{key} stays under {_CAP} lines ({_arm}, {len(out.splitlines())})')
+        # The `of=` count is text the model reads as its own sense of how far
+        # along it is, so it is derived from the registry and checked against
+        # it -- ten tags used to carry a hardcoded 5. The sibling driver had
+        # four different counts for one procedure (#936 C2); this one agreed
+        # with STAGES by luck, and nothing looked.
+        _m = re.search(r'\bof="(\d+)">', out)
+        want(_m is None or int(_m.group(1)) == len(STAGES),
+             f'{key} counts the stages the registry has')
+
+    # --list is read back from the PRINTER, not re-derived from STAGES:
+    # re-deriving would pass on a --list that printed nothing at all.
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        main(['--list'])
+    _listed = {ln.split()[0] for ln in _buf.getvalue().splitlines() if ln.strip()}
+    want(_listed == set(STAGES),
+         f'--list names every stage ({sorted(set(STAGES) - _listed)} missing, '
+         f'{sorted(_listed - set(STAGES))} invented)')
 
     want(STAGES['L2'](_args(base)).startswith('<error>'),
          'routing refuses to start without a placement close-out')

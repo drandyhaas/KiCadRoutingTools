@@ -9,10 +9,12 @@ next stage until the evidence the previous one owed actually exists.
 The refusal is the mechanism. A gate written in prose is a sentence someone
 skims; a gate that will not print the next instructions cannot be skimmed past.
 
-This test runs the driver's own --self-test (33 checks: every stage emits a
-tagged block, says what comes next, stays under 80 lines, no hedging phrases,
-every guard refuses without its evidence and proceeds with it) and pins the
-contract the skill file promises.
+This test runs each driver's own --self-test (115 checks for the placement
+driver and 209 for the loop one at the time of writing: every stage emits a
+tagged block, says what comes next, stays under its line cap, counts the
+stages the registry has, hands off to a stage its flags can actually reach,
+no hedging phrases, every guard refuses without its evidence and proceeds
+with it) and pins the contract the skill file promises.
 
 Run: python3 -X utf8 tests/test_run8_placement_driver.py
 """
@@ -35,6 +37,23 @@ def check(name, cond, detail=''):
           + (f'\n        {detail}' if not cond and detail else ''))
     if not cond:
         FAILURES.append(name)
+
+
+def _registry(path):
+    """The stage ids a driver REGISTERS, read out of the driver itself.
+
+    Naming stages here is what let placement_driver's hand-written --list
+    tuple ship without P-brief (#936 C2): the only external pin checked
+    that P0 and P-close were present, and both were in the broken tuple.
+    """
+    import importlib.util
+    name = 'krt_' + os.path.basename(path)[:-3]
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    stages = getattr(mod, 'STAGES', {})
+    assert len(stages) >= 5, f'{path} registers {len(stages)} stage(s)'
+    return stages
 
 
 def run(args):
@@ -72,6 +91,13 @@ def test_loop_driver():
     code, out = run_loop(['--self-test'])
     check('its self-test passes', code == 0 and out.strip().endswith('OK'),
           out[-400:])
+
+    code, out = run_loop(['--list'])
+    listed = {ln.split()[0] for ln in out.splitlines() if ln.strip()}
+    check('it lists every stage it registers',
+          code == 0 and listed == set(_registry(LOOP_DRIVER)),
+          f'--list: {sorted(listed)} vs STAGES: '
+          f'{sorted(_registry(LOOP_DRIVER))}')
 
     code, out = run_loop(['--stage', 'L2', '--board', 'b.kicad_pcb'])
     check('routing refuses to start without a placement close-out', code == 4)
@@ -156,7 +182,16 @@ def main():
           out[-400:])
 
     code, out = run(['--list'])
-    check('it lists its stages', code == 0 and 'P0' in out and 'P-close' in out)
+    # EVERY stage the driver registers, read out of the driver itself.
+    # Naming two of them here is what let the hand-written tuple ship
+    # without P-brief (#936 C2): P0 and P-close were both in it, so the
+    # only external pin on --list passed while the index omitted the one
+    # stage that records a design fact.
+    listed = {ln.split()[0] for ln in out.splitlines() if ln.strip()}
+    check('it lists every stage it registers',
+          code == 0 and listed == set(_registry(DRIVER)),
+          f'--list: {sorted(listed)} vs STAGES: '
+          f'{sorted(_registry(DRIVER))}')
 
     print('one stage at a time')
     code, out = run(['--stage', 'P0', '--board', 'b.kicad_pcb'])
