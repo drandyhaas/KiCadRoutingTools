@@ -2043,8 +2043,13 @@ def _self_test():
         # starts improvising, which is the failure this driver exists to stop.
         want(key == 'P-close' or 'Next:' in out or out.startswith('<error>'),
              f'{key} says what comes next')
-        # Instructions must fit in a reading, not a scroll.
-        want(len(out.splitlines()) <= 80, f'{key} stays under 80 lines')
+        # Instructions must fit in a reading, not a scroll. SAY WHICH ARM THIS
+        # MEASURED: with only --board and --before, five of the nine stages
+        # refuse, so this line was reporting a 3-line refusal as "under 80
+        # lines" for the stages whose bodies are the longest in the file.
+        _arm = 'refusal' if out.startswith('<error>') else 'body'
+        want(len(out.splitlines()) <= 80,
+             f'{key} stays under 80 lines ({_arm}, {len(out.splitlines())})')
         # The `of=` count is the model's own sense of how far along it is, and
         # it is TEXT -- so it is derived from the registry and checked against
         # it here. Eight stages used to say of="7" and P-brief of="8", over a
@@ -2078,6 +2083,21 @@ def _self_test():
     # flag the Next: line did not name.
     with tempfile.TemporaryDirectory() as _tmp:
         _fix = _next_line_fixture(_tmp)
+
+        # THE BODY LENGTHS, out loud. The cap above measures whichever arm the
+        # cheap fixture produces, so for a stage that refuses there it has
+        # never seen the instructions at all. These are the real numbers; P4 is
+        # over the 80-line norm today and trimming it is an editorial job, not
+        # a fact fix, so this reports rather than refuses. Reported > silent:
+        # a number nobody prints is a number nobody argues with.
+        _over = {k: len(_render_for_next(k, _fix).splitlines())
+                 for k in sorted(STAGES)}
+        print('  NOTE  stage body lines: '
+              + ', '.join(f'{k} {v}' for k, v in _over.items())
+              + f" -- over the 80-line norm: "
+              + (', '.join(f'{k} ({v})' for k, v in _over.items() if v > 80)
+                 or 'none'))
+
         _checked = 0
         for key in sorted(STAGES):
             for _cmd in _next_commands(_render_for_next(key, _fix)):
