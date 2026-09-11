@@ -7073,14 +7073,26 @@ def auto_detect_bga_exclusion_zones(pcb_data: 'PCBData', margin: float = 0.0) ->
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    if len(sys.argv) < 2:
-        print("Usage: python py_router/kicad_parser.py <input.kicad_pcb> [output.json]")
-        sys.exit(1)
+    # A REAL parser, not a hand-rolled `Usage:` print. `--help` used to be read
+    # as the input FILENAME here, so a capability probe got
+    # `FileNotFoundError: '--help'` -- and this module, the one every other
+    # tool parses boards with, was invisible to any catalogue that asks a tool
+    # what it is (#937). `krt_registry.py` enumerates the catalogue by exactly
+    # that question, so a tool that cannot answer it is a tool nobody finds.
+    _ap = argparse.ArgumentParser(
+        description="Parse a KiCad PCB file and save the extracted data as "
+                    "JSON.")
+    _ap.add_argument('input_file', help='the .kicad_pcb to parse')
+    _ap.add_argument('output_file', nargs='?', default=None,
+                     help='where to write the JSON '
+                          '(default: <input>_extracted.json)')
+    _a = _ap.parse_args()
 
-    input_file = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else input_file.replace('.kicad_pcb', '_extracted.json')
+    input_file = _a.input_file
+    output_file = _a.output_file or input_file.replace('.kicad_pcb',
+                                                       '_extracted.json')
 
     print(f"Parsing {input_file}...")
     pcb_data = parse_kicad_pcb(input_file)

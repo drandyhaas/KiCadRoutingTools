@@ -574,12 +574,19 @@ def analyze_pcb(filepath: str) -> Tuple[Dict[str, ComponentInfo], PCBData]:
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python analyze_power_paths.py <pcb_file>")
-        sys.exit(1)
+    import argparse
 
-    components, pcb_data = analyze_pcb(sys.argv[1])
+    # A REAL parser, not a hand-rolled `Usage:` print: `--help` used to be read
+    # as the board FILENAME, so this answered a capability probe with
+    # `FileNotFoundError: '--help'` (#937). See kicad_parser.py's `__main__`
+    # for the same fix and why it matters.
+    _ap = argparse.ArgumentParser(
+        description="Classify components by power role and report the ones "
+                    "that still need analysis.")
+    _ap.add_argument('pcb_file', help='the .kicad_pcb to analyze')
+    _a = _ap.parse_args()
+
+    components, pcb_data = analyze_pcb(_a.pcb_file)
 
     # Show components needing analysis
     unknown = get_components_needing_analysis(components)
