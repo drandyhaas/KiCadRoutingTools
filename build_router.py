@@ -15,6 +15,10 @@ binary can agree on the version string yet carry a different ABI (#615 -- the
 take it). An explicit --tag overrides this and is honored as-given.
 """
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': [], 'kind': 'utility'}
+
 import sys
 if sys.version_info[0] < 3:
     print("ERROR: Python 3 is required. You are running Python %d.%d." % sys.version_info[:2])

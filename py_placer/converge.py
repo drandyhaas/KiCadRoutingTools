@@ -43,6 +43,11 @@ VERBS
         Iterations spent, split completion vs systemic. A budget going to the
         instrument rather than the board is the failure this makes visible.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json

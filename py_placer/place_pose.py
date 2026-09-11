@@ -55,6 +55,11 @@ There is no `--allow-unplaced`: this tool has no unplaced gate, because placing
 the parts of a pile one decision at a time is what it is for. An unplaced board
 is NOTED, not refused.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json

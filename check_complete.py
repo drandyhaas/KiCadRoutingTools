@@ -40,6 +40,11 @@ because a component nothing examined is UNEXAMINED and never clean.
 
 Exit: 0 done, 2 usage, 3 board state, 4 incomplete, 5 unsound floors.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'instrument'}
+
 import argparse
 import json
 import os

@@ -25,6 +25,11 @@ having lanes to spare. `--json` keeps them apart (`starved_faces`,
 
 V1 limitation, stated: supply-tap/via lane consumption is not modeled.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse

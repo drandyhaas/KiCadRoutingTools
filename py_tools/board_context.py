@@ -53,6 +53,10 @@ is flagged when the two disagree.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401
 import argparse
 import contextlib

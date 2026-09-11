@@ -33,6 +33,11 @@ teammate; <error> you skipped evidence.
 
 Exit: 0 emitted, 2 usage, 4 a guard refused.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['combined'], 'kind': 'driver'}
+
 import argparse
 import hashlib
 import json

@@ -31,6 +31,10 @@ graded against rules it no longer carries is worse than no board.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (#522: puts ../py_router on sys.path)
 
 import argparse

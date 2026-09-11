@@ -51,6 +51,11 @@ Exit codes (deliberately the same dialect as check_floorplan.py)
     3  board state (missing file, unparseable board)
     4  graded, blocking > 0
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'instrument'}
+
 import argparse
 import json
 import os

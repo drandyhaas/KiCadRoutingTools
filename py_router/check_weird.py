@@ -74,6 +74,11 @@ Usage:
 
 Exit code 0 when clean, 1 when any findings.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing'], 'kind': 'instrument'}
+
 import argparse
 import math
 import sys

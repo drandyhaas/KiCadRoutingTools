@@ -38,6 +38,10 @@ way ``py_tools/make_film._badge`` does.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['combined'], 'kind': 'instrument'}
+
 import argparse
 import collections
 import json

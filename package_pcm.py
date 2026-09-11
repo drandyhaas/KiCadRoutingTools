@@ -34,6 +34,10 @@ containing sha256/download_size/install_size for metadata.json patching.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': [], 'kind': 'utility'}
+
 import argparse
 import copy
 import hashlib
