@@ -9,12 +9,18 @@ next stage until the evidence the previous one owed actually exists.
 The refusal is the mechanism. A gate written in prose is a sentence someone
 skims; a gate that will not print the next instructions cannot be skimmed past.
 
-This test runs each driver's own --self-test (115 checks for the placement
-driver and 209 for the loop one at the time of writing: every stage emits a
-tagged block, says what comes next, stays under its line cap, counts the
-stages the registry has, hands off to a stage its flags can actually reach,
-no hedging phrases, every guard refuses without its evidence and proceeds
-with it) and pins the contract the skill file promises.
+This test runs each driver's own --self-test -- every stage emits a tagged
+block, says what comes next, stays under its line cap, counts the stages the
+registry has, hands off to a stage its flags can actually reach, no hedging
+phrases, every guard refuses without its evidence and proceeds with it -- and
+pins the contract the skill file promises.
+
+NO CHECK COUNT IS QUOTED HERE ON PURPOSE. An earlier draft said "115 checks
+for the placement driver and 209 for the loop one"; adding two arms to the
+loop driver's self-test in the same branch made it 206 and nothing noticed,
+because a number in a docstring is derived from nothing. That is the exact
+defect class #936 exists to remove, so the count is read off the driver when
+you want it (`--self-test | grep -c PASS`) rather than asserted here.
 
 Run: python3 -X utf8 tests/test_run8_placement_driver.py
 """
