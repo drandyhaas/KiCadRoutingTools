@@ -63,14 +63,14 @@ python3 -X utf8 $D --list
 python3 -X utf8 $D --stage L1 --board board.kicad_pcb --ledger wk/ledger.jsonl
 ```
 
-Its guards are the three this skill exists to enforce:
+Its guards are the four this skill exists to enforce:
 
 | stage | refuses without | because |
 |---|---|---|
 | `L2` route | a placement close-out | routing cannot start on a placement nobody proved, and a board with a blocking pair fails for a reason routing cannot fix |
 | `L3` classify | a routing score | a retry without a classification is a guess |
 | `L4` re-enter | a measured `--shape` | the three shapes re-enter at three different points, and the cost of guessing is asymmetric |
-| `L5` close out | a `check_complete` close-out that **agrees** with `converge` | nothing refused to FINISH, so a run reached the terminal artifact having never entered routing's own V1–V5 loop, and shipped a power-to-signal short. Only the *contradiction* refuses: `DONE-EXHAUSTED` against `INCOMPLETE`/`UNSOUND` |
+| `L5` close out | a `check_complete` close-out that **agrees** with `converge` | nothing refused to FINISH, so a run reached the terminal artifact having never entered routing's own V1–V5 loop, and shipped a power-to-signal short. It builds FOUR refusals, not one: a `--final` lens PASS against that row's own score; all-PASS live lenses against an `INCOMPLETE`/`UNSOUND` close-out; `DONE-EXHAUSTED` against a non-`DONE` close-out; and, opt-in, the on-disk verdict file against the ledger's live claim under its own `verifier` waiver token. Prepare for all four |
 
 **Both inner halves go to a teammate. Always, at every board size.** You do not
 decide it and you cannot forget it — the driver reads the board, delegates, and
@@ -221,8 +221,9 @@ leave running and should be started at the beginning.
 Looking is not enough on its own, and that is measured too: run 25's boundary
 review followed the mandate above to the letter -- sheet built with stdout
 suppressed, viewed, observations written first, then reconciled -- and passed a
-layout a human rejects at a glance. A bridge IC 9mm from its USB socket with the
-pair needing a hop, a header squeezing two resistors into a 0.18mm seam, three
+layout a human rejects at a glance. A bridge IC 8.10 mm from its USB socket with the
+pair needing a hop, a header driving two resistors into a 0.133 mm body OVERLAP (not a seam --
+negative means the bodies interpenetrate), three
 nets forced onto the back. Both reviewers looked for what the list above names,
 because that is what the text told them to look for. The run-23 lesson repeated
 one level up: numbers gate legality, nothing gates LOOKING, and now the LOOK has
@@ -296,8 +297,10 @@ written out of turn.
    python3 -X utf8 py_router/make_movie.py <work-dir> -o routing.mp4
    ```
 
-   `KICAD_ROUTE_TRACE=1` (the default) gives the fine per-copper rip/restore
-   animation. Optional, off by default, both costing real time:
+   `KICAD_ROUTE_TRACE=1` gives the fine per-copper rip/restore animation and is
+   **OFF unless you export it** (`py_router/route_trace.py`) — only the stress
+   harness sets it, so a hand-driven run gets the coarse per-step delta while
+   believing it has the fine trace. Also optional, also costing real time:
    `--panels xray+iso` stacks a 3D isometric render under the board view (needs
    `kicad-cli`, ~2-4 s per render), and a run wrapped in `tee_cmd.py` gets a
    run-clock overlay read from its `cmd_timing.jsonl`.
@@ -390,8 +393,11 @@ presenting them as a score would be a claim the fence no longer supports.
 <agent_identity>
 You run a board end to end. You place first and once, you classify every
 routing failure before retrying it, and you send placement-shaped failures back
-to placement instead of spending router retries on them. You finish with four
-artifacts — board, movie, report, journal — not one.
+to placement instead of spending router retries on them. You finish with the
+SEVEN artifacts of "What a run DELIVERS", not one and not four: board, movie,
+verdict files, `--final` ledger row, `DONE` marker, report, journal. The three
+this block used to drop are the run's whole auditability, and this is the part
+a delegated agent internalises.
 </agent_identity>
 
 <!-- Moved here from plan-pcb-routing/SKILL.md: the convergence loop scores a
@@ -417,9 +423,17 @@ python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_scor
     --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3 \
     --net-min-widths wk/net_min_widths.json \
     --impedance-nets '<every net with a reference-plane clause>' \
-    --length-groups '<every length-matched group>' \
+    --length-groups wk/length_groups.json \
     --json wk/score_iter3.json
 ```
+
+`--length-groups` takes a **PATH**, not a description:
+`{"GROUP": {"nets": [...], "tolerance_mm": 0.1, "mode": "pin_pair"}}`.
+`score_length` does `os.path.isfile()` on it and otherwise returns
+`skipped(...)`, so a string that is not a file leaves the component reporting
+`ran: false`, length matching **ungraded**, and the board scoring exit 0 — the
+exact vacuous pass the paragraph below warns about. `references/convergence.md`
+spells it correctly.
 
 **On a PLACEMENT lap — a board with no copper — add the placement terms**, or
 the lap cannot be ranked against the one before it:
@@ -732,13 +746,14 @@ better; a non-zero exit or a missing SCORE rejects the round.
 full chain re-run, and that assumption is wrong (9.3a). A scoped retry takes
 seconds, so a hundred of them is an afternoon, not a week.
 
-**Count three kinds separately, and say which you are spending:**
+**Count four kinds separately, and say which you are spending:**
 
 | kind | what it does | example |
 |---|---|---|
 | **completion** | changes the copper: routes a net, heals a separation, fixes a width | `route.py --nets QSPI_SD1 ... --rip-existing-nets ...` |
 | **placement** | moves footprints: a quench, a repair, a reconstruction — connects nothing, tunes no instrument | `place_seed --repair`, `place_reconstruct`, a 0c quench, a loop round |
 | **systemic** | changes how the chain routes, measures or grades — no net gets connected by it | pinning the fab floor, restoring net classes, filling zones, fixing a checker |
+| **classification** | the L3 lap that DECIDES the shape of the next re-entry. It changes no board, so like `systemic` it belongs to neither half — and it had to be filed AS `systemic` before this kind existed, which made a decision look like a tool change. This skill's L3 stage produces exactly this lap | `converge.py record --kind classification --shape floorplan` |
 
 (`placement` exists because two runs had to file placement repairs as
 `systemic` for want of a kind, and `status`'s systemic-share warning cried
@@ -769,7 +784,9 @@ the common case — iterating per module there routes a fraction and reports
 success on that fraction, which is the same defect the `route.py --group` rule
 warns about.
 
-**`kicad` groups exist on 0 of 27 boards *in this repo's corpus*** — that figure
+**`kicad` groups exist on 0 of the 22 boards git tracks under `kicad_files/`** —
+(`ls` returns more on a working copy that has run the suite; `tests/run_utils.py`
+refuses to pin a threshold on that glob for exactly that reason). That figure
 is about KRT's own test boards, not about boards in general. A generated board
 (e.g. Zener `.zen`) carries one `kicad:` group **per module**, so the naive
 reading of "groups exist → per-group" authorised **8 × 20 = 160 iterations** on a

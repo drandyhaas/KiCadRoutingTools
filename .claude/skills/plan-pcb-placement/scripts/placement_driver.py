@@ -510,17 +510,31 @@ def p5(a):
 Use this when the question is "which arrangement", not "is this one legal".
 
   python3 -X utf8 py_placer/place_portfolio.py {a.board} --out-dir wk/slate \\
-      --candidates <K> --keep <N> [--full-probe]
+      --candidates <K> --keep <N> [--full-probe] \\
+      --intent <the graded floorplan intent> --lock <the P2 locks>
+
+PASS --intent AND --lock, or rule 1 below grades nothing. place_portfolio
+learns the declared intent from --intent and the mechanical locks from --lock;
+without them its HARD gate has no constraint to be hard about, and a step that
+optimises against no constraint is the failure this whole procedure exists to
+stop.
 
 Rank rules, in this order:
   1. HARD gates first: legality and the declared intent. A candidate that fails
      either is not in the running, however good it looks.
   2. Prefer a ranking that ROUTED something over one that only measured the
      placement. A placement metric cannot see the thing you are choosing for.
-  3. hpwl and crossings ANNOTATE the slate; they do not rank it. Both correlate
-     positively with distance-to-truth on damaged boards -- that is the
-     measured dependent variable, not routed blocking; nothing here has
-     correlated either with blocking (docs/placement-predictors.md).
+  3. hpwl and crossings should ANNOTATE the slate rather than rank it -- they
+     correlate positively with distance-to-truth on damaged boards, which is
+     the measured dependent variable, not routed blocking (#703 measured
+     crossings against routed blocking too: it fails its sign rule 5/1 on the
+     full sample and passes 6/0 once optimizer-made placements are excluded,
+     so neither arm is the answer; docs/placement-predictors.md).
+     BUT READ WHAT rank_key ACTUALLY DOES: py_placer/placement/portfolio.py's
+     rank_key orders on crossings FIRST, and its own docstring calls that an
+     unresolved, disclosed contradiction with this rule. #789 withdrew the
+     crossings BAR, not the crossings ORDER. So do not take the printed order
+     as agreeing with rule 3 -- read portfolio.json and decide deliberately.
 
 Adopt one deliberately, say why in writing, and re-run P4 on the adopted board.
 Adoption is a decision, not a step -- it is not replayable, so it belongs in

@@ -58,8 +58,8 @@ it and search from its net centroid instead, holding everything else fixed:
     python3 -X utf8 py_placer/place_seed.py <board> <out> --intent fp.json --reseat \
         --clearance <floor>                     # bare --reseat = auto scope
 
-The auto scope is the off-outline pad-CENTRE census, which is zero on all 33
-corpus boards, so this is a no-op with exit 0 on a healthy board. It composes
+The auto scope is the off-outline pad-CENTRE census, which is zero on every
+corpus board git tracks, so this is a no-op with exit 0 on a healthy board. It composes
 with `--repair` and runs before it, and `place_reconstruct --stages
 ...,reseat,legalize` is the same engine as a ladder rung. **Read
 `witnesses_after`, not `reseated`** — the first predicts routability, the
@@ -1104,8 +1104,13 @@ discarded no matter how green its legality block reads.
 **Acceptance rule — apply it, do not skip it.** It is a CONJUNCTION, and all
 three parts are required:
 
-1. Read the `JSON_SUMMARY:` line from 0c. If `crossings_after > crossings_before`
-   or `hpwl_after > hpwl_before`, **discard the result.** **And add a third term the
+1. Read the `JSON_SUMMARY:` line from 0c. If `hpwl_after > hpwl_before`,
+   **discard the result.** `crossings_after > crossings_before` is measured and
+   reported (`rule1_advisory`) and **does not bar anything** — its half of this
+   rule was WITHDRAWN by #789, and `rule1_check` in `py_placer/placement/portfolio.py`
+   has no crossings branch at all. Obeying the withdrawn clause discards correct
+   repairs; the two paragraphs below say why, and this sentence used to contradict
+   them. **And add a third term the
    quench has no objective for: `check_drc` PAD-PAD must not rise.** Rule 1 as written is
    built entirely out of the quench's own cost function, so it can only measure whether
    the quench succeeded at being a quench. Measured across 29 candidates on one board,
