@@ -145,6 +145,14 @@ _ROOT_JOIN_ARGV_OK = {
         'module-level T_WORKLIST/T_DRIVERS/T_RUN/T_CONVERGE/T_DFL/T_923/'
         'T_431 constants, every one a directory-qualified literal, so the '
         'join is over a relative path rather than a bare basename.',
+    'mutate_937.py':
+        'same shape and same reason: its `tests` values are the module-level '
+        'T_REG/T_CHK/T_OOB/T_GATE/T_LEV/T_DRV/T_431 constants, every one a '
+        'directory-qualified literal ("tests/test_937_tool_registry.py"), so '
+        'the join is over a relative path rather than a bare basename. '
+        '`run_utils.tool()` is the wrong resolver here for the reason the '
+        'three rows above give: these are TEST files rather than shipped '
+        'CLIs, and it looks only in the four tool directories #522 created.',
 }
 
 
