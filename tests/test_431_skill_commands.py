@@ -497,6 +497,7 @@ def test_driver_commands_supply_required_options_and_values():
     """
     problems = []
     checked = 0
+    unparsed = {}
     for src in DRIVERS:
         text = source_text(src)
         for tool in TOOLS:
@@ -507,7 +508,20 @@ def test_driver_commands_supply_required_options_and_values():
             try:
                 parser = _parser_obj(tool)
             except Exception:
-                continue          # covered by the flag test's own <parser> row
+                # DECLARED, not dropped. `_parser_obj` builds the parser by
+                # importing the tool and calling `main()` with --help
+                # intercepted; a tool that parses its args anywhere else has no
+                # `main` to call, and this arm used to `continue` in silence --
+                # 13 emitted command spans went unchecked while the gate
+                # printed a clean count. The flag NAMES in them are still
+                # covered, by the flag test's `--help` reader; what is not
+                # covered is whether each flag was given a VALUE.
+                #
+                # Counted and held to no growth, the shape test_923 uses for
+                # its skipped sections: a population that is legitimate to have
+                # and illegitimate to grow.
+                unparsed[tool] = unparsed.get(tool, 0) + len(spans)
+                continue
             import argparse as _ap
             # store_true/store_false/count/help consume nothing; every other
             # action stores a value and argparse errors without one -- EXCEPT
@@ -550,7 +564,21 @@ def test_driver_commands_supply_required_options_and_values():
     # with the refusal half gone -- measured, as a battery row that SURVIVED.
     # Measured after: 154.
     assert checked >= 90, f'only {checked} driver command(s) scanned'
-    print(f'  PASS: {checked} driver command spans, all runnable')
+    # The population this arm cannot value-check, named and capped. 13 today:
+    # check_drc.py 10, check_connected.py 3 -- both parse their args outside a
+    # `main()`, so `_parser_obj` has nothing to call. Giving either one a
+    # `main()` moves its spans into `checked` and this number DOWN, which is
+    # why the guard is a ceiling and not an equality.
+    _unp = sum(unparsed.values())
+    assert _unp <= 13, (
+        f'{_unp} driver command span(s) are value-unchecked, up from 13:\n'
+        + '\n'.join(f'  {t}: {n}' for t, n in sorted(unparsed.items()))
+        + '\n\nA tool whose parser cannot be built has its flag NAMES checked '
+          'by the --help reader but not whether each was given a VALUE. Give '
+          'it a main(), or raise this ceiling deliberately and say why.')
+    print(f'  PASS: {checked} driver command spans, all runnable '
+          f'({_unp} value-unchecked: '
+          f'{", ".join(f"{os.path.basename(t)} {n}" for t, n in sorted(unparsed.items())) or "none"})')
 
 
 def test_the_refusal_branches_are_scanned():
@@ -985,10 +1013,44 @@ def test_exit_code_contract_is_documented():
         'commands annotated "exits 3" whose flag returns before the board-state '
         'gate:\n' + '\n'.join(f'  {w}: {t} {f} answers and returns 0'
                               for w, t, f in sorted(set(problems))))
+    # POSITIVE CONTROL on the SCANNER, because `checked == 0` today and a
+    # scanner that has stopped matching reports exactly the same zero. The two
+    # `_returns_before_gate` assertions above hold the ANALYSER down; nothing
+    # held down the thing that feeds it. Synthetic text in the shape the scan
+    # looks for -- a `#` comment carrying "exits 3", a command within the next
+    # three lines -- must produce exactly one row, and the same text with the
+    # annotation as prose rather than a comment must produce none.
+    def _scan(sample):
+        n = 0
+        ls = sample.splitlines()
+        for i, line in enumerate(ls):
+            if 'exits 3' not in line and 'exit 3' not in line:
+                continue
+            if not line.lstrip().startswith('#'):
+                continue
+            blk = '\n'.join(ls[i + 1:i + 4])
+            for tool in TOOLS:
+                for b in _continued_blocks(blk, tool):
+                    n += len(_cited_flags(b, tool))
+        return n
+
+    _hit = ('# --suggest-locks exits 3 when the board is unplaced\n'
+            'python3 -X utf8 py_placer/place_optimize.py b.kicad_pcb '
+            '--suggest-locks\n')
+    _miss = ('The tool exits 3 when the board is unplaced.\n'
+             'python3 -X utf8 py_placer/place_optimize.py b.kicad_pcb '
+             '--suggest-locks\n')
+    assert _scan(_hit) == 1, (
+        'the exit-code scanner no longer finds an annotated command -- so its '
+        f'{checked} is a claim about the scanner, not about the skills')
+    assert _scan(_miss) == 0, (
+        'the exit-code scanner reads PROSE as an annotation; an "exits 3" in a '
+        'sentence is not a claim attached to a command')
     print(f'  PASS: exit-3 contract; {checked} annotated flag(s) reach the gate'
           if checked else
-          '  PASS: exit-3 contract; no command in the skills is annotated with '
-          'an exit code today, so the analyser control above is the live half')
+          '  PASS: exit-3 contract; 0 commands in the skills are annotated with '
+          'an exit code today -- the analyser controls and the scanner control '
+          'are what is live')
 
 
 def test_skill_decides_placement_by_measurement_not_by_default():
