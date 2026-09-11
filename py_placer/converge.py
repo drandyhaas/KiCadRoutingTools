@@ -2147,6 +2147,41 @@ def row_label(row):
     return '(no lever recorded)'
 
 
+def lever_identity(entry):
+    """WHICH LEVER a ledger row pulled, or None when the row records none.
+
+    The basename of `lever_argv[0]` -- the command that produced the board.
+    Never `lever`, which is free prose: `run_watch.py` is explicit that the
+    prose field is "NEVER matched", because a gate that reads a disclosure
+    punishes disclosing.
+
+    None is a first-class answer and is REPORTED rather than guessed at. Most
+    rows without one have no command to record: an L2 freeze stamp, an
+    `--exhausted` declaration and an L5 close-out all change no board and say
+    so. `board_store.replay_command` takes the same line for the same reason
+    -- it raises rather than reconstructing, because "pretending otherwise is
+    how a ledger becomes prose".
+    """
+    argv = entry.get('lever_argv') if isinstance(entry, dict) else None
+    if not argv or not isinstance(argv, (list, tuple)):
+        return None
+    for tok in argv:
+        if isinstance(tok, str) and tok.endswith('.py'):
+            return os.path.basename(tok)
+    first = argv[0] if isinstance(argv[0], str) else None
+    return os.path.basename(first) if first else None
+
+
+def _lever_histogram(rows):
+    """{lever: n} over the rows that name one, sorted for a stable document."""
+    out = {}
+    for e in rows:
+        name = lever_identity(e)
+        if name:
+            out[name] = out.get(name, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def cmd_status(a):
     from board_store import Ledger
     lg = Ledger(a.ledger)
@@ -2158,6 +2193,30 @@ def cmd_status(a):
     # where the systemic NOTE already lives.
     _unlevered = [e for e in rows if not str(e.get('lever') or '').strip()]
     c['unlevered'] = len(_unlevered)
+    # THE STRUCTURED LEVER CHANNEL, beside the free-text one (#937).
+    #
+    # `loop_driver.py:4-9` records the ONE documented reason the two drivers
+    # are separate: "placement accepts a lap when the named finding it aimed
+    # at is gone, routing accepts an iteration when `blocking` strictly
+    # decreased... The driver never emits both." That is an argument for an
+    # accept rule stated PER LEVER rather than per half -- and the first thing
+    # such a rule needs is to know which lever a row pulled.
+    #
+    # `lever` cannot answer that: it is free prose by design, and
+    # run_watch.py:544 is explicit that it is "NEVER matched" because
+    # reporting on a disclosure punishes the disclosure. `lever_argv` can, and
+    # this reports how far it reaches. Measured over the 28 recorded ledgers
+    # in this tree: 411 of 450 rows carry one (91%), by kind completion 98%,
+    # placement 86%, systemic 79% -- and the 39 that do not are almost all
+    # rows with NO COMMAND to record (L2 freeze stamps, `--exhausted`
+    # declarations, L5 close-outs), with 4 genuinely undocumented.
+    #
+    # REPORTED, NOT YET GATED. Making the accept rule per-lever moves DONE and
+    # STUCK verdicts, and this repo grades a verdict-moving change by a corpus
+    # A/B, never by reasoning -- so the identity ships first and the rule that
+    # would consume it is a separate, measured change.
+    c['lever_identities'] = _lever_histogram(rows)
+    c['unreplayable'] = sum(1 for e in rows if lever_identity(e) is None)
     # #894: the placement terms per lap, and each lap's movement against the
     # row it was recorded against. Additive, inside the one JSON document --
     # this stdout is an API that callers json.loads() whole, which is why

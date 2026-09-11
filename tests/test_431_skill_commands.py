@@ -875,6 +875,7 @@ def test_the_defaults_the_skills_quote_are_the_real_defaults():
 def test_every_documented_flag_exists():
     problems = []
     checked = 0
+    uncited = []
     for tool in TOOLS:
         # Collect the citations FIRST, and only then go looking for a parser.
         # A tool invoked without flags has no contract to check, and resolving
@@ -887,6 +888,13 @@ def test_every_documented_flag_exists():
                 for flag in _cited_flags(block, tool):
                     cites.append((src, flag))
         if not cites:
+            # DISCLOSED, not silently skipped (#937). A tool the skills invoke
+            # and pass no flag to is legitimate -- but it is also exactly what
+            # a tool going dark looks like, and the 900-odd aggregate below
+            # absorbs it either way. Naming the population turns an invisible
+            # zero into a number somebody can argue with, which is the shape
+            # #939 used for the 13 value-unchecked spans.
+            uncited.append(tool)
             continue
         try:
             valid = _parser_for(tool)
@@ -912,7 +920,18 @@ def test_every_documented_flag_exists():
     # instruction branch alone yields 574, so 400 could not see the refusal
     # half disappear. Measured after: 862.
     assert checked >= 650, f"only {checked} flag citations found -- scanner broken?"
-    print(f"  PASS: {checked} flag citations, all real")
+    # ...and the population this aggregate CANNOT see. A per-tool floor was
+    # considered and rejected: test_doc_flag_liveness gives the reason in its
+    # own words -- "a gate that cries wolf gets deleted" -- and most of these
+    # are tools the skills legitimately invoke bare. A CEILING is the right
+    # shape: legitimate to have, illegitimate to grow.
+    assert len(uncited) <= 10, (
+        f"{len(uncited)} of the {len(TOOLS)} discovered tools are invoked "
+        f"with no flag at all, so this gate checks nothing about them: "
+        f"{sorted(uncited)}")
+    print(f"  PASS: {checked} flag citations, all real "
+          f"({len(uncited)} tool(s) invoked with no flag: "
+          f"{', '.join(sorted(os.path.basename(t) for t in uncited))})")
 
 
 def test_the_placement_tools_are_actually_mentioned():
