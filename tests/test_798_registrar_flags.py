@@ -160,7 +160,7 @@ def t_a_script_still_does_NOT_inherit_another_CLIs_flags():
 
 def t_a_computed_flag_name_is_a_known_limit_not_a_silent_gap():
     """`render_placement.py` builds 18 toggles as `f'--{name}'`
-    (py_tools/render_placement.py:1571-1573), so no source scan can see them.
+    (py_tools/render_placement.py:1576-1578), so no source scan can see them.
 
     That is why it is NOT in FLAG_SCRIPTS, and this pins the reason: if
     someone adds it, the exact-match test above would fail with a list of 18

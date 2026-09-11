@@ -2543,8 +2543,13 @@ def _close_out(a, name):
 
     The asymmetry this exists to remove: L2 refuses to START routing without a
     placement close-out, while nothing ever refused to FINISH. A run reached
-    the terminal artifact having never invoked the routing half's own V1-V5 at
+    the terminal artifact having never run the routing half's own close-out at
     all, and shipped a board carrying a power-rail-to-signal short.
+
+    (This said "the routing half's own V1-V5". Those stages were a
+    `routing_driver.py` that never reached main and was removed twice; the
+    convergence loop they came from lives in references/convergence.md, and
+    the routing skill's own proof is its Step 9 plan checker. #937.)
 
     The gate is NOT "produce a document" -- a well-shaped empty one would
     satisfy that. It is that TWO INDEPENDENT INSTRUMENTS MUST NOT CONTRADICT
@@ -2794,8 +2799,8 @@ def _args(argv=None):
                          '--json`. L5 refuses without it: L2 refuses to START '
                          'routing without a placement close-out and nothing '
                          'ever refused to FINISH, so a run reached the '
-                         'terminal artifact having never entered the routing '
-                         "half's own V1-V5 loop at all.")
+                         'terminal artifact having never run the routing '
+                         "half's own close-out at all.")
     ap.add_argument('--accept-unclosed', nargs='*', action='extend',
                     metavar='CHECK', default=None,
                     help='ship with a NAMED close-out check unsatisfied: '

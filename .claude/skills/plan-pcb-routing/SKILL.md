@@ -7,6 +7,77 @@ description: Analyzes a KiCad PCB file and creates a comprehensive routing plan.
 
 When this skill is invoked with a KiCad PCB file, perform a comprehensive analysis and present a routing plan to the user.
 
+## How to run this skill
+
+**Step 0 first, always.** Then Step 1 onward in order, and Step 9 last: it
+emits the plan as an executable artifact and then PROVES it, with a checker
+that refuses by name rather than a paragraph you are trusted to have read.
+
+There is no driver here, and that is deliberate. The placement half stages its
+work behind one because the AI is deciding there and a refusal is what keeps a
+decision honest. Routing's failure mode is different -- the CHAIN being wrong,
+not a judgement being wrong -- so what this half needs is a checker over the
+plan, and it gets one. Placement stages encode a decision order over levers
+and are stable; routing stages encode the copper chain, which the engine moves
+underneath them.
+
+### Who is in the seat here
+
+**In the routing half, YOU PLAN and the scripts EXECUTE.** You choose the
+chain, the nets and the parameters, and you read the failures; `route.py` and
+its siblings lay the copper. You do not hand-place copper, and you do not work
+around a checker that refuses.
+
+That is the opposite of the placement half, where YOU DECIDE -- which parts
+move, where, and why -- and the scripts legalize and measure. The test for
+which mode you are in: **if the work replays from a recorded command list
+without judgement, it is script work.** Routing passes it, which is why every
+run here leaves a `redo_commands.sh` that replays with no model in the loop.
+Placement cannot, and does not pretend to.
+
+The tools are of two kinds, and the difference decides how you use one:
+
+| | **ACTOR** | **INSTRUMENT** |
+|---|---|---|
+| what it does | changes the board | says what is wrong with it |
+| here | `route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py` | `check_connected.py`, `check_drc.py`, `check_complete.py`, `board_score.py`, `check_weird.py`, `check_cycles.py` |
+| how you use it | name it in the plan and let it run | run it -- never optional |
+
+Every runnable tool in this clone declares which door it serves and which of
+those two kinds it is. The routing door's own view, with each tool's purpose:
+
+```bash
+python3 -X utf8 krt_registry.py --door routing
+```
+
+## Step 0: the placement gate -- is this board ready to route?
+
+**Measure first, then decide.** A board whose parts are in the wrong places is
+not a routing problem and no router setting fixes it: a part whose pad copper
+lies outside the outline converts one-for-one into unrouted and broken nets,
+because its nets cannot be routed at all.
+
+```bash
+python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --json wk/assembly0.json
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py board.kicad_pcb --json wk/score0.json --quiet
+```
+
+Read the VERDICT line, **not** `blocking == 0`: `blocking` is one of five
+conjuncts `check_assembly` decides on, so a board unbuildable through a
+coincident-origin stack or a containment reads `blocking` 0 and is still NOT
+BUILDABLE.
+
+- **NOT BUILDABLE** -> stop. This is placement work. Use `/plan-pcb-placement`
+  for the placement half alone, or `/plan-pcb-placement-and-routing` when the
+  board needs both.
+- **buildable** -> go to Step 1.
+
+**Arriving from the loop, this gate is already satisfied -- say so rather than
+re-deriving it.** `/plan-pcb-placement-and-routing` runs these same instruments
+at L2 before it hands the board over, and its placement close-out is the
+evidence. Re-running them costs seconds and is never wrong; skipping the gate
+because "the loop must have done it" is.
+
 ## Step 1: Load and Analyze PCB Structure
 
 ```python

@@ -70,7 +70,7 @@ Its guards are the four this skill exists to enforce:
 | `L2` route | a placement close-out | routing cannot start on a placement nobody proved, and a board with a blocking pair fails for a reason routing cannot fix |
 | `L3` classify | a routing score | a retry without a classification is a guess |
 | `L4` re-enter | a measured `--shape` | the three shapes re-enter at three different points, and the cost of guessing is asymmetric |
-| `L5` close out | a `check_complete` close-out that **agrees** with `converge` | nothing refused to FINISH, so a run reached the terminal artifact having never entered routing's own V1–V5 loop, and shipped a power-to-signal short. It builds FOUR refusals, not one: a `--final` lens PASS against that row's own score; all-PASS live lenses against an `INCOMPLETE`/`UNSOUND` close-out; `DONE-EXHAUSTED` against a non-`DONE` close-out; and, opt-in, the on-disk verdict file against the ledger's live claim under its own `verifier` waiver token. Prepare for all four |
+| `L5` close out | a `check_complete` close-out that **agrees** with `converge` | nothing refused to FINISH, so a run reached the terminal artifact having never run routing's own close-out, and shipped a power-to-signal short. It builds FOUR refusals, not one: a `--final` lens PASS against that row's own score; all-PASS live lenses against an `INCOMPLETE`/`UNSOUND` close-out; `DONE-EXHAUSTED` against a non-`DONE` close-out; and, opt-in, the on-disk verdict file against the ledger's live claim under its own `verifier` waiver token. Prepare for all four |
 
 **Both inner halves go to a teammate. Always, at every board size.** You do not
 decide it and you cannot forget it — the driver reads the board, delegates, and
@@ -155,10 +155,12 @@ the run, and a watcher had to reconstruct both from the transcript.
 2. **Freeze what the placement decided.** Lock the refs whose poses are
    decisions (mechanically fixed parts, anything a spec pins). A later step
    that moves them silently undoes the placement work.
-3. **Route.** Follow `/plan-pcb-routing` from Step 1 on the placed board. Its
-   Step 0 gate will pass, because you just did that work.
-4. **On a routing failure, classify before retrying** (the routing skill's
-   convergence section owns the classifier):
+3. **Route.** Follow `/plan-pcb-routing` from its Step 0 on the placed
+   board. That gate will pass, because you just did that work -- say so and
+   move on rather than re-deriving it.
+4. **On a routing failure, classify before retrying** (the classifier lives
+   in `references/convergence.md`, here -- `ca6bb455` moved it out of the
+   routing skill, and this line went on citing where it used to be):
 
    | the diagnosis says | re-enter at |
    |---|---|
@@ -731,7 +733,7 @@ Three rules about that number:
   never let it read as clean.
 
 **`place_route_loop`'s own `ACCEPTED` / `REJECTED` is NOT a quality verdict.**
-`better()` (`py_placer/place_route_loop.py:564`) compares `failures` and `iterations`, both
+`better()` (`py_placer/place_route_loop.py:569`) compares `failures` and `iterations`, both
 from route.py's own `JSON_SUMMARY`; it never runs a checker. Treat it as a cheap
 pre-filter and **re-score with `board_score.py` before believing it.**
 

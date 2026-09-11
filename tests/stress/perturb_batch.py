@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """First-batch runner for the #411 perturbed-corpus rig.
 
-Walks the `plan-pcb-routing` skill's Step 0 ladder on a PERTURBED board and
+Walks the `plan-pcb-placement` skill's Step 0 ladder on a PERTURBED board and
 scores the result against the original, which is free ground truth.
 
     Step 0    decision table -- a perturbed board is the "rough / imported /
