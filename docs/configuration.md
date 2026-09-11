@@ -549,10 +549,23 @@ See [Length Matching](length-matching.md#time-matching) for how propagation dela
 
 The `GridRouteConfig` dataclass holds all routing parameters:
 
+**These are the DATACLASS's own field defaults, which is what a bare
+`GridRouteConfig()` gives you — not what a routed board gets.** The four track
+geometry fields below read lower than the `--track-width` / `--clearance` /
+`--via-size` / `--via-drill` rows in the flag table above, and both are right:
+every routing entry point resolves geometry from the board's own net class,
+else from `routing_defaults.py` (`TRACK_WIDTH` 0.3, `CLEARANCE` 0.25,
+`VIA_SIZE` 0.5, `VIA_DRILL` 0.3), and passes that in — so these four are
+overridden before a single track is laid. The values here are held against
+`py_router/routing_config.py` by `tests/run_doc_examples.py`, which checks the
+NAMES and the NUMBERS of this block; the flag table above it is gated by
+neither.
+
 ```python
 @dataclass
 class GridRouteConfig:
-    # Track geometry (see routing_defaults.py for values)
+    # Track geometry -- the dataclass floor; the CLIs pass the board's net
+    # class, else routing_defaults.py's (looser) values, over the top
     track_width: float = 0.1      # mm (default for non-power nets)
     clearance: float = 0.1       # mm between tracks
     via_size: float = 0.3         # mm via outer diameter

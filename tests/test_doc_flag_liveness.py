@@ -54,9 +54,13 @@ import krt_capabilities as K                                   # noqa: E402
 #: literal text scan cannot see although `--help` lists it and the flag parses;
 #: and `--seed`/`--variant` is prose about a seeder that MIGHT take such an
 #: axis, not a claim that the flag exists. Adding the file would ship two
-#: standing false positives, which is how a gate stops being read. Its numeric
-#: claims are covered instead -- `test_doc_constants` has it, and
-#: `test_431_skill_commands` resolves its flags through the real parsers.
+#: standing false positives, which is how a gate stops being read. What DOES
+#: cover it is `test_431_skill_commands`, which resolves its flags through the
+#: real parsers. `test_doc_constants` lists the file but currently derives
+#: NOTHING from it: that gate needs a `CONST (module.py) | value |` row and the
+#: placement skill has none, so it is listed for the day one appears, not
+#: because it grades anything today. Saying "its numeric claims are covered"
+#: would be the same unchecked coverage claim #923 is about.
 DOCS = (
     os.path.join('.claude', 'skills', 'plan-pcb-routing', 'SKILL.md'),
     os.path.join('.claude', 'skills', 'plan-pcb-placement-and-routing',
