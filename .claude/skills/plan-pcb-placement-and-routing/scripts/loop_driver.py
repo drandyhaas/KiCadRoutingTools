@@ -300,8 +300,20 @@ def _guard_congestion(a):
     # matrix. hpwl's direction has to be checked per board, not assumed.
     # See docs/placement-calibration.md.
     b, n = float(m_base['hpwl']), float(m_now['hpwl'])
+    _cx_b = m_base.get('crossings')
+    _cx_n = m_now.get('crossings')
+    _cx = (f'    crossings  {float(_cx_b):.0f} -> {float(_cx_n):.0f}'
+           f'   [REPORTED, never gated -- non-negotiable 4]\n'
+           if isinstance(_cx_b, (int, float))
+           and isinstance(_cx_n, (int, float)) else '')
     if b <= 0:
-        return True, None
+        # PRINT, even here. This arm passed with `None` -- a baseline hpwl of
+        # 0 means the renders cannot be compared, and saying nothing is
+        # indistinguishable from saying "congestion is fine" (#937).
+        return True, (f'  CONGESTION READ: the baseline render reports hpwl '
+                      f'{b:.1f}, so no gain can be computed from it. This '
+                      f'stage is NOT telling you the placement is fine; it is '
+                      f'telling you the comparison is unavailable.\n' + _cx)
     gain = (b - n) / b
     # REPORT, do not refuse. The threshold that used to live here was withdrawn
     # on measurement (docs/placement-calibration.md): the same premise --
@@ -313,13 +325,24 @@ def _guard_congestion(a):
     # `parameter`-shaped, because every per-net test can pass on a board no
     # router can finish. That part needs no threshold.
     if gain >= _CONGESTION_RATIO:
-        return True, None
-    _cx_b = m_base.get('crossings')
-    _cx_n = m_now.get('crossings')
-    _cx = (f'  crossings  {float(_cx_b):.0f} -> {float(_cx_n):.0f}'
-           f'   [REPORTED, never gated -- non-negotiable 4]\n'
-           if isinstance(_cx_b, (int, float))
-           and isinstance(_cx_n, (int, float)) else '')
+        # PRINT THE MEASUREMENT IN THIS ARM TOO (#937). This returned
+        # `(True, None)`, so a board that PASSED the cut was waved through
+        # with the numbers on neither screen nor record -- and the crossings
+        # pair was computed only below this line, so on a passing board the
+        # one figure non-negotiable 4 says must ALWAYS be reported was never
+        # printed at all.
+        #
+        # _CONGESTION_RATIO's own comment says it "decides whether to print a
+        # warning beside the numbers -- it does NOT decide anything". That was
+        # the intent and this is what makes it true: the threshold now decides
+        # which READING accompanies the measurement, never whether the
+        # operator sees it. An instrument that withholds a measurement is not
+        # an instrument.
+        return True, (
+            f'  CONGESTION READ: hpwl {b:.1f} -> {n:.1f} '
+            f'({gain * 100:+.1f}% of the gap closed), at or above the '
+            f'{_CONGESTION_RATIO * 100:.0f}% mark where this stage stops '
+            f'asking for a disposition.\n' + _cx)
     if a.accept_congestion and str(a.accept_congestion).strip():
         return True, (
             f'  CONGESTION READ (accepted): hpwl {b:.1f} -> {n:.1f} '
@@ -334,7 +357,10 @@ def _guard_congestion(a):
         f'The congestion read says this may be PLACEMENT-shaped, and nothing '
         f'has said otherwise.\n\n'
         f'    hpwl       {b:.1f} -> {n:.1f}   ({gain * 100:+.1f}% of the gap '
-        f'closed)\n' + _cx.replace('  crossings', '    crossings') +
+        # _cx already carries the 4-space indent this block wants. It used to
+        # be built at 2 and re-indented here -- which, once the shared builder
+        # moved to 4, would have matched INSIDE its own indent and produced 6.
+        f'closed)\n' + _cx +
         f'\n'
         f'    The placement left {(1 - gain) * 100:.1f}% of the wirelength it '
         f'started with.\n'
@@ -3896,8 +3922,19 @@ def _self_test():
         out = STAGES['L4'](_args(base + ['--shape', 'parameter',
                                          '--congestion-json', _cgood,
                                          '--congestion-baseline', _cbase]))
-        want('CONGESTION READ' not in out,
-             'a healthy congestion gain adds no warning')
+        # A healthy gain adds no REFUSAL and demands no disposition -- but it
+        # does print the numbers. This used to assert `'CONGESTION READ' not
+        # in out`, which pinned the defect rather than the property: above the
+        # ratio the stage returned (True, None) and the operator saw no hpwl
+        # and no crossings at all, while _CONGESTION_RATIO's own comment
+        # claimed it only "decides whether to print a warning BESIDE the
+        # numbers" (#937).
+        want(not out.startswith('<error>') and 'CONGESTION READ' in out
+             and 'hpwl' in out,
+             'a healthy congestion gain still PRINTS the measurement')
+        want('--accept-congestion' not in out.split('CONGESTION READ')[-1]
+             .split('\n\n')[0],
+             '...and asks for no disposition, which is what the ratio decides')
         out = STAGES['L4'](_args(base + ['--shape', 'parameter',
                                          '--congestion-json', _cgood]))
         want(out.startswith('<error>') and '--congestion-baseline' in out,

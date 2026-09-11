@@ -118,15 +118,25 @@ finished with: anything after that — a pour, a repair, a placement re-entry �
 leaves its verdicts stale, and a verdict recorded against a board it did not
 read is the defect this loop exists to catch.
 
-**The agent TYPE is a cost decision, so make it rather than default it.** A
-fresh agent starts empty and will rebuild the context it was not given — one
-measured half spent its first hour writing read-only probe scripts for facts
-this loop already held. A fork starts with the parent's whole conversation and
-rebuilds nothing, but carries those tokens into every turn of its own, mostly
-cached, and is a bigger context to reason inside. The fork buys the REBUILD, not
-the per-turn cost. Fork when the parent holds facts the half cannot re-derive
-from the files named in its brief; use a fresh agent when everything it needs is
-one of those files; and say in the report which you chose.
+**The agent TYPE is a cost decision. The driver makes it for you, and you
+override it when the criterion says so — what you must not do is let it pass
+unread.** A fresh agent starts empty and will rebuild the context it was not
+given — one measured half spent its first hour writing read-only probe scripts
+for facts this loop already held. A fork starts with the parent's whole
+conversation and rebuilds nothing, but carries those tokens into every turn of
+its own, mostly cached, and is a bigger context to reason inside. The fork buys
+the REBUILD, not the per-turn cost.
+
+So the default is `fork`, and it is a measured default rather than a
+convenience. **The criterion for overriding it:** use `--delegate-mode fresh`
+when everything the half needs is in the files its brief names, so there is no
+rebuild to buy. Say in the report which you used and why.
+
+(This paragraph used to say "make it rather than default it" while the
+paragraph thirteen lines above said the tool now takes the decision, and the
+code has no path that evaluates the criterion at all — it reads one flag and
+falls back to `fork`. Two sentences that close together must not disagree;
+the tool proposing and the reader disposing is what both were reaching for.)
 
 **The END-TO-END VERIFIER is never a fork, in either mode.** Its prompt ends
 "Re-derive every number yourself. Do not trust the report", and
