@@ -479,7 +479,7 @@ is_edge_stub(pad_x, pad_y, bga_zones) -> bool
 from kicad_parser import parse_kicad_pcb
 from connectivity import find_connected_groups, find_stub_free_ends
 
-pcb = parse_kicad_pcb('kicad_files/fanout_output.kicad_pcb')
+pcb = parse_kicad_pcb('kicad_files/routed_output.kicad_pcb')
 net = next(n for n in pcb.nets.values()
            if len(n.pads) >= 2 and any(s.net_id == n.net_id for s in pcb.segments))
 

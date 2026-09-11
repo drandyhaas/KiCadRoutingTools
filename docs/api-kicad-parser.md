@@ -333,7 +333,7 @@ from under BGAs.
 from kicad_parser import (parse_kicad_pcb, find_components_by_type,
                           detect_bga_pitch, auto_detect_bga_exclusion_zones)
 
-pcb = parse_kicad_pcb('kicad_files/fanout_starting_point.kicad_pcb')
+pcb = parse_kicad_pcb('kicad_files/routed_output.kicad_pcb')
 for fp in find_components_by_type(pcb, 'BGA'):
     print(f"{fp.reference}: pitch {detect_bga_pitch(fp)}mm, {len(fp.pads)} pads")
 for zone in auto_detect_bga_exclusion_zones(pcb):
