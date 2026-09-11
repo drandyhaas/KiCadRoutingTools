@@ -140,6 +140,25 @@ ROWS = [
      '            out |= set()\n',
      (T_DFL,), KILLED),
 
+    # ---- the placement door gates off-outline pad copper --------------------
+    # The top-priority placement defect, checked at one door of three until now.
+    # Deliberately on the PER-PAD channel: check_assembly's `oob_pad_count` is a
+    # part-level AABB that reads non-zero on two HUMAN boards whose pads are
+    # fine (glasgow_revC 0.03mm, watchy 0.17mm), so gating on that count would
+    # refuse them. Blinding the read must redden the driver's own self-test.
+    ('off-outline-gate-blinded', 'pd',
+     "    _oob = (chk.get('a_off_outline') or {}).get('pad_copper')\n",
+     "    _oob = None\n",
+     (T_DRIVERS,), KILLED),
+
+    # ---- test_431's exit-code scanner, its only live half -------------------
+    # The corpus has 0 annotated commands, so a scanner that stopped matching
+    # reports the same 0. The positive control is what tells those apart.
+    ('exit3-scanner-blinded', 't431',
+     "            blk = '\\n'.join(ls[i + 1:i + 4])\n",
+     "            blk = ''\n",
+     (T_431,), KILLED),
+
     # ---- B6: a gate must not pin the citation it exists to keep correct -----
     # `def better` moved from 358 to 564. The gate hardcoded 358, so correcting
     # the skill FAILED the test whose job is keeping the skill correct.
