@@ -420,6 +420,155 @@ def test_a_half_can_declare_itself_exhausted_on_the_record():
           "later lap retracts it")
 
 
+def test_a_score_that_measured_nothing_is_reported_not_raised():
+    """#936 D1. `verdict --score` on a document whose `blocking` is null.
+
+    `_score_key` returns None for `blocking is None` deliberately -- its own
+    comment says an unmeasured lap must not rank as `inf`, because `inf >= inf`
+    made the plateau test TRUE and an unmeasured lap then read as a plateaued
+    one. It also says "the callers already filter None". The ledger-row caller
+    does; the `--score` caller did not, so `blocking = key[0]` raised
+    `TypeError: 'NoneType' object is not subscriptable` -- on exactly the input
+    the docstring is written for.
+
+    `blocking: null` is what board_score emits when a component that was ASKED
+    for could not answer. The verdict must name the missing measurement and
+    must NOT be a verdict about the board.
+
+    THE LEDGER HERE IS PLATEAUED ON PURPOSE -- five recorded laps in each half
+    at an identical score. A bare `key[0] if key else None` guard is the weaker
+    fix this test exists to reject, and on a ONE-LAP ledger it is
+    indistinguishable from the real one: both halves report `too-few-laps`, so
+    execution reaches CONTINUE either way and only the exit code differs. Only
+    on a plateaued ledger does the bare guard fall past `elif blocking == 0`
+    into the terminal branch and print
+    `STUCK: blocking == None and neither half improved in its last 5 recorded
+    laps`, which reads as a measurement of a board nothing measured. Measured
+    with the bare guard substituted: verdict STUCK, exit 5.
+
+    `'DONE' not in stdout` would be a tautology (a null `blocking` can never
+    satisfy `elif blocking == 0`), so the assertion below is on the verdict
+    NAME, which is the thing a caller reads -- loop_driver's L5 branches on it
+    and discards the exit code entirely.
+
+    _score_key returns None for three distinct documents. Each gets its own
+    sentence, and the "a component could not answer" cause is asserted only
+    when the score itself names one in `unknown` -- publishing an unmeasured
+    cause is the defect this whole issue is about.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        flat = json.dumps({'blocking': 3, 'quality': {}})
+        for half, n in (('placement', 5), ('completion', 5)):
+            for i in range(n):
+                assert _cv(['record', '--ledger', led, '--board', BOARD,
+                            '--kind', half, '--lever', f'{half} lap {i}',
+                            '--score', flat]).returncode == 0
+
+        p = os.path.join(td, 'null.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'quality': {},
+                       'ungraded': ['length'], 'unknown': ['impedance']}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', p])
+        assert 'Traceback' not in r.stderr, r.stderr
+        doc = json.loads(r.stdout)
+        # The half that matters: NOT a verdict about the board. This is what
+        # the bare guard fails -- it says STUCK here.
+        assert doc['verdict'] == 'NO-SCORE', doc
+        assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+        assert 'could not answer (impedance)' in doc['reason'], doc['reason']
+        assert doc['unknown'] == ['impedance'], doc
+        assert doc['ungraded'] == ['length'], doc
+
+        # ...and with nothing named in `unknown`, the cause is NOT asserted.
+        p2 = os.path.join(td, 'null2.json')
+        with open(p2, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'quality': {}}, fh)
+        why = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', p2]).stdout)['reason']
+        assert 'nothing measured it' in why and 'could not answer' not in why, why
+
+        # The other two None-shaped documents get their OWN sentences, because
+        # a missing key and a null value are not the same fact.
+        for doc_in, phrase in (
+                ([1, 2], 'is a list, not an object'),
+                ({'quality': {}}, 'no `blocking` key at all'),
+                (None, 'holds the JSON document `null`')):
+            q = os.path.join(td, 'shape.json')
+            with open(q, 'w', encoding='utf-8') as fh:
+                json.dump(doc_in, fh)
+            r = _cv(['verdict', '--ledger', led, '--score', q])
+            assert r.returncode == 2 and 'Traceback' not in r.stderr, r.stderr
+            got = json.loads(r.stdout)
+            assert got['verdict'] == 'NO-SCORE', got
+            assert phrase in got['reason'], (phrase, got['reason'])
+            # ONE shape for every NO-SCORE document: a consumer reading
+            # doc['ungraded'] must not KeyError on half of them.
+            assert 'ungraded' in got and 'unknown' in got, got
+
+        # Reading a MALFORMED score must not be the thing that raises: this is
+        # the crash class the guard exists to remove, and `sorted(x or [])`
+        # reintroduces it one line inside the fix.
+        bad = os.path.join(td, 'badungraded.json')
+        with open(bad, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'ungraded': 5}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', bad])
+        assert r.returncode == 2 and 'Traceback' not in r.stderr, r.stderr
+        assert json.loads(r.stdout)['ungraded'] == ['<not a list: 5>'], r.stdout
+
+        # ...and the cause is claimed ONLY when the score names one as a LIST.
+        # `{"unknown": "impedance"}` is not a component that answered; saying
+        # so would be publishing an unmeasured cause.
+        us = os.path.join(td, 'unknown_str.json')
+        with open(us, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'unknown': 'impedance'}, fh)
+        why = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', us]).stdout)['reason']
+        assert 'could not answer' not in why, why
+
+        # `quality` IS NOT NECESSARILY A DICT. This raised AttributeError in
+        # _score_key -- the same crash class, in the same function, one line
+        # above the guard added for it -- and `record` accepts such a score, so
+        # the raising value lands in the LEDGER and every later verdict on that
+        # ledger tracebacks in the row comprehension whatever `--score` says.
+        ql = os.path.join(td, 'quality_list.json')
+        with open(ql, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 1, 'quality': [1, 2]}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', ql])
+        assert 'Traceback' not in r.stderr, r.stderr
+        assert json.loads(r.stdout)['verdict'] != 'NO-SCORE', r.stdout
+
+        poison = os.path.join(td, 'poison.jsonl')
+        assert _cv(['record', '--ledger', poison, '--board', BOARD, '--kind',
+                    'placement', '--lever', 'malformed quality',
+                    '--score', json.dumps({'blocking': 1, 'quality': [1, 2]})]
+                   ).returncode == 0, 'record accepts it, which is the problem'
+        good = os.path.join(td, 'good.json')
+        with open(good, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 0, 'quality': {'vias': 1, 'copper_mm': 2,
+                                                  'segments': 3}}, fh)
+        r = _cv(['verdict', '--ledger', poison, '--score', good])
+        assert 'Traceback' not in r.stderr, \
+            'one malformed ledger row must not break every later verdict'
+
+        # ...and a score that DID measure still gets a real verdict, so the
+        # guard is not a blanket refusal.
+        ok = os.path.join(td, 'ok.json')
+        with open(ok, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 0, 'quality': {'vias': 1, 'copper_mm': 2,
+                                                  'segments': 3}}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', ok])
+        assert r.returncode in (converge.CONTINUE, converge.DONE,
+                                converge.STUCK, converge.BUDGET), r.returncode
+        assert json.loads(r.stdout)['verdict'] != 'NO-SCORE', r.stdout
+        # 2 is not one of the four verdict codes, so a caller switching on the
+        # exit cannot mistake "nothing measured" for a verdict about a board.
+        assert 2 not in (converge.CONTINUE, converge.DONE, converge.STUCK,
+                         converge.BUDGET)
+    print("  PASS: a null `blocking` is reported as NO-SCORE, not raised, "
+          "and not graded as STUCK on a plateaued ledger")
+
+
 def test_two_scores_that_graded_different_components_do_not_compare():
     """D12. Two `blocking` totals over different component sets are not larger
     and smaller versions of each other.

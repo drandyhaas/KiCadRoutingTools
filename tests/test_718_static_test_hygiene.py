@@ -140,6 +140,11 @@ _ROOT_JOIN_ARGV_OK = {
         'same shape and same reason as mutate_902: its `tests` values are the '
         'module-level T431/T923 constants, both directory-qualified literals, '
         'so the join is over a relative path rather than a bare basename.',
+    'mutate_936.py':
+        'same shape and same reason again: its `tests` values are the '
+        'module-level T_WORKLIST/T_DRIVERS/T_RUN/T_CONVERGE/T_DFL/T_923/'
+        'T_431 constants, every one a directory-qualified literal, so the '
+        'join is over a relative path rather than a bare basename.',
 }
 
 
@@ -959,7 +964,7 @@ _UNRESOLVABLE = {}
 #: exact shape of the defect #877 is about, reproduced in its own gate.
 #: 42 before #902 added `mutate_902.py`; 43 before #892 added `mutate_892.py`;
 #: 45 before #893/#916 added `mutate_893_916.py`.
-_BATTERY_COUNT = 47
+_BATTERY_COUNT = 48
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

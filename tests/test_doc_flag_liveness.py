@@ -36,6 +36,7 @@ gate that cries wolf gets deleted.
 
 Run: python3 -X utf8 tests/test_doc_flag_liveness.py
 """
+import ast
 import os
 import re
 import sys
@@ -48,23 +49,34 @@ import krt_capabilities as K                                   # noqa: E402
 
 #: The docs this gate holds to the engine's actual surface.
 #:
-#: `plan-pcb-placement/SKILL.md` is NOT here, and it was tried (#923). Two rows
-#: come back and neither is a defect: `--no-ratsnest` is registered as
-#: `f'--no-{name}'` (`py_tools/render_placement.py:1653`), which this gate's
-#: literal text scan cannot see although `--help` lists it and the flag parses;
-#: and `--seed`/`--variant` is prose about a seeder that MIGHT take such an
-#: axis, not a claim that the flag exists. Adding the file would ship two
-#: standing false positives, which is how a gate stops being read. What DOES
-#: cover it is `test_431_skill_commands`, which resolves its flags through the
-#: real parsers. `test_doc_constants` lists the file but currently derives
-#: NOTHING from it: that gate needs a `CONST (module.py) | value |` row and the
-#: placement skill has none, so it is listed for the day one appears, not
-#: because it grades anything today. Saying "its numeric claims are covered"
-#: would be the same unchecked coverage claim #923 is about.
+#: `plan-pcb-placement/SKILL.md` was excluded (#923) over two rows that came
+#: back, on the reasoning that neither was a defect and a gate shipping two
+#: standing false positives stops being read. #936 resolved both instead, so
+#: it is in the list now:
+#:
+#:   * `--no-ratsnest` is REAL -- `render_placement.py --help` prints it --
+#:     and `_bool_pair` composes it as `f'--no-{name}'`, so no literal exists
+#:     anywhere for the scan to find. `_composed_flags` resolves registrars
+#:     of that shape at their call sites now, rather than by name.
+#:   * `--variant` exists on NO tool, and the prose that named it was a
+#:     conditional about a seeder that MIGHT take such an axis. `--seed` is
+#:     the axis both seeders actually take; the sentence says so now.
+#:
+#: An excluded file is where a real defect hides, so this list is the whole
+#: population again.
+#:
+#: Kept from the #923 review, because it stays true and is the reason the
+#: exclusion could not simply be waved through: `test_doc_constants` lists
+#: the placement skill but derives NOTHING from it -- that gate needs a
+#: `CONST (module.py) | value |` row and the file has none. It is listed for
+#: the day one appears. "Its numeric claims are covered elsewhere" was the
+#: unchecked coverage claim that review removed, and adding the file HERE is
+#: what makes the coverage real rather than asserted.
 DOCS = (
     os.path.join('.claude', 'skills', 'plan-pcb-routing', 'SKILL.md'),
     os.path.join('.claude', 'skills', 'plan-pcb-placement-and-routing',
                  'SKILL.md'),
+    os.path.join('.claude', 'skills', 'plan-pcb-placement', 'SKILL.md'),
     os.path.join('docs', 'api-routing-config.md'),
 )
 
@@ -105,9 +117,11 @@ SKIP_DIRS = ('.git', 'wk', 'kicad_files', 'docs', 'node_modules',
 #:   * generated boolean pairs stay live via the `--no-` derivation below --
 #:     `argparse.BooleanOptionalAction` registers `--refs` and supplies
 #:     `--no-refs` (`py_router/route_render.py`), which appears in no
-#:     add_argument call anywhere. (The broad scan's comment cited
-#:     `--no-ratsnest` here; there is no such flag -- render_placement.py
-#:     registers `--ratsnest-nets` and `--ratsnest-all` and nothing else.)
+#:     add_argument call anywhere. This comment used to add that
+#:     `--no-ratsnest` is 'no such flag -- render_placement.py registers
+#:     --ratsnest-nets and --ratsnest-all and nothing else'. That was WRONG:
+#:     `--help` prints `--ratsnest` and `--no-ratsnest`, both composed by
+#:     `_bool_pair`, and `_composed_flags` is what finds them (#936).
 _ADD_ARG_CALL = re.compile(r"add_argument\s*\(")
 _FLAG_LIT = re.compile(r"""['"](--[a-z][a-z0-9-]{2,})['"]""")
 
@@ -172,11 +186,90 @@ def live_flags():
             for m in _ADD_ARG_CALL.finditer(text):
                 out |= set(_FLAG_LIT.findall(
                     _call_args(text, m.end() - 1)))
+            out |= _composed_flags(text)
     # Paired boolean flags: several tools register `--x` and get `--no-x`
     # from a helper, so `--no-ratsnest` is real on render_placement.py while
     # appearing in no add_argument call anywhere. A text scan cannot see the
     # generated half, so derive it.
     out |= {'--no-' + f[2:] for f in list(out)}
+    return out
+
+
+def _composed_flags(text):
+    """Flags a REGISTRAR builds from an f-string, resolved at its call sites.
+
+    `py_tools/render_placement.py:_bool_pair` does
+
+        g.add_argument(f'--{name}', ...); g.add_argument(f'--no-{name}', ...)
+
+    so neither `--ratsnest` nor `--no-ratsnest` is a literal anywhere and the
+    scan above sees neither. The `--no-` derivation does not rescue it either:
+    it derives from a set that never contained `--ratsnest`.
+
+    This file's own comment used to assert "there is no such flag --
+    render_placement.py registers `--ratsnest-nets` and `--ratsnest-all` and
+    nothing else". `render_placement.py --help` prints both `--ratsnest` and
+    `--no-ratsnest`, and #936 is an issue about exactly that kind of sentence.
+
+    Resolved by SHAPE, not by a list of helper names: find any function whose
+    body calls `add_argument` with an f-string of exactly two parts,
+    `--<literal>` then `{param}`, and read the literal every caller in the
+    same file passes at that parameter's position.
+
+    WHAT THAT SHAPE DOES NOT COVER, stated because an unstated limit is how
+    a gate is believed to cover more than it does. UNDER: an f-string of
+    three or more parts (`f'--{prefix}-{name}'`), and a keyword-only
+    parameter (`fn.args.args` excludes kwonly and posonly). OVER: a
+    registrar that reassigns its parameter before use yields the
+    pre-transform spelling; a same-named function in another scope
+    contributes its call sites; a call under `if False:` still counts.
+    Over-approximating is the dangerous direction here -- an invented flag
+    makes the gate blind to a real dead one -- so if a second registrar ever
+    appears, check it. `render_placement._bool_pair` is the only one in the
+    repo today, and all 18 flags it yields are real per `--help`.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    #: {function name: [(literal prefix, positional index, parameter name)]}
+    registrars = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        params = [a.arg for a in fn.args.args]
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'add_argument' and node.args):
+                continue
+            first = node.args[0]
+            if not isinstance(first, ast.JoinedStr) or len(first.values) != 2:
+                continue
+            head, tail = first.values
+            if not (isinstance(head, ast.Constant)
+                    and isinstance(head.value, str)
+                    and head.value.startswith('--')
+                    and isinstance(tail, ast.FormattedValue)
+                    and isinstance(tail.value, ast.Name)
+                    and tail.value.id in params):
+                continue
+            registrars.setdefault(fn.name, []).append(
+                (head.value, params.index(tail.value.id), tail.value.id))
+
+    out = set()
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+            continue
+        for prefix, idx, arg_name in registrars.get(call.func.id, ()):
+            val = None
+            if len(call.args) > idx and isinstance(call.args[idx], ast.Constant):
+                val = call.args[idx].value
+            for kw in call.keywords:
+                if kw.arg == arg_name and isinstance(kw.value, ast.Constant):
+                    val = kw.value.value
+            if isinstance(val, str) and val:
+                out.add(prefix + val)
     return out
 
 

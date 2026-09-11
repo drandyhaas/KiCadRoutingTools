@@ -9,7 +9,8 @@ move one.
 Corpus reality, measured rather than assumed, and the reason the sources are
 ordered the way they are:
 
-  * 0 of 27 in-repo boards carry a `(group ...)` block, so that path is verified
+  * 0 of the 22 boards git tracks under `kicad_files/` carry a `(group ...)`
+    block, so that path is verified
     against a synthetic fixture only.
   * 12 of 22 boards with `(path ...)` have more than one sheet. ulx3s: 11 sheets
     sized 83/34/23/20/20/12. That makes sheet the workhorse.
@@ -105,7 +106,7 @@ def test_ambiguous_uuid_pulls_in_every_claimant():
 
 
 def test_boards_without_groups_parse_to_an_empty_dict():
-    """0 of 27 corpus boards have one; absence is normal, not an error."""
+    """0 of the 22 tracked boards have one; absence is normal, not an error."""
     for b in ('tigard', 'watchy', 'ulx3s'):
         assert parse_kicad_pcb(_board(b)).groups == {}
 

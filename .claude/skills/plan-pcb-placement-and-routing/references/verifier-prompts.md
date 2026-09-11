@@ -93,8 +93,12 @@ a clean-looking report.
 > assembly channel's blocking pairs did not rise, or the result is
 > discarded. `crossings` is REPORTED, never gated: it correlates POSITIVELY
 > with distance-to-truth (r = +0.78 -- that is DISTANCE, not routed
-> `blocking`; no predictor here has been correlated with `blocking`, see
-> `docs/placement-predictors.md`), so a verifier failing a placement on
+> `blocking`. #703 HAS since measured crossings against routed `blocking`:
+> it fails its sign rule 5/1 on the full sample and passes 6/0 once
+> optimizer-made placements are excluded, so neither arm is the answer and
+> the prohibition still rests on the distance measurement -- see
+> `docs/placement-predictors.md`, which is the authority), so a verifier
+> failing a placement on
 > it rejects exactly the correct homecomings. Then intersect `moved[].reference` with the advisor's
 > high-confidence findings and with `locked_refs`: any overlap is a FAIL.
 > **Do not judge by how much moved** — "lots moved, looks broken" and "barely
@@ -186,9 +190,21 @@ VERDICT=FAIL:lens=drc;finding=8 vias below the 0.6 mm spec on B.Cu;
    `--lens` remains for laps, whose lenses are working notes. It
    refuses at write time anything that is not a `VERDICT=(PASS|FAIL):lens=…`
    line, so a malformed verdict stays visible instead of being normalised into
-   something that reads like a pass — and `--final` refuses without all three
-   routed-board lenses, because `blocking == 0` and "every lens passes" are two
-   different claims and only the first had a number.
+   something that reads like a pass — and `--final --kind completion` refuses
+   without all three routed-board lenses, because `blocking == 0` and "every
+   lens passes" are two different claims and only the first had a number.
+
+   THE GATE IS COMPLETION-ONLY, and deliberately so — it is a claim about the
+   ROUTED BOARD (`py_placer/converge.py`, the `a.final and a.kind ==
+   'completion'` branch). A `--final --kind systemic` row is NOT refused.
+
+   That is a HOLE, not a route: nothing prescribes such a row. L5 emits
+   `--kind completion --final` for EVERY verdict name, `DONE-EXHAUSTED`
+   included, with all three `--lens-file` paths; and its `--exhausted`
+   declaration is a SEPARATE `--kind systemic` row carrying no `--final` at
+   all. So the only way to reach a `--final` row the gate does not check is
+   to hand-write one. Do not read "`--final` refuses" as unconditional —
+   read the kind.
 
    *(This used to say the record schema had no verdict field and to put it in
    free-text `--lever`. That was documenting a gap, not a design constraint —

@@ -1997,9 +1997,11 @@ python3 -X utf8 py_router/make_movie.py <work-dir> -o routing.mp4
 ```
 
 `make_movie` takes a run directory, or the step boards in chain order. The fine
-per-copper rip/restore animation needs `KICAD_ROUTE_TRACE=1` (the default),
-which leaves a `<board>_routetrace.json` beside each routed board; a step
-without one reveals its board-to-board delta in chunks instead.
+per-copper rip/restore animation needs `KICAD_ROUTE_TRACE=1`, which is **OFF unless
+you export it** (`py_router/route_trace.py`; only the stress harness sets it). It
+leaves a `<board>_routetrace.json` beside each routed board; a step without one
+reveals its board-to-board delta in chunks instead — which is what a hand-driven
+run gets by default.
 
 Two optional panels, both off by default and both costing real time:
 `--panels xray+iso` stacks a 3D isometric `kicad-cli` render under the board
