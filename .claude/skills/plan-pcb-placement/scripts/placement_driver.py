@@ -2647,6 +2647,27 @@ def _self_test():
                  '--waive', 'congestion:spent']))
             want(out.startswith('<error>') and _want in out,
                  f'a render whose review sheet is {_val!r} is refused')
+        # PAD COPPER OFF THE OUTLINE -- the top-priority placement defect, and
+        # the one this door did not check at all until #936. Held here rather
+        # than only by --dump-refusals: blinding the read left the driver's own
+        # self-test green, which a battery row measured as a SURVIVOR.
+        _rj = dict(_r15)
+        _rj['review_sheet'] = _sheet_file
+        _rj['checklist'] = dict(_rj.get('checklist') or {})
+        _rj['checklist']['a_off_outline'] = {
+            'pad_copper': [{'reference': 'U7'}, {'reference': 'J2'}],
+            'courtyard': []}
+        out = STAGES['P-close'](_args(
+            ['--board', _pb, '--before', _pa,
+             '--render-json', _wr('rs_oob.json', _rj),
+             '--intent-json', _wr('is_oob.json', _covered([], brief=None)),
+             '--congestion-before', _wr('rs_oob2.json', _dmg),
+             '--waive', 'congestion:spent']))
+        want(out.startswith('<error>') and 'PAD COPPER outside' in out
+             and 'U7' in out,
+             'a render naming parts with pad copper off the outline is refused,'
+             ' and the refusal names them')
+
         _rj = dict(_r15)
         _rj['review_sheet'] = _sheet_file
         out = STAGES['P-close'](_args(
