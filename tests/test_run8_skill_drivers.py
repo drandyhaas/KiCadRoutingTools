@@ -179,6 +179,27 @@ def test_loop_driver():
     check('...and says delegation is now a correctness decision',
           'CORRECTNESS one' in text)
 
+    # THE ROUTING SKILL, which this file declared and never read. `ROUTING_SKILL`
+    # was assigned and referenced nowhere else, so of this file's checks 0 were
+    # about the routing half -- the door with no driver, and therefore the one
+    # whose contract lives entirely in prose. A declared-but-unused path is a
+    # gate that looks present in a grep and asserts nothing.
+    #
+    # These pin what the LOOP relies on being true over there. They are
+    # deliberately not a driver contract: routing has no driver, and #937 is
+    # where whether it should have one is being decided.
+    rtext = open(ROUTING_SKILL, encoding='utf-8').read()
+    check('the routing skill ships', os.path.isfile(ROUTING_SKILL))
+    check('the routing skill still opens at the step the loop hands off to',
+          'Step 1: Load and Analyze PCB Structure' in rtext)
+    check('...and still ends its chain on route.py, which the loop assumes',
+          'route.py' in rtext)
+    # The handback the loop reads. L2 tells a delegate to follow this skill and
+    # then reads a close-out; if the reconciliation section is renamed away, the
+    # loop's instruction points at nothing and only a run would find out.
+    check('...and keeps the net-coverage reconciliation the loop cites',
+          'Net-Coverage Reconciliation' in rtext)
+
 
 def main():
     check('the driver ships with the skill', os.path.isfile(DRIVER))

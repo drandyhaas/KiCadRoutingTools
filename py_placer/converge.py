@@ -1086,8 +1086,13 @@ def cmd_record(a):
         _miss = sorted(_need - _seen)
         if _miss:
             # The old text said "routing_driver --stage V5 fans them out".
-            # There is no routing_driver.py in this repo and there never has
-            # been; V1-V5 survive only as prose. This is a REFUSAL, i.e. the
+            # There is no routing_driver.py on main, and V1-V5 survive here
+            # only as prose. (It DID exist -- created at 255af97d, grown to
+            # 19 stages, on 10 commits, none of them on main; the maintainer
+            # removed it twice by name because it forked before #562 and went
+            # on emitting two steps main had deleted. "Never has been" was
+            # wrong, and a refusal is the worst place to be wrong about what
+            # exists.) This is a REFUSAL, i.e. the
             # one message whose entire job is to say what to do next, so it
             # names a file the reader can open instead of a tool they cannot
             # find.

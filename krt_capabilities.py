@@ -443,8 +443,15 @@ def capabilities(root=ROOT):
         _eng = os.path.join(root, 'py_router')
         if os.path.isdir(_eng) and _eng not in sys.path:
             sys.path.insert(0, _eng)        # #522 layout: the engine dir
-        import routing_defaults as _d
-        out['version'] = getattr(_d, 'VERSION', None)
+        # /VERSION is the release triple's own file (Cargo.toml +
+        # /VERSION + metadata.json). This used to read
+        # `routing_defaults.VERSION`, which that module has never
+        # defined -- so `capabilities()['version']` was None on every
+        # call this function has ever made, while /VERSION said 0.22.0.
+        # A capability report whose version is always None cannot
+        # answer the one question it exists for: can THIS clone do X.
+        with open(os.path.join(root, 'VERSION'), encoding='utf-8') as _vf:
+            out['version'] = _vf.read().strip() or None
     except Exception:
         out['version'] = None
     return out
