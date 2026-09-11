@@ -104,6 +104,14 @@ BREAKS = [
       '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias')),
     ('R14', 'a poured net with no route-step width',
      ('--power-nets GND +3V3', '--power-nets GND')),
+    # Step 5b is TWO asserts and they fail on different things. The row above
+    # breaks `unsized` (poured, no route-step width); this breaks `orphans`
+    # (excluded from the route step, claimed by no Step-2b impedance route) --
+    # which is the GNDA failure itself: a net excluded as "power" and never
+    # picked up, ending at 0/23 pads connected while the run reported success.
+    # tests/mutate_937.py found this gap by blinding `orphans` and SURVIVING.
+    ('R14', 'a net excluded from the route step and claimed by nothing',
+     ("--nets '*' --power-nets GND +3V3", "--nets '*' '!RF' --power-nets GND +3V3")),
     ('R15', 'gnd-via distance under the floor',
      ('--power-nets GND +3V3 --clearance 0.09',
       '--power-nets GND +3V3 --clearance 0.09 --via-size 0.45 '
