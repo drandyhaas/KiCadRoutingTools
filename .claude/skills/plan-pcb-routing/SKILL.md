@@ -2650,6 +2650,26 @@ A per-board plan file that ever gets improved (a better recipe found on a
 later pass) should be REGENERATED through this skill, not hand-patched —
 the skill is the tuner; the plan file is its output.
 
+### Then PROVE it, before you run it
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py <board>_plan.sh --board board.kicad_pcb
+```
+
+Read-only, no model in the loop. It evaluates the rules of this skill that a
+recorded chain can answer — the chain ends on `route.py`, verification is
+commented rather than executable, no pipes, Step 5b's two net-coverage
+`assert`s, the cap pass after every fanout — and REFUSES BY NAME, citing the
+line here each rule comes from, so you can argue with it at its source.
+
+Exit 0 checked and clean, 2 usage, 3 the plan could not be read, 4 a rule
+failed. A refusal is not a malfunction: fix the plan, do not run it.
+
+It also PRINTS what it cannot decide, with the tool that owns each — nine
+rules need a routed board or a finished run, and an unchecked rule that says
+so is honest where a silently absent one is not. `--list` shows both sets
+without reading a plan.
+
 ### Stop conditions
 
 There are four, they are listed in `.claude/skills/plan-pcb-placement-and-routing/SKILL.md`

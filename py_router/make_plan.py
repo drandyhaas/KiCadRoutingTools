@@ -85,6 +85,29 @@ def make_plan(source, out=None):
     return out, steps, skipped
 
 
+def plan_commands(source):
+    """[(cwd, argv)] for a manifest or run dir -- EVERY recorded command, in
+    file order, with nothing pruned.
+
+    `make_plan` above converts to GUI steps, and that conversion deliberately
+    DROPS what the GUI cannot execute: every `check_*` command, `cd`, `cp`,
+    superseded retries and dead-end branches, and any tool with no plan
+    action. It also loses the tool NAME (`route_planes` and `repair_planes`
+    both become `repair_planes`), the argv, and any index back into the file.
+
+    A checker of the plan needs precisely what that drops -- whether the chain
+    ends on route.py, whether a `cp` carried its `.kicad_pro`, whether a pipe
+    got in -- so it gets the raw list, and `plan_steps_from_manifest` stays
+    the one conversion.
+
+    Note what even this cannot see: `parse_manifest` drops COMMENTS, and the
+    routing skill requires verification commands to BE comments. A rule about
+    those has to read the file text.
+    """
+    from redo_stress_test import parse_manifest
+    return parse_manifest(resolve_manifest(source))
+
+
 def describe(step, index):
     """One human-readable line for a step (no wx needed, unlike the GUI's
     step_label, so --list works under any python)."""
