@@ -1236,11 +1236,20 @@ after the token or in `--stop-reason`, never instead of it.
 2. **Budget exhausted** — you have actually written **100** ledger entries for this
    board. Report the best-scoring board **and the remaining blockers itemised with
    measurements**. Do not present it as finished.
-3. **Five consecutive iterations with `unrouted` and `broken` both unchanged,
-   after trying the rip lever, a finer grid, and a layer change on the failing
-   nets** → floorplan-limited or spec-limited. Say which, with the number. (Five,
-   and on the connectivity components — three iterations of `drc` not moving means
-   nothing when the real blocker is a dead net.)
+3. **Five RECORDED laps of one half — accepted or rejected — with the score not
+   improving, after trying the rip lever, a finer grid, and a layer change on
+   the failing nets** → floorplan-limited or spec-limited. Say which, with the
+   number.
+
+   **Do not count this by eye, and do not count `unrouted` and `broken`.**
+   `converge.py verdict --flat 5` is what decides it, and it compares
+   `(blocking, quality)` lexicographically, per half, over the last five
+   RECORDED laps — rejected ones included, because a rejected lap is evidence
+   that a lever did nothing. Quality counts, so a lap that only moved vias is
+   not a plateau; and a lap whose `blocking` is null is dropped as unjudged
+   rather than read as flat. This page used to say "`unrouted` AND `broken`
+   both unchanged", which is a different test that agrees with the tool only
+   by accident. The number five is right everywhere; the currency was not.
 4. **A blocker is geometrically unsatisfiable** → stop and report it as a
    **finding about the requirement**, with the measurements that prove it. Worked
    example: a 2.4 mm clearance requirement written as a netclass also applies

@@ -187,7 +187,7 @@ Fields that carry weight:
 |---|---|---|
 | 1 | `blocking == 0` **and** every lens passes | done — quote the score and the lens list |
 | 2 | budget exhausted — **100 ledger entries actually written** | the best-scoring board **and** every remaining blocker, itemised with measurements |
-| 3 | **5** consecutive iterations with `unrouted` AND `broken` both unchanged, after trying the rip lever, a finer grid and a layer change on the failing nets | floorplan-limited or spec-limited — say which, with the number |
+| 3 | **5** RECORDED laps of one half — accepted OR rejected — with `(blocking, quality)` not improving, after trying the rip lever, a finer grid and a layer change on the failing nets. `converge.py verdict --flat 5` decides it; this is NOT `unrouted` and `broken` read separately, and a lap whose `blocking` is null is dropped as unjudged rather than counted flat | floorplan-limited or spec-limited — say which, with the number |
 | 4 | a blocker is geometrically unsatisfiable | a finding **about the requirement**, with the measurement that proves it |
 
 Stop condition 4, worked: a requirement asked for 2.4 mm edge-to-edge clearance
