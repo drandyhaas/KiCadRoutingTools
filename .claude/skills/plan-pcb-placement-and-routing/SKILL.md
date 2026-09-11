@@ -513,7 +513,7 @@ have booted.
 
 | order | component | why it outranks the rest |
 |---|---|---|
-| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). **And READ the focus panels** — image read-case 3: `render_placement --summary-json wk/routeN.json --focus` classifies pocket-vs-scattered in one look, BEFORE the first lever. Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
+| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). **And READ the focus panels** — this is a look you must take before the first lever, not after: `render_placement --summary-json wk/routeN.json --focus` classifies pocket-vs-scattered in one look, BEFORE the first lever. Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
 | 2 | `broken` | a net in N pieces is N−1 dead wires. **Read `components.broken.nets`, not the count** — see below; the count alone is not a work list and a loop driven on it does not move |
 | 3 | `net_widths`, `undersized` | real copper, wrong size — fixable by re-routing what is already there |
 | 4 | `floorplan` | placement or intent |
@@ -575,7 +575,7 @@ of them is why the count does not move:**
 | a **plane net** (GND, any poured rail): stranded pads that cannot reach the pour | `repair_planes --rip-blocker-nets`. `route.py` will not tap a pour |
 | a **multipoint** signal/power net: some MST edges landed, one did not | `route.py --nets <that net>` — and read **`failed_multipoint`**, which is where its failure is reported |
 | a break whose stranded pad sits on a **DNF / do-not-fit** part | **not a defect.** Chasing it never converges. Say so once, with the ref, and exclude it from the target set |
-| a break at a fine-pitch pad with no room for a tap via | smaller `--via-size`/`--via-drill`, then finer `--grid-step` — the Step 5 ladder |
+| a break at a fine-pitch pad with no room for a tap via | smaller `--via-size`/`--via-drill`, then finer `--grid-step` — the fine-pitch retry ladder under the routing skill's `### Step 2: Route ALL Nets` |
 
 The `ref` on each stranded pad is what tells these apart, which is why it is in
 the list. A break on `[R1]` where R1 is unpopulated and a break on `[U1]` are the
@@ -621,7 +621,7 @@ writing a script to answer a question, check whether one of them already does.
 |---|---|---|
 | where is the gap, and what is walling it in | `net_forensics.py --nets N --radius 1.0` | per net: the connected ISLANDS, the exact unclosed gap endpoints, and an inventory of the foreign copper around each gap — **named, per layer, nearest-first**. Better than a ratsnest, which tells you two pads are unjoined and nothing about why |
 | the honest unconnected count | `kicad_unconnected.py board --items` | KiCad's own DRC, and it **refills the zones itself** — which is 9.1c's whole problem, already solved. Exit 4 = items remain, 3 = no oracle (NOT clean) |
-| WHERE the DRC violations sit, as a picture | `check_drc.py board --render wk/drc/` | one cropped panel per spatial cluster, red rings at each violation, count/types/rect in the caption — image read-case 7. The panel shows WHERE; the violation records say how much |
+| WHERE the DRC violations sit, as a picture | `check_drc.py board --render wk/drc/` | one cropped panel per spatial cluster, red rings at each violation, count/types/rect in the caption — a look you must take whenever DRC is what moved. The panel shows WHERE; the violation records say how much |
 | the endgame work list, join by join | `kicad_unconnected.py board --pairs-json wk/pairs.json`, or `converge.py where BOARD --oracle` | each remaining join as an exact net + pad↔copper endpoint pair (x/y/layer/kind) — the JOIN SPEC for a scoped route, no re-deriving from prose. `where --oracle` prints the pairs then runs forensics on exactly those nets |
 | what kind of failure is this | `converge.py where` / the router's own hint | the hint names the flag and the nets (9.3b); it diagnoses better than the score does |
 | where should this part go, facing which way | `converge.py poses BOARD --ref R` | ranks legal (x, y, rotation) poses by placement cost in **milliseconds**, with a per-component breakdown, and `--route` pays for tier 3 on only the top few |
@@ -726,7 +726,7 @@ Three rules about that number:
   never let it read as clean.
 
 **`place_route_loop`'s own `ACCEPTED` / `REJECTED` is NOT a quality verdict.**
-`better()` (`place_route_loop.py:358`) compares `failures` and `iterations`, both
+`better()` (`py_placer/place_route_loop.py:564`) compares `failures` and `iterations`, both
 from route.py's own `JSON_SUMMARY`; it never runs a checker. Treat it as a cheap
 pre-filter and **re-score with `board_score.py` before believing it.**
 
@@ -878,8 +878,10 @@ learn:
    the rip set contains a width-bearing net, pass its `--power-nets` /
    `--power-nets-widths` (or `--impedance`) in the same call.** And the rule
    does not extend to dru rules — a net routed under a staged/lifted dru
-   cannot be re-made by any call that reads the full sibling dru (see Step 5's
-   dru-has-no-pin bullet).
+   cannot be re-made by any call that reads the full sibling dru (see stop
+   condition 4's staged-sibling-dru bullet in §9.5 of THIS file — there is no
+   such bullet in the routing skill; "Step 5" there is the plane-repair step
+   #562 absorbed into the route step).
 3. **One net per call.** Routing two nets together let the second rip the first —
    reported as `1/2 routed` twice running, a different net each time. Sequential
    single-net calls connected both.
@@ -913,7 +915,7 @@ learn:
    and no gate stops you: the exit-3 refusal and its `--allow-bare-pads`
    override were removed in 5832e4eb (the empty-board 1c pour was the
    exempt case). Connect every pad first, or accept losing it. (Cross-ref:
-   the Step 5 ordering block says the same from the other side.)
+   the routing skill's `## Important Notes` item 3, "Order matters" (#424), says the same from the other side.)
 
 For plane-net pads that cannot reach their pour, the equivalent is
 `repair_planes --rip-blocker-nets` (out-of-chain only; it leaves the ripped
@@ -935,11 +937,11 @@ top blocker on the exact keys, not on impressions:
 | 2-layer board, heavy F.Cu skew, via count far above a hand layout | **parameters** | layer-cost rebalance, below |
 | `oob_count` or `overlap_area` rose after the last placement | **the placement is illegal** | discard it; do not route it |
 | `check_floorplan` exits 4 with `zone_containment` | **intent violated** | fix the placement to match, or say why the intent changed. Do not quietly rewrite the intent to match the board |
-| a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the Step 5b ledger — not a placement problem at all |
+| a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the routing skill's `## Step 5b: Net-Coverage Reconciliation` ledger — not a placement problem at all |
 | `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
 | a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | The default 2.3 is inadmissible: it returns a path up to ~2.3× optimal (#586 moved it from 1.9, and this row said 1.9 until #923 gave the gate a way to notice). Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` (the #529 dynamic budget self-extends; do not pass `--max-iterations`), then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
 | `--heuristic-weight 1.0` **on the net's own FIRST pass**, on a board carrying only what must precede it, did not change the length | **placement** | now the router genuinely had no shorter path. Signature: routed length far above the straight-line pad distance *and stable under an admissible search*. Go to `place_route_loop` — see the warning below, it needs BOTH `--target-nets` and `--accept-cmd` to see this at all. **A null measured on a SATURATED board proves nothing** — one run tested 1.0 at iteration 4, after fanout, USB and every signal were committed, got a byte-identical board, and recorded "no shorter path exists at this placement". Re-tested on the first pass that lays the net's copper, the same flag was worth 5.8× |
-| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1c (or the Step 3 finalize / Step 5 repair), not placement |
+| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1c, or the in-run plane finalize the route step ends with (#562 absorbed the old separate repair step; `py_router/repair_planes.py` is the out-of-chain utility) — not placement |
 | the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
 | a net fails on ONE layer at every grid and rip set, and routes instantly with a second layer | **the single-layer constraint is the blocker** | not a router failure. Report it against the requirement that imposed the layer restriction, with both measurements |
 | `drc` is large, uniform, one net pair, one overlap value | **grading artifact** | 9.1b — re-grade at the right class. Not a lever at all |
@@ -1066,11 +1068,11 @@ drc3/cluster1]`). The image mandates are auditable only through the ledger: run
 5's breach — a produced-but-never-opened delta render — was invisible precisely
 because nothing recorded reads. An iteration whose score had `unrouted`/`broken`
 > 0 or a failed `check_drc`, with no `[read: ...]` in its entry, skipped
-read-case 3 or 7. **Record NON-triggers the same way**: when a mandate's
+the look its own row mandates. **Record NON-triggers the same way**: when a mandate's
 trigger is checked and absent, say so in the entry (`[checked: 0 B.Cu parts ->
 no --per-side]`) — an unrecorded non-trigger is indistinguishable from a
 skipped mandate to any later audit (run 6's watcher had to grep the board to
-tell them apart). **A pose decision is read-case 5 even when the arithmetic
+tell them apart). **A pose decision needs its side-by-side reads even when the arithmetic
 is decisive**: a rot-0-vs-rot-180 call made on `components.inversions` alone,
 with no side-by-side ratsnest reads in the ledger, is a mandate skipped —
 run 7 decided the U3 pose twice that way; the number was right, and the
