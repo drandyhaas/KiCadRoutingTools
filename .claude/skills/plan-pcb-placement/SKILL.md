@@ -697,6 +697,14 @@ order:
        --intent floorplan.json [--seed N]
    ```
 
+   The driver's P1 refuses to seed without a ZONE PLAN (`--zone-plan`): that
+   intent with a `zone` rectangle and a `note` on a block for every movable
+   part, `must_lock` and the declared edge connectors excepted. Run 26 seeded
+   from one zone and then hand-placed most of its parts; the plan is where
+   the arrangement is decided, and the seed only fills it -- and P1 ranks
+   SEVERAL seeds from it with `compare_seeds.py` (next) rather than taking
+   the first.
+
    The seeder turns the intent's constructs into placement (edge bands →
    edge poses, single-ref zones → the spec coordinate, multi-ref zones →
    a packed block, everything else → its connectivity centroid), stamps
