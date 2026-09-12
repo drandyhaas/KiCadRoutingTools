@@ -1426,7 +1426,16 @@ def _select(menu: Dict[str, List[Move]],
             want_layer.update(delivered_layers(choice, corridor_groups(choice),
                                                geo, tooth_layer))
             taken.clear()
+            # placed_nets is declared "in step with placed_legs" and the
+            # align round cleared and rebuilt only ONE of them, so
+            # total()'s SEL_XLAYER branch zipped this round's legs against
+            # the GREEDY pass's (net, move) pairs -- a stale net name and a
+            # stale om.layer for every pair, and an outright index desync
+            # once the trial placed a different set of nets. It is why the
+            # recorded SEL_XLAYER verdict ("crossings worse, K41 196->301")
+            # is not evidence about the idea.
             placed_legs.clear()
+            placed_nets.clear()
             trial: Dict[str, Move] = {}
             for n in order:
                 pick = None
@@ -1440,6 +1449,7 @@ def _select(menu: Dict[str, List[Move]],
                 trial[n] = pick
                 if geo is not None:
                     placed_legs.append(geo.leg(n, pick))
+                    placed_nets.append((n, pick))
                 taken.append(pick)
             if len(trial) < len(choice):
                 break                      # lost a net: reject the round
