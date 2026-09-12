@@ -2872,6 +2872,8 @@ def _generate_bga_fanout_core(footprint: Footprint,
                         _m['exit'] = _fwd(*_m['exit'])
                     if _m.get('site') is not None:
                         _m['site'] = _fwd(*_m['site'])
+                    if _m.get('path'):
+                        _m['path'] = [_fwd(*q) for q in _m['path']]
                     nd = _m
                 _moved[(round(q.global_x, 3), round(q.global_y, 3))] = nd
             _hints = _moved

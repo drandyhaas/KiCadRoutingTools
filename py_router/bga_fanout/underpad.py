@@ -2296,6 +2296,47 @@ def generate_underpad_escape(footprint: Footprint,
             return None
         return (vx, vy), [(gx, gy), (vx, vy)]
 
+    def _dogbone_path_valid(p, site, path):
+        """A CALLER-chosen dog-bone site reached by a WALKED stub (#622, the
+        human's DU1: a short surface run from the ball to the diagonal
+        elbow, then along the inter-row or inter-column lane -- a band's
+        edge line, or a row gap -- to a free via site up to a few pitches
+        away; the engine's own lane-walk chooser, #652, with the site
+        chosen by the plan). `path` is [(ball), (elbow), (site)]; each leg
+        is checked as the chooser checks its k >= 1 candidates: a legal via
+        site clear of every registered copper and reservation, both legs
+        clear by the exact registries and on the raster with the flanking
+        own-footprint pads exempted. Returns (site, stub polyline) or None."""
+        gx, gy = p.global_x, p.global_y
+        vx, vy = site
+        hx, hy = grid.pitch_x / 2.0, grid.pitch_y / 2.0
+        pts = [(gx, gy)] + [tuple(q) for q in path[1:]]
+        if len(pts) < 2 or math.hypot(pts[-1][0] - vx, pts[-1][1] - vy) > 1e-6:
+            return None
+        if not (grid.min_x - 1e-6 <= vx <= grid.max_x + 1e-6
+                and grid.min_y - 1e-6 <= vy <= grid.max_y + 1e-6):
+            return None
+        span = max(math.hypot(q[0] - gx, q[1] - gy) for q in pts)
+        ctx = _via_ctx(p.net_id, gx, gy, extra=span + max(hx, hy))
+        if locked_smd_pads and not via_site_ok(vx, vy, via_size / 2.0):
+            return None
+        if _via_site_conflict(vx, vy, p.net_id, ctx) is not None:
+            return None
+        pad_ex = occ.disk_cells(gx, gy, max(pad_keep, via_keep))
+        via_ex = occ.disk_cells(vx, vy, via_keep)
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            if _seg_conflict(p.net_id, ax, ay, bx, by, ctx):
+                return None
+            lane_ex = set()
+            for p2 in footprint.pads:
+                if _pt_seg_d(p2.global_x, p2.global_y, ax, ay, bx, by) \
+                        < max(grid.pitch_x, grid.pitch_y) * 0.55:
+                    lane_ex |= occ.disk_cells(p2.global_x, p2.global_y, pad_keep)
+            if not occ.seg_clear(top_idx, (ax, ay), (bx, by),
+                                 exempt=pad_ex | via_ex | lane_ex):
+                return None
+        return (vx, vy), pts
+
     # Plan-follow, part 1 (planned FULL moves, see _move_of): these balls
     # leave the generic phases -- Phase A would lay a surface escape for a
     # ball the plan wants on the back layer, and Phase B would reserve a
@@ -2311,7 +2352,11 @@ def generate_underpad_escape(footprint: Footprint,
             miss = []
             kind = mv.get('kind')
             if kind == 'dogbone' and mv.get('site'):
-                ok = _dogbone_site_valid(p, tuple(mv['site']))
+                ok = None
+                if mv.get('path'):
+                    ok = _dogbone_path_valid(p, tuple(mv['site']), mv['path'])
+                if ok is None:
+                    ok = _dogbone_site_valid(p, tuple(mv['site']))
                 if ok is not None:
                     _reserve_dogbone(p, ok[0], ok[1])
                 else:
@@ -2541,12 +2586,28 @@ def generate_underpad_escape(footprint: Footprint,
         by_id = {id(p): p for p in _planned}
         NEG_MAX_BLOCKERS = 3
         NEG_MAX_TRIES = 16
+        # STRICT plan-follow (a 'strict' key on any planned move, 2026-09-11):
+        # the plan's berths are the planner's to choose, so (a) a
+        # negotiation is kept only when the count of balls laid EXACTLY
+        # rises -- the lexicographic score used to accept a trade that
+        # swapped one exact berth for another while a secondary count rose
+        # (K41: SA6 exact for SA12 walked 1.6 mm, SA11 for SA15, SCS1 for
+        # SODT0), and the caller then banned the ripped net's move as if
+        # the plan were infeasible; (b) the degrade ladder stops at level 2
+        # -- a ball with no berth on its asked FACE is left unescaped and
+        # reported, for the planner to re-plan against the laid copper,
+        # instead of being dumped on another face where it takes a gap the
+        # plan gave to someone else.
+        strict = any(bool(_move_of(p).get('strict')) for p in _planned)
+        max_level = 2 if strict else 3
 
         def goal_cell(mv):
             """The boundary cell at the asked gap, or None when the asked
             gap lies outside the ball window (a planner's 'gap' beyond the
             outer row or column): clamping it onto a ball line laid the
             escape somewhere the plan never asked for."""
+            if mv.get('exit') is None:
+                return None            # a face-only ask: no gap of its own
             gx, gy = occ.cell(*mv['exit'])
             face = mv['face']
             if face in ('right', 'left'):
@@ -2585,6 +2646,124 @@ def generate_underpad_escape(footprint: Footprint,
                         out.append((g[0], c) if ax else (c, g[1]))
             return out
 
+        def exact_lane(p, mv):
+            """The plan's move laid on ITS OWN LEGS (EXACT_LANE, 2026-09-10):
+            each leg checked against the exact registries and the raster
+            with the ball's own pad, its via site and the flanking
+            own-footprint pads exempted (as _dogbone_path_valid checks a
+            walked stub), then rasterised into the cell path commit()
+            consumes. None when a leg is blocked -- the ladder then runs as
+            before. Level 0's search reaches the asked EXIT by any cells,
+            and a stub it audited exact ran four rows down the neighbouring
+            gap (K35 SA6), taking the lane two other asks held."""
+            legs = mv.get('legs')
+            if not legs:
+                return None
+            kind = mv.get('kind', 'surface')
+            home = home_of(p)
+            gx, gy = p.global_x, p.global_y
+            site = db_site.get(id(p))
+            goal = goal_cell(mv)
+            if goal is None:
+                return None
+            gxy = occ.xy(*goal)
+            span = max(math.hypot(b[0] - gx, b[1] - gy) for (_a, b, _L) in legs)
+            ctx = _via_ctx(p.net_id, gx, gy, extra=span + max(grid.pitch_x, grid.pitch_y))
+            pad_ex = set(occ.disk_cells(gx, gy, max(pad_keep, via_keep)))
+            if site is not None:
+                pad_ex |= occ.disk_cells(site[0], site[1], via_keep)
+            # the legs the engine still has to lay: a surface stub whole; a
+            # dog-bone's run from its (reserved, stamped) site; a via-in-pad's
+            # run from the ball
+            run_L = mv.get('layer')
+            if kind == 'surface':
+                lay = [(a, b, L) for (a, b, L) in legs]
+            elif kind == 'dogbone':
+                # the run only, on the plan's run layer, from the reserved
+                # site (a via'd ball is HOMED to its run layer, so 'not the
+                # home layer' kept the stub leg and commit_dogbone, which
+                # takes the run's layer from the first cell, laid the run on
+                # the ball's layer -- seven B runs on F at K35, banned every
+                # pass)
+                if site is None:
+                    return None
+                lay = [(a, b, L) for (a, b, L) in legs if L == run_L]
+                if not lay:
+                    return None
+                lay[0] = ((site[0], site[1]), lay[0][1], lay[0][2])
+            else:
+                lay = [(a, b, L) for (a, b, L) in legs if L == run_L] or list(legs)
+            lay = [(a, b, L) for (a, b, L) in lay if math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-6]
+            if not lay:
+                return None
+            # the last leg ends at the window's boundary cell
+            a_, b_, L_ = lay[-1]
+            lay[-1] = (a_, gxy, L_)
+            cells = []
+            for (a, b, Lname) in lay:
+                li = L_idx.get(Lname)
+                if li is None:
+                    return None
+                if li == home and _seg_conflict(p.net_id, a[0], a[1], b[0], b[1], ctx):
+                    return None
+                lane_ex = set()
+                for p2 in footprint.pads:
+                    if _pt_seg_d(p2.global_x, p2.global_y, a[0], a[1], b[0], b[1]) \
+                            < max(grid.pitch_x, grid.pitch_y) * 0.55:
+                        lane_ex |= occ.disk_cells(p2.global_x, p2.global_y, pad_keep)
+                if not occ.seg_clear(li, a, b, exempt=pad_ex | lane_ex):
+                    if os.environ.get('EXACT_LANE_DEBUG'):
+                        # the first blocked stretch along the leg
+                        nn = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (res * 2)) + 1)
+                        where = None
+                        for k in range(nn):
+                            q0 = (a[0] + (b[0] - a[0]) * k / nn, a[1] + (b[1] - a[1]) * k / nn)
+                            q1 = (a[0] + (b[0] - a[0]) * (k + 1) / nn, a[1] + (b[1] - a[1]) * (k + 1) / nn)
+                            if not occ.seg_clear(li, q0, q1, exempt=pad_ex | lane_ex):
+                                where = q0
+                                break
+                        probe = ''
+                        if where is not None:
+                            q1 = (where[0] + (b[0] - a[0]) / nn, where[1] + (b[1] - a[1]) / nn)
+                            probe = (f'; clear with no exemption {occ.seg_clear(li, where, q1)},'
+                                     f' pad disk only {occ.seg_clear(li, where, q1, exempt=pad_ex)},'
+                                     f' lane disks only {occ.seg_clear(li, where, q1, exempt=lane_ex)},'
+                                     f' cell {occ.cell(*where)} grid {occ.grid[li][occ.cell(*where)[1] * occ.nx + occ.cell(*where)[0]] if hasattr(occ, "nx") else "?"}')
+                        near = ''
+                        if where is not None:
+                            wx, wy = where
+                            tt = [(t['net_id'], t['layer'], tuple(round(v, 2) for v in t['start']), tuple(round(v, 2) for v in t['end']))
+                                  for t in tracks if _pt_seg_d(wx, wy, t['start'][0], t['start'][1], t['end'][0], t['end'][1]) < 0.4]
+                            vv = [(v['net_id'], round(v['x'], 2), round(v['y'], 2)) for v in vias_to_add
+                                  if math.hypot(v['x'] - wx, v['y'] - wy) < 0.6]
+                            near = f'; committed near: tracks {tt[:4]} vias {vv[:4]}'
+                        print(f'    exact-lane {p.net_id} {kind}: leg {a}->{b} on {Lname} BLOCKED on the raster'
+                              f' at {tuple(round(v, 3) for v in where) if where else "?"}' + probe + near)
+                    return None
+                n = max(2, int(math.hypot(b[0] - a[0], b[1] - a[1]) / (res * 0.5)) + 1)
+                for k in range(n + 1):
+                    t = k / n
+                    c = occ.cell(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                    if not cells or cells[-1][:2] != c or cells[-1][2] != li:
+                        cells.append((c[0], c[1], li))
+            if not cells:
+                return None
+            sx, sy = occ.cell(gx, gy)
+            if kind == 'surface':
+                path = ([(sx, sy, home)] if cells[0][:2] != (sx, sy) else []) + cells
+                mode = 'surface'
+            elif kind == 'dogbone':
+                path, mode = cells, 'dogbone'
+            else:
+                first = cells[0][2]
+                path = [(sx, sy, home), (sx, sy, first)] + [c for c in cells if c[:2] != (sx, sy)]
+                mode = 'via_in_pad'
+            carve = _carve_foreign(db_path.get(id(p)) or [(gx, gy)] + ([site] if site else []),
+                                   home, {p.net_id})
+            if os.environ.get('EXACT_LANE_DEBUG'):
+                print(f'    exact-lane {p.net_id} {kind}: LAID {len(lay)} leg(s) {[(a, b, L) for (a, b, L) in lay]}')
+            return mode, path, carve
+
         def attempt(p, mv, level, goal_override=None, reach=None):
             """(mode, path, carve) for the ladder level: 0 exact (face, gap,
             layer, kind); 1 same face and layer at the NEAREST free gap, then
@@ -2599,6 +2778,10 @@ def generate_underpad_escape(footprint: Footprint,
             region can reach (astar's reach_out, per search configuration in
             `reach`) and the later gaps outside it are skipped -- the same
             walk order, the same first success, the same path."""
+            if level == 0 and goal_override is None and mv.get('legs'):
+                r = exact_lane(p, mv)
+                if r is not None:
+                    return r
             if level == 1 and goal_override is None:
                 reach = {}
                 for gc in gap_goals(mv):
@@ -2769,7 +2952,11 @@ def generate_underpad_escape(footprint: Footprint,
                     out.add(pid)
             return out
 
-        order = sorted(_planned, key=depth, reverse=True)
+        # a FACE-ONLY ask (no exit: fanout_from_plan's ask for a net the
+        # selector could not place) goes after every exact ask -- laid in
+        # depth order it took planned gaps first (K41 e7: 13 refusals)
+        order = sorted(_planned, key=lambda p: (_move_of(p).get('exit') is not None, depth(p)),
+                       reverse=True)
         pending = []
         for p in order:
             mv = _move_of(p)
@@ -2813,12 +3000,12 @@ def generate_underpad_escape(footprint: Footprint,
             for pid in sorted(bl, key=lambda i: -depth(by_id[i])):
                 q = by_id[pid]
                 mq = _move_of(q)
-                for lvl in range(4):
+                for lvl in range(max_level + 1):
                     m2, p2, c2 = attempt(q, mq, lvl)
                     if p2 is not None:
                         alive[pid] = do_commit(q, mq, m2, p2, c2, lvl)
                         break
-            if score(alive) > s0:
+            if (score(alive)[0] > s0[0]) if strict else (score(alive) > s0):
                 n_acc += 1
                 pending.remove(p)
                 neg_log.append((p.net_name, f'ripped {_bl_names}: accepted '
@@ -2830,7 +3017,7 @@ def generate_underpad_escape(footprint: Footprint,
                 apply_state(alive)
         for p in pending:
             mv = _move_of(p)
-            for lvl in range(1, 4):
+            for lvl in range(1, max_level + 1):
                 mode, path, carve = attempt(p, mv, lvl)
                 if path is not None:
                     alive[id(p)] = do_commit(p, mv, mode, path, carve, lvl)
@@ -2865,7 +3052,7 @@ def generate_underpad_escape(footprint: Footprint,
                     continue
                 mv = e['asked']
                 ask = (f"{mv.get('kind')}/{mv['face']}/{str(mv.get('layer'))[:1]}"
-                       f"@({mv['exit'][0]:.2f},{mv['exit'][1]:.2f})")
+                       + (f"@({mv['exit'][0]:.2f},{mv['exit'][1]:.2f})" if mv.get('exit') else '@(face only)'))
                 if e.get('got'):
                     mode, gf, gl, (ex, ey) = e['got']
                     lost = [k for k in ('face', 'gap', 'layer', 'kind') if not e[k]]
