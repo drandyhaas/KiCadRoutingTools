@@ -999,6 +999,55 @@ def _guard_render(a):
             'outline, is any part on any other part, is any part on a hole or a '
             'locked part, and did more parts move than the step claimed.\n\n'
             'Re-render with --json-out.')
+    # PAD COPPER OFF THE OUTLINE -- the top-priority placement defect, and
+    # until now checked at ONE of the three doors.
+    #
+    # `loop_driver.l2` refuses a board on it (measured, its own comment:
+    # "`oob_pad_count` alone refuses 24, of which 12 are refusals `blocking`
+    # misses"), and nothing in this file did -- so the same board closed out
+    # clean through the placement door and was refused through the loop.
+    # CLAUDE.md: "A part whose pad copper lies outside the outline is the
+    # top-priority placement defect... Measured, run 10: 11 such parts produced
+    # ALL 13 unrouted nets and most of the 37 broken ones."
+    #
+    # THE CHANNEL MATTERS, and it is not the one the loop uses. l2 reads
+    # `oob_pad_count` out of check_assembly's report, which is a part-level pad
+    # AABB inflated by the grading clearance -- its own `oob_pad_basis` string
+    # says so and points here instead. Measured over every tracked board: that
+    # count is non-zero on three, and on two of them -- both human-designed
+    # reference boards carrying edge-mounted switches, at 0.03mm and 0.17mm --
+    # this per-PAD measure reports an EMPTY list. The AABB fires on the
+    # bounding box of an edge part; the pads are on the board. Gating on that
+    # count would refuse two human boards on a measurement artifact, which is
+    # why CLAUDE.md names this key and adds "a whole-board pass/fail verdict is
+    # the wrong channel for it". (The boards are named in the PR that added
+    # this, not here: a skill that names corpus boards is what
+    # tests/test_run8_skills_generic.py refuses, because guidance written
+    # around one board stops being guidance.)
+    #
+    # So this gate binds on the per-pad list and NAMES THE PARTS, because a
+    # count is not something you can act on and the refusal exists to be acted
+    # on.
+    _oob = (chk.get('a_off_outline') or {}).get('pad_copper')
+    if isinstance(_oob, list) and _oob:
+        _refs = []
+        for _it in _oob:
+            _r = _it.get('reference') if isinstance(_it, dict) else _it
+            if _r and str(_r) not in _refs:
+                _refs.append(str(_r))
+        return False, (
+            f'{len(_oob)} part(s) carry PAD COPPER outside the board outline: '
+            f'{", ".join(_refs) or "see checklist.a_off_outline.pad_copper"}.'
+            f'\n\nThose nets cannot be routed at all, so this converts '
+            f'one-for-one into `unrouted` and `broken` -- measured, run 10: 11 '
+            f'such parts produced ALL 13 unrouted nets and most of the 37 '
+            f'broken ones. It is the top-priority placement defect, ahead of '
+            f'every clearance graze.\n\nMove those parts back inside the '
+            f'outline and re-render. The outline is not yours to change.\n\n'
+            f'This is the per-PAD measure, not check_assembly\'s '
+            f'`oob_pad_count`, which is a part-level AABB inflated by the '
+            f'clearance and reads non-zero on human boards whose pads are '
+            f'fine.')
     d = chk.get('d_moved') or {}
     if d.get('match') is False:
         return False, (
@@ -1871,6 +1920,20 @@ def _refusal_scenarios(tmp):
          + ['--render-json', render(name='r_other.json', of=other)]),
         ('a render with no checklist', with_before
          + ['--render-json', render(name='r_nochk.json', checklist=_DROP)]),
+        ('a render naming parts with pad copper off the outline', with_before
+         + ['--render-json', render(name='r_oob.json', checklist={
+             'a_off_outline': {'pad_copper': [{'reference': 'U7'},
+                                              {'reference': 'J2'}],
+                               'courtyard': []},
+             'd_moved': {'moved': 3, 'expected': None, 'match': None}})]),
+        # ...and the same list carrying no `reference`, which is the arm that
+        # falls back to naming the key. Without this row that fallback is a
+        # branch nothing renders -- exactly what --dump-refusals exists to say.
+        ('a render with off-outline pad copper it cannot attribute', with_before
+         + ['--render-json', render(name='r_oob_anon.json', checklist={
+             'a_off_outline': {'pad_copper': [{'amount_mm': 1.2}],
+                               'courtyard': []},
+             'd_moved': {'moved': 3, 'expected': None, 'match': None}})]),
         ('a render that disagrees on the move count', with_before
          + ['--render-json', render(name='r_moved.json', checklist={
              'd_moved': {'moved': 9, 'expected': 3, 'match': False}})]),
@@ -2587,6 +2650,27 @@ def _self_test():
                  '--waive', 'congestion:spent']))
             want(out.startswith('<error>') and _want in out,
                  f'a render whose review sheet is {_val!r} is refused')
+        # PAD COPPER OFF THE OUTLINE -- the top-priority placement defect, and
+        # the one this door did not check at all until #936. Held here rather
+        # than only by --dump-refusals: blinding the read left the driver's own
+        # self-test green, which a battery row measured as a SURVIVOR.
+        _rj = dict(_r15)
+        _rj['review_sheet'] = _sheet_file
+        _rj['checklist'] = dict(_rj.get('checklist') or {})
+        _rj['checklist']['a_off_outline'] = {
+            'pad_copper': [{'reference': 'U7'}, {'reference': 'J2'}],
+            'courtyard': []}
+        out = STAGES['P-close'](_args(
+            ['--board', _pb, '--before', _pa,
+             '--render-json', _wr('rs_oob.json', _rj),
+             '--intent-json', _wr('is_oob.json', _covered([], brief=None)),
+             '--congestion-before', _wr('rs_oob2.json', _dmg),
+             '--waive', 'congestion:spent']))
+        want(out.startswith('<error>') and 'PAD COPPER outside' in out
+             and 'U7' in out,
+             'a render naming parts with pad copper off the outline is refused,'
+             ' and the refusal names them')
+
         _rj = dict(_r15)
         _rj['review_sheet'] = _sheet_file
         out = STAGES['P-close'](_args(

@@ -36,6 +36,15 @@ Thumbs.db
 rust_*/target/
 *.pyd
 
+# render_placement writes <board>_placement.png (and _B/_F on a two-sided
+# board) BESIDE THE BOARD when -o is omitted -- render_placement.py:2220. So
+# grading the corpus leaves 31 PNGs in kicad_files/, and a `git add -A` ships
+# ~14 MB of generated renders into the commit. Measured: it did, into a #936
+# follow-up branch, and only reading the diffstat before pushing caught it.
+/kicad_files/*_placement.png
+/kicad_files/*_placement_B.png
+/kicad_files/*_placement_F.png
+
 # KiCad outputs (routed files, backups, project files)
 /kicad_files/test_diffpair*kicad_pcb
 /kicad_files/fanout_output*.kicad_pcb
