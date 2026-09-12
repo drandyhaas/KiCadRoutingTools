@@ -145,6 +145,14 @@ _ROOT_JOIN_ARGV_OK = {
         'module-level T_WORKLIST/T_DRIVERS/T_RUN/T_CONVERGE/T_DFL/T_923/'
         'T_431 constants, every one a directory-qualified literal, so the '
         'join is over a relative path rather than a bare basename.',
+    'mutate_941_942.py':
+        'same shape and same reason once more: its `tests` values are the '
+        'module-level T_937/T_941/T_942/T_918/T_431/T_DRIVERS constants, '
+        'every one a directory-qualified literal '
+        '("tests/test_942_subagent_contract.py"), so the join is over a '
+        'relative path rather than a bare basename. `run_utils.tool()` is the '
+        'wrong resolver here for the reason the rows above give: these are '
+        'TEST files rather than shipped CLIs.',
     'mutate_937.py':
         'same shape and same reason: its `tests` values are the module-level '
         'T_REG/T_CHK/T_OOB/T_GATE/T_LEV/T_DRV/T_431 constants, every one a '
@@ -972,7 +980,7 @@ _UNRESOLVABLE = {}
 #: exact shape of the defect #877 is about, reproduced in its own gate.
 #: 42 before #902 added `mutate_902.py`; 43 before #892 added `mutate_892.py`;
 #: 45 before #893/#916 added `mutate_893_916.py`.
-_BATTERY_COUNT = 49
+_BATTERY_COUNT = 50
 
 #: A floor well under today's 831, not a target. Same purpose as
 #: `test_the_scanners_still_match_something`: prove the corpus is populated.

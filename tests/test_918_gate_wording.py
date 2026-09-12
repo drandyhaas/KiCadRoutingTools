@@ -14,7 +14,7 @@ reason the stale formula below survived for as long as the term did.
    unbuildable through the other four.
 
    This IS #918's acceptance, which asks for `grep -rn "blocking == 0"` over
-   the three skill dirs to return "nothing **that is a gate**" -- the last
+   every enrolled skill dir to return "nothing **that is a gate**" -- the last
    three words are load-bearing and an earlier draft of this file dropped
    them. Zero occurrences was never the ask, and could not be: of the 30
    occurrences in those directories, 24 are about **board_score's** `blocking`,
@@ -45,9 +45,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOARD_SCORE = os.path.join(
     ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing', 'scripts',
     'board_score.py')
+#: Every skill that can state the gate or the formula. `plan-pcb-routing` was
+#: missing (#941): it is the third door, it discusses `blocking` in its own
+#: right, and an unlisted directory is where the next restatement lands -- the
+#: same registration hole this file's own docstring is about one level up.
 SKILL_DIRS = [
     os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement'),
     os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-placement-and-routing'),
+    os.path.join(ROOT, '.claude', 'skills', 'plan-pcb-routing'),
     os.path.join(ROOT, '.claude', 'skills', 'review-routed-board'),
 ]
 
@@ -78,7 +83,17 @@ GATE_WORDS = re.compile(
 #: with `"The board is buildable only when check_assembly reports
 #: `blocking == 0`"` -- a real gate, silenced -- and again with an unrelated
 #: parenthetical on a neighbouring line. Both are in `_self_test` below.
-PROHIBITION = re.compile(r'NOT\s+`blocking == 0`|not on that count')
+#:
+#: The `not` may carry markdown emphasis and may be lower-case: the routing
+#: skill spells the identical correction `**not** \`blocking == 0\``, and
+#: enrolling that skill (#941) made a CORRECT sentence read as a live gate
+#: purely because of the asterisks. Emphasis markers and case are typography;
+#: the literal that carries the meaning -- `not` immediately before the
+#: backticked scalar -- is still required, so the two adversarial texts above
+#: (which contain no `not` in that position at all) stay caught. Both
+#: spellings are in `_self_test`.
+PROHIBITION = re.compile(r'(?:\*\*|__|\*|_)?NOT(?:\*\*|__|\*|_)?\s+'
+                         r'`blocking == 0`|not on that count', re.I)
 
 #: A stated formula, in either spelling the repo uses: four or more
 #: `+`-joined identifiers (`unrouted + broken + drc + ...`), or the sample
@@ -157,7 +172,7 @@ def test_no_prose_gates_on_check_assembly_blocking():
         hits += gating_sites(lines, os.path.relpath(path, ROOT))
     check('no site gates on check_assembly\'s `blocking == 0`', not hits,
           '; '.join(hits) if hits else
-          'checked every .md and .py under the three skill dirs')
+          f'checked every .md and .py under the {len(SKILL_DIRS)} skill dirs')
 
 
 def _stated_formulas(lines, comps):
@@ -324,6 +339,14 @@ def _self_test():
          'FAILS unless `check_assembly` reports `buildable: true`\n'
          '(NOT `blocking == 0` -- that is 1 of its 5 conjuncts).',
          False, 'gate'),
+        ('the same correction with markdown emphasis and lower case',
+         'read its `VERDICT:` line, **not** `blocking == 0`. `blocking` is\n'
+         'one of the five conjuncts that verdict is made of.',
+         False, 'gate'),
+        ('...but emphasis alone does not excuse a real gate',
+         'The board is buildable only when `check_assembly` **reports**\n'
+         '`blocking == 0`; proceed no further until then.',
+         True, 'gate'),
         ('board_score\'s own blocking == 0 is not this rule\'s business',
          '`quality` is a tie-break only, compared once `blocking == 0`.',
          False, 'gate'),

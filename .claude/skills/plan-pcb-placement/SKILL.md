@@ -217,10 +217,27 @@ The rest of this file is the reference the stages point into: the doctrine
 behind each rung, with the measurements that decided it. Read the part a stage
 names, when it names it.
 
-The instruments this skill decides with, all report-only until you accept:
+**Reading `<floor>`, which every command below wants.** It is not a number to
+pick: run `check_assembly.py <board> --json wk/assembly0.json` and read
+`clearance` from it. Read `clearance_source` in the same breath — `board
+netclass` means the board answered, `fixed default` means it declared nothing
+and the tool supplied 0.25, and `board_declares_no_floor` says so outright.
+Two grades are comparable only when that source agrees, because the scalar
+alone cannot say whether 0.25 was the board's answer or the tool's.
+`check_assembly` and `check_channels` resolve it themselves when `--clearance`
+is omitted; `check_drc` still wants it spelled out.
+
+The instruments this skill decides with, all report-only until you accept.
+**`check_drc` is graded at `--clearance-margin 0` everywhere in this skill**,
+which `check_drc.py` itself calls "the honest setting, and the one the
+perturbed-corpus runs grade at". The flag's default is 0.05 — a 5% suppression
+— and the P0 number decides whether repair happens at all: `_guard_damage`
+refuses P2 and P3 with "There is no damage for this stage to repair" when P0
+reports zero, so a margin that hides a graze closes the stages that would have
+fixed it.
 
 ```bash
-python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # on the COPPER-FREE board
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0   # on the COPPER-FREE board
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb [--baseline before.kicad_pcb]
 python3 -X utf8 py_tools/check_channels.py board.kicad_pcb [--baseline before.kicad_pcb --gate]
 python3 -X utf8 py_tools/check_pockets.py board.kicad_pcb [--nets <the route step's set>]
@@ -304,7 +321,7 @@ space for everything else.
 always (the R2 rule, applied to the gate itself):**
 
 ```bash
-python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0   # NOT piped
 echo "EXIT=$?"
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb   # reads the board's own floor
 echo "EXIT=$?"
@@ -339,7 +356,12 @@ all: it is `quench.legality_metrics` (so `place_optimize`'s `JSON_SUMMARY`),
 `render_placement`'s `metrics`, `check_floorplan` and the portfolio that do. Do not
 grep this tool's output for it and conclude the quantity is unmeasured.
 
-The per-pair blocking COUNT is the gateable quantity. **A courtyard pair is not
+The per-pair blocking COUNT is the REPORTABLE quantity — the gate is
+`check_assembly`'s `buildable` verdict, of which that count is one of five
+conjuncts (non-negotiable 4, #918). What makes the count worth reporting is
+that it is 0-calibrated on every healthy corpus board, which the aggregate
+`overlap_area` is not; that is a property of the number, not a promotion to a
+gate. **A courtyard pair is not
 merely advisory:** it is the fifth `not_buildable` conjunct (rule 4 above, #918).
 It does NOT fire on every courtyard kiss. The pair must first survive
 `courtyard_blocking_pairs` (`py_placer/placement/legality.py`): unwaived (locked,
@@ -541,7 +563,7 @@ UNSMEARED board). Declare the edge classes FIRST (`--declare-classes`) so
 the reconstruct sees the bands:
 
 ```bash
-python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0   # measure (R0)
 python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb \
     --emit-intent auto.json --declare-classes   # part-class auto-declaration:
                                        # edge parts get bands; an implausibly-
@@ -572,7 +594,7 @@ Each lap:
 1. **Measure** — three instruments, JSONs kept as evidence:
 
    ```bash
-   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>
+   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0
    python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb \
        --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
    python3 -X utf8 py_tools/check_channels.py board.kicad_pcb \
@@ -1056,6 +1078,8 @@ flip in place, can be absent from an otherwise-legal ranking (measured:
 U3 rot-180 legal in place on two seeds where the enumeration listed no
 rot-180 pose at all).
 
+### Step 0b: the lock advisor — what the BOARD suggests locking
+
 Run this **second**, after Step 0a, and read the reasons. Nothing is locked
 automatically, deliberately: a wrong auto-lock silently freezes a part that
 needed to move, and that failure is invisible.
@@ -1136,9 +1160,11 @@ three parts are required:
    candidate reached **233 crossings, better than the human original's 276**, while
    sitting 18.7 mm out of position. `hpwl` behaves (its minimum is at the truth) and is
    what actually does the work in this rule. **Gate on `hpwl`, on PAD-PAD DRC, and on
-   `check_assembly`'s blocking pairs; report `crossings` and the aggregate
+   `check_assembly`'s `buildable` verdict — of which the blocking-pair count is one of
+   five conjuncts (non-negotiable 4), NOT on that count; report `crossings` and the
+   aggregate
    `overlap_area` and never gate on those two.** (Run 6 measured why the blocking-pair
-   COUNT belongs with the gates while the aggregate area never can: hpwl is gameable by
+   COUNT is the one worth reporting while the aggregate area never can be: hpwl is gameable by
    body-STACKING exactly as PAD-PAD was gameable by evacuation — two parts moved into
    the same space lower hpwl — and the run-5 board shipped that way. The per-pair count
    is 0-calibrated on every healthy corpus board; the aggregate has a nonzero floor.)

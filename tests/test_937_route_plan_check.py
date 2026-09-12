@@ -116,6 +116,90 @@ BREAKS = [
      ('--power-nets GND +3V3 --clearance 0.09',
       '--power-nets GND +3V3 --clearance 0.09 --via-size 0.45 '
       '--gnd-via-distance 0.5')),
+    # The row above puts all three flags on one argv, which is the only shape
+    # the rule used to see. This one is the shape the SKILL's own Step 3
+    # command has -- a route_planes GND-via pass carrying the distance ALONE,
+    # with the via size and clearance fixed by earlier steps. #941 row 2 is
+    # exactly that command, and the rule used to `continue` past it.
+    #
+    # It is a SECOND route_planes step, for two reasons. Not the first pour:
+    # that would redden R13 as well, and a break that reddens two rules names
+    # neither. Not the route.py step: `route.py` has no `--add-gnd-vias` in
+    # its argparse, so putting it there would encode a command that dies at
+    # argparse as if it were a plan.
+    ('R15', 'a gnd-via pass under the floor, with the size set upstream',
+     ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n',
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s3.kicad_pcb '
+      's3b.kicad_pcb \\\n'
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias '
+      '--gnd-via-distance 0.5\n')),
+    # R17 had NO row here, and the rule additionally carried '[needs --board]'
+    # while reading only the plan's own argv -- so `check()` skipped it on the
+    # bare invocation THIS HARNESS uses (the skill's own command line passes
+    # --board, so the rule ran there), and every row above it passed
+    # without it ever running. Both are fixed; these three rows are what says
+    # so. The escape layer must be an INNER one: the top escape layer is never
+    # this rule's to refuse (bga_fanout refuses to forbid it).
+    ('R17', 'a fanout escapes onto a poured inner layer',
+     ('--component U1 --nets \'*\' --clearance 0.09 --layers F.Cu B.Cu',
+      '--component U1 --nets \'*\' --clearance 0.09 '
+      '--layers F.Cu In1.Cu B.Cu')),
+]
+
+#: Rows that must NOT be refused -- a rule demanding something the engine
+#: refuses is worse than a rule that is absent. Same shape as BREAKS.
+COMPLIANT_VARIANTS = [
+    ('R17', 'a poured inner layer priced negative in --layer-costs is the '
+            'documented way to keep escapes off it (#288)',
+     ('--component U1 --nets \'*\' --clearance 0.09 --layers F.Cu B.Cu',
+      '--component U1 --nets \'*\' --clearance 0.09 '
+      '--layers F.Cu In1.Cu B.Cu --layer-costs 1.0 -1 1.0')),
+    ('R17', 'the TOP escape layer is poured -- bga_fanout raises rather than '
+            'forbid it, and an outer pour under a fanned part is Step 1\'s '
+            'own prescribed fix',
+     ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu',
+      '--nets GND +3V3 --plane-layers F.Cu In2.Cu')),
+    # The shape that catches R15 resolving sizes across TOOLS. A coarse PGA
+    # escape via (0.8/0.1) sits beside a GND-via pass whose own pour declares
+    # 0.45/0.09, so the vias actually placed imply a floor of 1.62 and 2.0 is
+    # correct. Resolving `max()` over the whole plan reads 0.8/0.1 -> 2.70 and
+    # refuses it. Without this row the revert SURVIVES: the compliant plan has
+    # no two tools disagreeing about via size, which is exactly the condition
+    # the bug needs. tests/mutate_941_942.py `r15-max-across-plan` found that.
+    ('R15', 'a GND-via pass at a distance its OWN tool sizes as legal, beside '
+            'a coarser fanout via it never places',
+     # One row, because the bug needs BOTH halves present at once: a coarse
+     # fanout via AND a GND pass sized by its own tool. Split across two rows
+     # each would be vacuous -- one has no --gnd-via-distance for R15 to read,
+     # the other has no second tool to disagree with.
+     # The GND pass must NOT carry its own --via-size: that is the whole
+     # point. A step that states its size is resolved identically by both
+     # rules, so only a step relying on the FALLBACK can tell them apart --
+     # and relying on the fallback is the shape the skill's Step 3 has.
+     ("python3 -u -X utf8 py_router/bga_fanout.py b.kicad_pcb s1.kicad_pcb "
+      "--component U1 --nets '*' --clearance 0.09 --layers F.Cu B.Cu\n"
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_placer/place_fanout_clearance.py s1.kicad_pcb '
+      's2.kicad_pcb --clearance 0.09\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s2.kicad_pcb s3.kicad_pcb '
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n',
+      "python3 -u -X utf8 py_router/bga_fanout.py b.kicad_pcb s1.kicad_pcb "
+      "--component U1 --nets '*' --clearance 0.09 --layers F.Cu B.Cu "
+      "--via-size 0.8 --via-drill 0.4\n"
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_placer/place_fanout_clearance.py s1.kicad_pcb '
+      's2.kicad_pcb --clearance 0.09\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s2.kicad_pcb s3.kicad_pcb '
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --via-size 0.45 '
+      '--clearance 0.09\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s3.kicad_pcb s3b.kicad_pcb '
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias '
+      '--gnd-via-distance 2.0\n')),
 ]
 
 
@@ -166,6 +250,58 @@ def t_each_break_is_refused_by_its_own_rule():
         print(f'  PASS: {len(BREAKS)} break(s), each refused by its own rule')
 
 
+def t_a_rule_does_not_refuse_what_the_engine_prescribes():
+    """The other half of a rule: what it must LET PASS.
+
+    Asserted per rule id rather than on the exit code, because these variants
+    are free to redden something else -- the claim is only that the named rule
+    stays quiet. A rule demanding something the engine refuses outright is
+    worse than an absent rule: it cannot be complied with, so it teaches the
+    reader to ignore the checker.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        for rid, what, (old, new) in COMPLIANT_VARIANTS:
+            assert COMPLIANT.count(old) == 1, (
+                f'{rid}: the variant anchor matches {COMPLIANT.count(old)} '
+                f'times, so this row edits nothing and asserts nothing')
+            r = _run(_write(tmp, f'ok_{rid}_{abs(hash(what))}.sh',
+                            COMPLIANT.replace(old, new, 1)))
+            # The rule must have RUN. Without this, a revert that puts the
+            # rule back behind `[needs --board]` makes `check()` skip it, it
+            # is absent from `failed` for that reason, and every row here
+            # passes while asserting nothing at all.
+            skipped = {ln.split()[1] for ln in r.stdout.splitlines()
+                       if ln.strip().startswith('SKIP')}
+            assert rid not in skipped, (
+                f'{rid} was SKIPPED on this plan, so "not refused" says '
+                f'nothing about it -- {what}\n{r.stdout}')
+            failed = {ln.split()[1] for ln in r.stdout.splitlines()
+                      if ln.strip().startswith('FAIL')}
+            assert rid not in failed, (
+                f'{rid} refused a plan it must accept -- {what}\n{r.stdout}')
+        print(f'  PASS: {len(COMPLIANT_VARIANTS)} prescribed plan(s) not '
+              f'refused by the rule that could have')
+
+
+def t_a_board_less_rule_is_not_gated_behind_the_board_flag():
+    """`check()` SKIPS every rule whose text says '[needs --board]'. A rule
+    that reads only the plan's argv and carries the marker anyway never runs
+    on the bare form this harness uses -- which is how R17 sat inert."""
+    import inspect
+    sys.path.insert(0, os.path.dirname(CHECKER))
+    import route_plan_check as rpc
+    inert = []
+    for rid, what, _cite, fn in rpc.RULES:
+        if 'needs --board' not in what:
+            continue
+        if 'p.board' not in inspect.getsource(fn):
+            inert.append(f'{rid} ({fn.__name__})')
+    assert not inert, (
+        f'rule(s) marked [needs --board] that never read p.board, so they are '
+        f'skipped for nothing: {", ".join(inert)}')
+    print(f'  PASS: every [needs --board] rule actually reads the board')
+
+
 def t_a_break_does_not_redden_unrelated_rules():
     """Attribution. If one bad line reddens four rules, naming one of them is
     a coincidence rather than a diagnosis."""
@@ -179,7 +315,7 @@ def t_a_break_does_not_redden_unrelated_rules():
                 noisy.append(f'{rid} ({what}) also reddened '
                              f'{sorted(failed - {rid})}')
     # NO exemptions, and that is measured rather than hoped for: every one of
-    # the 15 breaks reddens exactly its own rule. An allowlist was written
+    # every break reddens exactly its own rule. An allowlist was written
     # here first, for a case that turned out not to happen -- and an exempted
     # name is where this repo's guards have failed before, so it is gone.
     assert not noisy, (
@@ -241,6 +377,8 @@ def t_every_rule_and_every_delegation_is_listed():
 
 TESTS = (t_the_compliant_plan_passes,
          t_each_break_is_refused_by_its_own_rule,
+         t_a_rule_does_not_refuse_what_the_engine_prescribes,
+         t_a_board_less_rule_is_not_gated_behind_the_board_flag,
          t_a_break_does_not_redden_unrelated_rules,
          t_the_checker_writes_nothing,
          t_an_unreadable_plan_is_exit_3_not_a_crash,

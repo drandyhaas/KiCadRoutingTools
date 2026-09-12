@@ -236,9 +236,11 @@ instrument in the chain looks at copper, and there is no copper yet.
 
 Run BOTH, on the board with its copper removed. Neither alone is enough: the
 first cannot see two parts stacked on the same net, the second is the channel
-that can.
+that can. Copper still on? `copy_board.py` it, `route.py <copy> <copy> --nets '*'
+--undo` (keeps the .kicad_pro floor; leaves zone pours -- --ignore-nets those),
+measure THAT. Never stress/strip_routing.py -- non-negotiable 2 forbids it.
 
-  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <the board's own floor> --json wk/drc0.json
+  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <the board's own floor> --clearance-margin 0 --json wk/drc0.json
   echo "EXIT=$?"
   python3 -X utf8 py_tools/check_assembly.py {a.board} --json wk/assembly0.json
   echo "EXIT=$?"
@@ -516,8 +518,8 @@ broken at the cap is NAMED with its measurement, not carried silently.
 MEASURE (all four, every lap, on the copper-free board):
 
   python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0
-  python3 -X utf8 py_tools/check_assembly.py {a.board} --baseline {a.before}
-  python3 -X utf8 py_tools/check_channels.py {a.board} --baseline {a.before} --gate
+  python3 -X utf8 py_tools/check_assembly.py {a.board} --baseline <the board this RUN started from>
+  python3 -X utf8 py_tools/check_channels.py {a.board} --baseline <the board this RUN started from> --gate
   python3 -X utf8 check_rigid_consistency.py {a.before} {a.board}
 
 check_assembly and check_channels now READ THE BOARD's own clearance (and
@@ -592,7 +594,7 @@ board that lap came from:
 
   python3 -X utf8 py_tools/render_placement.py <this lap> --before <the lap before it> \\
       --pair --clearance <floor> --ignore-nets <poured nets> \\
-      --expect-moved <what the lever said it moved> \\
+      --expect-moved <the COUNT of parts this lap moved> \\
       --json-out wk/render_lapN.json -o wk/render_lapN.png
 
 Read WHAT THE MOVE DID: `N fixed, M NEW` is the lap's verdict. A lap that
@@ -615,13 +617,21 @@ Use this when the question is "which arrangement", not "is this one legal".
 
   python3 -X utf8 py_placer/place_portfolio.py {a.board} --out-dir wk/slate \\
       --candidates <K> --keep <N> [--full-probe] \\
-      --intent <the graded floorplan intent> --lock <the P2 locks>
+      --intent <the graded floorplan intent> \
+      --lock <the refs the lock advisor printed, plus the board's own (locked yes)>
 
-PASS --intent AND --lock, or rule 1 below grades nothing. place_portfolio
-learns the declared intent from --intent and the mechanical locks from --lock;
-without them its HARD gate has no constraint to be hard about, and a step that
-optimises against no constraint is the failure this whole procedure exists to
-stop.
+PASS --intent AND --lock, or rule 1 below grades nothing. The locks are NOT a
+P2 artifact -- P2 moves parts and writes no lock list. They come from the lock
+advisor (Step 0b: `place_optimize.py <board> --suggest-locks`) and from the
+refs the board already stamps
+`(locked yes)`, which place_portfolio honours whether or not you name them.
+place_portfolio learns the declared intent from --intent and the mechanical
+locks from --lock; without them its HARD gate has no constraint to be hard
+about, and a step that optimises against no constraint is the failure this
+whole procedure exists to stop. Both ARE read when given (`args.lock` reaches
+the seeder and the quench); what nothing does is REQUIRE them -- only
+--out-dir is required -- so a run with neither still produces a slate, prints
+JSON_SUMMARY and exits 0. The refusal is yours to make.
 
 Rank rules, in this order:
   1. HARD gates first: legality and the declared intent. A candidate that fails
@@ -1018,7 +1028,7 @@ def _guard_damage(a):
     if derr:
         return False, (derr + '\n\nP0 produces it:\n  python3 -X utf8 '
                               f'py_router/check_drc.py {a.board} --clearance <floor> '
-                              '--json wk/drc0.json')
+                              '--clearance-margin 0 --json wk/drc0.json')
     count = _dig(drc, 'violations')
     if count is None:
         count = _dig(drc, 'total_violations')
@@ -1031,7 +1041,7 @@ def _guard_damage(a):
             'evidence -- an empty or unrelated JSON passes a file-exists check '
             'and answers nothing.\n\nProduce the real measurement:\n'
             f'  python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> '
-            '--json wk/drc0.json')
+            '--clearance-margin 0 --json wk/drc0.json')
     if isinstance(count, int) and count == 0:
         asm, _ = _load(a.assembly_json, 'assembly')
         # THE VERDICT, not `blocking` (#937). `blocking` is ONE of
@@ -1584,7 +1594,16 @@ def _guard_congestion(a):
 #: P4 is over the 80-line norm and pinned at what it is: the structural
 #: finding is that its body holds FIVE VERBS (measure, act, prove, record,
 #: loop), so the remedy is a split, not a trim.
-_BODY_CEILING = {'P-brief': 60, 'P0': 70, 'P1': 35, 'P2': 45, 'P3': 80,
+#:
+#: P0 70 -> 75 (#941 row 11), the deliberate edit this comment asks for. P0
+#: mandated measuring "on the board with its copper removed" and named no lever
+#: for removing it -- and the only full copper stripper in the tree,
+#: tests/stress/strip_routing.py, is one non-negotiable 2 forbids BY NAME on a
+#: user's board. So the stage ordered something it gave no way to do, and the
+#: nearest tool was the forbidden one. Three lines name `route.py --undo`, its
+#: two limits (refuses unscoped; leaves zone pours) and the prohibition. A
+#: mandate with no lever is worse than three lines of body.
+_BODY_CEILING = {'P-brief': 60, 'P0': 75, 'P1': 35, 'P2': 45, 'P3': 80,
                  'P4': 100, 'P5': 45, 'P6': 30, 'P-close': 60}
 
 STAGES = {
@@ -1611,8 +1630,14 @@ def _args(argv=None):
     ap.add_argument('--stage', choices=sorted(STAGES))
     ap.add_argument('--board', default='board.kicad_pcb')
     ap.add_argument('--before', default=None,
-                    help='the board this one was derived from (the delta gates '
-                         'need it)')
+                    help='the board this one was derived from -- the IMMEDIATE '
+                         'predecessor, which is what the render delta wants. '
+                         'NOT the same thing as check_assembly --baseline, '
+                         'which must be the board the RUN started from: its '
+                         'courtyard conjunct gates only pairs whose members '
+                         'MOVED relative to the baseline, so a per-lap baseline '
+                         'hides every pair moved on an earlier lap and can read '
+                         'buildable where the origin reads NOT BUILDABLE')
     ap.add_argument('--drc-json', default=None)
     ap.add_argument('--assembly-json', default=None)
     ap.add_argument('--locks-json', default=None)

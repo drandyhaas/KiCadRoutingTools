@@ -781,8 +781,11 @@ Systemic iterations are necessary and they are not progress. A run once spent
 nets carrying no copper. **If three consecutive iterations are systemic, stop and
 ask what is actually unconnected** — you are tuning the instrument, not the board.
 
-Record `"kind": "completion" | "placement" | "systemic"` in every ledger entry.
-The final report states all three counts.
+Record `"kind": "completion" | "placement" | "systemic" | "classification"` in
+every ledger entry. The final report states all four counts — the same four the
+table above says to count separately, `classification` included. Filing an L3
+lap as `systemic` is what "made a decision look like a tool change", and it
+then reads as budget spent on the instrument.
 
 ```bash
 python3 -X utf8 py_router/route.py board.kicad_pcb --list-groups --group-by auto
@@ -921,7 +924,7 @@ learn:
    group's own QSPI pass; 7/7 without). Protect the group on the NEXT
    committing step instead; the `.kicad_pro` record carries it from there.
 5. **Tap passes over routed copper are a one-way door.** With the pour-first
-   order (#424) the Step 1c pour ambushes nobody — its taps land on an empty
+   order (#424) the Step 1 pour ambushes nobody — the fanout's plane drops land on an empty
    board and every later route sees them from the start. The door is the
    LATE tap passes: the plane FINALIZE (`--add-gnd-vias`/`--stitch-*`), the
    repair, and any re-pour over a routed board. Never name a
@@ -961,7 +964,7 @@ top blocker on the exact keys, not on impressions:
 | `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
 | a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | The default 2.3 is inadmissible: it returns a path up to ~2.3× optimal (#586 moved it from 1.9, and this row said 1.9 until #923 gave the gate a way to notice). Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` (the #529 dynamic budget self-extends; do not pass `--max-iterations`), then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
 | `--heuristic-weight 1.0` **on the net's own FIRST pass**, on a board carrying only what must precede it, did not change the length | **placement** | now the router genuinely had no shorter path. Signature: routed length far above the straight-line pad distance *and stable under an admissible search*. Go to `place_route_loop` — see the warning below, it needs BOTH `--target-nets` and `--accept-cmd` to see this at all. **A null measured on a SATURATED board proves nothing** — one run tested 1.0 at iteration 4, after fanout, USB and every signal were committed, got a byte-identical board, and recorded "no shorter path exists at this placement". Re-tested on the first pass that lays the net's copper, the same flag was worth 5.8× |
-| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1c, or the in-run plane finalize the route step ends with (#562 absorbed the old separate repair step; `py_router/repair_planes.py` is the out-of-chain utility) — not placement |
+| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1 (the pour), or the in-run plane finalize the route step ends with (#562 absorbed the old separate repair step; `py_router/repair_planes.py` is the out-of-chain utility) — not placement |
 | the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
 | a net fails on ONE layer at every grid and rip set, and routes instantly with a second layer | **the single-layer constraint is the blocker** | not a router failure. Report it against the requirement that imposed the layer restriction, with both measurements |
 | `drc` is large, uniform, one net pair, one overlap value | **grading artifact** | 9.1b — re-grade at the right class. Not a lever at all |
@@ -972,7 +975,7 @@ top blocker on the exact keys, not on impressions:
 | the **same victim set recurs under every order** at every grid | **capacity, not order** | the lane ledger (`check_floorplan --health`) will show the deficit; that is stop condition 3 with the ledger as the measurement, not another ordering lap |
 | you are about to write **"this pad cannot be routed"** | **unproven until measured** | `check_reachability.py --pad REF.NUM`. PASSABLE means it is a ROUTER finding and placement is the wrong lever; CAGED means geometry. 9 of 14 such claims across four runs were later refuted — see the impossibility-claim rule |
 | one part carries most of a critical net while its BLOCK sits elsewhere | **floorplan, at PART granularity** | `health_net_affinity_offenders` names it and prints the `converge.py poses --ref` line. Block displacement averages this away, so a quiet block metric is not evidence of absence |
-| the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO can still be re-routed before the plane FINALIZE/repair taps land, while a stranded trace-fed rail pad tends to stay lost once they do (rule 5's one-way door; poured rails are already connected from Step 1c and out of this fight). Spend the strandings on the recoverable class. Measured (run 6, signals-first era): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
+| the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO can still be re-routed before the plane FINALIZE/repair taps land, while a stranded trace-fed rail pad tends to stay lost once they do (rule 5's one-way door; poured rails are already connected from Step 1 (the pour) and out of this fight). Spend the strandings on the recoverable class. Measured (run 6, signals-first era): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
 
 **Accept an iteration only if `blocking` strictly decreased**, or `blocking` is
 unchanged and `quality` improved. Otherwise **revert to the parent board** and
@@ -1175,9 +1178,11 @@ run 7's final entry said "SWD closed, 5 opens" while its own score listed
 SWDIO among 6 unrouted — the prose shipped into the report and the correction
 cost a commit. The score is the record; the lever text is a caption of it.
 
-**Log the systemic/completion split in the final report**: *"41 iterations: 9
-systemic, 32 completion"* is a fact about how the budget was spent, and a run that
-cannot state it was not keeping a ledger.
+**Log the split across ALL FOUR kinds in the final report**: *"41 iterations:
+9 systemic, 30 completion, 1 placement, 1 classification"* is a fact about how
+the budget was spent, and a run that cannot state it was not keeping a ledger.
+Naming only two of the four is how a `classification` lap — a DECISION —
+disappears into the systemic count and reads as a tool change.
 
 #### 9.4b — Boundary verification: BLOCKING, at every accepted iteration and at close
 

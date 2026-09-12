@@ -2,13 +2,14 @@
   "$schema": "https://opencode.ai/config.json",
   "agent": {
     "pcb-analysis": {
-      "description": "Read-only PCB analysis for KiCadRoutingTools AI skills: may run the repo's checkers/analysis tools and fetch datasheets, but must not modify files. The GUI's headless skill runs select this agent (kicad_routing_plugin/ai_backend.py) as the opencode equivalent of the Claude Code --allowedTools allowlist in that module's CLAUDE_ALLOWED_TOOLS. That list is deliberately NOT restated here: it was, and adding Task to it (#552) made this sentence wrong with nothing to notice.",
+      "description": "Read-only PCB analysis for KiCadRoutingTools AI skills: may run the repo's checkers/analysis tools and fetch datasheets, but must not modify files. The GUI's headless skill runs select this agent (kicad_routing_plugin/ai_backend.py) as the opencode equivalent of the Claude Code --allowedTools allowlist in that module's CLAUDE_ALLOWED_TOOLS. That list is deliberately NOT restated here: it was, and adding Task to it (#552) made this sentence wrong with nothing to notice. `task` is declared explicitly (#942 S4) because the analysis skills ask for a subagent and this file used to answer neither yes nor no -- the same shape as the omission above, one level down: an undeclared permission is not a decision, it is a decision nobody wrote down.",
       "mode": "primary",
       "permission": {
         "edit": "deny",
         "bash": "allow",
         "webfetch": "allow",
-        "external_directory": "allow"
+        "external_directory": "allow",
+        "task": "allow"
       }
     }
   }

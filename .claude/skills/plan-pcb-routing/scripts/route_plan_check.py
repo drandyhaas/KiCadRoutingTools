@@ -59,6 +59,8 @@ for _d in (ROOT, os.path.join(ROOT, 'py_router'),
     if os.path.isdir(_d) and _d not in sys.path:
         sys.path.insert(0, _d)
 
+import routing_defaults  # noqa: E402  (needs the sys.path bootstrap above)
+
 CLEAN, CRASH, USAGE, UNREADABLE, REFUSED = 0, 1, 2, 3, 4
 
 #: The rules this checker cannot decide, each with the tool that can. Printed
@@ -414,17 +416,58 @@ def r_net_coverage_reconciles(p):
 
 
 def r_gnd_via_distance(p):
-    """SKILL.md :690 -- `--gnd-via-distance` >= 3x (via size + clearance)."""
+    """Step 3 GND return vias -- `--gnd-via-distance` >= 3x (via + clearance).
+
+    The size and the clearance are resolved from the PLAN, not from the one
+    argv that carries the distance. This rule used to `continue` unless all
+    three flags appeared together, and the step that sets the distance is a
+    `route_planes.py` GND-via pass, which has no reason to restate a via size
+    the earlier steps already fixed -- so the rule could not fire on the
+    skill's own Step 3 command, which is precisely the command #941 row 2
+    reports as recommending a distance below the floor.
+
+    Resolution order: this argv, then the other steps RUN BY THE SAME TOOL,
+    then `routing_defaults`. The reason names which it used, so a refusal
+    resting on a default is not mistaken for one resting on the plan.
+
+    Scoped to the same tool, and taking the SMALLEST value there, because the
+    vias whose spacing this grades are the ones THIS tool places. An earlier
+    draft took `max()` across every command in the plan, on the theory that the
+    widest via implies the floor that must hold for the whole board. That is
+    wrong, and refuses correct plans: a coarse PGA escape via
+    (`bga_fanout --via-size 0.8 --clearance 0.1`) beside a fine signal route
+    (`route.py --via-size 0.25 --clearance 0.0889`) yields a resolved floor of
+    2.70, while the GND-via pass that places the vias resolves 0.5/0.0889 for a
+    real floor of 1.77 -- so a correct 2.0 is refused by a via the pass never
+    places. A fanout escape via is not the via the GND pass places, and the
+    skill itself has them at different sizes.
+    """
+    def _resolved(flag, tool, fallback):
+        seen = [v for a in p.by_tool(tool)
+                for v in (scalar(a, flag),) if v is not None]
+        if seen:
+            return min(seen), f'{tool} elsewhere in the plan'
+        return fallback, 'routing_defaults'
+
     bad = []
     for argv in p.argvs:
         d = scalar(argv, '--gnd-via-distance')
-        vs, clr = scalar(argv, '--via-size'), scalar(argv, '--clearance')
-        if d is None or vs is None or clr is None:
+        if d is None:
             continue
+        tool = tool_of(argv)
+        vs, vs_src = scalar(argv, '--via-size'), 'this step'
+        if vs is None:
+            vs, vs_src = _resolved('--via-size', tool,
+                                   routing_defaults.VIA_SIZE)
+        clr, clr_src = scalar(argv, '--clearance'), 'this step'
+        if clr is None:
+            clr, clr_src = _resolved('--clearance', tool,
+                                     routing_defaults.CLEARANCE)
         floor = 3.0 * (vs + clr)
         if d < floor - 1e-9:
             bad.append(f'{tool_of(argv)} --gnd-via-distance {d:g} is below '
-                       f'3x(via {vs:g} + clearance {clr:g}) = {floor:.3f}')
+                       f'3x(via {vs:g} [{vs_src}] + clearance {clr:g} '
+                       f'[{clr_src}]) = {floor:.3f}')
     return bad
 
 
@@ -452,8 +495,31 @@ def r_impedance_needs_a_stackup(p):
 
 
 def r_fanout_layers_exclude_planes(p):
-    """SKILL.md :2635 / Step 10 rule 3 -- fanout `--layers` must EXCLUDE any
-    layer carrying a solid plane, or the escape routes into the pour."""
+    """Step 10 rule 3 -- fanout escape copper must stay off an INNER layer the
+    plan pours a solid plane on, or the escape routes into the pour.
+
+    The lever is `--layer-costs` (one value per `--layers` entry, negative =
+    forbidden, #288), NOT a shorter `--layers`. Both forbid identically -- a
+    negative entry is filtered out by the same `keep` list that a missing layer
+    never joins -- so the preference is about derivation, not effect: the cost
+    vector is what `route.py` takes too, a positive weight can price a layer
+    rather than delete it, and `--layers` stays a statement of the stack. What
+    matters HERE is that a poured layer carrying a negative cost is COMPLIANT,
+    so this rule refuses only a poured layer the plan neither prices nor omits.
+
+    Two things this rule must not demand, both measured against the engine:
+
+      * `--layers[0]` cannot be forbidden -- `bga_fanout` raises "The top escape
+        layer (...) cannot be forbidden - edge escapes are placed on it". A rule
+        that refused it would demand something no plan can satisfy.
+      * An OUTER-layer pour under a fanned part is sometimes the prescribed fix
+        (Step 1: when an inner pour cannot thread the ball lattice even at the
+        fab floor, the outer pour connects those pads by direct contact), and
+        the route step's in-run finalize re-pours it. Refusing that would refuse
+        the skill's own remedy.
+
+    Hence: inner layers only, and only when unpriced.
+    """
     plane_layers = set()
     for argv in p.by_tool('route_planes.py', 'repair_planes.py'):
         plane_layers |= set(values(argv, '--plane-layers'))
@@ -461,10 +527,25 @@ def r_fanout_layers_exclude_planes(p):
         return []
     bad = []
     for argv in p.by_tool('bga_fanout.py', 'qfn_fanout.py'):
-        clash = set(values(argv, '--layers')) & plane_layers
+        layers = values(argv, '--layers')
+        if not layers:
+            continue
+        costs = values(argv, '--layer-costs')
+        forbidden = set()
+        if len(costs) == len(layers):
+            for name, cost in zip(layers, costs):
+                try:
+                    if float(cost) < 0:
+                        forbidden.add(name)
+                except ValueError:
+                    pass
+        # layers[0] is the top escape layer: the engine refuses to forbid it,
+        # so it is never this rule's to refuse either.
+        clash = sorted((set(layers[1:]) & plane_layers) - forbidden)
         if clash:
-            bad.append(f'{tool_of(argv)} --layers includes {sorted(clash)}, '
-                       f'which the plan pours a solid plane on')
+            bad.append(f'{tool_of(argv)} --layers includes {clash}, which the '
+                       f'plan pours a solid plane on, and --layer-costs does '
+                       f'not forbid them (a negative cost per layer, #288)')
     return bad
 
 
@@ -486,17 +567,28 @@ RULES = (
     ('R10', 'max-ripup stays within bounds', 'Step 10 rule 6',
      r_max_ripup_within_bounds),
     ('R11', 'a cp carries the .kicad_pro', 'Never cp a board without its .kicad_pro', r_cp_carries_the_project),
-    ('R12', 'one cap pass, after every fanout', 'Step 1c',
+    # NOT 'after every fanout': that was the SKILL sentence this rule exists
+    # to refuse, copied into the rule's own name (#941 row 3). The body has
+    # always enforced "once, after the last".
+    ('R12', 'one cap pass, after the last fanout', 'Step 1c',
      r_one_cap_pass_after_fanout),
     ('R13', 'the first pour is bare', 'Step 1 bare pour', r_first_pour_has_no_via_tail),
     ('R14', 'net coverage reconciles (Step 5b)', 'Step 5b',
      r_net_coverage_reconciles),
-    ('R15', 'gnd-via distance clears 3x(via+clearance)', 'Step 4 GND vias',
+    ('R15', 'gnd-via distance clears 3x(via+clearance)',
+     'Step 3 GND return vias',
      r_gnd_via_distance),
     ('R16', 'no impedance pass without a stackup [needs --board]',
      'Step 10 rule 1',
      r_impedance_needs_a_stackup),
-    ('R17', 'fanout layers exclude poured layers [needs --board]',
+    # NOT '[needs --board]': this rule reads only the plan's own argv, never
+    # `p.board`, and `check()` SKIPS every rule whose text carries the marker.
+    # The skill's own command line does pass --board, so the rule ran there;
+    # what it did NOT run on is the bare `route_plan_check.py <plan>` form --
+    # this tool's own first usage line -- and that is the form test_937's
+    # harness uses, so the GATE never exercised R17 at all. Gating a rule on a
+    # flag it has no use for buys nothing and costs exactly that.
+    ('R17', 'fanout escapes stay off poured inner layers',
      'Step 10 rule 3',
      r_fanout_layers_exclude_planes),
 )
