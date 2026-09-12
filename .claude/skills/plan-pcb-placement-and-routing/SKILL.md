@@ -781,8 +781,11 @@ Systemic iterations are necessary and they are not progress. A run once spent
 nets carrying no copper. **If three consecutive iterations are systemic, stop and
 ask what is actually unconnected** — you are tuning the instrument, not the board.
 
-Record `"kind": "completion" | "placement" | "systemic"` in every ledger entry.
-The final report states all three counts.
+Record `"kind": "completion" | "placement" | "systemic" | "classification"` in
+every ledger entry. The final report states all four counts — the same four the
+table above says to count separately, `classification` included. Filing an L3
+lap as `systemic` is what "made a decision look like a tool change", and it
+then reads as budget spent on the instrument.
 
 ```bash
 python3 -X utf8 py_router/route.py board.kicad_pcb --list-groups --group-by auto
@@ -1175,9 +1178,11 @@ run 7's final entry said "SWD closed, 5 opens" while its own score listed
 SWDIO among 6 unrouted — the prose shipped into the report and the correction
 cost a commit. The score is the record; the lever text is a caption of it.
 
-**Log the systemic/completion split in the final report**: *"41 iterations: 9
-systemic, 32 completion"* is a fact about how the budget was spent, and a run that
-cannot state it was not keeping a ledger.
+**Log the split across ALL FOUR kinds in the final report**: *"41 iterations:
+9 systemic, 30 completion, 1 placement, 1 classification"* is a fact about how
+the budget was spent, and a run that cannot state it was not keeping a ledger.
+Naming only two of the four is how a `classification` lap — a DECISION —
+disappears into the systemic count and reads as a tool change.
 
 #### 9.4b — Boundary verification: BLOCKING, at every accepted iteration and at close
 

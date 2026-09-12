@@ -20,8 +20,10 @@ What it adds beyond sequencing is the part nothing else owns:
     next pass cannot quietly reuse one.
 
 State crosses the boundary on DISK (the converge ledger), never in a head.
-Delegation is a choice about context volume, not about correctness -- see
---delegate.
+Delegation itself is a CORRECTNESS rule, not a choice about context volume
+(run 14): an inline inner half can silently do the outer loop's job, because
+it always knows more than the parent does. --delegate/--no-delegate force the
+MECHANISM, never the decision.
 
     python3 -X utf8 <this> --stage L1 --board b.kicad_pcb
     python3 -X utf8 <this> --list
@@ -1084,8 +1086,9 @@ Follow it to P-close, including its refusals. Record every accepted lap into
 {a.ledger} with converge.py.
 
 --delegate forces a teammate for this half whatever the size, and
---no-delegate forces it inline. That is a context decision, not a correctness
-one: the guards below are identical either way.
+--no-delegate forces it inline. The guards below are identical either way,
+but delegating is a CORRECTNESS rule (run 14), not a context decision: both
+inner halves go to a teammate at every board size.
 
 Next: python3 -X utf8 {sys.argv[0]} --stage L2 --board <placed board> \\
           --ledger {a.ledger} --placement-report <its close-out json>
@@ -1448,7 +1451,7 @@ copy_board.py). Take the list from {_refs}, which the placement
 half wrote; do not re-derive it by diffing poses.
 
   python3 -X utf8 py_router/copy_board.py {a.board} {_frozen}
-  ... stamp (locked yes) on the refs that file names ...
+  python3 -X utf8 py_placer/place_pose.py {_frozen} {_frozen} lock <the refs it names>
   python3 -X utf8 py_placer/converge.py record --ledger {a.ledger} \\
       --board {_frozen} --kind systemic \\
       --lever "L2 freeze: <n> refs the placement half named as decisions
@@ -2256,7 +2259,7 @@ THEN confirm with the instruments, and put the numbers in the report beside the
 names of the instruments that produced them:
 
   python3 -X utf8 check_complete.py {a.board} --clearance <floor> \\
-      --authored-from <the board this chain STARTED from>
+      --authored-from <the CYCLE-1 wk/frozen.kicad_pcb, NOT the original board>
   python3 -X utf8 py_router/check_drc.py {a.board} --clearance <floor> --clearance-margin 0.1
   python3 -X utf8 py_router/check_connected.py {a.board}
   python3 -X utf8 py_tools/check_assembly.py {a.board}
@@ -2679,7 +2682,7 @@ def _close_out(a, name):
             e + f'\n\nL5 is where the run ships, so it is where the routing '
                 f'half has to have closed out. Produce it:\n\n'
                 f'  python3 -X utf8 check_complete.py {a.board} \\\n'
-                f'      --authored-from <the board this chain STARTED from> \\\n'
+                f'      --authored-from <the CYCLE-1 wk/frozen.kicad_pcb, NOT the original board> \\\n'
                 f'      --json wk/routing_close.json\n\n'
                 f'--authored-from is not optional bookkeeping: without it the '
                 f'floor check cannot run at all, and UNSOUND becomes '
@@ -2706,7 +2709,7 @@ def _close_out(a, name):
                f'{" / ".join(CLOSE_VERDICTS)}.')
             + f' A missing key is not a passing one.{_hint}\n\nProduce the '
               f'right document:\n  python3 -X utf8 check_complete.py {a.board} '
-              f'--authored-from <original> --json wk/routing_close.json')
+              f'--authored-from <the CYCLE-1 wk/frozen.kicad_pcb> --json wk/routing_close.json')
 
     # Bind by CONTENT. A path comparison accepts a close-out for a board that
     # has since been rewritten, and the close-out is the terminal artifact.
@@ -2751,7 +2754,7 @@ def _close_out(a, name):
             f'{_ff.get("reason", "no reason given")}.\n\nWithout it UNSOUND is '
             f'unreachable by construction, so a DONE from this document cannot '
             f'distinguish "the copper is right" from "the rule moved". Pass '
-            f'--authored-from <the board this chain STARTED from>, or '
+            f'--authored-from <the CYCLE-1 wk/frozen.kicad_pcb, NOT the original board>, or '
             f'--accept-unclosed fab_floors.')
 
     _ung = doc.get('ungraded') or []

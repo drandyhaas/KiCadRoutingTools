@@ -905,7 +905,9 @@ complete and ~4× faster; the conservative map on a small board is both
 more complete and 3–5× faster. Neither map is "the safe one" — the GATE
 is the safety.
 
-**Compute the tier, don't vibe it. DENSE** = the board has **6+ copper
+**Compute the tier, don't vibe it. This is the ONE definition of DENSE in
+this file; everywhere else cites it rather than restating the criteria.
+DENSE** = the board has **6+ copper
 layers AND** (a populated fine-pitch grid array of ≥100 balls at ≤0.8 mm
 pitch, **or** >150 nets). Everything else is STANDARD. Layer count is the
 load-bearing half of the gate: on ≤4 layers the outer layers ARE the
@@ -1347,15 +1349,21 @@ python3 -X utf8 py_router/route.py board_step1c.kicad_pcb board_step2.kicad_pcb 
     --no-bga-zone \
     --max-ripup 5 \
     --power-nets GND VCC <other PWR...> --power-nets-widths 0.3 0.4 <W...> \
-    --layers <ALL copper layers> --layer-costs <1.0 signals / 3.0 solid planes / 1.5 split-or-highway> \
+    --layers <ALL copper layers> --layer-costs <1.0 signals / 6.0 GND solid plane / 2.5 rail pours / 1.0 F-B and bus highway> \
     2>&1 | tee /tmp/step2_routing.txt
 
 The `--layer-costs` line is NOT optional when Step 1 poured any solid plane:
 without it signals cross the pours at cost 1.0 and shred them (measured: split
 power pours at 0–2% connected under a BGA on a chain that omitted it). Order
-matches `--layers`; 3.0 on solid-plane layers, 1.0–1.5 on split/route+pour and
-highway layers, 1.0 on F/B. On dense boards use the measured-optimal pricing
-from Step 2c instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
+matches `--layers`. **The prices are Step 5a-tuned's, on both tiers** — GND
+solid plane 6.0, rail pours 2.5, split/route+pour and bus-highway layers
+1.0–1.5, F/B 1.0 — which is also what Step 2c's measured-optimal set gives.
+This line used to say 3.0 on solid-plane layers and scope 6.0 to dense boards,
+which contradicted Step 5a-tuned's own STANDARD-board recipe (price 6.0) in
+both halves. Step 10 rule 8 already settles which wins: the Step 5a-tuned gate
+outranks the pour-philosophy survey, and the older "~3× is the sweet spot"
+figure below is #185's earlier screen, kept for the record rather than as the
+number to pass.
 
 (When Step 2b ran, exclude its impedance nets, e.g. `--nets "*" "!RF"`, and
 route from `board_step2b.kicad_pcb`.)
@@ -1694,8 +1702,8 @@ leave internal pads unconnected if they weren't fanned out.
 
 **Precedence: the Step 5a-tuned DENSITY GATE outranks this section.** The
 survey below describes HUMAN practice, and our engine measurably matches it
-only on DENSE boards. On STANDARD boards (no ≥100-ball fine-pitch array,
-≤150 nets) the measured-optimal map is inner-only pours + rails as wide
+only on DENSE boards. On STANDARD boards (the tier as Step 5a-tuned defines
+it — do not re-derive it here) the measured-optimal map is inner-only pours + rails as wide
 traces (see the Step 5a-tuned A/B: four small boards, floods → 16 opens
 total; inner-only → 0). Read this section as the Tier-DENSE playbook and
 as background on why pours matter at all.
@@ -1783,9 +1791,13 @@ signal layers and leave the inner layers clean for the pour:
 # GND plane on In1.Cu, power plane on In2.Cu -> penalize In1/In2 for signals:
 py_router/route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
 ```
-- **~3× is the sweet spot on boards where F/B alone can carry the signals.**
-  Any value ≥2× keeps signals off the planes and doesn't hurt completion; ≥5×
-  just adds vias/copper for negligible further gain. Order matches `--layers`;
+- **~3× was #185's sweet spot on boards where F/B alone can carry the signals**
+  — the earlier screen, and NOT the number to pass today: Step 5a-tuned and
+  Step 2c both measured GND solid plane at **6.0**, and Step 10 rule 8 makes
+  the tuned gate outrank this survey. The #185 shape still holds directionally
+  and is why the floor is not 1.0:
+  any value ≥2× keeps signals off the planes and doesn't hurt completion; ≥5×
+  was measured as negligible further gain *in that screen*. Order matches `--layers`;
   keep the real signal layers (F.Cu/B.Cu) at 1.0. **On dense boards (BGA ≥
   ~100 balls / DDR buses) where an inner layer was deliberately left
   signal-routable (see the dense-board exception above), keep that layer at
@@ -2797,8 +2809,15 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
 5. **No pipes in the emitted plan.sh.** `2>&1 | tee ...` is for
    interactive runs only — `manifest_to_plan.py` tokenizes pipe segments
    into net globs and corrupts the JSON. Plain redirects or nothing.
-6. **`--max-ripup`: 5 on dense boards** (any fine-pitch BGA present or
-   >150 nets), else leave the default 3.
+6. **`--max-ripup`: 5 on CONGESTED boards** — a deliberately looser test
+   than the DENSE tier, and NOT that tier: any fine-pitch BGA present, or
+   >150 nets, with no layer-count conjunct and no ≥100-ball threshold.
+   Else leave the default 3. It is looser on purpose: a raised ripup budget
+   on a board that turns out not to be DENSE costs some rip-and-retry, not
+   correctness, so the cheap test is the right one here. Rule 8's precedence
+   clause is about POUR maps and does not reach this rule — which is why
+   calling both of them "dense" made a 4-layer/200-net board read as two
+   different tiers depending on which sentence you had just read.
 7. **A "pair" whose far end is bare test points** may stay in the diff
    step (the peel machinery degrades gracefully) — note it in the plan
    rather than agonizing.
