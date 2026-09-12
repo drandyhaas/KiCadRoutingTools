@@ -241,8 +241,13 @@ def test_the_requirements_file_declares_pillow():
     want('Pillow' in dists, 'Pillow is declared', sorted(dists))
     txt = open(REQS, encoding='utf-8').read()
     want('route_render' in txt and 'render_placement' in txt,
-         'and the comment names the two files that import it at module scope, '
-         'so the next reader can check the claim')
+         'and the comment names the file that imports it at module scope AND '
+         'the one that stopped doing so, so the next reader can check the '
+         'claim against the source')
+    want('OPTIONAL_PACKAGES' in txt,
+         'and says where it is declared OPTIONAL (#943), because "declared in '
+         'requirements.txt" now means two different things -- installed by the '
+         'install path, and NOT a gate')
     want('imageio' in txt,
          'while imageio stays UNdeclared, with the reason written down -- it is '
          'function-scope, optional, and its absence is audible')
@@ -292,21 +297,64 @@ def test_startup_checks_reports_pillow_from_the_RENDER_gate():
          '_PY_PINS install numpy/scipy/shapely and not Pillow', out)
 
 
+def _module_scope_gate_call(path):
+    """Position of a module-scope CALL to check_render_dependencies(), or -1.
+
+    Read off the AST, never `src.find` (#943). The string also occurs in prose:
+    render_placement.py's comment explains that route_render calls the gate, and
+    a substring search accepted that comment as the call -- reporting the gate
+    satisfied by a file that no longer invokes it, which is precisely the
+    "defined and never called" shape this file exists to catch.
+    """
+    src = open(path, encoding='utf-8').read()
+    tree = ast.parse(src)
+    for node in tree.body:
+        if not isinstance(node, ast.Expr):
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        fn = call.func
+        name = (fn.id if isinstance(fn, ast.Name)
+                else fn.attr if isinstance(fn, ast.Attribute) else None)
+        if name == 'check_render_dependencies':
+            return node.lineno
+    return -1
+
+
 def test_the_render_gate_is_called_before_the_import_it_guards():
     """A gate defined and never called is the shape this whole file is about.
 
-    Both files import PIL at module scope with no fallback, so the call has to
-    come FIRST or the bare ImportError wins the race and the message never
-    prints.
+    route_render.py imports PIL at module scope with no fallback, so the call
+    has to come FIRST or the bare ImportError wins the race and the message
+    never prints.
+
+    render_placement.py is the OTHER arm (#943): it must not reach the raster
+    stack at module scope at all -- not PIL, and not route_render either, whose
+    own module-scope gate would fire just the same. It is imported for
+    PlacementModel / legality_findings by board_context.py and the stress
+    predictors, which grade a placement and draw nothing, so a gate here made
+    Pillow a requirement of grading.
     """
-    for rel in (('py_router', 'route_render.py'),
-                ('py_tools', 'render_placement.py')):
-        src = open(os.path.join(ROOT, *rel), encoding='utf-8').read()
-        call = src.find('check_render_dependencies()')
-        pil = src.find('from PIL import')
-        want(call != -1 and pil != -1 and call < pil,
-             '%s calls the render gate before importing PIL' % rel[-1],
-             'call=%d pil=%d' % (call, pil))
+    rr = os.path.join(ROOT, 'py_router', 'route_render.py')
+    src = open(rr, encoding='utf-8').read()
+    call = _module_scope_gate_call(rr)
+    pil = next((n.lineno for n in ast.parse(src).body
+                if isinstance(n, ast.ImportFrom) and n.module == 'PIL'), -1)
+    want(call != -1 and pil != -1 and call < pil,
+         'route_render.py calls the render gate before importing PIL',
+         'call=%s pil=%s' % (call, pil))
+
+    rp = os.path.join(ROOT, 'py_tools', 'render_placement.py')
+    ms = set(_module_scope_imports(rp))
+    want(not ms & {'PIL', 'route_render'},
+         'render_placement.py reaches the raster stack only inside the '
+         'functions that draw, so grading a placement does not need Pillow',
+         sorted(ms & {'PIL', 'route_render'}))
+    want(_module_scope_gate_call(rp) == -1,
+         'and it does not call the render gate at module scope either -- that '
+         'would refuse the import for the same reason',
+         _module_scope_gate_call(rp))
 
 
 def test_the_gui_dep_check_mirrors_the_routing_gate_and_no_more():
@@ -319,6 +367,26 @@ def test_the_gui_dep_check_mirrors_the_routing_gate_and_no_more():
     want("missing.append('Pillow')" not in src,
          'the GUI routing dialog does not block on Pillow either (its only '
          'raster consumer, the movie recorder, is off by default)')
+
+    # ...and the file that ACTUALLY decides, which this test did not read
+    # until #943. `deps_check` derives its list from requirements.txt, so
+    # declaring Pillow there gated the whole plugin on it -- past a check whose
+    # stated subject is "the GUI does not block on Pillow either". Reading only
+    # the hand-written list could not see a list that is generated.
+    dc = os.path.join(ROOT, 'kicad_routing_plugin', 'deps_check.py')
+    optional = set()
+    for node in ast.parse(open(dc, encoding='utf-8').read()).body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == 'OPTIONAL_PACKAGES'
+                        for t in node.targets)
+                and isinstance(node.value, ast.Dict)):
+            optional = {k.value for k in node.value.keys
+                        if isinstance(k, ast.Constant)}
+    want('Pillow' in optional,
+         'and deps_check -- which builds its list FROM requirements.txt, so it '
+         'is the one that actually gates the plugin -- declares Pillow '
+         'optional (behaviour covered by test_943_optional_render_dependency)',
+         sorted(optional))
 
 
 TESTS_TO_RUN = [

@@ -10,9 +10,17 @@ shapely>=1.8.0
 # Rasterization: board stills, review sheets, the routing movie and the film.
 # Listed because a fresh clone that followed the README could not render
 # anything without it -- but it is the RASTER path and nothing else, so its
-# absence DISABLES rendering rather than stopping anything (#943). Routing does
-# not touch it (`startup_checks.check_render_dependencies` is a gate of its own,
-# called from the render entry points only), and neither does the GUI plugin:
+# absence DISABLES rendering rather than stopping anything (#943).
+#
+# ONE file imports it at module scope: py_router/route_render.py, which is the
+# raster stack and nothing else, and which calls
+# `startup_checks.check_render_dependencies` first so the message is the
+# actionable one. py_tools/render_placement.py used to be the second, and its
+# import moved into the five functions that DRAW because that module also holds
+# PlacementModel / legality_findings, which py_tools/board_context.py and the
+# stress predictors import to GRADE a placement and draw nothing.
+#
+# Routing does not touch it, and neither does the GUI plugin:
 # `deps_check.OPTIONAL_PACKAGES` names it, so a machine without Pillow gets the
 # plugin with its movie checkbox and placement preview turned off, not a dialog
 # it cannot dismiss.
