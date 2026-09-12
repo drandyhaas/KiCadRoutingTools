@@ -1055,6 +1055,49 @@ def _materialise_rotation(part, rot: float) -> float:
     return rot
 
 
+def _facing_rank(state, ref: str, tx: float, ty: float, rot: float,
+                 exclude: Set[str], *, edge_refs: Set[str]) -> int:
+    """How many of `ref`'s connected pads would sit on a row facing the
+    outline with nothing beyond it, at pose (tx, ty, rot). The seeder's
+    opt-in rotation tie-break; the geometry is `placement.edge_facing`, the
+    same core `placement_score.edge_facing` and `floorplan.rule_pins_to_edge`
+    read, so what the search prefers is what the term then reports.
+
+    A declared edge connector ranks 0 at every angle: its mating row SHOULD
+    face the edge, and the edge stage seats it by its band anyway. Partners
+    are read over PLACED parts only -- the pile (`exclude`) sits at one
+    meaningless coordinate -- so early parts see few partners and the count
+    is an over-estimate for them; a tie-break, not a cost.
+    """
+    if ref in edge_refs:
+        return 0
+    from placement.edge_facing import MIN_PADS, count_pads_to_edge, pitch_of
+    part = state.parts[ref]
+    pads_all = part.pad_globals(tx, ty, rot)
+    pads = [(x, y, n) for x, y, n in pads_all if n > 0]
+    if len(pads) < MIN_PADS:
+        return 0
+    xs = [x for x, _, _ in pads_all]
+    ys = [y for _, y, _ in pads_all]
+    rect = (min(xs), min(ys), max(xs), max(ys))
+    centre = ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0)
+    nets = {n for _, _, n in pads}
+    partners: Dict[int, List[Tuple[float, float]]] = {}
+    for n in nets:
+        for other in state.net_refs.get(n, ()):
+            if other == ref or other in exclude:
+                continue
+            op = state.parts.get(other)
+            if op is None:
+                continue
+            for px, py, pn in op.pad_globals():
+                if pn == n:
+                    partners.setdefault(n, []).append((px, py))
+    return count_pads_to_edge(
+        pads, rect, state.board, partners, centre,
+        pitch=pitch_of((x, y) for x, y, _ in pads_all))['to_edge']
+
+
 def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                constraint=None, tol: float = 0.5,
                max_disp: Optional[float] = None,
@@ -1136,8 +1179,28 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                     from placement.legality import rotate_local_bounds
                     part.tht_by_rot[_r] = rotate_local_bounds(
                         *part.tht_by_rot[0.0], _r)
-            for rot in _ladder_rots:
-                xfine = max(0.05, getattr(state, 'grid_step', 0.1) or 0.1)
+            # OPT-IN (`seed_from_intent(rotate_by_facing=True)`): let every
+            # angle of the ladder find its own first fit, and keep the pose
+            # with the fewest connected pads on a row facing the outline
+            # with nothing beyond; a tie keeps #893's author order, and with
+            # the preference unset the search below is the one it always
+            # was. Why not a cost: this search has none (it keeps the first
+            # pose that fits), and the quench that follows it runs with its
+            # facing terms at zero (measured to fail a 4-board A/B, #932).
+            # MEASURED (tests/test_placement_ab.py, the facing-seed rows):
+            # the count it ranks by falls on two boards of three, and a
+            # guard rises on both of them (pin-order inversions on both;
+            # crossings and wire length on one), so it is REJECTED as a
+            # default and stays opt-in for a caller who has read that
+            # trade. The numbers are in the baseline file.
+            _pref = getattr(state, 'rotation_prefer', None)
+            xfine = max(0.05, getattr(state, 'grid_step', 0.1) or 0.1)
+
+            def _first_fit(rot):
+                """The first legal (x, y) for `rot` in the ring order this
+                search has always used, or None. The search body, lifted
+                into a closure so the preferred-rotation path below can ask
+                it once per angle without a second copy of the rings."""
                 for radius, step in ((SEARCH_RADIUS_MM, SEARCH_STEP_MM),
                                      (SEARCH_FINE_RADIUS_MM,
                                       SEARCH_FINE_STEP_MM),
@@ -1161,12 +1224,17 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                         if not _in_zone(x, y, rot):
                             continue
                         if _ok(x, y, rot):
-                            state.apply_move(ref, x, y, rot)
-                            return clr
-                if constraint is not None:
-                    continue    # a zone-constrained part stays in its zone
-                if max_disp is not None:
-                    continue    # a capped repair never sweeps the whole board
+                            return x, y
+                # The rings found nothing at this angle. A zone-constrained
+                # part stays in its zone and a capped repair never sweeps the
+                # whole board; everything else falls back to a whole-board
+                # sweep, nearest the target first -- PER ANGLE, exactly as the
+                # loop did before the rings were lifted into this closure.
+                # The first lift left this sweep outside the OFF path, and the
+                # review measured it: splitflap's default seed went from 0 to
+                # 6 unseated parts. The sweep is part of "first fit".
+                if constraint is not None or max_disp is not None:
+                    return None
                 u = state.usable
                 grid = []
                 nx = max(1, int((u[2] - u[0]) / FALLBACK_STEP_MM))
@@ -1179,8 +1247,39 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                 grid.sort()
                 for _, x, y in grid:
                     if _ok(x, y, rot):
-                        state.apply_move(ref, x, y, rot)
+                        return x, y
+                return None
+
+            if _pref is None or len(_ladder_rots) < 2:
+                # The search as it has always been: the first angle of the
+                # ladder that fits anywhere (rings, then the sweep) wins.
+                for rot in _ladder_rots:
+                    hit = _first_fit(rot)
+                    if hit is not None:
+                        state.apply_move(ref, hit[0], hit[1], rot)
                         return clr
+            else:
+                # OPT-IN (`seed_from_intent(rotate_by_facing=True)`): every
+                # angle finds ITS OWN first fit, and the pose with the fewest
+                # connected pads on a row facing the outline wins; ties keep
+                # #893's ladder order. Ranked at the pose each angle actually
+                # takes, not at the target: the first form of this ranked the
+                # ladder at (tx, ty) and then let the search seat the winner
+                # anywhere -- measured on esp_prog, the count it was chosen
+                # for did not move (3 -> 3) while crossings, hpwl and
+                # inversions all worsened. Costs up to four searches per part
+                # instead of one.
+                best = None
+                for i, rot in enumerate(_ladder_rots):
+                    hit = _first_fit(rot)
+                    if hit is None:
+                        continue
+                    key = (_pref(ref, hit[0], hit[1], rot, exclude), i)
+                    if best is None or key < best[0]:
+                        best = (key, hit[0], hit[1], rot)
+                if best is not None:
+                    state.apply_move(ref, best[1], best[2], best[3])
+                    return clr
     finally:
         state.clearance = full
         state._inc_violation.clear()
@@ -1900,7 +1999,8 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                      evict_depth: int = 0,
                      decap_owner_chips: bool = False,
                      immovable_extra: Sequence[str] = (),
-                     body_model: bool = False) -> Dict:
+                     body_model: bool = False,
+                     rotate_by_facing: bool = False) -> Dict:
     """Compute a full placement for an unplaced board from its intent.
 
     Returns {'placements': [...], 'lock_refs': [...], 'unseated': [...],
@@ -1978,6 +2078,18 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # of anything better. The angle is held by handing `_try_place` a
     # one-element ladder instead.
     declared_rot = floorplan.rotations_for_ref(intent, blocks) if intent else {}
+
+    # Opt-in (OFF by default until `tests/test_placement_ab.py` pins its
+    # rows): `_try_place` reads `state.rotation_prefer` and, when set, ranks
+    # its rotation ladder by `_facing_rank`. Unset, the ladder is untouched.
+    if rotate_by_facing:
+        import functools
+        state.rotation_prefer = functools.partial(
+            _facing_rank, state,
+            edge_refs={c['ref'] for c in (intent.edge_claims() if intent else ())})
+        notes.append('rotate-by-facing: the rotation ladder is ranked by '
+                     'pads-facing-the-outline (placement.edge_facing) '
+                     'before the first fit is kept')
 
     def _rot_ladder(ref):
         """The declared ladder for `ref`, or None for the fallback one."""

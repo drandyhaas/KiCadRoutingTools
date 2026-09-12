@@ -53,6 +53,14 @@ EDGE_MM = 2.0
 #: pitch under 0.2 mm (0.35 is the finest QFN in the corpus).
 MIN_PITCH_STEP = 0.2
 
+#: A part counts when it has at least this many CONNECTED pads: a two-pad
+#: passive has no row to face anything with. ONE constant for the term
+#: (`placement_score.EDGE_FACING_MIN_PADS`), the rule
+#: (`floorplan.PINS_TO_EDGE_MIN_PADS`) and the seeder's opt-in tie-break
+#: (`seeder._facing_rank`), so what the search prefers is what the term
+#: then reports -- three spellings of `3` drifted apart in review.
+MIN_PADS = 3
+
 Point = Tuple[float, float]
 
 

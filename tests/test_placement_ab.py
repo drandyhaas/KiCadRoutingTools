@@ -89,7 +89,7 @@ GROUP_SOURCES = ('kicad', 'sheet')
 BASELINE_INT_KEYS = ('crossings', 'health_bus_foreign_crossings',
                      'inversions', 'body_blocking', 'body_advisory',
                      'intent_errors', 'intent_errors_enforced',
-                     'intent_errors_other')
+                     'intent_errors_other', 'edge_facing_pads', 'unseated')
 BASELINE_FLOAT_KEYS = ('hpwl', 'health_block_displacement_max_mm')
 BASELINE_DICT_KEYS = ('intent_errors_by_rule',)
 
@@ -445,6 +445,74 @@ ROWS = [
         'rejected': True,
         'why': ('MECHANISM: the board candidate_valid names as the one where nearly every part starts in violation, so it is the most sensitive to a seat box that only grows -- and the one board where the trade goes the OTHER way, signal and both guards together. Kept because it DISAGREES with the other three, and deleting the dissenting row is how a finding becomes folklore.'),
     },
+    # --- run 26: the seeder's opt-in rotation tie-break --------------------
+    # REJECTED as a default, rows kept. The seed engine re-seats every part
+    # from the emitted intent, once with the ladder in #893's order and once
+    # with every angle finding its own first fit and the inboard-facing pose
+    # kept. The signal is the very quantity the tie-break ranks by, so it is
+    # nearly tautological and the GUARDS carry the rows: a rotation that
+    # faces inboard must not buy it with crossings, wire length, pin-order
+    # inversions or a pad short -- and measured, it does. The first form
+    # (rank the ladder at the seat target, then let the search seat the
+    # winner anywhere) moved the signal on no board; this form moves it on
+    # two of three, with a guard rising on both (inversions on both;
+    # crossings and wire length on one). `--rotate-by-facing` stays opt-in
+    # and no driver text cites it.
+    {
+        'name': 'facing-seed-esp_prog',
+        'board': 'esp_prog.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'rotate_by_facing': True},
+        'ignore_nets': ['GND'],
+        'signal': 'edge_facing_pads',
+        'guard': ('crossings', 'hpwl', 'inversions', 'body_blocking'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: each angle of the ladder finds its own first fit '
+                'and the pose with the fewest connected pads facing the '
+                'outline wins, ties in author order. The signal falls while '
+                'crossings and inversions rise: the inboard-facing angle seats where the '
+                'ring search first finds room for THAT angle, which is not '
+                'where the input angle would have sat, and every part seated '
+                'after it inherits the shift. Numbers: '
+                'tests/placement_ab_baseline.json.'),
+    },
+    {
+        'name': 'facing-seed-splitflap',
+        'board': 'splitflap_driver.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'rotate_by_facing': True},
+        'ignore_nets': ['GND'],
+        'signal': 'edge_facing_pads',
+        'guard': ('crossings', 'hpwl', 'inversions', 'body_blocking'),
+        'expect': 'regress',
+        'rejected': True,
+        'why': ('MECHANISM: as facing-seed-esp_prog, with the wire guards '
+                'going the OTHER way: crossings and wire length fall with '
+                'the signal here, and pin-order inversions alone rise -- '
+                'one guard is enough, as declared before the run. `unseated` '
+                'is in the baseline because the first form of this arm lost '
+                "the seeder's whole-board sweep on the OFF path and this "
+                'board is where that showed.'),
+    },
+    {
+        'name': 'facing-seed-tigard',
+        'board': 'tigard.kicad_pcb',
+        'corridors': [],
+        'engine': 'seed',
+        'seed_on': {'rotate_by_facing': True},
+        'ignore_nets': ['GND'],
+        'signal': 'edge_facing_pads',
+        'guard': ('crossings', 'hpwl', 'inversions', 'body_blocking'),
+        'expect': 'neutral',
+        'rejected': True,
+        'why': ('MECHANISM: as facing-seed-esp_prog. Here every angle the '
+                'tie-break prefers is the one the ladder tried first, so the '
+                'two arms write the same poses -- the neutral row, kept so a '
+                'change that makes them differ is seen.'),
+    },
 ]
 
 QUENCH_BASE = dict(
@@ -549,6 +617,100 @@ def _inversions(pcb_data, board_path):
         return None
 
 
+def _edge_facing(pcb_data, board_path, intent):
+    """`placement_score.edge_facing`'s value on a written board, or None if
+    the term did not run. The seed rows' SIGNAL and every other row's
+    evidence column; re-derived from the final poses like the rest of this
+    dict. For a `rotate_by_facing` row this is the quantity the tie-break
+    ranks by, so "it improved" is nearly tautological there and the GUARDS
+    carry the row -- the same circularity `_inversions` states."""
+    try:
+        import placement_score as ps
+        r = ps.edge_facing(pcb_data, board_path, intent=intent)
+        return int(r['value']) if r.get('ran') and r.get('value') is not None else None
+    except Exception as exc:                       # pragma: no cover - evidence
+        print('    edge_facing unmeasurable: %s: %s'
+              % (type(exc).__name__, exc))
+        return None
+
+
+def _ignore_ids(pcb, patterns):
+    """Net ids whose name matches any of `patterns` (fnmatch), or None."""
+    import fnmatch
+    ids = [n.net_id for n in pcb.nets.values()
+           if any(fnmatch.fnmatch(n.name, p) for p in (patterns or ()))]
+    return ids or None
+
+
+def _run_seed(board_path, out_path, intent, seed_kw,
+              group_sources=GROUP_SOURCES, ignore_nets=()):
+    """One SEED (from the intent, every part re-seated) + write + the same
+    independent grade `_run` applies. The engine switch for a row that
+    measures the seeder rather than the quench: `place_seed`'s path, minus
+    its polish, so the number is the seat search's own.
+
+    `crossings` / `hpwl` come from a fresh `pose_score.make_state` over the
+    WRITTEN board (`total_cost` is what the quench copies into
+    `metrics['after']`) with the row's `ignore_nets` resolved to net ids,
+    so the columns mean the same thing on both engines. The seat search
+    itself takes no ignore list (`seed_from_intent` has none); only the
+    columns do -- the first form of this arm declared the key and read it
+    nowhere, so GND airwires counted in the seed rows' guards.
+    """
+    import random
+    from kicad_parser import parse_kicad_pcb
+    from placement import floorplan, seeder
+    from placement.writer import write_placed_output
+    import pose_score
+
+    pcb = parse_kicad_pcb(board_path)
+    t0 = time.time()
+    res = seeder.seed_from_intent(
+        pcb, board_path, intent, random.Random('0'),
+        group_sources=group_sources, clearance=QUENCH_BASE['clearance'],
+        board_edge_clearance=QUENCH_BASE['board_edge_clearance'],
+        grid_step=QUENCH_BASE['grid_step'], **seed_kw)
+    write_placed_output(board_path, out_path, res['placements'])
+    for ext in ('.kicad_pro', '.kicad_dru'):
+        src = os.path.splitext(board_path)[0] + ext
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.splitext(out_path)[0] + ext)
+    graded = parse_kicad_pcb(out_path)
+    result = floorplan.grade(intent, graded, out_path, with_health=True,
+                             group_sources=group_sources)
+    summary = floorplan.summary(result)
+    cost = pose_score.make_state(
+        graded, out_path,
+        ignore_net_ids=_ignore_ids(graded, ignore_nets)).total_cost()
+    by_rule = {}
+    for v in result.errors:
+        by_rule[v.rule] = by_rule.get(v.rule, 0) + 1
+    from placement.quench import INTENT_ENFORCED_RULES
+    enforced = sum(n for r, n in by_rule.items() if r in INTENT_ENFORCED_RULES)
+    _bb, _ba = _body_overlap(graded, out_path, QUENCH_BASE['clearance'])
+    return {
+        'seconds': round(time.time() - t0, 1),
+        'crossings': cost.get('crossings'),
+        'hpwl': None if cost.get('hpwl') is None
+                else round(float(cost['hpwl']), 2),
+        'corridor_cut': None,
+        'health_bus_foreign_crossings':
+            summary.get('health_bus_foreign_crossings'),
+        'health_block_displacement_max_mm':
+            summary.get('health_block_displacement_max_mm'),
+        'inversions': _inversions(graded, out_path),
+        'body_blocking': _bb,
+        'body_advisory': _ba,
+        'intent_errors': summary.get('errors'),
+        'intent_errors_by_rule': by_rule,
+        'intent_errors_enforced': enforced,
+        'intent_errors_other': (summary.get('errors') or 0) - enforced,
+        'intent_gate_rejected': None,
+        'edge_facing_pads': _edge_facing(graded, out_path, intent),
+        'unseated': len(res.get('unseated') or ()),
+    }
+
+
 def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES):
     """One quench + write + independent grade. Returns the measured row.
 
@@ -651,6 +813,12 @@ def _run(board_path, out_path, intent, quench_kw, group_sources=GROUP_SOURCES):
         # 0 when a gate was built and refused nothing; None when NO gate was
         # built at all. The distinction is the point -- see quench.py.
         'intent_gate_rejected': None if gate is None else gate['rejected'],
+        # Run 26's facing number, carried on every row as evidence so the
+        # quench rows say what they do to it too.
+        'edge_facing_pads': _edge_facing(graded, out_path, intent),
+        # The seed engine's column (`_run_seed`); a quench moves nothing
+        # it has not seated, so the key is present and empty here.
+        'unseated': None,
     }
 
 
@@ -702,6 +870,36 @@ def run_row(row, workdir):
     d = os.path.join(workdir, row['name'])
     os.makedirs(d, exist_ok=True)
     intent = _intent_for(board, row['corridors'], d, row.get('zone_flags'))
+
+    if row.get('engine') == 'seed':
+        # The SEED engine: both arms re-seat every part from the intent; the
+        # ON arm carries `seed_on` (a `seed_from_intent` kwarg set). Same
+        # verdict rule, same independent grade, same print.
+        if not row.get('seed_on'):
+            raise AssertionError(f"{row['name']}: a seed row states no "
+                                 f"seed_on -- it would measure the same seed "
+                                 f"twice")
+        _ign = list(row.get('ignore_nets') or ())
+        off = _run_seed(board, os.path.join(d, 'off.kicad_pcb'), intent, {},
+                        ignore_nets=_ign)
+        on = _run_seed(board, os.path.join(d, 'on.kicad_pcb'), intent,
+                       dict(row['seed_on']), ignore_nets=_ign)
+        mark, notes = _verdict(off, on, row)
+        expected = row.get('expect')
+        tag = mark.upper()
+        if expected and mark == expected:
+            tag = f"{mark.upper()} (as measured)"
+        elif expected:
+            tag = f"{mark.upper()} != expected {expected.upper()}"
+        print(f"  {row['name']:<24} {tag:<32} "
+              f"({off['seconds']}s / {on['seconds']}s)  [seed engine]")
+        for k in ('crossings', 'hpwl', 'inversions', 'unseated', row['signal']):
+            print(f"      {k:<32} {off.get(k)!s:>12} -> {on.get(k)!s:>12}")
+        for n in notes:
+            print(f"      {n}")
+        if expected and mark != expected and row.get('why'):
+            print(f"      recorded reason: {row['why']}")
+        return mark, notes, off, on
 
     kw_off = dict(QUENCH_BASE)
     kw_off.update(row.get('quench_base') or {})
@@ -1093,7 +1291,8 @@ def _self_test():
             'intent_errors': 14,
             'inversions': 40, 'body_blocking': 2, 'body_advisory': 9,
             'intent_errors_enforced': 4, 'intent_errors_other': 10,
-            'intent_gate_rejected': None,
+            'intent_gate_rejected': None, 'edge_facing_pads': 3,
+            'unseated': 0,
             'intent_errors_by_rule': {'block_unresolved': 10,
                                       'zone_containment': 4}}
     von = {'crossings': 90, 'hpwl': 9.0, 'corridor_cut': 800.0, 'seconds': 1,
@@ -1102,7 +1301,8 @@ def _self_test():
            'intent_errors': 17,
            'inversions': 38, 'body_blocking': 2, 'body_advisory': 7,
            'intent_errors_enforced': 7, 'intent_errors_other': 10,
-           'intent_gate_rejected': None,
+           'intent_gate_rejected': None, 'edge_facing_pads': 2,
+           'unseated': 0,
            'intent_errors_by_rule': {'block_unresolved': 10,
                                      'zone_containment': 7}}
 
