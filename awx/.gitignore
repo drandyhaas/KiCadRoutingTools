@@ -1,2 +1,8 @@
 tmp/
+# the taut path cache, keyed by a board hash (225 KB and regenerated)
 *.taut.json
+# sweep definitions are per-experiment scratch -- a new one per question,
+# rewritten as the question changes. arms.example.json is the documented
+# one the README points at, and is tracked.
+arms.*.json
+!arms.example.json
