@@ -1371,21 +1371,31 @@ python3 -X utf8 py_router/route.py board_step1c.kicad_pcb board_step2.kicad_pcb 
     --no-bga-zone \
     --max-ripup 5 \
     --power-nets GND VCC <other PWR...> --power-nets-widths 0.3 0.4 <W...> \
-    --layers <ALL copper layers> --layer-costs <1.0 signals / 6.0 GND solid plane / 2.5 rail pours / 1.0 F-B and bus highway> \
+    --layers <ALL copper layers> --layer-costs <1.0 signals / 3.0 solid planes / 1.5 split-or-highway> \
     2>&1 | tee /tmp/step2_routing.txt
 
 The `--layer-costs` line is NOT optional when Step 1 poured any solid plane:
 without it signals cross the pours at cost 1.0 and shred them (measured: split
 power pours at 0–2% connected under a BGA on a chain that omitted it). Order
-matches `--layers`. **The prices are Step 5a-tuned's, on both tiers** — GND
-solid plane 6.0, rail pours 2.5, split/route+pour and bus-highway layers
-1.0–1.5, F/B 1.0 — which is also what Step 2c's measured-optimal set gives.
-This line used to say 3.0 on solid-plane layers and scope 6.0 to dense boards,
-which contradicted Step 5a-tuned's own STANDARD-board recipe (price 6.0) in
-both halves. Step 10 rule 8 already settles which wins: the Step 5a-tuned gate
-outranks the pour-philosophy survey, and the older "~3× is the sweet spot"
-figure below is #185's earlier screen, kept for the record rather than as the
-number to pass.
+matches `--layers`; **3.0 on solid-plane layers**, 1.0–1.5 on split/route+pour
+and highway layers, 1.0 on F/B. On dense boards use the measured-optimal
+pricing from Step 2c instead (GND plane 6.0, rail pours 2.5, bus highway FREE).
+
+**Two prices, deliberately, and this is the one to start from.** 3.0 is #185's
+screened value and what this general chain passes; Step 5a-tuned and Step 2c
+measure 6.0 and are the recipe to switch to when their gate selects them.
+Neither is "the" number: what both say is that the solid-plane layers must be
+several times the signal layers, and 2× already achieves the effect the rule
+exists for (see the #185 figures below). Step 10 rule 8 does NOT settle this
+one — it ranks the pour TOPOLOGY (outer floods vs inner-only, fragility, rail
+co-pours), not the price — so the price follows whichever recipe that gate put
+you on, and nothing in this file ranks 3.0 against 6.0 by measurement.
+
+An earlier pass through this file raised THIS line to 6.0 to make one value
+appear everywhere; that traded a
+harmless difference in scope for a change in the copper a standard board gets,
+which is not an editing decision, and it is reverted. If you want one price
+everywhere, that is a corpus A/B, not a wording fix.
 
 (When Step 2b ran, exclude its impedance nets, e.g. `--nets "*" "!RF"`, and
 route from `board_step2b.kicad_pcb`.)
@@ -1829,13 +1839,13 @@ signal layers and leave the inner layers clean for the pour:
 # GND plane on In1.Cu, power plane on In2.Cu -> penalize In1/In2 for signals:
 py_router/route.py ... --layers F.Cu In1.Cu In2.Cu B.Cu --layer-costs 1.0 3.0 3.0 1.0
 ```
-- **~3× was #185's sweet spot on boards where F/B alone can carry the signals**
-  — the earlier screen, and NOT the number to pass today: Step 5a-tuned and
-  Step 2c both measured GND solid plane at **6.0**, and Step 10 rule 8 makes
-  the tuned gate outrank this survey. The #185 shape still holds directionally
-  and is why the floor is not 1.0:
+- **~3× is #185's sweet spot on boards where F/B alone can carry the signals**,
+  and the value the Step 2 chain above passes. Step 5a-tuned and Step 2c
+  measured **6.0** for the recipes THEY select; both live in this file on
+  purpose, scoped to their own cases. #185's figures are why the floor is
+  not 1.0:
   any value ≥2× keeps signals off the planes and doesn't hurt completion; ≥5×
-  was measured as negligible further gain *in that screen*. Order matches `--layers`;
+  just adds vias/copper for negligible further gain. Order matches `--layers`;
   keep the real signal layers (F.Cu/B.Cu) at 1.0. **On dense boards (BGA ≥
   ~100 balls / DDR buses) where an inner layer was deliberately left
   signal-routable (see the dense-board exception above), keep that layer at
@@ -2125,7 +2135,7 @@ python3 py_router/route.py board.kicad_pcb --nets "*" \
 11. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
 12. **Use --no-bga-zone for difficult boards** - Even when fanout is complete, use `--no-bga-zone` during routing to allow the router to find alternative paths through the dense pin area. This is especially important for 2-layer boards where routing channels are limited.
 13. **Windows UTF-8 encoding** - On Windows, use `python3 -X utf8` to avoid Unicode encoding errors when scripts print special characters (like Ω for resistance). Example: `python3 -X utf8 py_router/route_planes.py ...`
-14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets (this is the Step 1 -> 1b order). Through-hole PGA pads automatically connect to planes on that layer; SMD BGA power balls get their plane vias from the FANOUT's plane-drop pass (#424), or are served by direct pour contact where the pour already covers them, and the route step's in-run finalize welds what is left. **Not from `route_planes.py`, which since #562 places no vias and draws no traces at all.** This approach:
+14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets (this is the Step 1 -> 1b order). Through-hole PGA pads automatically connect to planes on that layer; SMD BGA power balls get their plane vias from the FANOUT's plane-drop pass (#424), or are served by direct pour contact where the pour already covers them, and the route step's in-run finalize welds what is left. **Not from `route_planes.py`, which since #562 places no per-pad tap vias and draws no traces (it still places the via features it is asked for: thermal arrays #487, `--stitch-vias`, and the `--add-gnd-vias` of Step 3).** This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
 15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. The optimum sits in 3-5 and wobbles by board (measured: one board monotone-better all the way down to 3, another best at 5) -- the SHIPPED default is 3 (the sets-11-15 holdout showed 5 hurting ordinary boards while helping knob-sensitive ones -- #586); try 5 as a free retry variant on difficult boards (deterministic: keep whichever grades better), and escalate above 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.
