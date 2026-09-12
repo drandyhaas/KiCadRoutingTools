@@ -501,6 +501,37 @@ def test_a_legality_budget_bites_when_exceeded():
           f"{[v.message[:52] for v in hits]}")
 
 
+def test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_connectors():
+    """The facing criterion as a rule: a three-pin row 1 mm from the edge with
+    every partner behind it is ONE warn (never an error -- the reviewer
+    disposes), a declared edge connector on the same edge is not named, and
+    with no `edge_connectors` declared the rule abstains as 'not asked'."""
+    import tempfile as _tf
+    sys.path.insert(0, os.path.join(ROOT, 'tests'))
+    from test_894_placement_terms import _EDGE_BOARD
+    with _tf.TemporaryDirectory(prefix='t549e_') as tmp:
+        board = os.path.join(tmp, 'edge.kicad_pcb')
+        with open(board, 'w', encoding='utf-8') as fh:
+            fh.write(_EDGE_BOARD % '')
+        raw = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+               'edge_connectors': [{'ref': 'J1', 'class': 'edge_receptacle',
+                                    'edge': 'north',
+                                    'overhang_mm': {'min': 0.0, 'max': 0.5}}]}
+        r = _graded(raw, path=board)
+        hits = [v for v in r.violations if v.rule == 'pins_to_edge']
+        assert [v.ref for v in hits] == ['U2'], [v.message for v in hits]
+        assert hits[0].severity == 'warn' and hits[0].measured['pads_to_edge'] == 3
+        assert hits[0].measured['faces'] == ['north'], hits[0].measured
+        assert r.passed, "a WARN must not fail the grade"
+        assert 'pins_to_edge' in r.rules_run
+        raw['edge_connectors'] = []
+        r2 = _graded(raw, path=board)
+        assert 'pins_to_edge' in r2.rules_skipped, r2.rules_skipped
+        assert not [v for v in r2.violations if v.rule == 'pins_to_edge']
+    print("  PASS: one WARN naming U2 (3 pads, north); J1 excluded; skipped "
+          "without edge_connectors")
+
+
 def test_the_envelope_rule_refuses_to_licence_a_resize():
     """The board outline is fixed. A mismatch is a finding about the INTENT."""
     raw = _emit()
@@ -679,6 +710,7 @@ TESTS = [
     test_legality_numbers_are_the_optimizers_own,
     test_oob_area_is_refused_as_a_budget_because_it_is_cutout_blind,
     test_a_legality_budget_bites_when_exceeded,
+    test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_connectors,
     test_the_envelope_rule_refuses_to_licence_a_resize,
     test_emit_never_claims_a_zone_it_cannot_defend,
     test_emit_records_the_overhanging_parts_as_edge_connectors,

@@ -3602,6 +3602,64 @@ def rule_proximity(ctx) -> Iterator[Violation]:
                 expected={'max_mm': limit})
 
 
+def rule_pins_to_edge(ctx) -> Iterator[Violation]:
+    """A part whose pad row faces the board outline with nothing beyond it.
+
+    The facing criterion of the boundary review, as a number (run 26: a SOT-89
+    regulator seated with all three pins 0.40 mm from the north edge, every
+    net forced under its own body, and a review that wrote PASS because
+    nothing measured it). The geometry is `placement.edge_facing`, shared
+    with `placement_score.edge_facing` and the seeder, so the rule and the
+    term cannot disagree about a pad.
+
+    ALWAYS WARN, whatever the configured severity, like the
+    `connector_affinity` arm of `rule_edge_connector`: this is a judgement
+    for criterion 4 of the boundary review, and a legitimately edge-facing
+    row exists (a test-point header, a part whose only partner IS the edge
+    strip), so the reviewer disposes and the gate does not. The exclusion is
+    the intent's `edge_claims()` -- a declared connector's mating row SHOULD
+    face the edge -- and that is also why `_wants` arms the rule only on an
+    intent that declares `edge_connectors`: without the declaration the rule
+    would name every connector on the board.
+    """
+    from .edge_facing import EDGE_MM, count_pads_to_edge, part_inputs
+    excluded = {c['ref'] for c in ctx.intent.edge_claims()}
+    bounds = ctx.outline_bounds
+    if not bounds:
+        return
+    for ref in sorted(ctx.pcb.footprints or {}):
+        if ref in excluded:
+            continue
+        inputs = part_inputs(ctx.pcb, ref)
+        if inputs is None:
+            continue
+        pads, rect, partners, centre, pitch = inputs
+        if len(pads) < PINS_TO_EDGE_MIN_PADS:
+            continue
+        r = count_pads_to_edge(pads, rect, bounds, partners, centre,
+                               pitch=pitch)
+        if r['to_edge'] <= 0:
+            continue
+        faces = sorted(r['faces'])
+        gap = min(r['gaps'][f] for f in faces)
+        yield Violation(
+            rule='pins_to_edge', severity=WARN, ref=ref,
+            message=(f"{ref}: {r['to_edge']} of {r['pads']} connected pads sit "
+                     f"on a row facing the {'/'.join(faces)} edge "
+                     f"({gap:.2f}mm) with no partner beyond -- their nets can "
+                     f"only leave along the edge strip or under the part"),
+            measured={'pads_to_edge': r['to_edge'], 'pads': r['pads'],
+                      'faces': faces, 'gap_mm': round(gap, 4),
+                      'edge_mm': EDGE_MM},
+            expected={'pads_to_edge': 0})
+
+
+#: `rule_pins_to_edge` grades parts with at least this many CONNECTED pads
+#: -- the same floor `placement_score.EDGE_FACING_MIN_PADS` applies, spelled
+#: here so the rule module does not import the score module.
+PINS_TO_EDGE_MIN_PADS = 3
+
+
 RULES = (
     ('envelope', rule_envelope),
     ('zone_containment', rule_zone_containment),
@@ -3616,6 +3674,7 @@ RULES = (
     ('proximity', rule_proximity),
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
+    ('pins_to_edge', rule_pins_to_edge),
 )
 
 #: Rules whose violations are raised OUTSIDE the `RULES` loop, and so have no
@@ -3661,6 +3720,9 @@ _SKIP_REASON = {
     'proximity': 'the intent declares no proximity claims',
     'must_lock': 'the intent declares no must_lock patterns',
     'legality': 'the intent declares no legality_budget',
+    # The rule's exclusion list IS the declaration: without it every
+    # connector on the board would be named for facing the edge it mates at.
+    'pins_to_edge': 'the intent declares no edge_connectors',
 }
 
 
@@ -3801,6 +3863,11 @@ def _wants(intent: Intent, rule: str) -> bool:
         return bool(intent.must_lock)
     if rule == 'legality':
         return bool(intent.legality_budget)
+    if rule == 'pins_to_edge':
+        # Armed by the edge-connector DECLARATION, which is the rule's
+        # exclusion list: without it the rule would name every connector on
+        # the board for facing the edge it mates at.
+        return bool(intent.edge_connectors)
     return True
 
 

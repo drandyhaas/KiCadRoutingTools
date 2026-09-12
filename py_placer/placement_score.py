@@ -21,21 +21,26 @@ signals into one mark means no reader can say which of its inputs moved. Laps
 are compared by `compare_terms`, which is PARETO -- better on every term it can
 compare, worse on every term, or `mixed` with both sides named.
 
-THREE of the five terms CALL an existing grader rather than mirroring it:
+THREE of the six terms CALL an existing grader rather than mirroring it:
 `pair_length` and `pin_order_crossings` read `board_context.pin_order_rows`,
 and `cluster_to_pin` reads `floorplan.grade`'s measured proximity rows plus
 `board_context.serves_map`. A re-implementation of a grader in this repo has
 already been measured disagreeing with it 83 times, worst 0.234mm.
 
-The other TWO deliberately do not, and each says why at its definition: the
+The other THREE deliberately do not, and each says why at its definition: the
 nearest existing implementation measures a DIFFERENT QUANTITY.
 `plane_cut_proxy` does not call `routability.corridor_cut_mm` (it needs a
 declared corridor, and its chord is position-invariant along the lane, so it
 cannot rank two placements that differ by a nudge); `balance` does not call
 `check_pockets.census_scalars` (courtyard-area weighted, a hypot of both axes,
-per-side). Both build on geometry primitives -- `legality.pad_rect`,
-`rect_area`, `part_class.mechanical_parts`, `placement.body` -- rather than on
-a second copy of a grader.
+per-side); `edge_facing` does not call `escape.assign_faces` (one face per
+pad, with a row's end pads sent to the row's ends -- it answers "which lane
+does this pad escape through", not "which side of the part is it on"). All
+three build on geometry primitives -- `legality.pad_rect`, `rect_area`,
+`part_class.mechanical_parts`, `placement.body`, `escape._face_geometry` --
+rather than on a second copy of a grader, and `edge_facing`'s core lives in
+`placement.edge_facing` so `floorplan.rule_pins_to_edge` and the seeder read
+the same number.
 
 Vacuity
 -------
@@ -74,7 +79,11 @@ SCHEMA = 1
 #: The terms, IN ORDER, published so a consumer never invents one. There is
 #: deliberately NO aggregate over them: see the module docstring.
 TERM_ORDER = ('pair_length', 'pin_order_crossings', 'cluster_to_pin',
-              'plane_cut_proxy', 'balance')
+              'plane_cut_proxy', 'balance', 'edge_facing')
+
+#: `edge_facing` counts parts with at least this many CONNECTED pads: a
+#: two-pad passive has no row to face anything with.
+EDGE_FACING_MIN_PADS = 3
 
 #: Every term is lower-is-better. Shipped per term rather than assumed, so a
 #: future term cannot silently invert `compare_terms` by being added.
@@ -602,10 +611,87 @@ def pad_area_balance(pcb_data) -> dict:
                  pads=n, npth_pads_excluded=npth)
 
 
+def edge_facing(pcb_data, pcb_file=None, intent=None) -> dict:
+    """Connected pads on a row that faces the board outline with nothing beyond
+    it, summed over every part with `EDGE_FACING_MIN_PADS` or more connected
+    pads that is not an edge connector. Unit: pads. Lower is better.
+
+    The definition, and why it does not call `escape.assign_faces`, live in
+    `placement.edge_facing` -- one geometry core shared with
+    `floorplan.rule_pins_to_edge` and the seeder's opt-in rotation tie-break,
+    so the term, the rule and the search cannot disagree about a pad.
+
+    EDGE CONNECTORS ARE EXCLUDED, because their mating row SHOULD face the
+    edge. The exclusion is the intent's `edge_claims()` when an intent is
+    given -- the declaration every other consumer reads -- and otherwise
+    `part_class.classify_part` (`edge_receptacle` / `edge_actuator`), and the
+    payload says which (`exclusion_basis`), because the two can differ on a
+    part the classifier does not recognise.
+
+    `basis` is the counted population: a lap that changes which parts are
+    counted (a different intent, a part gaining or losing a net) is
+    `not-comparable` under `term_deltas`, like `plane_cut_proxy`.
+
+    Measured, run 26 (esp_prog placed from scratch): U2, the LDO, reads
+    3 of 3 -- its whole pin row 0.40 mm from the north edge -- and the
+    review's criterion 4 had passed it in prose.
+    """
+    unit = 'pads'
+    bounds = getattr(getattr(pcb_data, 'board_info', None), 'board_bounds', None)
+    if not bounds:
+        return _skip('the board has no outline, so no face can meet it', unit)
+    try:
+        from placement import edge_facing as ef
+        from placement import part_class
+    except Exception as exc:                                 # noqa: BLE001
+        return _skip(f'could not import the geometry this term calls: '
+                     f'{type(exc).__name__}: {exc}', unit)
+    if intent is not None:
+        excluded = {c['ref'] for c in intent.edge_claims()}
+        exclusion_basis = 'intent.edge_claims'
+    else:
+        excluded = set()
+        exclusion_basis = 'part_class'
+        for ref, fp in (pcb_data.footprints or {}).items():
+            try:
+                if part_class.classify_part(fp, ref).name in (
+                        'edge_receptacle', 'edge_actuator'):
+                    excluded.add(ref)
+            except Exception:                                # noqa: BLE001
+                pass
+    by_part = {}
+    total = 0
+    for ref in sorted(pcb_data.footprints or {}):
+        if ref in excluded:
+            continue
+        inputs = ef.part_inputs(pcb_data, ref)
+        if inputs is None:
+            continue
+        pads, rect, partners, centre, pitch = inputs
+        if len(pads) < EDGE_FACING_MIN_PADS:
+            continue
+        r = ef.count_pads_to_edge(pads, rect, bounds, partners, centre,
+                                  pitch=pitch)
+        by_part[ref] = {'pads': r['pads'], 'to_edge': r['to_edge'],
+                        'faces': r['faces'],
+                        'gaps': {f: g for f, g in r['gaps'].items()
+                                 if g <= r['edge_mm']}}
+        total += r['to_edge']
+    if not by_part:
+        return _skip(f'no part carries {EDGE_FACING_MIN_PADS} or more connected '
+                     f'pads outside the edge-connector set', unit,
+                     excluded=sorted(excluded), exclusion_basis=exclusion_basis)
+    n_pads = sum(v['pads'] for v in by_part.values())
+    return _term(total, unit, basis=sorted(by_part),
+                 share=round(total / n_pads, 4) if n_pads else 0.0,
+                 by_part=by_part, edge_mm=ef.EDGE_MM,
+                 excluded=sorted(excluded), exclusion_basis=exclusion_basis)
+
+
 # ------------------------------------------------------------- the document
 
 def placement_terms(pcb_data, pcb_file, *, clearance=None, intent=None) -> dict:
-    """All five terms for one board."""
+    """All six terms for one board."""
     if clearance is None:
         try:
             import list_nets
@@ -621,6 +707,7 @@ def placement_terms(pcb_data, pcb_file, *, clearance=None, intent=None) -> dict:
                                          clearance=clearance),
         'plane_cut_proxy': plane_cut_proxy(pcb_data, pcb_file),
         'balance': pad_area_balance(pcb_data),
+        'edge_facing': edge_facing(pcb_data, pcb_file, intent=intent),
     }
     return {'schema': SCHEMA, 'kind': 'placement-terms',
             'board': os.path.abspath(pcb_file) if pcb_file else None,
