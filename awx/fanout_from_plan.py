@@ -347,8 +347,19 @@ def _plan_braid_worker(args):
     so no worker solves cold)."""
     board, names, dref, plan, seeds = args
     import braid as te_
+    # START FROM EXACTLY THE PARENT'S SNAPSHOT, never from what this worker
+    # happens to be holding. A pool worker is long-lived and accumulates
+    # _L5_SEED across the trials it runs; `setdefault` let a trial inherit
+    # whichever predecessor landed in the same worker. The seed is not
+    # decoration -- _profiles5 fixes the `w` binaries to it and solves at
+    # L5_JUDGE_NODES (30), so the seed IS the answer at that cap. Which
+    # worker takes which trial is a wall-clock race and how many workers
+    # exist was os.cpu_count()-2, so the judged via count -- and the berth
+    # chosen from it -- depended on the machine. That is the defect the
+    # no-clock rule exists to forbid, wearing a different hat.
+    te_._L5_SEED.clear()
     for k, v in (seeds or {}).items():
-        te_._L5_SEED.setdefault(frozenset(k), set(v))
+        te_._L5_SEED[frozenset(k)] = set(v)
     bp = te_.plan_braid(board, names, dref, plan)
     return bp, {tuple(sorted(k)): sorted(v) for k, v in te_._L5_SEED.items()}
 
@@ -483,7 +494,12 @@ SRC_RESIDUE_ROUNDS = int(os.environ.get('SRC_RESIDUE_ROUNDS', '8'))   # one toot
 # greedy accepts one per net, in order, as before), a trial is ~3.3 s of
 # plan_braid at K41 and a pass is 40-65 of them, the slowest stage of the
 # chain by far. 1 = the sequential loop.
-DST_RESIDUE_WORKERS = int(os.environ.get('DST_RESIDUE_WORKERS', str(max(1, min(6, (os.cpu_count() or 2) - 2)))))
+# A FIXED worker count, not os.cpu_count()-2: the pool's size decided how
+# the trials were distributed, and with it (before the fix in
+# _plan_braid_worker) which seed each trial ran from. Pool.map is ordered,
+# so results no longer depend on this -- but a machine-derived default is
+# exactly the shape of dependence this chain is not allowed to have.
+DST_RESIDUE_WORKERS = int(os.environ.get('DST_RESIDUE_WORKERS', '6'))
 DST_SEARCH_CALLS = int(os.environ.get('DST_SEARCH_CALLS', '4000'))   # judge calls per call
 
 
