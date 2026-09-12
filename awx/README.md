@@ -395,11 +395,32 @@ file and is in the bundle only.
 
 ## TODO
 
-1. **Why the human's floor is lower per crossing.** The objective. We
-   pay 0.35 layer changes per crossing, the human 0.22. Find the
-   structural property (end-layer agreement? crossing parity along a
-   lane? partner layer at the crossing?) and score plans by it. Score
-   with `ledger_cal.py`, not with crossing counts.
+1. **THE PROPERTY IS FOUND, and it is one rule: every lane's DP floor is
+   0 or 2. Never more.** 123 of 123 lanes on the human's board, at
+   K35, K41 and K51. On ours the separation is perfect: we BEAT the
+   human at every rung where no lane exceeds 2, and lose at every rung
+   where one does. The arithmetic closes to the via -- K41 floor 72-64 =
+   8 = 4 violators x 2; K51 104-74 = 30 = 26 + 4.
+   Equivalently (found independently, same day, from the other
+   direction): the floor decomposes EXACTLY as `floor = M + X + E` --
+   M lanes forced to turn once, X turns BEYOND that one, E end-layer
+   disagreements -- and the human's X/lane is FLAT at ~0.2 from K15 to
+   K51 while ours goes 0.00 -> 0.37 -> 0.72 -> 1.23. **X is the entire
+   scaling gap.**
+   Since both pads are on F: floor 0 = every partner on B (stay on F);
+   floor 2 = the F-partners form ONE CONTIGUOUS RUN. A floor of 4 or 8
+   means the lane LEAVES the opposing bundle and re-enters it.
+   The controls kill every alternative: the human's permutation is no
+   more two-page-able than ours (residue 21 vs 22), has MORE crossings
+   (338 vs 275), the same M, the same slack.
+   **Why the planner cannot see it:** `plan_ends.plan_pages` builds
+   `pred[n] = (tooth != page) + (berth != page) + m.vias`, which is
+   STRUCTURALLY CAPPED AT 2 and computed per bus group independently. A
+   floor-4 lane is not representable in the objective the search
+   optimises. `braid.cross_corridor_vias` computes the missing
+   inter-corridor dive and is passed only to `vias_from_pages`, never
+   into `plan_pages`/`judged_cost`.
+   **Prize if every violator comes down to 2: K41 -8, K51 -26.**
 2. **K51 completion on the pattern arm.** `DST_SEED=pattern` gives 104
    vias against the baseline's 137 with chain 25 / slack +3, but ships 2
    open (SDQ12, SDQ5). The failure is a berth boxed in by its
@@ -408,13 +429,35 @@ file and is in the bundle only.
 3. **The pattern seed loses at K35/K41** (69 vs 58, 88 vs 80) where
    there is capacity to spare. Either gate it on slack, or find what it
    gives up when it is not needed.
-4. **The berth menu is the binding constraint on the joint solve.** Each
-   net has ~26 distinct berths and the solve is offered 4, pre-filtered
-   by `vias + ride`. Raising the cap to 8 quintuples the model (97k ->
-   505k rows) because every candidate is instantiated as a whole lane.
-   Column generation (one column = one lane, priced by a shortest path)
-   is the standard fix and does NOT inherit the compact LP's useless
-   bound (47.75 against an integer 102.62).
+4. **The berth menu is the binding constraint, and the fix is ROW
+   pruning -- not column generation.** Measured on the joint arm's own
+   K41 instance:
+   - Each net has ~19 distinct berth geometries (median; 7-31) across
+     ~4 faces. At `CANDS=4` the one-per-face guarantee consumes ALL FOUR
+     slots for 28 of 41 nets, so the `vias + ride` ranking never chooses
+     WHICH berth -- only one representative per face. That is why
+     `DST_XING_SCREEN` beat nothing: a better ranking still returns four
+     representatives. **The screen is not the lever; the cap is.**
+   - The blow-up is ROWS, not columns: plain -> cap 4 grows variables
+     7.9x and rows **48x**. And **77% of the proximity rows at cap 4
+     (88% at cap 8) are candidate-vs-candidate** -- pairs that can never
+     both be chosen, since at most one candidate per net is taken. Hard
+     compatibility is already carried separately by `alt_excl`.
+   - Dropping those rows: cap 4 156k -> **48k**, cap 8 527k -> **95k**,
+     the WHOLE 26-berth menu -> 255k. **Pruned cap 8 is 40% SMALLER than
+     the unpruned cap 4 that ships today.** Restore the dropped rows
+     lazily for the chosen set (bounded by the plain instance's ~2k
+     pairs, i.e. 1-4% growth per round).
+   - **Column generation is REFUTED for this model**, by this repo's own
+     solver study. The pricing subproblem is a per-lane chain DP, which
+     has the INTEGRALITY PROPERTY, so the Dantzig-Wolfe master's bound
+     equals the compact LP bound -- the same worthless 47.75 against an
+     integer 102.62 that killed the Lagrangian arm. The claim written
+     here on 2026-09-12 ("a DW master's bound is generally strictly
+     stronger, so the usual objection does not apply") is FALSE here.
+     And a bound is not what is missing: CP-SAT already PROVES these
+     instances optimal. Model size is the problem, and that is row
+     generation, not column generation.
 5. **Solver budget against quality.** CP-SAT proves the 550k-row cap-8
    instances optimal in 180-310 s, which is 7x over the time edict.
    Measure the incumbent at a short `BRAID_CPSAT_DET` before buying any
