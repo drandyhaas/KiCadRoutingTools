@@ -16,9 +16,14 @@ SOT-89 tab outline:
   * `fix_kicad_drc_settings.scan_board_minima` took `min(width)` over the same
     segments -> every chain step's writeback wrote `rules.min_track_width
     0.15 -> 0.1`, and `check_complete --authored-from` then read the board as
-    UNSOUND ("track width 0.15 -> 0.1").
+    UNSOUND ("track width 0.15 -> 0.1");
+  * `fix_kicad_drc_settings._fab_floor_disclosure`'s census counted them too,
+    so the FAB FLOOR RELAXED banner told its reader that N tracks sit under
+    the original floor on a board whose only sub-floor copper is an outline.
+    That one writes nothing, but it is the line a human reads to decide
+    whether to re-route, and a wrong denominator there is a wrong decision.
 
-Both now skip `seg.graphic`. This file pins each on the tracked fixture that
+All three now skip `seg.graphic`. This file pins each on the tracked fixture that
 produced them, with a control board carrying ONE real 0.1 mm track so that a
 checker which reports nothing at all cannot pass.
 
@@ -39,7 +44,7 @@ sys.path.insert(0, os.path.join(ROOT_DIR, 'py_router'))  # #522
 sys.path.insert(0, os.path.join(ROOT_DIR, 'py_tools'))  # #522
 
 from check_drc import run_drc
-from fix_kicad_drc_settings import scan_board_minima
+from fix_kicad_drc_settings import _fab_floor_disclosure, scan_board_minima
 from kicad_parser import parse_kicad_pcb
 
 RUN_ALL_FAST_OK = True
@@ -130,6 +135,31 @@ def main():
         cmin = scan_board_minima(control)
         check('scan_board_minima reads the control\'s track width 0.1',
               abs(cmin.get('min_track_width', 0.0) - STROKE) < 1e-9, f'{cmin}')
+
+        # --- 4: the FAB FLOOR RELAXED census counts tracks, not outlines ---
+        # The control carries 1 real track and 4 poly edges, every one of them
+        # 0.1 mm and so every one of them under a declared 0.15. The banner
+        # must say `1 of 1`, never `5 of 5`: the denominator is the population
+        # a reader would have to re-route.
+        lines = _fab_floor_disclosure(
+            control, {'min_track_width': FLOOR},
+            {'board': {'design_settings': {'rules': {'min_track_width': STROKE}}}})
+        tw = [ln for ln in lines if 'track width' in ln]
+        check('the relaxation banner fires on the control at all',
+              len(tw) == 1, f'{lines}')
+        check('...and its census counts the 1 real track, not the 4 poly edges',
+              bool(tw) and '1 of 1 object(s)' in tw[0], f'{tw[0] if tw else None}')
+
+        # And on the fixture, whose only sub-floor copper IS an outline: there
+        # is no track to count, so the census abstains rather than reporting
+        # eight.
+        flines = _fab_floor_disclosure(
+            FIXTURE, {'min_track_width': FLOOR},
+            {'board': {'design_settings': {'rules': {'min_track_width': STROKE}}}})
+        ftw = [ln for ln in flines if 'track width' in ln]
+        check('on esp_prog the census reports no object at all (nothing is a track)',
+              len(ftw) == 1 and 'object(s)' not in ftw[0],
+              f'{ftw[0] if ftw else flines}')
     finally:
         os.unlink(control)
 

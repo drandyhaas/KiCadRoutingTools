@@ -555,7 +555,12 @@ def _fab_floor_disclosure(output_pcb: str, rules_before: dict, proj: dict,
         pcb = parse_kicad_pcb(output_pcb)
         for key, _label, was, _now, _mv in relaxed:
             if key == "min_track_width":
-                objs = [s.width for s in pcb.segments if s.width]
+                # Graphic copper is a shape, not a track (#908, #337) -- the
+                # same exclusion `scan_board_minima` makes below. Counting a
+                # filled fp_poly's stroke here told the reader that N tracks
+                # sit under the original floor when none of them is a track.
+                objs = [s.width for s in pcb.segments
+                        if s.width and not getattr(s, 'graphic', False)]
             elif key == "min_via_diameter":
                 objs = [v.size for v in pcb.vias if v.size]
             elif key == "min_via_drill":
