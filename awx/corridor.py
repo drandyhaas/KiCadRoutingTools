@@ -133,7 +133,7 @@ def point_after_start(pts: Sequence[Pt], fwd: float) -> Pt:
 def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
                       pad_clear, D: float = 4.0, log=None,
                       spine_fn=None, dest_ref=None, centres=None,
-                      src_centres=None) -> List[List[str]]:
+                      src_centres=None, same_line=None) -> List[List[str]]:
     """Group nets into corridors.
 
     Two nets share a corridor when their stub ends are on the same
@@ -190,6 +190,14 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
                 continue
             ang = _angle(arr[a], arr[b])
             if ang <= 60.0:
+                union(a, b)
+            elif same_line is not None and same_line(a, b):
+                # two stubs on one BAND LINE (a banded destination): a
+                # comb along the band whatever the bearings from the
+                # array's centre say (inside the band the centre is
+                # beside the stubs, and two of them 4 mm apart read as
+                # arriving 110 degrees apart: two corridors, the second
+                # laid through the first's lanes)
                 union(a, b)
             elif log and dist < 2.0:
                 log(f'  no link {a}-{b} ({dist:.2f} mm apart): arrive '
@@ -295,7 +303,8 @@ def cluster_corridors(names: Sequence[str], paths, teeth, stubs,
             # the split-off nets regroup among themselves by proximity
             sub = cluster_corridors(split, paths, teeth, stubs, pad_clear, D,
                                     spine_fn=spine_fn, dest_ref=dest_ref,
-                                    centres=centres, src_centres=src_centres)
+                                    centres=centres, src_centres=src_centres,
+                                    same_line=same_line)
             todo = sorted(todo + sub, key=len, reverse=True)
         else:
             out.append(grp)

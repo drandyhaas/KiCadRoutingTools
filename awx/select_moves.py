@@ -20,10 +20,12 @@ silent assignment is impossible to audit.
 from __future__ import annotations
 
 import math
+import os
 from typing import (Callable, Dict, List, Optional, Sequence,
                     Tuple)
 
 from escape_moves import Move
+import escape_moves as em
 from schedule import lis_keep, lis_keep_weighted
 
 Pt = Tuple[float, float]
@@ -49,12 +51,31 @@ def _lane_spans(m: Move) -> List[Tuple[Tuple, float, float]]:
     (_lane_span); a CLIMB's (escape_moves climb=) axis-aligned runs on its
     run layer -- the gap it climbs along and the row or column it leaves
     by -- so the conflict test prices what the copper will take."""
-    if not getattr(m, 'climb', 0):
+    if not m.legs and m.site is None:
+        # a move synthesized from copper the engine laid (replan.synth_move)
+        # carries no legs: it occupies no lane the selector can price
+        return []
+    if not getattr(m, 'climb', 0) and not getattr(m, 'walk', 0):
         return [_lane_span(m)]
     out = []
+    if getattr(m, 'walk', 0):
+        # the walked SURFACE leg (elbow -> site) takes its lane on the home
+        # layer, and the run from the site takes its own
+        out.append(_lane_span(m))
+        # the ELBOW stands at the crossing of a column gap and a row gap on
+        # the home layer: a neighbour's stub running either gap through
+        # that crossing cannot be laid (K28 dv2: SDQ15/SWE/SDQ7 surface
+        # stubs asked next to walked berths, via-in-pad laid, 13 bans)
+        if len(m.legs) >= 2:
+            (_b, elbow, home) = m.legs[0]
+            e = 0.05
+            out.append((('col', round(elbow[0], 3), home), elbow[1] - e, elbow[1] + e))
+            out.append((('row', round(elbow[1], 3), home), elbow[0] - e, elbow[0] + e))
     for (p, q, L) in m.legs:
-        if L != m.layer:
+        if L != m.layer and not getattr(m, 'walk', 0):
             continue
+        if getattr(m, 'walk', 0) and (p, q, L) == m.legs[0]:
+            continue                    # the ball -> elbow diagonal: no lane
         if abs(p[0] - q[0]) < 1e-6 and abs(p[1] - q[1]) > 1e-6:
             out.append((('col', round(p[0], 3), L), min(p[1], q[1]), max(p[1], q[1])))
         elif abs(p[1] - q[1]) < 1e-6 and abs(p[0] - q[0]) > 1e-6:
@@ -162,8 +183,13 @@ def around_box(a: Pt, b: Pt, box, pad: float = 0.3) -> float:
     line when it misses; otherwise the shorter of the two ways round,
     bending at the padded corners. The corridor cannot cross the array,
     so a straight-line reach through it is not a distance the router
-    could ever realise."""
-    x0, y0, x1, y1 = box
+    could ever realise. Several boxes (a banded array's blocks): the
+    length of `around_boxes_path`."""
+    bs = _boxes(box)
+    if len(bs) > 1:
+        pth = around_boxes_path(a, b, bs, pad)
+        return sum(math.hypot(q[0] - p[0], q[1] - p[1]) for p, q in zip(pth, pth[1:]))
+    x0, y0, x1, y1 = bs[0]
     box = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
     # the hit tests run against a box shrunk by a hair: a tooth sits a
     # few tens of microns outside the padded box, and the leg from it to
@@ -345,6 +371,7 @@ class Corridor:
         self.box = box
         self.pad = pad
         self.launch = launch
+        self.bands = bands_of_boxes(box) if box else []
         # the caches key on the LAUNCH point as well as the exit, so a
         # caller that rebuilds the frame with one net moved -- which is
         # every step of a source-side search -- keeps the other nets'
@@ -363,7 +390,11 @@ class Corridor:
                round(pt[0], 4), round(pt[1], 4), self.pad)
         hit = self._legs.get(key)
         if hit is None:
-            hit = around_box_path(self.launch[n], pt, self.box, self.pad)
+            bi = band_of(pt, self.bands) if self.bands else None
+            if bi is not None:
+                hit = band_leg(self.launch[n], pt, self.bands[bi])
+            else:
+                hit = around_box_path(self.launch[n], pt, self.box, self.pad)
             self._legs[key] = hit
         return hit
 
@@ -382,6 +413,14 @@ class Corridor:
 
     def exit_key(self, n: str, m, t: Pt) -> float:
         pt = m if isinstance(m, tuple) else m.exit_pt
+        if self.bands:
+            # a band exit's place in the target order is its NESTED offset
+            # at the band's mouth (band_leg), not its stub's: every stub on
+            # one line projects alike, and an order by launch among them
+            # hid the nesting the copper must keep
+            bi = band_of(pt, self.bands)
+            if bi is not None:
+                pt = band_leg(self.launch[n], pt, self.bands[bi])[1]
         return pt[0] * t[0] + pt[1] * t[1]
 
     def order(self, grp: Sequence[str], sel: Dict[str, Move],
@@ -549,6 +588,18 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
                 same_lane = ok == key
             if same_lane and a < ob and oa < b:
                 return True
+            # a row-gap run and a column-gap run on ONE layer that cross:
+            # two stubs through one point (K28 dv3: SWE's walked leg west
+            # along row 66.56 and SCKE0's through-run down column 140.73,
+            # the second refused by the engine, the plan blind to it)
+            if ok[0] != key[0] and ok[2] == key[2] and (
+                    SEL_XING >= 2 or (SEL_XING and (
+                        getattr(m, 'walk', 0) or getattr(om, 'walk', 0)
+                        or getattr(m, 'climb', 0) or getattr(om, 'climb', 0)))):
+                (rk, ra, rb), (ck, ca, cb) = ((key, a, b), (ok, oa, ob)) if key[0] == 'row' \
+                    else ((ok, oa, ob), (key, a, b))
+                if ra - tol < ck[1] < rb + tol and ca - tol < rk[1] < cb + tol:
+                    return True
     if m.site is not None and _site_key(om) == _site_key(m):
         return True
     # a dog-bone's via spans every layer: if it sits in the other
@@ -586,14 +637,32 @@ def _site_in_lane(dm: Move, key, a, b) -> bool:
     return abs(sx - key[1]) < _VIA_REACH and a - _VIA_REACH < sy < b + _VIA_REACH
 
 
+def band_room(m: Move, others, bands) -> bool:
+    """Is there room in the band for this move's lane on its layer? A
+    band's capacity per layer is what fits between its stub-tip lines at
+    the block pitch (band_capacity); a move whose exit is not in a band
+    always has room."""
+    if not bands:
+        return True
+    bi = band_of(m.exit_pt, bands)
+    if bi is None:
+        return True
+    n = sum(1 for om in others
+            if om.layer == m.layer and band_of(om.exit_pt, bands) == bi)
+    return n < band_capacity(bands[bi])
+
+
 def lanes_free(m: Move, sel: Dict[str, Move], me: str,
-               strict: bool = True) -> bool:
+               strict: bool = True, bands=()) -> bool:
     """Is this move's channel and via site free, ignoring the net's own
     current claim? The same check select() applies inside its greedy
     pass (non-strict there), exposed so a later refinement cannot
-    quietly propose a move that two nets would have to share."""
-    return not any(_conflict(m, om, strict=strict) for other, om in sel.items()
-                   if other != me)
+    quietly propose a move that two nets would have to share. `bands`:
+    the destination's bands, whose capacity the move must also fit."""
+    if any(_conflict(m, om, strict=strict) for other, om in sel.items()
+           if other != me):
+        return False
+    return band_room(m, [om for other, om in sel.items() if other != me], bands)
 
 
 def plan_floor(sel: Dict[str, Move], geo: 'Corridor') -> int:
@@ -718,8 +787,16 @@ def refine_lis(choice: Dict[str, Move], groups, menu, geo: 'Corridor',
                     trial[n] = m
                     break
             else:
-                trial[n] = choice[n]        # nothing free: keep what it had
-        if len(trial) != len(choice):
+                # nothing free: keep what it had -- IF that is still free
+                # against the others' new slots. Kept unchecked, it shared a
+                # gap with a chain member (K41: SCKE1's through-run and
+                # SRAS's stub both at 139.93, every pass refusing one), the
+                # one conflict the greedy's own pass never makes.
+                if not free(choice[n], trial, n):
+                    trial = None
+                    break
+                trial[n] = choice[n]
+        if trial is None or len(trial) != len(choice):
             continue
         before = _floor(bus, choice, geo)
         after = _floor(bus, trial, geo)
@@ -808,7 +885,9 @@ def frame_line(launch, keep_out, pads=None) -> float:
     absolute coordinates in places, and a line that translated the
     mirrored geometry off the front's decimal grid flipped a few of
     those roundings (4 of 28 choices)."""
-    ys = [p[1] for p in launch.values()] + [keep_out[1], keep_out[3]]
+    ys = [p[1] for p in launch.values()]
+    for bx in _boxes(keep_out):
+        ys += [bx[1], bx[3]]
     if pads:
         ys += [p[1] for p in pads.values()]
     c = (min(ys) + max(ys)) / 2
@@ -832,6 +911,8 @@ class PairFrame:
     def box(self, b):
         if self.chi > 0 or b is None:
             return b
+        if b and isinstance(b[0], (tuple, list)):
+            return [self.box(bb) for bb in b]
         return (b[0], 2 * self.CY - b[3], b[2], 2 * self.CY - b[1])
 
     @staticmethod
@@ -1009,6 +1090,7 @@ def _select(menu: Dict[str, List[Move]],
         choice[n] = best
         if geo is not None:
             placed_legs.append(geo.leg(n, best))
+            placed_nets.append((n, best))
         taken.append(best)
         if log:
             log(f'  {n}: {best}  (of {len(cand[n])} candidates)')
@@ -1018,7 +1100,7 @@ def _select(menu: Dict[str, List[Move]],
         claim? The LIS pass swaps one net at a time -- without
         excluding `me`, a net is blocked from changing gap by the gap
         it is already sitting in."""
-        return lanes_free(m, sel, me, strict=False)
+        return lanes_free(m, sel, me, strict=False, bands=bands)
 
     # From here on the grouping is the CORRIDOR -- every net leaving on
     # one side -- not the taut-path cluster. The cluster chose the side
