@@ -2141,12 +2141,12 @@ class Corridor:
             kk = np.where((kk > 0) & (np.abs(Sm_[np.maximum(kk - 1, 0)] - Sg)
                                       < np.abs(Sm_[kk] - Sg)), kk - 1, kk)
             kg[k] = ix_[kk]
-            # ...and each mid sample's nearest grid point (the room test)
-            # NEAREST, as the comment says: np.searchsorted gives the first
-        # grid point >= the sample, so a sample at s=0.02 was priced at
-        # the s=0.1 separation -- a full step downstream, one-directional.
-        # It decides which samples may host a via (the `room` test) and
-        # which gkill rows exist, so it deletes and grants slots.
+            # ...and each mid sample's NEAREST grid point (the room test).
+            # np.searchsorted alone gives the first grid point >= the
+            # sample, so a sample at s=0.02 was priced at the s=0.1
+            # separation -- a full step downstream, one-directional. It
+            # decides which samples may host a via (the `room` test) and
+            # which gkill rows exist, so it deleted and granted slots.
             _g = np.clip(np.searchsorted(Sg, Sm), 0, len(Sg) - 1)
             _lo = np.clip(_g - 1, 0, len(Sg) - 1)
             gk[k] = np.where(np.abs(Sg[_lo] - Sm) <= np.abs(Sg[_g] - Sm), _lo, _g)
