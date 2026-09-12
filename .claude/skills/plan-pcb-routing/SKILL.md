@@ -143,7 +143,7 @@ for layer in pcb.board_info.stackup:  # List[StackupLayer], ordered top to botto
 Report problems prominently but still produce the full plan - the user decides whether
 to fix the stackup first.
 
-## Step 3: Check for Components Needing Fanout
+## Step 3 (analysis): Check for Components Needing Fanout
 
 Identify BGA, QFN, QFP, PGA, LGA, and other array packages that benefit from escape routing:
 
@@ -225,6 +225,14 @@ step, confirm the geometry actually has that problem:
    handles it.
 3. **Interior pads at fine pitch (<=0.6mm), or a perimeter at <=0.65mm with
    many pads?** → Yes, fanout genuinely helps (this is the boxed-in case).
+   **"Fine-pitch" is not one number in this file, and no sentence should be read
+   as if it were.** It is the FANOUT trigger at <=0.6 mm interior / <=0.65 mm
+   perimeter — the predicate in the code block above, the only executable one —
+   and a different threshold everywhere else: <=0.4 mm picks the grid step and
+   the working via, <=0.5 mm makes fanout REQUIRED on an interior-pad array and
+   selects the underpad escape, <=0.8 mm gates the DENSE tier and the plane
+   trunk width. Each site states its own number for that reason; a bare
+   "fine-pitch" with no number means this trigger.
    Dense 2-row mezzanine/card-edge connectors at 0.4mm (CM4/CM5, 200+ pads)
    DO benefit -- use `qfn_fanout.py --escape-method underpad --allow-via-in-pad`.
 4. **Unsure?** The fanout tools now refuse or warn on wrong shapes
@@ -823,7 +831,8 @@ Routing the microstrip width through a pour lands the trace well below target.
 The router cannot detect this — the trace width comes from your declaration,
 not from sensing copper. So this is **your decision to make in the plan**, and
 it must be coordinated across two steps. (With the pour-first order, an
-outer-layer GND pour normally comes from Step 1c — give THAT call the matching
+outer-layer GND pour normally comes from Step 1 (the pour; Step 1c is the decap
+pass) — give THAT call the matching
 `--zone-clearance G`; a pour-first pour makes the declaration safer, since the
 copper the trace is sized against actually exists when it routes.)
 
@@ -1058,7 +1067,7 @@ mechanically — do not eyeball it:
    and **never** leave it out (that leaves it unrouted). Give each its own `--nets`
    entry in the plane step, so it appears in BOTH lists in step 2 above.
 
-## Step 6: Generate Routing Plan
+## Step 6 (analysis): Generate Routing Plan
 
 Based on the analysis, generate a step-by-step plan. The general order is:
 
@@ -1452,9 +1461,17 @@ When Step 2 leaves failures on a dense board, do NOT hand-tune — iterate:
 # gate-skip), with rip authority against the settled board; the plan
 # guidance persists through rips, which is what makes iteration
 # CONVERGE instead of plateauing
-python3 -X utf8 py_router/route.py board_step2.kicad_pcb board_iter1.kicad_pcb --nets "*" <same flags+env>
-python3 -X utf8 py_router/route.py board_iter1.kicad_pcb board_iter2.kicad_pcb --nets "*" <same flags+env>
+python3 -X utf8 py_router/route.py board_step2.kicad_pcb board_iter1.kicad_pcb --nets "*" <the Step 2 flag string, verbatim>
+python3 -X utf8 py_router/route.py board_iter1.kicad_pcb board_iter2.kicad_pcb --nets "*" <the Step 2 flag string, verbatim>
 ```
+
+**"The Step 2 flag string" means the exact one you ran**, copied from the
+Step 2 command you emitted (or from `cmd_timing.jsonl` / the journal entry for
+that step) rather than reassembled from the ladders above -- Step 2 is built
+from several conditional blocks, and a flag that differs between passes makes
+iteration N incomparable to N-1, which is the one thing this loop depends on.
+There is no environment variable to carry unless Step 2c told you to set one;
+if it did, carry those too.
 
 Two iterations are near-free (measured: the tuned corpus run with 2
 iterations baked in cost +1.5% total time) and historically descend
@@ -1499,7 +1516,7 @@ presumably by freeing corridor space.
 `--no-smoothing` exists for A/B only (`KICAD_SMOOTH_ROUTE=0/1` overrides either
 way). The lesson worth carrying: a two-board result is not a default change.
 
-### Step 3: Finalize Planes — GND Return Vias + Stitching (only if wanted)
+### Step 3 of the example chain: Finalize Planes — GND Return Vias + Stitching (only if wanted)
 Skip this step entirely on low-speed boards. When the speed analysis calls
 for GND return vias or area stitching, re-run `route_planes` with the SAME
 nets/layers as Step 1 plus the via flags: an existing same-net zone on the
@@ -1596,7 +1613,7 @@ nothing. Otherwise read `kicad_routing_tools.protected_nets` out of the
 > must use `cp`, copy the `.kicad_pro` too. The routing scripts also WARN when an input
 > board has no sibling `.kicad_pro` (#441).
 
-### Step 6: Verify Results
+### Step 6 of the example chain: Verify Results
 The final board is `board_step2.kicad_pcb` (or `board_step4b.kicad_pcb` when
 the optional Step 3 GND-via pass ran — the `route.py` that CLOSES Step 3, never
 the `route_planes.py` output `board_step4` that precedes it) — call it
@@ -1649,7 +1666,7 @@ python3 -X utf8 py_router/route.py board_step1b.kicad_pcb board_step2.kicad_pcb 
 ```
 
 VCC simply stays out of the pour assignments and rides the route step at
-its wide power width; GND still pours in Step 1c and completes through the
+its wide power width; GND still pours in Step 1 and completes through the
 route step's finalize like the main flow. If VCC wasn't fanned out, add
 `--no-bga-zone U9` to allow router access.
 
@@ -1765,7 +1782,7 @@ plane-light plan (GND-only, rails as wide tracks) left ~26% incomplete spends
   ROUTABLE, but still poured.** Don't let plane assignments turn the region
   around a big BGA into 2-layer routing — long-haul nets need to cross
   *through* inner layers (1–2 vias each). The resolution is order, not
-  abstinence: solid planes pour FIRST (Step 1c); a layer signals must cross
+  abstinence: solid planes pour FIRST (Step 1, the pour); a layer signals must cross
   keeps its cost low (≤1.5) and gets its rail pours LATE (after the signal
   steps, like the 2-layer flow below — the pour flows around existing copper).
   Never leave a many-pad rail as pure tracks because its natural layer is
@@ -2095,7 +2112,7 @@ python3 py_router/route.py board.kicad_pcb --nets "*" \
 ## Important Notes
 
 0. **Net-coverage invariant (Step 5b)** - Every routable net must be claimed by a stage. Since #562 the route step takes `"*"` INCLUDING the plane nets, so the only legitimate exclusions are the Step-2b impedance nets; reconcile the exclusion set against that set (symmetric difference empty), check every poured net also appears in the route step's `--power-nets`, and confirm `check_connected.py`'s unrouted list is empty at the end. This is the guard against a net (e.g. a secondary ground like GNDA) being silently dropped by every stage.
-1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the plane vias will handle it
+1. **Always check for GND connections** - If a component has GND pads but GND isn't being fanned out, the fanout's own plane-drop vias (#424) plus the route step's in-run finalize will handle it
 2. **Fanout ALL non-plane nets** - Use `--nets "*" "!GND" "!VCC"` to fan out all nets except those handled by planes. Do NOT use `"/*"` alone as it misses nets with non-hierarchical names like `Net-(U9-Pad1)`. Unconnected nets are automatically filtered out.
 3. **Order matters** - Fanout (with plane-ball drops) comes AFTER the Step 1 bare pour (#424: planes FIRST, so the fill picks up the drop vias while intact and the fragility field steers every later route), then diff pairs, then the all-nets route with the plane nets INCLUDED (#562 — the run ends with the in-run plane finalize, so there is no separate repair step), then optional GND return vias/stitching. Signals route before stitching because stitching vias can relocate around tracks, but a diff pair cannot relocate around a badly placed via
 4. **Verify at the end** - Always run DRC, connectivity, and orphan stub checks
@@ -2108,7 +2125,7 @@ python3 py_router/route.py board.kicad_pcb --nets "*" \
 11. **Component shortcut** - Use `--component U1` to route all signal nets on a component (auto-excludes GND/VCC/unconnected)
 12. **Use --no-bga-zone for difficult boards** - Even when fanout is complete, use `--no-bga-zone` during routing to allow the router to find alternative paths through the dense pin area. This is especially important for 2-layer boards where routing channels are limited.
 13. **Windows UTF-8 encoding** - On Windows, use `python3 -X utf8` to avoid Unicode encoding errors when scripts print special characters (like Ω for resistance). Example: `python3 -X utf8 py_router/route_planes.py ...`
-14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets (this is the Step 1 -> 1b order). Through-hole PGA pads automatically connect to planes on that layer; SMD BGA pads need vias placed by `route_planes.py`. This approach:
+14. **BGA/PGA power pins and planes** - When using power planes, BGA/PGA power pins (GND, VCC) connect most efficiently via direct vias to the plane rather than fanout routing. Create planes first, then fanout only signal nets (this is the Step 1 -> 1b order). Through-hole PGA pads automatically connect to planes on that layer; SMD BGA power balls get their plane vias from the FANOUT's plane-drop pass (#424), or are served by direct pour contact where the pour already covers them, and the route step's in-run finalize welds what is left. **Not from `route_planes.py`, which since #562 places no vias and draws no traces at all.** This approach:
     - Reduces routing congestion (power pins don't consume escape channels)
     - Provides lower impedance power connections
 15. **Rip-up depth: MORE IS NOT BETTER (measured).** On a 6-board chain A/B, `--max-ripup 5` beat 10 (+0.78 pts completion, 13 fewer connectivity items, 3 boards better / 0 worse) and 20 was worse than 10 — each extra rip level risks a permanent casualty (a ripped victim whose corridor gets taken cannot be restored), and the gains from deep ripping don't materialize because victims can almost always reroute anyway. The optimum sits in 3-5 and wobbles by board (measured: one board monotone-better all the way down to 3, another best at 5) -- the SHIPPED default is 3 (the sets-11-15 holdout showed 5 hurting ordinary boards while helping knob-sensitive ones -- #586); try 5 as a free retry variant on difficult boards (deterministic: keep whichever grades better), and escalate above 5 only as a last resort on a specific failing net, never as the opening move. Do NOT add `--max-iterations` — the router self-budgets (#529 dynamic iterations, default on, up to a 1e7 ceiling while a search progresses); see the note in the routing-step section.

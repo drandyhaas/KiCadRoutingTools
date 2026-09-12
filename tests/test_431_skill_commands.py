@@ -564,14 +564,21 @@ def test_driver_commands_supply_required_options_and_values():
     # with the refusal half gone -- measured, as a battery row that SURVIVED.
     # Measured after: 154.
     assert checked >= 90, f'only {checked} driver command(s) scanned'
-    # The population this arm cannot value-check, named and capped. 13 today:
-    # check_drc.py 10, check_connected.py 3 -- both parse their args outside a
-    # `main()`, so `_parser_obj` has nothing to call. Giving either one a
-    # `main()` moves its spans into `checked` and this number DOWN, which is
-    # why the guard is a ceiling and not an equality.
+    # The population this arm cannot value-check, named and capped. 14 today:
+    # check_drc.py 10, check_connected.py 3, route.py 1 -- all parse their args
+    # outside a `main()`, so `_parser_obj` has nothing to call. Giving any of
+    # them a `main()` moves its spans into `checked` and this number DOWN,
+    # which is why the guard is a ceiling and not an equality.
+    #
+    # 13 -> 14 (#941 row 11), the deliberate raise this message asks for. P0
+    # mandated measuring on a copper-free board and named no lever to make one,
+    # while the only full copper stripper in the tree is one non-negotiable 2
+    # forbids BY NAME on a user's board. Naming `route.py --nets '*' --undo`
+    # adds one route.py span the arm cannot value-check, because route.py is
+    # one of those three. The alternative was to leave the mandate leverless.
     _unp = sum(unparsed.values())
-    assert _unp <= 13, (
-        f'{_unp} driver command span(s) are value-unchecked, up from 13:\n'
+    assert _unp <= 14, (
+        f'{_unp} driver command span(s) are value-unchecked, up from 14:\n'
         + '\n'.join(f'  {t}: {n}' for t, n in sorted(unparsed.items()))
         + '\n\nA tool whose parser cannot be built has its flag NAMES checked '
           'by the --help reader but not whether each was given a VALUE. Give '
