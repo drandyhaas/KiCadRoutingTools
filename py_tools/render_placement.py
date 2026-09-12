@@ -36,19 +36,20 @@ import os
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
-# The raster gate, placed BEFORE the import it guards (#887): a missing Pillow
-# gets the actionable install message instead of a bare ImportError string.
-# Deliberately NOT `check_python_dependencies` -- that one gates the routing
-# CLIs, and routing does not need Pillow. See startup_checks for what merging
-# the two cost.
-from startup_checks import check_render_dependencies
-check_render_dependencies()
-
-from PIL import ImageDraw
-
 import routing_defaults as defaults
 from kicad_parser import parse_kicad_pcb
-from route_render import BoardRenderer, load_font
+
+# The raster stack -- Pillow and `route_render` -- is imported inside the five
+# functions that DRAW, never here (#943). This module is also where
+# `PlacementModel` and `legality_findings` live, and `board_context.py` and the
+# stress predictors import it for those: they grade a placement and draw
+# nothing, so a module-scope raster gate made Pillow a requirement of placement
+# GRADING on a machine that only ever wanted a number.
+#
+# The actionable install message (#887's point, in preference to a bare
+# ImportError string) is not lost by moving them: `route_render` calls
+# `startup_checks.check_render_dependencies()` at ITS module scope, and every
+# draw path here reaches Pillow through `route_render`.
 
 # --- palette (OmniLayout's categories: outline / THT / top SMD / back SMD) ----
 C_COURT_F = (150, 152, 168)     # front courtyard
@@ -808,6 +809,7 @@ def draw_legality(d, r, model, *, side=None):
     were mandated on). Red rings + connecting line per conflicting pad pair,
     orange circles at NPTH keepouts, dashed red extent for parts whose pad
     copper leaves the board bbox."""
+    from route_render import load_font
     state = getattr(model, 'state', None)
     if state is None or getattr(state, 'legality_ctx', None) is None:
         return
@@ -952,6 +954,7 @@ def draw_ref_labels(d, r, model, refs, *, min_px=14, lo=11, hi=34):
     only useful if you can read it, so it is sized from the part's own footprint
     on screen and skipped entirely when the part is too small to carry one.
     """
+    from route_render import load_font
     for ref in refs:
         rect = model.rect(ref)
         if rect is None:
@@ -1131,7 +1134,8 @@ def write_review_sheet(path, panel_paths, fnd, conn_facts) -> None:
     > 3mm). Run 23's reviewer had these facts spread over two panels and a
     JSON, and the looking stopped at the spread.
     """
-    from PIL import Image
+    from PIL import Image, ImageDraw
+    from route_render import load_font
     imgs = [Image.open(p).convert('RGB') for p in panel_paths if p]
     if not imgs:
         raise ValueError('no panels to compose')
@@ -1250,6 +1254,7 @@ def draw_legend(d, r, spec) -> None:
     Only the keys this panel can actually show are drawn -- a legend listing
     arrows on a panel with no --before is itself misinformation.
     """
+    from route_render import load_font
     if getattr(spec, 'defects', None):
         # A defect panel's marks are its whole point, so they are the ONLY
         # legend on it. Listing the legality key beside them would invite the
@@ -1633,6 +1638,7 @@ def caption(spec: PanelSpec, extra: Optional[Dict] = None) -> str:
 
 
 def render_panel(spec: PanelSpec, *, size=1600, supersample=2, extra=None):
+    from route_render import BoardRenderer
     r = BoardRenderer(spec.model.pcb, size=size, supersample=supersample,
                       show_pads=False, view=spec.view,
                       layers=([spec.side + '.Cu']

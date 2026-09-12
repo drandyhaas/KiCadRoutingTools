@@ -34,6 +34,21 @@ class StartupCheckError(RuntimeError):
     """
 
 
+class RenderDependencyError(StartupCheckError, ImportError):
+    """The RASTER stack (Pillow) is missing -- rendering only, never routing.
+
+    Also an `ImportError`, deliberately (#943). Every consumer that DISABLES
+    rendering rather than failing spells that `except ImportError`, because the
+    thing it guards is a `from PIL import ...`. A bare StartupCheckError is a
+    RuntimeError, so it walked straight past those handlers: the GUI's routing
+    movie reported "failed (<install instructions>)" instead of "not rendered -
+    install Pillow", and the placement tab's preview fell into its silent
+    branch without setting `_preview_ok = False`, so it re-attempted the render
+    on every board. Being both types means a caller can catch whichever it
+    means -- the missing import, or the startup precondition.
+    """
+
+
 def check_python_dependencies():
     """Check that required Python libraries are available.
 
@@ -62,25 +77,29 @@ def check_python_dependencies():
     _raise_if_missing(missing)
 
 
-def _raise_if_missing(missing):
-    """Raise the actionable install message for a list of distribution names."""
+def _raise_if_missing(missing, exc=StartupCheckError):
+    """Raise the actionable install message for a list of distribution names.
+
+    `exc` is the class to raise: the routing gate wants a plain
+    StartupCheckError, the render gate wants RenderDependencyError so that
+    `except ImportError` sites catch it (#943).
+    """
     if missing:
         lines = ["ERROR: Missing required Python libraries:"]
         lines += [f"  - {lib}" for lib in missing]
         lines += ["", "Install with:",
                   f"  pip install {' '.join(missing)}",
                   f"  (or pip3 install {' '.join(missing)})"]
-        raise StartupCheckError("\n".join(lines))
+        raise exc("\n".join(lines))
 
 
 def check_render_dependencies():
-    """Check the libraries the RASTER path needs. Raises StartupCheckError.
+    """Check the libraries the RASTER path needs. Raises RenderDependencyError.
 
-    Pillow only (#887). `route_render.py` and `render_placement.py` import it at
-    MODULE SCOPE with no fallback, so every board still, review sheet and movie
-    needs it -- yet it was declared in neither requirements.txt nor these checks,
-    and a fresh clone learned that from a runtime ImportError string rather than
-    from the check that exists to say so up front.
+    Pillow only (#887). Every board still, review sheet and movie needs it --
+    yet it was declared in neither requirements.txt nor these checks, and a
+    fresh clone learned that from a runtime ImportError string rather than from
+    the check that exists to say so up front.
 
     SEPARATE from `check_python_dependencies`, which is the ROUTING gate, and
     that separation is the whole point. Pillow was briefly added to that gate
@@ -93,15 +112,22 @@ def check_render_dependencies():
     every board -- taking out the instrument that grades routing changes.
 
     Call it from the render entry points, which is where the requirement is
-    real: at module scope in the two files that import PIL with no fallback,
-    placed BEFORE that import so the message a user gets is this one.
+    real: at module scope in `route_render.py`, which is nothing but the raster
+    stack, and at the DRAW sites in `render_placement.py`, which is also where
+    `PlacementModel` and `legality_findings` live and is imported for those by
+    `board_context.py` and the stress predictors -- tools that grade a
+    placement and draw nothing (#943).
+
+    It raises `RenderDependencyError`, which is an `ImportError` as well as a
+    StartupCheckError, so the consumers that disable rendering rather than
+    failing keep working. See that class.
     """
     missing = []
     try:
         from PIL import Image, ImageDraw, ImageFont     # noqa: F401
     except ImportError:
         missing.append('Pillow')
-    _raise_if_missing(missing)
+    _raise_if_missing(missing, RenderDependencyError)
 
 
 def get_cargo_version():

@@ -6,19 +6,27 @@ installed via the KiCad PCM (Plugin and Content Manager), no pip step runs,
 so we must detect missing dependencies on first invocation and offer to
 install them into KiCad's bundled Python.
 
-The list of required packages is read from `requirements.txt` at the plugin
-root, so requirements.txt is the single source of truth for both the CLI
-install path (install_plugin.py) and this runtime check.
+The list of packages is read from `requirements.txt` at the plugin root, so
+requirements.txt is the single source of truth for both the CLI install path
+(install_plugin.py) and this runtime check.
+
+Not every one of them BLOCKS, though (#943). `OPTIONAL_PACKAGES` names the ones
+whose absence disables a feature instead of stopping the plugin; only the rest
+gate `ensure_dependencies`.
 
 The pip install runs in a worker thread so the wx event loop keeps ticking
 and the progress dialog stays responsive (otherwise KiCad freezes for the
 full duration of the install, which can be minutes on a slow network).
+
+It is not offered at all on a PEP 668 interpreter (#944) -- see
+`_externally_managed`.
 """
 
 import os
 import re
 import subprocess
 import sys
+import sysconfig
 import threading
 
 import wx
@@ -28,11 +36,91 @@ import wx
 # specific submodule imports catch broken/partial installs (e.g. shapely
 # without its native lib) better than a bare `import pkg`. Packages not in
 # this dict fall back to a plain `import <pkg>`.
+#
+# That fallback is only right while the pip name IS the import name, and it
+# fails SILENTLY when it is not (#943): Pillow imports as `PIL`, so `import
+# Pillow` raised ModuleNotFoundError on every machine and the probe reported a
+# package that was installed as missing -- a dialog no install could dismiss,
+# in front of a plugin that then refused to open. Every name in
+# requirements.txt needs an entry here unless the two names are identical, and
+# `tests/test_943_optional_render_dependency.py` checks that against the
+# installed distributions rather than against this comment.
 IMPORT_TESTS = {
     "numpy": "import numpy",
     "scipy": "from scipy.optimize import linear_sum_assignment",
     "shapely": "from shapely.geometry import Polygon",
+    "Pillow": "from PIL import Image",
 }
+
+# Packages the plugin can RUN without. They are still installed by the prompt
+# below when it fires for something else -- on the PCM path this dialog is the
+# only installer there is -- but a machine that lacks one gets the plugin, with
+# the feature that needs it turned off.
+#
+# Pillow is the RASTER path and nothing else (#943): the "Make routing movie"
+# checkbox (movie_recorder.py) and the placement tab's preview image
+# (placement_gui.py), both of which already disable themselves on ImportError.
+# Routing needs none of it -- `startup_checks.check_render_dependencies` is a
+# separate gate for exactly this reason, and gating the GUI on Pillow here
+# re-made, one layer up, the mistake that function was written to record.
+OPTIONAL_PACKAGES = {
+    "Pillow": "board renders, the placement preview and the routing movie",
+}
+
+
+def _optional_effect(names):
+    """One line per optional package saying what turns off without it."""
+    return "\n".join(
+        f"Without {n}: {OPTIONAL_PACKAGES.get(n, 'a feature')} are unavailable. "
+        f"Everything else works."
+        for n in names
+    )
+
+
+# Distro package names for the PEP 668 path (#944), Debian/Ubuntu spelling.
+# Fedora agrees on all but Pillow (python3-pillow), which the message SAYS
+# rather than guesses from a distro sniff that would be wrong on the next one.
+DISTRO_PACKAGES = {
+    "numpy": "python3-numpy",
+    "scipy": "python3-scipy",
+    "shapely": "python3-shapely",
+    "Pillow": "python3-pil",
+}
+FEDORA_PACKAGES = dict(DISTRO_PACKAGES, Pillow="python3-pillow")
+
+
+def _distro_command(names, table):
+    return " ".join(table.get(n, n.lower()) for n in names)
+
+
+def _externally_managed():
+    """Path of this interpreter's PEP 668 EXTERNALLY-MANAGED marker, or None.
+
+    #944: KiCad's Linux packages run the SYSTEM interpreter, and on Ubuntu
+    23.04+, Debian 12+ and Fedora 38+ that prefix is marked externally managed
+    -- pip refuses every install into it, `--user` included. The one-click
+    install offered below therefore cannot succeed there, and offering it
+    anyway spends a progress dialog to arrive at `error:
+    externally-managed-environment` in a log tail.
+
+    A venv is exempt even when its base prefix carries the marker (that is what
+    PEP 668 is FOR, and `sysconfig.get_path('stdlib')` inside a venv still
+    resolves to the base stdlib, so the file would be found), hence the prefix
+    test first.
+    """
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        return None
+    for key in ("stdlib", "platstdlib"):
+        try:
+            directory = sysconfig.get_path(key)
+        except Exception:
+            continue
+        if directory:
+            marker = os.path.join(directory, "EXTERNALLY-MANAGED")
+            if os.path.isfile(marker):
+                return marker
+    return None
+
 
 # Pattern matching the package name at the start of a requirements line.
 # Stops at the first version-specifier or environment-marker character.
@@ -78,13 +166,16 @@ def _required_packages():
 
 
 def _missing_packages():
-    missing = []
+    """Return (blocking, optional): the pip names that do not import, split by
+    whether the plugin can run without them (`OPTIONAL_PACKAGES`).
+    """
+    blocking, optional = [], []
     for pip_name, import_stmt in _required_packages():
         try:
             exec(import_stmt, {})
         except ImportError:
-            missing.append(pip_name)
-    return missing
+            (optional if pip_name in OPTIONAL_PACKAGES else blocking).append(pip_name)
+    return blocking, optional
 
 
 def _find_python_executable():
@@ -160,21 +251,73 @@ def _pip_install_threaded(packages, progress):
     return result["returncode"] == 0, log
 
 
-def ensure_dependencies(parent=None):
-    """Verify that scipy and shapely are importable. If not, prompt the user
-    to install them via pip into KiCad's Python. Returns True if all deps are
-    present (after any install), False if the user cancelled or install failed.
+def _describe_missing(blocking, optional):
+    """The missing packages as display lines, optional ones marked."""
+    lines = [f"  {name}" for name in blocking]
+    lines += [f"  {name}  (optional -- {OPTIONAL_PACKAGES.get(name, 'a feature')})"
+              for name in optional]
+    return "\n".join(lines)
+
+
+def _report_externally_managed(parent, blocking, optional, marker):
+    """Say what to install, instead of offering an install that cannot run.
+
+    Direction (1) of #944, and deliberately not (2): retrying with
+    `--break-system-packages` writes into a prefix the distro's own package
+    manager owns, which is the user's call to make and not a plugin's to make
+    silently. The command is spelled out so making it is one paste.
     """
-    missing = _missing_packages()
-    if not missing:
+    python_exe = _find_python_executable()
+    names = blocking + optional
+    debian = _distro_command(names, DISTRO_PACKAGES)
+    fedora = _distro_command(names, FEDORA_PACKAGES)
+    wx.MessageBox(
+        "KiCad Routing Tools needs the following Python packages that are not "
+        "bundled with KiCad:\n\n"
+        f"{_describe_missing(blocking, optional)}\n\n"
+        "This Python is managed by your distribution (PEP 668):\n"
+        f"  {marker}\n\n"
+        "pip cannot install into it, so no one-click install is offered. "
+        "Install the distribution's own packages instead:\n\n"
+        f"  sudo apt install {debian}\n"
+        f"  (Fedora: sudo dnf install {fedora})\n\n"
+        "If your distribution has no package for one of them, the deliberate "
+        "override is:\n"
+        f"  \"{python_exe}\" -m pip install --break-system-packages "
+        f"{' '.join(names)}",
+        "Install with your package manager", wx.OK | wx.ICON_INFORMATION,
+        parent=parent,
+    )
+
+
+def ensure_dependencies(parent=None):
+    """Verify the packages the plugin cannot run without are importable. If any
+    is missing, prompt the user to install them via pip into KiCad's Python.
+    Returns True if all BLOCKING deps are present (after any install), False if
+    the user cancelled or the install failed.
+
+    A missing `OPTIONAL_PACKAGES` entry never returns False and never raises a
+    dialog of its own (#943) -- the feature it serves turns itself off, which is
+    the behaviour the plugin already had at those call sites. It IS added to the
+    pip command when the prompt fires for a blocking package anyway, so a fresh
+    PCM install (which has none of them) still ends up with everything.
+    """
+    blocking, optional = _missing_packages()
+    if not blocking:
         return True
 
-    pkg_list = ", ".join(missing)
+    marker = _externally_managed()
+    if marker is not None:
+        _report_externally_managed(parent, blocking, optional, marker)
+        return False
+
+    to_install = blocking + optional
+    pkg_list = ", ".join(to_install)
     python_exe = _find_python_executable()
     msg = (
         f"KiCad Routing Tools needs the following Python packages that are not "
         f"bundled with KiCad:\n\n"
-        f"  {pkg_list}\n\n"
+        f"{_describe_missing(blocking, optional)}\n\n"
         f"Install them now into KiCad's Python?\n"
         f"({python_exe})"
     )
@@ -194,10 +337,11 @@ def ensure_dependencies(parent=None):
         style=wx.PD_APP_MODAL | wx.PD_CAN_ABORT | wx.PD_AUTO_HIDE,
     )
 
-    ok, log = _pip_install_threaded(missing, progress)
+    ok, log = _pip_install_threaded(to_install, progress)
     progress.Destroy()
 
-    if not ok:
+    still_missing, still_optional = _missing_packages()
+    if not ok and still_missing:
         wx.MessageBox(
             f"pip install failed.\n\n"
             f"You may need to install manually with:\n"
@@ -206,8 +350,19 @@ def ensure_dependencies(parent=None):
             "Install failed", wx.OK | wx.ICON_ERROR, parent=parent,
         )
         return False
+    if not ok:
+        # Only the optional half failed. Say so and carry on -- refusing here
+        # would block the plugin on a package it does not need (#943).
+        wx.MessageBox(
+            f"Installed what the plugin needs, but pip could not install: "
+            f"{', '.join(still_optional)}.\n\n"
+            f"{_optional_effect(still_optional)}\n\n"
+            f"To install later:\n"
+            f"  \"{python_exe}\" -m pip install {' '.join(still_optional)}",
+            "Some optional packages missing", wx.OK | wx.ICON_INFORMATION,
+            parent=parent,
+        )
 
-    still_missing = _missing_packages()
     if still_missing:
         wx.MessageBox(
             "Dependencies were installed but are still not importable in this "
