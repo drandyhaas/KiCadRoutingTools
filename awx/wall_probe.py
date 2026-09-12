@@ -34,8 +34,13 @@ if '--call' in sys.argv:
     CALL = sys.argv[sys.argv.index('--call') + 1]
 RECORDED = []
 names = coherent_nets(K)
+if os.environ.get('NETS'):
+    # a bench carries a subset of the ladder's list (K51's SZQ, a U1-R6
+    # net with no DU1 pad, has no copper on the human bench)
+    names = os.environ['NETS'].split(',')
 fo = f'tmp/{tag}_fo_k{K}.kicad_pcb'
-plan = json.load(open(f'tmp/{tag}_fo_k{K}.plan.json'))
+_pj = f'tmp/{tag}_fo_k{K}.plan.json'
+plan = json.load(open(_pj)) if os.path.exists(_pj) else None   # a bench board has no sidecar: the braid builds from geometry
 logs = []
 ctx, groups = te.setup(fo, names, DEST, logs.append, plan=plan)
 nid = ctx.byname[NET][0]
