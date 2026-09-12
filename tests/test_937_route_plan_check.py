@@ -160,6 +160,45 @@ COMPLIANT_VARIANTS = [
             'own prescribed fix',
      ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu',
       '--nets GND +3V3 --plane-layers F.Cu In2.Cu')),
+    # The shape that catches R15 resolving sizes across TOOLS. A coarse PGA
+    # escape via (0.8/0.1) sits beside a GND-via pass whose own pour declares
+    # 0.45/0.09, so the vias actually placed imply a floor of 1.62 and 2.0 is
+    # correct. Resolving `max()` over the whole plan reads 0.8/0.1 -> 2.70 and
+    # refuses it. Without this row the revert SURVIVES: the compliant plan has
+    # no two tools disagreeing about via size, which is exactly the condition
+    # the bug needs. tests/mutate_941_942.py `r15-max-across-plan` found that.
+    ('R15', 'a GND-via pass at a distance its OWN tool sizes as legal, beside '
+            'a coarser fanout via it never places',
+     # One row, because the bug needs BOTH halves present at once: a coarse
+     # fanout via AND a GND pass sized by its own tool. Split across two rows
+     # each would be vacuous -- one has no --gnd-via-distance for R15 to read,
+     # the other has no second tool to disagree with.
+     # The GND pass must NOT carry its own --via-size: that is the whole
+     # point. A step that states its size is resolved identically by both
+     # rules, so only a step relying on the FALLBACK can tell them apart --
+     # and relying on the fallback is the shape the skill's Step 3 has.
+     ("python3 -u -X utf8 py_router/bga_fanout.py b.kicad_pcb s1.kicad_pcb "
+      "--component U1 --nets '*' --clearance 0.09 --layers F.Cu B.Cu\n"
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_placer/place_fanout_clearance.py s1.kicad_pcb '
+      's2.kicad_pcb --clearance 0.09\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s2.kicad_pcb s3.kicad_pcb '
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n',
+      "python3 -u -X utf8 py_router/bga_fanout.py b.kicad_pcb s1.kicad_pcb "
+      "--component U1 --nets '*' --clearance 0.09 --layers F.Cu B.Cu "
+      "--via-size 0.8 --via-drill 0.4\n"
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_placer/place_fanout_clearance.py s1.kicad_pcb '
+      's2.kicad_pcb --clearance 0.09\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s2.kicad_pcb s3.kicad_pcb '
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --via-size 0.45 '
+      '--clearance 0.09\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s3.kicad_pcb s3b.kicad_pcb '
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias '
+      '--gnd-via-distance 2.0\n')),
 ]
 
 

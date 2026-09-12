@@ -33,6 +33,32 @@ precedent is mutate_936's four such rows, and the reason is the same.
 `t431-unchecked-cap` runs `test_431_skill_commands.py`, which costs ~170 s. It
 is the one slow row and it earns it: test_431 is what makes every command in
 every skill runnable-as-printed, and #941 row 11 raised one of its ceilings.
+
+FOUR ROWS EXPECT `SURVIVED`, AND THAT IS THE FINDING, not a pass. Each names a
+correction this PR made that NOTHING mechanically holds down, so the next edit
+can undo it silently:
+
+  * `variant-vacuous`, `board-flag-marker` -- these mutate assertions INSIDE
+    test_937. Nothing checks a checker's own checks, so blinding one is
+    invisible. Recorded so that if a guard is ever added the row flips to
+    KILLED, DISAGREES, and someone updates it.
+  * `918-dirs-narrowed` -- dropping `plan-pcb-routing` from test_918's
+    SKILL_DIRS does not fail anything; it just stops scanning, which is the
+    registration hole this PR closed. An absent directory cannot report itself.
+  * `blocking-count-regated` -- restoring "the per-pair blocking COUNT is the
+    gateable quantity" is caught by nothing: test_918's rule keys on
+    `blocking == 0` near `check_assembly`, and that sentence contains neither.
+    #941 row 10 is therefore prose-only, and this row is what says so out loud.
+
+A row that SURVIVES by expectation is a change detector, not a green light.
+The honest reading of this battery is "15 of 19 corrections are held down".
+
+WHAT THIS BATTERY DOES NOT COVER: rows 7 and 12-16, the placeholders, the
+DENSE/fine-pitch/Step-numbering unifications and every other prose-only edit in
+this PR. They are ordinary editing with no mechanical predicate to assert, and
+inventing a grep for each would produce exactly the tests CLAUDE.md warns about
+-- a comment quoting the phrase satisfies the grep. Named here rather than left
+to look like coverage.
 """
 import argparse
 import os
