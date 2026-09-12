@@ -488,16 +488,17 @@ for the plan:
   overrides either way (the recorded-manifest A/B switch). The per-net drop
   counts are in `JSON_SUMMARY.plane_drop`.
 
-**After every BGA/PGA fanout, run the decoupling-cap placement optimizer
-(#130).** A fanout drops vias near the ball field; where a foreign-net via
+**After the LAST BGA/PGA fanout, run the decoupling-cap placement optimizer
+ONCE (#130).** A fanout drops vias near the ball field; where a foreign-net via
 lands under a decoupling cap placed at a ball, the via copper overlaps the
 cap pad → a real `PAD-VIA` DRC violation at the clearance floor. The fix is
 placement, so run `place_fanout_clearance.py` on the **fanned** board to
 nudge those caps clear (and pull each pad toward its nearest same-net ball so
 a power/GND via dropped there later shares the via). See "Step 1b" below for
 the command. It's cheap, only touches caps near a BGA, and is a no-op when
-nothing collides — so run it ONCE after ALL fanouts are done, before signal
-routing (see Step 1c for why once, not per-BGA).
+nothing collides — but run it ONCE after ALL fanouts are done, before signal
+routing, never once per BGA: two passes compound the displacement (see Step 1c
+for the measurement).
 
 Report to user:
 - List of components that may need fanout
@@ -1502,14 +1503,27 @@ using the same parameters as Step 2.)
 python3 -X utf8 py_router/route_planes.py board_step2.kicad_pcb board_step4.kicad_pcb \
     --nets GND VCC \
     --plane-layers B.Cu F.Cu \
-    --add-gnd-vias --gnd-via-distance 2.0 \
+    --add-gnd-vias --gnd-via-distance 2.5 \
     2>&1 | tee /tmp/step3_planes.txt
 
-Adjust `--gnd-via-distance` based on the board's highest signal speed:
-- Ultra-high (>1 GHz): 2.0 mm
+python3 -X utf8 py_router/route.py board_step4.kicad_pcb board_step4b.kicad_pcb \
+    --nets GND VCC \
+    2>&1 | tee /tmp/step3_finalize.txt
+
+**The second command is not optional and not a formality.** A chain that ends
+on a bare `route_planes.py` re-pour ships a board whose welds, taps and
+oracle-exact fill nothing verified — "a PLAN ERROR, not a tuning choice", as
+the end-every-chain-on-`route.py` rule below puts it, and what Step 10 rule 10
+means by "when it runs, the chain still ends on `route.py`". The GND-via pass
+cut the pours it just stitched; only `route.py`'s in-run finalize repairs them.
+
+Adjust `--gnd-via-distance` based on the board's highest signal speed, and
+**floor every one of them at `3 x (via_size + clearance)`** — the tiers below
+are electrical targets, the floor is what fits:
+- Ultra-high (>1 GHz): the floor (~2.5 mm for standard vias); tighter is not buildable
 - High (100 MHz - 1 GHz): 3.0 mm
 - Medium (10 - 100 MHz): 5.0 mm
-- Minimum physical limit: 3 x (via_size + clearance)
+- Minimum physical limit: 3 x (via_size + clearance), ~2.5 mm for standard vias
 
 ### (No separate repair step — absorbed into Step 2, #562)
 The old Step 5 (`repair_planes.py`) and its Step 5c reconnect
@@ -1554,8 +1568,10 @@ nothing. Otherwise read `kicad_routing_tools.protected_nets` out of the
 > board has no sibling `.kicad_pro` (#441).
 
 ### Step 6: Verify Results
-The final board is `board_step2.kicad_pcb` (or `board_step4.kicad_pcb` when
-the optional Step 3 GND-via pass ran) — call it `board_final` below.
+The final board is `board_step2.kicad_pcb` (or `board_step4b.kicad_pcb` when
+the optional Step 3 GND-via pass ran — the `route.py` that CLOSES Step 3, never
+the `route_planes.py` output `board_step4` that precedes it) — call it
+`board_final` below.
 Invoke `/review-routed-board board_final.kicad_pcb` for the full review (DRC,
 connectivity, orphan stubs, length-match tolerances, GND return via coverage,
 diff pair checks). If that skill is unavailable, run the raw checks — `check_drc.py`
@@ -1994,20 +2010,26 @@ python3 py_router/route.py board.kicad_pcb --nets "*" --stats --output board_deb
 
 ### Post-Routing Enhancements
 
-```bash
-# Add teardrop settings to all pads (improves manufacturability)
-python3 py_router/route.py board.kicad_pcb --nets "*" --add-teardrops --output board_routed.kicad_pcb
-```
+**`--add-teardrops` exists and this skill does not plan it.** Only 7% of human
+boards use teardrops, so it is not a default worth spending; the plan leaves
+the tool's connection style alone (as it does `--thermal-relief`). No command
+is given here on purpose — a copy-pasteable one is what made this section read
+as a recommendation, and `route_plan_check` R07 refuses a plan carrying it.
 
 ### Advanced Routing Parameters
 
-For difficult boards, consider tuning these parameters:
+For difficult boards, consider tuning these parameters — every row below is one
+you may set. **`--max-iterations` is NOT among them**: the A* base budget is
+200000 and self-extends to 1e7 while the search is still progressing (#529,
+default on), so passing it can only make the router give up earlier than it
+would have. Do not put it in a plan; `route_plan_check` R09 refuses one that
+carries it. It used to be a row in this table, under a heading inviting the
+reader to tune it.
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
 | `--max-ripup 3` | 3 | Max blocking nets to rip up and retry |
 | `--no-smoothing` | (smoothing is ON) | Disables #536 octolinear smoothing. A/B only — OFF measured ~20 nets worse across 147 boards |
-| `--max-iterations 200000` | 200000 | A* base budget per route (self-extends to 1e7 while progressing — #529; don't tune) |
 | `--heuristic-weight 2.3` | 2.3 | >1 = faster but may miss tight routes, 1.0 = optimal. 2.3 = the corpus dose-response peak (#586: 1.7 and 3.0 both worse; do not "tune it down for quality" -- measured, not intuitive) |
 | `--via-cost 75` | 75 | Higher = fewer vias, longer paths; lower (25) for BGA escape. 75 = corpus-measured default (#586); 25 measured WORSE overall |
 | `--grid-step 0.1` | 0.1 | Smaller = finer routing but slower; 0.05 for fine-pitch |
@@ -2096,7 +2118,13 @@ in `tests/stress/tee_cmd.py` gets a run-clock overlay read from its
 
 ### Capture Logs for Analysis
 
-Always capture command output to `/tmp` files for later analysis:
+Always capture command output to `/tmp` files for later analysis — **in an
+interactive shell.** The `2>&1 | tee ...` form below, and in every example
+command in this file, is for running the chain by hand. **NEVER put a pipe in
+the emitted `plan.sh`** (Step 10 rule 5): `manifest_to_plan.py` tokenizes pipe
+segments into net globs, so a `2>&1 | tee x.log` tail becomes
+`nets: ['*', '2>&1', '|', 'tee', 'x.log']` and corrupts the JSON. In the plan
+file use a plain redirect, `> /tmp/step.txt 2>&1`, or nothing at all.
 
 ```bash
 python3 -X utf8 py_router/route.py input.kicad_pcb output.kicad_pcb --nets "*" 2>&1 | tee /tmp/route_output.txt

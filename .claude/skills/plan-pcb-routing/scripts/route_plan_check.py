@@ -59,6 +59,8 @@ for _d in (ROOT, os.path.join(ROOT, 'py_router'),
     if os.path.isdir(_d) and _d not in sys.path:
         sys.path.insert(0, _d)
 
+import routing_defaults  # noqa: E402  (needs the sys.path bootstrap above)
+
 CLEAN, CRASH, USAGE, UNREADABLE, REFUSED = 0, 1, 2, 3, 4
 
 #: The rules this checker cannot decide, each with the tool that can. Printed
@@ -414,17 +416,45 @@ def r_net_coverage_reconciles(p):
 
 
 def r_gnd_via_distance(p):
-    """SKILL.md :690 -- `--gnd-via-distance` >= 3x (via size + clearance)."""
+    """Step 4 GND vias -- `--gnd-via-distance` >= 3x (via size + clearance).
+
+    The size and the clearance are resolved from the PLAN, not from the one
+    argv that carries the distance. This rule used to `continue` unless all
+    three flags appeared together, and the step that sets the distance is a
+    `route_planes.py` GND-via pass, which has no reason to restate a via size
+    the earlier steps already fixed -- so the rule could not fire on the
+    skill's own Step 3 command, which is precisely the command #941 row 2
+    reports as recommending a distance below the floor.
+
+    Resolution order, each step widening only when the narrower one is silent:
+    this argv, then the widest value any other command in the plan declares
+    (widest, because the floor it implies is the one that must hold for the
+    whole board), then `routing_defaults`. The reason names which it used, so
+    a refusal resting on a default is not mistaken for one resting on the plan.
+    """
+    def _resolved(flag, fallback):
+        seen = [v for a in p.argvs
+                for v in (scalar(a, flag),) if v is not None]
+        if seen:
+            return max(seen), 'the plan'
+        return fallback, 'routing_defaults'
+
     bad = []
     for argv in p.argvs:
         d = scalar(argv, '--gnd-via-distance')
-        vs, clr = scalar(argv, '--via-size'), scalar(argv, '--clearance')
-        if d is None or vs is None or clr is None:
+        if d is None:
             continue
+        vs, vs_src = scalar(argv, '--via-size'), 'this step'
+        if vs is None:
+            vs, vs_src = _resolved('--via-size', routing_defaults.VIA_SIZE)
+        clr, clr_src = scalar(argv, '--clearance'), 'this step'
+        if clr is None:
+            clr, clr_src = _resolved('--clearance', routing_defaults.CLEARANCE)
         floor = 3.0 * (vs + clr)
         if d < floor - 1e-9:
             bad.append(f'{tool_of(argv)} --gnd-via-distance {d:g} is below '
-                       f'3x(via {vs:g} + clearance {clr:g}) = {floor:.3f}')
+                       f'3x(via {vs:g} [{vs_src}] + clearance {clr:g} '
+                       f'[{clr_src}]) = {floor:.3f}')
     return bad
 
 
@@ -521,7 +551,10 @@ RULES = (
     ('R10', 'max-ripup stays within bounds', 'Step 10 rule 6',
      r_max_ripup_within_bounds),
     ('R11', 'a cp carries the .kicad_pro', 'Never cp a board without its .kicad_pro', r_cp_carries_the_project),
-    ('R12', 'one cap pass, after every fanout', 'Step 1c',
+    # NOT 'after every fanout': that was the SKILL sentence this rule exists
+    # to refuse, copied into the rule's own name (#941 row 3). The body has
+    # always enforced "once, after the last".
+    ('R12', 'one cap pass, after the last fanout', 'Step 1c',
      r_one_cap_pass_after_fanout),
     ('R13', 'the first pour is bare', 'Step 1 bare pour', r_first_pour_has_no_via_tail),
     ('R14', 'net coverage reconciles (Step 5b)', 'Step 5b',

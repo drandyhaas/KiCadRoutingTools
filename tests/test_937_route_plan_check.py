@@ -116,6 +116,17 @@ BREAKS = [
      ('--power-nets GND +3V3 --clearance 0.09',
       '--power-nets GND +3V3 --clearance 0.09 --via-size 0.45 '
       '--gnd-via-distance 0.5')),
+    # The row above puts all three flags on one argv, which is the only shape
+    # the rule used to see. This one is the shape the SKILL's own Step 3
+    # command has -- a route_planes GND-via pass carrying the distance ALONE,
+    # with the via size and clearance fixed by earlier steps. #941 row 2 is
+    # exactly this command, and the rule used to `continue` past it.
+    # (On the route step, not the pour: putting it on the FIRST pour would
+    # redden R13 too, and a break that reddens two rules names neither.)
+    ('R15', 'a gnd-via pass under the floor, with the size set upstream',
+     ("--nets '*' --power-nets GND +3V3 --clearance 0.09",
+      "--nets '*' --power-nets GND +3V3 --clearance 0.09 --add-gnd-vias "
+      "--gnd-via-distance 0.5")),
     # R17 had NO row here, and the rule additionally carried '[needs --board]'
     # while reading only the plan's own argv -- so `check()` skipped it on the
     # bare invocation the skill prescribes, and the 16 rows above passed

@@ -397,11 +397,16 @@ Based on the highest speed class found on the board:
 
 | Speed Class | Frequency | Recommended `--gnd-via-distance` | Rationale |
 |-------------|-----------|----------------------------------|-----------|
-| Ultra-high | >1 GHz | 2.0 mm | Return path critical; lambda/20 ~ 7 mm at 1 GHz in FR4 |
+| Ultra-high | >1 GHz | the floor below (~2.5 mm) | Return path critical; lambda/20 ~ 7 mm at 1 GHz in FR4 — but 2.0 mm, the value this row used to name, is UNDER the floor |
 | High | 100 MHz - 1 GHz | 3.0 mm | Good return path, moderate density |
 | Medium | 10 - 100 MHz | 5.0 mm | Return current less localized |
 | Low | <10 MHz | Skip | Plane provides adequate return path |
 | **Minimum physical** | any | **3 x (via_size + clearance)** | Vias cannot physically fit closer |
+
+**The floor row is not a footnote — it outranks every row above it.** Compute
+`3 x (via_size + clearance)` for the board's actual via and clearance and
+recommend `max(the speed tier, that floor)`. Recommending below it asks for
+vias that cannot be placed.
 
 For this board, the tightest interface is **[interface]** at **[freq]**, so use:
 

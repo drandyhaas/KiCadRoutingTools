@@ -166,8 +166,17 @@ def _repo_local_names():
     """
     names = set()
     for root, dirs, files in os.walk(ROOT):
-        if any(part.startswith('.') or part in ('__pycache__', 'target')
-               for part in root.replace('\\', '/').split('/')):
+        # RELATIVE to ROOT, not the absolute path: the dot-prefix skip is meant
+        # to drop `.git`/`.claude` INSIDE the repo, and splitting the absolute
+        # path applies it to the checkout's own location too. A repo checked out
+        # under any dot-directory then yields ZERO local names and every
+        # first-party import reads as an undeclared third-party one -- measured
+        # as ~70 false failures in a worktree, which is exactly where
+        # `EnterWorktree` puts one (`.claude/worktrees/<name>`).
+        rel = os.path.relpath(root, ROOT).replace('\\', '/')
+        if rel != '.' and any(part.startswith('.') or
+                              part in ('__pycache__', 'target')
+                              for part in rel.split('/')):
             continue
         for d in dirs:
             if os.path.isfile(os.path.join(root, d, '__init__.py')):

@@ -337,8 +337,12 @@ harmless.
    only. On 4+ layer boards you MUST pass the board's inner copper layers too,
    e.g. `--layers F.Cu In1.Cu In2.Cu B.Cu`, or deep balls can't escape and are
    silently dropped (only the ~2 outer layers' worth of nets fan out — this
-   capped ottercast_audio at ~23%). qfn_fanout.py is perimeter-only and
-   doesn't need this.
+   capped ottercast_audio at ~23%). When an inner layer carries a solid plane,
+   keep the escapes off it with `--layer-costs` (a NEGATIVE value forbids the
+   layer, #288) rather than by shortening `--layers`: a layer dropped from the
+   list is also gone from the under-pad engine's via spans, which use
+   `--layers[0]` and `[-1]`. qfn_fanout.py is perimeter-only and doesn't need
+   this.
    ESCAPE COMPLETENESS (issue #122): bga_fanout.py ends with
    `JSON_SUMMARY: {"requested","escaped","failed","unescaped_nets",...}`.
    ALWAYS parse it. If `failed > 0`, balls were DROPPED (removed from output;
