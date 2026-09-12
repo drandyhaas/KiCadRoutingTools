@@ -3531,6 +3531,9 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     # ("N part(s) with pad copper off-board") could not say WHICH part -- one
     # run deduced the single ref by elimination.
     oob_refs = []
+    #: The PER-PAD census beside the AABB one (#937). See its basis string
+    #: below for why both travel and neither replaces the other.
+    oob_copper_refs = []
     board_info = getattr(pcb_data, 'board_info', None)
     if board_info is not None and getattr(board_info, 'board_bounds', None):
         gate = BoardOutlineGate(board_info,
@@ -3552,6 +3555,41 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                 oob_count += 1
                 oob_amount += amt
                 oob_refs.append([ref, round(amt, 4)])
+        # ...and the PER-PAD census beside it, at margin 0 (#937).
+        #
+        # The count above is an AABB over the whole part inflated by the
+        # GRADING CLEARANCE, which makes it unusable for the question a
+        # consumer actually has -- WHICH PART DO I MOVE. Measured over the
+        # tracked corpus it is non-zero on three boards, and on two of them
+        # (human reference boards carrying edge-mounted switches, at 0.03mm
+        # and 0.17mm) no pad crosses the real outline at all.
+        #
+        # BOTH TRAVEL; neither replaces the other. The coarse one keeps its
+        # meaning and its consumers: loop_driver's L2 gate is justified over
+        # 119 graded rows, where it refuses 24 boards of which 12 are refusals
+        # `blocking` does not make, and the two censuses are disjoint by
+        # construction -- a part off the outline collides with nothing. What
+        # this one adds is WHICH PADS, so a refusal is actionable and a coarse
+        # hit with an empty precise list reads as the artifact it is instead
+        # of as a silent defect.
+        pad_gate = BoardOutlineGate(board_info, 0.0)
+        for ref, pp in parts.items():
+            fp = fps[ref]
+            try:
+                rects = pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)
+            except Exception:                             # noqa: BLE001
+                continue
+            if not rects:
+                continue
+            # The same #628 ownership exemption the AABB pass takes: a part
+            # whose own pads ring a milled relief OWNS that ring and must not
+            # be graded as hanging off it.
+            own = pad_gate.rings_enclosing(
+                [(p.global_x, p.global_y) for p in pads_by_ref.get(ref, ())])
+            amt = max((pad_gate.rect_outside_amount(r[:4], skip_rings=own)
+                       for r in rects), default=0.0)
+            if amt > EPS:
+                oob_copper_refs.append([ref, round(amt, 4)])
     worst.sort(key=lambda t: -t[2])
     return {'pad_conflicts': pad_conflicts,
             'pad_shortfall': round(pad_shortfall, 4),
@@ -3559,6 +3597,19 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             'oob_pad_count': oob_count,
             'oob_pad_amount': round(oob_amount, 4),
             'oob_pad_refs': sorted(oob_refs),
+            # The PER-PAD channel (#937), margin 0, same #628 ring ownership.
+            # This is the one CLAUDE.md designates for the top-priority
+            # placement defect ("read it off render_placement's
+            # checklist.a_off_outline.pad_copper") -- carried here too so a
+            # consumer holding only the assembly report can act on it without
+            # also rendering, and so the two numbers can be read side by side.
+            'oob_pad_copper_count': len(oob_copper_refs),
+            'oob_pad_copper_refs': sorted(oob_copper_refs),
+            'oob_pad_copper_basis': ('per-PAD copper rects against the real '
+                                     'outline at margin 0 (the authoritative '
+                                     'measure; the same question '
+                                     'render_placement answers in '
+                                     'checklist.a_off_outline.pad_copper)'),
             # WHICH QUANTITY THIS IS. Three tools print "pad copper
             # off-board" for three different measurements. This one is the
             # part's pad AABB against an outline inflated by the GRADING

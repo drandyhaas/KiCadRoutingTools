@@ -24,6 +24,11 @@ Output carries exactly three tags:
 
 Exit: 0 emitted, 2 usage, 4 a guard refused.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement'], 'kind': 'driver'}
+
 import argparse
 import json
 import os
@@ -122,6 +127,104 @@ Next: python3 -X utf8 {sys.argv[0]} --stage P0 --board {a.board}
 </stage_instructions>'''
 
 
+def _p0_reading(a):
+    """What the two instruments SAY, once they have been produced (#937).
+
+    P0 asks the reader to "say which row you are in" over a five-row table
+    whose first and fourth rows are arithmetic on two numbers this stage's own
+    flags already name -- and P0 never opened either file. Judgement spent on
+    arithmetic is judgement not spent on the board, so the driver does the
+    arithmetic and the reader disposes.
+
+    WHAT IT DOES NOT DO IS PICK THE ROW. Two of the five -- `unplaced` and
+    `board carries copper` -- are not derivable from these documents at all
+    (P1's own text says an exit code does not test placedness, and neither
+    file carries a track or via count), so a driver that announced a row would
+    be announcing one it cannot see. It reports what each instrument reads and
+    NAMES what it cannot.
+
+    Returns '' when neither document was supplied -- the first-entry case,
+    where there is nothing to read yet.
+    """
+    if not a.drc_json and not a.assembly_json:
+        return ''
+    drc = _load(a.drc_json, 'drc')[0] if a.drc_json else None
+    asm = _load(a.assembly_json, 'assembly')[0] if a.assembly_json else None
+    rows, v, b = [], None, None
+    if a.drc_json:
+        v = _dig(drc, 'violations')
+        if v is None:
+            v = _dig(drc, 'total_violations')
+        if isinstance(v, list):
+            v = len(v)
+        rows.append('  check_drc       : ' + (
+            f'{v} violation(s) on the copper-free board'
+            if isinstance(v, int) else
+            f'NO violation count in {a.drc_json} -- that file answers nothing'))
+    if a.assembly_json:
+        # THE VERDICT, not `blocking`. Since #918 `blocking` is one of five
+        # not_buildable conjuncts, so a board unbuildable through a
+        # coincident-origin stack or a containment reads `blocking` 0 -- and
+        # one tracked board does exactly that.
+        b = _dig(asm, 'buildable')
+        # "[blocking 0, 1 of its 5 conjuncts]" PARSED BACKWARDS: beside a count
+        # it reads as "one of the five fired". Worse on a healthy board, where
+        # check_assembly writes the verdict as the literal string "buildable
+        # (blocking 0)" -- the line became "buildable (blocking 0)  [blocking
+        # 0, 1 of its 5 conjuncts]", whose plain reading is "buildable BECAUSE
+        # blocking is 0", the exact inference #918 exists to kill.
+        rows.append('  check_assembly  : '
+                    + str(_dig(asm, 'verdict') or 'no verdict recorded')
+                    + (f'   (blocking {_dig(asm, "blocking")} is only ONE of '
+                       f'the five conjuncts this verdict is made of -- act on '
+                       f'the verdict, never on the count)'
+                       if _dig(asm, 'blocking') is not None else ''))
+        oob = _dig(asm, 'oob_pad_copper_count')
+        if isinstance(oob, int) and oob > 0:
+            # NAME THE PARTS: a count is not something a reader can act on,
+            # which is the argument the off-outline refusal itself makes, and
+            # the refs sit one key away in the same document.
+            _refs = [r[0] if isinstance(r, (list, tuple)) else r
+                     for r in (_dig(asm, 'oob_pad_copper_refs') or [])]
+            rows.append(f'  ...and PAD COPPER OFF THE OUTLINE on {oob} '
+                        f'part(s): '
+                        + (', '.join(str(r) for r in _refs[:8]) or
+                           'see oob_pad_copper_refs'))
+            # ...and give it a row. The five-row table below has none for this
+            # finding, so a board with drc 0 + buildable true + copper off the
+            # outline landed on "both clean -> hand it to routing and stop",
+            # carrying the defect that produces 100% of unrouted nets.
+            rows.append('                    This OUTRANKS every row below: '
+                        'those nets cannot be routed at all. Re-seat them '
+                        '(P2 -> P3) before you classify. If they are '
+                        'castellations or a declared card edge, the crossing '
+                        'is by design -- say so and carry on.')
+    clash = ''
+    if isinstance(v, int) and isinstance(b, bool) and (v == 0) != b:
+        clash = (f'\nTHE TWO DISAGREE: check_drc reads {v} violation(s) and '
+                 f'check_assembly reads '
+                 f'{"buildable" if b else "NOT BUILDABLE"}. Say which you are '
+                 f'acting on, and why, before you move a part.\n')
+    elif a.assembly_json and b is None:
+        clash = ('\nThat assembly document carries no `buildable` field, so '
+                 'the two could not be compared. Treat the VERDICT string '
+                 'above as authoritative.\n')
+    # "dispose of any disagreement above" used to print even when nothing
+    # disagreed -- and a reader hunting for the disagreement they were told to
+    # dispose of finds `NOT BUILDABLE` beside `blocking 0` and "resolves" it by
+    # trusting the count. Only ask when there is something to ask about.
+    return ('\nWHAT THE INSTRUMENTS SAY about the files you named -- the row '
+            'is still yours to pick:\n\n' + '\n'.join(rows) + '\n' + clash +
+            '\nNeither document says whether this board is UNPLACED or '
+            'whether it CARRIES COPPER. Both are in one more command:\n'
+            '  python3 -X utf8 py_tools/board_brief.py ' + str(a.board) +
+            ' --json wk/brief0.json\n'
+            'Read `unplaced` / `partially_unplaced` for the first, and '
+            '`has_copper` / `segments` / `vias` for the second.\n\n'
+            + ('Name your row, and dispose of the disagreement above.\n'
+               if clash else 'Name your row.\n'))
+
+
 def p0(a):
     """Decide whether to touch the placement at all."""
     return f'''<stage_instructions stage="P0" name="gate" of="{len(STAGES)}">
@@ -156,6 +259,7 @@ the board declared nothing and the number is a fallback, not agreement.
 Every violation a COPPER-FREE board returns is a placement defect that no
 router can remove.
 
+{_p0_reading(a)}
 Then classify by what you MEASURED, and say which row you are in:
 
   both clean                  -> the placement is fit. Do not run a pass over
@@ -930,11 +1034,25 @@ def _guard_damage(a):
             '--json wk/drc0.json')
     if isinstance(count, int) and count == 0:
         asm, _ = _load(a.assembly_json, 'assembly')
+        # THE VERDICT, not `blocking` (#937). `blocking` is ONE of
+        # check_assembly's five not_buildable conjuncts since #918, so a board
+        # unbuildable through a coincident-origin stack, a containment, copper
+        # on a locked part or a moved-vs-baseline courtyard gate reads
+        # `blocking` 0 -- and then this guard told the reader there was "no
+        # damage for this stage to repair" about a board its own instrument
+        # had just graded NOT BUILDABLE. One tracked board is exactly that
+        # case. `buildable` is the field that answers the question this guard
+        # is asking; `blocking` is the fallback for a document old enough not
+        # to carry it.
+        buildable = _dig(asm, 'buildable') if asm else None
         blocking = _dig(asm, 'blocking') if asm else None
-        if not blocking:
+        undamaged = (not blocking) if buildable is None else bool(buildable)
+        if undamaged:
             return False, (
-                'The copper-free board reports 0 violations and no blocking '
-                'assembly pair. There is no damage for this stage to repair, '
+                'The copper-free board reports 0 violations and '
+                + ('an assembly verdict of buildable'
+                   if buildable is not None else 'no blocking assembly pair')
+                + '. There is no damage for this stage to repair, '
                 'and running a placement search on a legal board makes it '
                 'worse (measured).\n\nIf you want a different ARRANGEMENT '
                 'rather than a repair, that is --stage P5. If you were '
@@ -1028,7 +1146,26 @@ def _guard_render(a):
     # So this gate binds on the per-pad list and NAMES THE PARTS, because a
     # count is not something you can act on and the refusal exists to be acted
     # on.
+    # THE BY-DESIGN ESCAPE (#937). This census is per-pad against the real
+    # outline with NO exemption for castellations, card edges or a declared
+    # `edge_connectors` band -- and this skill says elsewhere that a
+    # castellated pad is centred ON the outline and such parts are MEANT to
+    # cross it. Without an escape the refusal ordered a reader to drag a
+    # mating connector inboard, which breaks the thing the board exists to
+    # mate with, and no flag could clear it.
+    #
+    # A REASON IS REQUIRED, like every other waiver here: `--waive
+    # off-outline:` with nothing after it is refused rather than honoured,
+    # because a waiver with no reason is a flag that makes a gate disappear.
+    _oobw = _waiver_for(a, 'off-outline')
+    if _oobw == '':
+        return False, ('--waive off-outline needs a REASON after the colon: '
+                       'which refs are by design, and to what mating '
+                       'standard. A waiver with no reason is a flag that '
+                       'makes the gate disappear.')
     _oob = (chk.get('a_off_outline') or {}).get('pad_copper')
+    if _oobw:
+        _oob = None
     if isinstance(_oob, list) and _oob:
         _refs = []
         for _it in _oob:
@@ -1042,8 +1179,19 @@ def _guard_render(a):
             f'one-for-one into `unrouted` and `broken` -- measured, run 10: 11 '
             f'such parts produced ALL 13 unrouted nets and most of the 37 '
             f'broken ones. It is the top-priority placement defect, ahead of '
-            f'every clearance graze.\n\nMove those parts back inside the '
-            f'outline and re-render. The outline is not yours to change.\n\n'
+            f'every clearance graze.\n\nUNLESS THE CROSSING IS BY DESIGN. A '
+            f'castellated row, a card edge and a declared `edge_connectors` '
+            f'part are all MEANT to cross the boundary -- this census has no '
+            f'exemption for them, so it names them too. If that is what these '
+            f'are, declare them in the intent\'s `edge_connectors` and re-run '
+            f'this stage with --waive off-outline:<the refs and the mating '
+            f'standard>. Do not move a connector inboard to satisfy a gate; '
+            f'that breaks the thing the board exists to mate with.\n\n'
+            f'Otherwise RE-SEAT them -- by net centroid, not back to an old '
+            f'pose (the objective is a board that routes, not a board '
+            f'restored):\n  python3 -X utf8 py_placer/place_seed.py <board> '
+            f'<out> --intent <intent> --reseat --clearance <the floor>\n'
+            f'The outline itself is never yours to change.\n\n'
             f'This is the per-PAD measure, not check_assembly\'s '
             f'`oob_pad_count`, which is a part-level AABB inflated by the '
             f'clearance and reads non-zero on human boards whose pads are '
@@ -1423,6 +1571,21 @@ def _guard_congestion(a):
                   f'this read did not require): {_waiver}']
     return _tail()
 
+
+#: Every stage's POPULATED body, held where it was measured (#937).
+#:
+#: Not one shared number: the 80-line assertion in `_self_test` measures
+#: whatever the CHEAP fixture returns, so a stage that refuses there is
+#: measured as its 3-line refusal and its instructions were never seen at all.
+#: P4's 98 passed that way. These are the real figures, and they are ceilings
+#: rather than targets -- their job is to stop silent growth, and raising one
+#: is a deliberate edit here with a reason beside it.
+#:
+#: P4 is over the 80-line norm and pinned at what it is: the structural
+#: finding is that its body holds FIVE VERBS (measure, act, prove, record,
+#: loop), so the remedy is a split, not a trim.
+_BODY_CEILING = {'P-brief': 60, 'P0': 70, 'P1': 35, 'P2': 45, 'P3': 80,
+                 'P4': 100, 'P5': 45, 'P6': 30, 'P-close': 60}
 
 STAGES = {
     'P-brief': p_brief,
@@ -1903,8 +2066,19 @@ def _refusal_scenarios(tmp):
         ('a DRC json that measures nothing', base
          + ['--drc-json', wrote('bare.json', {'schema': 1})]),
         ('a JSON file that does not parse', base + ['--drc-json', unreadable]),
+        # BOTH ARMS of the no-damage refusal (#937). The first has no
+        # assembly document at all, so the guard falls back to `blocking`;
+        # the second supplies a verdict, which is the field it now reads --
+        # `blocking` is 1 of check_assembly's 5 not_buildable conjuncts since
+        # #918, so a board can be NOT BUILDABLE at blocking 0 and this guard
+        # used to call that "no damage to repair".
         ('a board with no damage to repair', base
          + ['--drc-json', wrote('clean.json', {'violations': 0})]),
+        ('a board the assembly verdict calls buildable', base
+         + ['--drc-json', wrote('clean2.json', {'violations': 0}),
+            '--assembly-json', wrote('asm_ok.json',
+                                     {'buildable': True, 'blocking': 0,
+                                      'verdict': 'buildable (blocking 0)'})]),
         # P3's lock advice
         ('no lock advice', base + damaged),
         ('unlocked_high with nothing waived', base + damaged
@@ -1926,6 +2100,16 @@ def _refusal_scenarios(tmp):
                                               {'reference': 'J2'}],
                                'courtyard': []},
              'd_moved': {'moved': 3, 'expected': None, 'match': None}})]),
+        # ...and the by-design escape WITHOUT its reason (#937). The waiver
+        # exists because a castellated row or a card edge is meant to cross
+        # the outline and this census has no exemption for one; a waiver with
+        # no reason is refused rather than honoured.
+        ('an off-outline waiver with no reason', with_before
+         + ['--waive', 'off-outline:',
+            '--render-json', render(name='r_oobw.json', checklist={
+                'a_off_outline': {'pad_copper': [{'reference': 'J9'}],
+                                  'courtyard': []},
+                'd_moved': {'moved': 1, 'expected': None, 'match': None}})]),
         # ...and the same list carrying no `reference`, which is the arm that
         # falls back to naming the key. Without this row that fallback is a
         # branch nothing renders -- exactly what --dump-refusals exists to say.
@@ -2182,18 +2366,36 @@ def _self_test():
                  f'{_k} counts the stages the registry has '
                  f'({_m.group(1) if _m else "no of= tag in its body"})')
 
-        # THE BODY LENGTHS, out loud. The cap above measures whichever arm the
-        # cheap fixture produces, so for a stage that refuses there it has
-        # never seen the instructions at all. These are the real numbers; P4 is
-        # over the 80-line norm today and trimming it is an editorial job, not
-        # a fact fix, so this reports rather than refuses. Reported > silent:
-        # a number nobody prints is a number nobody argues with.
+        # THE BODY LENGTHS, out loud -- AND HELD (#937). The cap above
+        # measures whichever arm the CHEAP fixture produces, so for a stage
+        # that refuses there it has never seen the instructions at all: P4's
+        # 98 lines passed that assertion as a 3-line refusal, and P3 at 79 sits
+        # in the same blind spot one line under the line.
+        #
+        # Reporting alone was the previous answer and it is not enough: a
+        # number nobody can exceed is a number nobody has to argue with, and
+        # over this PR P0 grew by 10 with nothing to notice. So every stage is
+        # now held at a MEASURED ceiling rather than at one shared number.
+        #
+        # A ceiling, not a target: it exists to stop silent growth, and moving
+        # one is a deliberate edit here with a reason. P4 is over the 80-line
+        # norm and is pinned at what it is, because trimming it is an
+        # editorial job -- and the structural finding is that its 98 lines are
+        # FIVE VERBS (measure, act, prove, record, loop), so the fix is a split
+        # rather than a trim.
         _over = {k: len(v.splitlines()) for k, v in _bodies.items()}
         print('  NOTE  stage body lines: '
               + ', '.join(f'{k} {v}' for k, v in _over.items())
               + f" -- over the 80-line norm: "
               + (', '.join(f'{k} ({v})' for k, v in _over.items() if v > 80)
                  or 'none'))
+        for _k, _n in sorted(_over.items()):
+            _ceil = _BODY_CEILING.get(_k)
+            want(_ceil is not None,
+                 f'{_k} declares a body ceiling (a new stage must)')
+            if _ceil is not None:
+                want(_n <= _ceil,
+                     f'{_k} body is {_n} line(s), ceiling {_ceil}')
 
         _checked = 0
         for key, _body in _bodies.items():

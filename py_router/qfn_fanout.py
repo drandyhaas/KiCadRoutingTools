@@ -6,6 +6,10 @@ This is a thin wrapper that calls the qfn_fanout package.
 See qfn_fanout/README.md for documentation.
 """
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
+
 from qfn_fanout import main
 
 if __name__ == '__main__':

@@ -3,6 +3,10 @@ DRC Checker - Find overlapping tracks and vias between different nets.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'conditional'}
+
 import sys
 import argparse
 import math

@@ -5,6 +5,10 @@ BGA Fanout Strategy - Creates escape routing for BGA packages.
 This is a wrapper script that imports from the bga_fanout package.
 """
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
+
 from bga_fanout import main
 
 if __name__ == '__main__':

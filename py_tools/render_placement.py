@@ -27,6 +27,11 @@ never why it helped. The caption strip carries the verdict, and a render without
 it invites exactly the wrong review heuristic.
 """
 from __future__ import annotations
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse

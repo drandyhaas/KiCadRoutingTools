@@ -13,6 +13,11 @@ is a pure coordinate rewrite of existing segments (no adds/removes).
 
 Usage: pack_river.py IN.kicad_pcb OUT.kicad_pcb [--clearance C] [--min-run L]
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing'], 'kind': 'actor'}
+
 import argparse
 import math
 import re

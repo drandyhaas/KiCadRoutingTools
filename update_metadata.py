@@ -9,6 +9,10 @@ Usage:
         --repo drandyhaas/KiCadRoutingTools
 """
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': [], 'kind': 'utility'}
+
 import argparse
 import json
 import sys

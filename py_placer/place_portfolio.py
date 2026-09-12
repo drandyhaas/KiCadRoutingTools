@@ -22,6 +22,11 @@ not in a state placement may touch (unplaced, or already carries copper);
 
 See docs/placement-optimization.md (Portfolio section) for the background.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json

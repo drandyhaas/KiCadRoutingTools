@@ -19,6 +19,11 @@ It copies ``.kicad_pcb`` and every sibling in ``SIBLING_EXTS``
 the stress redo manifest (``REDO_MANIFEST``) like the routing tools, so a replayed
 manifest reproduces the full copy (not just the board) -- no more floor drop.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'actor'}
+
 import os
 import shutil
 import sys

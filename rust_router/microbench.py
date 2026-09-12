@@ -22,6 +22,11 @@ Usage:
 The printed `iterations` must be IDENTICAL across binaries for the
 byte-identical 0.18.0 items (S1, S2, C1); only the time may change.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': [], 'kind': 'utility'}
+
 import argparse
 import os
 import sys

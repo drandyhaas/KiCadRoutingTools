@@ -13,6 +13,10 @@ verifies the version; see CLAUDE.md).
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'actor'}
+
 import env_knobs
 import sys
 import os

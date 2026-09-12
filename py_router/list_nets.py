@@ -19,6 +19,10 @@ Examples:
     python list_nets.py board.kicad_pcb --diff-pairs --power
 """
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing'], 'kind': 'instrument'}
+
 import argparse
 import json
 import math

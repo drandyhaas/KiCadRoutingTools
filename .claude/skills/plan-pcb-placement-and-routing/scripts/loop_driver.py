@@ -33,6 +33,11 @@ teammate; <error> you skipped evidence.
 
 Exit: 0 emitted, 2 usage, 4 a guard refused.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['combined'], 'kind': 'driver'}
+
 import argparse
 import hashlib
 import json
@@ -295,8 +300,20 @@ def _guard_congestion(a):
     # matrix. hpwl's direction has to be checked per board, not assumed.
     # See docs/placement-calibration.md.
     b, n = float(m_base['hpwl']), float(m_now['hpwl'])
+    _cx_b = m_base.get('crossings')
+    _cx_n = m_now.get('crossings')
+    _cx = (f'    crossings  {float(_cx_b):.0f} -> {float(_cx_n):.0f}'
+           f'   [REPORTED, never gated -- non-negotiable 4]\n'
+           if isinstance(_cx_b, (int, float))
+           and isinstance(_cx_n, (int, float)) else '')
     if b <= 0:
-        return True, None
+        # PRINT, even here. This arm passed with `None` -- a baseline hpwl of
+        # 0 means the renders cannot be compared, and saying nothing is
+        # indistinguishable from saying "congestion is fine" (#937).
+        return True, (f'  CONGESTION READ: the baseline render reports hpwl '
+                      f'{b:.1f}, so no gain can be computed from it. This '
+                      f'stage is NOT telling you the placement is fine; it is '
+                      f'telling you the comparison is unavailable.\n' + _cx)
     gain = (b - n) / b
     # REPORT, do not refuse. The threshold that used to live here was withdrawn
     # on measurement (docs/placement-calibration.md): the same premise --
@@ -308,13 +325,24 @@ def _guard_congestion(a):
     # `parameter`-shaped, because every per-net test can pass on a board no
     # router can finish. That part needs no threshold.
     if gain >= _CONGESTION_RATIO:
-        return True, None
-    _cx_b = m_base.get('crossings')
-    _cx_n = m_now.get('crossings')
-    _cx = (f'  crossings  {float(_cx_b):.0f} -> {float(_cx_n):.0f}'
-           f'   [REPORTED, never gated -- non-negotiable 4]\n'
-           if isinstance(_cx_b, (int, float))
-           and isinstance(_cx_n, (int, float)) else '')
+        # PRINT THE MEASUREMENT IN THIS ARM TOO (#937). This returned
+        # `(True, None)`, so a board that PASSED the cut was waved through
+        # with the numbers on neither screen nor record -- and the crossings
+        # pair was computed only below this line, so on a passing board the
+        # one figure non-negotiable 4 says must ALWAYS be reported was never
+        # printed at all.
+        #
+        # _CONGESTION_RATIO's own comment says it "decides whether to print a
+        # warning beside the numbers -- it does NOT decide anything". That was
+        # the intent and this is what makes it true: the threshold now decides
+        # which READING accompanies the measurement, never whether the
+        # operator sees it. An instrument that withholds a measurement is not
+        # an instrument.
+        return True, (
+            f'  CONGESTION READ: hpwl {b:.1f} -> {n:.1f} '
+            f'({gain * 100:+.1f}% of the gap closed), at or above the '
+            f'{_CONGESTION_RATIO * 100:.0f}% mark where this stage stops '
+            f'asking for a disposition.\n' + _cx)
     if a.accept_congestion and str(a.accept_congestion).strip():
         return True, (
             f'  CONGESTION READ (accepted): hpwl {b:.1f} -> {n:.1f} '
@@ -329,7 +357,10 @@ def _guard_congestion(a):
         f'The congestion read says this may be PLACEMENT-shaped, and nothing '
         f'has said otherwise.\n\n'
         f'    hpwl       {b:.1f} -> {n:.1f}   ({gain * 100:+.1f}% of the gap '
-        f'closed)\n' + _cx.replace('  crossings', '    crossings') +
+        # _cx already carries the 4-space indent this block wants. It used to
+        # be built at 2 and re-indented here -- which, once the shared builder
+        # moved to 4, would have matched INSIDE its own indent and produced 6.
+        f'closed)\n' + _cx +
         f'\n'
         f'    The placement left {(1 - gain) * 100:.1f}% of the wirelength it '
         f'started with.\n'
@@ -1237,12 +1268,45 @@ def l2(a):
     if _ooberr:
         return err(_ooberr)
     if oob and oob > 0 and not _accept(a, 'oob_pad_count'):
+        # NAME WHICH CHANNEL, AND SHOW THE OTHER ONE (#937).
+        #
+        # This gate reads the part-level AABB inflated by the grading
+        # clearance, and it is right to: over 119 graded rows it refuses 24
+        # boards, 12 of them refusals `blocking` does not make. But the
+        # refusal it writes says "their nets cannot be routed at all", which
+        # is true of copper genuinely off the outline and NOT true of an
+        # edge-mounted part whose bounding box crosses an INFLATED outline
+        # while every pad stays on the board. Measured over the tracked
+        # corpus: of the three boards this fires on, two are exactly that --
+        # human reference boards with edge-mounted switches -- and a reader
+        # who saw only the count could not tell which they had.
+        #
+        # check_assembly carries both channels now, so print both and say
+        # which one is being refused on. The GATE is unchanged: same channel,
+        # same threshold, same waiver.
+        _exact = rep.get('oob_pad_copper_refs')
+        _exact = _exact if isinstance(_exact, list) else []
+        _named = ', '.join(f'{r} ({v}mm)' for r, v in _exact[:8]) or 'none'
+        if _exact:
+            _reading = ('Both channels agree: that copper really is off the '
+                        'board, and those nets cannot be routed at all.')
+        else:
+            _reading = ('THE TWO DISAGREE, and read that before you act: NO '
+                        'PAD crosses the real outline. The count above is the '
+                        'bounding box of an edge-mounted part against an '
+                        'outline inflated by the grading clearance. If that '
+                        'is what this board has, the overhang is probably BY '
+                        'DESIGN and the declaration below is the right answer '
+                        'rather than a placement re-entry.')
         return err(
             f'The placement close-out reports blocking = 0, but '
             f'oob_pad_count = {oob}: {oob} part(s) carry pad copper OFF the '
-            f'board. Those parts are assembly-clean precisely because nothing '
-            f'is out there to collide with, and their nets cannot be routed at '
-            f'all.\n\nThis is placement-shaped damage, and it is cheaper to '
+            f'board.\n\n'
+            f'    part AABB vs the inflated outline: {oob}\n'
+            f'    pad copper vs the REAL outline:    {len(_exact)}  '
+            f'[{_named}]\n\n'
+            f'{_reading}\n\nThis is placement-shaped damage, and it is '
+            f'cheaper to '
             f'fix now than to discover it as a routing failure and re-enter. '
             f'Go back to the placement half.\n\nIf the overhang is BY DESIGN '
             f'-- a card edge, a switch actuator, a castellated module -- '
@@ -1418,8 +1482,7 @@ half, and a teammate that receives an unfrozen board cannot know which poses
 were deliberate.
 
 Then delegate the routing half to a TEAMMATE of the agent type named in the
-tag below, for the same reason L1 does: it HAS the Agent tool, and the routing
-skill fans out three verification subagents at close-out. This half produces
+tag below, for the same reason L1 does: this half produces
 the most output of anything in the loop -- a route log here runs to thousands
 of lines -- and a fork does not change that: context is inherited inward, its
 output still does not come back.
@@ -1503,7 +1566,11 @@ were handed is the last thing left to compare against.
 Return, and return ONLY:
   1. confirmation that each of the four paths above exists, or WHICH does not;
   2. the PATH of every lens verdict you wrote, and the board sha each one
-     graded. Your lenses are YOUR gate while you loop; this run's --final row
+     graded -- or `none`, which is the expected answer: the routing skill
+     does NOT dispatch verification lenses, and the run-closing lenses are
+     dispatched once, by L5, on the board this loop ships. Do not invent
+     verifications to fill this line.
+     Your lenses, if you ran any, are YOUR gate while you loop; this --final row
      is recorded against the board the OUTER loop ships, and a verdict taken
      on an earlier board is history, not evidence for that row;
   3. SHAPE=<parameter|placement|floorplan>, or `none` if nothing failed;
@@ -2538,8 +2605,13 @@ def _close_out(a, name):
 
     The asymmetry this exists to remove: L2 refuses to START routing without a
     placement close-out, while nothing ever refused to FINISH. A run reached
-    the terminal artifact having never invoked the routing half's own V1-V5 at
+    the terminal artifact having never run the routing half's own close-out at
     all, and shipped a board carrying a power-rail-to-signal short.
+
+    (This said "the routing half's own V1-V5". Those stages were a
+    `routing_driver.py` that never reached main and was removed twice; the
+    convergence loop they came from lives in references/convergence.md, and
+    the routing skill's own proof is its Step 9 plan checker. #937.)
 
     The gate is NOT "produce a document" -- a well-shaped empty one would
     satisfy that. It is that TWO INDEPENDENT INSTRUMENTS MUST NOT CONTRADICT
@@ -2698,6 +2770,22 @@ def _close_out(a, name):
     return _cross_check(a, name, doc)
 
 
+#: Every POPULATED arm `--dump-all` renders, held where it was measured
+#: (#937). See the check at the end of the `--dump-all` block for why one
+#: shared number was never right here: `_CAP` grades whatever the cheap
+#: fixture returns, and every stage but L1 refuses there, so L2's 196-line
+#: delegated body and L5's three 161-line terminal arms had never been
+#: measured by anything.
+#:
+#: Ceilings against silent growth, not targets. An arm missing from this table
+#: FAILS, so a new one cannot arrive unmeasured.
+_ARM_CEILING = {
+    'L1': 90, 'L1 (delegated)': 90, 'L1 (inline)': 25,
+    'L2': 200, 'L2 (delegated)': 200, 'L2 (inline)': 95,
+    'L3': 75, 'L4': 45, 'L5': 40,
+    'L5 (DONE-EXHAUSTED)': 170, 'L5 (STUCK)': 170, 'L5 (BUDGET)': 170,
+}
+
 STAGES = {'L1': l1, 'L2': l2, 'L3': l3, 'L4': l4, 'L5': l5}
 TITLES = {'L1': 'place (inline or delegated)',
           'L2': 'freeze what placement decided, then route',
@@ -2789,8 +2877,8 @@ def _args(argv=None):
                          '--json`. L5 refuses without it: L2 refuses to START '
                          'routing without a placement close-out and nothing '
                          'ever refused to FINISH, so a run reached the '
-                         'terminal artifact having never entered the routing '
-                         "half's own V1-V5 loop at all.")
+                         'terminal artifact having never run the routing '
+                         "half's own close-out at all.")
     ap.add_argument('--accept-unclosed', nargs='*', action='extend',
                     metavar='CHECK', default=None,
                     help='ship with a NAMED close-out check unsatisfied: '
@@ -2841,6 +2929,7 @@ def main(argv=None):
         # opposite of what a dump is for.
         import tempfile
         refused = []
+        sizes = {}
         with tempfile.TemporaryDirectory() as tmp:
             def wrote(name, doc):
                 p = os.path.join(tmp, name)
@@ -2897,6 +2986,7 @@ def main(argv=None):
                 print(f'===== {k} =====')
                 body = STAGES[k](loose)
                 print(body)
+                sizes[k] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(k)
             # Both halves can delegate, and the teammate prompts are where the
@@ -2907,6 +2997,7 @@ def main(argv=None):
                 print(f'===== {k} (delegated) =====')
                 body = STAGES[k](loose)
                 print(body)
+                sizes[f'{k} (delegated)'] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(f'{k}/delegated')
             loose.delegate = False
@@ -2922,6 +3013,7 @@ def main(argv=None):
                 print(f'===== {k} (inline) =====')
                 body = STAGES[k](loose)
                 print(body)
+                sizes[f'{k} (inline)'] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(f'{k}/inline')
             loose.no_delegate = False
@@ -2977,11 +3069,37 @@ def main(argv=None):
                 print(f'===== L5 ({label}) =====')
                 body = STAGES['L5'](v)
                 print(body)
+                sizes[f'L5 ({label})'] = len(body.splitlines())
                 if body.startswith('<error>'):
                     refused.append(f'L5/{label}')
+        # EVERY ARM'S SIZE, MEASURED AND HELD (#937). The `_CAP` assertion in
+        # `_self_test` measures whatever the CHEAP fixture returns, and every
+        # stage but L1 REFUSES there -- so it was grading 6-to-9-line refusals
+        # and calling them bodies. What that hid, measured here: L2 delegated
+        # is 196 lines and L5's three terminal arms are 161 each, against a
+        # "cap" of 90. Nothing in the suite had ever seen them.
+        #
+        # One number was never right for these: L2 delegates an entire half
+        # and carries its teammate's whole brief. So each arm is held where it
+        # is MEASURED, as a ceiling against silent growth rather than a target
+        # to shrink to -- and an arm with no declared ceiling fails, so a new
+        # one cannot arrive unmeasured.
+        print('\n----- populated arm sizes -----')
+        _over = []
+        for _k in sorted(sizes):
+            _ceil = _ARM_CEILING.get(_k)
+            _mark = 'ok ' if _ceil is not None and sizes[_k] <= _ceil else '!! '
+            print(f'  {_mark} {_k:<18} {sizes[_k]:>4} line(s)   ceiling '
+                  f'{_ceil if _ceil is not None else "UNDECLARED"}')
+            if _ceil is None or sizes[_k] > _ceil:
+                _over.append(f'{_k} ({sizes[_k]}, ceiling {_ceil})')
+        if _over:
+            print(f'\n!! {len(_over)} arm(s) over their ceiling or '
+                  f'undeclared: {", ".join(_over)}')
         if refused:
             print(f'\n!! {len(refused)} stage(s) dumped a REFUSAL, not their '
                   f'instructions: {", ".join(refused)}')
+        if refused or _over:
             return 1
         return 0
     if a.dump_refusals:
@@ -3284,9 +3402,21 @@ def _refusal_scenarios(tmp):
         ('an oob_pad_count that is not a number', base
          + ['--score', score, '--placement-report', bent(
              'p_ox.json', oob_pad_count='five')]),
-        ('pad copper off the board', base
+        # BOTH ARMS of the off-outline refusal (#937). The first renders the
+        # DISAGREE reading (the AABB fires, no pad crosses the real outline --
+        # the edge-mounted-part case, which is 2 of the 3 boards this gate
+        # fires on across the tracked corpus); the second renders the AGREE
+        # reading. One row covered only the first, and `--dump-refusals` still
+        # reported 49 of 49 texts rendered, because the two readings are
+        # composed OUTSIDE the `err(...)` call and the site scanner only sees
+        # literals inside it. An arm nothing renders is the hole, not a gap.
+        ('pad copper off the board, and no pad actually crosses it', base
          + ['--score', score, '--placement-report', bent(
              'p_oob.json', oob_pad_count=5)]),
+        ('pad copper off the board, both channels agreeing', base
+         + ['--score', score, '--placement-report', bent(
+             'p_oob2.json', oob_pad_count=2,
+             oob_pad_copper_refs=[['U8', 0.8], ['J3', 1.25]])]),
         # the recording spine: a board no ledger row names
         ('a board no ledger row records', ['--board', other, '--ledger', led,
          '--score', wrote('s_o.json', {'blocking': 2}),
@@ -3841,8 +3971,19 @@ def _self_test():
         out = STAGES['L4'](_args(base + ['--shape', 'parameter',
                                          '--congestion-json', _cgood,
                                          '--congestion-baseline', _cbase]))
-        want('CONGESTION READ' not in out,
-             'a healthy congestion gain adds no warning')
+        # A healthy gain adds no REFUSAL and demands no disposition -- but it
+        # does print the numbers. This used to assert `'CONGESTION READ' not
+        # in out`, which pinned the defect rather than the property: above the
+        # ratio the stage returned (True, None) and the operator saw no hpwl
+        # and no crossings at all, while _CONGESTION_RATIO's own comment
+        # claimed it only "decides whether to print a warning BESIDE the
+        # numbers" (#937).
+        want(not out.startswith('<error>') and 'CONGESTION READ' in out
+             and 'hpwl' in out,
+             'a healthy congestion gain still PRINTS the measurement')
+        want('--accept-congestion' not in out.split('CONGESTION READ')[-1]
+             .split('\n\n')[0],
+             '...and asks for no disposition, which is what the ratio decides')
         out = STAGES['L4'](_args(base + ['--shape', 'parameter',
                                          '--congestion-json', _cgood]))
         want(out.startswith('<error>') and '--congestion-baseline' in out,

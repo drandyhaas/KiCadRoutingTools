@@ -7,6 +7,85 @@ description: Analyzes a KiCad PCB file and creates a comprehensive routing plan.
 
 When this skill is invoked with a KiCad PCB file, perform a comprehensive analysis and present a routing plan to the user.
 
+## How to run this skill
+
+**Step 0 first, always.** Then Step 1 onward in order, and Step 9 last: it
+emits the plan as an executable artifact and then PROVES it, with a checker
+that refuses by name rather than a paragraph you are trusted to have read.
+
+There is no driver here, and that is deliberate. The placement half stages its
+work behind one because the AI is deciding there and a refusal is what keeps a
+decision honest. Routing's failure mode is different -- the CHAIN being wrong,
+not a judgement being wrong -- so what this half needs is a checker over the
+plan, and it gets one. Placement stages encode a decision order over levers
+and are stable; routing stages encode the copper chain, which the engine moves
+underneath them.
+
+### Who is in the seat here
+
+**In the routing half, YOU PLAN and the scripts EXECUTE.** You choose the
+chain, the nets and the parameters, and you read the failures; `route.py` and
+its siblings lay the copper. You do not hand-place copper, and you do not work
+around a checker that refuses.
+
+That is the opposite of the placement half, where YOU DECIDE -- which parts
+move, where, and why -- and the scripts legalize and measure. The test for
+which mode you are in: **if the work replays from a recorded command list
+without judgement, it is script work.** Routing passes it, which is why every
+run here leaves a `redo_commands.sh` that replays with no model in the loop.
+Placement cannot, and does not pretend to.
+
+The tools are of two kinds, and the difference decides how you use one:
+
+| | **ACTOR** | **INSTRUMENT** |
+|---|---|---|
+| what it does | changes the board | says what is wrong with it |
+| here | `route.py`, `route_diff.py`, `route_planes.py`, `repair_planes.py`, `bga_fanout.py`, `qfn_fanout.py` | `check_connected.py`, `check_drc.py`, `check_complete.py`, `board_score.py`, `check_weird.py`, `check_cycles.py` |
+| how you use it | name it in the plan and let it run | run it -- never optional |
+
+Every runnable tool in this clone declares which door it serves and which of
+those two kinds it is. The routing door's own view, with each tool's purpose:
+
+```bash
+python3 -X utf8 krt_registry.py --door routing
+```
+
+## Step 0: the placement gate -- is this board ready to route?
+
+**Measure first, then decide.** A board whose parts are in the wrong places is
+not a routing problem and no router setting fixes it: a part whose pad copper
+lies outside the outline converts one-for-one into unrouted and broken nets,
+because its nets cannot be routed at all.
+
+```bash
+mkdir -p wk        # neither tool creates it, and both write into it
+python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb --json wk/assembly0.json
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py board.kicad_pcb --json wk/score0.json --quiet
+```
+
+**What each one is for.** `check_assembly` decides this gate: read its
+`VERDICT:` line, **not** `blocking == 0`. `blocking` is one of the five
+conjuncts that verdict is made of, so a board unbuildable through a
+coincident-origin stack or a containment reads `blocking` 0 and is still NOT
+BUILDABLE. `board_score` decides NOTHING here — record its `unrouted` and
+`broken` counts as the BASELINE you will compare the routed board against at
+the end of the chain.
+
+Classify from the JSON fields, not from exit status: `check_assembly` exits 4
+for any of its five conjuncts and its VERDICT line already says which one.
+
+- **NOT BUILDABLE** -> stop. This is placement work. Use `/plan-pcb-placement`
+  for the placement half alone, or `/plan-pcb-placement-and-routing` when the
+  board needs both.
+- **buildable** -> go to Step 1.
+
+**Run both commands every time.** They cost seconds. When you arrive from
+`/plan-pcb-placement-and-routing`, its L2 stage has already run these same two
+instruments before handing the board over — so ALSO quote that placement
+close-out beside your own reading, and the gate is shown satisfied twice rather
+than assumed once. Never skip the commands on the grounds that the loop must
+have run them.
+
 ## Step 1: Load and Analyze PCB Structure
 
 ```python
@@ -2579,6 +2658,32 @@ A per-board plan file that ever gets improved (a better recipe found on a
 later pass) should be REGENERATED through this skill, not hand-patched —
 the skill is the tuner; the plan file is its output.
 
+### Then PROVE it, before you run it
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-routing/scripts/route_plan_check.py <board>_plan.sh --board board.kicad_pcb
+```
+
+Read-only, no model in the loop. It evaluates **seventeen** rules of this
+skill that a recorded chain can answer, and REFUSES BY NAME, citing the
+SECTION here each rule comes from so you can argue with it at its source.
+
+**Run `--list` BEFORE you author the plan**, not after it is refused — it
+prints all seventeen in a few lines. The five that bite most often are: the
+chain ends on `route.py`, verification is commented rather than executable,
+no pipes, Step 5b's two net-coverage `assert`s, and one cap pass after the
+last fanout.
+
+Exit **0** checked and clean — proceed. **1** the checker itself crashed:
+nothing was proved, so fix the crash and do NOT run the plan. **2** usage.
+**3** the plan could not be read. **4** a rule failed. A refusal is not a
+malfunction: fix the plan, do not run it.
+
+It also PRINTS what it cannot decide, with the tool that owns each — nine
+rules need a routed board or a finished run, and an unchecked rule that says
+so is honest where a silently absent one is not. `--list` shows both sets
+without reading a plan.
+
 ### Stop conditions
 
 There are four, they are listed in `.claude/skills/plan-pcb-placement-and-routing/SKILL.md`
@@ -2635,8 +2740,14 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
 3. **Fanout `--layers` must EXCLUDE any layer carrying a solid plane**
    (e.g. the In1 GND plane) — escapes on the solid plane shred it, and
    the fanout does not avoid poured layers on its own.
-4. **The route flag is `--no-bga-zones` (plural).** The singular spelling
-   fails argparse.
+4. **Write `--no-bga-zones` (plural) everywhere.** Not because the singular
+   fails — measured, every one of `route.py`, `route_diff.py`,
+   `route_planes.py` and `repair_planes.py` ACCEPTS `--no-bga-zone` too, three
+   by an explicit alias and `route_diff` by argparse prefix matching. This
+   rule used to say the singular "fails argparse", which is false on all four
+   and made the twelve singular spellings in the body below look like bugs.
+   One spelling everywhere is still worth having; it is a consistency rule,
+   not a correctness one.
 5. **No pipes in the emitted plan.sh.** `2>&1 | tee ...` is for
    interactive runs only — `manifest_to_plan.py` tokenizes pipe segments
    into net globs and corrupts the JSON. Plain redirects or nothing.

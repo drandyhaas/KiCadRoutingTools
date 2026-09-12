@@ -39,6 +39,11 @@ A brief that silently omitted a measurement would read as "nothing to report".
 Exit codes: 0 = a brief was written, 2 = usage/load error, 3 = no outline
 (there is nothing to place against).
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse

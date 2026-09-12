@@ -362,7 +362,7 @@ def iso_panel(box_wh, png_path, caption, error='', scale=None):
     An earlier version returned only the image, so a panel that had "could not
     read the render" written across it still counted as a success.
 
-    Same contract as ``make_film._card_frame`` (``py_tools/make_film.py:231``),
+    Same contract as ``make_film._card_frame`` (``py_tools/make_film.py:236``),
     and deliberately so -- fitting an image of untrusted size into a fixed frame
     is the same problem, and it has been solved once here already.
 
