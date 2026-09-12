@@ -59,6 +59,9 @@ def _unblock_debug() -> bool:
 # kernels skip the bulk of the board's pads. Generous (~10x the largest realistic
 # margin) so routing stays byte-for-byte identical.
 _FOREIGN_PAD_WINDOW = 5.0  # mm
+# KICAD_SEG_DIST_EXACT=0 restores the sampled sweep in _seg_foreign_seg_dist
+# (the exact distance is the default; a corpus A/B is owed before this reaches main)
+_SEG_DIST_EXACT = os.environ.get('KICAD_SEG_DIST_EXACT', '1') != '0'
 # The sample-by-foreign sweeps below (_seg_foreign_pad_dist,
 # _seg_foreign_seg_dist) run in ROW CHUNKS so that no matrix exceeds this
 # many elements (512 KB of float64). Every element is computed from its own
@@ -471,6 +474,35 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                max(_nc.get(int(f), base_clearance),
                                    _tc.get(int(f), 0.0)) - base_clearance)
                            for f in fnid], dtype=float)
+    if _SEG_DIST_EXACT:
+        # The exact segment-to-segment distance (2026-09-11): the minimum
+        # between two segments is attained at an endpoint of one of them
+        # unless they cross, so four point-to-segment distances over the
+        # M foreign segments replace the (n + 1) x M sampled sweep -- the
+        # sampled minimum was never below the truth by more than the
+        # 0.02 mm step, this one IS the truth (so it can only be tighter).
+        # Profiled: 27,900 calls, 25 s of a 149 s K41 braid at write time.
+        def _p2ab(px, py):
+            pax_ = px - ax; pay_ = py - ay
+            tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+            return np.hypot(px - (ax + tt_ * abx), py - (ay + tt_ * aby))
+        d = np.minimum(_p2ab(x1, y1), _p2ab(x2, y2))
+        ux, uy = x2 - x1, y2 - y1
+        UL2 = ux * ux + uy * uy
+        if UL2 > 0:
+            for qx, qy in ((ax, ay), (bx, by)):
+                tt_ = np.clip(((qx - x1) * ux + (qy - y1) * uy) / UL2, 0.0, 1.0)
+                d = np.minimum(d, np.hypot(qx - (x1 + tt_ * ux), qy - (y1 + tt_ * uy)))
+            # a proper crossing: distance zero
+            c1 = ux * (ay - y1) - uy * (ax - x1)
+            c2 = ux * (by - y1) - uy * (bx - x1)
+            c3 = abx * (y1 - ay) - aby * (x1 - ax)
+            c4 = abx * (y2 - ay) - aby * (x2 - ax)
+            d = np.where((c1 * c2 < 0) & (c3 * c4 < 0), 0.0, d)
+        dist = d - hw
+        if excess is not None:
+            dist = dist - excess
+        return float(np.min(dist))
     rows = max(1, _SWEEP_CHUNK // ax.size)      # see _SWEEP_CHUNK
     best = math.inf
     for r0 in range(0, sx.size, rows):
