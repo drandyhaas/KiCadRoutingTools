@@ -47,11 +47,98 @@ def move_sig(m):
             (round(m.site[0], 2), round(m.site[1], 2)) if m.site else None)
 
 
+# The engine lays at these (realize's own generate_bga_fanout call); the
+# blocker census must use the SAME numbers or it names the wrong nets.
+FAN_TRACK = 0.1
+FAN_CLEAR = 0.1
+
+
+def _seg_point_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-12:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    return math.hypot(px - ax - t * dx, py - ay - t * dy)
+
+
+def _seg_seg_dist(a, b, c, d, n=12):
+    """Sampled segment-to-segment distance -- enough to decide whether two
+    escapes contend for the same room (this picks WHICH nets to re-fan, not
+    whether copper is legal; check_drc grades that)."""
+    best = 1e9
+    for i in range(n + 1):
+        t = i / n
+        px, py = a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])
+        best = min(best, _seg_point_dist(px, py, c[0], c[1], d[0], d[1]))
+        qx, qy = c[0] + t * (d[0] - c[0]), c[1] + t * (d[1] - c[1])
+        best = min(best, _seg_point_dist(qx, qy, a[0], a[1], b[0], b[1]))
+    return best
+
+
+def blockers_of(pcb, move, nid, byname, pool):
+    """The nets whose copper stands in the room `move` needs -- its legs on
+    their own layers, and its via site on EVERY layer (a barrel pierces
+    both). These are the escapes a one-net re-fan cannot touch, which is
+    why the engine degrades the ask instead of laying it: `_follow_plan`
+    can rip and re-lay a blocker, but only one that is IN THE SAME CALL
+    (K41 SA11: asked a dogbone under U1, laid `level 3 lost
+    ['face','gap','layer','kind'] = original`).
+
+    Returns (movable, pinned): nets of `pool` that may be re-fanned with
+    it, and blockers OUTSIDE the pool, which nothing in this chain can
+    move (the K35 climb was walled by SA14, a net not in the run)."""
+    id2nm = {v[0]: k for k, v in byname.items()}
+    legs = [(tuple(a), tuple(b), L) for (a, b, L) in (move.legs or ())]
+    site = tuple(move.site) if move.site else None
+    d_seg = FAN_TRACK / 2 + FAN_CLEAR + FAN_TRACK / 2
+    d_via = te.VIA_SIZE / 2 + FAN_CLEAR + FAN_TRACK / 2
+    d_vv = te.VIA_SIZE / 2 + FAN_CLEAR + te.VIA_SIZE / 2
+    hit = set()
+
+    def take(other_id):
+        if other_id and other_id != nid:
+            hit.add(other_id)
+    for sg in pcb.segments:
+        if sg.net_id == nid or not sg.net_id:
+            continue
+        a, b = (sg.start_x, sg.start_y), (sg.end_x, sg.end_y)
+        for (p, q, L) in legs:
+            if sg.layer == L and _seg_seg_dist(p, q, a, b) < d_seg + sg.width / 2:
+                take(sg.net_id)
+        if site is not None and _seg_point_dist(site[0], site[1], a[0], a[1],
+                                                b[0], b[1]) < d_via + sg.width / 2:
+            take(sg.net_id)          # the barrel pierces every layer
+    for v in pcb.vias:
+        if v.net_id == nid or not v.net_id:
+            continue
+        for (p, q, _L) in legs:
+            if _seg_point_dist(v.x, v.y, p[0], p[1], q[0], q[1]) < d_via + v.size / 2 - te.VIA_SIZE / 2:
+                take(v.net_id)
+        if site is not None and math.hypot(v.x - site[0], v.y - site[1]) < d_vv:
+            take(v.net_id)
+    names = {id2nm[i] for i in hit if i in id2nm}
+    movable = sorted(n for n in names if n in pool)
+    pinned = sorted(n for n in names if n not in pool)
+    return movable, pinned
+
+
 def full_move(m):
     """The plan's Move as the engine's FULL hint: face, exit point (its
     coordinate along the face is the gap), layer, kind, dog-bone site."""
-    return {'face': m.direction, 'exit': tuple(m.exit_pt), 'layer': m.layer,
-            'kind': m.kind, 'site': (tuple(m.site) if m.site else None)}
+    d = {'face': m.direction, 'exit': tuple(m.exit_pt), 'layer': m.layer,
+         'kind': m.kind, 'site': (tuple(m.site) if m.site else None)}
+    if getattr(m, 'walk', 0) and m.site is not None:
+        # a WALKED dog-bone: the surface stub's polyline, ball -> elbow ->
+        # site (underpad._dogbone_path_valid lays exactly it)
+        d['path'] = [tuple(m.legs[0][0]), tuple(m.legs[0][1]), tuple(m.site)]
+    if os.environ.get('EXACT_LANE') and m.legs:
+        # EXACT_LANE (2026-09-10): the move's own legs, laid verbatim by
+        # underpad.attempt before its search -- the engine's "exact" was
+        # the exact EXIT, and a stub audited exact ran four rows down the
+        # neighbouring gap (K35 SA6), taking the lane two other asks held
+        d['legs'] = [(tuple(a), tuple(b), L) for (a, b, L) in m.legs]
+    return d
 
 
 def snap_dir(dx, dy):
@@ -98,6 +185,10 @@ def measure_tooth(pcb, nm, pad, byname, dest_ref=None, which=None):
     # corner tie
     fp = pcb.footprints[pad.component_ref]
     g = em.grid_of(fp)
+    if os.environ.get('SPLIT_BLOCKS', '0') not in ('', '0'):
+        # a banded array's BLOCK bounds the face (a stub in the band is
+        # beyond its block's inner face, inside the array)
+        g = em.block_of(pad, em.blocks_of(fp))
     x0, y0, x1, y1 = g.bbox
     hx, hy = g.pitch_x / 2, g.pitch_y / 2
     beyond = [f for f, ok in (('right', tooth[0] > x1 + hx * 0.5),
@@ -192,9 +283,19 @@ def audit(asked, achieved, original, laid, log, label):
                 v.append('= original')
         exact = (nm in laid and g is not None and g['direction'] == a.direction
                  and g['layer'] == a.layer and g['kind'] == a.kind and gap <= GAP_TOL)
+        # WHICH dimensions the engine could not give, for a caller that has
+        # to decide whether asking again is worth a pass. Losing the gap is
+        # a berth a hair along its own face; losing the LAYER or the KIND is
+        # a structurally different berth, and the engine saying so once
+        # means it will say so again.
+        lost = [] if (nm not in laid or g is None) else \
+            [k for k, okd in (('face', g['direction'] == a.direction),
+                              ('layer', g['layer'] == a.layer),
+                              ('kind', g['kind'] == a.kind),
+                              ('gap', gap <= GAP_TOL)) if not okd]
         audit_d[nm] = {'original': o, 'asked': fmt_ask(a), 'achieved': g,
                        'gap_mm': round(gap, 3), 'outward_mm': round(outward, 3),
-                       'verdict': ', '.join(v), 'exact': exact}
+                       'verdict': ', '.join(v), 'exact': exact, 'lost': lost}
         log('  ' + f'{nm:7s} {fmt(o):42s} {fmt_ask(a):52s} {fmt(g):42s} {", ".join(v)}')
     n_ok = len(laid)
     same = sum(1 for nm in laid if audit_d[nm]['verdict'].endswith('= original'))
@@ -221,15 +322,30 @@ def drc_pairs(board):
 
 
 def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
-            guard_names=()):
+            guard_names=(), free=(), strict=False):
     """Strip the chosen nets' source copper, re-fan them in the asked
     faces, write `out_path`, audit every tooth. Returns a dict with the
     per-net audit, `ok` (laid) / `restored` (refused), and `rejected` (a
-    DRC reason) when the written board must not be used."""
+    DRC reason) when the written board must not be used.
+
+    `free`: the JOINT SOURCE RE-FAN (2026-09-11). Nets stripped and
+    re-laid in the SAME engine call as the chosen ones but given NO hint,
+    so the engine may put them anywhere. They are the blockers
+    (`blockers_of`) whose copper stands in the room the ask needs. A
+    one-net re-fan cannot move them -- they are foreign copper to it --
+    so the engine degrades the ask instead; inside one call
+    `underpad._follow_plan` can rip and re-lay them around it. They are
+    NOT audited against an ask (they have none) and are excluded from the
+    drift guard, which is a guard on teeth nobody asked to move.
+    `strict`: cap the engine's degrade ladder at level 2, so a ball with
+    no berth on its asked face is left UNESCAPED (and so restored to its
+    original copper, reported) rather than dumped somewhere the plan
+    never asked for and audited as a near-miss."""
     pcb = parse_kicad_pcb(board)
     pcb0 = parse_kicad_pcb(board)      # untouched copy for the drift guard
     n2n = {i: n.name for i, n in pcb.nets.items()}
-    names = list(src_choice)
+    free = [nm for nm in dict.fromkeys(free) if nm not in src_choice]
+    names = list(src_choice) + free
     original = {nm: measure_tooth(pcb, nm, src_pad[nm], byname) for nm in names}
 
     removed = {}
@@ -241,7 +357,12 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     hints = {}
     for nm, m in src_choice.items():
         p = src_pad[nm]
-        hints[(round(p.global_x, 3), round(p.global_y, 3))] = full_move(m)
+        fm = full_move(m)
+        if strict:
+            fm['strict'] = True
+        hints[(round(p.global_x, 3), round(p.global_y, 3))] = fm
+    # the `free` nets get NO hint on purpose: they are stripped so the
+    # engine has their room to give, not so it reproduces their escapes
     # the UNDER-PAD engine, not 'auto': the channel engine assigns a
     # channel per ball and runs it straight to the edge without treating
     # the unmoved nets' existing stubs as channel occupants (measured: a
@@ -281,13 +402,26 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
 
     pcb2 = parse_kicad_pcb(out_path)
     achieved = {nm: measure_tooth(pcb2, nm, src_pad[nm], byname) for nm in names}
-    log(f'  source realize: {len(names)} teeth asked to move, engine laid '
-        f'{len(ok)}, refused {len(restored)}'
-        + (f' (restored: {", ".join(restored)})' if restored else ''))
-    audit_d, counts = audit(src_choice, achieved, original, ok, log, 'source')
+    log(f'  source realize: {len(src_choice)} tooth/teeth asked to move, engine laid '
+        f'{len([n for n in ok if n in src_choice])}, refused '
+        f'{len([n for n in restored if n in src_choice])}'
+        + (f' (restored: {", ".join(n for n in restored if n in src_choice)})'
+           if any(n in src_choice for n in restored) else '')
+        + (f'; {len(free)} blocker(s) re-fanned with them: {", ".join(free)}'
+           if free else ''))
+    if free:
+        moved = [nm for nm in free
+                 if achieved.get(nm) and original.get(nm)
+                 and achieved[nm]['tooth'] != original[nm]['tooth']]
+        log(f'  source realize: blockers -- {len(moved)} of {len(free)} took a '
+            f'different tooth' + (f': {", ".join(moved)}' if moved else ''))
+    audit_d, counts = audit(src_choice, {n: achieved[n] for n in src_choice},
+                            {n: original[n] for n in src_choice},
+                            [n for n in ok if n in src_choice], log, 'source')
     # the teeth NOT asked to move must not have moved (the engine re-fans
     # only the stripped nets, but say so from the board, not from trust)
-    others = [nm for nm in guard_names if nm not in src_choice]
+    others = [nm for nm in guard_names
+              if nm not in src_choice and nm not in free]
     if others:
         before = te.endpoints(pcb0, others, byname)
         after = te.endpoints(pcb2, others, byname)
@@ -303,4 +437,4 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
             log('      ' + ln)
     return {'board': out_path, 'audit': audit_d, 'ok': ok, 'restored': restored,
             'achieved': achieved, 'original': original, 'rejected': rejected,
-            'counts': counts}
+            'counts': counts, 'free': list(free)}
