@@ -32,7 +32,17 @@ r = subprocess.run([PY, os.path.join(HERE, '..', 'py_router',
                                      'check_drc.py'), board,
                     '--clearance', '0.1', '--clearance-margin', '0.1'],
                    capture_output=True, text=True)
-m = re.search(r'FOUND (\d+) DRC VIOLATIONS', r.stdout + r.stderr)
+# ASSERT THE CHECKER RAN. `int(m.group(1)) if m else 0` read a crashed
+# check_drc -- bad path, import error, traceback -- as a clean board, on
+# the one tool that produces this campaign's headline verdict. A checker
+# that did not report is not evidence of anything (CLAUDE.md: "a test's
+# own failure path is the path nobody looks at").
+_drc_out = r.stdout + r.stderr
+m = re.search(r'FOUND (\d+) DRC VIOLATIONS', _drc_out)
+if m is None and 'NO DRC VIOLATIONS' not in _drc_out:
+    print(f'GRADE {os.path.basename(board)} BROKEN: check_drc returned '
+          f'{r.returncode} and reported no verdict -- ' + (_drc_out.strip().splitlines() or ['(no output)'])[-1])
+    sys.exit(2)
 ndrc = int(m.group(1)) if m else 0
 # ...and how many of them involve one of the run's own nets: the rest
 # is the board's (a whole-array fanout's grazes on other nets)
