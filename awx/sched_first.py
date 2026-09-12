@@ -52,13 +52,16 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import select_moves as sm
 from escape_moves import Move
+import prices as _pr  # ONE source for the swimmer price
 
 Pt = Tuple[float, float]
 
-SF_SWIM = float(os.environ.get('SF_SWIM', '12.0'))    # a net left off its page's chain
+SF_SWIM = _pr.CHAIN    # ONE source: prices.py -- a net left off its page's chain
 SF_NOCONFLICT = int(os.environ.get('SF_NOCONFLICT', '0'))   # DIAGNOSTIC: ignore lane conflicts (the order's own ceiling)
 SF_REPAIR = int(os.environ.get('SF_REPAIR', '60'))     # conflict-repair rounds (each re-solves ONE page)
-SF_REPAIR_S = float(os.environ.get('SF_REPAIR_S', '12'))  # ...and their time budget per choose(), seconds
+# a cap in JUDGE CALLS, never seconds (see fanout_from_plan.PLAN_CALLS):
+# a clock budget makes a slower machine answer DIFFERENTLY, not later
+SF_REPAIR_CALLS = int(os.environ.get('SF_REPAIR_CALLS', '1500'))
 # SF_BRAID_ORDER=1 (2026-09-11, README TODO 20): the launch order is the
 # braid's own (plan_braid on a provisional plan: joiners by their join
 # blocks, not by the teeth's projection across the bundle -- at K15 the
@@ -491,7 +494,8 @@ def choose(st, menu: Dict[str, List[Move]], log=None, rounds: int = 3,
             bad = conflicts(choice)
             if not bad:
                 return choice, skipped, total, True
-            if time.time() - t_start > SF_REPAIR_S:
+            import fanout_from_plan as _fp
+            if _fp._spent() - c_start > SF_REPAIR_CALLS:
                 break
             # a fixed net keeps its move: the other side of the pair loses
             free = [n for n in bad if n not in fixed] or list(bad)
@@ -503,6 +507,8 @@ def choose(st, menu: Dict[str, List[Move]], log=None, rounds: int = 3,
         return choice, skipped, total, False
 
     t_start = time.time()
+    import fanout_from_plan as _fp0
+    c_start = _fp0._spent()
     page = {n: tooth.get(n, 'F.Cu') for n in names}
     choice, skipped, total = solve(page)
     if fixed:
