@@ -104,7 +104,28 @@ FIXTURES = [
 # parts shipped a reference designator rotated 180 degrees from where KiCad
 # puts it -- relative to their own pads, which had rotated correctly.
 COMPOSED_DELTAS = (None, 90.0, 180.0)
-PASSES = [(b, r, d) for (b, r) in FIXTURES for d in COMPOSED_DELTAS]
+# A third kind of pass: a ROTATION with no flip at all. It exists because its
+# absence hid the mirror-image bug of the one above -- the flip path composed
+# its text angles and the plain rotation path never did, so 11 of run 26's 15
+# rotated parts shipped their Reference at the pre-rotation angle while every
+# pad had turned correctly. pcbnew's `SetOrientationDegrees(old + d)` moves
+# each text by exactly d (absolute angles).
+#
+# ORTHOGONAL deltas only, and that is a measurement, not a shortcut: at
+# 137.25 deg pcbnew re-derives every footprint-local coordinate through the
+# rotation and loses a nanometre on 43 of them across 7 of the 16 fixtures
+# (pad `at`, `fp_line` ends, `fp_curve` points, `fp_circle` centres), and the
+# canonical child sort then re-pairs near-identical nodes so seven of those
+# read as large differences. This writer emits the board's own values, which
+# is the lossless side of that disagreement (the arc-mid waiver below is the
+# same story for the flip). A fractional delta's FORMATTING is pinned by
+# `tests/test_457_writer_precision.py` (137.25 there); what this gate proves
+# is the composition against pcbnew, and 90/270 prove it exactly.
+ROTATE_DELTAS = (90.0, 270.0)
+# Flip rows first: the Y-mirror direction check runs once, on the first row
+# with pads, and must see a flip.
+PASSES = ([(b, r, d) for (b, r) in FIXTURES for d in COMPOSED_DELTAS]
+          + [(b, r, ('rotate', d)) for (b, r) in FIXTURES for d in ROTATE_DELTAS])
 
 # A run that compared nothing must fail. Floors are below today's counts so a
 # board changing is not a failure, and far above zero so a vacuous run is.
@@ -307,16 +328,23 @@ def main(argv=None):
             if fp is None:
                 problems.append(f"{board}:{ref} not on the board -- fixture stale")
                 continue
+            rotate_only = isinstance(delta, tuple)
             before_y = [p.GetFPRelativePosition().y for p in fp.Pads()]
             before_x = [p.GetFPRelativePosition().x for p in fp.Pads()]
-            fp.Flip(fp.GetPosition(), tb)
-            if delta is not None:
-                # COMPOSED: a flip AND a rotation the caller chose, which
-                # is not pcbnew's bare flip and is the case every shipped
-                # consumer actually asks for.
+            if rotate_only:
+                # A plain rotation: no flip, the orientation moves by d and
+                # pcbnew turns pads AND texts with it.
                 fp.SetOrientationDegrees(
-                    round((fp.GetOrientationDegrees() + delta) % 360, 6))
-            if before_y and not direction_checked:
+                    round((fp.GetOrientationDegrees() + delta[1]) % 360, 6))
+            else:
+                fp.Flip(fp.GetPosition(), tb)
+                if delta is not None:
+                    # COMPOSED: a flip AND a rotation the caller chose, which
+                    # is not pcbnew's bare flip and is the case every shipped
+                    # consumer actually asks for.
+                    fp.SetOrientationDegrees(
+                        round((fp.GetOrientationDegrees() + delta) % 360, 6))
+            if before_y and not direction_checked and not rotate_only:
                 # The enum is KiCad 10; on 9 the second arg is a bool. Prove
                 # the direction TAKEN mirrors Y, so a KiCad that changes the
                 # meaning fails loudly instead of comparing a different flip.
@@ -337,12 +365,22 @@ def main(argv=None):
             fp0 = parse_kicad_pcb(src).footprints[ref]
             side = 'F' if (fp0.layer or 'F').startswith('B') else 'B'
             ours = os.path.join(tmp, f"{board}_{ref}_ours.kicad_pcb")
-            write_placed_output(src, ours, [{
-                'reference': ref, 'new_x': round(fp0.x, 6),
-                'new_y': round(fp0.y, 6),
-                'new_rotation': round(((-(fp0.rotation or 0.0))
-                                       + (delta or 0.0)) % 360, 6),
-                'new_side': side}])
+            if rotate_only:
+                # No `new_side`: this exercises the ordinary rotation path,
+                # the one every placement lap takes.
+                placement = {
+                    'reference': ref, 'new_x': round(fp0.x, 6),
+                    'new_y': round(fp0.y, 6),
+                    'new_rotation': round(((fp0.rotation or 0.0)
+                                           + delta[1]) % 360, 6)}
+            else:
+                placement = {
+                    'reference': ref, 'new_x': round(fp0.x, 6),
+                    'new_y': round(fp0.y, 6),
+                    'new_rotation': round(((-(fp0.rotation or 0.0))
+                                           + (delta or 0.0)) % 360, 6),
+                    'new_side': side}
+            write_placed_output(src, ours, [placement])
 
             ta, tk = _block(ours, ref), _block(kout, ref)
             if ta is None or tk is None:
@@ -362,7 +400,10 @@ def main(argv=None):
             d = _diff(canon(parse_sexpr(ta)), canon(parse_sexpr(tk)),
                       limit=args.show, waived=waived)
             if d:
-                tag = 'pure flip' if delta is None else f'flip + {delta} deg'
+                if rotate_only:
+                    tag = f'rotate + {delta[1]} deg'
+                else:
+                    tag = 'pure flip' if delta is None else f'flip + {delta} deg'
                 problems.append(
                     f"{board}:{ref} [{tag}] {len(d)} node difference(s):")
                 problems.extend("      " + x for x in d[:args.show])

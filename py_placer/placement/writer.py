@@ -264,6 +264,62 @@ def _rotate_pad_angles(fp_text: str, delta_rot: float) -> str:
         fix_pad, fp_text)
 
 
+def _rotate_text_angles(fp_text: str, delta_rot: float, ref: str) -> str:
+    """Add delta_rot to the FIRST `(at x y [a])` of every top-level text node
+    (`property`, `fp_text`) in a footprint block.
+
+    KiCad stores a footprint text's angle as an ABSOLUTE board angle (probed
+    on pcbnew 10.0.0: `SetOrientationDegrees(old + d)` moves every text angle
+    by exactly d), so a rotation composes additively -- the same rule
+    `_rotate_pad_angles` applies to pads -- under the token rule
+    `_flip_at_angle` measured on the corpus: a present angle token is kept
+    (a text at 315 rotated by 45 keeps `(at x y 0)`), an absent one is added
+    only when the result is non-zero.
+
+    Until this existed the rotation path rotated pads only, so every rotated
+    part shipped its texts at the pre-rotation angle: 11 of run 26's 15 rotated
+    parts carried a Reference designator that no longer matched the pads it
+    labelled. The flip path has always composed its texts (#714) and is
+    untouched here -- one code path per mode, as `write_placed_output` says.
+    """
+    pieces = []
+    for head, s, e in _iter_sexpr_children(fp_text, 0):
+        if head not in _FLIP_TEXTS:
+            continue
+        node = fp_text[s:e]
+        m = re.search(r'\(at\s+([^\s()]+)\s+([^\s()]+)(?:\s+([^\s()]+))?\)',
+                      node)
+        if not m:
+            if re.search(r'\(at\b', node):
+                # Same doctrine as `_flip_at_angle`: an `(at ...)` that is
+                # there and does not parse must not be skipped silently, or
+                # the block ships with its pads turned and its texts not.
+                raise SideFlipUnsupported(
+                    f"{ref}: a text node has an `(at ...)` this rotation "
+                    f"cannot parse -- expected two or three plain numbers. "
+                    f"Refusing rather than rotating the pads and leaving the "
+                    f"text where it was: {node[:120]!r}")
+            continue
+        x, y, a = m.group(1), m.group(2), m.group(3)
+        na = round(((float(a) if a is not None else 0.0) + delta_rot) % 360, 6)
+        if a is not None or na != 0:
+            rep = f"(at {x} {y} {na:.6g})"
+        else:
+            rep = f"(at {x} {y})"
+        if rep != node[m.start():m.end()]:
+            pieces.append((s + m.start(), s + m.end(), rep))
+    if not pieces:
+        return fp_text
+    out = []
+    prev = 0
+    for s, e, rep in pieces:
+        out.append(fp_text[prev:s])
+        out.append(rep)
+        prev = e
+    out.append(fp_text[prev:])
+    return ''.join(out)
+
+
 class SideFlipUnsupported(Exception):
     """A flip was asked for on a footprint carrying a construct we will not guess at.
 
@@ -961,6 +1017,10 @@ def write_placed_output(input_file: str, output_file: str,
             delta_rot = (new_rot - old_rot) % 360
             if delta_rot != 0:
                 new_fp_text = _rotate_pad_angles(new_fp_text, delta_rot)
+                # The texts' angles are absolute too (pcbnew 10 probe), so
+                # they compose the same way; leaving them was how a rotated
+                # part shipped its Reference at the old angle.
+                new_fp_text = _rotate_text_angles(new_fp_text, delta_rot, key)
 
         content = content[:start] + new_fp_text + content[end:]
         modified_count += 1
