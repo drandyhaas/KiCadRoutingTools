@@ -2147,9 +2147,9 @@ class Corridor:
         # the s=0.1 separation -- a full step downstream, one-directional.
         # It decides which samples may host a via (the `room` test) and
         # which gkill rows exist, so it deletes and grants slots.
-        _g = np.clip(np.searchsorted(Sg, Sm), 0, len(Sg) - 1)
-        _lo = np.clip(_g - 1, 0, len(Sg) - 1)
-        gk[k] = np.where(np.abs(Sg[_lo] - Sm) <= np.abs(Sg[_g] - Sm), _lo, _g)
+            _g = np.clip(np.searchsorted(Sg, Sm), 0, len(Sg) - 1)
+            _lo = np.clip(_g - 1, 0, len(Sg) - 1)
+            gk[k] = np.where(np.abs(Sg[_lo] - Sm) <= np.abs(Sg[_g] - Sm), _lo, _g)
         prox = set()
         # the room a via needs from the other nets' lines: a single-lane
         # net's line KILLS the slot (as level 4), a candidate's line gates
@@ -6699,6 +6699,17 @@ class Corridor:
                 trials.append([v])
         for V in trials:
             seg0, via0 = list(ctx.pcb.segments), list(ctx.pcb.vias)
+            # ...and the BOOKKEEPING, which the rollback below used not to
+            # restore. A NESTED rip commits self.out_segs/out_vias for its
+            # own victims before returning; when the outer trial then lost
+            # a victim it put the BOARD back and left those entries naming
+            # copper that is no longer on it. The writer takes segments
+            # from ctx.pcb and vias from out_vias, so the net shipped with
+            # old tracks and new via positions -- every layer change with
+            # no barrel under it, reported as routed. Measured: 47 of 48
+            # "silent" opens across 391 recorded runs break at a via-less
+            # layer change, and SDQ5 on the 104-via K51 plan is one.
+            os0, ov0 = dict(self.out_segs), dict(self.out_vias)
             ids_s = {id(x) for v in V for x in self.out_segs[v]}
             ids_v = {id(x) for v in V for x in self.out_vias[v]}
             ctx.pcb.segments = [x for x in seg0 if id(x) not in ids_s]
@@ -6731,6 +6742,7 @@ class Corridor:
                 relaid[v] = r2
             if lost is not None:
                 ctx.pcb.segments, ctx.pcb.vias = seg0, via0
+                self.out_segs, self.out_vias = os0, ov0
                 log(f'    rip {V}: {nm} routed ({len(r1[1])} via(s)) but '
                     f'{lost} lost -- put back  ({_time.perf_counter() - t0:.1f} s)')
                 continue
@@ -7512,6 +7524,43 @@ def cross_corridor_vias(corridors):
     return out
 
 
+def _write_layer_jumps(board_path, names):
+    """Nets whose own copper meets on two layers with no barrel and no
+    plated pad there -- a layer change with nothing to make it. Returns
+    [(net, x, y)]. Read off the WRITTEN file, so it sees what shipped
+    rather than what the bookkeeping believes."""
+    import collections as _c
+    try:
+        pcb = parse_kicad_pcb(board_path)
+    except Exception:
+        return []
+    want = set(names)
+    by = {i: n.name.split('/')[-1] for i, n in pcb.nets.items()}
+    ends = _c.defaultdict(lambda: _c.defaultdict(set))
+    holes = _c.defaultdict(list)
+    for sg in pcb.segments:
+        n = by.get(sg.net_id)
+        if n in want:
+            ends[n][(round(sg.start_x, 3), round(sg.start_y, 3))].add(sg.layer)
+            ends[n][(round(sg.end_x, 3), round(sg.end_y, 3))].add(sg.layer)
+    for v in pcb.vias:
+        n = by.get(v.net_id)
+        if n in want:
+            holes[n].append((v.x, v.y))
+    for fp in pcb.footprints.values():
+        for p in fp.pads:
+            if p.drill and p.drill > 0 and by.get(p.net_id) in want:
+                holes[by[p.net_id]].append((p.global_x, p.global_y))
+    out = []
+    for n, pts in ends.items():
+        for (x, y), lays in pts.items():
+            if len(lays) < 2:
+                continue
+            if not any((hx - x) ** 2 + (hy - y) ** 2 < 0.04 for hx, hy in holes.get(n, ())):
+                out.append((n, x, y))
+    return out
+
+
 def plan_braid(board, names, dest, plan, log=None):
     """THE PLANNER, callable on a plan before any destination copper
     exists: the braid's own setup (corridors as it forms them, spines)
@@ -7860,8 +7909,21 @@ def write_out(a, ctx, corridors, names, log):
         shutil.copy(pro, a.out + '.kicad_pro')
     nv = sum(len(v) for v in out_vias.values())
     nseg = sum(len(emit[nm]) for nm in names)
+    # A VIA-LESS LAYER CHANGE IS A BROKEN NET, and it ships silently: the
+    # net is not refused, so nothing in the summary or the refusal list
+    # mentions it and only check_connected finds it. Measured over 391
+    # recorded runs: 48 of 146 open nets were "silent" and 47 of those 48
+    # break exactly here. The invariant is cheap and total -- wherever a
+    # net's own copper meets on two layers there must be a barrel or a
+    # plated pad -- and it was 0 on every complete board tested.
+    _jump = _write_layer_jumps(out_board, names)
+    if _jump:
+        log(f'  WARNING via-less layer change on {len(_jump)} net(s): '
+            + ', '.join(f'{n}@({x:.2f},{y:.2f})' for n, x, y in _jump[:6])
+            + ' -- these ship OPEN and are not in the refused list')
     log(f'\nwrote {out_board}: {nseg} segments, {nv} vias'
-        + (f' -- {len(refused)} net(s) REFUSED' if refused else ''))
+        + (f' -- {len(refused)} net(s) REFUSED' if refused else '')
+        + (f' -- {len(_jump)} VIA-LESS LAYER CHANGE(S)' if _jump else ''))
     return 1 if refused else 0
 
 

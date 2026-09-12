@@ -25,9 +25,21 @@ Two arms are current, and **a number is meaningless without its arm**:
 | | K15 | K28 | K35 | K41 | K51 |
 |---|---|---|---|---|---|
 | reference arm (one-pass plan) | 14 | 36 | 69 | 86 | -- |
-| joint-solve arm | -- | -- | **58** | **80** | 137 |
-| best complete K51 ever (`replan.py`) | | | | | 107 |
-| **human** | 22 | 46 | **58** | **70** | **81** (48 nets; 85 over 51) |
+| joint-solve arm | -- | -- | 58 | 80 | 137 |
+| **BEST MEASURED** (`replan.py`, opt-in) | 14 | 36 | **46** | **76** | **107** |
+| **human** | 22 | 46 | 58 | 70 | **81** (48 nets; 85 over 51) |
+
+**The best row is the one to beat, and it is not the arm the chain runs by
+default.** Every number in it is a real board in `awx/tmp/`, re-graded
+2026-09-12 at 0 open / 0 DRC: `rw35e_rp_k35` **46**, `c3b_k41` **76**,
+`rp6b_rp_k51` **107** (also `rw41e_rp_k41` 91, `rw35d_rp_k35_r1` 51).
+**At K35 we BEAT the human by 12 vias.** The deficit is real at K41 (+6)
+and K51 (+26), and it grows with congestion -- that is the shape of the
+problem, not "we match at K35".
+
+These boards come from `replan.py` -- the route as the judge -- run wide
+(`--worst=35..41 --probes=2 --apply=strip`). The K51 line was never run
+at that width; it ran `--worst=6 --probes=1` and stopped at 107.
 
 - **reference arm**: `SRC_ROUNDS=0 SEL_RETRY=6 EXACT_LANE=1
   DST_FACE_ASK=1 DST_WALK=3 SF_SWIM=30 BRAID_EXIT_GUARD=1
