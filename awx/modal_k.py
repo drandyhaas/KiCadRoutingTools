@@ -71,6 +71,17 @@ BASE_ENV = {
     "SF_JUDGE": "braid", "BRAID_ONE_DIVE": "5", "DST_RESIDUE": "3",
     "DST_RESIDUE_POOL": "displaced", "DST_RESIDUE_CANDS": "4",
     "BRAID_ALT_SOLVER": "cpsat", "BRAID_CPSAT_DET": "40",
+    # THE SEARCH IS BOUNDED BY WALL CLOCK IN FIVE PLACES, and a container
+    # is ~2x slower than the laptop, so budgets that never bind locally DO
+    # bind here -- that is not a slower answer, it is a DIFFERENT one.
+    # Measured: two identical cloud runs of the K35 baseline came back 72
+    # vias / 1436 segs and 58 / 1840. Raised until they do not bind; the
+    # deterministic bounds (BRAID_CPSAT_DET, the node budgets) are then
+    # what actually stops a solve. The real fix is a work-based budget in
+    # the search itself -- README TODO.
+    "DST_RESIDUE_S": "4000", "DST_SEARCH_S": "600",
+    "BRAID_L5_ALT_TIME": "300", "BRAID_L5_JUDGE_TIME": "120",
+    "SRC_REPLAN_S": "2000",
 }
 
 KEEP = re.compile(
@@ -79,7 +90,10 @@ KEEP = re.compile(
     r"launch order:|target order:|re-lay rungs|dp: |wrote ")
 
 
-@app.function(cpu=4, memory=4096, timeout=5400, max_containers=64)
+# memory: a cap-8 choice instance is 505k rows and peaked at 1.29 GB
+# SINGLE-threaded; CP-SAT runs 4 workers, and one cap-8 arm died on
+# SIGABRT with no output in a 4 GB container.
+@app.function(cpu=4, memory=12288, timeout=7200, max_containers=64)
 def run_arm(arm: dict) -> dict:
     """One (tag, K) chain, graded, with the lines worth reading back."""
     tag, K = arm["tag"], int(arm["K"])

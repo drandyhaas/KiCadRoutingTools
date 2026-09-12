@@ -240,6 +240,17 @@ Every one of these cost a session to learn.
 - **The probe must use the chain's own env and board.** `DST_WALK` and
   `DST_FACE_ASK` change the MENU; a probe run without them measures a
   different problem (measured: 45 berths seated vs the chain's 34).
+- **THE SEARCH IS BOUNDED BY WALL CLOCK, so a slower machine gives a
+  DIFFERENT answer, not a later one.** Five budgets: `DST_RESIDUE_S`
+  240, `DST_SEARCH_S` 45, `BRAID_L5_ALT_TIME` 30, `BRAID_L5_JUDGE_TIME`
+  10, `SRC_REPLAN_S` 180. None binds on the laptop at K35/K41, which is
+  why the chain reads as deterministic there; a container is ~2x slower
+  (K51 1330-1574 s against 600-900) and they DO bind, so two identical
+  cloud runs of the K35 baseline came back **72 vias / 1436 segs and 58
+  / 1840**. This is also the likeliest source of the "knife edge" +-2..3
+  via spread seen under load locally. `modal_k.py` raises all five until
+  they do not bind; the real fix is a WORK-based budget (a judge-call
+  count) instead of a clock, which is TODO 14.
 - **Modal is a different numeric era.** The cloud image pins numpy,
   scipy, ortools, shapely and grid_router to the local versions but runs
   python 3.13 against the local 3.14, and the baseline ladder comes back
@@ -341,6 +352,12 @@ file and is in the bundle only.
     net is in the run.
 13. **Tooling.** Promote the session probes into `awx/` with a line each
     here; add the flag-off parity gate that the hand check does today.
+14. **Budget the search by WORK, not by the clock.** Five wall-clock
+    bounds decide how far the residue search and the level-5 solves get,
+    so the answer depends on the machine and its load (see "Measuring
+    honestly"). Count judge calls / candidates instead, and the chain
+    becomes reproducible across machines -- which is what `modal_k.py`
+    needs before a cloud A/B means anything.
 
 ## What this adds to `py_router`
 
