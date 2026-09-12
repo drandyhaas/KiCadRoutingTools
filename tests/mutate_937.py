@@ -33,6 +33,12 @@ exist for.
 It is the one slow row and it earns it: nothing else asserts that
 `loop_driver --dump-all` exits 0, and that exit code is what holds the twelve
 populated-arm ceilings down.
+
+The three `T_REG` rows each re-run the registry probe (one subprocess per
+tracked .py, ~11 s at 8 workers), so they are the next most expensive and the
+reason a mutation must never add work INSIDE that probe -- see the note on
+`self-records-by-substring`, which cost 33 min of 100% CPU before its
+whole-tree dump was hoisted out of a per-node loop.
 """
 import argparse
 import io
@@ -83,9 +89,15 @@ ROWS = [
      (T_REG,), KILLED),
     # The cross-check that caught itself: a substring scan reports the module
     # that EXPLAINS record_invocation as a caller of it.
+    # The substring scan is hoisted OUT of the walk, which is both the honest
+    # shape of the defect (one whole-tree dump, then the scan) and the only
+    # affordable one: inside the loop it costs nodes x dump per file, and the
+    # probe covers 242 tracked files -- route.py alone is 34,513 nodes x 26 ms
+    # = ~15 min, route_planes.py ~9 min. Measured: the row burned 33 min of
+    # 100% CPU and was nowhere near done. Same mutation, same kill, seconds.
     ('self-records-by-substring', 'reg',
      "    for node in ast.walk(tree):\n        if not isinstance(node, ast.Call):\n            continue",
-     "    for node in ast.walk(tree):\n        if 'record_invocation' in ast.dump(tree):\n            return True\n        if not isinstance(node, ast.Call):\n            continue",
+     "    if 'record_invocation' in ast.dump(tree):\n        return True\n    for node in ast.walk(tree):\n        if not isinstance(node, ast.Call):\n            continue",
      (T_REG,), KILLED),
 
     # ---- the routing door has an entry gate --------------------------------
