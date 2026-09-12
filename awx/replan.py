@@ -57,6 +57,32 @@ from collections import Counter
 
 ARGV = [a for a in sys.argv[1:] if not a.startswith('--')]
 OPTS = dict(a[2:].split('=', 1) for a in sys.argv[1:] if a.startswith('--'))
+# --walk=1 (2026-09-10): destination candidates are the WALKED dog-bones
+# only (escape_moves walk=; DST_WALK must be set), any face including
+# the net's current one, banned per SITE rather than per class.
+# --length=1: a probe that ties the board's vias and shortens the run's
+# copper stands (the K28 question: every diver costs exactly 2 vias
+# whatever its berth, so a walked berth can only pay in copper).
+WALK_ONLY = OPTS.get('walk', '0') == '1'
+LENGTH_TIE = OPTS.get('length', '0') == '1'
+# --apply=strip (2026-09-10): the round's fanout board is DERIVED from the
+# probes' routed board -- every net stripped to the fanout copper of the
+# board that last laid its ends (the probe's re-fanned board for a net it
+# fanned or re-laid, else the round's fanout board) -- instead of being
+# re-fanned from the standing asks. The re-fan lost K35's round: the probes'
+# incremental board graded 0 open / 0 DRC / 52 vias (base 61), the re-fanned
+# board laid two neighbours differently (SODT0 drifted, SA6's class), so the
+# full braid had to decide and came back at 60. Derived, the ends agree by
+# construction and the incremental board ships. Destination moves only.
+APPLY_STRIP = OPTS.get('apply', 'refan') == 'strip'
+
+
+def _dban(m):
+    """The destination ban key of a move: its class, or under --walk
+    its class and site."""
+    if WALK_ONLY and getattr(m, 'site', None):
+        return (m.direction, m.layer, round(m.site[0], 2), round(m.site[1], 2))
+    return (m.direction, m.layer)
 # the source menu offers climbs (fanout_from_plan reads this at import)
 os.environ.setdefault('SRC_CLIMB', OPTS.get('climb', '14'))
 
@@ -127,7 +153,13 @@ def grade(board, K, base):
     line = next((l for l in (r.stdout + r.stderr).splitlines() if l.startswith('GRADE')), '')
     m = re.search(r'open=(\d+) drc=(\d+) vias=(\d+)', line)
     opens = sorted(line.split('open: ')[1].split(',')) if 'open: ' in line else []
-    return ([opens, int(m.group(2)), int(m.group(3))] if m else [None, None, None]), line
+    mm = None
+    if m and LENGTH_TIE:
+        pcb_ = parse_kicad_pcb(board)
+        ids = {i for i, n in pcb_.nets.items() if n.name.split('/')[-1] in set(coherent_nets(K, base))}
+        mm = round(sum(math.hypot(sg.end_x - sg.start_x, sg.end_y - sg.start_y)
+                       for sg in pcb_.segments if sg.net_id in ids), 1)
+    return ([opens, int(m.group(2)), int(m.group(3)), mm] if m else [None, None, None, None]), line
 
 
 def count_copper(board, nid):
@@ -451,7 +483,8 @@ def rank_dest(B, nm, bans, buses, cache, top):
         p = st['dgrid'].pitch_y if ax else st['dgrid'].pitch_x
         return abs(m.exit_pt[ax] - (pad.global_y if ax else pad.global_x)) / p
     menu = [m for m in dmenu_full(st)[nm]
-            if (m.direction, m.layer) not in bans and (m.direction, m.layer) != cur
+            if _dban(m) not in bans and (WALK_ONLY or (m.direction, m.layer) != cur)
+            and (not WALK_ONLY or getattr(m, 'walk', 0) > 0)
             and not legs_cross(m, others)
             and not (m.kind == 'surface' and depth(m) > MAX_DEPTH + 0.6)]
     out = []
@@ -469,7 +502,7 @@ def rank_dest(B, nm, bans, buses, cache, top):
     # one candidate per class: the cheapest of each (face, layer)
     seen, res = set(), []
     for c, n, m, N in out:
-        k = (m.direction, m.layer)
+        k = _dban(m)
         if k in seen:
             continue
         seen.add(k)
@@ -789,6 +822,15 @@ def braid_run(board, out_stem, nets, dref, log_to, probe=False):
     return os.path.exists(out_stem + '.kicad_pcb'), time.time() - t0
 
 
+# the board carrying a net's fanout copper (set per round by main under
+# --apply=strip: a net re-laid by a later probe is stripped to the copper
+# of the board that last laid ITS ends, not the round-start fanout board,
+# which no longer holds a berth an earlier stand moved -- measured at K35:
+# SA1 lost its new berth to a later probe's strip and was routed to the
+# ball, which the derived fanout board then reported as ENDS MISS)
+FAN_PCB = None
+
+
 def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay=None):
     """The real router's answer to ONE move on the routed board R: the
     net stripped to its tooth, the asked end(s) re-fanned against the
@@ -798,7 +840,8 @@ def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay
     nid, net = byname[nm]
     res = {'net': nm, 'src': src_move, 'dst': dst_move}
     txt = strip_eco(open(R, encoding='utf-8').read())
-    txt = strip_to_fanout_copper(txt, nm, nid, net.name, B.pcb, _pad(st['sgrid'].bbox))
+    pcb_for = FAN_PCB if FAN_PCB is not None else (lambda _c: B.pcb)
+    txt = strip_to_fanout_copper(txt, nm, nid, net.name, pcb_for(nm), _pad(st['sgrid'].bbox))
     # the LOCAL RE-BRAID: the lanes in the way of the new end are stripped
     # (their teeth and berths stay) and re-laid with the moved net
     C = conflicts(src_move if src_move is not None else dst_move, B.lanes, nm)
@@ -810,7 +853,7 @@ def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay
     whole = (-1e9, -1e9, 1e9, 1e9)
     for c in sorted(C):
         cid, cnet = byname[c]
-        txt = strip_to_fanout_copper(txt, c, cid, cnet.name, B.pcb, whole)
+        txt = strip_to_fanout_copper(txt, c, cid, cnet.name, pcb_for(c), whole)
     res['relaid'] = sorted(C)
     cur = tag + '_bare.kicad_pcb'
     write_board(txt, cur, R)
@@ -883,7 +926,7 @@ def probe(B, R, nm, src_move, dst_move, tag, K, base, nets_csv, log, extra_relay
             txt2 = open(b2, encoding='utf-8').read()
             for c in sorted(extra):
                 cid, cnet = byname[c]
-                txt2 = strip_to_fanout_copper(txt2, c, cid, cnet.name, B.pcb, whole)
+                txt2 = strip_to_fanout_copper(txt2, c, cid, cnet.name, pcb_for(c), whole)
             write_board(txt2, b2, cur)
             C |= extra
             res['relaid'] = sorted(C)
@@ -969,6 +1012,9 @@ def better(g, ref):
         return False
     if len(g[0]) != len(ref[0]):
         return len(g[0]) < len(ref[0])
+    if LENGTH_TIE and g[2] == ref[2] and len(g) > 3 and len(ref) > 3 \
+            and g[3] is not None and ref[3] is not None:
+        return g[3] < ref[3] - 0.3
     return g[2] < ref[2]
 
 
@@ -1039,6 +1085,13 @@ def main():
     tried = Counter()
     prevV = None
     census_hist = {}
+    fan_src = {}        # net -> the board carrying its fanout copper (--apply=strip)
+    _pcb_cache = {}
+
+    def _pcb_of(path):
+        if path not in _pcb_cache:
+            _pcb_cache[path] = parse_kicad_pcb(path)
+        return _pcb_cache[path]
     import gc
     import resource
     for rnd in range(1, ROUNDS + 1):
@@ -1047,6 +1100,10 @@ def main():
         log(f'\n=== round {rnd}: verdict off {os.path.basename(R)}  '
             f'(peak rss {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576:.0f} MB)')
         B = Board(F, names, dref, banned=frozenset(bans_s), R=R)
+        if APPLY_STRIP:
+            global FAN_PCB
+            _F_round = F
+            FAN_PCB = lambda c, _F=_F_round: _pcb_of(fan_src.get(c, _F))
         V = verdict(R[:-len('.kicad_pcb')])
         if prevV is not None:
             # an incremental board's log names only the re-laid nets: the
@@ -1121,6 +1178,8 @@ def main():
                 ends_try = ['src'] if w == 'tooth' else ['dst'] if w == 'berth' else ['dst', 'src']
             else:
                 ends_try = ['dst', 'src']
+            if WALK_ONLY:
+                ends_try = ['dst']
             ref_g = best_g
             cands = []
             if len(stand) >= WORST + 2:
@@ -1179,7 +1238,7 @@ def main():
                     log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}; '
                         f'{pr.get("src_verdict") or pr.get("dst_verdict") or ""}) {pr["seconds"]:.0f} s')
                     if end == 'dst':
-                        bans_d[nm].add((m.direction, m.layer))
+                        bans_d[nm].add(_dban(m))
                     elif end == 'src':
                         bans_s.add((nm, sr.move_sig(m)))
                     else:
@@ -1216,9 +1275,18 @@ def main():
                     if substitute is not None:
                         substitute.comove = list(getattr(m, 'comove', []) or [])
                 ok = better(g, ref_g) and (in_cls or substitute is not None) and not pr.get('refused')
+                if LENGTH_TIE and pr.get('unjudged') and in_cls and g[0] == [] and g[1] == 0 \
+                        and better(g, ref_g):
+                    # --length: the local braid refused a lane but the last
+                    # call closed it -- the board is complete and clean at
+                    # equal vias and shorter copper, which IS the verdict
+                    # asked for (K28: 14 of 15 walked probes refused locally
+                    # and every board graded 0 open / 0 DRC / 36 vias)
+                    ok = True
+                    pr['unjudged'] = False
                 if substitute is not None:
                     if end == 'dst':
-                        bans_d[nm].add((m.direction, m.layer))
+                        bans_d[nm].add(_dban(m))
                     else:
                         bans_s.add((nm, sr.move_sig(m)))
                     m = substitute
@@ -1239,21 +1307,23 @@ def main():
                     + (f', co-moved {pr["comove"]}' if pr.get('comove') else '')
                     + (f', refused {pr["refused_nets"]}' if pr.get('refused_nets') else '')
                     + f'; board open {g[0]} drc {g[1]} vias {g[2]} (ref {len(ref_g[0])}/{ref_g[2]})'
-                    f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
+                    + (f' mm {g[3]} (ref {ref_g[3]})' if LENGTH_TIE and len(g) > 3 and len(ref_g) > 3 else '')
+                    + f' -> {"STANDS" if ok else ("unjudged" if pr.get("unjudged") and in_cls else "rejected")}'
                     + (f' (the engine\'s substitute {fmt_move(m)} is the ask)' if substitute is not None else '')
                     + f' ({pr["seconds"]:.0f} s)')
                 if ok:
-                    results.append((len(g[0]), g[2], end, m, pr))
+                    results.append((len(g[0]), g[2], (g[3] if LENGTH_TIE and len(g) > 3
+                                                       and g[3] is not None else 0), end, m, pr))
                 elif not (pr.get('unjudged') and in_cls) and substitute is None:
                     if end == 'dst':
-                        bans_d[nm].add((m.direction, m.layer))
+                        bans_d[nm].add(_dban(m))
                     elif end == 'src':
                         bans_s.add((nm, sr.move_sig(m)))
                     else:
                         bans_pair[nm].add((sr.move_sig(m[0]), m[1].direction, m[1].layer))
             if results:
-                results.sort(key=lambda t: (t[0], t[1]))
-                _o, _v, end, m, pr = results[0]
+                results.sort(key=lambda t: (t[0], t[1], t[2]))
+                _o, _v, _mm, end, m, pr = results[0]
                 stand[nm] = ((m[0], m[1], pr) if end == 'both'
                              else (m if end == 'src' else None, m if end == 'dst' else None, pr))
                 if MODE == 'incremental':
@@ -1263,6 +1333,9 @@ def main():
                     best_g = list(pr['grade'])
                     B.lanes = lane_items(parse_kicad_pcb(R_cur), B.pcb, names, B.byname)
                     B.advance(nm, pr)
+                    fo_b = R_cur[:-len('_rb.kicad_pcb')] + '_dst.kicad_pcb'
+                    for o in {nm} | set(pr.get('relaid') or []) | set((pr.get('comove_got') or {})):
+                        fan_src[o] = fo_b
                     log(f'    {nm}: {os.path.basename(R_cur)} is the board now '
                         f'(open {best_g[0]}, drc {best_g[1]}, vias {best_g[2]})')
         # PHASE 2: each gatekeeper tried at another class of its own,
@@ -1293,7 +1366,7 @@ def main():
                 if 'fail' in pr:
                     log(f'    probe {end} {fmt_move(m)}: FAILED ({pr["fail"]}) {pr["seconds"]:.0f} s')
                     if end == 'dst':
-                        bans_d[g].add((m.direction, m.layer))
+                        bans_d[g].add(_dban(m))
                     else:
                         bans_s.add((g, sr.move_sig(m)))
                     continue
@@ -1314,7 +1387,7 @@ def main():
                     results.append((len(gg[0]), gg[2], end, m, pr))
                 elif not (pr.get('unjudged') and in_cls):
                     if end == 'dst':
-                        bans_d[g].add((m.direction, m.layer))
+                        bans_d[g].add(_dban(m))
                     else:
                         bans_s.add((g, sr.move_sig(m)))
             if results:
@@ -1343,6 +1416,58 @@ def main():
         if not stand:
             log(f'  round {rnd}: no candidate stands -- stopping ({time.time() - t_r:.0f} s)')
             break
+        if APPLY_STRIP and MODE == 'incremental' and stand and R_cur != R \
+                and not any(s_ is not None for (s_, _d, _p) in stand.values()):
+            # --apply=strip: the fanout board IS the routed board without
+            # its lanes, net by net, each stripped to the copper of the
+            # board that last laid its ends
+            F1 = f'{stem}_r{rnd}_fo.kicad_pcb'
+            txt = strip_eco(open(R_cur, encoding='utf-8').read())
+            whole = (-1e9, -1e9, 1e9, 1e9)
+            changed = sorted(o for o in names if fan_src.get(o))
+            for nm in names:
+                nid, net = B.byname[nm]
+                txt = strip_to_fanout_copper(txt, nm, nid, net.name, _pcb_of(fan_src.get(nm, F)), whole)
+            write_board(txt, F1, F)
+            B1 = Board(F1, names, dref, banned=frozenset(bans_s))
+            named1 = (named | set(changed)) & set(B1.choice)
+            pred1, bp1, side = B1.write_sidecar(named1)
+            R1 = f'{stem}_r{rnd}.kicad_pcb'
+            copy_board(R_cur, R1, eco=True)
+            for ext in ('.log', '.pack.json', '_refusals.json'):
+                src_ = R_cur[:-len('.kicad_pcb')] + ext
+                if os.path.exists(src_):
+                    shutil.copy(src_, R1[:-len('.kicad_pcb')] + ext)
+            with open(R1[:-len('.kicad_pcb')] + '.census.json', 'w') as f:
+                json.dump(census_hist, f, indent=1, sort_keys=True)
+            g1, line = grade(R1, K, base)
+            # the derived fanout board must carry every changed net's ends
+            # where the routed board has them (the same copper, so a
+            # mismatch is a stripping error, not the engine's)
+            miss, trimmed = [], []
+            for nm in changed:
+                a, b = B1.ends[nm]['dst'], B.ends[nm]['dst']
+                if a is None:
+                    miss.append(nm)
+                elif b is None or a['layer'] != b['layer'] or a['direction'] != b['direction'] \
+                        or math.hypot(a['tooth'][0] - b['tooth'][0], a['tooth'][1] - b['tooth'][1]) > END_AGREE:
+                    # the lane joined the berth short of its tip and the
+                    # braid trimmed the bypassed tip (the #622 overshoot
+                    # trim): the derived board's end is the routed board's
+                    trimmed.append(f'{nm}: {sr.fmt(b)} -> {sr.fmt(a)}')
+            keep = better(g1, g_round0) and not miss
+            log(f'  round {rnd}: {"KEPT" if keep else "rejected"} derived -- open {g1[0]}, drc {g1[1]}, '
+                f'vias {g1[2]}' + (f' mm {g1[3]}' if LENGTH_TIE else '')
+                + f' (round start {g_round0[0]}/{g_round0[2]}); fanout board {os.path.basename(F1)} derived '
+                f'from the routed board, {len(changed)} net(s) with new ends, sidecar {len(named1)} nets named'
+                + (f'; NO END on the derived board for {miss}' if miss else '')
+                + (f'; berths trimmed by their lanes: {trimmed}' if trimmed else '')
+                + f' ({time.time() - t_r:.0f} s)')
+            if keep:
+                F, R, best_g = F1, R1, g1
+            else:
+                best_g = g_round0
+            continue
         # standing moves must not CONFLICT with each other (two nets asked
         # for one berth slot: the engine laid neither as asked, measured):
         # the better-graded one keeps its move, the other waits a round
@@ -1442,7 +1567,8 @@ def main():
             want = choice_all.get(nm)
             if g is None:
                 unfaithful.append(f'{nm} berth: engine laid none')
-            elif nm in comoved and (g['direction'], g['layer']) != (want.direction, want.layer):
+            elif nm in comoved and want is not None \
+                    and (g['direction'], g['layer']) != (want.direction, want.layer):
                 log(f'    {nm} berth CO-MOVED by the engine: {fmt_move(want)} -> {sr.fmt(g)}')
             elif want is not None and (g['direction'], g['layer']) != (want.direction, want.layer):
                 unfaithful.append(f'{nm} berth: asked {fmt_move(want)}, got {sr.fmt(g)} -- {a.get("verdict")}')
@@ -1460,7 +1586,7 @@ def main():
                 f'no braid; the moves not laid as asked are banned, F stays')
             for nm, m in dst_moves.items():
                 if not ok or any(u.startswith(nm + ' ') for u in unfaithful):
-                    bans_d[nm].add((m.direction, m.layer))
+                    bans_d[nm].add(_dban(m))
             for nm, m in src_moves.items():
                 if not ok or any(u.startswith(nm + ' ') for u in unfaithful):
                     bans_s.add((nm, sr.move_sig(m)))
@@ -1557,7 +1683,7 @@ def main():
             F, R, best_g = F1, R1, g1
         else:
             for nm, m in dst_moves.items():
-                bans_d[nm].add((m.direction, m.layer))
+                bans_d[nm].add(_dban(m))
             for nm, m in src_moves.items():
                 bans_s.add((nm, sr.move_sig(m)))
     final = stem + '.kicad_pcb'
