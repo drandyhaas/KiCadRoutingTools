@@ -2147,9 +2147,17 @@ class Corridor:
             # separation -- a full step downstream, one-directional. It
             # decides which samples may host a via (the `room` test) and
             # which gkill rows exist, so it deleted and granted slots.
-            _g = np.clip(np.searchsorted(Sg, Sm), 0, len(Sg) - 1)
-            _lo = np.clip(_g - 1, 0, len(Sg) - 1)
-            gk[k] = np.where(np.abs(Sg[_lo] - Sm) <= np.abs(Sg[_g] - Sm), _lo, _g)
+            if len(Sg):
+                _g = np.clip(np.searchsorted(Sg, Sm), 0, len(Sg) - 1)
+                _lo = np.clip(_g - 1, 0, len(Sg) - 1)
+                gk[k] = np.where(np.abs(Sg[_lo] - Sm) <= np.abs(Sg[_g] - Sm), _lo, _g)
+            else:
+                # an EMPTY grid (s_hi < s_lo for this region): the nearest
+                # correction indexes Sg where the plain searchsorted did
+                # not, so it raised IndexError on a corridor the old code
+                # merely produced a degenerate map for. Same degenerate
+                # answer, no crash.
+                gk[k] = np.zeros(len(Sm), dtype=int)
         prox = set()
         # the room a via needs from the other nets' lines: a single-lane
         # net's line KILLS the slot (as level 4), a candidate's line gates

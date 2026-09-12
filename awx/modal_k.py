@@ -85,6 +85,10 @@ BASE_ENV = {
 # segs and 58 / 1840.
 
 KEEP = re.compile(
+    # Error/Traceback FIRST: a cloud arm that dies returns "NO GRADE" and
+    # chain_k.sh prints only the File line, so without these the actual
+    # exception never leaves the container and the run is undiagnosable.
+    r"Error|Traceback|Exception|line \d+, in |"
     r"GRADE |REFUSED |refusal reasons|pattern seed|seat repair|not asked again|"
     r"destination pass \d+: planner judge|destination re-plan|berth audit|"
     r"launch order:|target order:|re-lay rungs|dp: |wrote ")
