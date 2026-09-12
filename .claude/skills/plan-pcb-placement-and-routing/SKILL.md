@@ -268,7 +268,14 @@ reviewer has to decide -- and an unanswered criterion blocks the close.
    say it in words.
 4. **Facing.** Each IC's pad row that carries a connector's nets should face
    that connector, and a crystal's pads should face the pins they load. Read
-   `parts[].pads_by_face` and `parts[].partners` from the same sheet.
+   `parts[].pads_by_face` and `parts[].partners` from the same sheet. The
+   part of this criterion that HAS a number is a row facing the board
+   outline with nothing beyond it: `board_score --placement-terms` publishes
+   it as `placement.terms.edge_facing` (total pads, `by_part` per ref, a
+   2 mm edge gate) and `check_floorplan` prints it as `pins_to_edge` WARN
+   rows when the intent declares `edge_connectors`. Run 26's regulator read
+   3 of 3 there while the prose review had written PASS; a non-zero reading
+   is dispositioned by name, never rationalised as "the only free side".
 5. **Seams.** The tightest body-to-body seam on the board, in mm:
    `checklist.b_body_seam` from `render_placement --review-sheet ... --json-out`.
    Below 0.3mm is a finding -- ask whether a hand could place or rework it. The

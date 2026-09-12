@@ -337,6 +337,112 @@ def test_balance_weighs_copper_and_not_mask():
           and 'square' in (r['reason'] or ''), repr(r['reason']))
 
 
+#: A 30 x 20 board. U2 sits at (6, 3) with a three-pin row 2 mm ABOVE its
+#: origin, i.e. 1.0 mm from the north edge, every partner south of it (the
+#: run-26 regulator; rotating it 180 puts the row at y 5, 5 mm from the
+#: edge); U9 has the same row at y 9 with its partners on J1 beyond its
+#: north face (a part wired to the edge strip); J1 is a declared edge
+#: connector on that edge; C1/C2 are two-pad parts no term counts. The
+#: middle pin of each row is staggered 0.1 mm, the SOT-89 shape that once
+#: read as the lattice pitch.
+_EDGE_BOARD = '''(kicad_pcb
+ (version 20241229)
+ (net 0 "")
+ (net 1 "/A") (net 2 "/B") (net 3 "/C") (net 4 "/D") (net 5 "/E") (net 6 "/F")
+ (net 7 "/G") (net 8 "/H") (net 9 "/I")
+ (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (uuid "e1"))
+ (footprint "test:SOT" (layer "F.Cu") (uuid "fp-u2") (at 6 3%s)
+   (property "Reference" "U2" (at 0 0 0))
+   (pad "1" smd rect (at -1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 1 "/A") (uuid "u2p1"))
+   (pad "2" smd rect (at 0 -1.9) (size 0.9 1.5) (layers "F.Cu") (net 2 "/B") (uuid "u2p2"))
+   (pad "3" smd rect (at 1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 3 "/C") (uuid "u2p3"))
+ )
+ (footprint "test:SOT" (layer "F.Cu") (uuid "fp-u9") (at 20 11)
+   (property "Reference" "U9" (at 0 0 0))
+   (pad "1" smd rect (at -1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 4 "/D") (uuid "u9p1"))
+   (pad "2" smd rect (at 0 -1.9) (size 0.9 1.5) (layers "F.Cu") (net 5 "/E") (uuid "u9p2"))
+   (pad "3" smd rect (at 1.5 -2) (size 0.8 1.3) (layers "F.Cu") (net 6 "/F") (uuid "u9p3"))
+ )
+ (footprint "test:HDR" (layer "F.Cu") (uuid "fp-j1") (at 20 1)
+   (property "Reference" "J1" (at 0 0 0))
+   (pad "1" smd rect (at -2.54 0) (size 1 1) (layers "F.Cu") (net 4 "/D") (uuid "j1p1"))
+   (pad "2" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 5 "/E") (uuid "j1p2"))
+   (pad "3" smd rect (at 2.54 0) (size 1 1) (layers "F.Cu") (net 6 "/F") (uuid "j1p3"))
+ )
+ (footprint "test:C" (layer "F.Cu") (uuid "fp-c1") (at 6 10)
+   (property "Reference" "C1" (at 0 0 0))
+   (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "/A") (uuid "c1p1"))
+   (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "/B") (uuid "c1p2"))
+ )
+ (footprint "test:C" (layer "F.Cu") (uuid "fp-c2") (at 10 10)
+   (property "Reference" "C2" (at 0 0 0))
+   (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 3 "/C") (uuid "c2p1"))
+   (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 9 "/I") (uuid "c2p2"))
+ )
+)
+'''
+
+
+def _edge_board(tmp, rot=None):
+    p = os.path.join(tmp, f'edge{rot or 0}.kicad_pcb')
+    with open(p, 'w', encoding='utf-8') as fh:
+        fh.write(_EDGE_BOARD % ('' if rot is None else f' {rot}'))
+    return p
+
+
+def test_edge_facing_counts_a_row_at_the_edge_and_not_a_row_facing_its_partner():
+    """The run-26 shape: U2's three pins 1 mm from the north edge with every
+    partner south of it counts 3 of 3; U9's identical row faces J1 beyond its
+    north face (partner beyond) and counts 0; J1 is excluded by declaration;
+    the same U2 rotated 180 puts its row 3 mm from the edge and counts 0."""
+    from kicad_parser import parse_kicad_pcb
+    from placement import floorplan as fp
+    intent = fp.intent_from_dict({
+        'schema': 1, 'kind': fp.KIND, 'units': 'mm',
+        'edge_connectors': [{'ref': 'J1', 'class': 'edge_receptacle',
+                             'edge': 'north',
+                             'overhang_mm': {'min': 0.0, 'max': 0.5}}]})
+    with tempfile.TemporaryDirectory(prefix='t894e_') as tmp:
+        board = _edge_board(tmp)
+        r = ps.edge_facing(parse_kicad_pcb(board), board, intent=intent)
+        check('the term ran', r['ran'] is True, repr(r.get('reason')))
+        u2 = (r.get('by_part') or {}).get('U2', {})
+        check('U2: 3 of 3 pads face the north edge with no partner beyond',
+              u2.get('to_edge') == 3 and u2.get('pads') == 3
+              and u2.get('faces') == {'north': 3}, repr(u2))
+        u9 = (r.get('by_part') or {}).get('U9', {})
+        check('U9: the same row facing J1 across its edge counts 0',
+              u9.get('to_edge') == 0, repr(u9))
+        check('J1 is excluded by the intent, C1/C2 by their pad count',
+              r.get('basis') == ['U2', 'U9'] and r.get('excluded') == ['J1']
+              and r.get('exclusion_basis') == 'intent.edge_claims',
+              repr((r.get('basis'), r.get('excluded'))))
+        check('value is the sum and share is over the counted pads',
+              r['value'] == 3 and abs(r['share'] - 3 / 6) < 1e-9,
+              repr((r['value'], r.get('share'))))
+        # Without an intent the exclusion falls back to the classifier, which
+        # does not know "test:HDR" -- so J1 is counted and the payload says
+        # which basis produced the number.
+        r0 = ps.edge_facing(parse_kicad_pcb(board), board)
+        check('without an intent the exclusion basis is named as part_class',
+              r0.get('exclusion_basis') == 'part_class' and 'J1' in r0['basis'],
+              repr((r0.get('exclusion_basis'), r0.get('basis'))))
+        rot = _edge_board(tmp, rot=180)
+        r2 = ps.edge_facing(parse_kicad_pcb(rot), rot, intent=intent)
+        u2r = (r2.get('by_part') or {}).get('U2', {})
+        check('U2 rotated 180 (row 5 mm from the edge) counts 0',
+              u2r.get('to_edge') == 0 and u2r.get('gaps') == {}, repr(u2r))
+        # Pareto: the two boards differ on this term, in the right sense.
+        a = ps.placement_terms(parse_kicad_pcb(board), board, intent=intent)
+        b = ps.placement_terms(parse_kicad_pcb(rot), rot, intent=intent)
+        verdict, detail = ps.compare_terms(a['terms'], b['terms'])
+        row = next(d for d in detail if d.get('term') == 'edge_facing')
+        check('rotating the row away from the edge reads as better on the term',
+              row.get('judgement') == 'better' and row.get('delta') == -3
+              and verdict in ('better', 'mixed'),
+              repr((verdict, row)))
+
+
 def test_every_terms_skip_path_is_reachable():
     """The sweep over real boards takes the `ran: True` arm every time, so the
     refusal shapes are asserted directly. A skip arm no test reaches is a
@@ -357,7 +463,11 @@ def test_every_terms_skip_path_is_reachable():
             ('plane_cut on a 4-layer board', ps.plane_cut_proxy, _FourLayer(),
              'layer'),
             ('cluster_to_pin with nothing declared or elected',
-             lambda p: ps.cluster_to_pin(p, None), _NoOutline(), 'proximity')):
+             lambda p: ps.cluster_to_pin(p, None), _NoOutline(), 'proximity'),
+            ('edge_facing without an outline', ps.edge_facing, _NoOutline(),
+             'outline'),
+            ('edge_facing with no 3-pad part', ps.edge_facing, _FourLayer(),
+             'connected')):
         r = fn(arg)
         check(f'{name} refuses with a reason, value None',
               r['ran'] is False and r['value'] is None
