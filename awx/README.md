@@ -62,8 +62,11 @@ its **slack** (realization waste). On K51:
 1. **Slack is ~6 vias on every board measured, the human's included.**
    The router turns a plan into copper as tightly as the human does, so
    the whole deficit is the PLAN. It also caps every realization-side
-   idea at about 6 vias -- `collapse_dives.py` saved 4 on the baseline
-   (137 -> 133, 0 open 0 DRC) and found nothing on the pattern arm.
+   idea at about 6 vias -- `collapse_dives.py` saved 2 on the baseline
+   (137 -> 135, 0 open 0 DRC) and found nothing on the pattern arm. Note
+  it re-lays a ripped lane, so it must use the BRAID's track and
+  clearance: laying at its own 0.1/0.1 put 30 segments of thinner copper
+  into the board and reported a bigger saving than it had earned.
 2. **Crossing COUNT does not set the floor.** The human has MORE
    crossings than our best plan (338 against 275) and a floor of 74
    against 96 -- 0.22 layer changes per crossing where we pay 0.35.
@@ -220,6 +223,39 @@ octilinear, so a non-orthogonal pose is outside both models today
 | `pose_gate.sh` | the chain over FF / BF / FB / BB / R90 / R180 / R270 |
 | `modal_k.py` | fan a sweep onto Modal, one container per (arm, K) |
 
+## One source for every routing number
+
+Audited 2026-09-12, after a swimmer was found priced five different ways
+and `collapse_dives` was found re-laying at the wrong track AND the wrong
+via size. Every routing quantity now has exactly one home:
+
+| quantity | the one source | value | who reads it |
+|---|---|---|---|
+| braid lane track | `topo_strings.TRACK` | 0.127 | braid (`= ts.TRACK`), pack, cut_ledger, collapse_dives, replan, fanout |
+| braid hug clearance | `braid.CLEAR` | 0.105 | braid, pack, cut_ledger, collapse_dives |
+| spec clearance | `topo_strings.SPEC_CLEAR` | 0.1 | topo_strings |
+| via size / drill | `braid.VIA_SIZE` / `VIA_DRILL` | 0.25 / 0.15 | braid, cut_ledger, replan, fanout, collapse_dives |
+| **swimmer price** | **`prices.SWIM`** | one number, five sites | plan_ends, braid x3, sched_first |
+| `DIRS`, `LAYERS` | `escape_moves` | | fanout, source_realize, sched_first, replan |
+
+**The board carries TWO track widths on purpose.** The fanout's stubs are
+laid by the production engine at its own 0.1 / 0.1
+(`source_realize.FAN_TRACK` / `FAN_CLEAR`) -- 23 segments on a K51 board
+-- and the braid's lanes at 0.127 / 0.105 -- 2530. A tool that rips a
+braid lane and re-lays it must use the BRAID's numbers; `collapse_dives`
+used its own 0.1 / 0.1 and 0.45 / 0.25 and so put thinner copper and
+oversized vias into the board, which also inflated its reported saving
+(137 -> 133 claimed, 137 -> 135 real).
+
+**`braid.CLEAR` (0.105) and `topo_strings.SPEC_CLEAR` (0.1) are different
+quantities** -- the spec, and the spec plus 5 um so a hug does not sit
+exactly on it. They were both called `CLEAR` until this audit. Do not
+import one where the other is meant.
+
+Names that LOOK shared and are not: `TOL`, `STEP`, `MARGIN`, `CAP`,
+`PROX_TRACK`, `HW_COL` -- different local quantities that happen to
+share a generic name or a number. Leave them alone.
+
 ## Measuring honestly
 
 Every one of these cost a session to learn.
@@ -240,17 +276,23 @@ Every one of these cost a session to learn.
 - **The probe must use the chain's own env and board.** `DST_WALK` and
   `DST_FACE_ASK` change the MENU; a probe run without them measures a
   different problem (measured: 45 berths seated vs the chain's 34).
-- **THE SEARCH IS BOUNDED BY WALL CLOCK, so a slower machine gives a
-  DIFFERENT answer, not a later one.** Five budgets: `DST_RESIDUE_S`
-  240, `DST_SEARCH_S` 45, `BRAID_L5_ALT_TIME` 30, `BRAID_L5_JUDGE_TIME`
-  10, `SRC_REPLAN_S` 180. None binds on the laptop at K35/K41, which is
-  why the chain reads as deterministic there; a container is ~2x slower
-  (K51 1330-1574 s against 600-900) and they DO bind, so two identical
-  cloud runs of the K35 baseline came back **72 vias / 1436 segs and 58
-  / 1840**. This is also the likeliest source of the "knife edge" +-2..3
-  via spread seen under load locally. `modal_k.py` raises all five until
-  they do not bind; the real fix is a WORK-based budget (a judge-call
-  count) instead of a clock, which is TODO 14.
+- **THERE ARE NO CLOCKS. Every budget is in WORK, and that is a rule,
+  not a preference.** A clock budget does not make a slow machine answer
+  later, it makes it answer DIFFERENTLY. Measured: two identical cloud
+  runs of the K35 baseline -- same image, same env -- came back **72
+  vias / 1436 segs and 58 / 1840**, because a container is ~2x slower
+  than the laptop (K51 1330-1574 s against 600-900) and five wall-clock
+  budgets that never bind locally bound there. That was also the likely
+  source of the "knife edge" +-2..3 via spread under load.
+  So: every search loop is capped in **judge calls**
+  (`fanout_from_plan.PLAN_CALLS`; `DST_RESIDUE_CALLS`,
+  `DST_SEARCH_CALLS`, `SRC_REPLAN_CALLS`, `SF_REPAIR_CALLS`), HiGHS is
+  capped in **nodes** (`BRAID_MILP_NODES`, or a stage's own `nodes`) and
+  CP-SAT in **deterministic time** (`interleave_search` +
+  `max_deterministic_time`, always on -- `_milp_solve`'s `time_limit`
+  parameter is accepted and IGNORED). `py_router` was already clean.
+  **Do not add a `time_limit`, a `max_time_in_seconds` or a
+  `time.time()` guard that decides an output.**
 - **Modal is a different numeric era.** The cloud image pins numpy,
   scipy, ortools, shapely and grid_router to the local versions but runs
   python 3.13 against the local 3.14, and the baseline ladder comes back
@@ -352,12 +394,10 @@ file and is in the bundle only.
     net is in the run.
 13. **Tooling.** Promote the session probes into `awx/` with a line each
     here; add the flag-off parity gate that the hand check does today.
-14. **Budget the search by WORK, not by the clock.** Five wall-clock
-    bounds decide how far the residue search and the level-5 solves get,
-    so the answer depends on the machine and its load (see "Measuring
-    honestly"). Count judge calls / candidates instead, and the chain
-    becomes reproducible across machines -- which is what `modal_k.py`
-    needs before a cloud A/B means anything.
+14. **Re-express the two `*_TIME` stage knobs in nodes.**
+    `BRAID_L5_ALT_TIME` and `BRAID_L5_JUDGE_TIME` now reach an IGNORED
+    parameter, so setting them does nothing. They are still the natural
+    place to say how hard a stage should try; say it in nodes.
 
 ## What this adds to `py_router`
 
