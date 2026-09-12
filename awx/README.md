@@ -421,6 +421,81 @@ file and is in the bundle only.
    inter-corridor dive and is passed only to `vias_from_pages`, never
    into `plan_pages`/`judged_cost`.
    **Prize if every violator comes down to 2: K41 -8, K51 -26.**
+
+   **CAVEAT, from a third audit the same day, and it matters: the
+   per-net DP floor is CIRCULAR.** `ledger_cal._dp` prices each net with
+   every OTHER net pinned at its ACTUAL layer, so on a badly realized
+   board the partners alternate and each net's "floor" alternates with
+   them -- the instrument moves with the thing it is meant to be
+   independent of. The non-circular quantity is the JOINT floor: over
+   the same fixed paths, require opposite layers at every crossing, pin
+   the pad layers, minimise total changes (a parity system plus a
+   max-cut; 2-85 s per board, exact). It disagrees where it matters:
+
+   | board | routed | per-net floor | JOINT floor | joint slack |
+   |---|---|---|---|---|
+   | human K35 | 58 | 54 | **50** | 8 |
+   | ours K35 (the 58-via board) | 58 | 54 | **50** | 8 |
+   | human K41 | 70 | 64 | **60** | 10 |
+   | ours K41 (76) | 76 | 72 | **70** | 6 |
+   | ours K41 (131) | 130 | 108 | **88** | **42** |
+
+   So at K35 our 58-via board and the human's are STRUCTURALLY
+   IDENTICAL, the K41 floor gap is 8 rather than 12, and -- the part
+   that bites -- **the per-net floor is 20-40 vias loose on exactly the
+   boards the search walks past and rejects.** "Slack is ~6 on every
+   board, so realization ideas are capped at 6" is true of the boards we
+   SHIP and false of the ones we REJECT, and telling those apart is the
+   search's whole job. Build `joint_floor.py` before scoring plans by
+   any floor.
+1b. **The judge's ESCAPE term is anti-informative -- drop it from the
+   comparator.** `judge_by_braid` returns `sum(pred) + ride`, where the
+   escape half is `tooth_vias + m.vias + ride/VIA_MM`. Measured over the
+   distinct plans on disk, pairwise rank agreement with the ROUTED via
+   count:
+
+   | statistic | K41 | K35 |
+   |---|---|---|
+   | `pred` (the judge as it stands) | 59% | 51% |
+   | its CORRIDOR half alone | 62% | **64%** |
+   | its ESCAPE half alone | 53% | **41%** |
+   | LIS of launch->target alone | **64%** | **76%** |
+
+   The judge is worse than its own corridor half at both K, because at
+   K35 `pearson(esc, LIS) = +0.57` while `pearson(esc, routed) = -0.34`:
+   **a plan that spends more escape vias has a longer crossing-free
+   chain and routes BETTER** -- the human's trade, a dogbone at the ball
+   to buy the order -- and the judge charges it +1 per via. Sweeping
+   `corridor + w*escape` at K35 goes 64% (w=0) to 51% (w=1). It is a
+   SIGN error, not a scale error, which is why the swimmer-price work
+   (a LEVEL error) barely moved rank.
+   Ship LIS as a GUARD on acceptance, never as a maximand -- the settled
+   table is full of correlations that became objectives and lost.
+
+1c. **The search accepts at 1e-6 and takes 142 judged REGRESSIONS.**
+   965 accepted moves across the K35/K41 logs, median improvement 2.00
+   judged vias, 527 of 823 under 3; 142 accepted with the judged cost
+   RISING because the residue count fell. A comparator right 51-64% of
+   the time on a 2-via difference, accepting at 1e-6, is a random walk
+   with a drift -- and that is why removing the wall clock cost K35
+   58->66: **the clock was an early stop, and an early stop is a crude
+   regulariser.** Replace it with an acceptance MARGIN (work-free,
+   deterministic, satisfies the no-clocks rule), calibrated to the
+   comparator's measured resolution. A margin large enough to accept
+   nothing reproduces the pre-search plan exactly -- a free control.
+
+1d. **The swimmer count is a closed form, and the human has MORE.**
+   `n - (lambda1 + lambda2)` of the RSK shape of the launch->target
+   permutation is 12 on the K41 bench; the level-5 MILP's residue set is
+   12. Microseconds, no solver, no board. And reconstructing the human's
+   permutation from its copper: human K41 residue 14 against our 13.
+   It carries MORE structurally unpageable lanes and routes 70 to our
+   80. Repricing or minimising swimmers is EXHAUSTED -- the count is a
+   symptom of tangle in our own generator's distribution, not a cost.
+   (Also measured: judging at node budgets 1, 5, 15, 30, 100, 400 gives
+   an identical answer every time, so "more search is worse" is real
+   surrogate bias, not solver jitter.)
+
 2. **K51 completion on the pattern arm.** `DST_SEED=pattern` gives 104
    vias against the baseline's 137 with chain 25 / slack +3, but ships 2
    open (SDQ12, SDQ5). The failure is a berth boxed in by its
