@@ -1212,6 +1212,10 @@ def pattern_seed(st, log=print, order=None):
         # page). No face anywhere: `arc` is one order around the whole
         # array and it reverses at the corners by itself.
         nets_o = sorted(nets, key=lambda nm: o_of(launch[nm]))
+
+        def _sk_of(m):
+            return (round(m.exit_pt[0], 2), round(m.exit_pt[1], 2),
+                    m.direction, m.layer, m.kind)
         slot, cand = {}, {}
         for nm in nets_o:
             for m in menu[nm]:
@@ -1305,7 +1309,16 @@ def pattern_seed(st, log=print, order=None):
         log(f'    dp: {len(nets_o)} net(s), {n0}+{n1} slot(s) on '
             f'{pg_names[0]}/{pg_names[1]}, chain {dp[fin[0]][fin[1]][0]}')
         for nm in nets_o:
+            # the net's OWN move for that slot, never the representative.
+            # `slot` keys on (x, y, direction, layer, kind) only, and menus
+            # of different balls collide on that key constantly -- measured
+            # on the bench, 11 of 15 seated berths were a FOREIGN net's
+            # Move, one of them asking the engine to drill a via 9.6 mm
+            # away inside another ball, because `site` and `legs` travel
+            # with the Move into escape_dir_hints.
             m = chain.get(nm)
+            if m is not None:
+                m = (cand.get(nm) or {}).get(_sk_of(m), m)
             if m is not None and ok(m):
                 out[nm] = m
                 used.add((round(m.exit_pt[0], 2), round(m.exit_pt[1], 2)))
@@ -1527,9 +1540,15 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
         plan = braid_plan_of(st, ch, board)
         if alts:
             plan['alts'] = alts
+        # `excl` is NOT part of the crossing term -- it is the rule that
+        # two berths cannot both be laid. Nesting it under `if xing:` meant
+        # that on the DEFAULT path (DST_XING=0) the level-5 solve received
+        # ZERO exclusion rows while the log still printed "N exclusion(s)",
+        # so it was free to choose two berths sharing a lane.
+        if excl:
+            plan['alt_excl'] = list(excl)
         if xing:
             plan['alt_xing'] = xing
-            plan['alt_excl'] = excl or []
         PLAN_CALLS[0] += 1
         bp = te.plan_braid(board, list(ch), st['dref'], plan)
         f, pred, _bp, _pl = judge_by_braid(st, ch, board, bp=bp)
@@ -1552,17 +1571,32 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
     def _page_of(o, bp_):
         return (bp_.get(o, {}).get('page') if bp_ else None) or st['tooth0'].get(o)
 
-    def swim_of(nm, m, sel, bp_):
+    def swim_of(nm, m, sel, bp_, skip=()):
         """Inversions this berth makes with the lanes on its OWN page --
-        the crossings that actually consume page capacity, and so the
-        ones that decide whether a lane can be scheduled at all."""
+        the crossings that consume page capacity, and so the ones that
+        decide whether a lane can be scheduled at all.
+
+        `skip` is NOT optional in practice: an inversion belongs to TWO
+        lanes, so charging each candidate a delta against the held choice
+        counts the pair twice when both nets move, and measures it against
+        a berth the other net is about to leave. That is the exact defect
+        the crossing term was rewritten to fix (it drove K51 352 -> 394),
+        and this term shipped without the lesson -- nets whose berth is
+        also being chosen are priced pairwise or not at all.
+
+        The page is the one this BERTH would put the net on, not the one
+        the incumbent plan holds: a candidate that changes layer changes
+        the answer, which is the whole quantity being measured.
+        """
         if not DST_SWIM:
             return 0
-        pg = _page_of(nm, bp_)
+        pg = m.layer or _page_of(nm, bp_)
         lo = st['launch'][nm]
         n = 0
         for o, om in sel.items():
-            if o == nm or _page_of(o, bp_) != pg:
+            if o == nm or o in skip:
+                continue
+            if (om.layer or _page_of(o, bp_)) != pg:
                 continue
             olo = st['launch'][o]
             if (lo[1] - olo[1]) * (m.exit_pt[1] - om.exit_pt[1]) < 0:
@@ -1644,8 +1678,8 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
                                       - contend_of(nm, choice[nm]))
                      + DST_XING * (xing_of(nm, m, choice, _movers)
                                    - xing_of(nm, choice[nm], choice, _movers))
-                     + DST_SWIM * (swim_of(nm, m, choice, bp)
-                                   - swim_of(nm, choice[nm], choice, bp)))
+                     + DST_SWIM * (swim_of(nm, m, choice, bp, _movers)
+                                   - swim_of(nm, choice[nm], choice, bp, _movers)))
                 if g not in by_geo or c < by_geo[g][0]:
                     by_geo[g] = (c, m)
             if joint and by_geo:
@@ -1685,13 +1719,13 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
             r0 = ride_of(nm, choice[nm])
             k0 = contend_of(nm, choice[nm])
             x0 = xing_of(nm, choice[nm], choice, _movers)
-            s0 = swim_of(nm, choice[nm], choice, bp)
+            s0 = swim_of(nm, choice[nm], choice, bp, _movers)
             alts[nm] = [{'exit': list(m.exit_pt), 'layer': m.layer, 'dir': list(DIRS[m.direction]),
                          'cost': ((m.vias - choice[nm].vias)
                                   + (ride_of(nm, m) - r0) / pe.sm.VIA_MM
                                   + DST_CONTEND * (contend_of(nm, m) - k0)
                                   + DST_XING * (xing_of(nm, m, choice, _movers) - x0)
-                                  + DST_SWIM * (swim_of(nm, m, choice, bp) - s0))}
+                                  + DST_SWIM * (swim_of(nm, m, choice, bp, _movers) - s0))}
                         for m in cs]
         src_cands = {}
         if DST_RESIDUE_SRC:
@@ -1767,10 +1801,15 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
                             for j, mb in enumerate(opt[b_])
                             if lanes_cross(tuple(st['launch'][a_]), tuple(ma.exit_pt),
                                            tuple(st['launch'][b_]), tuple(mb.exit_pt))]
-                    n_all = len(opt[a_]) * len(opt[b_])
-                    if not hits or len(hits) == n_all:
+                    n_pair_opts = len(opt[a_]) * len(opt[b_])
+                    # n_pair_opts, not n_all: "does this pair's crossing
+                    # status VARY across the pair's own combinations" is a
+                    # question about len(opt[a]) * len(opt[b]). The two
+                    # shared one name, so the solve log's "(N moves)" -- a
+                    # measured number -- printed the last pair's product.
+                    if not hits or len(hits) == n_pair_opts:
                         continue            # constant for this pair: no variable
-                    varying.append((abs(len(hits) / n_all - 0.5), a_, b_, hits))
+                    varying.append((abs(len(hits) / n_pair_opts - 0.5), a_, b_, hits))
             varying.sort(key=lambda t: t[0])        # most discriminating first
             n_em = 0
             for _d, a_, b_, hits in varying:
@@ -2659,9 +2698,17 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     r = subprocess.run([sys.executable,
                         os.path.join(HERE, '..', 'py_router', 'check_drc.py'),
                         out_path, '--clearance', '0.1',
-                        '--clearance-margin', '0.1'],
+                        '--clearance-margin', '0.1',
+                        # or check_drc truncates each category at 20 and the
+                        # nets beyond that are never banned, never freed
+                        '--max-print', '0'],
                        capture_output=True, text=True)
-    clean = 'NO DRC VIOLATIONS' in (r.stdout + r.stderr)
+    _drc_txt = r.stdout + r.stderr
+    clean = 'NO DRC VIOLATIONS' in _drc_txt
+    if not clean and 'DRC VIOLATION' not in _drc_txt:
+        raise RuntimeError(f'check_drc gave no verdict for {out_path} '
+                           f'(exit {r.returncode}): '
+                           + ((_drc_txt.strip().splitlines() or ['(no output)'])[-1])[:200])
     # the nets of every violation the fanout board ships (check_drc names
     # the pair on a line of its own): the loop treats them as berths not
     # laid as asked, or a pass with every berth "exact" and a crossing
@@ -2669,8 +2716,29 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     import re as _re
     drc_nets = set()
     drc_pairs = set()       # the PAIRS too (SF_EQUIV learns a pair of the run's nets as a move pair)
-    for a, b in _re.findall(r'^\s+(.+?) <-> (.+?)\s*$', r.stdout, flags=_re.M):   # names may hold spaces
-        a, b = a.split('/')[-1], b.split('/')[-1]
+    # check_drc prints the two sides as `Kind:/NET` with a SUFFIX on some
+    # forms -- `Pad:/NET (REF.PAD)`, `... [SHORT]`, `Via:/NET (drill hole
+    # clearance)`. Taking the whole side and splitting on '/' recovered a
+    # clean name only for seg-seg and via-via, so EVERY pad violation --
+    # including a pad-pad SHORT, the commonest BGA-fanout defect -- fell
+    # out of the feedback, and the loop could print "every berth laid as
+    # planned" on a shorted board. Strip the kind prefix and everything
+    # from the first space or bracket.
+    def _net_of(side):
+        # strip the kind prefix and the TRAILING annotations only -- never
+        # split on whitespace: this board's nets are `/DDR3 16x1/SDQ2`, so
+        # a space split yields `DDR3`
+        side = side.strip()
+        if ':' in side[:6]:
+            side = side.split(':', 1)[1]
+        for _ in range(3):
+            side = _re.sub(r'\s*\[[^\]]*\]\s*$', '', side)
+            side = _re.sub(r'\s*\([^)]*\)\s*$', '', side)
+        return side.strip().split('/')[-1]
+    for a, b in _re.findall(r'^\s+(.+?) <-> (.+?)\s*$', _drc_txt, flags=_re.M):
+        a, b = _net_of(a), _net_of(b)
+        if not a or not b:
+            continue
         drc_nets.add(a); drc_nets.add(b)
         drc_pairs.add(frozenset((a, b)))
     fanout_once.drc_nets = drc_nets
