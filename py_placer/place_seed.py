@@ -85,6 +85,16 @@ Examples:
                         "non-obstacles either way (the existing exclude "
                         "mechanism); this changes only WHO goes first "
                         "(run-4 C)")
+    p.add_argument("--rotate-by-facing", action="store_true",
+                   help="Among the rotations that fit, seat the one that leaves "
+                        "the fewest connected pads on a row facing the board "
+                        "outline with nothing beyond (placement.edge_facing, "
+                        "the same number placement_score reports). OFF by "
+                        "default, and measured: tests/test_placement_ab.py "
+                        "REJECTED it as a default on three boards (fewer "
+                        "pads face the edge, more crossings and pin-order "
+                        "inversions). Opt in when that trade is the one you "
+                        "want; a tie keeps the input rotation first.")
     p.add_argument("--evict-depth", type=int, default=0, choices=(0, 1, 2),
                    metavar="N",
                    help="Eviction rung (#630, #699). At every depth a part "
@@ -627,7 +637,8 @@ Examples:
         grid_step=args.grid_step, seed_refs=seed_refs,
         anchors_first=args.anchors_first,
         anchor_rounds=args.anchor_rounds,
-        evict_depth=args.evict_depth)
+        evict_depth=args.evict_depth,
+        rotate_by_facing=args.rotate_by_facing)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
