@@ -20,7 +20,14 @@ place_portfolio.py to diversify and rank what this emits.
 Exit codes: 0 seeded and graded clean; 2 bad arguments; 3 the board cannot be
 seeded (no Edge.Cuts outline -- the outline is spec-owned and will not be
 invented -- or the board is already placed / carries copper); 4 the seed was
-written but parts could not be seated or the intent grade has errors.
+written but parts could not be seated or the intent grade has errors ON
+PARTS THE SEED PLACED. A grade error on a part the seed was told not to move
+-- `(locked yes)` in the file, or matched by the intent's `must_lock` -- is
+printed and counted in `grade_errors_pinned`, and does not fail the gate:
+it is a contradiction between the board and the intent, which only their
+author can settle. Measured, run 27: a fixed USB socket declared
+`along_edge: center` within 0.6 mm sits 1.75 mm off centre, and every one of
+ten seeds failed on it, so nothing the seeder did could ever be ranked.
 """
 
 #: #937 registry: which door(s) show this tool, and whether it changes
@@ -32,6 +39,45 @@ import argparse
 import json
 import os
 import sys
+
+
+def _split_pinned(graded, output_file, intent):
+    """(own, pinned): the grade errors the seed is answerable for, and the
+    ones that sit on a part it was told not to move -- `(locked yes)` in the
+    written file (which is where `must_lock` lands after stamping) or matched
+    by a `must_lock` pattern. Block-level findings (no `ref`) are always own.
+    """
+    import fnmatch
+    from kicad_parser import parse_kicad_pcb
+    locked = {r for r, f in parse_kicad_pcb(output_file).footprints.items()
+              if getattr(f, 'locked', False)}
+    pats = tuple(getattr(intent, 'must_lock', ()) or ())
+
+    def pinned(v):
+        ref = getattr(v, 'ref', None)
+        return bool(ref) and (ref in locked
+                              or any(fnmatch.fnmatch(ref, p) for p in pats))
+    return ([v for v in graded.errors if not pinned(v)],
+            [v for v in graded.errors if pinned(v)])
+
+
+def _print_grade(own, pinned):
+    """The gate's errors, then the set-aside ones NAMED -- never silent."""
+    for v in own[:10]:
+        print(f"  GRADE ERROR [{v.rule}] {v.message}")
+    if pinned:
+        by = {}
+        for v in pinned:
+            by.setdefault(v.ref, set()).add(v.rule)
+        print(f"  {len(pinned)} grade error(s) sit on locked part(s) the seed "
+              f"did not place -- "
+              + '; '.join(f"{r}: {', '.join(sorted(rs))}"
+                          for r, rs in sorted(by.items()))
+              + ". Reported, not the seed's failure: a pinned pose that "
+              "breaks a declared clause is a contradiction between the board "
+              "and the intent, and only their author can say which is wrong.")
+        for v in pinned[:10]:
+            print(f"  GRADE ERROR (pinned) [{v.rule}] {v.message}")
 
 
 def main():
@@ -539,9 +585,10 @@ Examples:
                                      group_sources=sources,
                                      clearance=args.clearance,
                                      board_edge_clearance=args.board_edge_clearance)
-            for v in graded.errors[:10]:
-                print(f"  GRADE ERROR [{v.rule}] {v.message}")
-            summary['grade_errors'] = len(graded.errors)
+            own, pinned = _split_pinned(graded, args.output_file, intent)
+            _print_grade(own, pinned)
+            summary['grade_errors'] = len(own)
+            summary['grade_errors_pinned'] = len(pinned)
             summary['pad_conflicts_after'] = pads_after['pad_conflicts']
             # #697: the requirement each counted pair was graded at, when it
             # sits above args.clearance, so the count is explainable.
@@ -552,7 +599,7 @@ Examples:
                       f"{_req_cl(pads_after)}")
             summary['hole_conflicts_after'] = pads_after['hole_conflicts']
             summary['oob_pad_count_after'] = pads_after['oob_pad_count']
-            if graded.errors:
+            if own:
                 exit_rc = 4
         _stage.cleanup()
         summary.setdefault('complete', True)
@@ -811,8 +858,8 @@ Examples:
         print(f"place_seed: outline cannot be trusted for grading: {exc}",
               file=sys.stderr)
         return UNPLACED_EXIT
-    for v in graded.errors[:10]:
-        print(f"  GRADE ERROR [{v.rule}] {v.message}")
+    own, pinned = _split_pinned(graded, args.output_file, intent)
+    _print_grade(own, pinned)
     after = ratsnest.get('after', {})
     summary = {'placed': len(result['placements']),
                'unseated': len(result['unseated']),
@@ -838,18 +885,23 @@ Examples:
                    1 for e in (result.get('evictions') or [])
                    if not e.get('accepted')),
                'locked': n_locked,
-               'grade_errors': len(graded.errors),
+               'grade_errors': len(own),
+               'grade_errors_pinned': len(pinned),
                'grade_warnings': len(graded.warnings),
                'crossings': after.get('crossings'),
                'hpwl': (round(after['hpwl'], 3)
                         if after.get('hpwl') is not None else None),
                'output': args.output_file}
     print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
-    if result['unseated'] or graded.errors:
+    if result['unseated'] or own:
         print("place_seed: the seed does NOT satisfy its intent -- see the "
               "errors above. It was still written, for inspection.",
               file=sys.stderr)
         return 4
+    if pinned:
+        print(f"place_seed: {len(pinned)} grade error(s) on locked part(s) set "
+              f"aside (named above); the seed's own work grades clean.",
+              file=sys.stderr)
     return 0
 
 
