@@ -751,8 +751,15 @@ def flow_dir(path: Sequence[Pt], end_dir: Pt, at_start: bool,
     points south and flows east). No face is read: `end_dir` comes from
     the copper of the stub itself."""
     if polyline_len(path) < 2 * probe:
-        q = path[-1] if at_start else path[0]
-        p = path[0] if at_start else path[-1]
+        # BOTH ends measure FORWARD along the path: at_start wants
+        # (further in) - (start), at the arrival end (end) - (further
+        # back). The two were written as one expression with the operands
+        # swapped for the arrival case, so any taut path shorter than
+        # 2*probe reported its arrival flow REVERSED -- verified: a 5 mm
+        # east path gives (1,0) and a 1 mm east path gave (-1,0). A
+        # corridor of short lanes then built its spine against a u_s
+        # pointing back into the destination array.
+        p, q = (path[0], path[-1]) if at_start else (path[0], path[-1])
         taut = _unit((q[0] - p[0], q[1] - p[1]))
     elif at_start:
         q = point_after_start(path, probe)

@@ -208,6 +208,23 @@ XLAYER_FREE = float(os.environ.get('XLAYER_FREE', '0.15'))
 SEL_RETRY = int(os.environ.get('SEL_RETRY', '0'))
 
 
+# NEST_IN / NEST_STEP / BAND_LPITCH were USED here and DEFINED NOWHERE --
+# not in this file, not in the tree, not in any commit in git history. So
+# every path through band_leg / band_capacity raised NameError, i.e. the
+# first net whose exit lands in a band crashed the planner. That is only
+# reachable with SPLIT_BLOCKS=1 (it is what makes `keep_out` a list of
+# block boxes and `Corridor.bands` non-empty), which is why it never fired
+# on the default chain -- and it means the README's recorded verdict for
+# SPLIT_BLOCKS, "complete, general, LOST", was never measured. It is a
+# crash, not a loss. Values below are the braid's own band geometry
+# (Corridor.offsets' comb): the nested rider sits a track+clearance inside
+# the tip line and each deeper rider steps by the same, and a band packs
+# at the braid's lane pitch.
+NEST_IN = 0.232                     # TRACK 0.127 + CLEAR 0.105: one lane's slice
+NEST_STEP = 0.0                     # no per-depth ramp: the comb is parallel
+BAND_LPITCH = 0.35                  # braid.LPITCH -- the comb's lane pitch
+
+
 def band_leg(launch: Pt, pt: Pt, band) -> List[Pt]:
     x0, y0, x1, y1 = band
     if x1 - x0 >= y1 - y0:
@@ -754,6 +771,9 @@ def score(choice: Dict[str, Move], groups, geo: 'Corridor',
 
 
 
+_TOUCH = 1e-6        # two spans that meet at a point DO conflict (see below)
+
+
 def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool:
     """Two moves that cannot both be laid: a shared lane stretch or a
     shared site -- and, `strict`, a lane matched within `tol` (half a
@@ -777,7 +797,15 @@ def _conflict(m: Move, om: Move, tol: float = 0.16, strict: bool = True) -> bool
                              and abs(ok[1] - key[1]) < tol)
             else:
                 same_lane = ok == key
-            if same_lane and a < ob and oa < b:
+            # TOUCHING IS OVERLAPPING. Strict `<` let two stubs that meet
+            # at exactly one point pass: two vertically adjacent balls both
+            # stubbing half a pitch into their shared row gap and then
+            # diverging left/right share a lane key and abut at the ball's
+            # x, so `oa < b` was `x < x` -> False and BOTH were selected --
+            # a planned dead short between two nets (measured on DU1
+            # column x=138.7286, GND and VCC-DRAM meeting at (138.7286,
+            # 61.7608) on F.Cu).
+            if same_lane and a < ob + _TOUCH and oa < b + _TOUCH:
                 return True
             # a row-gap run and a column-gap run on ONE layer that cross:
             # two stubs through one point (K28 dv3: SWE's walked leg west
@@ -1127,6 +1155,18 @@ class PairFrame:
                       layer=self.layer(m.layer), exit_pt=self.pt(m.exit_pt), vias=m.vias,
                       legs=[(self.pt(a), self.pt(b), self.layer(L)) for (a, b, L) in m.legs],
                       site=None if m.site is None else self.pt(m.site),
+                      # walk and off_array travel with the move too. Losing
+                      # them made a mirrored board a DIFFERENT PROBLEM:
+                      # _lane_spans took the single-span path (the walk leg
+                      # and the elbow's crossing spans vanished from the
+                      # conflict test), _conflict's SEL_XING gate never
+                      # fired, and _select's SEL_EXT seeding -- which
+                      # detects a walked menu with any(m.walk) -- silently
+                      # switched off. A board and its mirror ran different
+                      # selection algorithms, against a class whose whole
+                      # purpose is that they must not.
+                      walk=getattr(m, 'walk', 0),
+                      off_array=getattr(m, 'off_array', False),
                       climb=getattr(m, 'climb', 0))
             self._fwd[id(m)] = mm
             self._back[id(mm)] = m

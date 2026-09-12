@@ -2142,7 +2142,14 @@ class Corridor:
                                       < np.abs(Sm_[kk] - Sg)), kk - 1, kk)
             kg[k] = ix_[kk]
             # ...and each mid sample's nearest grid point (the room test)
-            gk[k] = np.clip(np.searchsorted(Sg, Sm), 0, len(Sg) - 1)
+            # NEAREST, as the comment says: np.searchsorted gives the first
+        # grid point >= the sample, so a sample at s=0.02 was priced at
+        # the s=0.1 separation -- a full step downstream, one-directional.
+        # It decides which samples may host a via (the `room` test) and
+        # which gkill rows exist, so it deletes and grants slots.
+        _g = np.clip(np.searchsorted(Sg, Sm), 0, len(Sg) - 1)
+        _lo = np.clip(_g - 1, 0, len(Sg) - 1)
+        gk[k] = np.where(np.abs(Sg[_lo] - Sm) <= np.abs(Sg[_g] - Sm), _lo, _g)
         prox = set()
         # the room a via needs from the other nets' lines: a single-lane
         # net's line KILLS the slot (as level 4), a candidate's line gates
@@ -3120,8 +3127,20 @@ class Corridor:
             # would otherwise hold nothing)
             lo_a, hi_a = np.zeros(nv), np.ones(nv)
             for key, v in idx.items():
+                # DO NOT PIN A MOVING NET'S AS-LAID LANE. `(nm, 0)` is the
+                # lane the net has today; pinning its up/dn to the plain
+                # solution kept those vias in the objective whether or not
+                # the net moved, so every candidate was charged its own
+                # corridor vias PLUS the ones it would stop paying:
+                #     stay  ->  K
+                #     move  ->  K + y_cost + C_cand      (true: K - C_laid + ...)
+                # Only a move that flips a swimmer or carries a negative
+                # fanout delta could ever win. That is the measured
+                # "the berth chooser accepts nothing" -- a systematic bias,
+                # not a null result. The rows are gated by y, so once the
+                # bounds are free the model zeroes a deselected lane itself.
                 held = ((key[0] in ('up', 'dn', 'st', 'iv')
-                         and (not isinstance(key[1], tuple) or key[1][1] == 0))
+                         and not isinstance(key[1], tuple))
                         or (key[0] == 'w' and key[1] not in todo))
                 if held:
                     lo_a[v] = hi_a[v] = float(round(float(x0[v])))
