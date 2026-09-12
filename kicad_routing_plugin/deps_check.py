@@ -32,6 +32,7 @@ IMPORT_TESTS = {
     "numpy": "import numpy",
     "scipy": "from scipy.optimize import linear_sum_assignment",
     "shapely": "from shapely.geometry import Polygon",
+    "Pillow": "from PIL import Image",
 }
 
 # Pattern matching the package name at the start of a requirements line.
