@@ -4254,13 +4254,22 @@ def _plane_drop_pass(footprint, pcb_data, new_tracks, new_vias, net_filter,
                 net_id=v['net_id']))
         from bga_fanout.flip_frame import is_back_side, to_front_frame, flip_results
         if is_back_side(footprint):
+            # RECURSE, do not call generate_plane_drops directly: the
+            # rotation frame (#137) is applied by the block BELOW this one,
+            # and returning from here skipped it for back-side parts. The
+            # signal path at _generate_bga_fanout_core recurses for exactly
+            # this reason. A bottom-mounted BGA at a non-orthogonal angle
+            # otherwise had its plane-drop vias computed on a grid not
+            # aligned to its ball array -- the original #137 bug, back for
+            # back-side parts only. (The copper this pass already
+            # materialised into pcb_data travels into the turned frame with
+            # it, so the drops still see the signal escape.)
             rp, back = to_front_frame(pcb_data, footprint.reference)
-            d_tracks, d_vias, rep = generate_plane_drops(
-                rp.footprints[footprint.reference], rp, layers,
-                track_width=track_width, clearance=clearance,
-                via_size=via_size, via_drill=via_drill,
-                net_filter=net_filter, grid_step=grid_step,
-                plane_net_layers=plane_net_layers, no_via_in_pad=no_via_in_pad)
+            d_tracks, d_vias, rep = _plane_drop_pass(
+                rp.footprints[footprint.reference], rp, [], [], net_filter,
+                layers, track_width, clearance, via_size, via_drill,
+                grid_step, plane_net_layers=plane_net_layers,
+                no_via_in_pad=no_via_in_pad)
             flip_results(d_tracks, d_vias, [], back)
             return d_tracks, d_vias, rep
         from bga_fanout.rotate_frame import (needs_frame,
