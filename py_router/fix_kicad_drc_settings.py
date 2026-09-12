@@ -607,7 +607,14 @@ def scan_board_minima(pcb_path: str):
         return {}
 
     out = {}
-    widths = [s.width for s in pcb.segments if s.width and s.width > 0]
+    # Footprint / board GRAPHIC copper (#908, #337) is a shape, not a track:
+    # a filled fp_poly's stroke width is an outline width and KiCad's
+    # min_track_width rule never grades it. Counting it here wrote
+    # `rules.min_track_width 0.15 -> 0.1` on every step of a chain whose
+    # only 0.1 mm "track" was a SOT-89 tab outline, and made check_complete
+    # read that board as UNSOUND (run 26, esp_prog).
+    widths = [s.width for s in pcb.segments
+              if s.width and s.width > 0 and not getattr(s, 'graphic', False)]
     if widths:
         out["min_track_width"] = min(widths)
     via_drills = [v.drill for v in pcb.vias if v.drill]

@@ -3463,6 +3463,14 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         for seg in pcb_data.segments:
             if matching_net_ids is not None and seg.net_id not in matching_net_ids:
                 continue
+            if getattr(seg, 'graphic', False):
+                # Footprint / board graphic copper (#908, #337): a filled
+                # fp_poly's STROKE is an outline width, not a track width --
+                # the copper is the fill. KiCad's track_width constraint
+                # applies to PCB_TRACK only, never to a shape, so grading
+                # the perimeter segments here manufactured 8 permanent
+                # 'track-width' rows on a SOT-89 tab (run 26, esp_prog).
+                continue
             _tf = _track_floor(seg)
             too_thin, shortfall = check_track_width(seg, _tf, size_margin)
             if too_thin:
