@@ -3655,9 +3655,10 @@ def rule_pins_to_edge(ctx) -> Iterator[Violation]:
 
 
 #: `rule_pins_to_edge` grades parts with at least this many CONNECTED pads
-#: -- the same floor `placement_score.EDGE_FACING_MIN_PADS` applies, spelled
-#: here so the rule module does not import the score module.
-PINS_TO_EDGE_MIN_PADS = 3
+#: -- the same floor `placement_score.EDGE_FACING_MIN_PADS` applies, read
+#: from the geometry core both share (the rule module does not import the
+#: score module).
+from .edge_facing import MIN_PADS as PINS_TO_EDGE_MIN_PADS  # noqa: E402
 
 
 RULES = (

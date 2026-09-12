@@ -118,6 +118,27 @@ def main():
         check('the preference moved rotation only, not position',
               abs(st_on.parts['U2'].x - st_off.parts['U2'].x) < 1e-9
               and abs(st_on.parts['U2'].y - st_off.parts['U2'].y) < 1e-9)
+        # A FAR target: the rings find nothing, so the whole-board sweep
+        # must seat the part nearest the target -- with the flag off, exactly
+        # where the seeder seated it before the tie-break existed (measured
+        # on the pristine seeder: (26.3, 18.3) at rot 0, clearance 0.2). The
+        # first form of the tie-break lost this sweep on the OFF path and
+        # the review measured it on a corpus board (splitflap 0 -> 6
+        # unseated); the 30 x 20 fixture never needed the sweep at the
+        # target above, so nothing here had seen it.
+        st_far, _ = _state(path)
+        far = seeder._try_place(st_far, 'U2', 100.0, 100.0, set())
+        check('off, far target: the whole-board sweep still seats the part',
+              far is not None
+              and (round(st_far.parts['U2'].x, 3), round(st_far.parts['U2'].y, 3),
+                   st_far.parts['U2'].rot % 360) == (26.3, 18.3, 0.0),
+              f'{far} {(st_far.parts["U2"].x, st_far.parts["U2"].y, st_far.parts["U2"].rot)}')
+        st_far_on, _ = _state(path)
+        st_far_on.rotation_prefer = functools.partial(seeder._facing_rank, st_far_on,
+                                                      edge_refs=set())
+        far_on = seeder._try_place(st_far_on, 'U2', 100.0, 100.0, set())
+        check('on, far target: every angle sweeps too, and the part is seated',
+              far_on is not None, f'{far_on}')
 
         # --- 2: end to end through seed_from_intent -----------------------
         # A zone along the north edge, so the seeder seats U2 where one angle

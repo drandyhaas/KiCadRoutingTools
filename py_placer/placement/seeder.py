@@ -1071,11 +1071,11 @@ def _facing_rank(state, ref: str, tx: float, ty: float, rot: float,
     """
     if ref in edge_refs:
         return 0
-    from placement.edge_facing import count_pads_to_edge, pitch_of
+    from placement.edge_facing import MIN_PADS, count_pads_to_edge, pitch_of
     part = state.parts[ref]
     pads_all = part.pad_globals(tx, ty, rot)
     pads = [(x, y, n) for x, y, n in pads_all if n > 0]
-    if len(pads) < 3:
+    if len(pads) < MIN_PADS:
         return 0
     xs = [x for x, _, _ in pads_all]
     ys = [y for _, y, _ in pads_all]
@@ -1188,9 +1188,11 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
             # pose that fits), and the quench that follows it runs with its
             # facing terms at zero (measured to fail a 4-board A/B, #932).
             # MEASURED (tests/test_placement_ab.py, the facing-seed rows):
-            # the count it ranks by falls on two boards of three and every
-            # guard rises with it, so it is REJECTED as a default and stays
-            # opt-in for a caller who has read that trade.
+            # the count it ranks by falls on two boards of three, and a
+            # guard rises on both of them (pin-order inversions on both;
+            # crossings and wire length on one), so it is REJECTED as a
+            # default and stays opt-in for a caller who has read that
+            # trade. The numbers are in the baseline file.
             _pref = getattr(state, 'rotation_prefer', None)
             xfine = max(0.05, getattr(state, 'grid_step', 0.1) or 0.1)
 
@@ -1223,11 +1225,34 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                             continue
                         if _ok(x, y, rot):
                             return x, y
+                # The rings found nothing at this angle. A zone-constrained
+                # part stays in its zone and a capped repair never sweeps the
+                # whole board; everything else falls back to a whole-board
+                # sweep, nearest the target first -- PER ANGLE, exactly as the
+                # loop did before the rings were lifted into this closure.
+                # The first lift left this sweep outside the OFF path, and the
+                # review measured it: splitflap's default seed went from 0 to
+                # 6 unseated parts. The sweep is part of "first fit".
+                if constraint is not None or max_disp is not None:
+                    return None
+                u = state.usable
+                grid = []
+                nx = max(1, int((u[2] - u[0]) / FALLBACK_STEP_MM))
+                ny = max(1, int((u[3] - u[1]) / FALLBACK_STEP_MM))
+                for i in range(nx + 1):
+                    for j in range(ny + 1):
+                        x = round(u[0] + i * FALLBACK_STEP_MM, 3)
+                        y = round(u[1] + j * FALLBACK_STEP_MM, 3)
+                        grid.append(((x - tx) ** 2 + (y - ty) ** 2, x, y))
+                grid.sort()
+                for _, x, y in grid:
+                    if _ok(x, y, rot):
+                        return x, y
                 return None
 
             if _pref is None or len(_ladder_rots) < 2:
                 # The search as it has always been: the first angle of the
-                # ladder that fits anywhere wins.
+                # ladder that fits anywhere (rings, then the sweep) wins.
                 for rot in _ladder_rots:
                     hit = _first_fit(rot)
                     if hit is not None:
@@ -1241,8 +1266,9 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                 # takes, not at the target: the first form of this ranked the
                 # ladder at (tx, ty) and then let the search seat the winner
                 # anywhere -- measured on esp_prog, the count it was chosen
-                # for did not move (3 -> 3) while every guard worsened.
-                # Costs up to four searches per part instead of one.
+                # for did not move (3 -> 3) while crossings, hpwl and
+                # inversions all worsened. Costs up to four searches per part
+                # instead of one.
                 best = None
                 for i, rot in enumerate(_ladder_rots):
                     hit = _first_fit(rot)
@@ -1254,24 +1280,6 @@ def _try_place(state, ref: str, tx: float, ty: float, exclude: Set[str],
                 if best is not None:
                     state.apply_move(ref, best[1], best[2], best[3])
                     return clr
-                if constraint is not None:
-                    continue    # a zone-constrained part stays in its zone
-                if max_disp is not None:
-                    continue    # a capped repair never sweeps the whole board
-                u = state.usable
-                grid = []
-                nx = max(1, int((u[2] - u[0]) / FALLBACK_STEP_MM))
-                ny = max(1, int((u[3] - u[1]) / FALLBACK_STEP_MM))
-                for i in range(nx + 1):
-                    for j in range(ny + 1):
-                        x = round(u[0] + i * FALLBACK_STEP_MM, 3)
-                        y = round(u[1] + j * FALLBACK_STEP_MM, 3)
-                        grid.append(((x - tx) ** 2 + (y - ty) ** 2, x, y))
-                grid.sort()
-                for _, x, y in grid:
-                    if _ok(x, y, rot):
-                        state.apply_move(ref, x, y, rot)
-                        return clr
     finally:
         state.clearance = full
         state._inc_violation.clear()

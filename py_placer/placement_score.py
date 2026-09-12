@@ -82,8 +82,9 @@ TERM_ORDER = ('pair_length', 'pin_order_crossings', 'cluster_to_pin',
               'plane_cut_proxy', 'balance', 'edge_facing')
 
 #: `edge_facing` counts parts with at least this many CONNECTED pads: a
-#: two-pad passive has no row to face anything with.
-EDGE_FACING_MIN_PADS = 3
+#: two-pad passive has no row to face anything with. The value lives in
+#: the geometry core, shared with the rule and the seeder's tie-break.
+from placement.edge_facing import MIN_PADS as EDGE_FACING_MIN_PADS  # noqa: E402
 
 #: Every term is lower-is-better. Shipped per term rather than assumed, so a
 #: future term cannot silently invert `compare_terms` by being added.

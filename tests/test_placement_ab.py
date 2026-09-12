@@ -455,8 +455,9 @@ ROWS = [
     # inversions or a pad short -- and measured, it does. The first form
     # (rank the ladder at the seat target, then let the search seat the
     # winner anywhere) moved the signal on no board; this form moves it on
-    # two of three and every guard with it. `--rotate-by-facing` stays
-    # opt-in and no driver text cites it.
+    # two of three, with a guard rising on both (inversions on both;
+    # crossings and wire length on one). `--rotate-by-facing` stays opt-in
+    # and no driver text cites it.
     {
         'name': 'facing-seed-esp_prog',
         'board': 'esp_prog.kicad_pcb',
@@ -470,8 +471,8 @@ ROWS = [
         'rejected': True,
         'why': ('MECHANISM: each angle of the ladder finds its own first fit '
                 'and the pose with the fewest connected pads facing the '
-                'outline wins, ties in author order. The signal falls and '
-                'every guard rises: the inboard-facing angle seats where the '
+                'outline wins, ties in author order. The signal falls while '
+                'crossings and inversions rise: the inboard-facing angle seats where the '
                 'ring search first finds room for THAT angle, which is not '
                 'where the input angle would have sat, and every part seated '
                 'after it inherits the shift. Numbers: '
@@ -488,11 +489,13 @@ ROWS = [
         'guard': ('crossings', 'hpwl', 'inversions', 'body_blocking'),
         'expect': 'regress',
         'rejected': True,
-        'why': ('MECHANISM: as facing-seed-esp_prog, with one more: the ON '
-                'arm seats parts the OFF arm never finds room for, so its '
-                'crossings and inversions count a larger seated population '
-                '(`unseated` is in the baseline for exactly that). Judged on '
-                'the guards as declared before the run.'),
+        'why': ('MECHANISM: as facing-seed-esp_prog, with the wire guards '
+                'going the OTHER way: crossings and wire length fall with '
+                'the signal here, and pin-order inversions alone rise -- '
+                'one guard is enough, as declared before the run. `unseated` '
+                'is in the baseline because the first form of this arm lost '
+                "the seeder's whole-board sweep on the OFF path and this "
+                'board is where that showed.'),
     },
     {
         'name': 'facing-seed-tigard',
@@ -631,8 +634,16 @@ def _edge_facing(pcb_data, board_path, intent):
         return None
 
 
+def _ignore_ids(pcb, patterns):
+    """Net ids whose name matches any of `patterns` (fnmatch), or None."""
+    import fnmatch
+    ids = [n.net_id for n in pcb.nets.values()
+           if any(fnmatch.fnmatch(n.name, p) for p in (patterns or ()))]
+    return ids or None
+
+
 def _run_seed(board_path, out_path, intent, seed_kw,
-              group_sources=GROUP_SOURCES):
+              group_sources=GROUP_SOURCES, ignore_nets=()):
     """One SEED (from the intent, every part re-seated) + write + the same
     independent grade `_run` applies. The engine switch for a row that
     measures the seeder rather than the quench: `place_seed`'s path, minus
@@ -640,7 +651,11 @@ def _run_seed(board_path, out_path, intent, seed_kw,
 
     `crossings` / `hpwl` come from a fresh `pose_score.make_state` over the
     WRITTEN board (`total_cost` is what the quench copies into
-    `metrics['after']`), so the columns mean the same thing on both engines.
+    `metrics['after']`) with the row's `ignore_nets` resolved to net ids,
+    so the columns mean the same thing on both engines. The seat search
+    itself takes no ignore list (`seed_from_intent` has none); only the
+    columns do -- the first form of this arm declared the key and read it
+    nowhere, so GND airwires counted in the seed rows' guards.
     """
     import random
     from kicad_parser import parse_kicad_pcb
@@ -664,7 +679,9 @@ def _run_seed(board_path, out_path, intent, seed_kw,
     result = floorplan.grade(intent, graded, out_path, with_health=True,
                              group_sources=group_sources)
     summary = floorplan.summary(result)
-    cost = pose_score.make_state(graded, out_path).total_cost()
+    cost = pose_score.make_state(
+        graded, out_path,
+        ignore_net_ids=_ignore_ids(graded, ignore_nets)).total_cost()
     by_rule = {}
     for v in result.errors:
         by_rule[v.rule] = by_rule.get(v.rule, 0) + 1
@@ -862,9 +879,11 @@ def run_row(row, workdir):
             raise AssertionError(f"{row['name']}: a seed row states no "
                                  f"seed_on -- it would measure the same seed "
                                  f"twice")
-        off = _run_seed(board, os.path.join(d, 'off.kicad_pcb'), intent, {})
+        _ign = list(row.get('ignore_nets') or ())
+        off = _run_seed(board, os.path.join(d, 'off.kicad_pcb'), intent, {},
+                        ignore_nets=_ign)
         on = _run_seed(board, os.path.join(d, 'on.kicad_pcb'), intent,
-                       dict(row['seed_on']))
+                       dict(row['seed_on']), ignore_nets=_ign)
         mark, notes = _verdict(off, on, row)
         expected = row.get('expect')
         tag = mark.upper()
