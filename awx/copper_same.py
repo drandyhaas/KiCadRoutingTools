@@ -20,4 +20,8 @@ sa, va = key(sys.argv[1]); sb, vb = key(sys.argv[2])
 ds = len(set(sa) ^ set(sb)); dv = len(set(va) ^ set(vb))
 print(f'segments {len(sa)} vs {len(sb)} ({ds} differ), vias {len(va)} vs {len(vb)} ({dv} differ): '
       + ('IDENTICAL copper' if ds == 0 and dv == 0 and len(sa) == len(sb) and len(va) == len(vb) else 'DIFFERENT'))
-sys.exit(0 if ds == 0 and dv == 0 else 1)
+# the length test is in the verdict string AND in the exit code: a board
+# that duplicates a segment has the same SET and a different board, and
+# a caller following the docstring ("exit 0 identical") read DIFFERENT as
+# identical
+sys.exit(0 if ds == 0 and dv == 0 and len(sa) == len(sb) and len(va) == len(vb) else 1)
