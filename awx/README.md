@@ -27,7 +27,7 @@ Two arms are current, and **a number is meaningless without its arm**:
 | reference arm (one-pass plan) | 14 | 36 | 69 | 86 | -- |
 | joint-solve arm | -- | -- | **58** | **80** | 137 |
 | best complete K51 ever (`replan.py`) | | | | | 107 |
-| **human** | 22 | 46 | **58** | **70** | **81** |
+| **human** | 22 | 46 | **58** | **70** | **81** (48 nets; 85 over 51) |
 
 - **reference arm**: `SRC_ROUNDS=0 SEL_RETRY=6 EXACT_LANE=1
   DST_FACE_ASK=1 DST_WALK=3 SF_SWIM=30 BRAID_EXIT_GUARD=1
@@ -215,7 +215,8 @@ octilinear, so a non-orthogonal pose is outside both models today
 | `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for |
 | `pack.py`, `pack_board.py` | every lane a taut string against its neighbour |
 | **`ledger_cal.py`** | **per net: DP floor vs slack. The instrument that says whether to work on the plan or the realization** |
-| `census_vs_human.py`, `human_at_k.py` | per-net vias/copper/layers against the human, and where each via sits |
+| `human_at_k.py` | the human's vias for a coherent K set. **Mind the label**: `coherent_nets(51)` returns 48 nets, so "K51" is a 48-net problem -- the human is 81 over those 48 and 85 over the full 51. Both are right; ours route 48 |
+| `census_vs_human.py` | per-net vias/copper/layers against the human, and where each via sits |
 | `collapse_dives.py` | collapse short dives on a routed board (2 vias each) |
 | `cut_ledger.py` | Maley cut capacity of a plan, before any lane is routed |
 | `wall_probe.py`, `copper_same.py`, `cmp_copper.py` | track-level wall census, set-compare copper |
