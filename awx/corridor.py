@@ -763,10 +763,69 @@ def flow_dir(path: Sequence[Pt], end_dir: Pt, at_start: bool,
     return end_dir if _angle(taut, end_dir) <= snap_deg else taut
 
 
+def align_tail(sp_pts: Sequence[Pt], dest_box, margin: float = 0.5) -> List[Pt]:
+    """The spine's TAIL aligned with the destination array's own axis
+    (SPLIT_BLOCKS, 2026-09-10). A corridor's spine is the chord (or
+    medial line) from the teeth's centroid to the STUBS' centroid, and
+    with berths on three faces of the destination that centroid pulls
+    the chord across the array at an angle (the bench's K28: 13 degrees
+    through DU1). Every lane past the schedule region runs at a
+    constant offset from the spine, so inside the array -- a band comb,
+    a flank block -- it drifts across the band or the ball rows by the
+    tilt times its length. From where the spine first reaches the
+    array's near face (the padded box), it runs on along the axis the
+    chord points nearest to, for the chord's remaining length along
+    that axis: the lanes at the destination then run parallel to the
+    faces and the bands, as the human's do. Unchanged when the spine
+    never reaches the box."""
+    if dest_box is None or len(sp_pts) < 2:
+        return list(sp_pts)
+    x0, y0, x1, y1 = dest_box
+    bx = (x0 - margin, y0 - margin, x1 + margin, y1 + margin)
+    a, b = sp_pts[0], sp_pts[-1]
+    u = _unit((b[0] - a[0], b[1] - a[1]))
+    u_snap = (1.0 if u[0] > 0 else -1.0, 0.0) if abs(u[0]) >= abs(u[1]) \
+        else (0.0, 1.0 if u[1] > 0 else -1.0)
+    # the face the spine arrives at, and the coordinate of its line
+    if u_snap[0]:
+        face = bx[0] if u_snap[0] > 0 else bx[2]
+    else:
+        face = bx[1] if u_snap[1] > 0 else bx[3]
+    ax = 0 if u_snap[0] else 1
+    # the tail is the axis line THROUGH THE STUBS' CENTROID (the spine's
+    # end), from the face to that end -- not the chord's own face
+    # crossing: a steep chord (two band stubs reached from the source's
+    # far corner) meets the face inside the next block and its tail ran
+    # along a ball row. The spine keeps its points before the face and
+    # bends to the tail's start on the face line.
+    # ...on the array's CENTRE line (a banded array's band, a solid
+    # array's middle), not the stubs' centroid's: a corridor with berths
+    # on three faces has its centroid line on a ball row, the corridor's
+    # tube then holds that row's balls as static islands, and every lane
+    # is deflected round them. The tail runs from the face to the
+    # chord's end projected onto that line.
+    cy = ((y0 + y1) / 2) if ax == 0 else ((x0 + x1) / 2)
+    pf = (face, cy) if ax == 0 else (cy, face)
+    end = (b[0], cy) if ax == 0 else (cy, b[1])
+    rest = (end[0] - pf[0]) * u_snap[0] + (end[1] - pf[1]) * u_snap[1]
+    if rest <= 0.1:
+        return list(sp_pts)
+    out = [sp_pts[0]]
+    for q in sp_pts[1:]:
+        if (q[ax] - face) * u_snap[ax] >= 0:
+            break
+        out.append(q)
+    if math.hypot(pf[0] - out[-1][0], pf[1] - out[-1][1]) > 1e-6:
+        out.append(pf)
+    out.append(end)
+    return out
+
+
 def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
                 H: float, extra=None, log=None,
                 teeth: Optional[Sequence[Pt]] = None,
                 stubs: Optional[Sequence[Pt]] = None,
+                dest_box=None,
                 tooth_dirs: Optional[Sequence[Pt]] = None,
                 stub_dirs: Optional[Sequence[Pt]] = None,
                 relax: bool = True) -> Spine:
@@ -816,15 +875,17 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
         gap = (p2[0] - p1[0]) * u[0] + (p2[1] - p1[1]) * u[1]
         if gap <= 0.5:
             # the two zones overlap: nothing left to relax
-            return Spine(simplify([a, b], 0.08))
+            return Spine(align_tail(simplify([a, b], 0.08), dest_box))
         obs = RampedObstacles(base_obs, (Ct, Cs), H, extra=extra)
         if obs.seg_clear(p1, p2):
             # a clear straight channel: the chord, not relaxed (relaxing
             # it against the ramped obstacles can only add wiggles)
             sp = simplify([a, p1, p2, b], 0.08)
+            sp = align_tail(sp, dest_box)
             if log:
                 log(f'    spine: 2 mean pts -> 2 relaxed (0 rounds) -> '
-                    f'{len(sp)} vertices, {polyline_len(sp):.2f} mm, corners []')
+                    f'{len(sp)} vertices, {polyline_len(sp):.2f} mm, corners []'
+                    + ('  tail on the array axis' if dest_box is not None else ''))
             return Spine(sp)
     # THE MIDDLE, when the flows BEND (more than 30 degrees between
     # launch and arrival) or a big part / a laid corridor stands in the
@@ -851,7 +912,7 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
     p1 = (a[0] + R_t * u_t[0], a[1] + R_t * u_t[1])
     p2 = (b[0] - R_s * u_s[0], b[1] - R_s * u_s[1])
     if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) <= 0.5:
-        return Spine(simplify([a, b], 0.08))
+        return Spine(align_tail(simplify([a, b], 0.08), dest_box))
     H_eff = max(H, spread_across(teeth, Ct, u_t) + 0.1,
                 spread_across(stubs, Cs, u_s) + 0.1)
     obs = RampedObstacles(base_obs, (Ct, Cs), H_eff, extra=extra,
@@ -899,7 +960,7 @@ def build_spine(paths: Sequence[Sequence[Pt]], base_obs: 'ts.Obstacles',
             f'{len(sp)} octilinear, {polyline_len(sp):.2f} mm, '
             f'corners {[round(t_) for _i, _s, t_ in Spine(sp).corners()]}'
             + (f'  {[(round(x, 2), round(y, 2)) for x, y in sp]}' if len(sp) <= 8 else ''))
-    return Spine(sp)
+    return Spine(align_tail(sp, dest_box))
 
 
 # ---------------------------------------------------------------- distances
