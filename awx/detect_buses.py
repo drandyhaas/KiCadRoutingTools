@@ -147,6 +147,10 @@ def _write_shard(prefix, d, now):
     os.replace(tmp, _shard_path(prefix))
 
 
+import atexit as _atexit
+_atexit.register(lambda: _memo_save(force=True))   # the last dirty shards
+
+
 def _memo_load():
     """Kept for callers that poke the memo (probes): nothing to do, the
     shards load on first touch."""
@@ -183,13 +187,22 @@ def _memo_put(key, pts):
     _TAUT_DIRTY.add(prefix)
 
 
-def _memo_save():
+_TAUT_SAVE_EVERY = 60.0     # s between writes: the judge's trials each add strings, and 111 writes of a K41 search were 24 s
+_TAUT_LAST_SAVE = [0.0]
+
+
+def _memo_save(force=False):
     """Dirty shards only, merged with the shard on disk (another process
-    may have added to it meanwhile), stale entries dropped."""
+    may have added to it meanwhile), stale entries dropped. Throttled to
+    one write a minute (the memo is a cache: a crash loses new strings,
+    nothing else); `force` writes now, and atexit forces the last one."""
     import time as _t
     if not _TAUT_DIRTY:
         return
     now = _t.time()
+    if not force and now - _TAUT_LAST_SAVE[0] < _TAUT_SAVE_EVERY:
+        return
+    _TAUT_LAST_SAVE[0] = now
     try:
         os.makedirs(_TAUT_MEMO_DIR, exist_ok=True)
         for prefix in sorted(_TAUT_DIRTY):
