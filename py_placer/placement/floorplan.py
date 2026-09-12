@@ -2656,15 +2656,39 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                                   f"{float(hi):.2f}mm"),
                 measured={'overhang_mm': round(amount, 4)},
                 expected={'min': lo, 'max': float(hi)})
+        # The SEAT BASIS, decided once for the two conjuncts that ask where
+        # the part's MATING FACE is (nearest edge, seat). A receptacle's
+        # pads sit well inboard of its opening by construction: a micro-USB
+        # shell's SMD pads are 1.6-2.1 mm behind it. For an
+        # `edge_receptacle` (or a brief row carrying `mount_mode:
+        # edge_mount`) both conjuncts are therefore measured on the DRAWN
+        # body when the library drew one; everything else keeps the
+        # courtyard, and the OVERHANG conjunct above stays on the courtyard
+        # too (its edge-margin graze would read a flush body as a 0.55 mm
+        # overhang -- a different currency, not changed here).
+        basis = 'courtyard'
+        seat_rect = part.rect
+        ctxd = c.get('context') or {}
+        if (c.get('class') == 'edge_receptacle'
+                or ctxd.get('mount_mode') == 'edge_mount'):
+            brect, src = ctx.body_rect(ref)
+            if brect is not None and src in ('fab', 'silk'):
+                seat_rect, basis = brect, f'body:{src}'
         edge = c.get('edge')
         if edge and ctx.outline_bounds:
-            actual = _nearest_edge(part.rect, ctx.outline_bounds)
+            # Run 27's replay measured the courtyard reading on the same
+            # USB1: its pad box is 1.6 mm from the west edge and 1.3 mm from
+            # the south, so a socket flush with the west edge read "nearest
+            # the south edge but declared on the west" -- on every one of
+            # ten seeds, since the socket is a fixed part.
+            actual = _nearest_edge(seat_rect, ctx.outline_bounds)
             if actual != edge:
                 yield Violation(
                     rule='edge_connector', severity=ctx.sev('edge_connector'),
                     ref=ref, message=(f"{ref} sits nearest the {actual} edge "
                                       f"but is declared on the {edge} edge"),
-                    measured={'edge': actual}, expected={'edge': edge})
+                    measured={'edge': actual, 'basis': basis},
+                    expected={'edge': edge})
         # Run-4 A: the missing PROXIMITY conjunct. The rule used to grade only
         # the overhang band and the nearest-edge identity, so a receptacle
         # 15.8 mm INTERIOR passed ("nearest west, declared west" is satisfied
@@ -2688,28 +2712,12 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             _sev = WARN
         if setback is not None and amount <= legality.EPS:
             # The SEAT is a question about the part's BODY -- does its
-            # mating face reach the edge -- and a receptacle's pads sit
-            # well inboard of that face by construction: a micro-USB
-            # shell's SMD pads are 1.6-2.1 mm behind its opening. Measured
-            # on run 26's board: USB1's drawn fab body sits at 0.00 mm from
-            # the west edge where its pad box reads 2.1 mm, so the courtyard
-            # (here the pad-bbox fallback) reported "seated 1.30mm ... no
-            # overhang" on a socket that was flush, and the brief's four
-            # USB1 clauses had to be waived. For an `edge_receptacle` (or a
-            # brief row carrying `mount_mode: edge_mount`) the seat is
-            # therefore measured on the DRAWN body when the library drew one;
-            # everything else keeps the courtyard, and the OVERHANG conjunct
-            # above stays on the courtyard too (its edge-margin graze would
-            # read a flush body as a 0.55 mm overhang -- a different
-            # currency, not changed here).
-            basis = 'courtyard'
-            seat_rect = part.rect
-            ctxd = c.get('context') or {}
-            if (c.get('class') == 'edge_receptacle'
-                    or ctxd.get('mount_mode') == 'edge_mount'):
-                brect, src = ctx.body_rect(ref)
-                if brect is not None and src in ('fab', 'silk'):
-                    seat_rect, basis = brect, f'body:{src}'
+            # mating face reach the edge -- on `seat_rect`, the basis
+            # decided above. Measured on run 26's board: USB1's drawn fab
+            # body sits at 0.00 mm from the west edge where its pad box
+            # reads 2.1 mm, so the courtyard (here the pad-bbox fallback)
+            # reported "seated 1.30mm ... no overhang" on a socket that was
+            # flush, and the brief's four USB1 clauses had to be waived.
             clr = ctx.gate.edge_clearance(seat_rect)
             if clr > float(setback) + legality.EPS:
                 yield Violation(

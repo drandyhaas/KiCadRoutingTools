@@ -13,6 +13,10 @@ pad copper from x = 115.6.
 For an `edge_receptacle` (or a brief row carrying `mount_mode: edge_mount`)
 the seat is now measured on the drawn body when the library drew one (fab,
 else silk); every other entry, and the OVERHANG conjunct, keep the courtyard.
+The NEAREST-EDGE conjunct reads the same basis: run 27's replay measured the
+same socket's pad box 1.6 mm from the west edge and 1.3 mm from the south, so
+on the courtyard it read "nearest the south edge but declared on the west" on
+every one of ten seeds -- a fixed part, so no seed could pass.
 
 Run:
     python3 tests/test_run26_edge_seat_body_basis.py
@@ -128,6 +132,33 @@ def main():
           'west-flush part still fails the edge rule',
           any(v.rule == 'edge_connector' and v.ref == 'USB1'
               for v in r4.violations))
+
+    # --- 1b: the NEAREST-EDGE conjunct reads the same basis (run 27) -----
+    def _near(result, ref):
+        return [v for v in result.violations
+                if v.rule == 'edge_connector' and v.ref == ref
+                and 'edge' in v.measured
+                and 'edge_clearance_mm' not in v.measured]
+
+    b = pcb.board_info.board_bounds
+    pads = [p for p in pcb.footprints['USB1'].pads
+            if p.pad_type != 'np_thru_hole']
+    south_gap = b[3] - max(p.global_y + p.size_y / 2 for p in pads)
+    west_gap = min(p.global_x - p.size_x / 2 for p in pads) - b[0]
+    check('anti-vacuity: USB1 pad box lies nearer the south edge than the west',
+          south_gap < west_gap, f'south {south_gap:.2f} west {west_gap:.2f}')
+    check('an edge_receptacle flush by its body is nearest its declared edge',
+          _near(r, 'USB1') == [], f'{[v.message for v in _near(r, "USB1")]}')
+    n2 = _near(r2, 'USB1')
+    check('a plain entry still reads the courtyard, and misreads south',
+          len(n2) == 1 and n2[0].measured.get('edge') == 'south'
+          and n2[0].measured.get('basis') == 'courtyard',
+          f'{[(v.measured, v.message[:60]) for v in n2]}')
+    check('mount_mode: edge_mount selects the body basis for nearest-edge too',
+          _near(r3, 'USB1') == [], f'{[v.message for v in _near(r3, "USB1")]}')
+    check('and the east claim is refused by nearest-edge on the body, not only by the seat',
+          any(v.measured.get('edge') == 'west' for v in _near(r4, 'USB1')),
+          f'{[v.measured for v in _near(r4, "USB1")]}')
 
     # --- 2: synthetic: no drawn body -> courtyard; silk body -> body:silk --
     for layer, want_basis, want_hit in (
