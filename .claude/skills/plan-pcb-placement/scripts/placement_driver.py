@@ -277,8 +277,11 @@ Then classify by what you MEASURED, and say which row you are in:
   violations, or a mechanically-fixed part where mechanics forbid  -> P2
   rough/imported, all legal   -> P5 (a slate), or P4 for local violations only
 
-Next: python3 -X utf8 {sys.argv[0]} --stage <P1|P2|P5> --board {a.board} \\
+Next: python3 -X utf8 {sys.argv[0]} --stage <P2|P5> --board {a.board} \\
           --drc-json wk/drc0.json --assembly-json wk/assembly0.json
+
+Next, for P1 only: it seeds FROM A ZONE PLAN and refuses without one.
+  python3 -X utf8 {sys.argv[0]} --stage P1 --board {a.board} --zone-plan <the plan>
 
 Next, for P4 only: it grades DELTAS, so it also needs the pair. It refuses
 without both -- an absolute threshold is what made two of its gates unusable.
@@ -289,6 +292,9 @@ without both -- an absolute threshold is what made two of its gates unusable.
 
 
 def p1(a):
+    ok, plan = _guard_zone_plan(a)
+    if not ok:
+        return err(plan)
     return f'''<stage_instructions stage="P1" name="unplaced" of="{len(STAGES)}">
 The board has no placement to repair. Do not test this with an exit code -- one
 placement tool exits 0 and gives advice on a board with every part at its
@@ -301,17 +307,31 @@ print('no outline:', p.board_info.board_bounds is None)
 print('stacked at defaults:', len({{(round(f.x,3), round(f.y,3))
       for f in p.footprints.values()}}) < len(p.footprints) / 2)"
 
+ZONE PLAN {a.zone_plan}: {plan['zoned']} zoned block(s) cover all {plan['movable']}
+movable part(s); {plan['locked']} must_lock and {plan['edge']} declared edge
+connector(s) are not the seed's to arrange. The plan is where the arrangement
+is DECIDED: run 26 seeded from one zone and then hand-placed most of its parts.
+
 Walk the ladder in order and say which rung applies:
 
 1. The repo has its own seeder -> run it, then treat the output as a rough
    placement (P4/P5).
-2. No seeder, but an intent exists or the spec states placement facts ->
-   author the intent (P6), then seed from it:
-       python3 -X utf8 py_placer/place_seed.py {a.board} seed.kicad_pcb --intent fp.json
-   The seeder grades its own output against the same intent; exit 4 means the
-   seed does not satisfy the intent it was built from, and says which rule broke.
-3. Neither -> say so and STOP. This toolchain does not invent a placement, and
-   inventing mechanical geometry is what every rule here forbids.
+2. Otherwise seed FROM THE PLAN, several seeds, and rank only the ones that
+   pass their own gate (exit 4 names the rule; 0 of N passing is the PLAN's
+   problem, not the seeder's -- run 26 had none pass and hand-placed instead):
+       python3 -X utf8 py_placer/compare_seeds.py {a.board} --intent {a.zone_plan} \\
+           --seeds 0 1 2 --out-dir wk/seedcmp
+   Then FACE the rows. The seeder keeps the first rotation that fits, so read
+   `edge_facing` per part off the best seed and turn every part whose connected
+   pads face the outline with nothing beyond (run 26's regulator: 3 of 3 pins
+   0.40 mm from the edge, and a review with no number wrote PASS):
+       python3 -X utf8 py_placer/placement_score.py wk/seedcmp/seed_<best>.kicad_pcb \\
+           --intent {a.zone_plan} --json wk/terms_seed.json
+       python3 -X utf8 py_placer/place_pose.py wk/seedcmp/seed_<best>.kicad_pcb \\
+           seed.kicad_pcb face <REF> <FACE> <PARTNER>
+3. No seed passes, on a rule the plan itself sets -> fix the plan and say so.
+   This toolchain does not invent a placement, and inventing mechanical
+   geometry is what every rule here forbids.
 
 Next: P4 legalizes the seed, P6 declares the intent first. Both FOLLOW a move,
 so both refuse without the render of the seed against the board it came from:
@@ -1022,6 +1042,105 @@ def _dig(doc, key):
     return None
 
 
+def _engine():
+    """py_placer / py_router on sys.path, once, for the one guard that reads
+    the board and the intent with the SAME code the seeder runs -- never a
+    re-typed fnmatch -- so a plan this guard passes is the plan the seeder
+    reads, block for block."""
+    root = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '..'))
+    for sub in ('py_placer', 'py_router'):
+        p = os.path.join(root, sub)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
+def _guard_zone_plan(a):
+    """P1 seeds FROM A PLAN. Refuse to seed from nothing (run 26).
+
+    Run 26's placement half seeded from an intent carrying ONE zone, and
+    then hand-placed most of its parts one pose at a time, because nothing
+    had decided where anything went before the first seed. The arrangement
+    is a decision, and this guard makes it a document: every movable part
+    in a block with a `zone` rectangle and a `note`, or the stage does not
+    print. MOVABLE is what the seeder moves -- any part with a pad
+    (place_seed sends a pad-bearing pile part to the board centre whether
+    or not a pad is connected, so a fiducial or a mounting hole must be
+    zoned or must_lock too) minus `must_lock` patterns (fnmatch, as the
+    seeder resolves them) minus the intent's `edge_claims()` (exact refs,
+    as the grader looks them up; a `connector_affinity` entry claims no
+    edge and IS seeded at its centroid, so it needs a zone). Returns
+    (True, {counts}) or (False, why)."""
+    import fnmatch
+    plan, perr = _load(a.zone_plan, 'The zone plan (--zone-plan)')
+    if perr:
+        return False, (
+            perr + '\n\nA zone plan is a floorplan intent whose `blocks[].zone` '
+            'rectangles cover every movable part -- the arrangement, decided '
+            'BEFORE the first seed rather than one hand-placed pose at a '
+            'time after it. Start from what the board and the brief already '
+            'say, then author the zones by hand (a rectangle in board mm '
+            'and a `note` saying why, per block):\n'
+            f'  python3 -X utf8 py_tools/check_floorplan.py {a.board} '
+            '--emit-intent wk/zone_plan.json')
+    _engine()
+    from placement import floorplan as _fp
+    try:
+        intent = _fp.intent_from_dict(plan, a.zone_plan)
+    except Exception as exc:                                # noqa: BLE001
+        return False, (
+            f'The zone plan does not read as a floorplan intent '
+            f'({type(exc).__name__}: {exc}). The seeder would refuse it the '
+            'same way; fix the file, not the flag.')
+    zoned = [z for z in intent.blocks if z.rect is not None]
+    if not zoned:
+        return False, (
+            'The zone plan declares no `blocks[].zone` at all, so it decides '
+            'nothing about where anything goes: the seeder would seat every '
+            'part at its connectivity centroid, which is how run 26 ended '
+            'up hand-placing most of its parts after the seed. Give every '
+            'movable part a block with a zone rectangle and a note.')
+    noteless = sorted(z.name for z in zoned if not (z.note or '').strip())
+    if noteless:
+        return False, (
+            f'{len(noteless)} zoned block(s) carry no `note`: '
+            f'{", ".join(noteless)}. A zone is a decision, and a rectangle '
+            'with no reason beside it is one nobody can review or revisit; '
+            'say in the note why THESE parts go THERE.')
+    from kicad_parser import parse_kicad_pcb
+    try:
+        pcb = parse_kicad_pcb(a.board)
+    except Exception as exc:                                # noqa: BLE001
+        return False, (
+            f'The board cannot be read ({type(exc).__name__}: {exc}), so '
+            'nothing can say which parts the plan covers.')
+    if not pcb.footprints:
+        return False, (
+            f'{a.board} parses but carries no footprint, so there is nothing '
+            'for a zone plan to cover. This is not the unplaced board; point '
+            '--board at it.')
+    members, _problems = _fp.resolve_blocks(intent, pcb, ('kicad', 'sheet'))
+    covered = set()
+    for z in zoned:
+        covered.update(members.get(z.name, ()))
+    movable = {ref for ref, fp_ in pcb.footprints.items() if fp_.pads}
+    locked = {ref for ref in movable
+              if any(fnmatch.fnmatch(ref, pat) for pat in intent.must_lock)}
+    claimed = {str(c.get('ref')) for c in intent.edge_claims()}
+    edge = {ref for ref in movable if ref in claimed}
+    left = sorted(movable - locked - edge - covered)
+    if left:
+        return False, (
+            f'{len(left)} movable part(s) sit in no zoned block: '
+            f'{", ".join(left)}. A part the plan does not place is a part '
+            'the seeder puts at its connectivity centroid, at the first '
+            'rotation that fits -- the pose nobody decided. Add each to a '
+            'block with a zone, or declare it must_lock / an edge connector '
+            'if that is what it is.')
+    return True, {'zoned': len(zoned), 'movable': len(movable - locked - edge),
+                  'locked': len(locked), 'edge': len(edge)}
+
+
 def _guard_damage(a):
     """P2/P3 exist to repair damage; refuse to run them blind, or on a clean board."""
     drc, derr = _load(a.drc_json, 'The copper-free DRC result (--drc-json)')
@@ -1603,7 +1722,13 @@ def _guard_congestion(a):
 #: nearest tool was the forbidden one. Three lines name `route.py --undo`, its
 #: two limits (refuses unscoped; leaves zone pours) and the prohibition. A
 #: mandate with no lever is worse than three lines of body.
-_BODY_CEILING = {'P-brief': 60, 'P0': 75, 'P1': 35, 'P2': 45, 'P3': 80,
+#:
+#: P1 35 -> 45 and P0 75 -> 78 (run 26). P1 seeds FROM A ZONE PLAN now: its
+#: body gained the plan's coverage line, a ranked-seeds command in place of
+#: the single seed, and a facing step -- the three things run 26's placement
+#: half did not have and hand-placed most of its parts without. P0 gained the
+#: three-line handoff that carries the plan into P1, since P1 refuses without it.
+_BODY_CEILING = {'P-brief': 60, 'P0': 78, 'P1': 45, 'P2': 45, 'P3': 80,
                  'P4': 100, 'P5': 45, 'P6': 30, 'P-close': 60}
 
 STAGES = {
@@ -1672,6 +1797,14 @@ def _args(argv=None):
                          'a question nothing else in the close-out asks. '
                          'Omitted, the move count still prints and nothing '
                          'refuses.')
+    ap.add_argument('--zone-plan', default=None, metavar='PATH',
+                    help='the floorplan intent P1 seeds FROM: a block with a '
+                         '`zone` rectangle and a `note` for every movable '
+                         'part (must_lock and declared edge connectors '
+                         'excepted). P1 refuses without one and names the '
+                         'parts a plan leaves out: run 26 seeded from a '
+                         'single zone and then hand-placed most of its '
+                         'parts, one pose at a time, with no plan anywhere.')
     # --congestion-ratio is GONE. It set a threshold P-close refused on, and the
     # calibration withdrew that refusal (docs/placement-calibration.md): the
     # premise inverts on 1 of 3 corpus boards, where a perfect repair scores a
@@ -1750,6 +1883,34 @@ def _fake_render(board, halo=100.0, crossings=100.0, hpwl=1000.0, moved=3):
     }
 
 
+def _tiny_board(path, refs, unconnected=()):
+    """A board `parse_kicad_pcb` reads: an outline and one part per ref, each
+    with one pad -- connected, except for the refs in `unconnected` (a
+    mounting hole, a fiducial), which the seeder moves all the same. On disk,
+    because the guard reads the file the flag names."""
+    fps = ''.join(
+        f'  (footprint "test:FP" (layer "F.Cu") (uuid "fp-{r}") (at {2 + 3 * i} 2)\n'
+        f'    (property "Reference" "{r}" (at 0 0))\n'
+        f'    (pad "1" smd rect (at 0 0) (size 0.6 0.8) (layers "F.Cu") '
+        f'(net {0 if r in unconnected else 1} "{"" if r in unconnected else "/A"}") (uuid "p1-{r}"))\n'
+        f'  )\n' for i, r in enumerate(refs))
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('(kicad_pcb (version 20241229) (generator "test")\n'
+                 '  (net 0 "")\n  (net 1 "/A")\n'
+                 '  (gr_rect (start 0 0) (end 20 10) (layer "Edge.Cuts") '
+                 '(uuid "e1"))\n' + fps + ')\n')
+    return path
+
+
+def _zone_plan_doc(blocks, **extra):
+    """A floorplan intent carrying `blocks` and nothing else the guard
+    does not ask for."""
+    doc = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+           'blocks': blocks}
+    doc.update(extra)
+    return doc
+
+
 def _next_line_fixture(tmp):
     """Fabricated evidence for every guard, as flag -> path.
 
@@ -1765,15 +1926,20 @@ def _next_line_fixture(tmp):
             _json.dump(doc, fh)
         return p
 
-    board = os.path.join(tmp, 'b.kicad_pcb')
+    # The board is a REAL two-part board, not an empty file: P1's zone-plan
+    # guard parses it and resolves the plan's blocks against it, and an
+    # empty file would make every populated dump of P1 a refusal.
+    board = _tiny_board(os.path.join(tmp, 'b.kicad_pcb'), ('U1', 'U2'))
     before = os.path.join(tmp, 'a.kicad_pcb')
-    for p in (board, before):
-        open(p, 'w', encoding='utf-8').close()
+    open(before, 'w', encoding='utf-8').close()
     return {
         'board': board,
         'flags': {
             '--board': board,
             '--before': before,
+            '--zone-plan': wrote('zp.json', _zone_plan_doc(
+                [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+                  'note': 'the fixture plan: both parts, one zone'}])),
             '--drc-json': wrote('d.json', {'violations': 3}),
             '--locks-json': wrote('l.json', {'findings': [],
                                              'lock_patterns': []}),
@@ -2071,6 +2237,11 @@ def _refusal_scenarios(tmp):
                            'graded': 0, 'uncovered': 0, 'abstained': 0,
                            'complete': True}})]
 
+    tiny = _tiny_board(os.path.join(tmp, 'tiny.kicad_pcb'), ('U1', 'U2'))
+    zp_ok = wrote('zp_ok.json', _zone_plan_doc(
+        [{'name': 'all', 'refs': ['U*'], 'zone': [0, 0, 10, 10],
+          'note': 'both parts, one zone'}]))
+
     def clause_intent(name, **row):
         r = {'id': 'proximity[0:Y1~U1].max_mm', 'state': 'uncovered'}
         r.update(row)
@@ -2104,6 +2275,33 @@ def _refusal_scenarios(tmp):
             '--assembly-json', wrote('asm_ok.json',
                                      {'buildable': True, 'blocking': 0,
                                       'verdict': 'buildable (blocking 0)'})]),
+        # _guard_zone_plan (run 26): P1 seeds FROM a plan, one row per way
+        # the plan fails to be one. The base board is an EMPTY file, which
+        # is the no-footprint arm; the missing-plan arm is `no evidence at
+        # all` above.
+        ('a zone plan that is not an intent', base
+         + ['--zone-plan', wrote('zp_bad.json', {'schema': 1, 'blocks': 'x'})]),
+        ('a zone plan whose blocks carry no zone', base
+         + ['--zone-plan', wrote('zp_nozone.json', _zone_plan_doc(
+             [{'name': 'a', 'refs': ['U*']}]))]),
+        ('a zoned block with no note', base
+         + ['--zone-plan', wrote('zp_nonote.json', _zone_plan_doc(
+             [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 10, 10]}]))]),
+        # The two rows below name a board OTHER than `base`'s, and every
+        # stage runs on every row: P2's damage refusal embeds the board
+        # path in a check_drc command, so a new path is a new command span
+        # on a tool test_431 cannot value-check (it pins that count).
+        # `damaged` satisfies that guard, so P2 renders its body instead.
+        ('a zone plan over a board that cannot be read',
+         ['--board', os.path.join(tmp, 'nope.kicad_pcb'), '--zone-plan', zp_ok]
+         + damaged),
+        ('a zone plan over a board with no footprint', base
+         + ['--zone-plan', zp_ok]),
+        ('a zone plan leaving parts uncovered',
+         ['--board', tiny, '--zone-plan', wrote('zp_half.json', _zone_plan_doc(
+             [{'name': 'a', 'refs': ['U1'], 'zone': [0, 0, 5, 5],
+               'note': 'U1 only'}]))]
+         + damaged),
         # P3's lock advice
         ('no lock advice', base + damaged),
         ('unlocked_high with nothing waived', base + damaged
@@ -2515,6 +2713,89 @@ def _self_test():
                                   '--waive', 'U2:e', '--waive', 'U3:s']))
         want(out.startswith('<error>') and 'do not parse' in out,
              'P3 refuses a waiver with no reason (REF, not REF:reason)')
+
+    # P1 seeds FROM A PLAN (run 26). The guard names what the plan leaves out,
+    # and only that: a must_lock part and a declared edge connector are not
+    # the seed's to arrange and must not be demanded.
+    with tempfile.TemporaryDirectory() as tmp1:
+        _tb = _tiny_board(os.path.join(tmp1, 'tiny.kicad_pcb'),
+                          ('U1', 'U2', 'H1', 'J1'))
+
+        def _zp(name, blocks, **extra):
+            p = os.path.join(tmp1, name)
+            json.dump(_zone_plan_doc(blocks, **extra),
+                      open(p, 'w', encoding='utf-8'))
+            return p
+
+        out = STAGES['P1'](_args(['--board', _tb]))
+        want(out.startswith('<error>') and '--emit-intent' in out,
+             'P1 refuses without a zone plan, and says how to start one')
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+            'half.json', [{'name': 'a', 'refs': ['U1'], 'zone': [0, 0, 5, 5],
+                           'note': 'U1 only'}])]))
+        want(out.startswith('<error>') and '3 movable part(s)' in out
+             and 'H1, J1, U2' in out,
+             'P1 names every movable part the plan leaves out')
+        # A declared edge connector is exempt only when it CLAIMS an edge
+        # (`edge_claims()`, what the seeder's edge stage seats); a
+        # connector_affinity entry is seeded at its centroid like any part.
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+            'lock.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+                           'note': 'the two ICs'}],
+            must_lock=['H*'], edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
+        want(out.startswith('<stage_instructions')
+             and '1 zoned block(s) cover all 2' in out
+             and '1 must_lock and 1 declared edge' in out,
+             'P1 proceeds once every movable part is zoned, locked or a '
+             'declared edge connector, and prints the census')
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+            'aff.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+                          'note': 'the two ICs'}],
+            must_lock=['H*'],
+            edge_connectors=[{'ref': 'J1', 'class': 'connector_affinity'}])]))
+        want(out.startswith('<error>') and '1 movable part(s)' in out
+             and ': J1.' in out,
+             'P1 does not exempt a connector_affinity entry -- it claims no '
+             'edge and the seeder seats it at its centroid')
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+            'nozone.json', [{'name': 'a', 'refs': ['U*']}])]))
+        want(out.startswith('<error>') and 'no `blocks[].zone`' in out,
+             'P1 refuses a plan whose blocks carry no zone')
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+            'nonote.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5]}],
+            must_lock=['H*'], edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
+        want(out.startswith('<error>') and 'carry no `note`' in out
+             and ': a.' in out,
+             'P1 refuses a zoned block that states no reason')
+        # A part with a pad and NO connected pin is still the seeder's to
+        # move (place_seed sends every pad-bearing pile part to the centre),
+        # so a fiducial or a mounting hole is demanded like any other part
+        # until the plan locks it -- P2's table calls it a mechanical fact,
+        # and a fact goes in `must_lock`, not in a zone.
+        _tb2 = _tiny_board(os.path.join(tmp1, 'fid.kicad_pcb'),
+                           ('U1', 'U2', 'FID1'), unconnected=('FID1',))
+        out = STAGES['P1'](_args(['--board', _tb2, '--zone-plan', _zp(
+            'fid.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+                          'note': 'the two ICs'}])]))
+        want(out.startswith('<error>') and '1 movable part(s)' in out
+             and ': FID1.' in out,
+             'P1 demands a part with no connected pin too -- the seeder moves it')
+        out = STAGES['P1'](_args(['--board', _tb2, '--zone-plan', _zp(
+            'fid_lock.json', [{'name': 'a', 'refs': ['U*'], 'zone': [0, 0, 5, 5],
+                               'note': 'the two ICs'}], must_lock=['FID*'])]))
+        want(out.startswith('<stage_instructions'),
+             '...and is satisfied once must_lock names it')
+        # Membership comes from resolve_blocks, the seeder's own rule: a
+        # block naming a GROUP this board does not have covers nothing, so
+        # every part is named -- a re-typed fnmatch has no group to miss.
+        out = STAGES['P1'](_args(['--board', _tb, '--zone-plan', _zp(
+            'group.json', [{'name': 'a', 'group': 'nosuch',
+                            'zone': [0, 0, 5, 5], 'note': 'by group'}],
+            must_lock=['H*'], edge_connectors=[{'ref': 'J1', 'edge': 'west'}])]))
+        want(out.startswith('<error>') and '2 movable part(s)' in out
+             and 'U1, U2' in out,
+             'P1 resolves a group block the way the seeder does, and an '
+             'unknown group covers nobody')
 
     # P-close's congestion gate. The numbers are neo6502's own (run 15): a
     # placement that closed 49% of its halo gap and 2% of its crossings gap

@@ -1491,7 +1491,12 @@ half wrote; do not re-derive it by diffing poses.
       --board {_frozen} --kind systemic \\
       --lever "L2 freeze: <n> refs the placement half named as decisions
                (poses unchanged from the placement close-out; new file,
-               new content hash)"
+               new content hash). WAIVERS carried from the placement half:
+               <every --waive its P-close was closed with, verbatim, or none>"
+
+A waived gate is a gap the routing half inherits, so it rides on the freeze row
+rather than staying in the placement half's head: run 26 waived the USB seat
+clause by clause, and the routing half never heard it.
 
 --kind systemic, NOT placement: a freeze turns no lap of the loop. Recorded as
 a placement row it entered the placement half's plateau window carrying no
@@ -2857,9 +2862,16 @@ def _close_out(a, name):
 #:
 #: L1's number is the POPULATED arm (105), not the cheap fixture's 100 --
 #: the self-test measures both and the bigger one is what the cap is for.
+#:
+#: L2 220 -> 225 (run 26): the freeze text carries the placement half's
+#: WAIVERS onto the freeze row, verbatim. Run 26 closed its placement half
+#: with the USB seat waived clause by clause, and the routing half never
+#: heard it -- a waived gate is a gap the routing half inherits, and the freeze
+#: row is the one record both halves read. Five lines, shared by the
+#: delegated and inline arms.
 _ARM_CEILING = {
     'L1': 105, 'L1 (delegated)': 105, 'L1 (inline)': 25,
-    'L2': 220, 'L2 (delegated)': 220, 'L2 (inline)': 95,
+    'L2': 225, 'L2 (delegated)': 225, 'L2 (inline)': 95,
     'L3': 75, 'L4': 45, 'L5': 40,
     'L5 (DONE-EXHAUSTED)': 170, 'L5 (STUCK)': 170, 'L5 (BUDGET)': 170,
 }
@@ -4130,6 +4142,22 @@ def _self_test():
     # The hand-off is NAMED in the text the orchestrator reads.
     want('place_prompt.txt' in deleg and 'place_return.md' in deleg,
          'L1 names both halves of the hand-off on disk')
+    # ...and L2's freeze row carries the placement half's waivers (run 26
+    # waived the USB seat clause by clause and the routing half never heard
+    # of it). Asserted on the RENDERED text: --dump-all prints every
+    # populated L2 arm (cheap, delegated, inline), and all three share the
+    # one `freeze` string.
+    import contextlib as _ctx
+    import io as _io
+    _dbuf = _io.StringIO()
+    with _ctx.redirect_stdout(_dbuf):
+        try:
+            main(['--dump-all'])
+        except SystemExit:
+            pass
+    want(_dbuf.getvalue().count('WAIVERS carried from the placement half') >= 3,
+         "L2 carries the placement half's waivers onto the freeze row, on "
+         "every rendered arm")
 
     # THE CAP'S POPULATED ARM. The `base` fixture above names no artifact that
     # exists, so it measures the cheapest L1 there is. This one exists.
