@@ -72,8 +72,9 @@ from schedule import Schedule  # noqa: E402
 import escape_moves as em  # noqa: E402
 from select_moves import pair_chirality  # noqa: E402
 from bga_fanout.flip_frame import to_front_frame, other_layer, mirror_axis  # noqa: E402
+import prices as _pr  # ONE source for the swimmer price
 
-TRACK = 0.127
+TRACK = ts.TRACK         # ONE source: topo_strings
 CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
 VIA_SIZE = 0.25
 VIA_DRILL = 0.15
@@ -138,7 +139,7 @@ SLOPE_W = 0.02                 # extra band half-width per unit |do/ds|:
 # rescue / last-call budget multiplier. Defaults = the braid as it was
 # (measured: one attempt gives the same board 22% faster; a halved
 # budget loses nets, so the probe keeps the full one).
-SWIM_PRICE = 2                 # the planner's price for a lane that cannot
+SWIM_PRICE = _pr.PLANNER       # ONE source: prices.py. The planner's price for a lane that cannot
                                # run in-band (a dive and a surface)
 ATTEMPTS = int(os.environ.get('BRAID_ATTEMPTS', '6'))
 BUDGET_X = int(os.environ.get('BRAID_BUDGET_X', '4'))
@@ -206,7 +207,7 @@ DIVE_ROOM = float(os.environ.get('BRAID_DIVE_ROOM', '0.3'))   # s either side of
 # Pages are the special case, so the model cannot lose to them; one
 # change alone could (K28 greedy berths: 38 under pages, 44 under level 1).
 RIDE_W = float(os.environ.get('BRAID_RIDE_W', '2.0'))    # a stayer's two-change ride
-SWIM_W = float(os.environ.get('BRAID_SWIM_W', '2.5'))    # a net left to swim (exact_pages' price)
+SWIM_W = _pr.PAGES    # ONE source: prices.py -- a net left to swim (exact_pages' price)
 # BRAID_ONE_DIVE=3: the profiles chosen on PROXIMITY, not crossings. Level
 # 2 constrained layers at the crossing points and asked DIVE_ROOM of s
 # either side; measured at K35 (wall census at the last call) two lanes
@@ -269,7 +270,7 @@ PROF_DS = 0.1                                                  # the sampling st
 MAXCH = int(os.environ.get('BRAID_MAXCH', '4'))
 _PROFILE_MEMO = {}                                             # (geometry key) -> (solution, message)
 VIA_SEP = 0.4                                                  # two changes of one lane at least this far apart in s
-RESIDUE_W = float(os.environ.get('BRAID_RESIDUE_W', '6.0'))    # a net no profile fits (level 4)
+RESIDUE_W = _pr.MILP    # ONE source: prices.py -- a net no profile fits (level 4/5)
 # BRAID_ONE_DIVE=5: the schedule over the TAIL as well (2026-09-11, late).
 # Level 4 models [s0, s1] as straight lines; the tail -- the exit run at
 # its slot, the exit leg along o at its s, the jog along the stub's row
@@ -7534,6 +7535,10 @@ def plan_braid(board, names, dest, plan, log=None):
                        # a via where that is not the lane's page, another
                        # where it is not the berth's layer
                        'exit_leg_layer': getattr(c, 'leg_layer', {}).get(nm),
+                       # the PLANNED lane polyline, so a caller can price
+                       # a lane the schedule gave no profile (a swimmer)
+                       # by the crossings it will actually have to make
+                       'lane': list(getattr(c, 'lane_xy', {}).get(nm, ()) or ()),
                        # ONE_DIVE: the scheduled change point (s) of a diver
                        'dive': getattr(c, 'dive', {}).get(nm),
                        'ride': getattr(c, 'ride', {}).get(nm),

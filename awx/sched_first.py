@@ -102,8 +102,7 @@ SF_BIN = float(os.environ.get('SF_BIN', '0.2'))
 # swimmer's two vias, the refusals it seeds, and the route's own chances
 VIA_W = 3.0                                          # the greedy's weights, kept
 CHAN_W = 2.0
-LAYERS = ('F.Cu', 'B.Cu')
-DIRS = {'right': (1.0, 0.0), 'left': (-1.0, 0.0), 'up': (0.0, -1.0), 'down': (0.0, 1.0)}
+from escape_moves import DIRS, LAYERS  # noqa: E402,F401  -- ONE source
 
 
 def _other(L: str) -> str:

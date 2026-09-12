@@ -29,7 +29,11 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 from kicad_writer import add_tracks_and_vias_to_pcb  # noqa: E402
 import connect as cn  # noqa: E402
 
-TRACK, CLEAR, VIA_SIZE, VIA_DRILL = 0.1, 0.1, 0.45, 0.25
+# the BRAID's numbers, not our own: this tool rips a braid lane and
+# re-lays it, so laying at 0.1/0.1 put 30 segments of THINNER copper
+# into a board whose lanes are 0.127 (measured on the K51 baseline)
+import braid as _br  # noqa: E402
+TRACK, CLEAR, VIA_SIZE, VIA_DRILL = _br.TRACK, _br.CLEAR, _br.VIA_SIZE, _br.VIA_DRILL
 
 ap = argparse.ArgumentParser()
 ap.add_argument('board')

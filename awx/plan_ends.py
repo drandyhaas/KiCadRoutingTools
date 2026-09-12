@@ -35,7 +35,21 @@ Pt = Tuple[float, float]
 
 
 
-SWIM_VIAS = 2      # a swimmer's dive and surface; its mid-corridor changes are the braid's
+# SWIM_VIAS: what the judge charges for a lane the schedule gives no page.
+# It was 2 -- a dive and a surface -- which is LESS than a scheduled lane
+# really costs, so the search was rewarded for accepting swimmers. What a
+# swimmer actually costs, measured per net on routed boards: K35 2.50,
+# K41 3.08, K51 3.74 against scheduled 1.90 / 2.13 / 2.29, and against
+# the plan's own prediction the flat 2 misses by +2.92 (K41) and +1.55
+# (K51) per swimmer. Two other prices were tried and are WORSE: the
+# braid's swim_changes line (over by 3.31 / 1.73, larger spread) and the
+# DP floor of the planned lane (no better, sd worse) -- a swimmer has no
+# planned path, so its cost is not predictable from the plan's geometry.
+# A calibrated CONSTANT is therefore the honest model, and it makes the
+# planner prefer orders that need fewer swimmers instead of orders that
+# hide them.
+import prices as _pr
+SWIM_VIAS = _pr.JUDGE          # ONE source: prices.py
 import os as _os
 # SWIM_CHANGES (2026-09-11, TODO 13 ii): a swimmer priced by the changes the
 # braid's hold-then-run line implies for it (plan_braid 'swim_changes',

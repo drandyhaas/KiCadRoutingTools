@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from typing import Dict, List, Optional, Sequence, Set
+import prices as _pr  # ONE source for the swimmer price
 
 # BRAID_EXACT_PAGES=1 (2026-09-11, README TODO 20): the two pages assigned
 # EXACTLY -- the fewest swimmers, then the fewest page vias -- instead of
@@ -46,7 +47,7 @@ def exact_pages(launch: Sequence[str], ranks: Sequence[int], cost) -> Optional[D
     # refusals it seeds -- NOT a large weight: with swimmers at 1000 the
     # split traded five back-page lanes (2 vias each) for one swimmer,
     # K35 69 -> 72 and K41 86 -> 90 (2026-09-11)
-    SWIM = 2.5
+    SWIM = _pr.PAGES          # ONE source: prices.py
     for i, nm in enumerate(launch):
         for p, P in enumerate(L):
             c[2 * i + p] = -SWIM + float(cost(nm, P))

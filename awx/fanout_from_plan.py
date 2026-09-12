@@ -79,8 +79,7 @@ DST_WALK = int(os.environ.get('DST_WALK', '0'))
 # anything. 0 = off, the menu byte-identical.
 DST_WALK_OFF = int(os.environ.get('DST_WALK_OFF', '0'))
 
-DIRS = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
-LAYERS = ('F.Cu', 'B.Cu')
+from escape_moves import DIRS, LAYERS  # noqa: E402,F401  -- ONE source
 
 
 def copy_pro(src_board, dst_board):
@@ -1030,6 +1029,16 @@ DST_ASK_BAN = int(os.environ.get('DST_ASK_BAN', '0') or 0)
 #            from the source: the perimeter walked from one flank round the
 #            front to the other, which is what a bus wrapping an array does
 DST_SEED_ORDER = os.environ.get('DST_SEED_ORDER', 'face')
+# DST_SWIM (2026-09-12): the candidate SCREEN priced by the inversions a
+# berth makes WITH LANES ON ITS OWN PAGE. The screen ranks ~26 berths by
+# `vias + ride` and hands the solve 4 of them, so the solve can only
+# repair an order the screen already chose -- and `vias + ride` knows
+# nothing about pages. Raw crossing count was tried twice (DST_XING,
+# DST_XING_SCREEN) and beat nothing, and the reason is that MOST
+# crossings are free: two lanes on different pages cross at no cost. The
+# crossings that are NOT free are the ones inside a page, and they are
+# exactly what turns a lane into a swimmer. So count those.
+DST_SWIM = float(os.environ.get('DST_SWIM', '0') or 0)
 
 
 def _seat_repair(out, menu, cost_of, log, launch=None):
@@ -1524,6 +1533,26 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
         return _contend.get(nm, {}).get(
             (round(m.site[0], 3), round(m.site[1], 3)), 0)
 
+    def _page_of(o, bp_):
+        return (bp_.get(o, {}).get('page') if bp_ else None) or st['tooth0'].get(o)
+
+    def swim_of(nm, m, sel, bp_):
+        """Inversions this berth makes with the lanes on its OWN page --
+        the crossings that actually consume page capacity, and so the
+        ones that decide whether a lane can be scheduled at all."""
+        if not DST_SWIM:
+            return 0
+        pg = _page_of(nm, bp_)
+        lo = st['launch'][nm]
+        n = 0
+        for o, om in sel.items():
+            if o == nm or _page_of(o, bp_) != pg:
+                continue
+            olo = st['launch'][o]
+            if (lo[1] - olo[1]) * (m.exit_pt[1] - om.exit_pt[1]) < 0:
+                n += 1
+        return n
+
     def xing_of(nm, m, sel, skip=()):
         """How many of the OTHER lanes this net's lane would cross if it
         berthed at `m` -- the page capacity it consumes (see DST_XING).
@@ -1598,7 +1627,9 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
                      + DST_CONTEND * (contend_of(nm, m)
                                       - contend_of(nm, choice[nm]))
                      + DST_XING * (xing_of(nm, m, choice, _movers)
-                                   - xing_of(nm, choice[nm], choice, _movers)))
+                                   - xing_of(nm, choice[nm], choice, _movers))
+                     + DST_SWIM * (swim_of(nm, m, choice, bp)
+                                   - swim_of(nm, choice[nm], choice, bp)))
                 if g not in by_geo or c < by_geo[g][0]:
                     by_geo[g] = (c, m)
             if joint and by_geo:
@@ -1638,11 +1669,13 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
             r0 = ride_of(nm, choice[nm])
             k0 = contend_of(nm, choice[nm])
             x0 = xing_of(nm, choice[nm], choice, _movers)
+            s0 = swim_of(nm, choice[nm], choice, bp)
             alts[nm] = [{'exit': list(m.exit_pt), 'layer': m.layer, 'dir': list(DIRS[m.direction]),
                          'cost': ((m.vias - choice[nm].vias)
                                   + (ride_of(nm, m) - r0) / pe.sm.VIA_MM
                                   + DST_CONTEND * (contend_of(nm, m) - k0)
-                                  + DST_XING * (xing_of(nm, m, choice, _movers) - x0))}
+                                  + DST_XING * (xing_of(nm, m, choice, _movers) - x0)
+                                  + DST_SWIM * (swim_of(nm, m, choice, bp) - s0))}
                         for m in cs]
         src_cands = {}
         if DST_RESIDUE_SRC:
