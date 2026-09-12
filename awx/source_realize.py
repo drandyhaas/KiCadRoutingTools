@@ -35,8 +35,7 @@ from bga_fanout import generate_bga_fanout  # noqa: E402
 import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 
-DIRS = {'right': (1, 0), 'left': (-1, 0), 'up': (0, -1), 'down': (0, 1)}
-LAYERS = ('F.Cu', 'B.Cu')
+from escape_moves import DIRS, LAYERS  # noqa: E402,F401  -- ONE source
 GAP_TOL = 0.2      # mm: an achieved tooth this close to the asked exit is the same gap
 
 

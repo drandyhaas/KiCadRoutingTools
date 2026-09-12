@@ -97,7 +97,7 @@ import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
 
-LAYERS = ('F.Cu', 'B.Cu')
+from escape_moves import LAYERS  # noqa: E402,F401  -- ONE source
 
 
 _ECO = re.compile(r'\s*\(gr_line(?:[^()]|\([^()]*\))*\)')

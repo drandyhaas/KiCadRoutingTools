@@ -22,8 +22,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
 
 TRACK = 0.127
-CLEAR = 0.1
-MARGIN_OUT = CLEAR + TRACK / 2      # routing margin outside the field
+SPEC_CLEAR = 0.1     # the spec clearance. NOT braid.CLEAR, which is
+                     # 0.105 -- the spec plus 5um so a hug does not sit
+                     # exactly on it. Two different quantities: do not
+                     # import one where the other is meant.
+MARGIN_OUT = SPEC_CLEAR + TRACK / 2      # routing margin outside the field
 MARGIN_IN = 0.06                     # bare-copper margin inside the field
 FREEZE = 0.35                        # no pushes this close to an endpoint
 STEP = 0.12                          # densify step (mm)

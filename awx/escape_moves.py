@@ -183,6 +183,9 @@ def bands_of(blocks: List[Grid]) -> List[Tuple[float, float, float, float]]:
 
 
 DIRS = {'left': (-1, 0), 'right': (1, 0), 'up': (0, -1), 'down': (0, 1)}
+LAYERS = ('F.Cu', 'B.Cu')
+# escape_moves owns both: it imports nothing of ours, so every module
+# can take them from here instead of keeping its own copy
 
 
 def site_contention(menu: Dict[str, List[Move]], reach: float) -> Dict[str, Dict[Tuple[float, float], int]]:
