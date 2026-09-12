@@ -189,6 +189,8 @@ def flip_hints(hints: Dict, footprint: Footprint, turned: PCBData,
                 mv['exit'] = m(*mv['exit'])
             if mv.get('site') is not None:
                 mv['site'] = m(*mv['site'])
+            if mv.get('path'):
+                mv['path'] = [m(*q) for q in mv['path']]
             if isinstance(mv.get('layer'), str):
                 mv['layer'] = other_layer(mv['layer'])
             d = mv
