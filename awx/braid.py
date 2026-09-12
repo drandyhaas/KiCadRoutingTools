@@ -318,6 +318,11 @@ L5_PSCOST = int(os.environ.get('BRAID_L5_PSCOST', '0'))     # HiGHS mip_pscost_m
 # judge and the residue search, ~12 s a trial at K41 with the braid's
 # cap): the seeded incumbent is the answer in nearly every solve, so a
 # plan being RANKED gets a shorter proof than the plan being LAID.
+# NOTE: the two *_TIME knobs below now reach _milp_solve's IGNORED
+# `time_limit` parameter; a solve is bounded by nodes or by deterministic
+# time. They are kept because they are still the natural place to express
+# "how hard should this stage try", and the next step is to re-express
+# them in nodes. Setting them changes nothing today.
 L5_JUDGE_TIME = float(os.environ.get('BRAID_L5_JUDGE_TIME', '10'))
 # The solve's budget is a NODE count, not a clock (2026-09-11, late): a
 # wall-time cap ships whichever incumbent the clock catches, so the same
@@ -410,6 +415,11 @@ SOLVER = os.environ.get('BRAID_SOLVER', 'highs')
 # the route's), while the choice solve wants the proven optimum of a
 # gated instance HiGHS never closes. Default: the same as BRAID_SOLVER.
 ALT_SOLVER = os.environ.get('BRAID_ALT_SOLVER', SOLVER)
+# NO SOLVE IN THIS FILE IS BOUNDED BY THE CLOCK. A time limit does not
+# make a slow machine answer later, it makes it answer DIFFERENTLY --
+# measured as two identical cloud runs of the K35 baseline coming back 72
+# and 58 vias. HiGHS is bounded by NODES, CP-SAT by DETERMINISTIC TIME.
+MILP_NODES = int(os.environ.get('BRAID_MILP_NODES', '200000'))
 CPSAT_WORKERS = int(os.environ.get('BRAID_CPSAT_WORKERS', '4'))
 # BRAID_CPSAT_REPAIR (2026-09-12): the alt stages always hand CP-SAT a hint
 # (`x0`), but a CHOICE instance's hint is the PLAIN solution extended, which
@@ -419,12 +429,18 @@ CPSAT_WORKERS = int(os.environ.get('BRAID_CPSAT_WORKERS', '4'))
 # repair the hint into a feasible start, which is the whole value of having
 # an incumbent on an instance whose LP relaxation is worthless.
 CPSAT_REPAIR = int(os.environ.get('BRAID_CPSAT_REPAIR', '0') or 0)
-CPSAT_DET = float(os.environ.get('BRAID_CPSAT_DET', '0') or 0)   # deterministic-time budget (0: wall clock only)
+CPSAT_DET_DEFAULT = 40.0    # used when BRAID_CPSAT_DET is unset: there is no wall-clock arm to fall back to
+CPSAT_DET = float(os.environ.get('BRAID_CPSAT_DET', '0') or 0)   # deterministic-time budget (0: CPSAT_DET_DEFAULT)
 CPSAT_SCALE = 10000                                              # objective coefficients as integers
 
 
 def _cpsat_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, det=None, workers=None):
     """CP-SAT on the same instance as _milp_solve (every variable 0/1 --
+
+    `time_limit` is IGNORED and kept only so the two back ends share one
+    signature: this solve is bounded by deterministic time, never by the
+    clock.
+
     the continuous states are implied integral by the chain rows).
     Returns (x, message, feasible); the objective the caller reads is
     recomputed from the float cvec."""
@@ -454,17 +470,20 @@ def _cpsat_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, de
         for i in range(nv):
             m.AddHint(x[i], int(round(float(x0[i]))))
     sv = cp_model.CpSolver()
-    sv.parameters.max_time_in_seconds = float(time_limit)
     sv.parameters.num_workers = int(workers or CPSAT_WORKERS)
     sv.parameters.relative_gap_limit = float(gap)
     sv.parameters.log_search_progress = False
     if x0 is not None and CPSAT_REPAIR:
         sv.parameters.repair_hint = True
         sv.parameters.hint_conflict_limit = int(CPSAT_REPAIR)
+    # deterministic time, ALWAYS: `interleave_search` plus
+    # `max_deterministic_time` is what makes the answer independent of the
+    # machine and of how many other solves are running beside it. Without
+    # it the same K41 instance gave 80 / 82 / 85 / 80.
     det = CPSAT_DET if det is None else det
-    if det and det > 0:
-        sv.parameters.interleave_search = True
-        sv.parameters.max_deterministic_time = float(det)
+    sv.parameters.interleave_search = True
+    sv.parameters.max_deterministic_time = float(det if det and det > 0
+                                                 else CPSAT_DET_DEFAULT)
     st_ = sv.Solve(m)
     if st_ not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None, sv.StatusName(st_), False
@@ -474,6 +493,11 @@ def _cpsat_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, de
 def _milp_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, pscost=None, nodes=None,
                 solver=None):
     """min cvec.x s.t. lb <= A x <= ub, lo <= x <= hi, integrality `integ`;
+
+    `time_limit` is IGNORED -- HiGHS is bounded by `nodes` (else
+    MILP_NODES) and CP-SAT by deterministic time, so the answer does not
+    depend on the machine or on what else is running beside it.
+
     A from `rows` (dicts of column -> coefficient). Returns (x, message,
     feasible) -- x None when the solver found nothing. Uses scipy's
     bundled HiGHS directly when it is there (for the warm start `x0` and
@@ -506,7 +530,9 @@ def _milp_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, psc
     if hs_core is None:
         from scipy.optimize import milp, LinearConstraint, Bounds
         res = milp(cvec, constraints=LinearConstraint(A.tocsr(), lb_, ub_), integrality=integ,
-                   bounds=Bounds(lo, hi), options={'time_limit': time_limit, 'mip_rel_gap': gap})
+                   bounds=Bounds(lo, hi),
+                   options={'node_limit': int(nodes) if nodes and nodes > 0 else MILP_NODES,
+                            'mip_rel_gap': gap})
         return res.x, res.message, res.x is not None
     Ac = A.tocsc()
     lp = hs_core.HighsLp()
@@ -531,12 +557,11 @@ def _milp_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, psc
         # once); accepted only before this process's first solve
         hs.setOptionValue('threads', 1)
         _HIGHS_THREADS_SET[0] = True
-    hs.setOptionValue('time_limit', float(time_limit))
     hs.setOptionValue('mip_rel_gap', float(gap))
     if pscost is not None and pscost >= 0:
         hs.setOptionValue('mip_pscost_minreliable', int(pscost))
-    if nodes is not None and nodes > 0:
-        hs.setOptionValue('mip_max_nodes', int(nodes))
+    hs.setOptionValue('mip_max_nodes',
+                      int(nodes) if nodes is not None and nodes > 0 else MILP_NODES)
     hs.passModel(lp)
     if x0 is not None:
         sol = hs_core.HighsSolution()
@@ -1594,7 +1619,7 @@ class Corridor:
         else:
             cons = LinearConstraint(lil_matrix((1, nv)).tocsr(), [-np.inf], [np.inf])
         res = milp(cvec, constraints=cons, integrality=integ, bounds=Bounds(lo_b, hi_b),
-                   options={'time_limit': 30})
+                   options={'node_limit': MILP_NODES})
         if res.x is None:
             self.log(f'  one dive: no solution ({res.message}); LIS pages kept')
             return
@@ -1806,7 +1831,7 @@ class Corridor:
                     return
             else:
                 res = milp(cvec, constraints=cons, integrality=integ, bounds=Bounds(0, 1),
-                           options={'time_limit': 60})
+                           options={'node_limit': MILP_NODES})
                 if res.x is None:
                     (log or self.log)(f'  profiles4: no solution ({res.message}); LIS pages kept')
                     return
@@ -2590,7 +2615,7 @@ class Corridor:
                 lo_b, hi_b = np.zeros(nv), np.ones(nv)
                 hi_b[idx[('w', nm)]] = 0.0
                 r2 = milp(cvec, constraints=LinearConstraint(A, lb, ub), integrality=integ,
-                          bounds=Bounds(lo_b, hi_b), options={'time_limit': 60})
+                          bounds=Bounds(lo_b, hi_b), options={'node_limit': MILP_NODES})
                 if r2.x is None:
                     why.append(f'{nm}: INFEASIBLE')
                 else:
@@ -3410,7 +3435,7 @@ class Corridor:
             else:
                 cons = LinearConstraint(lil_matrix((1, nv)).tocsr(), [-np.inf], [np.inf])
             res = milp(cvec, constraints=cons, integrality=integ, bounds=Bounds(0, 1),
-                       options={'time_limit': 60})
+                       options={'node_limit': MILP_NODES})
             if res.x is None:
                 (log or self.log)(f'  profiles3: no solution ({res.message}); LIS pages kept')
                 return
@@ -3607,7 +3632,7 @@ class Corridor:
             x, msg = memo[mkey]
         else:
             res = milp(cvec, constraints=cons, integrality=integ, bounds=Bounds(lo_b, hi_b),
-                       options={'time_limit': 60})
+                       options={'node_limit': MILP_NODES})
             if res.x is None:
                 (log or self.log)(f'  profiles: no solution ({res.message}); LIS pages kept')
                 return

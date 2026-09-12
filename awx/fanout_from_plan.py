@@ -354,6 +354,22 @@ def _plan_braid_worker(args):
     return bp, {tuple(sorted(k)): sorted(v) for k, v in te_._L5_SEED.items()}
 
 
+# EVERY BUDGET IN THIS FILE IS COUNTED IN JUDGE CALLS, NEVER IN SECONDS.
+# A clock budget does not make a slow machine answer later, it makes it
+# answer DIFFERENTLY: measured, two identical cloud runs of the K35
+# baseline came back 72 vias / 1436 segs and 58 / 1840, because a
+# container is ~2x slower than the laptop and budgets that never bind
+# locally bound there. The loops below all terminate naturally (finite
+# sweeps over finite candidates); these caps are the safety net, in the
+# one unit that is the same on every machine -- calls to the braid's
+# planner, which is what the search actually spends.
+PLAN_CALLS = [0]
+
+
+def _spent():
+    return PLAN_CALLS[0]
+
+
 def judge_by_braid(st, choice, board, achieved=None, bp=None):
     """THE judgment of a candidate plan: the braid's own planner
     (braid.plan_braid) on the plan's ends -- corridors as the braid forms
@@ -363,6 +379,7 @@ def judge_by_braid(st, choice, board, achieved=None, bp=None):
     computed elsewhere (a worker process), priced here."""
     plan = braid_plan_of(st, choice, board, achieved)
     if bp is None:
+        PLAN_CALLS[0] += 1
         bp = te.plan_braid(board, list(choice), st['dref'], plan)
     pages = {nm: bp[nm]['page'] for nm in choice}
     legs = {nm: bp[nm].get('exit_leg_layer') for nm in choice}
@@ -412,7 +429,7 @@ DST_FACE_GROUP = int(os.environ.get('DST_FACE_GROUP', '0'))
 # weave, which are the lanes refused in band. For each residue net every
 # collision-free move of its menu is judged by the braid's planner; the
 # move that lowers the residue count, then the judged cost, is kept;
-# sweeps until nothing improves. DST_RESIDUE_S caps the seconds.
+# sweeps until nothing improves. DST_RESIDUE_CALLS caps the judge calls.
 # DST_RESIDUE=2 (2026-09-11, latest): the berth choice INSIDE the braid's
 # level-5 solve (residue_choice, braid._alts5) -- every collision-free
 # move of every residue net is handed to the planner as a candidate
@@ -427,7 +444,10 @@ DST_FACE_GROUP = int(os.environ.get('DST_FACE_GROUP', '0'))
 # K35 is structural (the launch-vs-target permutation needs eight
 # crossing-free pages) and no residue net's own free move fixes it.
 DST_RESIDUE = int(os.environ.get('DST_RESIDUE', '0'))
-DST_RESIDUE_S = float(os.environ.get('DST_RESIDUE_S', '240'))
+# a cap in JUDGE CALLS (see PLAN_CALLS). Generous: the loops end on their
+# own sweeps, so this only stops a runaway -- and it stops it at the same
+# place on every machine.
+DST_RESIDUE_CALLS = int(os.environ.get('DST_RESIDUE_CALLS', '20000'))
 # DST_RESIDUE=3's screen: per net the cheapest move on EVERY face it can
 # leave by (the face is what moves a net along the target order, the gap
 # only fine-tunes it), then the rest filled to DST_RESIDUE_CANDS with
@@ -465,7 +485,7 @@ SRC_RESIDUE_ROUNDS = int(os.environ.get('SRC_RESIDUE_ROUNDS', '8'))   # one toot
 # plan_braid at K41 and a pass is 40-65 of them, the slowest stage of the
 # chain by far. 1 = the sequential loop.
 DST_RESIDUE_WORKERS = int(os.environ.get('DST_RESIDUE_WORKERS', str(max(1, min(6, (os.cpu_count() or 2) - 2)))))
-DST_SEARCH_S = float(os.environ.get('DST_SEARCH_S', '45'))   # budget per call, s
+DST_SEARCH_CALLS = int(os.environ.get('DST_SEARCH_CALLS', '4000'))   # judge calls per call
 
 
 # DST_DIVERS=1 (2026-09-10): the HUMAN's berth for every net that dives,
@@ -595,8 +615,9 @@ def refine_dest_by_judge(st, choice, board, log=print, budget=None):
     best few; the first confirmed improvement is applied. Sweeps until
     nothing improves or the budget is spent. Returns (choice, cost)."""
     import time
-    budget = DST_SEARCH_S if budget is None else budget
+    budget = DST_SEARCH_CALLS if budget is None else budget
     t0 = time.time()
+    c0 = _spent()
     cache = {}
     pb = planned_buses(st, choice)
     bands = pe.sm.bands_of_boxes(st['dboxes']) if st['dboxes'] else []
@@ -605,11 +626,11 @@ def refine_dest_by_judge(st, choice, board, log=print, budget=None):
     f0, n_moves, n_conf = best_f, 0, 0
     sweeps = 0
     improved = True
-    while improved and time.time() - t0 < budget:
+    while improved and _spent() - c0 < budget:
         improved = False
         sweeps += 1
         for n in sorted(choice, key=lambda k: -best_pred.get(k, 0)):
-            if time.time() - t0 > budget:
+            if _spent() - c0 > budget:
                 break
             cands = []
             for m in st['dmenu'].get(n, ()):
@@ -797,6 +818,7 @@ def residue_search(st, choice, board, log=print, sweeps=4):
     """DST_RESIDUE: see the flag. Returns the choice."""
     import time
     t0 = time.time()
+    c0 = _spent()
     bands = pe.sm.bands_of_boxes(st['dboxes']) if st['dboxes'] else []
 
     def judge(ch):
@@ -817,11 +839,11 @@ def residue_search(st, choice, board, log=print, sweeps=4):
     log(f'  residue search: {len(res)} residue net(s) {res}, judged {f0:.2f}'
         + (f'; {DST_RESIDUE_WORKERS} workers' if pool else ''))
     for _sw in range(sweeps):
-        if not res or time.time() - t0 > DST_RESIDUE_S:
+        if not res or _spent() - c0 > DST_RESIDUE_CALLS:
             break
         improved = False
         for nm in sorted(res, key=lambda n: -pred.get(n, 0)):
-            if time.time() - t0 > DST_RESIDUE_S:
+            if _spent() - c0 > DST_RESIDUE_CALLS:
                 break
             best = None
             cands = []
@@ -843,6 +865,8 @@ def residue_search(st, choice, board, log=print, sweeps=4):
                 try:
                     outs = pool.map(_plan_braid_worker,
                                     [(board, list(trial), st['dref'], pl, seeds) for _m, trial, pl in trials])
+                    PLAN_CALLS[0] += len(trials)   # after the map: the
+                    # sequential fallback below counts its own
                 except Exception as e:
                     log(f'  residue search: worker pool failed ({e}); sequential from here')
                     pool.terminate(); pool = None
@@ -897,10 +921,10 @@ def residue_search(st, choice, board, log=print, sweeps=4):
 # planner itself ranks best. The winner still goes through the existing
 # realize-and-confirm loop, so a tooth the engine cannot lay as asked is
 # still banned. 0 = off. Cost is len(residue) x SRC_REPLAN_CANDS planner
-# calls, so it is budgeted (SRC_REPLAN_S).
+# calls, so it is budgeted (SRC_REPLAN_CALLS).
 SRC_REPLAN = int(os.environ.get('SRC_REPLAN', '0'))
 SRC_REPLAN_CANDS = int(os.environ.get('SRC_REPLAN_CANDS', '3'))
-SRC_REPLAN_S = float(os.environ.get('SRC_REPLAN_S', '180'))
+SRC_REPLAN_CALLS = int(os.environ.get('SRC_REPLAN_CALLS', '15000'))
 # SRC_REFAN_JOINT=1 (2026-09-11): the JOINT SOURCE RE-FAN. A tooth the
 # planner wants is usually blocked by NEIGHBOURING escapes that are already
 # laid, and a one-net re-fan cannot move them -- to that call they are
@@ -1433,6 +1457,7 @@ def src_replan_pick(st, choice, board, res, base_key, log=print, tabu=()):
     `base_key` = (swimmers, cost) of the plan as it stands."""
     import time
     t0 = time.time()
+    c0 = _spent()
     best = None
     n = 0
     for nm in res:
@@ -1440,7 +1465,7 @@ def src_replan_pick(st, choice, board, res, base_key, log=print, tabu=()):
         if not moves:
             continue
         for m in _src_screen(st, nm, moves, SRC_REPLAN_CANDS, set(tabu)):
-            if time.time() - t0 > SRC_REPLAN_S:
+            if _spent() - c0 > SRC_REPLAN_CALLS:
                 log(f'    source re-plan: budget spent after {n} trial(s)')
                 return best
             try:
@@ -1470,6 +1495,7 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
     improves. Returns the choice."""
     import time
     t0 = time.time()
+    c0 = _spent()
     bands = pe.sm.bands_of_boxes(st['dboxes']) if st['dboxes'] else []
 
     def judge(ch, alts=None, excl=None, xing=None):
@@ -1479,6 +1505,7 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
         if xing:
             plan['alt_xing'] = xing
             plan['alt_excl'] = excl or []
+        PLAN_CALLS[0] += 1
         bp = te.plan_braid(board, list(ch), st['dref'], plan)
         f, pred, _bp, _pl = judge_by_braid(st, ch, board, bp=bp)
         res = [nm for nm in ch if bp.get(nm, {}).get('page') is None]
@@ -1522,7 +1549,7 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
     # (K41 sweep 1: SA8 proposed back, the judge refused, sweep 2 again)
     tabu = {(nm, sr.move_sig(m)) for nm, m in choice.items()}
     for sw in range(sweeps):
-        if not res or time.time() - t0 > DST_RESIDUE_S:
+        if not res or _spent() - c0 > DST_RESIDUE_CALLS:
             break
         cands = {}
         n_all = 0
