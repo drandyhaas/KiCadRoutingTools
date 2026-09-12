@@ -71,18 +71,18 @@ BASE_ENV = {
     "SF_JUDGE": "braid", "BRAID_ONE_DIVE": "5", "DST_RESIDUE": "3",
     "DST_RESIDUE_POOL": "displaced", "DST_RESIDUE_CANDS": "4",
     "BRAID_ALT_SOLVER": "cpsat", "BRAID_CPSAT_DET": "40",
-    # THE SEARCH IS BOUNDED BY WALL CLOCK IN FIVE PLACES, and a container
-    # is ~2x slower than the laptop, so budgets that never bind locally DO
-    # bind here -- that is not a slower answer, it is a DIFFERENT one.
-    # Measured: two identical cloud runs of the K35 baseline came back 72
-    # vias / 1436 segs and 58 / 1840. Raised until they do not bind; the
-    # deterministic bounds (BRAID_CPSAT_DET, the node budgets) are then
-    # what actually stops a solve. The real fix is a work-based budget in
-    # the search itself -- README TODO.
-    "DST_RESIDUE_S": "4000", "DST_SEARCH_S": "600",
-    "BRAID_L5_ALT_TIME": "300", "BRAID_L5_JUDGE_TIME": "120",
-    "SRC_REPLAN_S": "2000",
+    # one BLAS thread, as chain_k.sh does: a pool sized from the machine
+    # makes a reduction's summation order machine-dependent
+    "OMP_NUM_THREADS": "1", "VECLIB_MAXIMUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
 }
+# Nothing here raises a time budget any more: there are none. Every loop
+# is capped in JUDGE CALLS and every solve in nodes or deterministic
+# time, so a container answers exactly what the laptop answers, however
+# much slower it is. That is what made the first cloud sweep unreadable
+# -- two identical runs of the K35 baseline came back 72 vias / 1436
+# segs and 58 / 1840.
 
 KEEP = re.compile(
     r"GRADE |REFUSED |refusal reasons|pattern seed|seat repair|not asked again|"

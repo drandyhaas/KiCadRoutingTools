@@ -19,6 +19,19 @@
 # BASE (default fb_t2q_fresh.kicad_pcb): the bench, its source array
 # already fanned out. DEST (default DU1): the destination reference.
 cd "$(dirname "$0")"
+# ONE BLAS THREAD. Apple's Accelerate (and OpenBLAS/MKL elsewhere) sizes
+# its own pool from the machine and the load, which makes a reduction's
+# summation order machine-dependent -- the same class of defect as a
+# wall-clock budget, and this chain is required to be deterministic.
+# HiGHS already pins itself to one thread; CP-SAT's 4 workers are
+# reproducible because they run under max_deterministic_time. Pinning
+# also stops the residue search's 6 worker PROCESSES from each spawning
+# a BLAS pool on an 8-core box.
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+export VECLIB_MAXIMUM_THREADS=${VECLIB_MAXIMUM_THREADS:-1}
+export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
+export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
+export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-1}
 TAG=${1:-chain}
 shift
 mkdir -p tmp
