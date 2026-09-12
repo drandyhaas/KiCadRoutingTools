@@ -58,6 +58,15 @@ def coherent_nets(K, board=BENCH):
             ok.append(n)
         except AssertionError:
             pass
+    # A SHORT COUNT IS A DIFFERENT PROBLEM, and it was silent: "K51" is
+    # 48 nets here, so the human's 81 (48 nets) and 85 (51) are both
+    # right and both were in circulation for one label. Pointing --board
+    # at a ROUTED board is worse: a routed net has no free stub end, so
+    # K41 returned the 7 UNROUTED nets instead of the 41.
+    if len(ok) < K:
+        print(f'  coherent_nets: asked K={K}, {len(ok)} net(s) qualify on '
+              f'{os.path.basename(board)} -- this is a {len(ok)}-net problem',
+              file=sys.stderr)
     return ok[:K]
 
 

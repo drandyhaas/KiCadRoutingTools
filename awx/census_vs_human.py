@@ -25,6 +25,28 @@ nets = subprocess.run(
     capture_output=True, text=True).stdout.strip().split(',')
 
 
+SRC_R = DST_R = None      # set from the arrays' own reach (see _cls)
+
+
+def _cls(du, dd):
+    """SRC / DST / MID, the three classes the docstring promises.
+
+    It used to be `'S' if du < dd else 'D'` -- nearest-of-two, no radii,
+    no MID at all -- so a via in the dead centre of the field was
+    reported as a destination-end via and the claim this tool exists to
+    test ("the human's vias are at the ENDS") could not be falsified on
+    any board. A via is at an end when it is within that array's reach;
+    anything else is mid-field.
+    """
+    if SRC_R and du <= SRC_R:
+        return 'S'
+    if DST_R and dd <= DST_R:
+        return 'D'
+    if not SRC_R and not DST_R:
+        return 'S' if du < dd else 'D'
+    return 'M'
+
+
 def short(name):
     return name.rsplit('/', 1)[-1]
 
@@ -54,9 +76,15 @@ def census(path):
         d['vias'] += 1
         du = math.hypot(v.x - u1.x, v.y - u1.y) if u1 else 999
         dd = math.hypot(v.x - du1.x, v.y - du1.y) if du1 else 999
-        d['vpos'].append('S' if du < dd else 'D')
+        d['vpos'].append(_cls(du, dd))
         d.setdefault('vxy', []).append((round(v.x, 2), round(v.y, 2),
-                                        'S' if du < dd else 'D'))
+                                        _cls(du, dd)))
+    if u1 and du1:
+        # an "end" via is one inside its own array's reach: a third of the
+        # centre-to-centre span, so the middle third of the field is MID
+        global SRC_R, DST_R
+        span = math.hypot(du1.x - u1.x, du1.y - u1.y)
+        SRC_R = DST_R = span / 3.0
     return by, (u1.x, u1.y) if u1 else None, \
         (du1.x, du1.y) if du1 else None
 

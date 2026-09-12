@@ -28,9 +28,22 @@ for line in (r.stdout + r.stderr).splitlines():
     m = re.search(r'(\S+) \(net \d+\):', line)
     if m and m.group(1).split('/')[-1] in nets:
         opens.append(m.group(1).split('/')[-1])
+    # ...and the OTHER shape check_connected prints: a net with no copper
+    # at all is listed under "Unrouted nets" as `    NAME (N pads)`, which
+    # the regex above does not match. Measured: stripping every one of
+    # SA9's 28 copper blocks graded open=0 AND fewer vias -- an arm that
+    # drops a net entirely scored as a via win.
+    m2 = re.match(r'\s+(\S+) \(\d+ pads?\)\s*$', line)
+    if m2 and m2.group(1).split('/')[-1] in nets:
+        opens.append(m2.group(1).split('/')[-1])
 r = subprocess.run([PY, os.path.join(HERE, '..', 'py_router',
                                      'check_drc.py'), board,
-                    '--clearance', '0.1', '--clearance-margin', '0.1'],
+                    '--clearance', '0.1', '--clearance-margin', '0.1',
+                    # or k-net-drc counts only what check_drc PRINTED: it
+                    # truncates each category at 20, so measured 146 and
+                    # 7947 true violations both reported ~45-78 -- the
+                    # metric saturated and could not rank a failing arm
+                    '--max-print', '0'],
                    capture_output=True, text=True)
 # ASSERT THE CHECKER RAN. `int(m.group(1)) if m else 0` read a crashed
 # check_drc -- bad path, import error, traceback -- as a clean board, on

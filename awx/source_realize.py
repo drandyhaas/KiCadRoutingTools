@@ -315,6 +315,15 @@ def drc_pairs(board):
                         board, '--clearance', '0.1', '--clearance-margin', '0.1'],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
+    # A CHECKER THAT DID NOT REPORT IS NOT A CLEAN BOARD. This is the only
+    # copper gate on the board `realize` writes (and replan's probe-clean
+    # test), and `return []` on no output read a traceback -- bad path,
+    # import error -- as "no violations". Verified: drc_pairs on a
+    # nonexistent board returned [].
+    if 'NO DRC VIOLATIONS' not in out and 'DRC VIOLATION' not in out:
+        raise RuntimeError(
+            f'check_drc gave no verdict for {board} (exit {r.returncode}): '
+            + ((out.strip().splitlines() or ['(no output)'])[-1])[:200])
     if 'NO DRC VIOLATIONS' in out:
         return []
     return [ln.strip() for ln in out.splitlines() if '<->' in ln]
