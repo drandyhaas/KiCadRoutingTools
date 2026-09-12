@@ -315,13 +315,54 @@ The human's berth order gives 68 crossings at K41 against our 250, and a
 longest crossing-free chain of 29 against our 21 -- but see the floor
 finding above before treating crossings as the objective.
 
+## What the 2026-09-12 audit changed
+
+Ten parallel audits over everything this branch adds. The defects are
+fixed and in the log; what matters here is which RECORDED CONCLUSIONS
+they invalidate, because those are the ones that would otherwise be
+believed forever:
+
+- **"The berth chooser accepts nothing" was never a null result.**
+  `_alts5` stage A pinned a moving net's as-laid lane vias into the
+  objective, so every candidate was charged the vias it would stop
+  paying as well as its own. Only a move flipping a swimmer could win.
+  Every source and berth arm judged through it was measured under a
+  systematic bias.
+- **`SPLIT_BLOCKS` was never measured.** `NEST_IN`, `NEST_STEP` and
+  `BAND_LPITCH` were used and defined nowhere in any commit, so the band
+  path raised NameError on the first band exit. Its recorded verdict
+  ("complete, general, lost") is void -- it is a crash.
+- **`SEL_XLAYER`'s verdict is void too**: that arm ran through a
+  `zip(placed_nets, placed_legs)` desync pairing a trial leg with a
+  stale net.
+- **The joint solve had no compatibility constraints at all.**
+  `plan['alt_excl']` was nested under `if xing:`, and `DST_XING` is 0 by
+  default -- so every recorded `DST_RESIDUE=3` result was produced by a
+  solve free to pick two berths that cannot both be laid.
+- **The DRC feedback could not see a pad short**, so a pass could print
+  "every berth laid as planned" on a shorted board.
+- **"The human's vias are at the ENDS" could not be falsified**: the
+  census's MID class did not exist (it was nearest-of-two). With it
+  implemented, several of the human's vias are mid-field.
+- **`grade_k` graded a crashed checker as clean**, and missed a net with
+  no copper at all -- an arm that DROPPED a net scored as a via win.
+  Re-graded every headline board with the strict tool: all unchanged, so
+  no recorded number was actually wrong.
+- **The judge's answer depended on the machine's core count** -- pool
+  workers inherited each other's level-5 seeds, and at a 30-node budget
+  the seed is the answer. Same class as the clock rule, different hat.
+
+Two lessons worth keeping: an instrument that cannot measure must FAIL,
+never report clean; and a knob measured negative through a broken path
+has not been measured.
+
 ## Settled -- do not re-run these
 
 | arm | verdict |
 |---|---|
 | `BRAID_SOLVER=cpsat` (plain solves) | **never** -- K41 98. `BRAID_ALT_SOLVER=cpsat` (choice solves) is the good one |
 | `BRAID_VIA_ROOM_REFUSED=2` | breaks K51 (3 open / 30 DRC). Default 0 |
-| `SEL_XLAYER=1` | crossings WORSE (K41 196 -> 301) |
+| `SEL_XLAYER=1` | crossings WORSE (K41 196 -> 301) -- but that arm ran through a `zip` desync pairing trial legs with stale nets, so the verdict is **not evidence**; unmeasured |
 | `DST_XING` per-candidate | pairwise deltas are not additive; the pairwise MILP form fixes the bug and still beats nothing |
 | `DST_XING_SCREEN` | helps nothing, alone or with the pattern seed |
 | `SEL_CONTEND` / `DST_CONTEND` | fail in both placements, at every weight |
@@ -332,7 +373,7 @@ finding above before treating crossings as the objective.
 | `SRC_REPLAN=1` | names a better tooth, the one-net re-fan cannot lay it; superseded by `SRC_REFAN_JOINT` |
 | `BRAID_EXACT_PAGES=1` | the two pages by exact MILP instead of the LIS greedy: never won a chain |
 | `SWIM_CHANGES=1` | a swimmer priced by the braid's implied changes: unmeasured on a chain |
-| `SPLIT_BLOCKS=1` | complete, general, lost (it also gates `corridor.align_tail`) |
+| `SPLIT_BLOCKS=1` | **verdict VOID** -- it raised NameError on the first band exit (NEST_IN/NEST_STEP/BAND_LPITCH undefined) so it was never measured. Fixed 0912; unmeasured |
 | the wave schedule, `refine_sides`, the source chooser | reverted (the wave never existed on take5; it is in the bundle) |
 | `group_pages`, `plan_nest`, `improve_k`, `channel_shift` | dropped with take4 (bundle: `~/Downloads/bus/bus622-take4.bundle`) |
 
