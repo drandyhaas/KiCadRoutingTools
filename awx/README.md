@@ -371,11 +371,41 @@ file and is in the bundle only.
    away is not asked again. Built, default off. First measurement is
    negative (K35 66 against 58); finish the ladder before deciding.
 7. **The corpus A/B for the production changes, then the PR to main.**
-   Five changes sit in SHARED code and owe it: the pad keep-out's
-   sub-cell offset quantised, the back-side BGA fanned as the front's
-   mirror, the rotate frame's fixes, the fanout's plan-follow, and
-   **`KICAD_SEG_DIST_EXACT`** -- the one that touches every board the
-   tool routes, not just this chain.
+   Audited 2026-09-12; the list was FIVE and is really this. Everything
+   here changes copper on boards that have nothing to do with this
+   chain, and a change that moves copper but is not on the list is the
+   one nobody thinks to measure.
+   - **`KICAD_SEG_DIST_EXACT`** (`single_ended_routing`) -- default ON,
+     every route on every board. The maths is verified exact (3,008
+     cases against brute force: it is never larger than the truth, max
+     deviation 1.1e-16), so it cannot admit close copper. But it tightens
+     a boolean gate `d >= clr + w/2` at ~10 sites in `pcb_modification`
+     -- smoothing, dangling-bridge repair, re-bend, stub trim,
+     castellated retract, via nudge -- so those passes now DECLINE moves
+     they used to accept. Fewer sub-clearance grazes, possibly more
+     repairs left undone; only the A/B can say which dominates.
+   - the pad keep-out's sub-cell offset quantised (`routing_utils`, both
+     obstacle stampers, every route)
+   - `plane_fill_model` cell rounding -- changes which fill cell a
+     pour-direct stub taps, on every board with planes and #678
+     pour-served balls. CLAUDE.md: a plane/oracle change cannot be judged
+     by one replay pair.
+   - `bga_fanout/escape.py` tie-breaks -- escape direction and channel
+     choice on EVERY BGA/QFN fanout
+   - the `underpad` ordering/quantisation family (`depth()`, `CELL_EPS`,
+     the keep-out raster rounding whose own comment measures "244
+     boundary cells stamped differently") -- reorders Phase A's claim
+     sequence, which decides which ball claims each rim gap, on every
+     under-pad fanout
+   - `rotate_frame.to_axis_aligned_frame` -- every non-orthogonal BGA/QFN
+     board. This one is a FIX (main saw pours and outline in the
+     un-rotated frame) but it is a copper-changing fix.
+   - `_foreign_seg_arr_trust` -- weakens a shared cache's staleness
+     digest. The invariant holds today; a future in-window copper edit
+     would route against phantom copper with nothing to catch it.
+   - the back-side BGA fanned as the front's mirror, and the fanout's
+     plan-follow (`escape_dir_hints`, which also owes a GUI call site and
+     a `FLAG_PARAMS` entry -- the Class-2 drift CLAUDE.md forbids)
 8. **The second bench's in-band gap.** zynq_ad9364 at K28: 0 open, 55
    vias, but 17 of 28 in band. The leg rules were tuned on ONE bench.
    Fix `flow_frame.py turn` first -- the article does not run through
