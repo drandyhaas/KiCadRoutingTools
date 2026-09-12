@@ -278,8 +278,10 @@ Inner pins beyond depth 2 cannot escape without fanout routing through channels 
 **Escape layers (multi-layer boards):** `bga_fanout.py` defaults to `--layers F.Cu B.Cu`
 only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
 `--layers F.Cu In1.Cu In2.Cu B.Cu` — otherwise deep balls have nowhere to escape to
-and those nets are dropped from the fanout. `qfn_fanout.py` is perimeter-only and
-doesn't take escape layers.
+and those nets are dropped from the fanout. **Keeping escapes off a poured layer is
+`--layer-costs`, not a shorter `--layers`** (Step 10 rule 3): a layer dropped from the
+list is also gone from the under-pad engine's via spans, which use `--layers[0]` and
+`[-1]`. `qfn_fanout.py` is perimeter-only and doesn't take escape layers.
 
 **Staggered multi-row no-lead packages (AQFN) - use via-in-pad (#500).** An
 AQFN (e.g. `Nordic_AQFN-73-1EP_7x7mm_P0.5mm`, on osprey_kb / hex_gateway /
@@ -1195,13 +1197,14 @@ plane nets. Do NOT use `"/*"` alone, as it misses nets with non-hierarchical
 names like `Net-(U9-Pad1)` which would then require `--no-bga-zone` to route.
 
 On a 4+ layer board also pass every copper layer with `--layers` (default is
-F.Cu B.Cu only) so inner balls can escape — drop `--layers` only for true
-2-layer boards.
+F.Cu B.Cu only) so inner balls can escape, and price the poured layers with
+`--layer-costs` so the escapes stay off them (Step 10 rule 3) — drop `--layers`
+only for true 2-layer boards, as this example does: its two layers ARE the
+default, and both carry a pour it must escape onto anyway.
 
 python3 -X utf8 py_router/bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
     --nets "*" "!GND" "!VCC" \
-    --layers F.Cu In1.Cu In2.Cu B.Cu \
     --output board_step1b.kicad_pcb \
     2>&1 | tee /tmp/step1_fanout.txt
 
@@ -1743,7 +1746,9 @@ boards, grouped by dominant component/function):**
 
 **MANDATORY whenever any layer carries a solid plane: derive `--layer-costs`
 from the plane plan and pass it to EVERY signal-routing step** (`route.py`,
-the finalize's reconciliation, and retries). A measured failure mode: a 6-layer BGA
+the finalize's reconciliation, retries, **and `bga_fanout.py`** — it takes the
+same vector, and a negative entry there FORBIDS escape copper on that layer,
+which is exactly Step 10 rule 3). A measured failure mode: a 6-layer BGA
 chain poured three solid inner planes and then passed NO `--layer-costs`
 anywhere — signals crossed all three pours at cost 1.0, shredded them into
 islands, and the board graded worse than a plane-light plan. Pour-first order
@@ -2737,9 +2742,22 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
 2. **Populated-array escape:** `dogbone` supersedes the older
    "channel-infeasible → underpad" advice for populated BGAs; underpad is
    for WLCSP/inner-row cases where no inter-pad gap exists at all.
-3. **Fanout `--layers` must EXCLUDE any layer carrying a solid plane**
-   (e.g. the In1 GND plane) — escapes on the solid plane shred it, and
-   the fanout does not avoid poured layers on its own.
+3. **Fanout escape copper must stay OFF any INNER layer carrying a solid
+   plane** (e.g. the In1 GND plane) — escapes on the solid plane shred it,
+   and the fanout does not avoid poured layers on its own. **The lever is
+   `--layer-costs`, not a shorter `--layers`**: one value per `--layers`
+   entry, negative = forbidden (#288, whose stated case is "a soon-to-be-
+   plane inner layer"). Dropping the layer from `--layers` instead also
+   removes it from the under-pad engine's via spans, which use `--layers[0]`
+   and `[-1]`. Two limits this rule used to state as absolutes and are not:
+   **`--layers[0]` cannot be forbidden at all** — `bga_fanout` raises
+   *"The top escape layer (...) cannot be forbidden - edge escapes are
+   placed on it"* — and pouring the balls' **own outer** layer is sometimes
+   the prescribed fix, not a mistake (see Step 1: when an inner pour cannot
+   thread the ball lattice even at the fab floor, the outer pour is what
+   connects those pads by direct contact). So this rule binds the inner
+   plane layers; an outer-layer pour under a fanned part is a deliberate
+   choice the plan states, and the route step's in-run finalize re-pours it.
 4. **Write `--no-bga-zones` (plural) everywhere.** Not because the singular
    fails — measured, every one of `route.py`, `route_diff.py`,
    `route_planes.py` and `repair_planes.py` ACCEPTS `--no-bga-zone` too, three

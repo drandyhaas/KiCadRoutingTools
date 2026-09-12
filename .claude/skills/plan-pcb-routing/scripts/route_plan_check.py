@@ -452,8 +452,28 @@ def r_impedance_needs_a_stackup(p):
 
 
 def r_fanout_layers_exclude_planes(p):
-    """SKILL.md :2635 / Step 10 rule 3 -- fanout `--layers` must EXCLUDE any
-    layer carrying a solid plane, or the escape routes into the pour."""
+    """Step 10 rule 3 -- fanout escape copper must stay off an INNER layer the
+    plan pours a solid plane on, or the escape routes into the pour.
+
+    The lever is `--layer-costs` (one value per `--layers` entry, negative =
+    forbidden, #288), NOT a shorter `--layers`: a layer dropped from the list is
+    also gone from the under-pad engine's via spans, which use layers[0]/[-1].
+    So a poured layer that carries a negative cost is COMPLIANT, and this rule
+    refuses only a poured layer the plan neither prices nor omits.
+
+    Two things this rule must not demand, both measured against the engine:
+
+      * `--layers[0]` cannot be forbidden -- `bga_fanout` raises "The top escape
+        layer (...) cannot be forbidden - edge escapes are placed on it". A rule
+        that refused it would demand something no plan can satisfy.
+      * An OUTER-layer pour under a fanned part is sometimes the prescribed fix
+        (Step 1: when an inner pour cannot thread the ball lattice even at the
+        fab floor, the outer pour connects those pads by direct contact), and
+        the route step's in-run finalize re-pours it. Refusing that would refuse
+        the skill's own remedy.
+
+    Hence: inner layers only, and only when unpriced.
+    """
     plane_layers = set()
     for argv in p.by_tool('route_planes.py', 'repair_planes.py'):
         plane_layers |= set(values(argv, '--plane-layers'))
@@ -461,10 +481,25 @@ def r_fanout_layers_exclude_planes(p):
         return []
     bad = []
     for argv in p.by_tool('bga_fanout.py', 'qfn_fanout.py'):
-        clash = set(values(argv, '--layers')) & plane_layers
+        layers = values(argv, '--layers')
+        if not layers:
+            continue
+        costs = values(argv, '--layer-costs')
+        forbidden = set()
+        if len(costs) == len(layers):
+            for name, cost in zip(layers, costs):
+                try:
+                    if float(cost) < 0:
+                        forbidden.add(name)
+                except ValueError:
+                    pass
+        # layers[0] is the top escape layer: the engine refuses to forbid it,
+        # so it is never this rule's to refuse either.
+        clash = sorted((set(layers[1:]) & plane_layers) - forbidden)
         if clash:
-            bad.append(f'{tool_of(argv)} --layers includes {sorted(clash)}, '
-                       f'which the plan pours a solid plane on')
+            bad.append(f'{tool_of(argv)} --layers includes {clash}, which the '
+                       f'plan pours a solid plane on, and --layer-costs does '
+                       f'not forbid them (a negative cost per layer, #288)')
     return bad
 
 
@@ -496,7 +531,13 @@ RULES = (
     ('R16', 'no impedance pass without a stackup [needs --board]',
      'Step 10 rule 1',
      r_impedance_needs_a_stackup),
-    ('R17', 'fanout layers exclude poured layers [needs --board]',
+    # NOT '[needs --board]': this rule reads only the plan's own argv, never
+    # `p.board`. It carried the marker, and `check()` SKIPS every rule whose
+    # text carries it -- so the one rule Step 10 rule 3 is enforced by did not
+    # run on the bare `route_plan_check.py <board>_plan.sh` invocation the
+    # skill prescribes, which is every invocation that does not remember a
+    # flag it has no use for.
+    ('R17', 'fanout escapes stay off poured inner layers',
      'Step 10 rule 3',
      r_fanout_layers_exclude_planes),
 )

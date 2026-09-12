@@ -116,6 +116,31 @@ BREAKS = [
      ('--power-nets GND +3V3 --clearance 0.09',
       '--power-nets GND +3V3 --clearance 0.09 --via-size 0.45 '
       '--gnd-via-distance 0.5')),
+    # R17 had NO row here, and the rule additionally carried '[needs --board]'
+    # while reading only the plan's own argv -- so `check()` skipped it on the
+    # bare invocation the skill prescribes, and the 16 rows above passed
+    # without it ever running. Both are fixed; these three rows are what says
+    # so. The escape layer must be an INNER one: the top escape layer is never
+    # this rule's to refuse (bga_fanout refuses to forbid it).
+    ('R17', 'a fanout escapes onto a poured inner layer',
+     ('--component U1 --nets \'*\' --clearance 0.09 --layers F.Cu B.Cu',
+      '--component U1 --nets \'*\' --clearance 0.09 '
+      '--layers F.Cu In1.Cu B.Cu')),
+]
+
+#: Rows that must NOT be refused -- a rule demanding something the engine
+#: refuses is worse than a rule that is absent. Same shape as BREAKS.
+COMPLIANT_VARIANTS = [
+    ('R17', 'a poured inner layer priced negative in --layer-costs is the '
+            'documented way to keep escapes off it (#288)',
+     ('--component U1 --nets \'*\' --clearance 0.09 --layers F.Cu B.Cu',
+      '--component U1 --nets \'*\' --clearance 0.09 '
+      '--layers F.Cu In1.Cu B.Cu --layer-costs 1.0 -1 1.0')),
+    ('R17', 'the TOP escape layer is poured -- bga_fanout raises rather than '
+            'forbid it, and an outer pour under a fanned part is Step 1\'s '
+            'own prescribed fix',
+     ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu',
+      '--nets GND +3V3 --plane-layers F.Cu In2.Cu')),
 ]
 
 
@@ -164,6 +189,49 @@ def t_each_break_is_refused_by_its_own_rule():
                 f'by its own rule. Asserting only on the exit code would have '
                 f'passed this.\n{r.stdout}')
         print(f'  PASS: {len(BREAKS)} break(s), each refused by its own rule')
+
+
+def t_a_rule_does_not_refuse_what_the_engine_prescribes():
+    """The other half of a rule: what it must LET PASS.
+
+    Asserted per rule id rather than on the exit code, because these variants
+    are free to redden something else -- the claim is only that the named rule
+    stays quiet. A rule demanding something the engine refuses outright is
+    worse than an absent rule: it cannot be complied with, so it teaches the
+    reader to ignore the checker.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        for rid, what, (old, new) in COMPLIANT_VARIANTS:
+            assert COMPLIANT.count(old) == 1, (
+                f'{rid}: the variant anchor matches {COMPLIANT.count(old)} '
+                f'times, so this row edits nothing and asserts nothing')
+            r = _run(_write(tmp, f'ok_{rid}_{abs(hash(what))}.sh',
+                            COMPLIANT.replace(old, new, 1)))
+            failed = {ln.split()[1] for ln in r.stdout.splitlines()
+                      if ln.strip().startswith('FAIL')}
+            assert rid not in failed, (
+                f'{rid} refused a plan it must accept -- {what}\n{r.stdout}')
+        print(f'  PASS: {len(COMPLIANT_VARIANTS)} prescribed plan(s) not '
+              f'refused by the rule that could have')
+
+
+def t_a_board_less_rule_is_not_gated_behind_the_board_flag():
+    """`check()` SKIPS every rule whose text says '[needs --board]'. A rule
+    that reads only the plan's argv and carries the marker anyway never runs
+    on the invocation the skill prescribes -- which is how R17 sat inert."""
+    import inspect
+    sys.path.insert(0, os.path.dirname(CHECKER))
+    import route_plan_check as rpc
+    inert = []
+    for rid, what, _cite, fn in rpc.RULES:
+        if 'needs --board' not in what:
+            continue
+        if 'p.board' not in inspect.getsource(fn):
+            inert.append(f'{rid} ({fn.__name__})')
+    assert not inert, (
+        f'rule(s) marked [needs --board] that never read p.board, so they are '
+        f'skipped for nothing: {", ".join(inert)}')
+    print(f'  PASS: every [needs --board] rule actually reads the board')
 
 
 def t_a_break_does_not_redden_unrelated_rules():
@@ -241,6 +309,8 @@ def t_every_rule_and_every_delegation_is_listed():
 
 TESTS = (t_the_compliant_plan_passes,
          t_each_break_is_refused_by_its_own_rule,
+         t_a_rule_does_not_refuse_what_the_engine_prescribes,
+         t_a_board_less_rule_is_not_gated_behind_the_board_flag,
          t_a_break_does_not_redden_unrelated_rules,
          t_the_checker_writes_nothing,
          t_an_unreadable_plan_is_exit_3_not_a_crash,
