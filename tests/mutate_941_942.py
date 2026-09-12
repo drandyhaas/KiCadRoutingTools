@@ -6,7 +6,7 @@ withdraws, so the reader acts on the first sentence and believes they complied.
 #942 is the same shape in the text handed to a teammate. A correction that no
 gate holds down is a correction the next edit undoes -- and this repo's
 recurring failure is a NEW gate that asserts nothing while printing PASS, which
-happened twice inside this very PR (an R17 rule that never ran, and two
+happened twice inside this very PR (an R17 rule its own gate never ran, and two
 COMPLIANT_VARIANTS rows that were vacuous under a full revert). So every row
 below reverts one fix and names the test that must go red.
 
@@ -98,8 +98,8 @@ ROWS = [
     # ---- #941 rows 1-6: the contradictions a checker refuses ---------------
     # R17 carried '[needs --board]' while reading only the plan's argv, and
     # check() SKIPS every rule whose text carries that marker. Restoring it
-    # makes the rule inert on the invocation the skill prescribes -- which is
-    # how it shipped, with the gate passing.
+    # makes the rule inert on the bare form this harness uses -- which is how
+    # it shipped, with the gate passing.
     ('r17-gated-behind-board', 'rpc',
      "    ('R17', 'fanout escapes stay off poured inner layers',",
      "    ('R17', 'fanout escapes stay off poured inner layers [needs --board]',",

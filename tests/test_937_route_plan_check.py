@@ -137,7 +137,8 @@ BREAKS = [
       '--gnd-via-distance 0.5\n')),
     # R17 had NO row here, and the rule additionally carried '[needs --board]'
     # while reading only the plan's own argv -- so `check()` skipped it on the
-    # bare invocation the skill prescribes, and every row above it passed
+    # bare invocation THIS HARNESS uses (the skill's own command line passes
+    # --board, so the rule ran there), and every row above it passed
     # without it ever running. Both are fixed; these three rows are what says
     # so. The escape layer must be an INNER one: the top escape layer is never
     # this rule's to refuse (bga_fanout refuses to forbid it).
@@ -285,7 +286,7 @@ def t_a_rule_does_not_refuse_what_the_engine_prescribes():
 def t_a_board_less_rule_is_not_gated_behind_the_board_flag():
     """`check()` SKIPS every rule whose text says '[needs --board]'. A rule
     that reads only the plan's argv and carries the marker anyway never runs
-    on the invocation the skill prescribes -- which is how R17 sat inert."""
+    on the bare form this harness uses -- which is how R17 sat inert."""
     import inspect
     sys.path.insert(0, os.path.dirname(CHECKER))
     import route_plan_check as rpc

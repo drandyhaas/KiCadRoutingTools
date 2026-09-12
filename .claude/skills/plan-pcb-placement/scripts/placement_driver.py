@@ -628,9 +628,10 @@ refs the board already stamps
 place_portfolio learns the declared intent from --intent and the mechanical
 locks from --lock; without them its HARD gate has no constraint to be hard
 about, and a step that optimises against no constraint is the failure this
-whole procedure exists to stop. Nothing ENFORCES this: both flags are optional
-in its argparse and nothing reads `args.lock`, so a run with neither produces a
-slate, prints JSON_SUMMARY and exits 0. The refusal is yours to make.
+whole procedure exists to stop. Both ARE read when given (`args.lock` reaches
+the seeder and the quench); what nothing does is REQUIRE them -- only
+--out-dir is required -- so a run with neither still produces a slate, prints
+JSON_SUMMARY and exits 0. The refusal is yours to make.
 
 Rank rules, in this order:
   1. HARD gates first: legality and the declared intent. A candidate that fails

@@ -582,11 +582,12 @@ RULES = (
      'Step 10 rule 1',
      r_impedance_needs_a_stackup),
     # NOT '[needs --board]': this rule reads only the plan's own argv, never
-    # `p.board`. It carried the marker, and `check()` SKIPS every rule whose
-    # text carries it -- so the one rule Step 10 rule 3 is enforced by did not
-    # run on the bare `route_plan_check.py <board>_plan.sh` invocation the
-    # skill prescribes, which is every invocation that does not remember a
-    # flag it has no use for.
+    # `p.board`, and `check()` SKIPS every rule whose text carries the marker.
+    # The skill's own command line does pass --board, so the rule ran there;
+    # what it did NOT run on is the bare `route_plan_check.py <plan>` form --
+    # this tool's own first usage line -- and that is the form test_937's
+    # harness uses, so the GATE never exercised R17 at all. Gating a rule on a
+    # flag it has no use for buys nothing and costs exactly that.
     ('R17', 'fanout escapes stay off poured inner layers',
      'Step 10 rule 3',
      r_fanout_layers_exclude_planes),
