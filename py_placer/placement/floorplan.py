@@ -1676,6 +1676,47 @@ class _Ctx:
         self._assembly_census = None
         self._bodies = None
         self._bodies_error = ''
+        self._oob_exempt = None
+
+    def oob_exempt(self) -> Dict[str, float]:
+        """`{ref: overhang_mm}` for every declared edge connector whose
+        courtyard leaves the outline by an amount INSIDE its own
+        `overhang_mm` band -- the parts `rule_edge_connector` has always said
+        are correct off the board, and that `rule_legality` used to count
+        against `legality_budget.oob_count` anyway.
+
+        Measured, run 26: an intent declaring `CON1 east overhang 0..0.5` and
+        `legality_budget {oob_count: 0}` (the emitter bakes the pile's own 0)
+        refused all ten of its seeds on CON1's 0.25 mm overhang, and the
+        placement was finished by hand.
+
+        The amount is `rect_outside_amount` with the part's OWN milled rings
+        skipped -- the exact call `QuenchState.legality_metrics` makes -- so
+        "counted" and "exempt" are decided on one number, never on two
+        readings of the outline. Only `edge_claims()` entries qualify (a
+        `connector_affinity` row claims no edge), only entries with a `max`
+        (an unbounded band would exempt any overhang whatever, which is the
+        run-10 160 mm case), and only when the part is actually off the board
+        (an interior connector is not "exempt" from anything). A part outside
+        its band is NOT exempt: it stays in the count AND `rule_edge_connector`
+        names it, two rules reporting one fact.
+        """
+        if self._oob_exempt is None:
+            out: Dict[str, float] = {}
+            for c in self.intent.edge_claims():
+                ref = c['ref']
+                part = self.parts.get(ref)
+                lim = c.get('overhang_mm') or {}
+                if part is None or lim.get('max') is None:
+                    continue
+                lo = float(lim.get('min', 0.0))
+                hi = float(lim['max'])
+                amt = self.gate.rect_outside_amount(
+                    part.rect, skip_rings=self.state._owned_rings(ref))  # noqa: SLF001
+                if amt > legality.EPS and lo - legality.EPS <= amt <= hi + legality.EPS:
+                    out[ref] = float(amt)
+            self._oob_exempt = out
+        return self._oob_exempt
 
     def assembly_census(self) -> Dict[str, object]:
         """#837's per-side census, memoised. The SAME function
@@ -2583,7 +2624,9 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
     """A connector that must reach the board edge: a card edge, a USB shell, a
     HAT header. This is the one class of part whose courtyard leaving the
     outline is CORRECT, so declaring it is also what stops `oob_count` from
-    reporting it as a defect forever."""
+    reporting it as a defect forever -- kept by `rule_legality` through
+    `_Ctx.oob_exempt()`, for a declared part inside its own overhang band
+    (it was a promise with no implementation until run 26 measured it)."""
     for c in ctx.intent.edge_connectors:
         ref = c['ref']
         part = ctx.parts.get(ref)
@@ -2644,19 +2687,45 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
             setback = INTERIOR_AFFINITY_MM
             _sev = WARN
         if setback is not None and amount <= legality.EPS:
-            clr = ctx.gate.edge_clearance(part.rect)
+            # The SEAT is a question about the part's BODY -- does its
+            # mating face reach the edge -- and a receptacle's pads sit
+            # well inboard of that face by construction: a micro-USB
+            # shell's SMD pads are 1.6-2.1 mm behind its opening. Measured
+            # on run 26's board: USB1's drawn fab body sits at 0.00 mm from
+            # the west edge where its pad box reads 2.1 mm, so the courtyard
+            # (here the pad-bbox fallback) reported "seated 1.30mm ... no
+            # overhang" on a socket that was flush, and the brief's four
+            # USB1 clauses had to be waived. For an `edge_receptacle` (or a
+            # brief row carrying `mount_mode: edge_mount`) the seat is
+            # therefore measured on the DRAWN body when the library drew one;
+            # everything else keeps the courtyard, and the OVERHANG conjunct
+            # above stays on the courtyard too (its edge-margin graze would
+            # read a flush body as a 0.55 mm overhang -- a different
+            # currency, not changed here).
+            basis = 'courtyard'
+            seat_rect = part.rect
+            ctxd = c.get('context') or {}
+            if (c.get('class') == 'edge_receptacle'
+                    or ctxd.get('mount_mode') == 'edge_mount'):
+                brect, src = ctx.body_rect(ref)
+                if brect is not None and src in ('fab', 'silk'):
+                    seat_rect, basis = brect, f'body:{src}'
+            clr = ctx.gate.edge_clearance(seat_rect)
             if clr > float(setback) + legality.EPS:
                 yield Violation(
                     rule='edge_connector', severity=_sev,
                     ref=ref,
                     message=(f"{ref} is an edge part seated {clr:.2f}mm from "
-                             f"the nearest edge with no overhang (seat "
-                             f"tolerance {float(setback):.2f}mm) -- "
+                             f"the nearest edge with no overhang ({basis}; "
+                             f"seat tolerance {float(setback):.2f}mm) -- "
                              + ("a plug may not reach it; disposition in the "
                                 "boundary review or declare max_setback_mm"
                                 if _sev == WARN else
                                 "the mating face cannot reach the edge")),
-                    measured={'edge_clearance_mm': round(clr, 4)},
+                    measured={'edge_clearance_mm': round(clr, 4),
+                              'basis': basis,
+                              'courtyard_clearance_mm': round(
+                                  ctx.gate.edge_clearance(part.rect), 4)},
                     expected={'max_setback_mm': float(setback)})
 
         # #712: WHERE ALONG the edge. The three conjuncts above are all
@@ -3340,6 +3409,17 @@ def rule_legality(ctx) -> Iterator[Violation]:
     slot as clean. Count and amount both see the real rings.
     """
     budget = ctx.intent.legality_budget or {}
+    # Declared edge connectors inside their own overhang band are off the
+    # board CORRECTLY (the promise in `rule_edge_connector`'s docstring, now
+    # kept here): they leave `oob_count` before it meets the budget. The raw
+    # count stays in `ctx.legality['oob_count']` -- it is the optimizer's own
+    # number and `test_legality_numbers_are_the_optimizers_own` pins it --
+    # and the exemption is published beside it as `oob_count_exempt`.
+    # `oob_amount` is NOT reduced: an author who budgets millimetres of
+    # overhang is budgeting the connectors too, and no run has asked for
+    # the split; say so here rather than guess.
+    exempt = ctx.oob_exempt()
+    ctx.legality['oob_count_exempt'] = len(exempt)
     for key, label in (('overlap_area', 'courtyard overlap area (mm2)'),
                        ('oob_count', 'parts leaving the board outline'),
                        ('oob_amount', 'total off-board overhang (mm)')):
@@ -3354,12 +3434,21 @@ def rule_legality(ctx) -> Iterator[Violation]:
         if got is None:
             continue
         lim = float(budget[key])
+        measured = {key: round(float(got), 4)}
+        note = ''
+        if key == 'oob_count' and exempt:
+            raw = got
+            got = raw - len(exempt)
+            measured = {key: int(got), 'oob_count_raw': int(raw),
+                        'exempt': sorted(exempt)}
+            note = (f" ({len(exempt)} declared edge connector(s) within "
+                    f"their overhang band exempt: {', '.join(sorted(exempt))})")
         if got > lim + legality.EPS:
             yield Violation(
                 rule='legality', severity=ctx.sev('legality'),
                 message=(f"{label}: {got:.3f} exceeds the declared budget "
-                         f"{lim:.3f}"),
-                measured={key: round(float(got), 4)}, expected={key: lim})
+                         f"{lim:.3f}{note}"),
+                measured=measured, expected={key: lim})
 
 
 def rule_proximity(ctx) -> Iterator[Violation]:
