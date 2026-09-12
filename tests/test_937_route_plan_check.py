@@ -120,16 +120,24 @@ BREAKS = [
     # the rule used to see. This one is the shape the SKILL's own Step 3
     # command has -- a route_planes GND-via pass carrying the distance ALONE,
     # with the via size and clearance fixed by earlier steps. #941 row 2 is
-    # exactly this command, and the rule used to `continue` past it.
-    # (On the route step, not the pour: putting it on the FIRST pour would
-    # redden R13 too, and a break that reddens two rules names neither.)
+    # exactly that command, and the rule used to `continue` past it.
+    #
+    # It is a SECOND route_planes step, for two reasons. Not the first pour:
+    # that would redden R13 as well, and a break that reddens two rules names
+    # neither. Not the route.py step: `route.py` has no `--add-gnd-vias` in
+    # its argparse, so putting it there would encode a command that dies at
+    # argparse as if it were a plan.
     ('R15', 'a gnd-via pass under the floor, with the size set upstream',
-     ("--nets '*' --power-nets GND +3V3 --clearance 0.09",
-      "--nets '*' --power-nets GND +3V3 --clearance 0.09 --add-gnd-vias "
-      "--gnd-via-distance 0.5")),
+     ('--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n',
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu\n'
+      '# cwd=/repo\n'
+      'python3 -u -X utf8 py_router/route_planes.py s3.kicad_pcb '
+      's3b.kicad_pcb \\\n'
+      '--nets GND +3V3 --plane-layers In1.Cu In2.Cu --add-gnd-vias '
+      '--gnd-via-distance 0.5\n')),
     # R17 had NO row here, and the rule additionally carried '[needs --board]'
     # while reading only the plan's own argv -- so `check()` skipped it on the
-    # bare invocation the skill prescribes, and the 16 rows above passed
+    # bare invocation the skill prescribes, and every row above it passed
     # without it ever running. Both are fixed; these three rows are what says
     # so. The escape layer must be an INNER one: the top escape layer is never
     # this rule's to refuse (bga_fanout refuses to forbid it).
@@ -218,6 +226,15 @@ def t_a_rule_does_not_refuse_what_the_engine_prescribes():
                 f'times, so this row edits nothing and asserts nothing')
             r = _run(_write(tmp, f'ok_{rid}_{abs(hash(what))}.sh',
                             COMPLIANT.replace(old, new, 1)))
+            # The rule must have RUN. Without this, a revert that puts the
+            # rule back behind `[needs --board]` makes `check()` skip it, it
+            # is absent from `failed` for that reason, and every row here
+            # passes while asserting nothing at all.
+            skipped = {ln.split()[1] for ln in r.stdout.splitlines()
+                       if ln.strip().startswith('SKIP')}
+            assert rid not in skipped, (
+                f'{rid} was SKIPPED on this plan, so "not refused" says '
+                f'nothing about it -- {what}\n{r.stdout}')
             failed = {ln.split()[1] for ln in r.stdout.splitlines()
                       if ln.strip().startswith('FAIL')}
             assert rid not in failed, (
@@ -258,7 +275,7 @@ def t_a_break_does_not_redden_unrelated_rules():
                 noisy.append(f'{rid} ({what}) also reddened '
                              f'{sorted(failed - {rid})}')
     # NO exemptions, and that is measured rather than hoped for: every one of
-    # the 15 breaks reddens exactly its own rule. An allowlist was written
+    # every break reddens exactly its own rule. An allowlist was written
     # here first, for a case that turned out not to happen -- and an exempted
     # name is where this repo's guards have failed before, so it is gone.
     assert not noisy, (

@@ -397,7 +397,7 @@ Based on the highest speed class found on the board:
 
 | Speed Class | Frequency | Recommended `--gnd-via-distance` | Rationale |
 |-------------|-----------|----------------------------------|-----------|
-| Ultra-high | >1 GHz | the floor below (~2.5 mm) | Return path critical; lambda/20 ~ 7 mm at 1 GHz in FR4 — but 2.0 mm, the value this row used to name, is UNDER the floor |
+| Ultra-high | >1 GHz | the floor below (2.25 mm at the default 0.5 via / 0.25 clearance) | Return path critical; lambda/20 ~ 7 mm at 1 GHz in FR4 — but 2.0 mm, the value this row used to name, is UNDER the floor |
 | High | 100 MHz - 1 GHz | 3.0 mm | Good return path, moderate density |
 | Medium | 10 - 100 MHz | 5.0 mm | Return current less localized |
 | Low | <10 MHz | Skip | Plane provides adequate return path |

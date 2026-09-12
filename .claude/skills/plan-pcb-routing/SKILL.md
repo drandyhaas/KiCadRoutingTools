@@ -278,10 +278,16 @@ Inner pins beyond depth 2 cannot escape without fanout routing through channels 
 **Escape layers (multi-layer boards):** `bga_fanout.py` defaults to `--layers F.Cu B.Cu`
 only. On a 4+ layer board, pass ALL the board's copper layers, e.g.
 `--layers F.Cu In1.Cu In2.Cu B.Cu` — otherwise deep balls have nowhere to escape to
-and those nets are dropped from the fanout. **Keeping escapes off a poured layer is
-`--layer-costs`, not a shorter `--layers`** (Step 10 rule 3): a layer dropped from the
-list is also gone from the under-pad engine's via spans, which use `--layers[0]` and
-`[-1]`. `qfn_fanout.py` is perimeter-only and doesn't take escape layers.
+and those nets are dropped from the fanout. **Keep escapes off a poured INNER layer
+with `--layer-costs`, not with a shorter `--layers`** (Step 10 rule 3). The two are
+equivalent as a way to forbid: a negative cost filters the layer out of the engine's
+list exactly as omitting it would. Prefer the cost vector because it is the same one
+`route.py` takes (derive the plane map once and pass it everywhere), because a
+positive weight lets you make a layer expensive instead of only deleting it, and
+because `--layers` then keeps meaning "the board's copper stack" rather than a
+per-step subset. Note the asymmetry: omitting the TOP layer promotes the next one to
+edge-escape duty, while a negative cost on it is refused outright.
+`qfn_fanout.py` is perimeter-only and doesn't take escape layers.
 
 **Staggered multi-row no-lead packages (AQFN) - use via-in-pad (#500).** An
 AQFN (e.g. `Nordic_AQFN-73-1EP_7x7mm_P0.5mm`, on osprey_kb / hex_gateway /
@@ -769,7 +775,10 @@ is the `/find-high-speed-nets` skill's job: it classifies nets into speed tiers
 Follow that skill's methodology here (its quick net-name/footprint scan decides
 whether the deeper datasheet pass is worth it) and put the recommended distance
 into the plan's GND-via step. Remember its physical floor: never set
-`--gnd-via-distance` below 3 x (via_size + clearance), ~2.5 mm for standard vias.
+`--gnd-via-distance` below 3 x (via_size + clearance) -- 2.25 mm at the repo's
+own defaults (`routing_defaults.VIA_SIZE` 0.5 + `CLEARANCE` 0.25), and MORE on a
+board that routes wider. Compute it for the sizes this plan actually passes; the
+number is not a constant.
 
 Report to user when presenting the plan:
 - If high-speed nets found: "**GND Return Vias:** This board has [tier] signals ([examples]).
@@ -1200,10 +1209,12 @@ plane nets. Do NOT use `"/*"` alone, as it misses nets with non-hierarchical
 names like `Net-(U9-Pad1)` which would then require `--no-bga-zone` to route.
 
 On a 4+ layer board also pass every copper layer with `--layers` (default is
-F.Cu B.Cu only) so inner balls can escape, and price the poured layers with
-`--layer-costs` so the escapes stay off them (Step 10 rule 3) — drop `--layers`
-only for true 2-layer boards, as this example does: its two layers ARE the
-default, and both carry a pour it must escape onto anyway.
+F.Cu B.Cu only) so inner balls can escape, and forbid the poured **inner**
+layers with a negative `--layer-costs` entry so the escapes stay off them
+(Step 10 rule 3). **Not the first `--layers` entry** — the top escape layer
+cannot be forbidden, and a negative cost there is refused outright. Drop
+`--layers` only for true 2-layer boards, as this example does: its two layers
+ARE the default, and both carry a pour the fanout must escape onto anyway.
 
 python3 -X utf8 py_router/bga_fanout.py board_step1.kicad_pcb \
     --component U9 \
@@ -1212,7 +1223,9 @@ python3 -X utf8 py_router/bga_fanout.py board_step1.kicad_pcb \
     2>&1 | tee /tmp/step1_fanout.txt
 
 **Then check the `JSON_SUMMARY` line: if `failed > 0`, balls were dropped — retry
-before continuing.** First confirm all copper layers are passed; then re-run with
+before continuing.** First confirm every copper layer the board has is available
+to the fanout — on a 4+ layer board that means `--layers`, and on a 2-layer board
+like this one the default already is both; then re-run with
 `--clearance` at the manufacturing floor (e.g. `--clearance 0.1`), which fixes the
 common case (an 0.8 mm-pitch BGA can't fit a track between balls at 0.2 mm). If still
 short, add the fine-pitch escape via and/or a smaller `--track-width`. Only proceed
@@ -1516,6 +1529,8 @@ python3 -X utf8 py_router/route_planes.py board_step2.kicad_pcb board_step4.kica
 
 python3 -X utf8 py_router/route.py board_step4.kicad_pcb board_step4b.kicad_pcb \
     --nets GND VCC \
+    --power-nets GND VCC --track-width <the Step 2 rail width> \
+    --layers <ALL copper layers> --layer-costs <the Step 2 vector> \
     2>&1 | tee /tmp/step3_finalize.txt
 
 **The second command is not optional and not a formality.** A chain that ends
@@ -1524,14 +1539,20 @@ oracle-exact fill nothing verified — "a PLAN ERROR, not a tuning choice", as
 the end-every-chain-on-`route.py` rule below puts it, and what Step 10 rule 10
 means by "when it runs, the chain still ends on `route.py`". The GND-via pass
 cut the pours it just stitched; only `route.py`'s in-run finalize repairs them.
+**Carry Step 2's `--layer-costs` and `--power-nets` into it**: it is a
+signal-routing step like any other, so the MANDATORY-layer-costs rule applies
+(without it the finalize's own reconnects cross the pours at cost 1.0), and
+`--power-nets` is where the taps and welds get their width.
 
 Adjust `--gnd-via-distance` based on the board's highest signal speed, and
 **floor every one of them at `3 x (via_size + clearance)`** — the tiers below
 are electrical targets, the floor is what fits:
-- Ultra-high (>1 GHz): the floor (~2.5 mm for standard vias); tighter is not buildable
+- Ultra-high (>1 GHz): the floor itself (2.25 mm at the default via+clearance);
+  tighter is not buildable, so there is no tighter tier to offer
 - High (100 MHz - 1 GHz): 3.0 mm
 - Medium (10 - 100 MHz): 5.0 mm
-- Minimum physical limit: 3 x (via_size + clearance), ~2.5 mm for standard vias
+- Minimum physical limit: 3 x (via_size + clearance) -- 2.25 mm at the default
+  0.5 via / 0.25 clearance, recomputed for whatever sizes the plan passes
 
 ### (No separate repair step — absorbed into Step 2, #562)
 The old Step 5 (`repair_planes.py`) and its Step 5c reconnect
@@ -2031,12 +2052,16 @@ as a recommendation, and `route_plan_check` R07 refuses a plan carrying it.
 ### Advanced Routing Parameters
 
 For difficult boards, consider tuning these parameters — every row below is one
-you may set. **`--max-iterations` is NOT among them**: the A* base budget is
-200000 and self-extends to 1e7 while the search is still progressing (#529,
-default on), so passing it can only make the router give up earlier than it
-would have. Do not put it in a plan; `route_plan_check` R09 refuses one that
-carries it. It used to be a row in this table, under a heading inviting the
-reader to tune it.
+you may set. **`--max-iterations` is NOT among them** (`--max-iterations`,
+default: 200000, `routing_defaults.MAX_ITERATIONS`): the A* base budget
+self-extends to 1e7 while the search is still progressing (#529, default on).
+Below the base you can only make the router give up sooner than it would have;
+above it you are asking for less than #529 already grants. Either way the
+number does nothing a plan wants. Do not put it in a plan; `route_plan_check`
+R09 refuses one that carries it. It used to be a row in this table, under a
+heading inviting the reader to tune it. (The repo's own long-running
+integration tests do pass larger values — that is a test harness pinning a
+bound, not a plan.)
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
@@ -2633,9 +2658,12 @@ Example cleanup prompt:
 > - board_step1.kicad_pcb (after fanout)
 > - board_step1c.kicad_pcb (after GND/VCC pours)
 > - board_step2.kicad_pcb (after the all-nets route + in-run plane finalize)
-> - board_step4.kicad_pcb (after GND return vias, if run)
+> - board_step4.kicad_pcb (after GND return vias — INTERMEDIATE, not shippable:
+>   the GND-via pass cut the pours it stitched and nothing has repaired them yet)
+> - board_step4b.kicad_pcb (after the route.py that CLOSES Step 3 — this is the
+>   finalized board when Step 3 ran)
 >
-> The final routed board is: board_step2.kicad_pcb (or board_step4 if GND vias ran)
+> The final routed board is: board_step2.kicad_pcb (or board_step4b.kicad_pcb if GND vias ran)
 >
 > Would you like me to delete the intermediate files?"
 
@@ -2787,9 +2815,13 @@ Lessons from a dry-run audit (an agent following this skill end-to-end):
    and the fanout does not avoid poured layers on its own. **The lever is
    `--layer-costs`, not a shorter `--layers`**: one value per `--layers`
    entry, negative = forbidden (#288, whose stated case is "a soon-to-be-
-   plane inner layer"). Dropping the layer from `--layers` instead also
-   removes it from the under-pad engine's via spans, which use `--layers[0]`
-   and `[-1]`. Two limits this rule used to state as absolutes and are not:
+   plane inner layer"). The two are equivalent *as a way to forbid* — a
+   negative entry filters the layer out of the engine's list exactly as
+   omitting it would — so the reason to prefer the cost vector is that it is
+   the same vector `route.py` takes (derive the plane map once, pass it to
+   every step), that a positive weight can make a layer expensive instead of
+   deleting it, and that `--layers` keeps meaning "the board's copper stack".
+   Two limits this rule used to state as absolutes and are not:
    **`--layers[0]` cannot be forbidden at all** — `bga_fanout` raises
    *"The top escape layer (...) cannot be forbidden - edge escapes are
    placed on it"* — and pouring the balls' **own outer** layer is sometimes

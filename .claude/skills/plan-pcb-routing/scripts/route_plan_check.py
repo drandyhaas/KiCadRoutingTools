@@ -416,7 +416,7 @@ def r_net_coverage_reconciles(p):
 
 
 def r_gnd_via_distance(p):
-    """Step 4 GND vias -- `--gnd-via-distance` >= 3x (via size + clearance).
+    """Step 3 GND return vias -- `--gnd-via-distance` >= 3x (via + clearance).
 
     The size and the clearance are resolved from the PLAN, not from the one
     argv that carries the distance. This rule used to `continue` unless all
@@ -426,17 +426,27 @@ def r_gnd_via_distance(p):
     skill's own Step 3 command, which is precisely the command #941 row 2
     reports as recommending a distance below the floor.
 
-    Resolution order, each step widening only when the narrower one is silent:
-    this argv, then the widest value any other command in the plan declares
-    (widest, because the floor it implies is the one that must hold for the
-    whole board), then `routing_defaults`. The reason names which it used, so
-    a refusal resting on a default is not mistaken for one resting on the plan.
+    Resolution order: this argv, then the other steps RUN BY THE SAME TOOL,
+    then `routing_defaults`. The reason names which it used, so a refusal
+    resting on a default is not mistaken for one resting on the plan.
+
+    Scoped to the same tool, and taking the SMALLEST value there, because the
+    vias whose spacing this grades are the ones THIS tool places. An earlier
+    draft took `max()` across every command in the plan, on the theory that the
+    widest via implies the floor that must hold for the whole board. That is
+    wrong, and refuses correct plans: a coarse PGA escape via
+    (`bga_fanout --via-size 0.8 --clearance 0.1`) beside a fine signal route
+    (`route.py --via-size 0.25 --clearance 0.0889`) yields a resolved floor of
+    2.70, while the GND-via pass that places the vias resolves 0.5/0.0889 for a
+    real floor of 1.77 -- so a correct 2.0 is refused by a via the pass never
+    places. A fanout escape via is not the via the GND pass places, and the
+    skill itself has them at different sizes.
     """
-    def _resolved(flag, fallback):
-        seen = [v for a in p.argvs
+    def _resolved(flag, tool, fallback):
+        seen = [v for a in p.by_tool(tool)
                 for v in (scalar(a, flag),) if v is not None]
         if seen:
-            return max(seen), 'the plan'
+            return min(seen), f'{tool} elsewhere in the plan'
         return fallback, 'routing_defaults'
 
     bad = []
@@ -444,12 +454,15 @@ def r_gnd_via_distance(p):
         d = scalar(argv, '--gnd-via-distance')
         if d is None:
             continue
+        tool = tool_of(argv)
         vs, vs_src = scalar(argv, '--via-size'), 'this step'
         if vs is None:
-            vs, vs_src = _resolved('--via-size', routing_defaults.VIA_SIZE)
+            vs, vs_src = _resolved('--via-size', tool,
+                                   routing_defaults.VIA_SIZE)
         clr, clr_src = scalar(argv, '--clearance'), 'this step'
         if clr is None:
-            clr, clr_src = _resolved('--clearance', routing_defaults.CLEARANCE)
+            clr, clr_src = _resolved('--clearance', tool,
+                                     routing_defaults.CLEARANCE)
         floor = 3.0 * (vs + clr)
         if d < floor - 1e-9:
             bad.append(f'{tool_of(argv)} --gnd-via-distance {d:g} is below '
@@ -486,10 +499,13 @@ def r_fanout_layers_exclude_planes(p):
     plan pours a solid plane on, or the escape routes into the pour.
 
     The lever is `--layer-costs` (one value per `--layers` entry, negative =
-    forbidden, #288), NOT a shorter `--layers`: a layer dropped from the list is
-    also gone from the under-pad engine's via spans, which use layers[0]/[-1].
-    So a poured layer that carries a negative cost is COMPLIANT, and this rule
-    refuses only a poured layer the plan neither prices nor omits.
+    forbidden, #288), NOT a shorter `--layers`. Both forbid identically -- a
+    negative entry is filtered out by the same `keep` list that a missing layer
+    never joins -- so the preference is about derivation, not effect: the cost
+    vector is what `route.py` takes too, a positive weight can price a layer
+    rather than delete it, and `--layers` stays a statement of the stack. What
+    matters HERE is that a poured layer carrying a negative cost is COMPLIANT,
+    so this rule refuses only a poured layer the plan neither prices nor omits.
 
     Two things this rule must not demand, both measured against the engine:
 
@@ -559,7 +575,8 @@ RULES = (
     ('R13', 'the first pour is bare', 'Step 1 bare pour', r_first_pour_has_no_via_tail),
     ('R14', 'net coverage reconciles (Step 5b)', 'Step 5b',
      r_net_coverage_reconciles),
-    ('R15', 'gnd-via distance clears 3x(via+clearance)', 'Step 4 GND vias',
+    ('R15', 'gnd-via distance clears 3x(via+clearance)',
+     'Step 3 GND return vias',
      r_gnd_via_distance),
     ('R16', 'no impedance pass without a stackup [needs --board]',
      'Step 10 rule 1',
