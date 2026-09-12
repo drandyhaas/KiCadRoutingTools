@@ -36,6 +36,14 @@ Pt = Tuple[float, float]
 
 
 SWIM_VIAS = 2      # a swimmer's dive and surface; its mid-corridor changes are the braid's
+import os as _os
+# SWIM_CHANGES (2026-09-11, TODO 13 ii): a swimmer priced by the changes the
+# braid's hold-then-run line implies for it (plan_braid 'swim_changes',
+# passed to vias_from_pages as `swim_changes`) instead of the flat
+# SWIM_VIAS. Measured before it: the flat price ranked K51 plans at 0.2
+# rank correlation with the braid; the K41 chain plan shipped with 13
+# swimmers priced 2 each and routed 82-92 against 72 predicted. 0 = off.
+SWIM_CHANGES = int(_os.environ.get('SWIM_CHANGES', '0') or 0)
 
 
 def plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses, chi: int = 1):
@@ -104,7 +112,7 @@ def _plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
 
 
 def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
-                    changes=None, cross=None):
+                    changes=None, cross=None, swim_changes=None):
     """Per-net vias implied by a page assignment ({net: layer | None}):
     tooth vias + the lane's layer CHANGES + berth vias. `changes` is the
     braid planner's count over the lane's whole profile (tooth, page,
@@ -120,7 +128,8 @@ def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
         pg = pages.get(n)
         tv = tooth_vias.get(n, 0) + (cross or {}).get(n, 0)
         if pg is None:
-            pred[n] = tv + SWIM_VIAS + m.vias
+            sw = (swim_changes or {}).get(n) if SWIM_CHANGES else None
+            pred[n] = tv + (sw if sw is not None else SWIM_VIAS) + m.vias
             continue
         ch = (changes or {}).get(n)
         if ch is not None:

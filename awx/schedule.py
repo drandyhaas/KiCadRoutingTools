@@ -13,7 +13,58 @@ corridor's business, not this module's.
 """
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Optional, Sequence, Set
+
+# BRAID_EXACT_PAGES=1 (2026-09-11, README TODO 20): the two pages assigned
+# EXACTLY -- the fewest swimmers, then the fewest page vias -- instead of
+# the LIS-first greedy below. Measured on the K8 exact plan: a crossing-
+# free 4/4 split the greedy made 5/2 + 1 swimmer (10 vias for 8); on the
+# K41 greedy plan's own orders 17 swimmers where 14 suffice.
+EXACT_PAGES = int(os.environ.get('BRAID_EXACT_PAGES', '0'))
+
+
+def exact_pages(launch: Sequence[str], ranks: Sequence[int], cost) -> Optional[Dict[str, Optional[str]]]:
+    """{net: 'F.Cu' | 'B.Cu' | None (swims)}: no two nets on one page
+    inverted (launch order vs `ranks`), the fewest swimmers first and
+    then the least total `cost(net, page)` -- a small integer programme
+    (scipy HiGHS). None if scipy is unavailable."""
+    try:
+        import numpy as np
+        from scipy.optimize import milp, LinearConstraint, Bounds
+        from scipy.sparse import lil_matrix
+    except Exception:
+        return None
+    n = len(launch)
+    if n == 0:
+        return {}
+    L = ('F.Cu', 'B.Cu')
+    inv = [(i, j) for i in range(n) for j in range(i + 1, n) if ranks[j] < ranks[i]]
+    nv = 2 * n
+    c = np.zeros(nv)
+    # a swimmer at its via price (SWIM_VIAS 2) plus a little for the
+    # refusals it seeds -- NOT a large weight: with swimmers at 1000 the
+    # split traded five back-page lanes (2 vias each) for one swimmer,
+    # K35 69 -> 72 and K41 86 -> 90 (2026-09-11)
+    SWIM = 2.5
+    for i, nm in enumerate(launch):
+        for p, P in enumerate(L):
+            c[2 * i + p] = -SWIM + float(cost(nm, P))
+    A = lil_matrix((n + 2 * len(inv), nv))
+    r = 0
+    for i in range(n):
+        A[r, 2 * i] = 1; A[r, 2 * i + 1] = 1; r += 1
+    for i, j in inv:
+        for p in range(2):
+            A[r, 2 * i + p] = 1; A[r, 2 * j + p] = 1; r += 1
+    res = milp(c, constraints=LinearConstraint(A.tocsr(), -np.inf, np.ones(r)),
+               integrality=np.ones(nv), bounds=Bounds(0, 1))
+    if res.x is None:
+        return None
+    out: Dict[str, Optional[str]] = {}
+    for i, nm in enumerate(launch):
+        out[nm] = next((P for p, P in enumerate(L) if res.x[2 * i + p] > 0.5), None)
+    return out
 
 
 def lis_keep(ranks: Sequence[int]) -> Set[int]:
@@ -100,26 +151,33 @@ class Schedule:
         # plan-following fanout now does -- a B-born keeper no longer
         # pays two vias to ride F.
         self.page = {nm: None for nm in self.launch}
-        for L in ('F.Cu', 'B.Cu'):
-            born = [i for i, nm in enumerate(self.launch)
-                    if self.tl[nm] == L]
-            if not born:
-                continue
-            sub = lis_keep_weighted([ranks[i] for i in born],
-                                    [on(self.launch[i], L) - 1.0 for i in born])
-            for k in sub:
-                self.page[self.launch[born[k]]] = L
-        rest = [nm for nm in self.launch if self.page[nm] is None]
-        inv = {nm: sum(1 for om in self.launch
-                       if om != nm and self.inverted(nm, om))
-               for nm in rest}
-        for nm in sorted(rest, key=lambda n: -inv[n]):
-            own = self.tl[nm]
-            for L in (own, 'B.Cu' if own == 'F.Cu' else 'F.Cu'):
-                members = [om for om in self.launch if self.page[om] == L]
-                if all(not self.inverted(nm, om) for om in members):
-                    self.page[nm] = L
-                    break
+        exact = exact_pages(self.launch, ranks, lambda nm, L: 2.0 - on(nm, L)) \
+            if EXACT_PAGES else None
+        if exact is not None:
+            self.page = exact
+            if log:
+                log('  pages assigned exactly (BRAID_EXACT_PAGES)')
+        else:
+            for L in ('F.Cu', 'B.Cu'):
+                born = [i for i, nm in enumerate(self.launch)
+                        if self.tl[nm] == L]
+                if not born:
+                    continue
+                sub = lis_keep_weighted([ranks[i] for i in born],
+                                        [on(self.launch[i], L) - 1.0 for i in born])
+                for k in sub:
+                    self.page[self.launch[born[k]]] = L
+            rest = [nm for nm in self.launch if self.page[nm] is None]
+            inv = {nm: sum(1 for om in self.launch
+                           if om != nm and self.inverted(nm, om))
+                   for nm in rest}
+            for nm in sorted(rest, key=lambda n: -inv[n]):
+                own = self.tl[nm]
+                for L in (own, 'B.Cu' if own == 'F.Cu' else 'F.Cu'):
+                    members = [om for om in self.launch if self.page[om] == L]
+                    if all(not self.inverted(nm, om) for om in members):
+                        self.page[nm] = L
+                        break
         keep = {i for i, nm in enumerate(self.launch) if self.page[nm] == 'F.Cu'}
         self.b_page = [nm for nm in self.launch if self.page[nm] == 'B.Cu']
         self.swimmers = [nm for nm in self.launch if self.page[nm] is None]
