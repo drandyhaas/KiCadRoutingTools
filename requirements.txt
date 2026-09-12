@@ -8,9 +8,14 @@ scipy>=1.7.0
 shapely>=1.8.0
 
 # Rasterization: board stills, review sheets, the routing movie and the film.
-# A HARD requirement, not an optional one -- py_router/route_render.py and
-# py_tools/render_placement.py import it at MODULE SCOPE with no fallback, so a
-# fresh clone that followed the README could not render anything.
+# Listed because a fresh clone that followed the README could not render
+# anything without it -- but it is the RASTER path and nothing else, so its
+# absence DISABLES rendering rather than stopping anything (#943). Routing does
+# not touch it (`startup_checks.check_render_dependencies` is a gate of its own,
+# called from the render entry points only), and neither does the GUI plugin:
+# `deps_check.OPTIONAL_PACKAGES` names it, so a machine without Pillow gets the
+# plugin with its movie checkbox and placement preview turned off, not a dialog
+# it cannot dismiss.
 #
 # The floor is deliberately LOW: everything the renderer needs (alpha_composite,
 # LANCZOS, ImageChops, PngInfo) is far older than this, and a low floor keeps

@@ -561,7 +561,11 @@ class TestCensusFailureIsNotCleanliness(unittest.TestCase):
 
     def test_the_sheet_says_not_measured_instead_of_blocking_none(self):
         import render_placement as RP
-        from PIL import Image
+        # Patched on PIL itself, not on `RP.ImageDraw`: render_placement imports
+        # the raster stack inside the functions that draw (#943), so it has no
+        # module attribute to reach through. The name is resolved at call time
+        # either way, so this intercepts the same Draw.
+        from PIL import Image, ImageDraw
         fnd = self._findings(broken=True)
         lines = []
         with tempfile.TemporaryDirectory() as td:
@@ -580,16 +584,16 @@ class TestCensusFailureIsNotCleanliness(unittest.TestCase):
                     lines.append(s)
                     return self._inner.text(xy, s, **kw)
 
-            _orig = RP.ImageDraw.Draw
+            _orig = ImageDraw.Draw
 
             def _draw(img, *a, **k):
                 return _Spy(_orig(img, *a, **k))
 
-            RP.ImageDraw.Draw = _draw
+            ImageDraw.Draw = _draw
             try:
                 RP.write_review_sheet(sheet, [panel], fnd, [])
             finally:
-                RP.ImageDraw.Draw = _orig
+                ImageDraw.Draw = _orig
             self.assertTrue(os.path.isfile(sheet))
         joined = ' '.join(lines)
         self.assertIn('NOT MEASURED', joined)
