@@ -226,7 +226,8 @@ octilinear, so a non-orthogonal pose is outside both models today
 | `connect.py`, `topo_strings.py`, `taut_fast.py` | the real router and the taut relaxation |
 | `replan.py` | the ROUTE as the judge; re-plans the ends the braid paid for |
 | `pack.py`, `pack_board.py` | every lane a taut string against its neighbour |
-| **`ledger_cal.py`** | **per net: DP floor vs slack. The instrument that says whether to work on the plan or the realization** |
+| **`ledger_cal.py`** | **per net: DP floor vs slack. The instrument that says whether to work on the plan or the realization -- but its per-net floor is CIRCULAR (each net priced against the others AS LAID); read it beside `joint_floor.py`** |
+| **`joint_floor.py`** | **the NON-circular floor: one MILP over the fixed paths that picks every path's layer at every crossing at once. Validated against the audit's independent parity+max-cut on three boards. `JOINT_FLOOR_NODES` bounds it -- no clock** |
 | `human_at_k.py` | the human's vias for a coherent K set. **Mind the label**: `coherent_nets(51)` returns 48 nets, so "K51" is a 48-net problem -- the human is 81 over those 48 and 85 over the full 51. Both are right; ours route 48 |
 | `census_vs_human.py` | per-net vias/copper/layers against the human, and where each via sits |
 | `collapse_dives.py` | collapse short dives on a routed board (2 vias each) |
@@ -234,7 +235,8 @@ octilinear, so a non-orthogonal pose is outside both models today
 | `wall_probe.py`, `copper_same.py`, `cmp_copper.py` | track-level wall census, set-compare copper |
 | `make_bench.py`, `rotate_board.py`, `mirror_board.py`, `bend_bench.py`, `channel_bench.py` | build an article from any board, and its poses |
 | `pose_gate.sh` | the chain over FF / BF / FB / BB / R90 / R180 / R270 |
-| `modal_k.py` | fan a sweep onto Modal, one container per (arm, K) |
+| `modal_k.py` | fan a sweep onto Modal, one container per (arm, K); `memory=(4096, 12288)` -- the request is the bill, the limit is the safety net |
+| `arms.*.json` | the sweeps: `arms.judge.json` (the comparator: `SF_ESC_W`, `SF_ACCEPT_MARGIN`), `arms.prune.json` (`BRAID_L5_ALT_PRUNE` x cap), `arms.next.json` (everything else untested), `arms.solver.json` (the older matrix) |
 
 ## One source for every routing number
 
@@ -422,6 +424,29 @@ file and is in the bundle only.
    into `plan_pages`/`judged_cost`.
    **Prize if every violator comes down to 2: K41 -8, K51 -26.**
 
+   **CORRECTED 2026-09-12 by `joint_floor.py`, and the framing above is
+   the part that is wrong.** "0 or 2, never more, 123 of 123" is a
+   property of the CIRCULAR per-net instrument. Under the non-circular
+   joint floor the human has exactly ONE lane above 2 on every board:
+
+   | | routed | per-net floor | JOINT floor |
+   |---|---|---|---|
+   | human K35 | -- | 2x27, 0x8 | 2x23, **4x1**, 0x11 |
+   | human K41 | -- | 2x32, 0x9 | 2x28, **4x1**, 0x12 |
+   | human K51 | -- | 2x37, 0x10 | 2x32, **6x1**, 0x14 |
+   | ours K35 (76 v) | 2x16, 4x8, 6x2, 0x9 | 2x17, 4x7, 6x2, 0x9 | 2x21, **4x6**, 0x8 |
+
+   The cheapest assignment is NOT the one where every lane is 0 or 2: at
+   K35 the joint optimum takes four lanes from 2 down to 0 and pays ONE
+   lane up to 4, which is 4 vias cheaper (54 -> 50). So **"bring every
+   violator down to 2" is not the objective** -- a violator can be the
+   thing that buys the zeros, and an optimiser told to eliminate them
+   would walk away from the optimum.
+   What DOES survive, and is the finding worth keeping, is the
+   COMPARATIVE form: under the same non-circular instrument the human
+   carries **one** lane above 2 and we carry **six**. The separation is
+   real; the absolute "never more than 2" was the instrument talking.
+
    **CAVEAT, from a third audit the same day, and it matters: the
    per-net DP floor is CIRCULAR.** `ledger_cal._dp` prices each net with
    every OTHER net pinned at its ACTUAL layer, so on a badly realized
@@ -448,6 +473,32 @@ file and is in the bundle only.
    SHIP and false of the ones we REJECT, and telling those apart is the
    search's whole job. Build `joint_floor.py` before scoring plans by
    any floor.
+   **BUILT 2026-09-12: `joint_floor.py`.** One MILP over the FIXED paths:
+   a binary per crossing SITE (the layer there), the equality
+   `y[m,j] + y[o,k] = 1` at every crossing, both pad layers pinned, and
+   the changes along each path as `d >= |difference|` pairs. Exact, and
+   small -- K51's 338 crossings give ~700 binaries and HiGHS closes it in
+   seconds. It reuses `ledger_cal`'s own `Path` and `_cross_pair`, and
+   takes its nets from `coherent_nets` WITHOUT `--board` exactly as
+   `ledger_cal` does, so both instruments run over one set (passing the
+   routed output instead gave 10 paths of 35).
+   **It reproduces the audit's table exactly, by a different method** --
+   the audit derived these with a parity system plus a max-cut, this is a
+   MILP, and they agree on every published row:
+
+   | board | routed | per-net | JOINT | joint slack |
+   |---|---|---|---|---|
+   | human K35 | 58 | 54 | **50** | 8 |
+   | human K41 | 70 | 64 | **60** | 10 |
+   | human K51 | 80 | 74 | **70** | 10 |
+   | ours K35 (the local 76-via control) | 76 | 74 | **66** | 10 |
+
+   Note the last row against the first: our 76-via board floors at 66
+   where the human's 58-via board floors at 50. The per-net floor said 74
+   against 54 -- it hid 8 vias of our headroom and 4 of theirs. Infeasible
+   is a first-class answer (an odd cycle in the parity system means these
+   paths have no two-layer realization at all) and is reported, not
+   raised.
 1b. **The judge's ESCAPE term is anti-informative -- drop it from the
    comparator.** `judge_by_braid` returns `sum(pred) + ride`, where the
    escape half is `tooth_vias + m.vias + ride/VIA_MM`. Measured over the
@@ -471,6 +522,13 @@ file and is in the bundle only.
    (a LEVEL error) barely moved rank.
    Ship LIS as a GUARD on acceptance, never as a maximand -- the settled
    table is full of correlations that became objectives and lost.
+   **BUILT 2026-09-12: `SF_ESC_W`** (`fanout_from_plan`), the weight on
+   the escape half. 1.0 is the judge exactly as it has always been and is
+   the default; 0.0 is the corridor half alone. The split is exact --
+   `vias_from_pages` emits `tooth_vias + cross + changes + m.vias` per
+   net, so the escape half is the tooth and berth vias plus the ride and
+   everything else is corridor, cross-corridor dives included. The LIS
+   acceptance GUARD is NOT built.
 
 1c. **The search accepts at 1e-6 and takes 142 judged REGRESSIONS.**
    965 accepted moves across the K35/K41 logs, median improvement 2.00
@@ -483,6 +541,12 @@ file and is in the bundle only.
    deterministic, satisfies the no-clocks rule), calibrated to the
    comparator's measured resolution. A margin large enough to accept
    nothing reproduces the pre-search plan exactly -- a free control.
+   **BUILT 2026-09-12: `SF_ACCEPT_MARGIN`** (`fanout_from_plan
+   .accept_key`, wired into all three key-tuple acceptance sites). 0 is
+   off and is the default -- the plain `k1 < k0` tuple compare, verified
+   inert. Above 0 a move must win by the margin on the judged cost, and a
+   residue drop stops trumping a cost rise of any size: it may cost at
+   most the margin. Unmeasured.
 
 1d. **The swimmer count is a closed form, and the human has MORE.**
    `n - (lambda1 + lambda2)` of the RSK shape of the launch->target
@@ -523,6 +587,18 @@ file and is in the bundle only.
      the unpruned cap 4 that ships today.** Restore the dropped rows
      lazily for the chosen set (bounded by the plain instance's ~2k
      pairs, i.e. 1-4% growth per round).
+   - **BUILT 2026-09-12: `BRAID_L5_ALT_PRUNE`** (`braid._l5_build`, both
+     proximity emission sites), default off. **It is a RELAXATION, and
+     the claim above that such a pair "can never both be chosen" is
+     WRONG** -- the exactly-one row is PER NET, so net A's candidate and
+     net B's candidate are routinely chosen together and the row between
+     them can bind. What the prune gives up is precisely the
+     mover-vs-mover interaction, the same blind spot that made the
+     per-candidate crossing term non-additive at K51. The model can
+     therefore return a schedule that is infeasible once both movers are
+     seated; the chosen set is re-judged by the full judge and laid by
+     the real router, so the cost is a worse route, not a wrong board.
+     The LAZY RESTORE is NOT built. Arms staged in `arms.prune.json`.
    - **Column generation is REFUTED for this model**, by this repo's own
      solver study. The pricing subproblem is a per-lane chain DP, which
      has the INTEGRALITY PROPERTY, so the Dantzig-Wolfe master's bound
@@ -538,6 +614,27 @@ file and is in the bundle only.
    Measure the incumbent at a short `BRAID_CPSAT_DET` before buying any
    approximate solver. `BRAID_CPSAT_REPAIR` (hint repair) is built and
    unmeasured.
+   **FOUND 2026-09-12, and it is a defect, not a knob: `CPSAT_SCALE` was
+   destroying the level-5 tie-break.** CP-SAT takes integer objective
+   coefficients, so the float objective is multiplied by `CPSAT_SCALE`
+   (10000) and rounded. An up/dn costs `1.0 + 1e-4 * u_` with u_ in
+   [0,1] -- and `1e-4 * u_ * 10000 = u_`, which rounds to 0 below 0.5 and
+   1 above. The tie-break exists to break the symmetry "between the
+   twenty equal places a dive could sit, which is what the
+   branch-and-bound was grinding on", and under CP-SAT it survived as ONE
+   coarse step. At 1e6 it is 100 levels. This is on the hot path: every
+   cloud arm runs `BRAID_ALT_SOLVER=cpsat`. Exposed as
+   `BRAID_CPSAT_SCALE` at its old value, because raising it changes the
+   integer objective and therefore possibly the answer -- a knob to
+   measure, not a silent fix.
+   Also **`BRAID_L5_AUX_CONT`**: `z` (the DST_XING pair) and `iv` (the
+   island) are implied integral at any optimum -- `z` sits in exactly one
+   row `z >= ya + yb - 1` with positive cost, `iv` only in
+   `st + w + iv (- y) >= c` rows with every other term binary -- so
+   declaring them continuous removes branching candidates without moving
+   the optimal value. It can still change WHICH optimum comes back, so it
+   is off by default. Inert under CP-SAT, which builds every variable as
+   a Bool regardless.
 6. **`DST_ASK_BAN`** -- an ask the engine answered a layer/kind/face
    away is not asked again. Built, default off. First measurement is
    negative (K35 66 against 58); finish the ladder before deciding.
@@ -571,6 +668,22 @@ file and is in the bundle only.
    - `rotate_frame.to_axis_aligned_frame` -- every non-orthogonal BGA/QFN
      board. This one is a FIX (main saw pours and outline in the
      un-rotated frame) but it is a copper-changing fix.
+   - **`underpad._follow_plan`'s blocker order -- a DETERMINISM DEFECT,
+     found 2026-09-12, patch held at `scratchpad/determinism_blockers.patch`
+     (NOT applied: the tree must match the sweeps in flight).**
+     `blockers_of` returns a SET of `id(pad)` -- memory addresses -- and
+     Python's stable sort therefore breaks depth ties in whatever order the
+     allocator produced that run. Measured: two runs of IDENTICAL code on
+     the identical board printed `ripped ['SDQ14','SBA0','SDQ6']` and
+     `ripped ['SDQ14','SDQ6','SBA0']`. The re-lay order is load-bearing --
+     which blocker gets its gap back first decides the copper -- so this is
+     a WALL-CLOCK-CLASS defect: same input, different output. It also makes
+     a "byte-identical with the flag off" check fail for the wrong reason,
+     which cost one false alarm today. The fix ties the break to the pad's
+     own identity (`-depth, net_name, pad_number`), a property of the board
+     rather than of the process. Audited the siblings: `escaped` and
+     `coupled_pairs` are membership/count only and never iterated, and the
+     `net_id` sets are board values, so this was the only instance.
    - `_foreign_seg_arr_trust` -- weakens a shared cache's staleness
      digest. The invariant holds today; a future in-window copper edit
      would route against phantom copper with nothing to catch it.
@@ -586,6 +699,12 @@ file and is in the bundle only.
 10. **A better routing order.** Lanes are laid sequentially and every
     refusal the rip repairs is a sequential loss. Most-constrained-first
     is the reference.
+    **BUILT 2026-09-12: `BRAID_LAY_ORDER=xing`**, default ''. The
+    constrainedness measure is free and general -- how many other lanes
+    this one CROSSES, i.e. the pairs whose launch and target ranks
+    disagree. Ties keep the target order, so off is byte-identical. Also
+    **`BRAID_RIP_VICTIMS` / `BRAID_RIP_DEPTH`**, which were hard-coded 3
+    and 1 on `rip_for`'s signature with no way to turn them.
 11. **The packing's purpose is unmeasured.** `BRAID_PACK=1` ships 0 open
     0 DRC with vias unchanged and far fewer segments; nobody has
     measured what the segments buy.
@@ -594,12 +713,69 @@ file and is in the bundle only.
     with the human is an INPUT, not a result. The joint source re-fan is
     built (`SRC_REFAN_JOINT=1`) and only pays at K51, where the blocking
     net is in the run.
+    **BUILT 2026-09-12: `SRC_EXCHANGE=1`, a PROBE that changes nothing.**
+    A tooth is physical copper, so a plan exchanging two nets' launch
+    points is not realizable without a re-fan -- and three sessions of
+    source arms measured null, which may be the engine or may be the
+    idea. The probe asks the cheap half first: under the braid's own
+    judge, does ANY pairwise exchange improve the plan? If none does the
+    realize build is not worth writing; if some do, the gains name the
+    pairs a re-fan should target. Capped at `SRC_EXCHANGE_PAIRS` (60).
+    **FIRST READING, K15: `2 of 60 pair(s) improve the judge; SA9<->SCAS
+    +2.00, SA7<->SCAS +2.00`.** So the source order is NOT dead on the
+    merits -- gains exist and they are worth 2 judged vias, which is the
+    median accepted move's size. The null results of three source arms are
+    therefore about the REALIZE step, not about the idea. Read the ladder
+    arm (`sx`) before drawing anything stronger from one K15.
+12b. **MEMORY, measured in situ 2026-09-12.** A K35 joint arm peaks at
+    **640 MB** for the whole fanout stage, and the peak is ONE `_alts5`
+    call built in two steps:
+    - `_l5_build` holds 329,837 row DICTS alive at once -- 434 B/row, a
+      7.7x blow-up over the 7 MB CSC they encode -- for **+164 MB in one
+      call**. The fix is a flat `(cols, vals, rowptr)` store plus a hash
+      dedup key; measured 5-6x smaller, and the COO/CSC it builds is
+      bit-identical. NOT BUILT (half a day; `_milp_solve`, `_cpsat_solve`,
+      the `n_viol` loop and both dump paths are the consumers).
+    - **CP-SAT never returns its arena**, so repeated solves of the SAME
+      model ratchet the process: 303 -> 357 -> 441 -> 488 -> 640 MB across
+      five. HiGHS on the same harness is flat (82 -> 131 -> 127 -> 130).
+      The fix is to run the solve in a short-lived child. NOT BUILT.
+    **DONE:** `_milp_solve` builds its COO with `np.repeat`/`np.fromiter`
+    instead of three Python lists (+46 MB / 0.31 s -> +11 MB / 0.14 s at
+    cap 4, ~-155 MB at cap 8; COO and CSC verified bit-identical), and
+    `modal_k.py` asks for `memory=(4096, 12288)` instead of a flat 12 GB
+    -- the 12 GB was a guess standing in for a diagnosis of a SIGABRT
+    nobody confirmed as an OOM.
+    **Ruled out, do not spend time here:** `_PROFILE_MEMO` (34 entries /
+    1.1 MB), `_L5_SEED`, the 6 spawn workers (the joint arm never opens
+    the pool -- `DST_RESIDUE=3` runs `residue_choice`, which is single
+    process), the sharded taut memo (457 MB on disk, 38 MB resident for
+    all 256), CP-SAT `num_workers` (4/2/1 -> 674/681/658 MB, no saving,
+    and it CHANGES THE ANSWER), row dedup (already exact, 0 duplicates
+    left), and the obstacle windows.
+    **And a measurement trap for the honesty list: on macOS a memory
+    reading taken while the box is loaded is low by up to 2x** -- the
+    same CP-SAT solve read 329 MB loaded and 577-693 MB idle, because the
+    compressor moves pages out of RSS. CP-SAT peak also has a ~20%
+    run-to-run spread on an identical instance, so one peak is not a
+    result any more than one K is.
+
 13. **Tooling.** Promote the session probes into `awx/` with a line each
     here; add the flag-off parity gate that the hand check does today.
-14. **Re-express the two `*_TIME` stage knobs in nodes.**
-    `BRAID_L5_ALT_TIME` and `BRAID_L5_JUDGE_TIME` now reach an IGNORED
-    parameter, so setting them does nothing. They are still the natural
-    place to say how hard a stage should try; say it in nodes.
+14. ~~Re-express the two `*_TIME` stage knobs in nodes.~~ **WITHDRAWN
+    2026-09-12 -- the premise was wrong on both halves.** The node
+    budgets ALREADY EXIST and are already the live ones:
+    `BRAID_L5_JUDGE_NODES` (30) and `BRAID_L5_ALT_NODES` reach
+    `_milp_solve(nodes=)` at every level-5 call site. And the `*_TIME`
+    names are not dead either -- `_l5_time` is part of the level-5 MEMO
+    KEY, where the separation is load-bearing: a plan-only pass solved
+    under the judge's cap must not serve the real attempts (K41: attempt
+    0 laid a 3 s incumbent, 84 vias for the 76 the full-cap optimum
+    routed). Renaming them would collapse that key onto the lay pass's.
+    Attempting the rename duplicated two live constants and left
+    `L5_ALT_TIME` undefined at three call sites; reverted. What is true
+    is only that they are confusingly named for a value that is a memo
+    discriminator and a `min(cap, ...)` argument, never a budget.
 
 ## What this adds to `py_router`
 
