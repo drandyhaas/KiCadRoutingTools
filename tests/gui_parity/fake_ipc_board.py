@@ -49,8 +49,16 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(os.path.dirname(_HERE))
-if _REPO not in sys.path:
-    sys.path.insert(0, _REPO)
+# The repo root AND py_placer: `_flush_footprint_moves` imports
+# `placement.writer`, which lives under py_placer/ since the #522 reorg. The
+# path belongs HERE, in the module that has the dependency, rather than in each
+# gate that happens to drive a footprint move -- `test_footprint_position_sync`
+# set up four paths and not this one, so every run of it died on
+# `ModuleNotFoundError: No module named 'placement.writer'` inside push_commit,
+# which exits exactly like a failed assertion.
+for _p in (_REPO, os.path.join(_REPO, 'py_placer')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from kicad_parser import parse_kicad_pcb, KICAD_10_MIN_VERSION  # noqa: E402
 
