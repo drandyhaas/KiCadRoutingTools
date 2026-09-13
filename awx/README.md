@@ -37,8 +37,31 @@ default.** Every number in it is a real board in `awx/tmp/`, re-graded
 and K51 (+26), and it grows with congestion -- that is the shape of the
 problem, not "we match at K35".
 
+**2026-09-13, LOCAL, and the K51 line moved a long way -- but read the open
+column.** `BRAID_LAY_ORDER=xing` then `replan.py`:
+
+| board | vias | open | how |
+|---|---|---|---|
+| `rpW51_rp_k51` | **91** | **1 (SA1)** | `xing` 112->99, then `--worst=48 --probes=2 --rounds=6` |
+| `rpX51_rp_k51` | 95 | 1 (SA1) | `xing`, then the default-width replan |
+| `rpA41_rp_k41` | **82** | **0** | replan `--rounds=4` at the default width |
+| `rpW41_rp_k41` | 83 | 0 | replan `--worst=41 --probes=2 --rounds=6` |
+
+**K41 82 at 0 open is a real board and beats the cloud's 88**, though it is
+still short of the recorded 76. **K51 91 is NOT a valid board** -- SA1 ships
+open, and an open net UNDER-counts vias, so 91 is not comparable to the 107
+until it closes. Closing SA1 is the single thing standing between this and a
+new K51 record. Note the width did not decide either bench: K41 was BETTER at
+the default width (82 vs 83), K51 better wide (91 vs 95).
+
 These boards come from `replan.py` -- the route as the judge -- run wide
-(`--worst=35..41 --probes=2 --apply=strip`). The K51 line was never run
+(`--worst=<the net count> --probes=2 --apply=strip`; `--worst` takes ONE
+integer, so the `35..41` written here before was a range across K, not
+syntax -- `int('35..41')` raises and no round runs). `--worst=N` re-plans
+every REFUSED net plus the N most via-expensive ones, so N = the net count
+puts the whole board in play against the default 3; `--probes=N` is how
+many screened candidates per net AND end get a real router probe (5-20 s
+each), so the recipe is ~25-30x the default's work per round. The K51 line was never run
 at that width; it ran `--worst=6 --probes=1` and stopped at 107.
 
 - **reference arm**: `SRC_ROUNDS=0 SEL_RETRY=6 EXACT_LANE=1
@@ -228,6 +251,8 @@ octilinear, so a non-orthogonal pose is outside both models today
 | `pack.py`, `pack_board.py` | every lane a taut string against its neighbour |
 | **`ledger_cal.py`** | **per net: DP floor vs slack. The instrument that says whether to work on the plan or the realization -- but its per-net floor is CIRCULAR (each net priced against the others AS LAID); read it beside `joint_floor.py`** |
 | **`joint_floor.py`** | **the NON-circular floor: one MILP over the fixed paths that picks every path's layer at every crossing at once. Validated against the audit's independent parity+max-cut on three boards. `JOINT_FLOOR_NODES` bounds it -- no clock** |
+| `room_probe.py` | **does a plan-time feature predict a swimmer's vias?** Takes FANOUT/ROUTED board pairs, rebuilds the crossing geometry the judge sees (`braid.plan_braid`) and correlates candidate features against the routed count. Every family tried is null (|r| <= 0.13 over 97 swimmers) -- run it before building any new per-lane cost term |
+| `modal_k.py` | cloud arms. `return_board: true` returns the routed board, `return_files: [globs]` any tmp/ artifact (plan sidecar, raw logs, judge dumps) -- without these a cloud-only phenomenon cannot be diagnosed at all, and K44's regression is cloud-only |
 | `human_at_k.py` | the human's vias for a coherent K set. **Mind the label**: `coherent_nets(51)` returns 48 nets, so "K51" is a 48-net problem -- the human is 81 over those 48 and 85 over the full 51. Both are right; ours route 48 |
 | `census_vs_human.py` | per-net vias/copper/layers against the human, and where each via sits |
 | `collapse_dives.py` | collapse short dives on a routed board (2 vias each) |
@@ -370,12 +395,345 @@ Two lessons worth keeping: an instrument that cannot measure must FAIL,
 never report clean; and a knob measured negative through a broken path
 has not been measured.
 
+## What the 2026-09-13 session established
+
+**Read this before running anything.** It invalidates a comparison this
+campaign made routinely, and it closes off a whole class of work.
+
+> **THIRTEEN KNOBS NAMED IN THIS FILE ARE NOT COMMITTED** -- they live only
+> in the working tree, so a fresh checkout CANNOT reproduce the measurements
+> that name them. They are instruments and records of NEGATIVE results, not
+> improvements, which is why they were held back:
+>
+> | knob | why it is not committed |
+> |---|---|
+> | `SF_KEY_COST` | confirmed K44 regression, 98 -> 112, spread 0 over three containers |
+> | `SF_SWIM_MODEL` | harmful on the cloud: K51 105 -> 131, K44 only 106 against a 98 baseline |
+> | `BRAID_KEEP_SCHED_PAGES` | costs 12-16 vias on EVERY bench (K35 62->74, K41 88->104, K51 105->117) |
+> | `BRAID_CPSAT_CONFLICTS`, `BRAID_CPSAT_CONVERGE` | unusable: a 40 s solve had not finished in 31 MINUTES |
+> | `BRAID_ALT_TWOSTAGE`, `BRAID_L5_W_PER_LANE`, `BRAID_CPSAT_ENF`, `BRAID_W_PER_NET` | built for the two-stage/CP-SAT study; never shown to beat the baseline |
+> | `DST_RIDE_W` | rejected -- K51 regression |
+> | `SF_LDS_W` | inert (wired and verified live; it just decides nothing) |
+> | `SF_RIDE_W` | correct and default-inert, but NEVER exercised through a chain |
+> | `SF_REPAIR_CALLS` | a counter from the CP-SAT repair probe |
+>
+> The FINDINGS they produced are real and are recorded here. Everything else
+> this file names is committed. **This list is auditable** -- every
+> backticked `*_KNOB` in this file was checked against the committed
+> sources; re-run that check when adding one.
+
+
+
+**The short version, in the order it matters:**
+1. **The plan-side swimmer price is CLOSED, and the per-lane model is
+   HARMFUL, not merely inert.** A swimmer's via cost is not predictable at
+   plan time (four feature families, |r| <= 0.13 over 97-98 swimmers on 5
+   boards), so no cost term built on the plan can rank it -- and the cloud
+   arms confirm it end to end: `SF_SWIM_MODEL`+`SWIM_CHANGES` costs **K51
+   105 -> 131** and reaches only 106 at K44 against a 98 baseline. Do not
+   add another without clearing the |r| > 0.2 bar (`room_probe.py`).
+2. **The judge has no resolution on vias** -- it gave the SAME 73.0 predicted
+   vias to a 98-via and a 112-via board, so the choice fell through to
+   corridor length: 5.3 mm, costing 14 vias.
+3. **`replan.py` (the route as the judge) is the only lever that moved a
+   bench**: K41 91->82 at 0 open, K51 112->99->91 (SA1 still open).
+4. **`BRAID_LAY_ORDER=xing` is the largest single-knob win** (K51 -13) and
+   is slack-dependent (K41 +6). An arm, never a default.
+5. **K51 COMPLETION, not the via count, is the open problem.** The 91-via
+   board is invalid for ONE net (SA1) and it is fully diagnosed: the lane
+   was never laid, walled at both ends, ends on opposite layers, tail
+   exhausted. Search budget and via room are both measured INERT on it.
+6. **Never compare local to cloud** (below) -- and note a verdict in the
+   settled table belongs to the BOARD it was measured on:
+   `BRAID_VIA_ROOM_REFUSED=2` "breaks K51" on the old 137-via baseline and
+   is bit-identical on the 99-via one.
+
+### Never compare a LOCAL result to a CLOUD one
+
+They are not the same experiment, for two separate reasons, and the gap is
+large: K35 local 76 vs cloud 60; K41 local 107 vs cloud 88.
+
+1. **`max_deterministic_time` is not portable across architectures.** On a
+   byte-identical instance (md5 verified both sides), `BRAID_CPSAT_DET=40`
+   gives arm64 **1685 conflicts / obj 41.845872** and x86_64 **1970 / obj
+   40.845888** (Intel and AMD agree exactly with each other). x86_64 gets
+   1.17x the search per deterministic unit. ortools never claimed otherwise
+   -- `sat_parameters.proto` documents it only as "correlated with the real
+   time used by the solver". It buys immunity to machine LOAD, which is what
+   this chain needed, and nothing about different CPUs.
+   `BRAID_CPSAT_CONFLICTS` (new, default 0 = unchanged) bounds the solve by
+   `max_number_of_conflicts` instead -- an integer count of discrete search
+   events, identical on any CPU. **2000** matches today's x86_64 depth.
+   CAVEAT: a conflict count bounds SEARCH, not TIME. It does not bound
+   presolve at all, and the conflict rate is instance-specific (~42/s on the
+   K35 alt instance, unmeasured elsewhere). Ship it with a generous
+   deterministic-time backstop AND record which of the two fired -- a
+   backstop nobody checks is how this class of bug returns.
+2. **The second divergence is SOLVED, and it runs through the CP-SAT
+   solution VECTOR rather than its budget.** Equalising the budget leaves
+   the routed board byte-identical (arm64 DET=40 and DET=80 both give K35
+   76v/1376s), which is what made the solver look innocent -- but CP-SAT
+   returns a DIFFERENT SOLUTION VECTOR per architecture at the same
+   objective, and `braid._profiles5` rewrites `sched.page[nm]` from that
+   vector. One net's page flips, the residue goes 14 vs 13, `f` differs by
+   exactly 1.0000 (the fraction bit-identical), a different berth is
+   accepted, and 10 of 35 berths end up different. Freezing the rewrite
+   (`BRAID_KEEP_SCHED_PAGES`) does remove the channel and costs 12-16 vias
+   on every bench, so the rewrite is load-bearing: see the settled table.
+
+### The local-vs-cloud bisect, as far as it went
+
+Everything upstream of `residue_choice` is bit-identical across arm64 and
+x86_64 -- net set, escape MENUS 35/35, cost vectors 0 of 35, ranking order,
+and the `lane_free`/`_conflict`/`band_room` accept decisions 140/140. The
+divergence enters ONLY at `residue_choice`, the stage that judges berths by
+running the braid, and then 10 of 35 berths differ. ELIMINATED by direct
+test: `grid_router` (identical copper on a byte-identical board, sha
+`fd04a350d0ad` on arm64 and two x86_64 containers), the CP-SAT budget,
+`BRAID_L5_SEED` (0 and 1 give the same local board), and the 449 MB on-disk
+taut memo (cold gives the identical board -- it IS a pure cache).
+LOCALISED TO: `plan_braid`'s PAGE ASSIGNMENT. The same plan is judged
+residue 14 locally and 13 in a container, `f` differing by exactly 1.0000 --
+one swimmer -- with every net's launch_idx, target_idx and corridor
+IDENTICAL. Five nets differ only in their page (SA15, SBA1, SODT0 gain one
+in the cloud; SDQ0, SDQ15 lose one). The page branch in `schedule.py` is
+integer-only -- `lis_keep_weighted`'s weights are {0.5, 1.0, 1.5}, exact
+dyadic; `inverted` compares indices; the fill sorts on a count -- so it
+cannot diverge on identical inputs. **ANSWERED: the input that diverges is
+the CP-SAT solution vector, via `_profiles5`'s page rewrite** (see item 2
+above).
+
+### Every parameter response is JAGGED -- single arms are not evidence
+
+Five independent sweeps in one session, all non-monotone:
+
+    DST_RIDE_W      K41  0.25->107  0.5->92  1.0->88  **1.5->124**  2.0->84  3.0->82*  4.0->82*
+    DST_RIDE_W      K35  62  62  60  **62**  59  **83**  68
+    DST_RESIDUE_CANDS K41 joint 4->107 8->94 16->106 ; two-stage 4->94 8->82* 16->118
+    BRAID_RESIDUE_W K41  6->84  10->89  14->114
+    BRAID_L5_SEED   K28  net-set 34 / none 36 / plan 40          (* = ships open nets)
+
+**K35 is BISTABLE** -- three identical cloud containers gave [60, 70, 70],
+mode 70 -- so quoting 60 as "the baseline" understates every K35 comparison.
+**K41 and K51 baselines reproduce EXACTLY** (K41 88v/2545s over three
+independent arms; K51 129v/1open twice). Grade there, never on K35 alone.
+The `nodes` column of `BRAID_SOLVE_DUMP` was None for every CP-SAT solve
+ever recorded; it now carries NumConflicts, the one portable unit.
+
+### The excess is a TAIL, and the machinery that closes it is via-blind
+
+First-pass scheduled lanes are at per-lane parity with the human (abp K41
+1.73 vias/lane vs 1.71). The gap sits in lanes REFUSED on the first pass and
+then closed by the x4 budget, the last call, or a blocker rip, at 5-8 vias
+where a first-pass lane costs 2. On the best K41 board (76) the whole +6 over
+the human is four rescued lanes; at 2 each that board is 66. Every step of
+that chain accepts the FIRST completion without pricing vias: the x4 rescue
+takes whatever the wider search returns (`braid.py:6960`), `connect_ladder`
+returns the first rung that succeeds (`:7308`), and `rip_for` runs only when
+the route outright fails and keeps the first complete trial (`:7337`) -- the
+K51 log shows it accepting a victim at 2 -> 4 vias. That is why every
+PRICE term measured inert: they price the plan, and the excess is set
+downstream by acceptance rules no price term can see.
+`modal_k.py`'s `KEEP` filter dropped exactly those attribution lines, so a
+cloud via count could be read and never explained; it now carries them
+(`lanes: N/K`, `rescued at x4`, `last call`, `rip [`, `econ re-lay`,
+`unplaced`, `NOT escaped`).
+
+### Measured this session, and NOT committable
+
+| arm | verdict |
+|---|---|
+| `BRAID_ALT_TWOSTAGE=1` (choose, then schedule) | every solve PROVED optimal (14/14, zero gap) vs the joint model's 2 of 4 with gaps to 28.77 -- and the board does not improve: K35 identical, K41 -8 fair vias but +1 open. **Convergence is not what costs vias.** |
+| Dantzig-Wolfe | refuted before building: only **15%** of the choice MILP's rows are lane-local, 84% are 2-lane coupling, so the master would carry the model |
+| CP-SAT enforcement literals (`BRAID_CPSAT_ENF`) | gap 32.49 -> 32.10. CP-SAT's presolve already does it -- its bound is 9.36 where the LP is -19.61 |
+| `BRAID_L5_W_PER_LANE=1` | gap -> 31.08, identical board. The "swimmers 24.45" slack was LP-relaxation slack, which CP-SAT does not use |
+| `DST_RIDE_W=2.0` | K41 88->84 (-18% copper), K35 59, K15/K28 byte-identical -- but **K51 129v/1open -> 118v/3open**, a completion regression, and its neighbours 1.5 and 3.0 are much worse on both benches. A lucky point, not a corrected rate |
+| `DST_XING` / `DST_CONTEND` / `DST_SWIM` | all three built-but-zero terms are **correctly zero**. At K41 vs base 88: XING 93/100/110/119, CONTEND 90, SWIM 98 |
+| `replan.py --apply=strip` | its branch is gated off by **"a SOURCE move stands"** and never executed in any arm; the whole A/B compared two identical code paths |
+| `BRAID_RESIDUE_W=10` | **the one live lead.** K28 38->36, K44 98->94, K47 120v/4open->108v/3open, K51 **129v/1open -> 117v/0open** (first complete K51), K41 +1, K35 60->78. Pays where the two-page capacity binds; wants to be a RULE scaled by the plan's own residue fraction, not a constant |
+
+`replan.py` had been crashing on every round since its first commit (`:+d`
+on a float residual); fixed, and its first working run took cloud K35
+60 -> **56**, matching the best K35 on record and beating the human's 58.
+
+## The judge has NO RESOLUTION on vias (2026-09-13, K44 cloud dumps)
+
+The clearest measurement of the planning metric yet, from the two K44 arms
+that differ ONLY in the judge's sort key (`d44base` 98 vias, `d44key` 112):
+
+| arm | model's predicted vias | judged `f` | => ride | ROUTED |
+|---|---|---|---|---|
+| `d44base` | **73.0** | 167.25 | 94.25 | **98** |
+| `d44key`  | **73.0** | 167.96 | 94.96 | **112** |
+
+1. **Both plans predict the SAME 73.0 vias.** The model cannot tell a 98-via
+   board from a 112-via one. It has zero resolution on the quantity being
+   optimised.
+2. **So the decision was made on `ride` alone** -- corridor length, 56% of
+   `f` (94 of 167). `VIA_MM = 7.5`, so the 0.71 gap in `f` is **5.3 mm**.
+   The judge took a plan 5.3 mm shorter and 14 vias worse.
+3. **The error is DIFFERENTIAL, not a bias**: 73 vs 98 is -25, 73 vs 112 is
+   -39. This is why NO constant reprice can fix it -- a per-swimmer delta
+   adds 21*d to one plan and 22*d to the other, moving the gap by 1*d, so
+   closing 14 vias needs d = 14 vias PER SWIMMER. Measured exactly as
+   predicted: `SWIM_PRICE` 3 and 3.5 both returned 112, and
+   `SF_SWIM_MODEL`+`SWIM_CHANGES` is bit-identical at K41 and K51.
+4. Where the 14 lives: swimmers 70 -> 78 (+8, mean 3.33 -> 3.55) and PAGE
+   LANES 28 -> 34 (+6, mean 1.22 -> 1.55). Not a swimmer-only defect.
+
+**The model prices by CLASS (swimmer = flat 2.0, page lane = its changes),
+never by the CONGESTION the lane will actually meet.** Two plans with the
+same class histogram are indistinguishable to it however differently they
+route.
+
+**Note the arithmetic above retires the CONSTANT only.** A per-swimmer delta
+moves a 21-vs-22-swimmer gap by 1*delta; a PER-LANE model is free to move the
+two plans by different amounts, so it is not refuted by that argument.
+It is refuted by a different measurement -- see below.
+
+### A swimmer's via cost is NOT PREDICTABLE from the plan (98 swimmers, 5 boards)
+
+Actual swimmer vias: mean **3.19**, sd **1.77**, range 0-10. Against every
+plan-time feature:
+
+| predictor | corr with actual vias |
+|---|---|
+| page crossings | +0.016 |
+| changes (what `SF_SWIM_MODEL` prices) | **-0.032** |
+| diamonds reserved | +0.074 |
+| airline length | +0.056 |
+| copper length | +0.168 |
+| detour ratio copper/airline | +0.268 (and POST-route) |
+
+Per board the crossing correlation is not merely weak but SIGN-UNSTABLE:
+-0.380 (d44base), +0.121 (d44key), +0.181 (K51 local). And a learned per-net
+prior is not available either -- over 23 nets that swam on >=3 boards the
+**WITHIN-net sd is 1.34 against a BETWEEN-net sd of 1.01**, so the same net
+varies more across boards than nets differ from each other (SA8:
+[2,10,6,3,2,6,2]).
+
+**The cost is a property of the REALIZED board, not of the net or the plan** --
+the braid absorbs most predicted crossings without a via (a 13-change swimmer
+came out at 2), and whether it can is local ROOM, which has not happened yet
+when the judge runs. Consequences:
+- a better CONSTANT (3.19, not 2.0) fixes the level and adds no ranking power;
+- the swimmer COUNT is a rational REGULARISER, not an accident: refusing to
+  trade a structural property for a sub-2-via gain in an unpredictable
+  quantity is correct, which is the argument against shipping `SF_KEY_COST`
+  alone;
+- **ROOM WAS TRIED AND IS ALSO NULL** (`room_probe.py`, 97 swimmers over 5
+  boards). Longitudinal room between a change's two crossings, lateral
+  crowding in the window a change needs, and a room-WEIGHTED change count
+  all fail: best |r| = 0.125 (`loose0.1`), `crowd` -0.003..-0.026, and the
+  room-weighted count -- the actual candidate term -- is **-0.001**. At
+  n=97 significance needs |r| > ~0.20, so none of these is distinguishable
+  from zero. CAVEAT: this room is measured in the crossing-ORDER coordinate
+  (position 0-1 along the lane), which is topological; PHYSICAL room (mm of
+  channel against via diameter, the radial via-room result) is not tested
+  by it -- but is not available where the judge runs either;
+- the only accurate estimator is the braid itself (`replan.py`), which is where
+  every best board comes from.
+
+## The replan, verified end to end (2026-09-13)
+
+`replan.py` is the only estimator of a lane's cost that is ACCURATE, because
+it is the braid itself -- and after today it is also the only lever that has
+moved a bench this session. Verified on a real K51 run, not inferred:
+
+```
+round 1: apply path = DERIVED (strip)
+round 1: KEPT derived -- open ['SBA2'], drc 0, vias 110 (round start ['SBA2']/112)
+```
+
+- **The faithful apply path fires.** `--apply=strip` derives the round's
+  fanout board from the probes' own routed board, so the ends agree BY
+  CONSTRUCTION. Confirmed by artifact as well as by the log: the strip branch
+  writes `_r<N>.census.json` and no `_r<N>_fo.log`; refan writes the log.
+- **Source moves are really probed** (`ends_try = ['dst','src']` by default,
+  plus `both` pairs) and really stand.
+- **It improves boards**: K51 112->110 at the default width, K41 91->82.
+
+**THE GATE TO KNOW ABOUT.** The strip path needs four conditions and one of
+them is `'a SOURCE move stands'` being FALSE (`replan.py:1447`). So when the
+source arm succeeds, strip is silently disabled and the apply falls back to
+`refan`. Observed firing 2026-09-13 at the wide width:
+
+```
+round 1: apply path = incremental/refan -- blocked by a SOURCE move stands
+```
+
+Two things temper it, and both were measured rather than assumed:
+- **refan is AUDITED and was FAITHFUL there** -- "every move laid in its
+  class", "39/39 unmoved teeth unchanged", "ends of 4 changed net(s) agree on
+  both boards", and the round was KEPT (91->83). When the audit fails the
+  round is REJECTED and the moves banned, so the current behaviour is SAFE,
+  not broken. What the gate costs is WORK (a full re-fan, 466 s that round)
+  and the rounds the audit throws away.
+- **the gate looks unnecessary**: `fan_src[nm]` points at the probe's
+  `_dst.kicad_pcb`, which is copied from `cur` AFTER `sr.realize` lays the
+  new tooth -- verified on three probes (SA11, SA12, SA14): the source
+  copper changes and `_dst` carries it through identically. `git log -S "a
+  SOURCE move stands"` finds no commit and no measurement behind it; it
+  traces to the strip commit's stated scope, "Destination moves only."
+
+**Width did not decide either bench** (K41 better at the default width, 82 vs
+83; K51 better wide, 91 vs 95), so `--worst`/`--probes` is not a free win --
+it is ~25-30x the work per round for a board that may be worse.
+**`--mode=rebraid` is INERT at both K41 and K51.**
+
+## SA1: why K51's last net is open, and what does NOT close it (2026-09-13)
+
+K51's best board (`xing` + replan, 91 vias) is INVALID for one net. The
+refusal record (`<board>_refusals.json`) and the braid log name it exactly:
+
+```
+SA1  tooth (127.027, 67.829) B.Cu   berth (146.354, 63.361) F.Cu
+     page null (a SWIMMER), stage last_call,
+     failed_rescues 3, margins [2.0, 4.0, 6.0], rip_assist true
+```
+```
+forward  cell ... layer=1: ok, 6/8 neighbors blocked
+    Blocking obstacles: /DDR3 16x1/SA1(3 track)      <- its OWN stub
+backward cell ... layer=0: ok, 6/8 neighbors blocked
+    Blocking obstacles: /DDR3 16x1/SA4(9 track)
+```
+
+**The lane was never laid at all.** On the shipped board SA1 has ONE B.Cu
+segment at the tooth and nine F.Cu segments at the berth -- the whole 17 mm
+corridor run between x=127.03 and x=144.33 is missing. The A* is walled at
+BOTH ends (6 of 8 neighbours blocked): its own stub at the tooth, and SA4 --
+47 segments sprawling x 126.7-144.3, y 60.7-70.3 -- across the berth
+approach. Its ends are on OPPOSITE layers, so it must change layer somewhere
+in a corridor that has no room for the dive.
+
+**The tail is EXHAUSTED, not unused.** Three rescues at 2/4/6 mm, the
+blocker-directed rip (`rip_for`) taking out SBA1 and then SCKE1, and
+`last_call` -- all ran, all refused. Note `failed_rescues < 3` and
+`margins=[2.0, 4.0, 6.0]` are HARDCODED in `braid.py` with no env knob;
+only `BRAID_ATTEMPTS` (6) and `BRAID_BUDGET_X` (4) are tunable.
+
+**What does NOT close it** (all on the 99-via `xing` board):
+
+| arm | result |
+|---|---|
+| `BRAID_VIA_ROOM_REFUSED=2` | **bit-identical** to the base. The settled table's "breaks K51 (3 open / 30 DRC)" was measured on the OLD 137-via baseline and does not reproduce here -- it is simply INERT in this regime |
+| `BRAID_ATTEMPTS=10` | **bit-identical** to the base |
+| `BRAID_BUDGET_X=8` | 97 vias but **2 open** (SA11, SDQ11) -- a deeper budget moved the refusal, it did not remove it |
+| `replan.py --worst=48 --probes=2 --rounds=6` | 99->91 vias, SA1 STILL open, though the wide replan puts every refused net first in its queue by construction |
+
+**So the block is not search budget and not via room -- it is that the
+corridor has no room for this lane's dive at all.** The next thing to try is
+the thing none of these touch: change what SA1 is ASKED for (its berth face
+or its tooth layer, so the ends stop disagreeing), or move SA4, which is the
+net actually in the way. `blockers_of` names the movable-vs-pinned split.
+
 ## Settled -- do not re-run these
 
 | arm | verdict |
 |---|---|
 | `BRAID_SOLVER=cpsat` (plain solves) | **never** -- K41 98. `BRAID_ALT_SOLVER=cpsat` (choice solves) is the good one |
-| `BRAID_VIA_ROOM_REFUSED=2` | breaks K51 (3 open / 30 DRC). Default 0 |
+| `BRAID_VIA_ROOM_REFUSED=2` | breaks K51 (3 open / 30 DRC) on the OLD 137-via baseline. **Re-measured 2026-09-13 on the 99-via `xing` board: bit-identical to the base -- INERT, not harmful, in that regime.** Read the verdict WITH its board; this one is congestion-dependent. Default 0 |
+| `BRAID_ATTEMPTS=10` / `BRAID_BUDGET_X=8` | on K51's refused net: `ATTEMPTS=10` bit-identical, `BUDGET_X=8` gives 97 vias but **2 open** instead of 1. More search does not close a lane with no room; it moves which lane refuses |
 | `SEL_XLAYER=1` | crossings WORSE (K41 196 -> 301) -- but that arm ran through a `zip` desync pairing trial legs with stale nets, so the verdict is **not evidence**; unmeasured |
 | `DST_XING` per-candidate | pairwise deltas are not additive; the pairwise MILP form fixes the bug and still beats nothing |
 | `DST_XING_SCREEN` | helps nothing, alone or with the pattern seed |
@@ -386,9 +744,25 @@ has not been measured.
 | `DST_ASK_BAN=1` | an ask the engine answered a layer/kind away is not repeated: INERT on the pattern arm (18 bans, identical copper), harmful on the baseline (K35 58 -> 66; K51 0 open -> 5 open + 23 DRC) |
 | `SRC_REPLAN=1` | names a better tooth, the one-net re-fan cannot lay it; superseded by `SRC_REFAN_JOINT` |
 | `BRAID_EXACT_PAGES=1` | the two pages by exact MILP instead of the LIS greedy: never won a chain |
-| `SWIM_CHANGES=1` | a swimmer priced by the braid's implied changes: unmeasured on a chain |
+| `SF_LIS_GUARD=1` | protects the crossing-free chain: **+19 vias at K41** (107 vs 88), +4 K35, and 3 open at K51. Page assignment is ALREADY optimal -- 3 of 5 plans sit exactly on the Greene bound lambda_1+lambda_2, so this guards a solved sub-problem |
+| `SF_LDS_W` (crossing depth) | wired and verified (f shifts by exactly 4x11 at weight 4) and INERT at every weight on K35/K41; at K51 2.0 and 4.0 give 115 vias but 2 OPEN. LDS is an integer 6-11 that rarely differs between neighbouring plans, so it adds a near-constant and reorders nothing |
+| `SWIM_CHANGES=1` | the braid's own per-swimmer change count. Inert at K35/K41 (most swimmers there really do need 2 changes, which is what the flat price assumed); K51 124v/0open vs base 129v/1open. Superseded: it could only ever move the SECOND element of the judge's key |
+| `SF_SWIM_MODEL=1` | the same count computed in the PLANNER (verified to emit mean 3.4-4.8 vias/swimmer against the flat 2.0, spread 0-7). K41 88=88, K51 129=129. Inert for the same reason |
+| `BRAID_W_PER_NET=1` | per-net swim cost in the berth-choice MILP. On an ISOLATED braid over a fixed board it is 65 -> 63 vias; **in the chain it is K41 88 -> 124 with an open net**, K51 115v/2open. The isolated test exercises the profile solve only -- in the chain the same cost also drives `_alts5`, the berth CHOICE |
+| `BRAID_KEEP_SCHED_PAGES=1` (NOT COMMITTED) | stop `_profiles5` rewriting pages from the CP-SAT vector (the cross-arch divergence runs through that line). **Costs 12-16 vias on EVERY bench** (K35 62->74, K41 88->104, K51 105->117). The page rewrite is load-bearing: the page is meant to BE the layer the lane ends up on, and freezing it leaves swimmer accounting and the exit blocks reading a page that disagrees with the copper |
+| `BRAID_CPSAT_SCALE=1000000` | the via tie-break is `1.0 + 1e-4*u`; at the default 10000 that rounds 20 slot positions to 2 integers, at 1e6 it keeps 20. Neutral at K41, **costs 8 vias at K35 (62->70) and 22 at K51 (105->127)**. The coarse rounding was acting as a REGULARISER: collapsing near-equal slot choices beats letting the solver chase 1e-4 differences that do not survive into the routed board |
+| `BRAID_CPSAT_CONFLICTS` / `BRAID_CPSAT_CONVERGE` | count-based and convergence-based budgets, built to replace the non-portable `max_deterministic_time`. **Unusable: a 40 s solve had not finished in 31 MINUTES.** A conflict count bounds the SEARCH, not PRESOLVE, and setting one means no time budget is set at all; the convergence loop repeats presolve every round |
+| `SWIM_CHANGES=1` | a swimmer priced by the braid's implied changes. **MEASURED 2026-09-13**: it needs `SF_SWIM_MODEL=1` too (on the judge's path `bp['swim_changes']` is empty, so alone it silently falls back to the constant). Together: bit-identical at K41 and K51, and on the cloud K44 bench **122/1-open against 98/0**. See the per-swimmer row below |
+| `SWIM_PRICE` (the ONE constant) | **cannot re-rank at equal swimmer count, by construction.** A uniform price shifts every candidate's `f` by the same amount whenever two candidates swim the same NUMBER of lanes, so it only re-ranks candidates whose counts differ. Measured at K44 locally: `SWIM_PRICE=3` on top of `SF_KEY_COST=1` is **bit-identical** to base (same 2154 segs, same 126 vias), while `SF_SWIM_MODEL=1 SWIM_CHANGES=1` -- which prices WHICH nets swim, not how many -- moves the board. This qualifies `prices.py`'s standing "calibrate the ONE number on the ladder" instruction: the constant is the right model of the BIAS (swimmers really cost mean 3.15 vias at K51 vs the flat 2.0, and that -23 is exactly the K51 predicted-89/actual-112 gap) but the wrong instrument for the judge's actual job, which is ORDERING |
 | `SPLIT_BLOCKS=1` | **verdict VOID** -- it raised NameError on the first band exit (NEST_IN/NEST_STEP/BAND_LPITCH undefined) so it was never measured. Fixed 0912; unmeasured |
 | the wave schedule, `refine_sides`, the source chooser | reverted (the wave never existed on take5; it is in the bundle) |
+| `BRAID_LAY_ORDER=xing` | **the largest single-knob win measured, and slack-dependent**: K51 112->99, K41 91->97. Not a default -- an arm, like the pattern seed. See TODO 10 |
+| `SF_ESC_W` (0, 0.25, 0.5, 0.75) | all bit-identical at K51; `=10` gives 142/3-open, so the knob is LIVE and the nulls are real. The escape term does not discriminate between K51's candidates. See TODO 1b |
+| `SRC_REFAN_JOINT=1` | bit-identical at K51 -- the recorded "only pays at K51" does not survive a chain run |
+| `replan.py --mode=rebraid` | inert at K41 and K51; `incremental` wins or ties. The candidates it was meant to unlock (logged "unjudged ... would need the full braid") did not materialise into a better board |
+| `SF_SWIM_MODEL=1 SWIM_CHANGES=1` on the CLOUD (NOT COMMITTED) | the per-lane model, tested on the benches where these effects live. **K44**: with `SF_KEY_COST` it recovers 6 of the 14 (112->**106**) but never reaches the 98 baseline; WITHOUT it, **122 / 1 open against 98 / 0**. **K51**: **105 -> 131**, a 26-via loss against `SF_KEY_COST` alone. Bit-identical at K41/K51 locally. So it is not merely inert -- on net it is HARMFUL, exactly as the predictability measurement predicts: you cannot rank by an estimate whose correlation with the truth is -0.03 |
+| a per-swimmer via MODEL of any kind | **do not build another one without a plan-time feature correlating above \|r\|=0.2 with routed vias.** Four families tested null over 97-98 swimmers / 5 boards: crossings, a learned per-net prior, geometry, and ROOM. `room_probe.py` is the instrument |
+| `SF_KEY_COST=1` (NOT COMMITTED) | the residue judge returned `k = (len(res), f)`, so swimmer COUNT was the PRIMARY key and the via cost `f` only a tie-break -- it minimised swimmers, not vias. Keying on `(0, f)` instead is a **big win at the top and a real loss in the middle**: K28 38->36, K35 70->62, K47 120/4open->114/0open, K51 129/1open->**105/0open**, K15 and K41 unchanged -- but **K44 98->112**. The K44 regression is NOT bench noise: 3 identical containers per arm gave spread 0 on both (98,98,98 vs 112,112,112). Not clearly better across the ladder, so NOT committed. The finding that stands is the DIAGNOSIS -- the judge was never pricing vias -- and `SF_KEY_COST` is the instrument that proved it |
 | `group_pages`, `plan_nest`, `improve_k`, `channel_shift` | dropped with take4 (bundle: `~/Downloads/bus/bus622-take4.bundle`) |
 
 Opt-in and kept, all present here: `replan.py` (the route as the judge),
@@ -397,35 +771,33 @@ file and is in the bundle only.
 
 ## TODO
 
-1. **THE PROPERTY IS FOUND, and it is one rule: every lane's DP floor is
-   0 or 2. Never more.** 123 of 123 lanes on the human's board, at
-   K35, K41 and K51. On ours the separation is perfect: we BEAT the
-   human at every rung where no lane exceeds 2, and lose at every rung
-   where one does. The arithmetic closes to the via -- K41 floor 72-64 =
-   8 = 4 violators x 2; K51 104-74 = 30 = 26 + 4.
-   Equivalently (found independently, same day, from the other
-   direction): the floor decomposes EXACTLY as `floor = M + X + E` --
-   M lanes forced to turn once, X turns BEYOND that one, E end-layer
-   disagreements -- and the human's X/lane is FLAT at ~0.2 from K15 to
-   K51 while ours goes 0.00 -> 0.37 -> 0.72 -> 1.23. **X is the entire
-   scaling gap.**
-   Since both pads are on F: floor 0 = every partner on B (stay on F);
-   floor 2 = the F-partners form ONE CONTIGUOUS RUN. A floor of 4 or 8
-   means the lane LEAVES the opposing bundle and re-enters it.
-   The controls kill every alternative: the human's permutation is no
-   more two-page-able than ours (residue 21 vs 22), has MORE crossings
-   (338 vs 275), the same M, the same slack.
-   **Why the planner cannot see it:** `plan_ends.plan_pages` builds
-   `pred[n] = (tooth != page) + (berth != page) + m.vias`, which is
-   STRUCTURALLY CAPPED AT 2 and computed per bus group independently. A
-   floor-4 lane is not representable in the objective the search
-   optimises. `braid.cross_corridor_vias` computes the missing
-   inter-corridor dive and is passed only to `vias_from_pages`, never
-   into `plan_pages`/`judged_cost`.
-   **Prize if every violator comes down to 2: K41 -8, K51 -26.**
+**Priorities after 2026-09-13, highest first.** The via-count work on the
+PLAN side is closed (item 1d); what is left is completion and the search's
+acceptance rule.
 
-   **CORRECTED 2026-09-12 by `joint_floor.py`, and the framing above is
-   the part that is wrong.** "0 or 2, never more, 123 of 123" is a
+1. **Close SA1** (item 2) -- K51's 91-via board is invalid for one net and
+   nothing in the search budget or via-room family touches it. The untried
+   lever is the ASK (its berth face / tooth layer, so the ends stop
+   disagreeing on layer) or moving SA4, the net actually in the way.
+2. **`SF_ACCEPT_MARGIN`** (item 1c) -- the most promising UNMEASURED knob in
+   this file, now that three separate regularisers have each been found to
+   be load-bearing by removing them.
+3. **`BRAID_LAY_ORDER=xing` as a slack-GATED arm** (item 10) -- the largest
+   single-knob win measured (K51 -13) and a loss where there is slack
+   (K41 +6), exactly like the pattern seed.
+4. Everything below, in the order written.
+
+
+1. **The FLOOR gap, and the instrument that measures it honestly.**
+   (The original framing here -- "every lane's DP floor is 0 or 2, never
+   more, 123 of 123", with a prize of K41 -8 / K51 -26 for bringing every
+   violator down to 2 -- was REFUTED on 2026-09-12 and has been removed.
+   It was an artefact of the circular per-net instrument, and acting on it
+   would have walked the optimiser AWAY from the optimum: at K35 the joint
+   optimum takes four lanes from 2 down to 0 and pays ONE lane up to 4,
+   which is 4 vias cheaper. What follows is what survived.)
+
+   **What `joint_floor.py` established.** "0 or 2, never more" is a
    property of the CIRCULAR per-net instrument. Under the non-circular
    joint floor the human has exactly ONE lane above 2 on every board:
 
@@ -529,6 +901,23 @@ file and is in the bundle only.
    net, so the escape half is the tooth and berth vias plus the ride and
    everything else is corridor, cross-corridor dives included. The LIS
    acceptance GUARD is NOT built.
+   **MEASURED 2026-09-13 at K51, and it buys nothing there.** `SF_ESC_W` at
+   0, 0.25, 0.5 and 0.75 are ALL bit-identical to the default (112 vias,
+   1 open, 2625 segs) -- and `SF_ESC_W=10` gives **142 vias / 3 open**, so
+   the knob is demonstrably LIVE and the nulls are real. Down-weighting the
+   escape half cannot help at K51 because the term does not DISCRIMINATE
+   between the candidates the search sees there; only up-weighting moves the
+   board, and that direction is harmful. The rank-agreement result was
+   measured over plans ON DISK at K35/K41 and does not transfer to K51's
+   search. Unmeasured at K35/K41 through a chain.
+   **DEFECT FIXED the same day: the RIDE was inside the escape weight.**
+   `judged_cost` returned `cor + SF_ESC_W * (esc + ride)`, so `SF_ESC_W=0`
+   also made the CORRIDOR LENGTH free -- the one term already under-priced.
+   Split out as **`SF_RIDE_W`** (NOT COMMITTED; default 1, and the default path is verified
+   numerically identical over 2000 random cases). An escape via sits at the
+   pad in room dedicated to that ball; a corridor via takes room IN the
+   channel and pushes its neighbours round it, so escape SHOULD cost less
+   than corridor -- but the corridor LENGTH has no reason to scale with it.
 
 1c. **The search accepts at 1e-6 and takes 142 judged REGRESSIONS.**
    965 accepted moves across the K35/K41 logs, median improvement 2.00
@@ -546,7 +935,17 @@ file and is in the bundle only.
    off and is the default -- the plain `k1 < k0` tuple compare, verified
    inert. Above 0 a move must win by the margin on the judged cost, and a
    residue drop stops trumping a cost rise of any size: it may cost at
-   most the margin. Unmeasured.
+   most the margin. **Still UNMEASURED, and after 2026-09-13 it is the most
+   promising unmeasured knob in this file.** Three separate regularisers
+   have now been found by accident, each costing vias when removed or
+   loosened: the wall clock (deleting it cost K35 58->66), `CPSAT_SCALE`'s
+   coarse rounding (raising it to 1e6 cost K51 105->127), and the swimmer
+   COUNT itself (`SF_KEY_COST` cost K44 98->112, and the K44 dumps show the
+   inversions are decided on gaps of 0.875-1.613 predicted vias). A
+   comparator with NO resolution on vias -- it scored a 98-via and a 112-via
+   board at the same 73.0 -- accepting at 1e-6 is the disease all three are
+   treating. `SF_ACCEPT_MARGIN` is the principled, deterministic form of the
+   same medicine and nobody has run it.
 
 1d. **The swimmer count is a closed form, and the human has MORE.**
    `n - (lambda1 + lambda2)` of the RSK shape of the launch->target
@@ -559,12 +958,37 @@ file and is in the bundle only.
    (Also measured: judging at node budgets 1, 5, 15, 30, 100, 400 gives
    an identical answer every time, so "more search is worse" is real
    surrogate bias, not solver jitter.)
+   **CLOSED 2026-09-13. "Repricing swimmers is exhausted" is now PROVEN,
+   four independent ways, and the reason is stronger than "it is a
+   symptom": a swimmer's via cost is NOT PREDICTABLE AT PLAN TIME.**
+   See "A swimmer's via cost is NOT PREDICTABLE from the plan" above --
+   crossing structure, a learned per-net prior, plan geometry and ROOM all
+   return |r| <= 0.13 over 97-98 swimmers on 5 boards. Every knob in the
+   family measured inert or harmful on a chain: `SWIM_PRICE` (3 and 3.5,
+   cloud K44 both 112), `SF_SWIM_MODEL`+`SWIM_CHANGES` (bit-identical at
+   K41 and K51), `SF_ESC_W` (bit-identical at four values). **Do not add
+   another per-swimmer cost term without first showing a plan-time feature
+   that correlates with routed vias above |r| = 0.2** -- `room_probe.py`
+   is the instrument and takes fanout/routed board pairs.
 
-2. **K51 completion on the pattern arm.** `DST_SEED=pattern` gives 104
-   vias against the baseline's 137 with chain 25 / slack +3, but ships 2
-   open (SDQ12, SDQ5). The failure is a berth boxed in by its
-   neighbours' stubs, not a lack of room (`cut_ledger` says every cut
-   fits).
+2. **K51 COMPLETION is THE open problem, and it is now the only thing
+   between us and a K51 record.** Two arms reach a low via count and both
+   ship ONE open net:
+   - `xing` + replan: **91 vias, SA1 open** (2026-09-13, the best line)
+   - `DST_SEED=pattern`: 104 vias against the baseline's 137, chain 25 /
+     slack +3, but **2 open** (SDQ12, SDQ5)
+
+   An open net UNDER-counts vias, so none of these numbers is comparable to
+   the 107 record until it closes -- **closing one net is worth more than
+   any further via-count work at K51.**
+   **SA1 is fully diagnosed -- see "SA1: why K51's last net is open" above.**
+   Short form: the lane was never laid (only its two stubs exist), it is
+   walled at both ends, its ends are on OPPOSITE layers so it must dive in a
+   corridor with no room, and the tail is exhausted (3 rescues, rips,
+   last_call). Search budget and via room BOTH measured inert on it
+   (`BRAID_VIA_ROOM_REFUSED=2` and `BRAID_ATTEMPTS=10` are bit-identical;
+   `BRAID_BUDGET_X=8` just moves the refusal to two other nets). The
+   untried lever is changing what SA1 is ASKED for, or moving SA4.
 3. **The pattern seed loses at K35/K41** (69 vs 58, 88 vs 80) where
    there is capacity to spare. Either gate it on slack, or find what it
    gives up when it is not needed.
@@ -705,6 +1129,19 @@ file and is in the bundle only.
     disagree. Ties keep the target order, so off is byte-identical. Also
     **`BRAID_RIP_VICTIMS` / `BRAID_RIP_DEPTH`**, which were hard-coded 3
     and 1 on `rip_for`'s signature with no way to turn them.
+    **MEASURED 2026-09-13, and it is the LARGEST single-knob win on the
+    board -- but it is SLACK-DEPENDENT and must not become a default.**
+
+    | bench | off | `xing` | |
+    |---|---|---|---|
+    | K51 | 112 / 1 open | **99 / 1 open** | **-13** |
+    | K41 | 91 / 0 open | 97 / 0 open | **+6, worse** |
+
+    Same shape as the pattern seed (item 3): it pays where the board is over
+    capacity and costs where there is slack. It is the front half of the best
+    K51 line on record -- `xing` 112->99, then `replan.py` ->91. Gate it on
+    slack, or carry it as an ARM, never as the default. K35/K28/K15
+    unmeasured.
 11. **The packing's purpose is unmeasured.** `BRAID_PACK=1` ships 0 open
     0 DRC with vias unchanged and far fewer segments; nobody has
     measured what the segments buy.
@@ -712,7 +1149,11 @@ file and is in the bundle only.
     U1's teeth are the bench's own fanout and the source disagreement
     with the human is an INPUT, not a result. The joint source re-fan is
     built (`SRC_REFAN_JOINT=1`) and only pays at K51, where the blocking
-    net is in the run.
+    net is in the run. **MEASURED 2026-09-13 at K51: bit-identical to the
+    base (112 / 1 open). The "only pays at K51" claim does not survive a
+    chain run.** Note the replan DOES move source ends and they DO stand
+    (see the replan section), so the source is not immovable -- what is
+    null is this knob.
     **BUILT 2026-09-12: `SRC_EXCHANGE=1`, a PROBE that changes nothing.**
     A tooth is physical copper, so a plan exchanging two nets' launch
     points is not realizable without a re-fan -- and three sessions of
@@ -762,6 +1203,17 @@ file and is in the bundle only.
 
 13. **Tooling.** Promote the session probes into `awx/` with a line each
     here; add the flag-off parity gate that the hand check does today.
+    **2026-09-13: `room_probe.py` promoted** (does a plan-time feature
+    predict a swimmer's vias? -- run it BEFORE building any per-lane cost
+    term) and **`modal_k.py` grew `return_board` / `return_files`**, without
+    which no cloud-only phenomenon can be diagnosed at all: it returned
+    filtered log lines only, so a cloud arm's copper could be counted but
+    never looked at, and K44's regression is cloud-only. Still owed: the
+    flag-off parity gate. **A trap worth the line: on zsh `env $VARS cmd`
+    does NOT word-split**, so `env "A=1 B=2" cmd` sets ONE variable named
+    `A` to `1 B=2`. It cost a wasted arm today (and once before); write the
+    assignments out, and note the chain failed LOUDLY (`ValueError`) rather
+    than silently measuring the wrong thing.
 14. ~~Re-express the two `*_TIME` stage knobs in nodes.~~ **WITHDRAWN
     2026-09-12 -- the premise was wrong on both halves.** The node
     budgets ALREADY EXIST and are already the live ones:
