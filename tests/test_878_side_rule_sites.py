@@ -117,9 +117,16 @@ _DECLARED = {
         (1, 'runs inside KiCad pcbnew, where py_placer is imported only '
             'lazily inside try blocks and is not guaranteed importable. Its '
             'or-F.Cu default is behaviour-identical to side_of_layer.'),
-    ('kicad_routing_plugin/placement_gui.py', 'PlacementTab._apply_pose'):
-        (1, 'same as _pose_moves above -- the GUI half, not importable from '
-            'a py_placer-less pcbnew session.'),
+    # main spells this site `PlacementTab._apply_pose`. The IPC port folded
+    # that method into `_apply_ipc` -- kipy has no `Flip()`, so applying a
+    # pose and applying the copper are one commit here. Same single
+    # expression, same reason.
+    ('kicad_routing_plugin/placement_gui.py', 'PlacementTab._apply_ipc'):
+        (1, 'same as _pose_moves above -- the GUI half. placement_gui reaches '
+            'py_placer only lazily, inside the functions that need it '
+            '(`from placement.labels import ...`), and nothing imports it at '
+            'module scope, so the canonical rule is not guaranteed importable '
+            'where this expression runs.'),
 }
 
 _fail = []
