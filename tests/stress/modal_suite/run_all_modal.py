@@ -117,9 +117,77 @@ PY_VERSION = os.environ.get(
     f"{sys.version_info.major}.{sys.version_info.minor}") \
     if modal.is_local() else "3.12"
 
+#: Requirement names this image must NOT install, each with the reason. On
+#: ipc-migration `requirements.txt` is also the file KiCad 10 provisions the
+#: PLUGIN's venv from, so it declares the GUI front's runtime -- which this
+#: image has no use for and, in wxPython's case, cannot build.
+#:
+#: Keyed by the normalised distribution name (lowercased, `_`/`.` -> `-`).
+_IMAGE_EXCLUDE = {
+    "wxpython":
+        "PyPI publishes no manylinux wheel, so pip builds it from source and "
+        "the image build DIES (`failed to build installable wheels`) before a "
+        "single shard runs. Nothing here wants it: this image has no KiCad "
+        "and no display, every wx test self-skips, and main's own image -- "
+        "whose requirements.txt does not list wxPython -- has never had it. "
+        "Dropping it restores parity with that image rather than removing "
+        "something the suite uses.",
+}
+
+
+def _image_requirements():
+    """requirements.txt minus `_IMAGE_EXCLUDE`, as a path to a temp file.
+
+    Filtered rather than replaced by a hand-written list, for the reason the
+    comment above gives at length: a hardcoded set cost six phantom failures
+    on the first real run. Only the names declared above are dropped, and the
+    declaration is checked in BOTH directions -- a name that is no longer IN
+    requirements.txt fails here, so this set cannot rot into a silent
+    exclusion of something that was renamed.
+
+    Environment markers are left alone: `pyobjc-framework-Cocoa;
+    sys_platform == 'darwin'` needs no entry because pip already skips it on
+    Linux, and hiding it here would claim a decision this file did not make.
+    """
+    import re as _re
+    import tempfile as _tf
+    src = _repo_root / "requirements.txt"
+    kept, dropped = [], set()
+    for line in src.read_text(encoding="utf-8").splitlines(True):
+        bare = line.split("#", 1)[0].strip()
+        if not bare:
+            kept.append(line)
+            continue
+        name = _re.split(r"[<>=!~;\[ ]", bare, 1)[0].strip()
+        norm = _re.sub(r"[-_.]+", "-", name).lower()
+        if norm in _IMAGE_EXCLUDE:
+            dropped.add(norm)
+            kept.append("# (dropped for the suite image: %s)\n" % norm)
+            continue
+        kept.append(line)
+    stale = sorted(set(_IMAGE_EXCLUDE) - dropped)
+    if stale:
+        raise SystemExit(
+            "run_all_modal: _IMAGE_EXCLUDE names %s, which requirements.txt "
+            "no longer declares. A stale exclusion is how a dependency the "
+            "suite DOES need gets dropped silently -- fix the name or delete "
+            "the entry." % stale)
+    if dropped:
+        print("suite image: not installing %s (%s)"
+              % (", ".join(sorted(dropped)),
+                 "; ".join(_IMAGE_EXCLUDE[d] for d in sorted(dropped))[:120]
+                 + "..."))
+    path = os.path.join(_tf.mkdtemp(prefix="krt-req-"), "requirements.txt")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(kept)
+    return path
+
+
 image = (
     modal.Image.debian_slim(python_version=PY_VERSION)
-    .pip_install_from_requirements(str(_repo_root / "requirements.txt"))
+    .pip_install_from_requirements(
+        _image_requirements() if modal.is_local()
+        else str(_repo_root / "requirements.txt"))
     # pytest is a TEST-only dependency, so it is deliberately absent from
     # requirements.txt (which is the shipping runtime). A handful of tests
     # import it for fixtures/parametrisation and die with
