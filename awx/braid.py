@@ -319,11 +319,15 @@ L5_PSCOST = int(os.environ.get('BRAID_L5_PSCOST', '0'))     # HiGHS mip_pscost_m
 # judge and the residue search, ~12 s a trial at K41 with the braid's
 # cap): the seeded incumbent is the answer in nearly every solve, so a
 # plan being RANKED gets a shorter proof than the plan being LAID.
-# NOTE: the two *_TIME knobs below now reach _milp_solve's IGNORED
-# `time_limit` parameter; a solve is bounded by nodes or by deterministic
-# time. They are kept because they are still the natural place to express
-# "how hard should this stage try", and the next step is to re-express
-# them in nodes. Setting them changes nothing today.
+# NOTE: the two *_TIME knobs below are NOT budgets -- they reach
+# _milp_solve's IGNORED `time_limit` parameter, because a solve is bounded
+# by nodes (L5_JUDGE_NODES / L5_ALT_NODES, which are live and do the real
+# work) or by deterministic time. They are NOT dead, though: `_l5_time`
+# is part of the level-5 MEMO KEY, and that separation is load-bearing --
+# a plan-only pass cut short under the judge's cap must not serve the real
+# attempts (K41: attempt 0 laid a 3 s incumbent, 84 vias for the 76 the
+# full-cap optimum routed). Renaming them to *_NODES would collapse that
+# key onto the lay pass's.
 L5_JUDGE_TIME = float(os.environ.get('BRAID_L5_JUDGE_TIME', '10'))
 # The solve's budget is a NODE count, not a clock (2026-09-11, late): a
 # wall-time cap ships whichever incumbent the clock catches, so the same
@@ -332,6 +336,30 @@ L5_JUDGE_TIME = float(os.environ.get('BRAID_L5_JUDGE_TIME', '10'))
 # solve under `mip_max_nodes` returns the identical solution on every
 # repeat and reaches the 20 s optimum by 100 nodes (5-7 s under load);
 # the time limits above are the safety net only.
+# MEASURED 2026-09-12: NEITHER OF THESE BINDS, so do not build a theory on
+# the difference between them. Instrumenting a real K35 chain
+# (BRAID_SOLVE_DUMP) caught every level-5 HiGHS solve: 41 in the fanout
+# stage and 12 in the braid stage, and ALL 53 finished at the ROOT NODE
+# (`mip_node_count` median 1, max 1) with an incumbent-to-dual-bound gap of
+# at most 0.44. Presolve plus the LP relaxation settles these instances; a
+# cap of 100 against a cap of 30 decides nothing.
+# WHY THIS COMMENT EXISTS: the judge/lay split here looks like a
+# speed-for-accuracy trade and reads like the obvious explanation for the
+# judge disagreeing with the braid (the braid's swimmers exceed the judge's
+# residue by a median of +2 at K41, +3 at K51). A whole architecture
+# argument was built on that -- "judge at the budget the braid lays at" --
+# and the measurement above refutes its premise. The disagreement is real;
+# the node budget is not its cause.
+# DO NOT DELETE THEM EITHER: `_milp_solve(nodes=None)` falls back to
+# MILP_NODES (200000), so removing the cap RAISES it 2000x rather than
+# neutralising it, and an unbounded solve is how a deterministic work
+# budget turns back into a wall clock. They are safety bounds that
+# currently cost nothing. Both are also part of the level-5 MEMO KEY
+# (see `mkey`), where separating a judge pass from a lay pass IS
+# load-bearing.
+# SCOPE OF THE EVIDENCE: measured at K35 only. K41/K51 build larger
+# corridors and were not instrumented; if you need to rely on "never
+# binds" there, measure it rather than assume it.
 L5_NODES = int(os.environ.get('BRAID_L5_NODES', '100'))         # the braid's solves
 L5_JUDGE_NODES = int(os.environ.get('BRAID_L5_JUDGE_NODES', '30'))   # a plan being ranked
 L4_JUDGE_NODES = int(os.environ.get('BRAID_L4_JUDGE_NODES', '5'))    # level 4 as a seed inside a judge call
@@ -356,7 +384,31 @@ ECON_LONG = float(os.environ.get('BRAID_ECON_LONG', '3.0'))   # econ re-lay: a l
 # and the birth via at the launch slot (a change at the leg's end).
 # Head-on launches keep their fan-in outside the model, as level 4 did.
 HEAD_L5 = int(os.environ.get('BRAID_HEAD_L5', '0') or 0)
-L5_SEED = int(os.environ.get('BRAID_L5_SEED', '1') or 0)    # 0: cold solves as before
+# DEFAULT FLIPPED TO 0 (2026-09-12): the level-5 MILP warm start is OFF.
+# `_L5_SEED` is a module GLOBAL, one slot per net-set, overwritten by every
+# judge call INCLUDING trials the search then rejects, and read back as a
+# HiGHS warm start. Measured: judging the IDENTICAL plan after five
+# different rejected trials moved the answer 5 times out of 5 at K41, and
+# clearing the global restored the cold answer exactly -- so the search was
+# hill-climbing a target that moved under it, and every comparison it made
+# carried the previous trial's residue.
+# MEASURED ON THE FULL LOCAL LADDER, and it does NOT clear the bar, so the
+# default stays 1. Turning it OFF (BRAID_L5_SEED=0):
+#     K15  12 vias / 518 segs   -> byte-identical
+#     K28  34 vias / 1154 segs  -> 36 / 1459      WORSE (+2 vias, +26% copper)
+#     K35  76 vias / 1376 segs  -> byte-identical
+#     K41 107 vias / 2 open     -> 102 / 1 open   BETTER (-5 vias, -1 open)
+# Better on one rung, worse on another: that is not "clearly better across
+# the K benches". Attributed cleanly -- restoring this one knob returned
+# BOTH K28 and K41 to their exact baselines, which also proves every other
+# change in the same batch inert.
+# The COUPLING it causes is real and worth knowing: judging the IDENTICAL
+# plan after five different rejected trials moved the answer 5 times out of
+# 5 at K41, and clearing the global restored the cold answer exactly -- so
+# with the seed on, the search hill-climbs a target that moves under it.
+# The judge call is also faster without it (K41 6.82 s vs 7.15 s). If the
+# K28 loss can be explained or recovered, this is worth revisiting.
+L5_SEED = int(os.environ.get('BRAID_L5_SEED', '1') or 0)    # 0: cold solves, no cross-trial coupling
 # The BERTH CHOICE inside the solve (2026-09-11, latest; _alts5): a plan
 # being ranked may offer candidate berths for its residue nets (the
 # fanout loop's residue search, DST_RESIDUE=2). Each candidate is a
@@ -421,7 +473,220 @@ ALT_SOLVER = os.environ.get('BRAID_ALT_SOLVER', SOLVER)
 # measured as two identical cloud runs of the K35 baseline coming back 72
 # and 58 vias. HiGHS is bounded by NODES, CP-SAT by DETERMINISTIC TIME.
 MILP_NODES = int(os.environ.get('BRAID_MILP_NODES', '200000'))
+# BRAID_L5_ALT_PRUNE (2026-09-12): drop the SOFT proximity rows between two
+# CANDIDATE lanes of DIFFERENT nets -- a RELAXATION, not an exact reduction.
+# BE CLEAR ABOUT WHAT IT GIVES UP. The exactly-one row is PER NET, so net
+# A's candidate and net B's candidate CAN both be chosen, and the row
+# between them CAN bind. Dropping it prices each candidate against the
+# other nets AS LAID and leaves the mover-vs-mover interaction unmodelled
+# -- the same blind spot that made the per-candidate crossing term
+# non-additive (see the DST_XING measurements). The model can therefore
+# return a schedule that is not feasible once both movers are seated; it
+# is caught downstream, because the chosen set is re-judged by the full
+# judge and the lanes are laid by the real router, so the cost of a bad
+# relaxation is a worse route, not a wrong board. Hard compatibility is
+# untouched either way -- that is carried separately by ctx.alt_excl.
+# WHY IT IS WORTH MEASURING: candidate-vs-candidate is 77% of the
+# proximity rows at cap 4 and 88% at cap 8, so dropping it takes cap 4
+# from 156k rows to 48k and cap 8 from 527k to 95k -- pruned cap 8 is
+# ~40% SMALLER than the unpruned cap 4 that ships today, and the whole
+# ~26-berth menu fits in 255k. The candidate pool (4 berths of a median
+# 26) is the measured wall, and this is the only lever that makes a
+# bigger pool affordable. Default OFF until the K ladder says otherwise.
+L5_ALT_PRUNE = int(os.environ.get('BRAID_L5_ALT_PRUNE', '0') or 0)
+# ...and the LAZY RESTORE that turns the relaxation back into an exact
+# model: solve, look at which candidates were actually CHOSEN, put their
+# mover-vs-mover rows back, re-solve. 1 = the bare relaxation (no restore).
+# 2+ = restore rounds; the loop also stops early the moment a round adds no
+# row, which is the usual case after one. The restored set is bounded by
+# the pairs among the chosen lanes -- one per net -- so it is the PLAIN
+# instance's pair count, ~2k at K41, i.e. 1-4% growth on the pruned model
+# rather than the 77-88% the prune removed.
+L5_ALT_PRUNE_ROUNDS = int(os.environ.get('BRAID_L5_ALT_PRUNE_ROUNDS', '1') or 1)
+# BRAID_ULP (2026-09-12): nudge the lane-separation array by N ULPs -- a
+# change with NO physical meaning whatsoever (one ULP of a millimetre is
+# ~2e-16 mm, twelve orders below the 0.001 mm the board file can even
+# express) that nonetheless perturbs every downstream comparison.
+# WHAT IT IS FOR. A faster implementation of a float computation is often
+# not BIT-EXACT -- numpy uses FMA, a pure-Python interp does not, and they
+# disagree by 1-2 ULP on a third of queries. Rejecting such a speedup is
+# only justified if the ladder cannot survive the perturbation, and we
+# have never measured whether it can: run-to-run is byte-identical, so
+# our measured spread is exactly ZERO and "comparable performance" has no
+# numeric definition. This makes the reseed a KNOB, so the ladder can be
+# run at several seeds and the spread READ instead of assumed.
+# NOTE THIS IS STILL DETERMINISTIC: same seed, same board, same answer,
+# every run. It is a different deterministic answer, which is a different
+# thing from a wall clock's non-reproducible one.
+# It is a MEASUREMENT INSTRUMENT, never a default. 0 = off, untouched.
+ULP = int(os.environ.get('BRAID_ULP', '0') or 0)
+
+
+def _ulp_nudge(a):
+    """`a` moved BRAID_ULP steps toward +inf (or -inf when negative),
+    elementwise. np.nextafter is the smallest representable step, so this
+    is the least perturbation a float array can carry."""
+    if not ULP:
+        return a
+    out = np.asarray(a, float).copy()
+    to = np.inf if ULP > 0 else -np.inf
+    for _ in range(abs(ULP)):
+        out = np.nextafter(out, to)
+    return out
+# BRAID_L5_AUX_CONT (2026-09-12): declare the two AUXILIARY level-5
+# variables continuous instead of integer. Both are implied integral at
+# any optimum, so this removes branching candidates without changing the
+# optimal VALUE:
+#   `z` (the DST_XING pair) sits in exactly one row, z >= ya + yb - 1,
+#       with z in [0,1] and a POSITIVE cost, so minimising pins it to
+#       max(0, ya + yb - 1) -- integral whenever y is.
+#   `iv` (the island) sits only in rows `st + w + iv (- y) >= c` with
+#       every other term binary and a positive cost ISLAND_W, so it takes
+#       the smallest value the tightest of those rows needs: 0 or 1.
+# It can still change WHICH optimum is returned among equal ones, hence
+# the copper, so it is off by default. Inert under CP-SAT, which builds
+# every variable as a Bool regardless.
+AUX_CONT = int(os.environ.get('BRAID_L5_AUX_CONT', '0') or 0)
+# BRAID_LAY_ORDER (2026-09-12, README TODO 10): the order lanes are LAID
+# in. '' (default) = the target order, as always. 'xing' = most-constrained
+# first, the constrainedness being how many other lanes this one crosses.
+LAY_ORDER = os.environ.get('BRAID_LAY_ORDER', '')
+# ...and how hard the rip tries when a lane is refused. These were hard
+# coded defaults on rip_for; they are the natural dials for "repair
+# harder" and there was no way to turn them.
+RIP_VICTIMS = int(os.environ.get('BRAID_RIP_VICTIMS', '3'))
+RIP_DEPTH = int(os.environ.get('BRAID_RIP_DEPTH', '1'))
 CPSAT_WORKERS = int(os.environ.get('BRAID_CPSAT_WORKERS', '4'))
+
+
+def _prime_highs_threads():
+    """Pin HiGHS to ONE thread for the life of the process, at IMPORT.
+
+    WHY THIS IS NOT THE OBVIOUS `setOptionValue('threads', 1)`: HiGHS
+    builds ONE GLOBAL task scheduler at the first `run()` in a process and
+    silently ignores every later `threads` setting. `_milp_solve` sets the
+    option, but only on ITS path and only once (`_HIGHS_THREADS_SET`) --
+    and seven other sites (braid.py 640/1729/1941/2756/3615/3812,
+    schedule.py 61) go through plain `scipy.optimize.milp`, which has no
+    threads option at all. Whichever runs FIRST fixes the pool. Measured
+    on this 8-core box, thread count of a fresh process:
+        _milp_solve first .................. 1   (pin flag True)
+        plain scipy milp first, then ours .. 4   (pin flag True -- and inert)
+    So the guard could report success while HiGHS ran hardware_concurrency
+    threads. In a container `hardware_concurrency` reports the HOST's
+    cores, which vary across a cloud fleet -- machine-dependent behaviour,
+    exactly what the no-clocks rule exists to forbid, arriving through a
+    thread pool instead of a timer.
+    Running a trivial LP here claims the scheduler before any other call
+    site can, so the pin holds for every solve on every path.
+    """
+    try:
+        import scipy.optimize._highspy._core as hs_core
+    except Exception:
+        return False
+    if not hasattr(hs_core, '_Highs'):
+        return False
+    try:
+        lp = hs_core.HighsLp()
+        lp.num_col_ = 1
+        lp.num_row_ = 0
+        lp.a_matrix_.num_col_ = 1
+        lp.a_matrix_.num_row_ = 0
+        lp.a_matrix_.format_ = hs_core.MatrixFormat.kColwise
+        lp.a_matrix_.start_ = np.zeros(2, dtype=np.int32)
+        lp.a_matrix_.index_ = np.zeros(0, dtype=np.int32)
+        lp.a_matrix_.value_ = np.zeros(0, dtype=float)
+        lp.col_cost_ = np.zeros(1)
+        lp.col_lower_ = np.zeros(1)
+        lp.col_upper_ = np.ones(1)
+        lp.row_lower_ = np.zeros(0)
+        lp.row_upper_ = np.zeros(0)
+        h = hs_core._Highs()
+        h.setOptionValue('output_flag', False)
+        h.setOptionValue('threads', 1)
+        h.passModel(lp)
+        h.run()
+        return True
+    except Exception:
+        return False
+
+
+HIGHS_PRIMED = _prime_highs_threads() if int(
+    os.environ.get('BRAID_HIGHS_PIN', '1') or 0) else False
+
+
+# WHAT THE LAST SOLVE ACTUALLY ACHIEVED (2026-09-12). Branch-and-bound
+# carries two numbers: the INCUMBENT (a solution it found) and the DUAL
+# BOUND (a proof no solution is better). Run to optimality they meet; cut
+# short at a node budget they do not, and the difference is the `mip_gap`.
+# `_milp_solve` returned only the incumbent vector and threw bound, gap and
+# node count away -- so the judge could not tell whether an evaluation was
+# a converged answer or a truncated guess, which is exactly the question
+# that decides whether ranking plans by the incumbent means anything.
+# A dict, not a return value, so no call site changes.
+SOLVE_INFO = {}
+
+
+def obj_parts(inst, x):
+    """The objective SPLIT BY TERM at a solution -- what the solve is
+    really minimising.
+
+    The level-5 cost mixes five things with very different meanings:
+      w  = a net no profile fits (a SWIMMER), at RESIDUE_W each
+      up/dn = a layer change, i.e. A VIA, at ~1.0 each
+      iv = an island, at ISLAND_W
+      y  = the BERTH CHOICE's own cost, handed in by the candidate screen
+           (vias + ride/VIA_MM + crossing/swim terms) -- a cost computed
+           OUTSIDE this model and simply carried
+      z  = a crossing pair
+    If one term dwarfs the rest, the solve is effectively optimising only
+    that one, and the story that it "schedules lanes to minimise vias" is
+    wrong. Cheap to compute and it says so directly.
+    """
+    cvec, idx = inst['cvec'], inst['idx']
+    part = {}
+    for key, v in idx.items():
+        xv = float(x[v])
+        if abs(xv) < 1e-9:
+            continue
+        cls = key[0]
+        cls = {'up': 'vias', 'dn': 'vias', 'w': 'swimmers', 'iv': 'islands',
+               'y': 'berth_choice', 'z': 'crossings'}.get(cls, cls)
+        c = float(cvec[v]) * xv
+        d = part.setdefault(cls, [0.0, 0])
+        d[0] += c
+        d[1] += 1
+    return {k: (round(v, 3), n) for k, (v, n) in sorted(part.items())}
+
+
+def _note_solve(bound=None, gap=None, nodes=None, obj=None, how=''):
+    SOLVE_INFO.update(bound=bound, gap=gap, nodes=nodes, obj=obj, how=how)
+    _h = SOLVE_INFO.setdefault('hist', [])
+    _h.append((how, obj, bound, gap, nodes, SOLVE_INFO.get('tag', '')))
+    if len(_h) > 200000:
+        del _h[:100000]
+
+
+# BRAID_SOLVE_DUMP=<path>: append every solve's (solver, incumbent, dual
+# bound, gap, nodes) at process exit. The chain is TWO processes -- the
+# fanout stage and the braid stage -- so the pid is in the name; and the
+# fanout's judge calls and the braid's lay calls are the two populations
+# worth telling apart.
+if os.environ.get('BRAID_SOLVE_DUMP'):
+    import atexit as _atexit
+
+    @_atexit.register
+    def _dump_solves():
+        import csv
+        base = os.environ['BRAID_SOLVE_DUMP']
+        try:
+            with open(f'{base}.{os.getpid()}.csv', 'w', newline='') as fh:
+                w = csv.writer(fh)
+                w.writerow(('how', 'incumbent', 'bound', 'relgap', 'nodes', 'tag'))
+                for row in SOLVE_INFO.get('hist', ()):
+                    w.writerow(row)
+        except Exception:
+            pass
 # BRAID_CPSAT_REPAIR (2026-09-12): the alt stages always hand CP-SAT a hint
 # (`x0`), but a CHOICE instance's hint is the PLAIN solution extended, which
 # need not satisfy the choice rows -- the stage-A log has a "seed VIOLATES n
@@ -432,7 +697,19 @@ CPSAT_WORKERS = int(os.environ.get('BRAID_CPSAT_WORKERS', '4'))
 CPSAT_REPAIR = int(os.environ.get('BRAID_CPSAT_REPAIR', '0') or 0)
 CPSAT_DET_DEFAULT = 40.0    # used when BRAID_CPSAT_DET is unset: there is no wall-clock arm to fall back to
 CPSAT_DET = float(os.environ.get('BRAID_CPSAT_DET', '0') or 0)   # deterministic-time budget (0: CPSAT_DET_DEFAULT)
-CPSAT_SCALE = 10000                                              # objective coefficients as integers
+# CP-SAT takes INTEGER objective coefficients, so the float objective is
+# scaled and rounded by this. 10000 is what it has always been -- and it
+# very nearly destroys the level-5 position tie-break: an up/dn costs
+# `1.0 + 1e-4 * u_` with u_ in [0,1], and 1e-4 * u_ * 10000 = u_, which
+# rounds to 0 for u_ < 0.5 and 1 for u_ >= 0.5. The tie-break exists to
+# break the symmetry "between the twenty equal places a dive could sit,
+# which is what the branch-and-bound was grinding on" (see the cvec
+# comment) and under CP-SAT it survives as a single coarse step. At 1e6
+# it is 100 distinct levels. This matters because BASE_ENV runs
+# BRAID_ALT_SOLVER=cpsat, so the cloud ladder is on this path.
+# Raising it changes the integer objective, hence possibly the answer, so
+# it is a knob at its old value, not a silent fix.
+CPSAT_SCALE = int(os.environ.get('BRAID_CPSAT_SCALE', '10000'))  # objective coefficients as integers
 
 
 def _cpsat_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, det=None, workers=None):
@@ -486,6 +763,15 @@ def _cpsat_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, de
     sv.parameters.max_deterministic_time = float(det if det and det > 0
                                                  else CPSAT_DET_DEFAULT)
     st_ = sv.Solve(m)
+    # the same two numbers HiGHS reports (see SOLVE_INFO): what CP-SAT
+    # FOUND against what it PROVED. Scaled back off CPSAT_SCALE so the gap
+    # is in the objective's own units.
+    try:
+        _note_solve(bound=sv.BestObjectiveBound() / CPSAT_SCALE,
+                    obj=sv.ObjectiveValue() / CPSAT_SCALE,
+                    nodes=None, gap=None, how='cpsat')
+    except Exception:
+        pass
     if st_ not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None, sv.StatusName(st_), False
     return np.array([float(sv.Value(x[i])) for i in range(nv)]), sv.StatusName(st_), True
@@ -513,12 +799,20 @@ def _milp_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, psc
     nv = len(cvec)
     # the matrix from coordinate arrays: a lil_matrix filled row by row
     # took a gigabyte and minutes on the joint-order instance (100k rows)
-    ri, ci, vi = [], [], []
-    for i_, co in enumerate(rows):
-        for k_, v_ in co.items():
-            ri.append(i_); ci.append(k_); vi.append(float(v_))
-    A = coo_matrix((np.asarray(vi, float), (np.asarray(ri, np.int64), np.asarray(ci, np.int64))),
-                   shape=(max(1, len(rows)), nv))
+    # ...and the coordinate arrays themselves come from numpy, not from
+    # three Python lists (2026-09-12): measured on the K35 cap-4 instance
+    # (112k rows / 517k nnz) the list path cost +46 MB peak and 0.31 s
+    # against +11 MB and 0.14 s here -- ~-155 MB at cap 8, on every plain
+    # level-5 solve. The COO and its CSC are bit-identical either way
+    # (np.array_equal on indptr/indices/data), because `np.repeat` over the
+    # per-row lengths reproduces exactly the row index the loop emitted and
+    # dict iteration order is insertion order in both.
+    counts = np.fromiter((len(co) for co in rows), np.int64, len(rows))
+    nnz = int(counts.sum())
+    ri = np.repeat(np.arange(len(rows), dtype=np.int64), counts)
+    ci = np.fromiter((k_ for co in rows for k_ in co), np.int64, nnz)
+    vi = np.fromiter((float(v_) for co in rows for v_ in co.values()), float, nnz)
+    A = coo_matrix((vi, (ri, ci)), shape=(max(1, len(rows)), nv))
     lb_ = np.asarray(lb if rows else [-np.inf], float)
     ub_ = np.asarray(ub if rows else [np.inf], float)
     hs_core = None
@@ -534,6 +828,10 @@ def _milp_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, psc
                    bounds=Bounds(lo, hi),
                    options={'node_limit': int(nodes) if nodes and nodes > 0 else MILP_NODES,
                             'mip_rel_gap': gap})
+        _note_solve(bound=getattr(res, 'mip_dual_bound', None),
+                    gap=getattr(res, 'mip_gap', None),
+                    nodes=getattr(res, 'mip_node_count', None),
+                    obj=getattr(res, 'fun', None), how='scipy')
         return res.x, res.message, res.x is not None
     Ac = A.tocsc()
     lp = hs_core.HighsLp()
@@ -573,6 +871,9 @@ def _milp_solve(cvec, rows, lb, ub, integ, lo, hi, time_limit, gap, x0=None, psc
     info = hs.getInfo()
     feasible = int(info.primal_solution_status) == int(hs_core.kSolutionStatusFeasible)
     msg = hs.modelStatusToString(hs.getModelStatus())
+    _note_solve(bound=float(info.mip_dual_bound), gap=float(info.mip_gap),
+                nodes=int(info.mip_node_count),
+                obj=float(info.objective_function_value), how='highs')
     if not feasible:
         return None, msg, False
     return np.array(hs.getSolution().col_value), msg, True
@@ -2063,7 +2364,7 @@ class Corridor:
         return max(VIA_ROOM_XY, getattr(self, '_vr_mode', 0))
 
     def _l5_build(self, lanes, samp, net_of, tl, dl, y_cost=None, excl=(), coarse=(),
-                  cand_fixed=None, y_pair=None):
+                  cand_fixed=None, y_pair=None, keep_pairs=frozenset()):
         """Level 5's MILP over `lanes`: keys into `samp`, each a sampled
         polyline with its static walls (_l5_static), belonging to the net
         `net_of[key]`, born on `tl[key]` and ending on `dl[key]`.
@@ -2175,11 +2476,26 @@ class Corridor:
                 if hit[i_]:
                     gkill.setdefault((a_, int(k_)), set()).add(b_)
         _vr = self._via_room_mode()
+
+        def _both_cand(a_, b_):
+            """Two CANDIDATE lanes of different nets -- the pairs
+            L5_ALT_PRUNE relaxes away. Both CAN be chosen at once; see the
+            constant's comment for what that costs. A candidate key is
+            (net, j) with j > 0; j == 0 is the lane the net holds today and
+            a bare key is a net with no candidates."""
+            return (L5_ALT_PRUNE
+                    and isinstance(a_, tuple) and isinstance(b_, tuple)
+                    and a_[1] > 0 and b_[1] > 0 and a_[0] != b_[0]
+                    # ...unless a previous round CHOSE both and put the
+                    # pair back (see L5_ALT_PRUNE_ROUNDS)
+                    and (a_, b_) not in keep_pairs and (b_, a_) not in keep_pairs)
         xpair = set()      # mid lines whose order SWAPS: they cross somewhere
         for i, a_ in enumerate(M):
             for b_ in M[i + 1:]:
                 if net_of[a_] == net_of[b_]:
                     continue          # one net's candidates never meet
+                if _both_cand(a_, b_):
+                    continue          # mover-vs-mover, relaxed away
                 dd = np.abs(Og[a_] - Og[b_])
                 ok = ~np.isnan(dd)
                 _room_from(a_, b_, dd, ok)
@@ -2232,7 +2548,8 @@ class Corridor:
         tree = cKDTree(allxy)
         pp = tree.query_pairs(PROX_TRACK - 1e-6, output_type='ndarray')
         for i, j in pp:
-            if net_i[lane_of[i]] != net_i[lane_of[j]] and not (is_mid[i] and is_mid[j]):
+            if net_i[lane_of[i]] != net_i[lane_of[j]] and not (is_mid[i] and is_mid[j]) \
+                    and not _both_cand(M[lane_of[i]], M[lane_of[j]]):
                 prox.add((M[lane_of[i]], int(local[i]), M[lane_of[j]], int(local[j])))
         prox = sorted(prox, key=lambda t: (str(t[0]), t[1], str(t[2]), t[3]))
         vp = tree.query_pairs(VIA_NEED, output_type='ndarray')
@@ -2469,11 +2786,11 @@ class Corridor:
                 u_ = float(samp[key[1]]['U'][key[2]]) / max(float(samp[key[1]]['U'][-1]), 1e-9)
                 cvec[v] = 1.0 + 1e-4 * u_; integ[v] = 1
             elif key[0] == 'iv':
-                cvec[v] = ISLAND_W; integ[v] = 1
+                cvec[v] = ISLAND_W; integ[v] = 0 if AUX_CONT else 1
             elif key[0] == 'y':
                 cvec[v] = float(y_cost.get(key[1], 0.0)); integ[v] = 1
             elif key[0] == 'z':
-                cvec[v] = pair_w.get(v, 0.0); integ[v] = 1
+                cvec[v] = pair_w.get(v, 0.0); integ[v] = 0 if AUX_CONT else 1
         return dict(idx=idx, rows=rows, lb=lb, ub=ub, cvec=cvec, integ=integ, cand=cand,
                     prox=prox, n_blk=n_blk, n_rows_raw=n_rows_raw, n_samples=len(allxy),
                     n_gated=len(gated), n_gkill=len(gkill), n_pair=len(pair_w))
@@ -3092,115 +3409,142 @@ class Corridor:
             a_, i_, b_, j_, w_ = e
             y_pair[((a_, int(i_)), (b_, int(j_)))] = float(w_)
             h.update(f'z{a_}:{i_}:{b_}:{j_}:{float(w_):.4f}'.encode())
-        inst = self._l5_build(lanes, samp2, net_of, tl_of, dl_of, y_cost=y_cost, excl=excl,
-                              y_pair=y_pair,
-                              coarse=[k for k in lanes if isinstance(k, tuple) and k[1] > 0],
-                              cand_fixed={k: cand_plain[k if not isinstance(k, tuple) else k[0]]
-                                          for k in lanes if not isinstance(k, tuple) or k[1] == 0})
-        idx, nv = inst['idx'], len(inst['idx'])
-        # seeded with the plain solution: y at the laid berths, every other
-        # candidate idle -- feasible by construction (their rows relaxed)
-        x0 = np.zeros(nv)
-        for key, v in idx.items():
-            if key[0] == 'y':
-                x0[v] = 1.0 if key[1][1] == 0 else 0.0
-                continue
-            k0 = key
-            if key[0] in ('up', 'dn', 'st', 'iv') and isinstance(key[1], tuple):
-                if key[1][1] != 0:
-                    continue
-                k0 = (key[0], key[1][0]) + tuple(key[2:])
-            v0 = idx_plain.get(k0)
-            if v0 is not None:
-                x0[v] = x_plain[v0]
-        obj0 = float(inst['cvec'] @ x0)
-        n_viol = 0
-        for co, lo_, hi_ in zip(inst['rows'], inst['lb'], inst['ub']):
-            v_ = sum(c_ * x0[v] for v, c_ in co.items())
-            if v_ < lo_ - 1e-6 or v_ > hi_ + 1e-6:
-                n_viol += 1
-        akey = mkey + ('alts', h.hexdigest(), L5_ALT_NODES)
-        memo = _PROFILE_MEMO
-        if akey in memo:
-            x, msg, obj_a = memo[akey]
-            note = 'memo'
-        else:
-            # stage A: the laid lanes' schedules and the nets without
-            # candidates fixed as level 5 solved them; the residue nets
-            # choose (see L5_ALT_NODES)
-            # ...every AS-LAID lane's schedule is held too: a net that stays
-            # keeps level 5's schedule, a net that moves relaxes it by its
-            # y, so nothing but the candidates and the choice is free (the
-            # joint order, DST_RESIDUE=3, offers every net candidates and
-            # would otherwise hold nothing)
-            lo_a, hi_a = np.zeros(nv), np.ones(nv)
+        # THE LAZY RESTORE LOOP (see L5_ALT_PRUNE_ROUNDS). With the prune
+        # off this runs EXACTLY ONCE and `keep_pairs` stays empty, so the
+        # model, the memo key and the answer are what they have always been.
+        keep_pairs = frozenset()
+        _rounds = max(1, L5_ALT_PRUNE_ROUNDS) if L5_ALT_PRUNE else 1
+        for _pr in range(_rounds):
+            inst = self._l5_build(lanes, samp2, net_of, tl_of, dl_of, y_cost=y_cost, excl=excl,
+                                  y_pair=y_pair,
+                                  coarse=[k for k in lanes if isinstance(k, tuple) and k[1] > 0],
+                                  cand_fixed={k: cand_plain[k if not isinstance(k, tuple) else k[0]]
+                                              for k in lanes if not isinstance(k, tuple) or k[1] == 0},
+                                  keep_pairs=keep_pairs)
+            idx, nv = inst['idx'], len(inst['idx'])
+            # seeded with the plain solution: y at the laid berths, every other
+            # candidate idle -- feasible by construction (their rows relaxed)
+            x0 = np.zeros(nv)
             for key, v in idx.items():
-                # DO NOT PIN A MOVING NET'S AS-LAID LANE. `(nm, 0)` is the
-                # lane the net has today; pinning its up/dn to the plain
-                # solution kept those vias in the objective whether or not
-                # the net moved, so every candidate was charged its own
-                # corridor vias PLUS the ones it would stop paying:
-                #     stay  ->  K
-                #     move  ->  K + y_cost + C_cand      (true: K - C_laid + ...)
-                # Only a move that flips a swimmer or carries a negative
-                # fanout delta could ever win. That is the measured
-                # "the berth chooser accepts nothing" -- a systematic bias,
-                # not a null result. The rows are gated by y, so once the
-                # bounds are free the model zeroes a deselected lane itself.
-                held = ((key[0] in ('up', 'dn', 'st', 'iv')
-                         and not isinstance(key[1], tuple))
-                        or (key[0] == 'w' and key[1] not in todo))
-                if held:
-                    lo_a[v] = hi_a[v] = float(round(float(x0[v])))
-            t_s = _t.time()
-            xs, n_pn = x0, 0
-            if L5_ALT_PERNET and len(todo) > 1:
-                # the per-net sweep (see L5_ALT_PERNET): residue nets first
-                res_now = [nm for nm in M if x_plain[idx_plain[('w', nm)]] > 0.5]
-                order = [nm for nm in todo if nm in res_now] + [nm for nm in todo if nm not in res_now]
-                for nm in order:
-                    lo_n, hi_n = lo_a.copy(), hi_a.copy()
-                    for key, v in idx.items():
-                        if key[0] == 'y' and key[1][0] != nm:
-                            lo_n[v] = hi_n[v] = float(round(float(xs[v])))
-                        elif key[0] in ('up', 'dn', 'st', 'iv') and isinstance(key[1], tuple) \
-                                and key[1][0] != nm and key[1][1] > 0:
-                            lo_n[v] = hi_n[v] = float(round(float(xs[v])))
-                        elif key[0] == 'w' and key[1] != nm and key[1] in todo:
-                            lo_n[v] = hi_n[v] = float(round(float(xs[v])))
-                    xn, msg_n, ok_n = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
-                                                  lo_n, hi_n, min(L5_ALT_TIME, 10.0), L5_GAP, x0=xs,
-                                                  pscost=L5_PSCOST, nodes=200, solver=ALT_SOLVER)
-                    if ok_n and float(inst['cvec'] @ xn) < float(inst['cvec'] @ xs) - 1e-9:
-                        xs = xn
-                        n_pn += 1
-            xa, msg_a, ok_a = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
-                                          lo_a, hi_a, L5_ALT_TIME, L5_GAP, x0=xs, pscost=L5_PSCOST,
-                                          nodes=max(L5_ALT_NODES, 1000), solver=ALT_SOLVER)
-            if not ok_a or (xs is not x0 and float(inst['cvec'] @ xa) > float(inst['cvec'] @ xs) + 1e-9):
-                xa, msg_a, ok_a = xs, 'per-net sweep', True
-            t_a = _t.time() - t_s
-            if not ok_a:
-                _alog = log or self.log
-                if os.environ.get('BRAID_L5_ALT_LOG'):
-                    _alog = lambda m: print(m, file=sys.stderr)
-                _alog(f'  profiles5 alts: stage A no solution ({msg_a}); {n_cand} candidate(s), '
-                      f'{len(inst["rows"])} rows, seed {"feasible" if not n_viol else f"VIOLATES {n_viol} rows"}, '
-                      f'{_t.time() - t0:.1f} s')
-                return
-            obj_a = float(inst['cvec'] @ xa)
-            note = f'A {t_a:.1f} s {msg_a[:16]}' + (f' ({n_pn} per-net gains)' if L5_ALT_PERNET else '')
-            x, msg = xa, msg_a
-            if L5_ALT_NODES > 0:
-                # stage B: everything free, from stage A's answer
+                if key[0] == 'y':
+                    x0[v] = 1.0 if key[1][1] == 0 else 0.0
+                    continue
+                k0 = key
+                if key[0] in ('up', 'dn', 'st', 'iv') and isinstance(key[1], tuple):
+                    if key[1][1] != 0:
+                        continue
+                    k0 = (key[0], key[1][0]) + tuple(key[2:])
+                v0 = idx_plain.get(k0)
+                if v0 is not None:
+                    x0[v] = x_plain[v0]
+            obj0 = float(inst['cvec'] @ x0)
+            n_viol = 0
+            for co, lo_, hi_ in zip(inst['rows'], inst['lb'], inst['ub']):
+                v_ = sum(c_ * x0[v] for v, c_ in co.items())
+                if v_ < lo_ - 1e-6 or v_ > hi_ + 1e-6:
+                    n_viol += 1
+            # the restored pairs are part of the key: round 1 and round 2
+            # are different models and must not share a memo entry
+            akey = mkey + ('alts', h.hexdigest(), L5_ALT_NODES,
+                           hashlib.sha1(repr(sorted(keep_pairs, key=str)).encode()).hexdigest()[:12]
+                           if keep_pairs else '')
+            memo = _PROFILE_MEMO
+            if akey in memo:
+                x, msg, obj_a = memo[akey]
+                note = 'memo'
+            else:
+                # stage A: the laid lanes' schedules and the nets without
+                # candidates fixed as level 5 solved them; the residue nets
+                # choose (see L5_ALT_NODES)
+                # ...every AS-LAID lane's schedule is held too: a net that stays
+                # keeps level 5's schedule, a net that moves relaxes it by its
+                # y, so nothing but the candidates and the choice is free (the
+                # joint order, DST_RESIDUE=3, offers every net candidates and
+                # would otherwise hold nothing)
+                lo_a, hi_a = np.zeros(nv), np.ones(nv)
+                for key, v in idx.items():
+                    # DO NOT PIN A MOVING NET'S AS-LAID LANE. `(nm, 0)` is the
+                    # lane the net has today; pinning its up/dn to the plain
+                    # solution kept those vias in the objective whether or not
+                    # the net moved, so every candidate was charged its own
+                    # corridor vias PLUS the ones it would stop paying:
+                    #     stay  ->  K
+                    #     move  ->  K + y_cost + C_cand      (true: K - C_laid + ...)
+                    # Only a move that flips a swimmer or carries a negative
+                    # fanout delta could ever win. That is the measured
+                    # "the berth chooser accepts nothing" -- a systematic bias,
+                    # not a null result. The rows are gated by y, so once the
+                    # bounds are free the model zeroes a deselected lane itself.
+                    held = ((key[0] in ('up', 'dn', 'st', 'iv')
+                             and not isinstance(key[1], tuple))
+                            or (key[0] == 'w' and key[1] not in todo))
+                    if held:
+                        lo_a[v] = hi_a[v] = float(round(float(x0[v])))
                 t_s = _t.time()
-                xb, msg_b, ok_b = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
-                                              np.zeros(nv), np.ones(nv), L5_ALT_TIME, L5_GAP,
-                                              x0=xa, pscost=L5_PSCOST, nodes=L5_ALT_NODES, solver=ALT_SOLVER)
-                note += f', B {_t.time() - t_s:.1f} s {msg_b[:16]}'
-                if ok_b and float(inst['cvec'] @ xb) <= obj_a + 1e-9:
-                    x, msg = xb, msg_b
-            memo[akey] = (x, msg, obj_a)
+                xs, n_pn = x0, 0
+                if L5_ALT_PERNET and len(todo) > 1:
+                    # the per-net sweep (see L5_ALT_PERNET): residue nets first
+                    res_now = [nm for nm in M if x_plain[idx_plain[('w', nm)]] > 0.5]
+                    order = [nm for nm in todo if nm in res_now] + [nm for nm in todo if nm not in res_now]
+                    for nm in order:
+                        lo_n, hi_n = lo_a.copy(), hi_a.copy()
+                        for key, v in idx.items():
+                            if key[0] == 'y' and key[1][0] != nm:
+                                lo_n[v] = hi_n[v] = float(round(float(xs[v])))
+                            elif key[0] in ('up', 'dn', 'st', 'iv') and isinstance(key[1], tuple) \
+                                    and key[1][0] != nm and key[1][1] > 0:
+                                lo_n[v] = hi_n[v] = float(round(float(xs[v])))
+                            elif key[0] == 'w' and key[1] != nm and key[1] in todo:
+                                lo_n[v] = hi_n[v] = float(round(float(xs[v])))
+                        xn, msg_n, ok_n = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
+                                                      lo_n, hi_n, min(L5_ALT_TIME, 10.0), L5_GAP, x0=xs,
+                                                      pscost=L5_PSCOST, nodes=200, solver=ALT_SOLVER)
+                        if ok_n and float(inst['cvec'] @ xn) < float(inst['cvec'] @ xs) - 1e-9:
+                            xs = xn
+                            n_pn += 1
+                xa, msg_a, ok_a = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
+                                              lo_a, hi_a, L5_ALT_TIME, L5_GAP, x0=xs, pscost=L5_PSCOST,
+                                              nodes=max(L5_ALT_NODES, 1000), solver=ALT_SOLVER)
+                if not ok_a or (xs is not x0 and float(inst['cvec'] @ xa) > float(inst['cvec'] @ xs) + 1e-9):
+                    xa, msg_a, ok_a = xs, 'per-net sweep', True
+                t_a = _t.time() - t_s
+                if not ok_a:
+                    _alog = log or self.log
+                    if os.environ.get('BRAID_L5_ALT_LOG'):
+                        _alog = lambda m: print(m, file=sys.stderr)
+                    _alog(f'  profiles5 alts: stage A no solution ({msg_a}); {n_cand} candidate(s), '
+                          f'{len(inst["rows"])} rows, seed {"feasible" if not n_viol else f"VIOLATES {n_viol} rows"}, '
+                          f'{_t.time() - t0:.1f} s')
+                    return
+                obj_a = float(inst['cvec'] @ xa)
+                note = f'A {t_a:.1f} s {msg_a[:16]}' + (f' ({n_pn} per-net gains)' if L5_ALT_PERNET else '')
+                x, msg = xa, msg_a
+                if L5_ALT_NODES > 0:
+                    # stage B: everything free, from stage A's answer
+                    t_s = _t.time()
+                    xb, msg_b, ok_b = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
+                                                  np.zeros(nv), np.ones(nv), L5_ALT_TIME, L5_GAP,
+                                                  x0=xa, pscost=L5_PSCOST, nodes=L5_ALT_NODES, solver=ALT_SOLVER)
+                    note += f', B {_t.time() - t_s:.1f} s {msg_b[:16]}'
+                    if ok_b and float(inst['cvec'] @ xb) <= obj_a + 1e-9:
+                        x, msg = xb, msg_b
+                memo[akey] = (x, msg, obj_a)
+            if _pr + 1 >= _rounds:
+                break
+            # which candidates did the solve actually take? Put back the
+            # rows between the chosen movers -- those are the pairs the
+            # relaxation dropped that can really bind.
+            chosen_k = sorted((key[1] for key, v in idx.items()
+                               if key[0] == 'y' and x[v] > 0.5 and key[1][1] > 0),
+                              key=str)
+            grew = set(keep_pairs)
+            for _i, _a in enumerate(chosen_k):
+                for _b in chosen_k[_i + 1:]:
+                    if _a[0] != _b[0]:
+                        grew.add((_a, _b))
+            if len(grew) <= len(keep_pairs):
+                break          # nothing new to restore: the answer stands
+            keep_pairs = frozenset(grew)
         obj = float(inst['cvec'] @ x)
         if os.environ.get('BRAID_L5_ALT_DUMP'):
             # diagnostic: the choice instance, its seed and its solution
@@ -3238,6 +3582,11 @@ class Corridor:
         _alog = log or self.log
         if os.environ.get('BRAID_L5_ALT_LOG'):
             _alog = lambda m: print(m, file=sys.stderr)
+        if os.environ.get('BRAID_OBJ_PARTS'):
+            _p0 = obj_parts(inst, x0)
+            _p1 = obj_parts(inst, x)
+            _alog(f'  OBJ PARTS seed {_p0}')
+            _alog(f'  OBJ PARTS solved {_p1}')
         _alog(
             f'  profiles5 alts: {len(todo)} residue net(s), {n_cand} candidate berth(s), '
             f'{inst["n_gated"]} gated lane(s), {len(excl)} exclusion(s), '
@@ -5281,7 +5630,8 @@ class Corridor:
                 if hi_s - lo_s < 0.1:
                     continue
                 S = np.arange(lo_s, hi_s, 0.05)
-                d = np.array([line_o(nm, s) - line_o(om, s) for s in S])
+                d = _ulp_nudge(np.array([line_o(nm, s) - line_o(om, s)
+                                         for s in S]))
                 for i in np.where(np.sign(d[:-1]) != np.sign(d[1:]))[0]:
                     want.append((float(S[i]), self._need_at(om, float(S[i]), sched)))
             if not want and c_ is None and rd_ is None:
@@ -6208,9 +6558,26 @@ class Corridor:
             # after it instead); the best attempt is kept as ever
             sw_ = [nm for nm in M if sched.page.get(nm) is None]
             ti = {nm: i for i, nm in enumerate(self.target)}
+            # MOST-CONSTRAINED-FIRST (README TODO 10, BRAID_LAY_ORDER).
+            # Lanes are laid sequentially against the lanes already down,
+            # so every refusal the rip has to repair is a loss the ORDER
+            # caused. The constrainedness measure is general and free: how
+            # many other lanes this one CROSSES, i.e. the pairs whose
+            # launch and target ranks disagree. A lane that crosses many
+            # others has the fewest ways through and should choose first,
+            # while a lane that crosses nothing can take whatever is left.
+            # Ties keep the target order, so the flag off is byte-identical.
+            li = {nm: i for i, nm in enumerate(self.launch)}
+            if LAY_ORDER == 'xing':
+                nx = {nm: sum(1 for om in M if om != nm
+                              and (li.get(nm, 0) - li.get(om, 0))
+                              * (ti.get(nm, 0) - ti.get(om, 0)) < 0)
+                      for nm in M}
+            else:
+                nx = {}
             order = (sorted((nm for nm in self.target if nm not in sw_),
-                            key=lambda nm: (-boost.get(nm, 0), ti[nm]))
-                     + sorted(sw_, key=lambda nm: (-boost.get(nm, 0), -abs(
+                            key=lambda nm: (-boost.get(nm, 0), -nx.get(nm, 0), ti[nm]))
+                     + sorted(sw_, key=lambda nm: (-boost.get(nm, 0), -nx.get(nm, 0), -abs(
                          self.launch_o[nm] - self.target_o[nm]))))
             routed = set()
             self.refused = []
@@ -6588,7 +6955,7 @@ class Corridor:
                 return res
         return None
 
-    def rip_for(self, nm, others, rep, max_victims=3, depth=1, protect=frozenset()):
+    def rip_for(self, nm, others, rep, max_victims=None, depth=None, protect=frozenset()):
         """BLOCKER-DIRECTED RIP at last call (#622 K41 SBA2). A lane
         still refused when every other lane is real copper is boxed by
         lanes routed before it -- the sequential loss, an earlier lane
@@ -6613,6 +6980,13 @@ class Corridor:
         refused lane's copper, not yet in the board, like any ladder."""
         import time as _time
         ctx, log = self.ctx, self.log
+        # the two dials (see RIP_VICTIMS / RIP_DEPTH); None = whatever the
+        # environment says, which defaults to the 3 and 1 this signature
+        # used to hard code
+        if max_victims is None:
+            max_victims = RIP_VICTIMS
+        if depth is None:
+            depth = RIP_DEPTH
         nid, _ = ctx.byname[nm]
         t0 = _time.perf_counter()
         blocked = rep.get('blocked') or []
