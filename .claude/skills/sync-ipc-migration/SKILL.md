@@ -97,12 +97,74 @@ python3 -m py_compile install_plugin.py package_pcm.py kicad_routing_plugin/*.py
 python3 -c "import json; m=json.load(open('metadata.json')); print(m['versions'][0])"
 
 # main was NOT altered, and is now fully contained in ipc-migration:
-git rev-parse --short main origin/main        # must be equal
+#   (NOT `git rev-parse --short main origin/main` -- with two revisions that
+#    exits 128 "Needed a single revision" and reads as a failed check.)
+test "$(git rev-parse main)" = "$(git rev-parse origin/main)" \
+    && echo "main untouched" || echo "MAIN MOVED -- investigate"
 git log --oneline ipc-migration..main         # must be empty
 ```
 
 If anything regressed, look at the IPC adapter usage in `routing_dialog.py`
 for the correct pattern to mirror.
+
+### Run the full suite ON MODAL, not on the laptop
+
+```bash
+# From the ipc-migration worktree. ~16 min across 50 containers, against
+# ~40 min of one laptop -- and you can keep editing while it runs.
+modal run tests/stress/modal_suite/run_all_modal.py
+
+# BEFORE the merge is committed, ship the WORKING TREE instead of a clean
+# checkout of HEAD (the image otherwise tests the pre-merge branch and comes
+# back green on work it never saw). Stamps the provenance `+dirty`.
+KICAD_SWEEP_DIRTY=1 modal run tests/stress/modal_suite/run_all_modal.py
+
+# One family while iterating on a red:
+modal run tests/stress/modal_suite/run_all_modal.py --filters "726 943"
+```
+
+`run_all.py --shard I/N` does the splitting, so a local run and the fan-out
+cover the SAME set. Three things decide whether the result can be trusted, and
+the third is specific to THIS branch:
+
+- **The verdict is each shard's own exit code, never the parsed counts.** A
+  container that OOMs prints no summary line at all, so a driver deciding on
+  counts reads that silence as zero failures. A shard that never reported
+  fails the run and is named.
+- **When a cloud run fails tests that pass locally, suspect the IMAGE before
+  the code.** The first full run on main reported 15 such failures and not one
+  was a code defect (missing git index, missing Pillow/pytest, wrong Python).
+  See the table in `tests/README.md`.
+- **The cloud image has NO KiCad, and on ipc-migration that is the half that
+  matters.** Every pcbnew/wx test self-skips (exit 77) into its own bucket and
+  is NOT a pass, and `tests/gui_parity/` is not collected by `run_all` at all
+  -- which is exactly where this branch's differences from main live. A green
+  Modal run therefore says nothing about the port. Finish with a LOCAL pass
+  under KiCad's python (see the note in CLAUDE.md about
+  `ApplePersistenceIgnoreState` if a wx gate appears to hang):
+
+  ```bash
+  python3 tests/gui_parity/test_settings_roundtrip.py
+  python3 tests/gui_parity/test_714_mirror_pcbnew_parity.py
+  python3 tests/gui_parity/test_fanout_rotated_gui.py
+  python3 tests/gui_parity/test_gui_engine_parity.py
+  python3 tests/gui_parity/test_gui_livechain_rp2350.py
+  ```
+
+  And sweep the whole directory for gates that die on an import rather than
+  run -- a sync brings new ones from main every time, and an ImportError exits
+  the same way a real failure does:
+
+  ```bash
+  for f in tests/gui_parity/test_*.py; do
+      python3 "$f" >/tmp/g.out 2>&1
+      printf '%-60s %s\n' "$(basename "$f")" "$?"
+  done      # 0 = pass, 77 = declared SKIP, anything else = look at it
+  ```
+
+  A gate whose SWIG half the port removed must be made to REFUSE BY NAME and
+  exit 77, saying where the coverage went and which arm is not covered -- never
+  left to die on an import, and never deleted silently.
 
 ## Step 4: Commit (do not push)
 
