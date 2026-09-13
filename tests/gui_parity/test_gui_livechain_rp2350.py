@@ -98,12 +98,40 @@ def _reexec_into_kicad():
     sys.exit(0)
 
 
+#: path -> the check_drc stdout that produced its grade, so a non-zero stage
+#: can say WHAT it found. The gate used to report a bare count and then delete
+#: the workdir, which left "GUI 9 / CLI 0" as a number with no way to act on
+#: it short of re-running the whole 6-minute chain with a patched copy.
+_REPORTS = {}
+
+
 def _grade(pcb, clr=0.09):
     r = subprocess.run(['python3', os.path.join(REPO, 'py_router', 'check_drc.py'), pcb,
                         '--clearance', str(clr), '--hole-to-hole-clearance', '0.2',
                         '--clearance-margin', '0.1'], capture_output=True, text=True)
+    _REPORTS[pcb] = r.stdout
     m = re.search(r'FOUND (\d+) DRC', r.stdout)
     return 0 if 'NO DRC' in r.stdout else (int(m.group(1)) if m else -1)
+
+
+def _print_violations(tag, pcb, limit=20):
+    """The violation lines behind a non-zero stage, before the workdir goes.
+
+    check_drc prints a header line per violation class and then one line per
+    violation; everything before the FOUND banner is progress chatter, so the
+    banner is the anchor rather than a pattern for the lines themselves --
+    which differ per class and would drift.
+    """
+    out = _REPORTS.get(pcb, '')
+    idx = out.find('FOUND ')
+    if idx < 0:
+        return
+    body = [ln for ln in out[idx:].splitlines() if ln.strip()]
+    print(f"  --- {tag}: what check_drc found in {os.path.basename(pcb)} ---")
+    for ln in body[:limit]:
+        print('    ' + ln)
+    if len(body) > limit:
+        print(f'    ... {len(body) - limit} more line(s)')
 
 
 def _cli_chain(work):
@@ -165,6 +193,7 @@ def _cli_chain(work):
             grades[tag] = -1
             break
         grades[tag] = _grade(out)
+        _CLI_OUTS[tag] = out
     return grades
 
 
@@ -198,6 +227,10 @@ PLAN = [
 # main(); _cli_chain reads it so both legs start from the SAME bytes.
 _STAGED = {}
 
+#: stage tag -> the board each leg graded, for _print_violations.
+_GUI_SNAPS = {}
+_CLI_OUTS = {}
+
 
 def main():
     start_board = START_BOARD
@@ -210,6 +243,12 @@ def main():
     import replay_plan_vs_run as R
 
     work = tempfile.mkdtemp(prefix='rp2350_livechain_')
+    # KICAD_LIVECHAIN_KEEP=1: leave the workdir behind. Both legs'
+    # boards at every stage are the only way to answer WHY a stage
+    # diverged, and re-running to get them back costs ~6 minutes.
+    keep = bool(os.environ.get('KICAD_LIVECHAIN_KEEP'))
+    _rm = ((lambda *a, **k: print(f'  (kept: {work})')) if keep
+           else shutil.rmtree)
 
     # Stage the input WITH a sibling .kicad_pro (the checked-in fixture has
     # none). A project-less board makes the two fronts legitimately diverge:
@@ -235,11 +274,11 @@ def main():
     res = R.replay({'input_board': staged}, PLAN, work, snapshots=True)
     if res.get('aborted'):
         print(f"FAIL: GUI plan aborted: {res['aborted']}")
-        shutil.rmtree(work, ignore_errors=True)
+        _rm(work, ignore_errors=True)
         return 1
     if res.get('completed', 0) != len(PLAN):
         print(f"FAIL: GUI plan ran {res.get('completed')} of {len(PLAN)} steps.")
-        shutil.rmtree(work, ignore_errors=True)
+        _rm(work, ignore_errors=True)
         return 1
 
     # replay() snapshots each completed step as gui_stepNN.kicad_pcb.
@@ -248,9 +287,10 @@ def main():
         snap = os.path.join(work, f'gui_step{i:02d}.kicad_pcb')
         if not os.path.exists(snap):
             print(f"FAIL: no GUI snapshot for stage {tag}")
-            shutil.rmtree(work, ignore_errors=True)
+            _rm(work, ignore_errors=True)
             return 1
         stages[tag] = _grade(snap)
+        _GUI_SNAPS[tag] = snap
 
     # #495: actually RUN the CLI chain instead of asserting it is clean.
     print("\nrunning the equivalent CLI file chain for comparison...", flush=True)
@@ -267,7 +307,15 @@ def main():
             gui_bad.append(tag)
         if c != 0:
             cli_bad.append(tag)
-    shutil.rmtree(work, ignore_errors=True)
+    # Say WHAT each failing stage found, on both legs, while the boards still
+    # exist. A divergence is a question about violation CLASSES -- the same
+    # count from different causes is a different bug -- and the answer was
+    # being deleted three lines later.
+    for tag in gui_bad:
+        _print_violations('GUI ' + tag, _GUI_SNAPS.get(tag, ''))
+    for tag in cli_bad:
+        _print_violations('CLI ' + tag, _CLI_OUTS.get(tag, ''))
+    _rm(work, ignore_errors=True)
 
     rc = 0
     if cli_bad:

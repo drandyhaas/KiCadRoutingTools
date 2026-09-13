@@ -790,6 +790,38 @@ def _apply_board_swaps(commit: _Commit, board, results_data: dict, pcb_data) -> 
     return modified
 
 
+def _report_unmatched_strip(kind, leftovers, limit=6):
+    """Say which flagged copper this apply could NOT find on the live board.
+
+    The CLI writer has always had this channel (`unmatched_out=` on
+    `remove_segments_from_content` / `remove_vias_from_content`); the IPC apply
+    matched silently and dropped the misses on the floor. That silence is not
+    cosmetic: a strip that matches NOTHING leaves the old copper in place while
+    the replacement is added on top, so the board ships stacked same-net
+    barrels and foreign copper running into a via the engine believed was
+    gone -- and every count the apply returns still looks healthy.
+
+    Measured on rp2350_fpga_eensy_prePlane: the engine reported "Stripping 7
+    stale input via(s)", this apply matched ZERO of them, and the live board
+    came out with 8 vias the CLI chain does not have and 9 DRC violations the
+    CLI chain does not have. Nothing in the run said so.
+    """
+    if not leftovers:
+        return
+    print(f"  WARNING: {len(leftovers)} flagged {kind}(s) could not be matched "
+          f"on the live board and were NOT removed; the copper that replaces "
+          f"them is being added on top")
+    for item in leftovers[:limit]:
+        if kind == "via":
+            print(f"    via at ({item.x:.3f}, {item.y:.3f}) net_id={item.net_id}")
+        else:
+            print(f"    segment ({item.start_x:.3f}, {item.start_y:.3f}) -> "
+                  f"({item.end_x:.3f}, {item.end_y:.3f}) on {item.layer} "
+                  f"net_id={item.net_id}")
+    if len(leftovers) > limit:
+        print(f"    ... {len(leftovers) - limit} more")
+
+
 def apply_routing_results(board, results_data: dict, *,
                           pcb_data=None,
                           add_debug_lines: bool = False,
@@ -827,12 +859,13 @@ def apply_routing_results(board, results_data: dict, *,
         # layer, and net, then delete it as part of this commit.
         segs_to_remove = results_data.get("segments_to_remove") or []
         if segs_to_remove:
-            remove_keys = set()
+            remove_keys = {}
             for s in segs_to_remove:
                 a = pos_key(s.start_x, s.start_y)
                 b = pos_key(s.end_x, s.end_y)
-                remove_keys.add((frozenset((a, b)), layer_id_for(s.layer),
-                                 net_name_for(s.net_id)))
+                remove_keys[(frozenset((a, b)), layer_id_for(s.layer),
+                             net_name_for(s.net_id))] = s
+            hit = set()
             for t in board.get_tracks():
                 sx, sy = _vec_xy_mm(t.start)
                 ex, ey = _vec_xy_mm(t.end)
@@ -840,7 +873,11 @@ def apply_routing_results(board, results_data: dict, *,
                 key = (frozenset((pos_key(sx, sy), pos_key(ex, ey))), t.layer, tname)
                 if key in remove_keys:
                     commit.remove(t)
+                    hit.add(key)
                     counts["removed"] += 1
+            counts["segments_unmatched"] = len(remove_keys) - len(hit)
+            _report_unmatched_strip(
+                "segment", [remove_keys[k] for k in remove_keys if k not in hit])
 
         # Remove original-board VIAS the pipeline flagged (#508 finding 11:
         # route_diff returns vias_to_remove alongside segments_to_remove).
@@ -848,15 +885,21 @@ def apply_routing_results(board, results_data: dict, *,
         # vias behind, so a ripped-up route keeps stale barrels on the board.
         vias_to_remove = results_data.get("vias_to_remove") or []
         if vias_to_remove:
-            via_keys = {(pos_key(v.x, v.y), net_name_for(v.net_id))
+            via_keys = {(pos_key(v.x, v.y), net_name_for(v.net_id)): v
                         for v in vias_to_remove}
+            vhit = set()
             for vv in board.get_vias():
                 vx, vy = _vec_xy_mm(vv.position)
                 vname = ((getattr(vv.net, "name", "") or "")
                          if vv.net is not None else "")
-                if (pos_key(vx, vy), vname) in via_keys:
+                k = (pos_key(vx, vy), vname)
+                if k in via_keys:
                     commit.remove(vv)
+                    vhit.add(k)
                     counts["removed"] += 1
+            counts["vias_unmatched"] = len(via_keys) - len(vhit)
+            _report_unmatched_strip(
+                "via", [via_keys[k] for k in via_keys if k not in vhit])
 
         # Segments + vias from each net's result
         for result in results_data.get("results", []):

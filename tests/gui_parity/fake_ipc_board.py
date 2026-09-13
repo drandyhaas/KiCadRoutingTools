@@ -377,10 +377,38 @@ class FakeIpcBoard:
         self._reseed()
 
     def _strip_vias(self, vias):
+        """Delete the file's `(via ...)` blocks for vias the adapter removed.
+
+        `net_id_to_name` is NOT optional here, though the signature allows it.
+        `remove_vias_from_content` matches on (position, NET TOKEN), and it
+        canonicalises the token through this map: without it every target key
+        carries the numeric net id while a KiCad 10 board's via blocks spell
+        `(net "NAME")`, so NOTHING matches and the vias stay in the file. The
+        sibling call in `push_commit` -- `write_plane_output(...,
+        removed_segments=...)` -- has always passed it, which is why this
+        harness removed segments correctly and vias not at all.
+
+        That asymmetry made the harness manufacture a product bug. Measured on
+        rp2350_fpga_eensy_prePlane: the GUI leg shipped 8 vias the CLI leg does
+        not -- including two barrels stacked in one hole -- and 9 DRC
+        violations, and `test_gui_livechain_rp2350` reported it as a live-chain
+        divergence (#362's own subject) for as long as the gate has been able
+        to run. The real IPC plugin never reaches this code: it removes items
+        over the socket.
+
+        Unmatched targets are REPORTED rather than dropped, because a silent
+        zero-match is precisely what hid this.
+        """
         from kicad_writer import remove_vias_from_content
         with open(self.path, 'r', encoding='utf-8') as f:
             content = f.read()
-        content, _n = remove_vias_from_content(content, vias)
+        leftovers = []
+        content, _n = remove_vias_from_content(
+            content, vias, self._name_of, unmatched_out=leftovers)
+        if leftovers:
+            print(f"  FakeIpcBoard: {len(leftovers)} via(s) the adapter "
+                  f"removed could not be matched in the file and were NOT "
+                  f"stripped")
         with open(self.path, 'w', encoding='utf-8') as f:
             f.write(content)
 
