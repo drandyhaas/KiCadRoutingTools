@@ -1356,6 +1356,22 @@ def apply_footprint_moves(board, placements, via_moves=None, new_segments=None,
         # match could delete a DIFFERENT net's via sitting within a micron of the
         # moved via's old spot (parity with
         # placement/writer._remove_vias_at_positions).
+        # The protection spec of every via this nudge will re-place. kipy can
+        # write NONE of it back: its padstack exposes `solder_mask_mode` and
+        # not covering / plugging / capping / filling, so `make_via` below
+        # emits a via that INHERITS the board's `(setup ...)`. For a via that
+        # was inheriting anyway that is exactly right; for one carrying an
+        # explicit spec -- via-in-pad's IPC-4761 Type VII, say -- it is a
+        # silent fab change. Say it instead of shipping it quietly (#489 s8,
+        # #741). Read once: the scan walks the whole board file.
+        _specs = {}
+        if via_moves:
+            try:
+                from kicad_parser import (kipy_via_protection_attrs,
+                                          via_protection_attrs_from_path)
+                _specs = via_protection_attrs_from_path(get_board_full_path())
+            except Exception:                                    # noqa: BLE001
+                _specs = {}
         for old_x, old_y, vd in via_moves:
             old_key = pos_key(old_x, old_y)
             want_net = _net_name_of(vd)
@@ -1366,6 +1382,15 @@ def apply_footprint_moves(board, placements, via_moves=None, new_segments=None,
                     continue
                 vx, vy = _vec_xy_mm(vv.position)
                 if pos_key(vx, vy) == old_key:
+                    if _specs:
+                        spec = kipy_via_protection_attrs(vv, _specs)
+                        if spec:
+                            print(f"  WARNING: the via at ({vx:.3f}, {vy:.3f}) "
+                                  f"on {vname or 'no net'} declares "
+                                  f"{'/'.join(sorted(spec))} protection; the "
+                                  f"IPC front cannot write that back, so the "
+                                  f"nudged via will INHERIT the board's "
+                                  f"(setup ...) instead (#489 s8 / #741)")
                     commit.remove(vv)
                     break
             layers = vd.get('layers') or ['F.Cu', 'B.Cu']

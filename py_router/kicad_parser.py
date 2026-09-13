@@ -3647,6 +3647,23 @@ def pcbnew_protection_accessors_usable(via=None) -> bool:
         return False
 
 
+def via_protection_attrs_from_path(path) -> Dict[str, Dict[str, str]]:
+    """{via uuid: spec} read from a board FILE. Shared by both live fronts.
+
+    Split out of `via_protection_attrs_from_board_file` so the IPC builder can
+    use the same scan: kipy has no `GetFileName()`, it resolves the open
+    document's path through the adapter, and re-deriving the map there would
+    be a second implementation of the one thing #751 exists to keep single.
+    """
+    try:
+        if not path or not os.path.isfile(path):
+            return {}
+        with open(path, 'r', encoding='utf-8') as f:
+            return _extract_via_protection_attrs(f.read())
+    except Exception:
+        return {}
+
+
 def via_protection_attrs_from_board_file(board) -> Dict[str, Dict[str, str]]:
     """{via uuid: spec} read from a pcbnew BOARD's own file, for a wrapper that
     cannot be asked (#751).
@@ -3663,11 +3680,7 @@ def via_protection_attrs_from_board_file(board) -> Dict[str, Dict[str, str]]:
     better than the {} every via got before.
     """
     try:
-        path = board.GetFileName()
-        if not path or not os.path.isfile(path):
-            return {}
-        with open(path, 'r', encoding='utf-8') as f:
-            return _extract_via_protection_attrs(f.read())
+        return via_protection_attrs_from_path(board.GetFileName())
     except Exception:
         return {}
 
@@ -5434,6 +5447,10 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
             net_id, _ = resolve_net(getattr(track, "net", None))
             width = _nm_to_mm(getattr(track, "width", 0))
             layer = get_layer_name(getattr(track, "layer", None))
+            # #521: user-PINNED copper. Every arc segment inherits the arc's
+            # own flag -- a locked arc is locked as a whole, and the pieces
+            # are this parser's linearization, not the board's objects.
+            seg_locked = kipy_locked(track)
             # Arc tracks: kipy models them as a distinct ArcTrack carrying a
             # `.mid` point (a straight Track has none). Linearize the bulge with
             # the SAME helper the text parser uses (three defining points), so
@@ -5448,17 +5465,27 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
                                                (mid_x, mid_y), (end_x, end_y)):
                     segments.append(Segment(
                         start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
-                        width=width, layer=layer, net_id=net_id))
+                        width=width, layer=layer, net_id=net_id,
+                        locked=seg_locked))
             else:
                 segments.append(Segment(
                     start_x=start_x, start_y=start_y,
                     end_x=end_x, end_y=end_y,
-                    width=width, layer=layer, net_id=net_id))
+                    width=width, layer=layer, net_id=net_id,
+                    locked=seg_locked))
         except Exception:
             continue
 
     # --- Vias ---
     vias: List[Via] = []
+    # #489 s8 / #741: the protection spec, read ONCE from the open document's
+    # own file and handed to every via by uuid. Not per-via, because the scan
+    # is a whole-file regex walk; and not from the live board, because kipy
+    # cannot answer it -- see kipy_via_protection_attrs for why a PARTIAL read
+    # would be worse than none. `_ipc_board_path()` is the same resolver
+    # PCBData.source_path uses, so an unsaved board yields {} and every via
+    # reads as inheriting, which is the safe answer for copper with no file.
+    _via_specs = via_protection_attrs_from_path(_ipc_board_path())
     try:
         via_iter = board.get_vias()
     except Exception:
@@ -5482,6 +5509,13 @@ def _build_pcb_data_from_board_impl(board, guide_layer: str = "User.1",
                 drill=_nm_to_mm(getattr(v, "drill_diameter", 0)),
                 layers=[get_layer_name(top_bl), get_layer_name(bot_bl)],
                 net_id=net_id,
+                # Parity with BOTH of main's parse paths, which fill these and
+                # which this builder did not: without tenting_attrs a via the
+                # plugin RE-PLACES (the #313 cap nudge, a rip-up, a tap
+                # relocation) loses its own protection, and without locked a
+                # user-pinned via's net was rip-eligible in defiance of #521.
+                tenting_attrs=kipy_via_protection_attrs(v, _via_specs),
+                locked=kipy_locked(v),
             ))
         except Exception:
             continue
@@ -5865,6 +5899,62 @@ def _fp_reference(fp) -> str:
                 break
             v = nxt
     return ""
+
+
+def kipy_locked(item) -> bool:
+    """Is this kipy track / arc / via user-PINNED (`(locked yes)`)?
+
+    #521's contract is that KiCad-locked copper makes its net never-rippable,
+    with NO override, and both of main's parse paths fill `locked`. The IPC
+    builder filled it for FOOTPRINTS only, so on this front every locked track
+    and via read as unlocked and its net was rip-eligible like any other --
+    a promise the tool makes in CLAUDE.md and did not keep here.
+
+    kipy exposes `.locked` as a property on `Via` but NOT on `Track` /
+    `ArcTrack`, even though every one of those protos carries the field. So
+    prefer the property where it exists and fall back to the proto, rather
+    than reading the proto for everything: a future kipy that adds the
+    property should be read through it, and a future kipy that drops the
+    field should make this return False rather than raise mid-parse.
+    """
+    v = getattr(item, "locked", None)
+    if isinstance(v, bool):
+        return v
+    try:
+        from kipy.proto.common.types import LockedState
+        return item.proto.locked == LockedState.LS_LOCKED
+    except Exception:
+        return False
+
+
+def kipy_via_protection_attrs(via, text_specs: Dict[str, Dict[str, str]]
+                              ) -> Dict[str, str]:
+    """A kipy Via's protection spec `{token: raw inner s-expr}`, from the
+    board's own FILE.
+
+    The IPC twin of `pcbnew_via_protection_attrs`, and it has no live-object
+    arm at all -- deliberately. kipy's padstack exposes `solder_mask_mode` on
+    `front_outer_layers` / `back_outer_layers` and nothing else: there is no
+    covering, plugging, capping or filling in the proto. Reading tenting from
+    it would produce a PARTIAL spec, which is worse than none, because the
+    spec's whole job (#489 s8 / #741) is to be handed BACK when a via is
+    re-placed -- so a partial one would silently drop four tokens AND turn a
+    via that was inheriting the board's `(setup ...)` into an explicit
+    override. Via-in-pad is exactly the case that needs the tokens kipy cannot
+    see (IPC-4761 Type VII is filled + capped + plated).
+
+    `text_specs` comes from `via_protection_attrs_from_path`, keyed by via
+    uuid, and carries the same caveat #751 documents: the file can LAG the
+    live board mid-plan, which degrades in the SAFE direction -- a via added
+    in-session has no entry, reads as unspecified, and keeps inheriting.
+    """
+    if not text_specs:
+        return {}
+    try:
+        uid = str(via.id.value)
+    except Exception:
+        return {}
+    return dict(text_specs.get(uid, {}))
 
 
 def kipy_raw_references(live_fps) -> List[str]:
