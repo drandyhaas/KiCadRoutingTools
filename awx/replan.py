@@ -74,7 +74,22 @@ LENGTH_TIE = OPTS.get('length', '0') == '1'
 # board laid two neighbours differently (SODT0 drifted, SA6's class), so the
 # full braid had to decide and came back at 60. Derived, the ends agree by
 # construction and the incremental board ships. Destination moves only.
-APPLY_STRIP = OPTS.get('apply', 'refan') == 'strip'
+# DEFAULT FLIPPED TO strip (2026-09-12). `refan` was the default and is
+# UNFAITHFUL: the probe verifies one move and the apply lays another. Seen
+# in tmp/rp1_k51.out, where both applied moves that round disagreed with
+# what was probed --
+#     SA11 berth: asked surface/right/F exit=(146.33,62.56) v=0,
+#          got via_in_pad/right/B ... LAYER F->B, KIND surface->via_in_pad,
+#          GAP off 5.50mm
+# -- so the thing GRADED is not the thing BUILT, and probing harder buys
+# nothing. That matters more than it used to: route-in-the-loop is the one
+# approach that makes "more running" monotone by construction, and it is
+# worthless on an apply path that does not lay what it promised.
+# The evidence for strip was already in the comment above (refan lost
+# K35's round, 52 probed -> 60 re-fanned) and every "best measured" board
+# in the README came from a strip run; meanwhile all 22 replan runs on
+# disk used the refan default. `--apply=refan` remains the opt-out.
+APPLY_STRIP = OPTS.get('apply', 'strip') == 'strip'
 
 
 def _dban(m):
@@ -1131,8 +1146,12 @@ def main():
         log(f'  plan model on this fanout: {sum(pred.values())} vias over {len(pred)} nets, '
             f'{nsw_plan} swimmers; the braid: {sum(real.values())} vias, {nsw_braid} swimmers, '
             f'refused {[n for n in names if V.get(n, {}).get("refused")]}; '
-            f'residual real-pred: total {sum(resid.values()):+d}, '
-            f'|.| {sum(abs(x) for x in resid.values())} over {len(resid)} nets')
+            # :+d CRASHED HERE. resid is real - pred, and the plan model's
+            # prediction is a FLOAT, so the residual always was one -- this
+            # line has never changed and raises ValueError on every round 1,
+            # which is why no replan round could run at all.
+            f'residual real-pred: total {sum(resid.values()):+.1f}, '
+            f'|.| {sum(abs(x) for x in resid.values()):.1f} over {len(resid)} nets')
         worst = [nm for nm in names if V.get(nm, {}).get('refused')]
         sw = sorted((nm for nm in names if not V.get(nm, {}).get('refused')
                      and V[nm].get('lane_vias', 0) >= MIN_VIAS),
@@ -1416,8 +1435,21 @@ def main():
         if not stand:
             log(f'  round {rnd}: no candidate stands -- stopping ({time.time() - t_r:.0f} s)')
             break
-        if APPLY_STRIP and MODE == 'incremental' and stand and R_cur != R \
-                and not any(s_ is not None for (s_, _d, _p) in stand.values()):
+        # WHICH APPLY PATH, AND WHY. The strip branch needs four things at
+        # once and said nothing when it did not get them, so a whole
+        # --apply=strip vs refan A/B ran with the branch never firing in
+        # either arm and reported "no difference" off two identical code
+        # paths. Name the blocker instead.
+        _why = [n for n, ok_ in (('apply!=strip', APPLY_STRIP),
+                                 ('mode!=incremental', MODE == 'incremental'),
+                                 ('no candidate stands', bool(stand)),
+                                 ('no incremental board this round', R_cur != R),
+                                 ('a SOURCE move stands',
+                                  not any(s_ is not None for (s_, _d, _p) in stand.values())))
+                if not ok_]
+        log(f'  round {rnd}: apply path = ' + ('DERIVED (strip)' if not _why
+                                               else 'incremental/refan -- blocked by ' + ', '.join(_why)))
+        if not _why:
             # --apply=strip: the fanout board IS the routed board without
             # its lanes, net by net, each stripped to the copper of the
             # board that last laid its ends
