@@ -307,9 +307,18 @@ ROWS = [
     # The relocation's own disclosure replaced by the SELECTOR's. It still reads
     # like a disclosure and still says NOT MEASURED -- about a different
     # experiment. This is the shape a laundered claim actually takes.
+    # RE-ANCHORED (#877). `d3a3f47d` ("#554: the routed A/B ran, and it is
+    # UNDERPOWERED with the incumbent ahead") REWORDED the claim -- the A/B it
+    # said did not exist has since been run -- so the quote matched nothing.
+    # The mutation is unchanged: make the claim name a DIFFERENT experiment
+    # than the one it reports, which is what the gate has to catch.
     ('efficacy-names-the-wrong-experiment', 'r',
-     "NO_EFFICACY_CLAIM = (\n    'NOT MEASURED: no paired routed A/B of relocate-on vs relocate-off exists, '\n",
-     "NO_EFFICACY_CLAIM = (\n    'NOT MEASURED: no paired routed A/B of pins vs diagnosis exists. '\n",
+     "NO_EFFICACY_CLAIM = (\n"
+     "    'UNDERPOWERED, AND THE INCUMBENT WON. The paired routed A/B of relocate-on '\n"
+     "    'vs relocate-off HAS now been run (tests/stress/block_relocation_study.py): '\n",
+     "NO_EFFICACY_CLAIM = (\n"
+     "    'UNDERPOWERED, AND THE INCUMBENT WON. The paired routed A/B of pins '\n"
+     "    'vs diagnosis HAS now been run (tests/stress/block_relocation_study.py): '\n",
      (T554, T554S), 'KILLED'),
 
     # ---- an expected survivor, recorded rather than deleted -----------------
@@ -326,6 +335,12 @@ ROWS = [
      "        pass\n",
      (T554,), 'SURVIVED'),
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
 
 
 def _dirty(path):

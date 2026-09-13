@@ -18,7 +18,21 @@ So: publish the capability set and let the consumer assert against it.
 `--require` takes `module` or `module:--flag` tokens and exits non-zero listing
 everything missing, so a consumer's check is one line and its failure message
 names the gap instead of the symptom.
+
+NOT THE CATALOGUE. `KNOWN_MODULES` is the pinnable set -- the modules a
+consumer is likely to assert on -- and it is deliberately short and
+hand-maintained, because every name in it is answered on every call and this
+has to stay fast enough for `route.py --capabilities` to run before argparse.
+For "what tools exist in this clone at all, what is each for, and which door
+serves it", see `krt_registry.py`: it enumerates by BEHAVIOUR (`--help`
+answers with a usage line), covers every runnable tool rather than a chosen
+few, and is gated for completeness by `tests/test_937_tool_registry.py`.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['combined'], 'kind': 'utility'}
+
 import argparse
 import ast
 import functools
@@ -62,6 +76,11 @@ KNOWN_MODULES = (
     'check_impedance.py', 'check_orphan_stubs.py', 'check_pads.py',
     'check_pockets.py', 'place_seed.py',
     'kicad_unconnected.py', 'net_forensics.py', 'copy_board.py',
+    # #910. The opt-in DELIVERY step: a routed board ships zone
+    # outlines with no filled_polygon, so an unrefilled grade reports
+    # plane opens that are not real. A tool nobody can discover gets
+    # used by nobody.
+    'fill_for_delivery.py',
     'make_movie.py', 'render_placement.py', 'list_nets.py', 'route_summary.py',
     # The two pre-route placement instruments. `check_channels.py` is the
     # per-face lane ledger the placement skill tells an operator to run before
@@ -70,12 +89,30 @@ KNOWN_MODULES = (
     # no .md file anywhere -- an instrument nobody can discover produces no
     # findings.
     'check_channels.py', 'check_capacity.py',
+    # #891. The per-part context sheet a model reasons from -- body and
+    # its source, pads by board face, pin-order agreement, partners. An
+    # instrument nobody can discover produces no findings.
+    'board_context.py',
+    # #892. The verb that APPLIES a pose, beside the sheet that informs one:
+    # set / rotate / face / lock / unlock, graded by the legality engine. It
+    # is the sanctioned alternative to a hand pose writer, so a consumer that
+    # cannot discover it writes the hand script instead -- which is the whole
+    # failure this tool exists to end.
+    'place_pose.py',
 )
 
 # Scripts whose flag set a consumer may want to pin.
 FLAG_SCRIPTS = ('route.py', 'route_diff.py', 'route_planes.py',
                 'repair_planes.py', 'place_route_loop.py',
                 'place_optimize.py', 'check_drc.py', 'check_floorplan.py')
+# NOT here, deliberately: `place_pose.py`. This tuple's contract, enforced by
+# `tests/test_798_registrar_flags.py`, is that every flag the source registers
+# is visible in `--help` as an option and accepted by the top-level parser.
+# `place_pose`'s `--rot` / `--near` / `--relative` belong to per-VERB parsers
+# (`place_pose.py set --rot ...`), so they are neither, and listing the script
+# here made the gate red for telling the truth. Its verbs and their flags are
+# in the `--help` epilog, and the module is in KNOWN_MODULES above, so a
+# consumer can still discover it -- it just cannot pin a flat flag set.
 
 # The long option, whether or not a SHORT one is declared before it. 46 call
 # sites in the tracked tree spell `add_argument('-q', '--quiet', ...)`, and
@@ -417,11 +454,19 @@ def capabilities(root=ROOT):
         'flags': flags,
     }
     try:                                    # best-effort, never fatal
-        _eng = os.path.join(root, 'py_router')
-        if os.path.isdir(_eng) and _eng not in sys.path:
-            sys.path.insert(0, _eng)        # #522 layout: the engine dir
-        import routing_defaults as _d
-        out['version'] = getattr(_d, 'VERSION', None)
+        # (This used to insert py_router/ on sys.path so `routing_defaults`
+        # could be imported for its VERSION. Nothing here imports any more, so
+        # the insert was dead residue that still mutated the CALLER's sys.path
+        # as a side effect of asking a read-only question.)
+        # /VERSION is the release triple's own file (Cargo.toml +
+        # /VERSION + metadata.json). This used to read
+        # `routing_defaults.VERSION`, which that module has never
+        # defined -- so `capabilities()['version']` was None on every
+        # call this function has ever made, while /VERSION said 0.22.0.
+        # A capability report whose version is always None cannot
+        # answer the one question it exists for: can THIS clone do X.
+        with open(os.path.join(root, 'VERSION'), encoding='utf-8') as _vf:
+            out['version'] = _vf.read().strip() or None
     except Exception:
         out['version'] = None
     return out

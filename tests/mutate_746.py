@@ -139,6 +139,12 @@ GUI_ROWS = [
      "    via_resolved = result['via_resolved']"),
 ]
 
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
+
 BATTERIES = {
     'engine': (ENGINE, ENGINE_TEST, ENGINE_ROWS),
     'gui': (GUI, GUI_TEST, GUI_ROWS),

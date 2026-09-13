@@ -154,20 +154,23 @@ class AISkillRunner:
             raise RuntimeError(f"a {self.backend.label} run is already in progress")
         cmd = self.backend.build_cmd(self.cli_path, prompt,
                                      model=model, effort=effort, **cmd_kwargs)
-        # npm installs resolve `claude` to a .cmd shim, which Windows launches
-        # through an implicit cmd.exe -- and cmd's tokenizer does not
-        # understand list2cmdline's \" escaping, so the first embedded quote
-        # in the prompt ends the quoted region and any | in it becomes a
-        # shell pipe. Claude Code reads the prompt from stdin in -p mode, so
-        # hand it over that way and keep the argv quote-free.
+        # npm installs resolve `claude`/`opencode` to a .cmd shim, which
+        # Windows launches through an implicit cmd.exe -- and cmd's tokenizer
+        # does not understand list2cmdline's \" escaping, so the first embedded
+        # quote in the prompt ends the quoted region and any | in it becomes a
+        # shell pipe. Both CLIs can take the prompt on stdin, so hand it over
+        # that way and keep the argv quote-free.
+        #
+        # The BACKEND does the split (#925). This used to search the argv for
+        # Claude's `-p` here, which no opencode command line contains: the
+        # lookup raised, the `except` swallowed it, and opencode went on
+        # passing a ~3 kB quoting-heavy prompt through cmd.exe -- dying at
+        # launch with "The system cannot find the file specified." A backend
+        # whose argv this runner does not recognise now stays on argv by
+        # DECLARATION rather than by an exception nobody sees.
         self._stdin_payload = None
         if os.name == "nt" and cmd and cmd[0].lower().endswith((".cmd", ".bat")):
-            try:
-                i = cmd.index("-p")
-                if i + 1 < len(cmd) and cmd[i + 1] == prompt:
-                    self._stdin_payload = cmd.pop(i + 1)
-            except ValueError:
-                pass
+            cmd, self._stdin_payload = self.backend.stdin_prompt(cmd, prompt)
         self._stream_state = self.backend.stream_state()
         self._cancel_requested = False
         self._thread = threading.Thread(target=self._work, args=(cmd,), daemon=True)

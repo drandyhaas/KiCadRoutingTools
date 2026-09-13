@@ -1,0 +1,61 @@
+{
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_clearance": 0.15,
+        "min_hole_clearance": 0.15,
+        "min_hole_to_hole": 0.25,
+        "min_copper_edge_clearance": 0.3,
+        "min_track_width": 0.15,
+        "min_via_diameter": 0.45,
+        "min_through_hole_diameter": 0.25,
+        "min_via_drill": 0.25
+      },
+      "rule_severities": {}
+    }
+  },
+  "meta": {
+    "filename": "board.kicad_pro",
+    "version": 1
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.15,
+        "diff_pair_gap": 0.25,
+        "diff_pair_via_gap": 0.25,
+        "diff_pair_width": 0.2,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.2,
+        "name": "Default",
+        "pcb_color": "rgba(0, 0, 0, 0.000)",
+        "priority": 2147483647,
+        "schematic_color": "rgba(0, 0, 0, 0.000)",
+        "track_width": 0.15,
+        "via_diameter": 0.45,
+        "via_drill": 0.25,
+        "wire_width": 6
+      }
+    ],
+    "meta": {
+      "version": 0
+    }
+  },
+  "kicad_routing_tools": {
+    "floor_provenance": {
+      "authored_by": "run25 orchestrator, before any placement/routing tool ran (brief step 1, #441)",
+      "floors": {
+        "clearance": 0.15,
+        "track_width": 0.15,
+        "via_diameter": 0.45,
+        "via_drill": 0.25,
+        "hole_to_hole": 0.25,
+        "copper_edge": 0.3
+      },
+      "note": "fix_kicad_drc_settings capped min_clearance and the Default class at the 0.0508 mm pad override found on C1/C3/Q1/Q2/U2; both hand-raised to the declared 0.15 floor (KiCad floors a pad override at rules.min_clearance, so 0.15 is what every checker grades). Class draw defaults set to the declared sizes.",
+      "escalation": "board"
+    }
+  }
+}

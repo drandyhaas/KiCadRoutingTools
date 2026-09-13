@@ -21,6 +21,7 @@ a format change (#369 A9), so the format itself is part of the contract.
 
 import math
 import os
+import re
 import sys
 import tempfile
 
@@ -197,7 +198,86 @@ def test_paren_in_property_does_not_bleed_a_rotation_into_the_next_footprint():
     os.unlink(out)
 
 
+# --- the texts rotate with the pads ----------------------------------------
+
+def _reference_at(block):
+    """The `(at ...)` token of the block's Reference property, or None."""
+    i = block.find('(property "Reference"')
+    if i < 0:
+        return None
+    m = re.search(r'\(at [^)]*\)', block[i:])
+    return m.group(0) if m else None
+
+
+def test_footprint_rotation_reaches_the_reference_text():
+    """A text's stored angle is absolute (pcbnew 10 probe), so rotating the
+    footprint must add the delta to it, exactly as it does to every pad. This
+    was the rotation path's gap: 11 of run 26's 15 rotated parts shipped their
+    Reference at the pre-rotation angle."""
+    src = _board(_fp('U1', 10.0, 10.0, rot=0, pad_angle=None))
+    out, text = _write(src, [{'reference': 'U1', 'new_x': 10.0, 'new_y': 10.0,
+                              'new_rotation': 90}])
+    assert _reference_at(text) == '(at 0 0 90)', f"{_reference_at(text)!r}"
+    assert '(at 0.5 0 90)' in text, "the pad rule regressed"
+    os.unlink(src)
+    os.unlink(out)
+
+
+def test_text_rotation_composes_with_a_stored_angle_and_keeps_the_token():
+    """A text already at 45 rotated by 90 reads 135; one at 315 rotated by 45
+    wraps to 0 and KEEPS its angle token (every text on the tracked corpus
+    carries the three-token form, and the flip path's token rule is the one
+    measured there)."""
+    for stored, delta, want in ((45, 90, '(at 1 1 135)'),
+                                (315, 45, '(at 1 1 0)'),
+                                (0, 137.25, '(at 1 1 137.25)')):
+        extra = (f'\t\t(fp_text user "hello"\n\t\t\t(at 1 1 {stored})\n'
+                 f'\t\t\t(layer "F.SilkS")\n\t\t)\n')
+        src = _board(_fp('U1', 10.0, 10.0, rot=0, pad_angle=None, extra=extra))
+        out, text = _write(src, [{'reference': 'U1', 'new_x': 10.0,
+                                  'new_y': 10.0, 'new_rotation': delta}])
+        i = text.index('(fp_text user')
+        got = re.search(r'\(at [^)]*\)', text[i:]).group(0)
+        assert got == want, f"stored {stored} + {delta}: {got!r} != {want!r}"
+        os.unlink(src)
+        os.unlink(out)
+
+
+def test_text_rotation_does_not_bleed_into_the_next_footprint():
+    """The #113 paren case, for texts: C1's rotation must not reach C2's
+    Reference through an unbalanced property value."""
+    mpn = '\t\t(property "MPN" "TCR2EF115,LM(CT"\n\t\t\t(at 0 0)\n\t\t)\n'
+    src = _board(_fp('C1', 10.0, 10.0, rot=0, pad_angle=None, extra=mpn)
+                 + _fp('C2', 20.0, 20.0, rot=0, pad_angle=None))
+    out, text = _write(src, [{'reference': 'C1', 'new_x': 10.0, 'new_y': 10.0,
+                              'new_rotation': 90}])
+    split = text.index('(footprint', text.index('"C1"'))
+    c1_block, c2_block = text[:split], text[split:]
+    assert _reference_at(c1_block) == '(at 0 0 90)', f"{_reference_at(c1_block)!r}"
+    assert _reference_at(c2_block) == '(at 0 0)', \
+        f"rotation bled into C2's Reference: {_reference_at(c2_block)!r}"
+    os.unlink(src)
+    os.unlink(out)
+
+
+def test_flip_path_owns_its_text_angles():
+    """A side change composes the text angle ONCE, on the flip path (#714):
+    `new_rot + 180 - (a - old_rot)` = 270 for rot 0 -> 90 flipped. If the
+    rotation path also ran, the angle would come out 0 (270 + 90)."""
+    src = _board(_fp('U1', 10.0, 10.0, rot=0, pad_angle=None))
+    out, text = _write(src, [{'reference': 'U1', 'new_x': 10.0, 'new_y': 10.0,
+                              'new_rotation': 90, 'new_side': 'B'}])
+    got = _reference_at(text)
+    assert got is not None and got.split()[-1].rstrip(')') == '270', f"{got!r}"
+    os.unlink(src)
+    os.unlink(out)
+
+
 TESTS = [
+    test_footprint_rotation_reaches_the_reference_text,
+    test_text_rotation_composes_with_a_stored_angle_and_keeps_the_token,
+    test_text_rotation_does_not_bleed_into_the_next_footprint,
+    test_flip_path_owns_its_text_angles,
     test_coordinate_keeps_six_decimals,
     test_large_coordinate_keeps_sub_micron_precision,
     test_written_position_round_trips_through_the_parser,

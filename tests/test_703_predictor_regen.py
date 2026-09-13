@@ -141,15 +141,37 @@ sys.path.insert(0, os.path.join(ROOT, 'tests', 'stress'))
 #:     holds for the blocking half, and is left standing above with this
 #:     correction rather than quietly edited.
 #:
+#: RE-RECORDED 2026-09-10 (#908). Footprint copper -- `fp_poly` on a copper
+#: layer inside a `(footprint ...)` block -- is now parsed, modelled as an
+#: obstacle and graded by check_drc; before this it was invisible to all
+#: three, AND the writer relocated it to silkscreen on every write. esp_prog
+#: carries one: the drawn tab of U2's SOT89. All three esp_prog rows move, and
+#: the two kinds of movement are worth separating:
+#:
+#:   * `truth.quality` on all three -- the router now has an obstacle it did
+#:     not have, so it lays different copper past U2. authored
+#:     39/353.93/256 -> 34/344.06/286; perturb-scatter-d1
+#:     32/327.31/282 -> 37/363.0/311; portfolio-1 31/341.99/263 ->
+#:     30/350.67/304. Stable across repeated runs.
+#:   * `esp_prog:portfolio-1` -- `truth.headline` 0 -> 1, and it is NOT a
+#:     routing failure: `blocking_by` reads unrouted 0, broken 0, **drc 1**.
+#:     The quench candidate moves U2 so its tab lands ON Q1's pads, and
+#:     check_drc now says so: "Pad:/DTR (Q1.2) <-> Seg:net_0 [Polygon(U2)],
+#:     overlap 0.101mm". kicad-cli 10.0.0 independently reports the same
+#:     candidate as `shorting_items` against Q1 pad 2 AND pad 3. So the row
+#:     did not get worse -- a real defect in that placement stopped being
+#:     invisible. The header's "this row is the study's headline in miniature"
+#:     commentary is left standing above, with this as its second correction.
+#:
 EXPECTED = {
     'esp_prog:authored': dict(
         poses_sha256='67a9712d200814442b4a25cf1fa8ccd075c1968d5b08c0ad58c4662f0a479da7',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=8.2,
+        seconds=8.3,
         truth={'headline': 0,
-               # re-recorded 2026-09-03 with the #530 defaults --fab-tier auto /
-               # --escalation fab (the pre-#857 ladder): 33/345.52/373 -> 39/353.93/256
-               'quality': {'vias': 39, 'copper_mm': 353.93, 'segments': 256}},
+               # 2026-09-03 (#530 auto/fab defaults): 33/345.52/373 -> 39/353.93/256
+               # 2026-09-10 (#908 footprint copper): 39/353.93/256 -> 34/344.06/286
+               'quality': {'vias': 34, 'copper_mm': 344.06, 'segments': 286}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 127.48707486477095, 'overlap_area': 1.1400451712000104,
@@ -160,10 +182,11 @@ EXPECTED = {
     'esp_prog:perturb-scatter-d1': dict(
         poses_sha256='ce4d5a3803cfcf56d4ab3cfbf4f1be3ffd61242a1be78ef4ce2cae110dc96eca',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=11.2,
+        seconds=12.6,
         truth={'headline': 0,
-               # re-recorded 2026-09-03 (auto/fab defaults): 29/341.07/288 -> 32/327.31/282
-               'quality': {'vias': 32, 'copper_mm': 327.31, 'segments': 282}},
+               # 2026-09-03 (auto/fab defaults): 29/341.07/288 -> 32/327.31/282
+               # 2026-09-10 (#908 footprint copper): 32/327.31/282 -> 37/363.0/311
+               'quality': {'vias': 37, 'copper_mm': 363.0, 'segments': 311}},
         predictors={
             'crossings': 50, 'hpwl': 252.34828000000005,
             'halo': 130.46454030971682, 'overlap_area': 1.1400451712000104,
@@ -210,10 +233,14 @@ EXPECTED = {
     'esp_prog:portfolio-1': dict(
         poses_sha256='d1290d938a770bb17f2c6a4869b8224eb30aeba6bb37e11c2ae2f3c6c042695b',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=9.5,
-        truth={'headline': 0,
-               # re-recorded 2026-09-03 (auto/fab defaults): 32/347.03/270 -> 31/341.99/263
-               'quality': {'vias': 31, 'copper_mm': 341.99, 'segments': 263}},
+        seconds=12.0,
+        # headline 3 -> 0 (2026-09-03) -> 1 (2026-09-10). The 1 is `drc`, NOT
+        # `unrouted`/`broken`: this candidate lands U2's SOT89 tab on Q1's
+        # pads, and #908 is what makes that visible. See the header note.
+        truth={'headline': 1,
+               # 2026-09-03 (auto/fab defaults): 32/347.03/270 -> 31/341.99/263
+               # 2026-09-10 (#908 footprint copper): 31/341.99/263 -> 30/350.67/304
+               'quality': {'vias': 30, 'copper_mm': 350.67, 'segments': 304}},
         predictors={
             'crossings': 23, 'hpwl': 260.0687799999999,
             'halo': 101.01900525631262, 'overlap_area': 1.0,

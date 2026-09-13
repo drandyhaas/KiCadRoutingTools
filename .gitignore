@@ -36,6 +36,23 @@ Thumbs.db
 rust_*/target/
 *.pyd
 
+# render_placement writes <board>_placement.png (and _B/_F on a two-sided
+# board) BESIDE THE BOARD when -o is omitted -- render_placement.py:2225. So
+# grading the corpus leaves 44 PNGs in kicad_files/, and a `git add -A` ships
+# ~21 MB of generated renders into the commit. Measured: it did, into a #936
+# follow-up branch, and only reading the diffstat before pushing caught it.
+#
+# The COUNT and the SIZE were re-measured by rendering all 33 tracked boards
+# (22 one-sided renders + 11 _B/_F pairs = 44 files, 22,407,483 bytes). The
+# first figures here, 31 PNGs / ~14 MB, were recalled from that branch rather
+# than measured and were low on both. Treat the byte figure as an order of
+# magnitude: it moves with the renderer's default size/supersample and with
+# Pillow's compression, so it is not a constant to pin. The three patterns
+# below were checked against the 44 actual filenames -- all matched.
+/kicad_files/*_placement.png
+/kicad_files/*_placement_B.png
+/kicad_files/*_placement_F.png
+
 # KiCad outputs (routed files, backups, project files)
 /kicad_files/test_diffpair*kicad_pcb
 /kicad_files/fanout_output*.kicad_pcb

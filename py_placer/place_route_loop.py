@@ -26,6 +26,11 @@ Usage:
       [quench options]
 """
 from __future__ import annotations
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
 import argparse
@@ -1226,6 +1231,7 @@ def main():
             align_radius=args.align_radius,
             align_span=args.align_span,
             orient_weight=args.orient_weight,
+            facing_weight=args.facing_weight,
             metrics_out=ratsnest,
             groups=blocks,
             verbose=args.verbose,
@@ -1418,7 +1424,14 @@ def main():
         try:
             from make_movie import make_movie
             out = args.movie or os.path.join(work, 'placement.mp4')
-            got = make_movie([work], out=out, camera='auto', quiet=False)
+            # tween= was MISSING here, so --movie-tween was parsed into
+            # args.movie_tween and then read by NOTHING: `--movie-tween 0`
+            # (cut straight to each new placement, no glide) silently rendered
+            # the default 10-frame glide instead, and so did every other value.
+            # A flag argparse accepts and the code ignores is worse than a flag
+            # that does not exist, because it looks like it worked.
+            got = make_movie([work], out=out, camera='auto', quiet=False,
+                             tween=args.movie_tween)
             print(f"Movie: {got}" if got else "Movie: nothing to animate")
         except Exception as e:
             print(f"  (movie skipped: {e})")

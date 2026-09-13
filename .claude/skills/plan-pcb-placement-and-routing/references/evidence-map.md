@@ -1,7 +1,12 @@
 # Evidence map: produce X → read key Y → do Z
 
-Every artifact the placement tools emit, the exact JSON key to read from it, and
+The artifacts the placement tools emit, the exact JSON key to read from each, and
 the decision that key drives. Read this before quoting any number.
+
+"**Every** artifact" is what this line used to claim, and it was not true: there
+was no row for `py_tools/board_context.py` (E3) and none for `brief_coverage`
+(E2), both of which a verifier is REQUIRED to read. If you need a key that is
+not here, run the tool and read its output — then add the row.
 
 **The governing rule: never read a picture on its own.** Every render is paired
 with a number that either confirms or contradicts it, and the number wins.
@@ -100,24 +105,52 @@ Nobody reads these today, and they are where the loop's actual history lives.
 
 ---
 
-## E. `check_floorplan.py BOARD --intent ... [--health]`
+## E1. `check_floorplan.py BOARD --intent ... [--health]` — the stdout `JSON_SUMMARY`
 
 | key | decision |
 |---|---|
 | exit code | `0` clean · `2` argparse or malformed intent · `3` board state / untrustworthy outline · `4` **violations found** |
 | `pass` | The gate |
+| `violations` | A **COUNT** here. In the E2 document the same name is the LIST. Quote the one you are looking at |
+| `cutouts` / `edge_contours` | **Counts** here; the geometry is `outline.*` in E2 |
 | `violations_by_rule` | Which rule fired, and how often — names the thing to fix |
-| `violations[].measured` vs `.expected` | The falsifiable number. This is what goes in a verifier's `evidence=` |
 | `rules_run` / `rules_skipped` | **Anti-vacuity.** `0 violations` with `rules_run: 0` means nothing was checked. Quote both |
 | `blocks_resolved` vs `blocks` | A block resolving to nothing is reported as an error, but check this too |
 | `state_*` | `duplicate_fraction`, `spread_ratio`, `outside_fraction`, `partially_unplaced` — the signals behind the exit-3 verdict, and the only place they are emitted at all. `partially_unplaced` is the case exit 3 **hides**: a netlist re-import dropped a few new parts at the origin on an otherwise-placed board, and "place these specific refs" is the right instruction |
-| `state.stacked_refs` vs `state.stacked_suspect_refs` | Co-located refs, and the subset `partially_unplaced` is actually decided on. They differ **by design** — parts the far side of the board cannot reach, and marker classes (fiducial / mount_hole / testpoint) that share a coordinate deliberately, are excluded. Quote the SUSPECT list; a non-empty `stacked_refs` beside `partially_unplaced: false` is normal, not a broken check. Two traps: a **drilled** part counts on both sides, so it is never excluded by side; and being `(locked yes)` is **not** an excuse, because this toolchain stamps its own locks |
-| `outline.cutouts` / `.edge_contours` / `.simple_rectangle` | What the parts must avoid. `edge_contours` are clearance-bearing and **invisible in every render** |
 | `health_block_displacement_max_mm`, `health_blocks_displaced` | How far a block sits from what it connects to. The 80 mm-magnetics failure mode a nudge cannot fix |
 | `health_bus_foreign_crossings` | What crosses a declared bus corridor |
-| `health_signals_skipped` | Signals that did not run, each with a reason. `blocked_cell_share` always needs a route first |
+| `health_signals_skipped` | A **COUNT** of signals that did not run (`len(health.skipped)`) — the per-signal REASONS are `health.skipped` in the E2 document, not here. `blocked_cell_share` always needs a route first |
 
 ---
+
+## E2. `check_floorplan.py BOARD --intent ... --json wk/floorplan.json` — the document
+
+The SAME run writes two artifacts and they are not the same shape. `state` is a nested object here and a `state_*` prefix in E1; `violations` is a list here and a count there. Per the rule at the top of this page: read the keys of the artifact in front of you, and do not substitute the other spelling.
+
+| key | decision |
+|---|---|
+| `violations[].measured` / `.expected` | The falsifiable number. This is what goes in a verifier's `evidence=`. E1 has only the count |
+| `state.stacked_refs` / `state.stacked_suspect_refs` | Co-located refs, and the subset `partially_unplaced` is actually decided on. They differ **by design** — parts the far side of the board cannot reach, and marker classes (fiducial / mount_hole / testpoint) that share a coordinate deliberately, are excluded. Quote the SUSPECT list; a non-empty `stacked_refs` beside `partially_unplaced: false` is normal, not a broken check. Two traps: a **drilled** part counts on both sides, so it is never excluded by side; and being `(locked yes)` is **not** an excuse, because this toolchain stamps its own locks |
+| `outline.cutouts` / `.edge_contours` / `.simple_rectangle` | What the parts must avoid. `edge_contours` are clearance-bearing and **invisible in every render**. E1 carries the first two as bare counts and `simple_rectangle` not at all |
+| `health.skipped` | The signals that did not run, each with its REASON. E1's `health_signals_skipped` is the length of this |
+| `brief_coverage.uncovered` / `.abstained` / `.drifted` / `.complete` | What the declared design brief (#711) did and did not reach. `verifier-prompts.md` makes lens 1 FAIL on these, and `--require-brief-coverage` refuses a grade with nothing declared behind it — so a verifier handed only this page could not satisfy the lens it was asked to run until this row existed |
+| `legality`, `edge_seating`, `decap_pin_evidence` | The per-rule evidence behind `violations`. Present only when the intent declares the rule |
+
+---
+
+## E3. `py_tools/board_context.py BOARD --json -o wk/context.json` — the per-part sheet (#891)
+
+Boundary criteria 1, 2 and 4 are decided on these keys and this page had no row for the tool at all, so a verifier handed only this file could not answer the questions it was given.
+
+| key | decision |
+|---|---|
+| `pin_order.rows[].verdict` / `.span_mm` | Per interface: does the connector's pin order agree with what it mates to, and over what span. `.inversions` counts the crossings; `.scope` and `.nets` say what was compared. `pin_order.error` is set when nothing could be compared — read it before quoting a clean verdict |
+| `parts[].pads_by_face` | Which face of the part its pads escape toward. An empty `{}` means the body model could not decide, NOT that there are no pads |
+| `parts[].partners` | What this part actually connects to, ranked. An empty list is a part with no signal partners — normal for a decap, a finding for a bridge IC |
+| `parts[].body_mm` / `.body_source` | The body extent and WHERE IT CAME FROM. `body_mm: null` means unmodelled, so every clearance conclusion drawn from it is a guess; `body_source` is how you tell |
+| `parts[].part_class` / `.part_class_confidence` / `.role` / `.serves` | What the part is for. Low confidence is a reason to look, not to overrule |
+| `floors.clearance` / `.track_width` | The board's OWN floors — what every other instrument must be graded at, never a round number you picked |
+| `sources` | Which derivation produced each of the above. The anti-vacuity row: a key computed from nothing still has a value |
 
 ## F. Routing summary — `route.py`'s `JSON_SUMMARY`, in `wk/route.log`
 
@@ -195,11 +228,16 @@ on this page describes what a step *claims*; this describes what the board *is*.
 
 | key | decision |
 |---|---|
-| `blocking` | **must reach 0 before the board is deliverable.** `unrouted + broken + drc + undersized + floorplan + impedance + length` |
+| `blocking` | **must reach 0 before the board is deliverable.** `unrouted + broken + drc + undersized + floorplan + assembly + impedance + length + net_widths` -- NINE, re-derived from `board_score.py`'s own `parts` dict by `tests/test_918_gate_wording.py` |
 | `blocking_by.<component>` | names WHERE the blocking sits. **The largest entry is NOT automatically the lever** -- that rule wrecked a run. Choose by the connectivity-first ladder (unrouted -> broken -> widths -> floorplan -> drc); an entry's size ranks within a rung, never across rungs |
 | `quality` = `{vias, copper_mm, segments}` | tie-break **only** at `blocking == 0`. Comparing it earlier lets a router trade a disconnected net for a lower via count |
 | `ungraded` | components nothing examined (no `--intent`, no `--impedance-nets`, no `--length-groups`). **Report as unexamined, never as clean** |
 | `unknown` | a component that was asked for and could not run. `blocking` is `null`, not 0 — the loop must not stop here |
+| `components.assembly.buildable` / `.verdict` | **`check_assembly`'s OWN verdict, over all FIVE `not_buildable` conjuncts.** Gate on this, NOT `blocking == 0` — that scalar is one of the five, so a board unbuildable through a coincident-origin stack or a containment reads 0 and is still NOT BUILDABLE (#918). `buildable: false` is not deliverable at any `blocking` |
+| `components.assembly.conjuncts` / `.count_basis` | the five conjunct counts as published, and which of them `count` was built from. `courtyard_blocking_gating` is **`null` here by construction** — board_score passes no `--baseline`, so the fifth conjunct is structurally unarmed; `conjuncts_unmeasured` names it. Not measured is **not** measured clean |
+| `placement` (copper-free laps, `--placement-terms`) | the five terms a placement lap can be RANKED by -- worst diff-pair span, crossed pin orders, cluster distance, plane-cut proxy, pad-area balance. **Report-only**: never in `blocking`, never in the exit code. Without it `quality` is `(0, 0.0, 0)` for every placement of every board and two laps cannot be ordered at all |
+| `placement.terms.<t>.basis` | the POPULATION a term was measured over. When it moves between laps the term is **not judged** -- a total over a different population is not a larger or smaller version of the first (the argument `commensurability` makes about `blocking`). Measured over four laps of one board: a plane term's blocker set read 3 / 11 / 3 / 3 as parts were frozen, and its value 0.8 / 22.3 / 0.0 / 0.0 with it |
+| `placement.vs_parent.verdict` | PARETO against the parent lap: `better` only when no measured term regressed. `mixed` names both sides and is **not** an improvement. There is no aggregate and no weight -- #694 |
 | `components.drc.graded_at` | the clearance actually graded at. Confirm it is the routed floor; stricter invents violations, looser hides them |
 | `components.drc.by_type` | `segment-segment`, `pad-segment`, … — clearance conflicts |
 | `components.undersized.by_type` | `track-width`, `via-size`, `via-drill-size` — **sub-spec copper**, graded separately per floor. Note what this cannot see: diameter and drill are tested independently, so a via whose ring is zero (a 0.3/0.3 via) passes both — removing such vias earns no credit here; state it in the ledger |
@@ -228,9 +266,10 @@ only when you know better than the board.
 | key | decision |
 |---|---|
 | `parent_sha` | the last **accepted** board (content hash; `step-back --to` checks it out). Resolve it for `render_placement --before`; using N−1 renders a delta that never existed |
-| `lever` + `lever_argv` | `lever` is the one-line intent, `lever_argv` the reproducible command — `replay` refuses prose-only entries. "tuned parameters" is not a lever. Verdicts and stop-condition claims have no field of their own: name them **in the `--lever` text** |
+| `lever` + `lever_argv` | `lever` is the one-line intent, `lever_argv` the reproducible command — `replay` refuses prose-only entries, and `record` refuses an argv carrying an MSYS2-rewritten net name (`C:/Program Files/Git/…`), which would replay as a vacuous pass. "tuned parameters" is not a lever. A verdict list has no field of its own: name it **in the `--lever` text** |
+| `stop_condition` + `stop_reason` | #901. The condition is a TOKEN — `1 \| 2 \| 3 \| 4 \| DONE-EXHAUSTED \| STUCK \| BUDGET` — checked on EVERY record, not only beside a failing lens. The prose goes in `stop_reason`, written either as `--stop-reason` or after the token (`"3: five laps, no new copper"`) |
 | `accepted` (`--rejected` at record time) | a rejected iteration is data — keeping it is what makes "five unchanged iterations" (stop-3) detectable |
-| `score.blocking` | flat across FIVE consecutive iterations, after the rip lever / finer grid / layer change ⇒ stop condition 3 (9.5 and convergence.md both say five; the connectivity components are what must be flat, not drc) |
+| `score.blocking` | flat across FIVE RECORDED laps of that half — **accepted or rejected** — after the rip lever / finer grid / layer change ⇒ stop condition 3. This is what `converge verdict --flat` actually measures: `(blocking, quality)` lexicographic, per half, over the last N recorded laps, with `blocking: null` laps dropped as unjudged. It is NOT `unrouted` and `broken` read separately — quality counts too, so a lap that only moved vias is not a plateau. Run the tool rather than counting by eye |
 | `kind` | `systemic` = budget went to the instrument; `status` warns when that share hits half |
 | accepted `result_sha`s, in order | the frame list for `make_movie.py`. Reverted boards animate a change that was undone |
 

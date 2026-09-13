@@ -22,6 +22,20 @@ Run it after touching either site:
 import os
 import subprocess
 import sys
+
+# This battery's runner is at MODULE SCOPE, so `import mutate_760` REWRITES
+# ENGINE FILES. #877 was filed after a census did exactly that to six batteries
+# and rewrote 13 files under py_router/ and py_placer/ -- then reported numbers
+# measured against its own damage. Refusing the import outright, rather than
+# hiding the runner behind `if __name__`, keeps the reason visible and points
+# at the API that answers the question the importer actually had.
+if __name__ != '__main__':                                 # pragma: no cover
+    raise ImportError(
+        'tests/mutate_760.py is a SCRIPT, not a module: importing it runs the '
+        'battery and rewrites engine files in place. To read its rows, use '
+        'tests/mutation_anchors.resolve_static(path), which parses the file '
+        'instead of executing it.')
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SER = os.path.join(ROOT, 'py_router/single_ended_routing.py')
 PCM = os.path.join(ROOT, 'py_router/pcb_modification.py')
@@ -61,11 +75,35 @@ ROWS = [
    "                hd >= npth_clr + w / 2.0 - 1e-4 and\n"
    "                edge_clears(x1, y1, x2, y2, w))"),
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
 killed = surv = broken = 0
+
+# A dirty target would be RESTORED to its committed text, silently destroying
+# uncommitted work. Every other battery refuses; this one did not (#877).
+_dirty = subprocess.run(
+    ['git', 'status', '--porcelain', '--'] + sorted({r[1] for r in ROWS}),
+    cwd=ROOT, capture_output=True, text=True).stdout.strip()
+if _dirty:
+    print('REFUSED: the files this battery rewrites have uncommitted changes.\n'
+          'Restoring them writes the COMMITTED text back over your work.\n'
+          + _dirty)
+    sys.exit(2)
+
 for row in ROWS:
     name, path, old, new = row[:4]
     nth = row[4] if len(row) > 4 else None
-    orig = open(path).read()
+    # RAW BYTES for the restore, decoded text for the match (#877). This was
+    # the worst of the four: no encoding AND no newline on either side, so it
+    # round-tripped every target through the locale codec (cp1252 on Windows)
+    # and translated every '\n' to os.linesep. `.gitattributes` pins `*.py text
+    # eol=lf`, so a single run left every target permanently "modified".
+    raw = open(path, 'rb').read()
+    orig = raw.decode('utf-8').replace('\r\n', '\n')
     if nth is not None:            # replace the Nth occurrence only
         parts = orig.split(old)
         if len(parts) - 1 < nth + 1:
@@ -77,7 +115,7 @@ for row in ROWS:
             print(f'  BROKEN {name}: anchor count {orig.count(old)}')
             broken += 1; continue
         mut = orig.replace(old, new)
-    open(path, 'w').write(mut)
+    open(path, 'w', encoding='utf-8', newline='').write(mut)
     try:
         r = subprocess.run([sys.executable, TEST], capture_output=True, text=True,
                            cwd=ROOT, timeout=600)
@@ -90,6 +128,6 @@ for row in ROWS:
             print(f'  SURVIVED {name}')
             surv += 1
     finally:
-        open(path, 'w').write(orig)
+        open(path, 'wb').write(raw)          # byte-exact, from what was read
 print(f'\n{killed} killed, {surv} SURVIVED, {broken} broken')
 sys.exit(1 if surv or broken else 0)

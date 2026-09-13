@@ -228,22 +228,32 @@ with tempfile.TemporaryDirectory() as wd:
 # fed to --fit WxH for half a board -- and the understated area fed
 # grow_board's utilisation.
 # --------------------------------------------------------------------------
+# #896: the canonical box is `placement.body`'s OCCUPANCY rect, and this arm
+# CALLS it rather than re-deriving the ladder. It used to spell out
+# courtyard-or-pad-bbox here, which was a mirror of the implementation -- so
+# when the ladder gained the .Fab and silk rungs the arm reported five
+# esp_prog "mismatches" that were the fix working (CON1 [1.5, 7.25] -> [3.2,
+# 9.7], CON2 [17.018, 1.778] -> [17.78, 2.54]). A test that re-implements what
+# it grades can only ever detect that the two copies drifted.
+from placement.body import board_bodies
 from placement.legality import rotate_local_bounds
-from placement.parser import extract_courtyard_bboxes
-from placement.utility import compute_footprint_bbox_local
+from placement.utility import compute_footprint_bbox_local  # noqa: F401
 
 for _bd in (BOARD, os.path.join(REPO, 'kicad_files', 'esp_prog.kicad_pcb')):
     if not os.path.isfile(_bd):
         continue
     _pcb = parse_kicad_pcb(_bd)
     _brief = build_brief(_pcb, _bd)
-    _cy = extract_courtyard_bboxes(_bd) or {}
+    _bodies = board_bodies(_pcb, _bd)
     bad, rotated, twopad = [], 0, 0
     for _ref, _row in _brief['parts'].items():
         _fp = _pcb.footprints.get(_ref)
         if _fp is None or _row['extent_source'] == 'none':
             continue
-        _box = _cy.get(_ref) or compute_footprint_bbox_local(_fp)
+        _geom = _bodies.get(_ref)
+        _box = (_geom.occupancy_local if _geom is not None
+                and _geom.occupancy_local is not None
+                else compute_footprint_bbox_local(_fp))
         _g = rotate_local_bounds(*_box, _fp.rotation or 0.0)
         want = [round(_g[2] - _g[0], 3), round(_g[3] - _g[1], 3)]
         if want != _row['extent_mm']:

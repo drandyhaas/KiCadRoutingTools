@@ -22,6 +22,8 @@ import subprocess
 import sys
 import tempfile
 
+import run_utils  # tool_env: PYTHONPATH for `python -c` children (#522)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))  # #522/py_placer layout
@@ -102,11 +104,29 @@ def main():
         prog = ('import cli_banner; cli_banner.install();'
                 'print("early line"); import os; os._exit(9)')
         with open(log_path, 'w', encoding='utf-8') as fh:
+            # tool_env, because a `python -c` child gets sys.path[0] = cwd and
+            # NOTHING else: `cli_banner` lives in py_router/ since the #522
+            # reorg, so the child died with ModuleNotFoundError and printed no
+            # line at all. This check then passed anyway -- see below.
             subprocess.run([sys.executable, '-X', 'utf8', '-c', prog],
-                           stdout=fh, stderr=subprocess.STDOUT, cwd=ROOT)
+                           stdout=fh, stderr=subprocess.STDOUT, cwd=ROOT,
+                           env=run_utils.tool_env())
         text = open(log_path, encoding='utf-8').read()
+        # An EXACT LINE, not `in text`, and that is the whole point. Python
+        # 3.13+ echoes the offending source line in a traceback, and this
+        # program's source CONTAINS the string `early line` -- so
+        # `'early line' in text` was satisfied by the failure message itself.
+        # The check passed on 3.13+ while the child was not running at all,
+        # and failed on 3.12 only because its tracebacks carry no source echo:
+        # a green that meant "this Python echoes source" and a red that meant
+        # "this one does not", neither of them about the thing under test.
+        # The echoed source is indented and carries the whole statement, so it
+        # can never equal a bare `early line`.
+        lines = [ln.strip() for ln in text.splitlines()]
+        check('the probe child actually ran (no import failure)',
+              'Traceback (most recent call last):' not in lines, repr(text))
         check('a hard-killed run still leaves its printed lines on disk',
-              'early line' in text, repr(text))
+              'early line' in lines, repr(text))
 
     print()
     if FAILURES:

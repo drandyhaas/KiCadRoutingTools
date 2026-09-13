@@ -39,6 +39,11 @@ A brief that silently omitted a measurement would read as "nothing to report".
 Exit codes: 0 = a brief was written, 2 = usage/load error, 3 = no outline
 (there is nothing to place against).
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
@@ -336,27 +341,37 @@ def state_section(pcb, pcb_file, skipped):
 def parts_section(pcb, pcb_file, skipped):
     """Per part: what an author needs to decide where it goes.
 
-    Size comes from the courtyard where the footprint has one and the pad
-    bounding box where it does not -- and `courtyard` says which, because a
-    pad bbox carries NO courtyard margin and treating the two alike is how a
-    part gets seated tighter than its own footprint allows (the quench warns
-    about this on every board that needs it).
+    Size comes from `placement.body` (#896), whose ladder is courtyard, else
+    the drawn .Fab body, else silk unioned with the pad bbox, else the pad
+    bbox -- and `extent_source` says WHICH, because a pad bbox carries no
+    courtyard margin and treating the two alike is how a part gets seated
+    tighter than its own footprint allows (the quench warns about this on
+    every board that needs it).
+
+    It reads the model rather than its own ladder because this table and the
+    body-overlap channel used to answer the same question differently: this
+    one went courtyard-or-pad-bbox and never looked at .Fab, so on a
+    courtyard-less library it reported a pad box for a part the assembly audit
+    was grading as a drawn housing.
     """
+    from placement.body import board_bodies
     from placement.legality import rotate_local_bounds
-    from placement.parser import extract_courtyard_bboxes
-    from placement.utility import compute_footprint_bbox_local
+    from placement.utility import compute_footprint_bbox_local  # noqa: F401
     from placement.part_class import classify_part
     from placement.escape import lane_pitch  # noqa: F401 (documents origin)
 
-    cy = _safe('parts.courtyards', extract_courtyard_bboxes, skipped,
-               pcb_file) or {}
+    bodies = _safe('parts.bodies', board_bodies, skipped, pcb, pcb_file) or {}
     out = {}
     for ref, fp in sorted(pcb.footprints.items()):
         pads = fp.pads or []
-        box = cy.get(ref)
-        if box:
-            src = 'courtyard'
-        elif pads:
+        geom = bodies.get(ref)
+        # OCCUPANCY, not the bare body: this extent is fed to `--fit WxH` and
+        # to grow_board's utilisation, both of which ask what the part takes
+        # up rather than what its plastic measures. A .Fab body is routinely
+        # narrower than the pads it sits between.
+        box = geom.occupancy_local if geom is not None else None
+        src = geom.source if geom is not None else 'none'
+        if box is None and pads:
             # compute_footprint_bbox_local, NOT max(global_x) - min(global_x).
             # The pad-CENTRE span omits the pads' own size, so a two-pad part
             # measures ZERO width along its pad axis: esp_prog C1 (an 0603)
@@ -365,9 +380,6 @@ def parts_section(pcb, pcb_file, skipped):
             # board -- a number grow_board's utilisation is computed from.
             box = compute_footprint_bbox_local(fp)
             src = 'pad_bbox'
-        else:
-            box = None
-            src = 'none'
         if box is None:
             w = h = 0.0
             rect = None
@@ -899,7 +911,13 @@ def format_text(b):
         c = db.get('counts') or {}
         L.append(f"  design brief {os.path.basename(db['path'])}: "
                  f"{c.get('interfaces', 0)} interface(s), "
-                 f"{c.get('keepouts', 0)} keep-out(s)")
+                 f"{c.get('keepouts', 0)} keep-out(s)"
+                 # #902. Appended only when there are any, so a brief that
+                 # declares none reads exactly as it did before -- and always
+                 # when there are, because a declared claim nobody prints is
+                 # one the reader has no way to know was ever made.
+                 + (f", {c['proximity']} proximity row(s)"
+                    if c.get('proximity') else ''))
         # Unknowns first: an unknown is the thing an author must go resolve.
         for k in (db.get('unknown') or ()):
             L.append(f"  !! design brief UNKNOWN: {k}")

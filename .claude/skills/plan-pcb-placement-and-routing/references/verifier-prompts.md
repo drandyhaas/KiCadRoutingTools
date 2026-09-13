@@ -4,6 +4,13 @@ Fan these out **in one response**, each handed only its slice. **Never hand a
 verifier the raw `.kicad_pcb`** — it is 100k+ lines of s-expressions and the
 verifier will skim it and guess.
 
+**And never as a `fork`** (#890). The same rule, applied to the agent type: a
+fork inherits the parent's entire transcript, which is the largest slice there
+is and includes the report these prompts end by telling the verifier not to
+trust. `loop_driver.py` forks the two working halves and pins the end-to-end
+verifier to a fresh `claude` in both `--delegate-mode` arms; that asymmetry is
+deliberate, and it is written here so the next reader does not "fix" it.
+
 Every verifier ends with exactly one line:
 
 ```
@@ -16,9 +23,19 @@ is the delivery channel and the driver asks for it that way, but a reply is a
 notification and notifications get lost: run 23's connectivity and drc lens
 verdicts never reached the parent — it waited on them, was nudged, and had to
 re-derive both lenses inline, which the copy on disk would have made
-unnecessary. Put it beside the round's other artifacts, named for the lens. A
-verdict you cannot produce afterwards is a finding about the verifier, not a
-reason to assume PASS.
+unnecessary. A verdict you cannot produce afterwards is a finding about the
+verifier, not a reason to assume PASS.
+
+**The name is `verdict_<lens>.txt`, beside the ledger** — `verdict_spec.txt`,
+`verdict_drc.txt`, `verdict_connectivity.txt`, and `verdict_record.txt` for the
+9.4b boundary verification. "Beside the round's other artifacts, named for the
+lens" was the whole instruction for two runs, and an unnamed file is a file
+nothing reads: one run invented `verify/VERDICT.txt`, and the close-out that
+was meant to quote it retyped the line from a reply instead. The loop driver
+prints these paths, cycle-suffixed, from the ledger's own directory; the
+close-out reads them with `converge.py record --lens-file`, which stores each
+file's path and sha256 in the row. One file per lens, the `VERDICT=` line
+FIRST in it and nothing above.
 
 `evidence=` must point into the round's own files — `wk/place.log#JSON_SUMMARY.
 crossings_after`, `wk/intent.json#/violations/3`, `wk/view/board_F.png@112.4,63.1`.
@@ -52,9 +69,15 @@ a clean-looking report.
 
 **1. `intent`** — given `intent.json`, `intent_result.json`, the front panel.
 > Does this board honour the declared floorplan? Report every `violations[]`
-> entry with its `measured` vs `expected`. Check `rules_run` and
-> `rules_skipped`: if `rules_run` is 0 this is a vacuous pass and you must FAIL
-> it. You may not conclude anything about DRC or connectivity.
+> entry with its `measured` vs `expected`. Then check CLAUSE COVERAGE, which
+> is a different question from the rule count: read `brief_coverage` and FAIL
+> if any clause the design brief declared is `uncovered` or `abstained`, or if
+> one is `drifted` -- graded, but not against what the brief says. `rules_run`
+> counts RULES: one run graded six of them, passed, and measured not one
+> clause its brief declared. `rules_run: 0` is still a vacuous pass and still a
+> FAIL, as the floor beneath that. A clause the author wrote `"unknown"`, and
+> one this toolchain carries by design, are NOT findings. You may not conclude
+> anything about DRC or connectivity.
 
 **2. `legality`** — given `view.log`'s JSON, both side panels.
 > Did legality regress? Compare `overlap_area` and `oob_count`/`oob_amount`
@@ -70,8 +93,12 @@ a clean-looking report.
 > assembly channel's blocking pairs did not rise, or the result is
 > discarded. `crossings` is REPORTED, never gated: it correlates POSITIVELY
 > with distance-to-truth (r = +0.78 -- that is DISTANCE, not routed
-> `blocking`; no predictor here has been correlated with `blocking`, see
-> `docs/placement-predictors.md`), so a verifier failing a placement on
+> `blocking`. #703 HAS since measured crossings against routed `blocking`:
+> it fails its sign rule 5/1 on the full sample and passes 6/0 once
+> optimizer-made placements are excluded, so neither arm is the answer and
+> the prohibition still rests on the distance measurement -- see
+> `docs/placement-predictors.md`, which is the authority), so a verifier
+> failing a placement on
 > it rejects exactly the correct homecomings. Then intersect `moved[].reference` with the advisor's
 > high-confidence findings and with `locked_refs`: any overlap is a FAIL.
 > **Do not judge by how much moved** — "lots moved, looks broken" and "barely
@@ -153,15 +180,31 @@ VERDICT=FAIL:lens=drc;finding=8 vias below the 0.6 mm spec on B.Cu;
   evidence=wk/score.json#/components/undersized/by_type/via-size;route=Step 2
 ```
 
-1. **Record the verdict with `converge.py record --lens`**, passing the
-   `VERDICT=` line verbatim — as the verifier returned it, or from its copy on
-   disk, never as one you remember — (repeatable; stored raw as
-   `entry["lenses"]`). It
+1. **Record the verdict with `converge.py record --lens-file`**, passing the
+   PATH of the file the verifier wrote — never a line you retyped from a reply,
+   and on a `--final` row never a bare `--lens` at all, which converge refuses
+   for connectivity, drc and spec. The row then stores that file's path and
+   sha256 (`entry["lens_source"]`, parallel to `entry["lenses"]`), so it says
+   which artifact it is quoting. A line pasted from a reply is a claim about
+   the run; a line read from the verifier's file is a claim about a file.
+   `--lens` remains for laps, whose lenses are working notes. It
    refuses at write time anything that is not a `VERDICT=(PASS|FAIL):lens=…`
    line, so a malformed verdict stays visible instead of being normalised into
-   something that reads like a pass — and `--final` refuses without all three
-   routed-board lenses, because `blocking == 0` and "every lens passes" are two
-   different claims and only the first had a number.
+   something that reads like a pass — and `--final --kind completion` refuses
+   without all three routed-board lenses, because `blocking == 0` and "every
+   lens passes" are two different claims and only the first had a number.
+
+   THE GATE IS COMPLETION-ONLY, and deliberately so — it is a claim about the
+   ROUTED BOARD (`py_placer/converge.py`, the `a.final and a.kind ==
+   'completion'` branch). A `--final --kind systemic` row is NOT refused.
+
+   That is a HOLE, not a route: nothing prescribes such a row. L5 emits
+   `--kind completion --final` for EVERY verdict name, `DONE-EXHAUSTED`
+   included, with all three `--lens-file` paths; and its `--exhausted`
+   declaration is a SEPARATE `--kind systemic` row carrying no `--final` at
+   all. So the only way to reach a `--final` row the gate does not check is
+   to hand-write one. Do not read "`--final` refuses" as unconditional —
+   read the kind.
 
    *(This used to say the record schema had no verdict field and to put it in
    free-text `--lever`. That was documenting a gap, not a design constraint —
@@ -177,8 +220,9 @@ Two failure modes to refuse by name:
   warnings" describes a board that did not pass. Either fix it, or report it as
   not done.
 - **Do not accept a lens that passed vacuously.** A lens whose inputs were empty
-  has not verified anything; that is why lens 1 must FAIL on `rules_run == 0` and
-  lens 9 must report `ungraded` as a finding.
+  has not verified anything; that is why lens 1 must FAIL on any declared brief
+  clause reported `uncovered` or `abstained` (and on `rules_run == 0` beneath
+  that), and lens 9 must report `ungraded` as a finding.
 
 **Stop condition 4 is the exception, and it is the only one.** A requirement that
 is geometrically unsatisfiable does not get more iterations — it gets a
@@ -231,7 +275,8 @@ Prompt skeleton (fill the <>):
 > FAIL); [4] every number in the claim traces to a field in an artifact
 > you hold; failing nets must be NAMED, not counted. Reply with exactly
 > one line: VERDICT=PASS or
-> VERDICT=FAIL:check=<1-4>;finding=<one line>;evidence=<path#pointer>.
+> VERDICT=FAIL:check=<1-5>;finding=<one line>;evidence=<path#pointer>,
+> written to `verdict_record.txt` beside the ledger before you answer.
 > Report the single most damning finding.
 
 Rules of engagement, mirrored from 9.4b:
@@ -252,7 +297,9 @@ Rules of engagement, mirrored from 9.4b:
 
 At any placement-phase or fix-loop boundary the verifier's input set grows
 by the fresh `check_assembly --json` output (and the render JSON's
-`checklist.b_body_overlap_pairs`). FAIL unless: `blocking == 0`;
+`checklist.b_body_overlap_pairs`). FAIL unless: `buildable` is `true`
+(NOT `blocking == 0` -- that scalar is 1 of check_assembly's 5
+`not_buildable` conjuncts, #918);
 `b_body_overlap_pairs` is `[]`; every `new_advisory_pairs` entry (the
 --baseline delta -- the loop currency) is fixed or dispositioned in the
 ledger entry. An operator claim of "placement done" with no check_assembly

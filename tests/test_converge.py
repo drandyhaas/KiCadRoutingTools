@@ -44,6 +44,29 @@ def _cv(args, **kw):
                           errors='replace', cwd=ROOT, **kw)
 
 
+def _lens_files(td, **verdicts):
+    """--lens-file flags for the routed-board lenses, written to `td` (#904).
+
+    A `--final --kind completion` row may not carry a BARE `--lens` for
+    connectivity, drc or spec: a close-out is the terminal record, nothing
+    reopens a ledger, and a line retyped from a reply is a claim about the run
+    where the row could carry a claim about a file. So every close-out arm in
+    this file writes the verdict where the verifier is already required to
+    write it (references/verifier-prompts.md) and passes the path.
+
+    Defaults to a clean PASS for all three; name a lens to override, e.g.
+    `_lens_files(td, drc='VERDICT=FAIL:lens=drc;finding=short;evidence=x')`.
+    """
+    out = []
+    for lens in ('connectivity', 'drc', 'spec'):
+        line = verdicts.get(lens, f'VERDICT=PASS:lens={lens}')
+        p = os.path.join(td, f'verdict_{lens}.txt')
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write(line + '\n')
+        out += ['--lens-file', p]
+    return out
+
+
 # ------------------------------------------------------------ rip invariants
 
 def test_rip_invariants_catch_all_four_traps():
@@ -171,20 +194,29 @@ def test_record_final_requires_stop_condition():
         # `blocking == 0` and "every lens passes" are two different claims and
         # only the first ever had a number, so a close-out could be written
         # with no lens dispatched at all.
+        # #901: the stop condition is a TOKEN and is checked on EVERY record,
+        # not only when a lens failed. This arm used to pass the bare prose
+        # 'plateau: 3 iterations, no new copper' and assert it round-tripped
+        # into the row -- i.e. it pinned the bug. The plateau IS stop condition
+        # 3 (convergence.md S3), and the prose is now its reason.
+        STOP = '3: plateau, 3 iterations, no new copper'
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
-                 '--stop-condition', 'plateau: 3 iterations, no new copper'])
+                 '--stop-condition', STOP])
         assert r.returncode == 2 and 'routed-board lenses' in r.stderr, r.stderr
         assert not os.path.exists(led), "nothing may be written on refusal"
-        lenses = ['--lens', 'VERDICT=PASS:lens=connectivity',
-                  '--lens', 'VERDICT=PASS:lens=drc',
-                  '--lens', 'VERDICT=PASS:lens=spec']
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
-                 '--stop-condition', 'plateau: 3 iterations, no new copper']
-                + lenses)
+                 '--stop-condition', 'plateau: 3 iterations, no new copper'])
+        assert r.returncode == 2 and 'stop condition' in r.stderr, r.stderr
+        assert not os.path.exists(led), "nothing may be written on refusal"
+        lenses = _lens_files(td)
+        r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
+                 '--stop-condition', STOP] + lenses)
         assert r.returncode == 0, r.stderr
         e = json.loads(r.stdout)
         assert e.get('final') is True
-        assert e.get('stop_condition', '').startswith('plateau')
+        assert e.get('stop_condition') == '3', e.get('stop_condition')
+        assert e.get('stop_reason') == 'plateau, 3 iterations, no new copper', \
+            e.get('stop_reason')
         assert len(e.get('lenses') or []) == 3, e.get('lenses')
     print("  PASS: --final without --stop-condition is refused; with it, recorded")
 
@@ -199,10 +231,9 @@ def test_record_final_wants_the_lens_verdicts():
         assert r.returncode == 2 and 'verbatim' in r.stderr, r.stderr
         assert not os.path.exists(led), "nothing may be written on refusal"
 
-        base = ['record', '--ledger', led, '--board', BOARD, '--final',
-                '--lens', 'VERDICT=PASS:lens=connectivity',
-                '--lens', 'VERDICT=FAIL:lens=drc;finding=short;evidence=x',
-                '--lens', 'VERDICT=PASS:lens=spec']
+        base = (['record', '--ledger', led, '--board', BOARD, '--final']
+                + _lens_files(
+                    td, drc='VERDICT=FAIL:lens=drc;finding=short;evidence=x'))
         r = _cv(base + ['--stop-condition', '1'])
         assert r.returncode == 2 and 'lens FAILED' in r.stderr, r.stderr
         r = _cv(base + ['--stop-condition', '4'])
@@ -232,12 +263,9 @@ def test_record_refuses_a_lens_verdict_its_own_score_contradicts():
         run17 = sc({'blocking': 79, 'quality': {},
                     'blocking_by': {'unrouted': 32, 'broken': 47, 'drc': 0,
                                     'undersized': 0}}, 's.json')
-        final = ['record', '--ledger', led, '--board', BOARD, '--final',
-                 '--kind', 'completion', '--stop-condition', '1',
-                 '--score-file', run17,
-                 '--lens', 'VERDICT=PASS:lens=connectivity',
-                 '--lens', 'VERDICT=PASS:lens=drc',
-                 '--lens', 'VERDICT=PASS:lens=spec']
+        final = (['record', '--ledger', led, '--board', BOARD, '--final',
+                  '--kind', 'completion', '--stop-condition', '1',
+                  '--score-file', run17] + _lens_files(td))
         r = _cv(final)
         assert r.returncode == 2, (r.returncode, r.stdout[:400])
         assert 'CONTRADICTS' in r.stderr, r.stderr
@@ -250,11 +278,10 @@ def test_record_refuses_a_lens_verdict_its_own_score_contradicts():
         # unfixable and said so).
         r = _cv(['record', '--ledger', led, '--board', BOARD, '--final',
                  '--kind', 'completion', '--stop-condition', '4',
-                 '--score-file', run17,
-                 '--lens', 'VERDICT=FAIL:lens=connectivity;finding=32 nets '
-                           'carry no copper;evidence=score.json#/blocking_by',
-                 '--lens', 'VERDICT=PASS:lens=drc',
-                 '--lens', 'VERDICT=PASS:lens=spec'])
+                 '--score-file', run17]
+                + _lens_files(td, connectivity=(
+                    'VERDICT=FAIL:lens=connectivity;finding=32 nets carry no '
+                    'copper;evidence=score.json#/blocking_by')))
         assert r.returncode == 0, r.stderr
 
         # CONSERVATIVE: an UNGRADED component is not a contradiction. This is
@@ -391,6 +418,155 @@ def test_a_half_can_declare_itself_exhausted_on_the_record():
         assert doc['routing'].get('declared_superseded'), doc['routing']
     print("  PASS: a half can be declared exhausted, with a reason, and a "
           "later lap retracts it")
+
+
+def test_a_score_that_measured_nothing_is_reported_not_raised():
+    """#936 D1. `verdict --score` on a document whose `blocking` is null.
+
+    `_score_key` returns None for `blocking is None` deliberately -- its own
+    comment says an unmeasured lap must not rank as `inf`, because `inf >= inf`
+    made the plateau test TRUE and an unmeasured lap then read as a plateaued
+    one. It also says "the callers already filter None". The ledger-row caller
+    does; the `--score` caller did not, so `blocking = key[0]` raised
+    `TypeError: 'NoneType' object is not subscriptable` -- on exactly the input
+    the docstring is written for.
+
+    `blocking: null` is what board_score emits when a component that was ASKED
+    for could not answer. The verdict must name the missing measurement and
+    must NOT be a verdict about the board.
+
+    THE LEDGER HERE IS PLATEAUED ON PURPOSE -- five recorded laps in each half
+    at an identical score. A bare `key[0] if key else None` guard is the weaker
+    fix this test exists to reject, and on a ONE-LAP ledger it is
+    indistinguishable from the real one: both halves report `too-few-laps`, so
+    execution reaches CONTINUE either way and only the exit code differs. Only
+    on a plateaued ledger does the bare guard fall past `elif blocking == 0`
+    into the terminal branch and print
+    `STUCK: blocking == None and neither half improved in its last 5 recorded
+    laps`, which reads as a measurement of a board nothing measured. Measured
+    with the bare guard substituted: verdict STUCK, exit 5.
+
+    `'DONE' not in stdout` would be a tautology (a null `blocking` can never
+    satisfy `elif blocking == 0`), so the assertion below is on the verdict
+    NAME, which is the thing a caller reads -- loop_driver's L5 branches on it
+    and discards the exit code entirely.
+
+    _score_key returns None for three distinct documents. Each gets its own
+    sentence, and the "a component could not answer" cause is asserted only
+    when the score itself names one in `unknown` -- publishing an unmeasured
+    cause is the defect this whole issue is about.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        led = os.path.join(td, 'l.jsonl')
+        flat = json.dumps({'blocking': 3, 'quality': {}})
+        for half, n in (('placement', 5), ('completion', 5)):
+            for i in range(n):
+                assert _cv(['record', '--ledger', led, '--board', BOARD,
+                            '--kind', half, '--lever', f'{half} lap {i}',
+                            '--score', flat]).returncode == 0
+
+        p = os.path.join(td, 'null.json')
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'quality': {},
+                       'ungraded': ['length'], 'unknown': ['impedance']}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', p])
+        assert 'Traceback' not in r.stderr, r.stderr
+        doc = json.loads(r.stdout)
+        # The half that matters: NOT a verdict about the board. This is what
+        # the bare guard fails -- it says STUCK here.
+        assert doc['verdict'] == 'NO-SCORE', doc
+        assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+        assert 'could not answer (impedance)' in doc['reason'], doc['reason']
+        assert doc['unknown'] == ['impedance'], doc
+        assert doc['ungraded'] == ['length'], doc
+
+        # ...and with nothing named in `unknown`, the cause is NOT asserted.
+        p2 = os.path.join(td, 'null2.json')
+        with open(p2, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'quality': {}}, fh)
+        why = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', p2]).stdout)['reason']
+        assert 'nothing measured it' in why and 'could not answer' not in why, why
+
+        # The other two None-shaped documents get their OWN sentences, because
+        # a missing key and a null value are not the same fact.
+        for doc_in, phrase in (
+                ([1, 2], 'is a list, not an object'),
+                ({'quality': {}}, 'no `blocking` key at all'),
+                (None, 'holds the JSON document `null`')):
+            q = os.path.join(td, 'shape.json')
+            with open(q, 'w', encoding='utf-8') as fh:
+                json.dump(doc_in, fh)
+            r = _cv(['verdict', '--ledger', led, '--score', q])
+            assert r.returncode == 2 and 'Traceback' not in r.stderr, r.stderr
+            got = json.loads(r.stdout)
+            assert got['verdict'] == 'NO-SCORE', got
+            assert phrase in got['reason'], (phrase, got['reason'])
+            # ONE shape for every NO-SCORE document: a consumer reading
+            # doc['ungraded'] must not KeyError on half of them.
+            assert 'ungraded' in got and 'unknown' in got, got
+
+        # Reading a MALFORMED score must not be the thing that raises: this is
+        # the crash class the guard exists to remove, and `sorted(x or [])`
+        # reintroduces it one line inside the fix.
+        bad = os.path.join(td, 'badungraded.json')
+        with open(bad, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'ungraded': 5}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', bad])
+        assert r.returncode == 2 and 'Traceback' not in r.stderr, r.stderr
+        assert json.loads(r.stdout)['ungraded'] == ['<not a list: 5>'], r.stdout
+
+        # ...and the cause is claimed ONLY when the score names one as a LIST.
+        # `{"unknown": "impedance"}` is not a component that answered; saying
+        # so would be publishing an unmeasured cause.
+        us = os.path.join(td, 'unknown_str.json')
+        with open(us, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': None, 'unknown': 'impedance'}, fh)
+        why = json.loads(_cv(['verdict', '--ledger', led,
+                              '--score', us]).stdout)['reason']
+        assert 'could not answer' not in why, why
+
+        # `quality` IS NOT NECESSARILY A DICT. This raised AttributeError in
+        # _score_key -- the same crash class, in the same function, one line
+        # above the guard added for it -- and `record` accepts such a score, so
+        # the raising value lands in the LEDGER and every later verdict on that
+        # ledger tracebacks in the row comprehension whatever `--score` says.
+        ql = os.path.join(td, 'quality_list.json')
+        with open(ql, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 1, 'quality': [1, 2]}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', ql])
+        assert 'Traceback' not in r.stderr, r.stderr
+        assert json.loads(r.stdout)['verdict'] != 'NO-SCORE', r.stdout
+
+        poison = os.path.join(td, 'poison.jsonl')
+        assert _cv(['record', '--ledger', poison, '--board', BOARD, '--kind',
+                    'placement', '--lever', 'malformed quality',
+                    '--score', json.dumps({'blocking': 1, 'quality': [1, 2]})]
+                   ).returncode == 0, 'record accepts it, which is the problem'
+        good = os.path.join(td, 'good.json')
+        with open(good, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 0, 'quality': {'vias': 1, 'copper_mm': 2,
+                                                  'segments': 3}}, fh)
+        r = _cv(['verdict', '--ledger', poison, '--score', good])
+        assert 'Traceback' not in r.stderr, \
+            'one malformed ledger row must not break every later verdict'
+
+        # ...and a score that DID measure still gets a real verdict, so the
+        # guard is not a blanket refusal.
+        ok = os.path.join(td, 'ok.json')
+        with open(ok, 'w', encoding='utf-8') as fh:
+            json.dump({'blocking': 0, 'quality': {'vias': 1, 'copper_mm': 2,
+                                                  'segments': 3}}, fh)
+        r = _cv(['verdict', '--ledger', led, '--score', ok])
+        assert r.returncode in (converge.CONTINUE, converge.DONE,
+                                converge.STUCK, converge.BUDGET), r.returncode
+        assert json.loads(r.stdout)['verdict'] != 'NO-SCORE', r.stdout
+        # 2 is not one of the four verdict codes, so a caller switching on the
+        # exit cannot mistake "nothing measured" for a verdict about a board.
+        assert 2 not in (converge.CONTINUE, converge.DONE, converge.STUCK,
+                         converge.BUDGET)
+    print("  PASS: a null `blocking` is reported as NO-SCORE, not raised, "
+          "and not graded as STUCK on a plateaued ledger")
 
 
 def test_two_scores_that_graded_different_components_do_not_compare():
@@ -822,27 +998,42 @@ def test_l5_printed_final_command_runs_as_printed():
               {'unrouted': 0, 'broken': 0, 'drc': 3, 'undersized': 0}}
 
     def run_as_printed(name, lens_by_name, score_doc, led):
-        score = os.path.join(os.path.dirname(led), 'score.json')
+        work = os.path.dirname(led)
+        score = os.path.join(work, 'score.json')
         with open(score, 'w', encoding='utf-8') as f:
             json.dump(score_doc, f)
+        # The paths the driver would resolve from --ledger, passed in the same
+        # shape `l5` passes them, so this test executes the command the stage
+        # really prints rather than a reconstruction of it.
+        verdicts = {f'verdict_{lens}.txt':
+                    os.path.join(work, f'verdict_{lens}.txt').replace('\\', '/')
+                    for lens in lens_by_name}
         text = final_record_command(led.replace('\\', '/'),
                                     BOARD.replace('\\', '/'),
-                                    score.replace('\\', '/'), name)
+                                    score.replace('\\', '/'), name,
+                                    verdicts)
         toks = shlex.split(text.replace('\\\n', ' '))
         assert toks[0] == 'python3' and toks[3] == 'py_placer/converge.py', \
             toks[:4]
         toks[0] = sys.executable
-        # The three placeholder slots must be present AND recognisable -- if
-        # the driver's wording drifts, fail here rather than silently testing
-        # a different command than the one printed.
-        subst = {f'<the {lens} VERDICT= line, verbatim>': line
-                 for lens, line in lens_by_name.items()}
+        # The three slots must be present AND be the paths the driver named --
+        # if its wording drifts, fail here rather than silently testing a
+        # different command than the one printed. #904: these are --lens-file
+        # slots now, so the verdict is WRITTEN where the printed command says
+        # the verifier put it, and converge reads it from there.
         hit = 0
         for i, t in enumerate(toks):
-            if t in subst:
-                toks[i] = subst[t]
+            if t == '--lens-file':
+                path = toks[i + 1]
+                lens = os.path.basename(path)[len('verdict_'):-len('.txt')]
+                assert lens in lens_by_name, (lens, path)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(lens_by_name[lens] + '\n')
                 hit += 1
-        assert hit == 3, f'expected 3 lens placeholders, found {hit}: {toks}'
+        assert hit == 3, f'expected 3 --lens-file slots, found {hit}: {toks}'
+        assert '--lens' not in toks, (
+            'a bare --lens on a close-out is refused by converge; the printed '
+            'command must not offer one')
         ia = toks.index('--argv')
         toks = toks[:ia + 1] + [sys.executable, '-c', 'pass']
         return subprocess.run(toks, capture_output=True, text=True,

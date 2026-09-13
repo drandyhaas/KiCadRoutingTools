@@ -28,6 +28,11 @@ There is deliberately NO exit code for "the board is too small". A gate that
 refuses on this would refuse boards that route fine -- the area test is a
 necessary condition, not a sufficient one -- and the executor decides.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse

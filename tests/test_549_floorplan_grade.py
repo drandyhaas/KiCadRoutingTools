@@ -491,14 +491,98 @@ def test_oob_area_is_refused_as_a_budget_because_it_is_cutout_blind():
 
 
 def test_a_legality_budget_bites_when_exceeded():
+    """Two arms, because one used to hide the other: ulx3s's emitted intent
+    DECLARES its overhanging parts as edge connectors, so with the exemption
+    the `oob_count` arm no longer fires and the old single assertion would
+    have passed on `overlap_area` alone."""
     raw = _emit()
     raw['legality_budget'] = {'overlap_area': 0.0, 'oob_count': 0}
+    n_conn = len(raw['edge_connectors'])
+    assert n_conn, "ulx3s has overhanging parts and none were recorded"
+    # (a) declared: the overlap arm bites, the outline arm is exempt by name,
+    #     and the raw count stays the optimizer's own beside the exemption.
     r = _graded(raw)
-    hits = [v for v in r.violations if v.rule == 'legality']
-    # ulx3s has real overhanging connectors, so a zero budget must catch them.
-    assert hits, "a zero legality budget caught nothing on ulx3s"
-    print(f"  PASS: {len(hits)} budget violation(s): "
-          f"{[v.message[:52] for v in hits]}")
+    hits = {v.expected and next(iter(v.expected)): v
+            for v in r.violations if v.rule == 'legality'}
+    assert 'overlap_area' in hits, "a zero overlap budget caught nothing on ulx3s"
+    assert 'oob_count' not in hits, \
+        f"declared edge connectors still counted: {hits['oob_count'].message}"
+    assert r.legality['oob_count_exempt'] == n_conn, r.legality
+    assert r.legality['oob_count'] == n_conn, \
+        "the raw oob_count must stay the optimizer's own number"
+    # (b) undeclared: the same parts are off the board and nothing vouches for
+    #     them, so a zero budget must catch every one.
+    raw['edge_connectors'] = []
+    r2 = _graded(raw)
+    oob = [v for v in r2.violations if v.rule == 'legality'
+           and 'oob_count' in v.expected]
+    assert len(oob) == 1 and oob[0].measured['oob_count'] == n_conn, \
+        [v.message for v in oob]
+    assert r2.legality['oob_count_exempt'] == 0
+    print(f"  PASS: overlap bites either way; oob_count {n_conn} exempt when "
+          f"declared, {n_conn} counted when not")
+
+
+def test_declared_edge_connectors_within_band_are_not_oob():
+    """The promise in rule_edge_connector's docstring, kept: a declared edge
+    connector inside its own overhang band leaves `oob_count` before the
+    budget sees it. Outside the band it stays counted AND the edge rule names
+    it (two rules, one fact); an entry with no `max` exempts nothing."""
+    raw = _emit()
+    raw['legality_budget'] = {'oob_count': 0}
+    conns = raw['edge_connectors']
+    assert not [v for v in _graded(raw).violations if v.rule == 'legality'], \
+        "a zero oob budget fired on parts the intent declares off the board"
+    # Tighten one band to nothing: that part is outside it now.
+    ref = conns[0]['ref']
+    conns[0]['overhang_mm'] = {'min': 0.0, 'max': 0.0}
+    r = _graded(raw)
+    leg = [v for v in r.violations if v.rule == 'legality']
+    edge = [v for v in r.violations if v.rule == 'edge_connector' and v.ref == ref]
+    assert len(leg) == 1 and leg[0].measured['oob_count'] == 1, \
+        [v.message for v in leg]
+    assert ref not in leg[0].measured['exempt'], leg[0].measured
+    assert edge, f"{ref} outside its band was not named by edge_connector"
+    assert r.legality['oob_count_exempt'] == len(conns) - 1
+    # No max at all: an unbounded band vouches for nothing.
+    conns[0]['overhang_mm'] = {'min': 0.0}
+    r = _graded(raw)
+    leg = [v for v in r.violations if v.rule == 'legality']
+    assert len(leg) == 1 and leg[0].measured['oob_count'] == 1, \
+        [v.message for v in leg]
+    print(f"  PASS: {len(conns)} declared parts exempt; one pushed outside its "
+          f"band (and one with no max) is counted and named")
+
+
+def test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_connectors():
+    """The facing criterion as a rule: a three-pin row 1 mm from the edge with
+    every partner behind it is ONE warn (never an error -- the reviewer
+    disposes), a declared edge connector on the same edge is not named, and
+    with no `edge_connectors` declared the rule abstains as 'not asked'."""
+    import tempfile as _tf
+    sys.path.insert(0, os.path.join(ROOT, 'tests'))
+    from test_894_placement_terms import _EDGE_BOARD
+    with _tf.TemporaryDirectory(prefix='t549e_') as tmp:
+        board = os.path.join(tmp, 'edge.kicad_pcb')
+        with open(board, 'w', encoding='utf-8') as fh:
+            fh.write(_EDGE_BOARD % '')
+        raw = {'schema': 1, 'kind': 'floorplan-intent', 'units': 'mm',
+               'edge_connectors': [{'ref': 'J1', 'class': 'edge_receptacle',
+                                    'edge': 'north',
+                                    'overhang_mm': {'min': 0.0, 'max': 0.5}}]}
+        r = _graded(raw, path=board)
+        hits = [v for v in r.violations if v.rule == 'pins_to_edge']
+        assert [v.ref for v in hits] == ['U2'], [v.message for v in hits]
+        assert hits[0].severity == 'warn' and hits[0].measured['pads_to_edge'] == 3
+        assert hits[0].measured['faces'] == ['north'], hits[0].measured
+        assert r.passed, "a WARN must not fail the grade"
+        assert 'pins_to_edge' in r.rules_run
+        raw['edge_connectors'] = []
+        r2 = _graded(raw, path=board)
+        assert 'pins_to_edge' in r2.rules_skipped, r2.rules_skipped
+        assert not [v for v in r2.violations if v.rule == 'pins_to_edge']
+    print("  PASS: one WARN naming U2 (3 pads, north); J1 excluded; skipped "
+          "without edge_connectors")
 
 
 def test_the_envelope_rule_refuses_to_licence_a_resize():
@@ -679,6 +763,8 @@ TESTS = [
     test_legality_numbers_are_the_optimizers_own,
     test_oob_area_is_refused_as_a_budget_because_it_is_cutout_blind,
     test_a_legality_budget_bites_when_exceeded,
+    test_declared_edge_connectors_within_band_are_not_oob,
+    test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_connectors,
     test_the_envelope_rule_refuses_to_licence_a_resize,
     test_emit_never_claims_a_zone_it_cannot_defend,
     test_emit_records_the_overhanging_parts_as_edge_connectors,

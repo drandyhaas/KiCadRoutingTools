@@ -20,3 +20,42 @@ shapely>=1.8.0
 # macOS-only: lets the spawned plugin process become the frontmost app so
 # the wx dialog opens in front of KiCad instead of behind it.
 pyobjc-framework-Cocoa; sys_platform == 'darwin'
+
+# Rasterization: board stills, review sheets, the routing movie and the film.
+# Listed because a fresh clone that followed the README could not render
+# anything without it -- but it is the RASTER path and nothing else, so its
+# absence DISABLES rendering rather than stopping anything (#943).
+#
+# ONE file imports it at module scope: py_router/route_render.py, which is the
+# raster stack and nothing else, and which calls
+# `startup_checks.check_render_dependencies` first so the message is the
+# actionable one. py_tools/render_placement.py used to be the second, and its
+# import moved into the five functions that DRAW because that module also holds
+# PlacementModel / legality_findings, which py_tools/board_context.py and the
+# stress predictors import to GRADE a placement and draw nothing.
+#
+# Routing does not touch it, and neither does the GUI plugin. On this branch
+# there is no `deps_check` (main's OPTIONAL_PACKAGES lives in the SWIG entry
+# point, deleted by the port) -- KiCad provisions the venv from this file, so
+# Pillow is simply present; if a hand-made venv lacks it, the movie checkbox
+# and the placement preview turn themselves off rather than raising a dialog
+# nobody can dismiss (#943).
+#
+# The floor is deliberately LOW: everything the renderer needs (alpha_composite,
+# LANCZOS, ImageChops, PngInfo) is far older than this, and a low floor keeps
+# older environments working. Captions want more: route_render.load_font asks
+# for a SIZED default font, ImageFont.load_default(size=), which arrived in
+# Pillow 10.1.0 -- below that its try/except falls back to the unsized default
+# and labels come out small but present. So 10.1 is the version to have, not the
+# version to require.
+#
+# (A previous comment here put load_default(size=) at 9.2. That is wrong -- it
+# is 10.1.0 -- and the error is worth naming because it was pinned INTO a
+# dependency declaration, where "the version at which the intended path works"
+# would then have been false.)
+Pillow>=9.2.0
+
+# NOT listed, deliberately: imageio and imageio-ffmpeg. They are needed only to
+# write .mp4, they are imported inside a function, and their absence is AUDIBLE
+# -- animate_route prints "mp4 unavailable (...); falling back to GIF" and
+# writes a sibling .gif. For mp4:  pip install imageio imageio-ffmpeg

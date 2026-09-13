@@ -1004,10 +1004,16 @@ with tempfile.TemporaryDirectory() as wd:
     _real_trade = seeder._evict_trade
     fired = {'n': 0}
 
+    # **kwargs, not a fixed tail: this double shadows `_evict_trade`, so its
+    # signature is a second copy of that function's and drifts the moment the
+    # real one grows a parameter. #893 added `rot_ladder=` and this stub raised
+    # TypeError -- a test failing because the test is stale, which reads as a
+    # regression in the code under test. Forwarding whatever it is given keeps
+    # the double honest without pinning it to today's argument list.
     def _stacking_trade(state, ref, blockers, tx, ty, constraint, tol,
-                        blocker_zones, placed, unplaced):
+                        blocker_zones, placed, unplaced, **kw):
         rec = _real_trade(state, ref, blockers, tx, ty, constraint, tol,
-                          blocker_zones, placed, unplaced)
+                          blocker_zones, placed, unplaced, **kw)
         if rec['accepted']:
             fired['n'] += 1
             pr = state.parts[ref]

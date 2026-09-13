@@ -40,142 +40,37 @@ because `run_all.py`'s glob only collects `tests/test_*.py`.
 
     python3 -X utf8 tests/gui_parity/test_726_gui_sync.py
 """
-import glob
-import os
-import subprocess
+
+# ---------------------------------------------------------------------------
+# NOT RUNNABLE ON ipc-migration, and it says so rather than dying on an import.
+#
+# `gui_utils.sync_footprint_positions_from_board` and `live_footprints_by_key`
+# are SWIG live-board helpers: they walk a `pcbnew.BOARD` and refresh a cached
+# PCBData from it. The IPC port deleted both -- the plan executor re-reads the
+# board through `kicad_ipc_adapter` between steps instead, so there is no
+# cached model to refresh and no live pcbnew footprint to match.
+#
+# Left in place, this file imported those names and died with an ImportError.
+# That is the failure mode CLAUDE.md names explicitly: a test that dies before
+# it tests anything exits the same way a satisfied guard does, so a run of the
+# gui_parity directory would report a #726 gate that ran and could not have.
+#
+# WHERE THE COVERAGE WENT. Nothing on this branch matches a live footprint to a
+# cached one by reference, so there is no mutation of the defect to make. What
+# does exist is the KEYING that made the defect possible, and that is graded by
+# `tests/test_726_kipy_reference_keys.py` on `kipy_raw_references` --
+# in-process, no KiCad. `tests/mutate_726.py` records the same thing at the row
+# level: its `gui-sync-matches-by-bare-reference` row is deliberately absent,
+# with the reason.
+#
+# Restore this file WITH the function if a live-board position sync ever comes
+# back; the three properties its docstring above enumerates are what it must
+# pin.
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-KICAD_PYTHONS = [
-    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
-    "/usr/bin/python3",
-    os.path.expandvars(r"C:\Program Files\KiCad\bin\python.exe"),
-    *sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"), reverse=True),
-]
-
-#: A board with two blocks sharing a reference AND pads on both, so a swapped
-#: pose is measurable. watchy's TP4/TP5 are real test points 15-18 mm apart.
-BOARD = os.path.join(REPO, 'kicad_files', 'watchy.kicad_pcb')
-DUP = 'TP4'
-
-TOL = 1e-6
-
-FAILURES = []
-
-
-def check(cond, what, detail=''):
-    if cond:
-        print('  ok    %s' % what)
-    else:
-        print('  FAIL  %s%s' % (what, ('  -- ' + detail) if detail else ''))
-        FAILURES.append(what)
-
-
-def _reexec_into_kicad():
-    for cand in KICAD_PYTHONS:
-        if cand == sys.executable or not os.path.exists(cand):
-            continue
-        if subprocess.run([cand, '-c', 'import pcbnew'],
-                          capture_output=True).returncode == 0:
-            argv = [cand, '-X', 'utf8', os.path.abspath(__file__)] + sys.argv[1:]
-            if os.name == 'nt':
-                # os.execv re-splits argv on spaces through the CRT on Windows.
-                sys.exit(subprocess.run(argv).returncode)
-            os.execv(cand, argv)
-    print("SKIP: no python with pcbnew found")
-    sys.exit(0)
-
-
-def _snapshot(pcb):
-    return {k: (round(f.x, 6), round(f.y, 6), round(f.rotation or 0.0, 6),
-                tuple(sorted((round(p.global_x, 6), round(p.global_y, 6))
-                             for p in f.pads)))
-            for k, f in pcb.footprints.items()}
-
-
-def main():
-    try:
-        import pcbnew  # noqa: F401
-    except ImportError:
-        _reexec_into_kicad()
-
-    import pcbnew
-    for _p in ('', 'py_router', 'py_placer', 'py_tools',
-               'kicad_routing_plugin'):
-        _d = os.path.join(REPO, _p)
-        if _d not in sys.path:
-            sys.path.insert(0, _d)
-    from kicad_parser import parse_kicad_pcb, mm_to_iu
-    from gui_utils import (sync_footprint_positions_from_board,
-                           live_footprints_by_key)
-
-    if not os.path.exists(BOARD):
-        print('SKIP: %s not found' % BOARD)
-        return 0
-    print('KiCad build: %s' % pcbnew.GetBuildVersion())
-
-    pcb = parse_kicad_pcb(BOARD)
-    twins = sorted(k for k in pcb.footprints if k.startswith(DUP))
-    check(len(twins) == 2,
-          'the fixture board still carries two %s blocks -- if it stops, this '
-          'gate is vacuous, so REPLACE the board rather than deleting the arm'
-          % DUP, str(twins))
-    if len(twins) != 2:
-        return 1
-    a, b = twins
-
-    board = pcbnew.LoadBoard(BOARD)
-    live = live_footprints_by_key(board)
-    check(set(live) >= set(twins),
-          'live_footprints_by_key resolves both twins',
-          str(sorted(set(twins) - set(live))))
-    check(live[a].m_Uuid.AsString() == pcb.footprints[a].uuid
-          and live[b].m_Uuid.AsString() == pcb.footprints[b].uuid,
-          'and each key names the SAME physical footprint as the parsed model')
-
-    # --- 1. a no-op sync is a true no-op ---
-    before = _snapshot(pcb)
-    n = sync_footprint_positions_from_board(board, pcb)
-    after = _snapshot(pcb)
-    check(n > 0, 'the sync ran (it is best-effort and never raises)', str(n))
-    drift = {k: (before[k], after[k]) for k in before if before[k] != after[k]}
-    check(not drift,
-          'a no-op sync moves NOTHING, on a board with duplicate references',
-          str(list(drift.items())[:2]))
-
-    # --- 2 & 3. a real move reaches the block it was made on ---
-    pcb2 = parse_kicad_pcb(BOARD)
-    base = _snapshot(pcb2)
-    board2 = pcbnew.LoadBoard(BOARD)
-    live2 = live_footprints_by_key(board2)
-    fp = live2[b]
-    old = fp.GetPosition()
-    fp.SetPosition(pcbnew.VECTOR2I(old.x + mm_to_iu(4.0),
-                                   old.y + mm_to_iu(3.0)))
-    sync_footprint_positions_from_board(board2, pcb2)
-    now = _snapshot(pcb2)
-
-    check(abs(now[b][0] - (base[b][0] + 4.0)) < 1e-3
-          and abs(now[b][1] - (base[b][1] + 3.0)) < 1e-3,
-          '%s picks up the move that was made ON %s' % (b, b),
-          '%s -> %s' % (base[b][:2], now[b][:2]))
-    check(now[a][:3] == base[a][:3],
-          '%s is untouched -- under a bare GetReference() lookup it acquires '
-          "%s's pose instead" % (a, b),
-          '%s -> %s' % (base[a][:3], now[a][:3]))
-    check(now[a][3] == base[a][3],
-          "%s's PADS are untouched too (the router's copper obstacles)" % a)
-    check(now[b][3] != base[b][3],
-          "%s's pads followed its footprint" % b)
-    others = [k for k in base if k not in (a, b) and base[k] != now[k]]
-    check(not others, 'and no unrelated part moved', str(others[:4]))
-
-    print('\n%d failure(s)' % len(FAILURES))
-    for f in FAILURES:
-        print('  FAILED: %s' % f)
-    return 1 if FAILURES else 0
-
-
 if __name__ == '__main__':
-    sys.exit(main())
+    print("SKIP: gui_utils.sync_footprint_positions_from_board does not exist "
+          "on ipc-migration (the IPC port removed the live-board position "
+          "sync). The keying half of #726 is graded by "
+          "tests/test_726_kipy_reference_keys.py.")
+    sys.exit(77)

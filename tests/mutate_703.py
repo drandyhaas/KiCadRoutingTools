@@ -78,10 +78,18 @@ _TIE_SCAN = (
     "            j += 1\n"
     "        avg = (i + j) / 2.0 + 1\n")
 
+# DISAMBIGUATED (#877). `89bd8a29` ("#789: the arithmetic -- Kendall tau-b in
+# rank_stats, and its self-test") added `board_tau` as a near-copy of
+# `board_rho`, so this block occurs TWICE. `replace(..., 1)` would still have
+# hit the `board_rho` copy -- it is first in the file -- but only by luck of
+# ordering, and the battery's own exactly-once check reported BROKEN. The
+# trailing line is board_rho's alone (`board_tau` tests both columns in one
+# `or`), so the quote names the site the row is about.
 _DROP_NULL = (
     "        if p is None or d is None:\n"
     "            dropped += 1\n"
-    "            continue\n")
+    "            continue\n"
+    "        if isinstance(p, float) and p != p:\n")
 
 _MAPPING_GUARD = (
     "    if not isinstance(rhos_by_board, Mapping):\n"
@@ -181,9 +189,18 @@ ROWS = [
      (T703,), 'KILLED'),
 
     # ---- the formatter that cannot emit a bare rho -------------------------
+    # DISAMBIGUATED (#877), with `fmt-rho-hides-a-missing-span` below. `fmt_tau`
+    # is a near-copy of `fmt_rho` and carries the same two `span` lines, so both
+    # rows quoted a string that occurs TWICE. The `rho=n/a` prefix belongs to
+    # `fmt_rho` alone and names the function each row is about; the mutations
+    # are unchanged.
     ('fmt-rho-drops-the-LOO-span', 'rs',
+     "        return f'rho=n/a [{reason or \"not measurable\"}' + (\n"
+     "            f', K={k}]' if k is not None else ']')\n"
      "    span = (f'LOO {fmt(lo, 0)}..{fmt(hi, 0)}' if lo == lo and hi == hi\n"
      "            else 'LOO not computed')\n",
+     "        return f'rho=n/a [{reason or \"not measurable\"}' + (\n"
+     "            f', K={k}]' if k is not None else ']')\n"
      "    span = ''\n",
      (T703,), 'KILLED'),
 
@@ -201,7 +218,8 @@ ROWS = [
     ('board-rho-coerces-a-null-to-zero', 'rs',
      _DROP_NULL,
      "        if p is None or d is None:\n"
-     "            p, d = (p or 0), (d or 0)\n",
+     "            p, d = (p or 0), (d or 0)\n"
+     "        if isinstance(p, float) and p != p:\n",
      (T703,), 'KILLED'),
 
     # ---- the anti-pooling guard, EXECUTED --------------------------------
@@ -236,7 +254,13 @@ ROWS = [
 
     # ---- renderings that misreport their own scope -------------------------
     ('fmt-rho-hides-a-missing-span', 'rs',
+     "        return f'rho=n/a [{reason or \"not measurable\"}' + (\n"
+     "            f', K={k}]' if k is not None else ']')\n"
+     "    span = (f'LOO {fmt(lo, 0)}..{fmt(hi, 0)}' if lo == lo and hi == hi\n"
      "            else 'LOO not computed')\n",
+     "        return f'rho=n/a [{reason or \"not measurable\"}' + (\n"
+     "            f', K={k}]' if k is not None else ']')\n"
+     "    span = (f'LOO {fmt(lo, 0)}..{fmt(hi, 0)}' if lo == lo and hi == hi\n"
      "            else '')\n",
      (T703,), 'KILLED'),
 
@@ -303,6 +327,12 @@ ROWS = [
      "def fmt(x: Optional[float], w: int = 8) -> str:\n",
      (T703,), 'SURVIVED'),
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
 
 
 def _uncache(path):

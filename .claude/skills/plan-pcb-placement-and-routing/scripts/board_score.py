@@ -31,7 +31,7 @@ disconnected net with a lower via count::
 
     score = (blocking, quality)
     blocking = (unrouted + broken + drc + undersized + floorplan
-               + impedance + length + net_widths)
+               + assembly + impedance + length + net_widths)
     quality  = (vias, copper_mm, segments)      # only compared once blocking == 0
 
 `blocking` must reach 0 before a board is deliverable. `quality` orders the
@@ -51,6 +51,11 @@ Exit codes (deliberately the same dialect as check_floorplan.py)
     3  board state (missing file, unparseable board)
     4  graded, blocking > 0
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'instrument'}
+
 import argparse
 import json
 import os
@@ -181,7 +186,7 @@ def _unescape_net_name(s: str) -> str:
 # reading the JSON, and that is who got this wrong.
 POURED_NETS_MEANING = (
     'nets with at least one zone on the board, i.e. a broken one of these is '
-    "route_disconnected_planes' job rather than route.py's. This is NOT a list "
+    "repair_planes.py's job rather than route.py's. This is NOT a list "
     'of plane/power nets and is NOT a safe --ignore-nets population: a board '
     'that pours signal nets puts them in here too (measured: 332 of 545 pads).')
 
@@ -229,7 +234,7 @@ def score_connectivity(root: str, board: str) -> dict:
     #
     # The pad REF matters as much as the count. A break whose stranded pad sits on
     # a do-not-fit part is not a functional defect and must not be chased forever;
-    # a break on a plane net wants route_disconnected_planes, not route.py. The
+    # a break on a plane net wants repair_planes.py, not route.py. The
     # ref is what lets the caller tell those apart.
     detail, cur = {}, None
     for line in out.splitlines():
@@ -249,10 +254,10 @@ def score_connectivity(root: str, board: str) -> dict:
     # NAME THE TOOL, not just the defect. Which step fixes a break is decided by
     # ONE fact the board already carries: is the net POURED? A stranded pad on a
     # plane net cannot be reached by route.py at all -- it needs a tap via, which
-    # is route_disconnected_planes' job -- and a run that reaches for route.py on
+    # is repair_planes.py's job -- and a run that reaches for route.py on
     # everything watches the count sit still. Measured: `broken` held at 14 across
     # two iterations of route.py calls, then fell to 11 in ONE
-    # route_disconnected_planes call once the plane nets were separated out.
+    # repair_planes.py call once the plane nets were separated out.
     #
     # Poured-ness is read off the board's own zones, so this is a fact and not a
     # guess. Everything else is `route`; the DNF case stays a human call, which is
@@ -292,7 +297,7 @@ def score_connectivity(root: str, board: str) -> dict:
     except OSError:
         pass
     for name, v in detail.items():
-        v['handler'] = ('route_disconnected_planes' if name in poured
+        v['handler'] = ('repair_planes' if name in poured
                         else 'route')
 
     return {'ran': True, 'count': int(m.group(1)), 'unrouted': unrouted,
@@ -348,14 +353,171 @@ def unrouted_shape(board: str, unrouted_names) -> dict:
             'open': sorted(open_nets)}
 
 
+#: check_assembly's five `not_buildable` conjuncts, by the JSON key each one
+#: publishes (check_assembly.py:508-510). `blocking` -- pad INTERSECTIONS -- is
+#: the first of them and is the only one this component used to read (#918).
+#:
+#: THEY ARE NOT DISJOINT AND THEY ARE NOT ONE CURRENCY, which is why `count`
+#: below does not add them up:
+#:
+#:   * `locked_contacts` is a strict SUBSET of `blocking`. `locked_ref` is set
+#:     at exactly one site, inside the pad-intersection channel, so every
+#:     locked-contact pair is already a blocking pair --
+#:     `tests/test_run8_locked_contact.py` asserts in so many words that it is
+#:     "a second channel, not a re-count".
+#:   * `coincident_origins` counts GROUPS, not pairs: an N-part stack is one
+#:     group and N(N-1)/2 potential pairs.
+#:   * `containment_blocking` counts `fab`-kind pairs, a different geometry
+#:     channel from `blocking`'s pad intersections -- but routinely the SAME
+#:     ref pair. Measured on a perturbed corpus board, 3 of 11 containments
+#:     named a pair already in `blocking`; on the fixture
+#:     `tests/test_918_assembly_verdict.py` builds, one stacked-capacitor
+#:     defect appears as a group AND as a containment.
+#:
+#: `courtyard_blocking_gating` is null here BY CONSTRUCTION: it is the
+#: moved-vs-baseline subset of the courtyard census, and board_score passes no
+#: --baseline, so check_assembly publishes null rather than 0. Reported as
+#: unmeasured, never counted as clean.
+ASSEMBLY_CONJUNCTS = ('blocking', 'locked_contacts', 'coincident_origins',
+                      'containment_blocking', 'courtyard_blocking_gating')
+
+#: The conjuncts that can ACTUALLY flip the verdict while `blocking` is 0, in
+#: this scorer's invocation. Two, not four:
+#:   * `locked_contacts` cannot -- it is a subset of `blocking` (above), so a
+#:     locked contact implies `blocking >= 1` and the board never had 0;
+#:   * `courtyard_blocking_gating` cannot -- it is `[]` unless `--baseline` was
+#:     passed, and board_score never passes one.
+#: Written down because the issue, and this file's first draft, claimed all
+#: four -- and a motivating case that cannot occur is not a motivating case.
+ASSEMBLY_LIVE_CONJUNCTS = ('coincident_origins', 'containment_blocking')
+
+
+def assembly_component(doc: dict, rc: int) -> dict:
+    """check_assembly's VERDICT, not one of its five conjuncts (#918).
+
+    `not_buildable` is `blocking or locked_contact or stack_groups or
+    containment_blocking or courtyard_gating`. This component read `blocking`
+    ALONE, so a board unbuildable through a coincident-origin stack or a
+    containment contributed 0 to `blocking` -- the headline the whole loop
+    ranks and stops on. check_assembly publishes `buildable` and `verdict` for
+    exactly this reader, and the comment above them names this defect verbatim,
+    so the verdict is READ here and the disjunction is never re-derived.
+
+    `count` IS `blocking`, floored at 1 when the verdict says NOT BUILDABLE.
+    It is deliberately NOT the sum of the conjuncts, and that was the first
+    draft's bug: `locked_contacts` is a subset of `blocking` and
+    `containment_blocking` routinely names a ref pair already in it, so adding
+    them counts one defect twice (measured on a perturbed corpus board: the
+    sum reported 44 where there were 38 distinct defective ref pairs and 30
+    pad intersections; and 2 on the stacked-capacitor fixture in
+    `tests/test_918_assembly_verdict.py`, where one defect appears as a group
+    AND as a containment). And they are not one currency -- pairs, a subset of
+    those pairs, and GROUPS -- so their total is a number with no unit.
+
+    The floor of 1 is therefore the whole mechanism, not a safety net: it says
+    "this board is not buildable" without inventing a magnitude. All five
+    conjuncts are published in `conjuncts` for a reader who wants to know
+    WHICH fired, and `count_basis` names how `count` was reached, so the
+    number is falsifiable from its own payload.
+
+    Two refusals rather than a quiet answer:
+
+      * no `buildable` key -- an older check_assembly is a DIFFERENT
+        instrument, and re-deriving the conjunction from whatever keys it did
+        publish is the exact thing this change removes;
+      * the exit code and the verdict DISAGREE (rc 4 with buildable true, rc 0
+        with buildable false) -- the instrument contradicting itself, which is
+        never a number to report. This is the self-check
+        tests/test_board_score_floorplan_severity.py ends on, from the other
+        side: there the scorer had to agree with the grader, here the grader
+        has to agree with itself before the scorer will read it.
+
+    Pure, so both arms are unit-testable without a board.
+    """
+    buildable = doc.get('buildable')
+    if not isinstance(buildable, bool):
+        return skipped(
+            "check_assembly published no `buildable` key: `blocking` alone is "
+            "1 of its 5 not_buildable conjuncts (check_assembly.py:508-510), "
+            "and this component will not re-derive the other four")
+    if (rc == 4) != (not buildable):
+        return skipped(
+            f"check_assembly contradicts itself: exit {rc} with "
+            f"buildable={buildable!r} (it exits 4 exactly when the verdict is "
+            f"NOT BUILDABLE). Reporting either number would be reporting an "
+            f"instrument that disagrees with itself")
+    conjuncts = {k: doc.get(k) for k in ASSEMBLY_CONJUNCTS}
+    measured = {k: v for k, v in conjuncts.items()
+                if isinstance(v, int) and not isinstance(v, bool)}
+    unmeasured = sorted(k for k in conjuncts if k not in measured)
+    blocking = int(doc.get('blocking') or 0)
+    fired = sorted(k for k, v in measured.items() if v and k != 'blocking')
+    if buildable:
+        count, basis = blocking, 'blocking (buildable)'
+    elif blocking:
+        count = blocking
+        basis = (f'blocking ({blocking}); NOT BUILDABLE, and the conjuncts are '
+                 f'not summed -- they overlap and are not one currency'
+                 + (f' (also fired: {", ".join(fired)})' if fired else ''))
+    else:
+        # THE case this component exists for: NOT BUILDABLE at blocking 0.
+        count = 1
+        basis = ('1: NOT BUILDABLE with blocking 0, so the verdict rests '
+                 'entirely on '
+                 + (', '.join(fired) if fired else
+                    'a conjunct this scorer cannot see')
+                 + '. One, not a sum: the conjuncts overlap (locked_contacts '
+                   'is a subset of blocking; a containment routinely names a '
+                   'pair already in it) and are not one currency (pairs vs '
+                   'GROUPS), so their total has no unit')
+    # WHICH conjuncts can actually reach this branch, so a reader is not sent
+    # looking for a case that cannot happen.
+    live = [k for k in ASSEMBLY_LIVE_CONJUNCTS if measured.get(k)]
+    # `courtyard_gating_basis` is the producer's own word for whether conjunct
+    # 5 was armed. READ it rather than asserting it: this function is public
+    # and pure, so it can legitimately be handed a document produced WITH
+    # --baseline, and a payload whose thesis is "not measured must never read
+    # as measured" must not hardcode an armedness it never measured.
+    _cg_basis = doc.get('courtyard_gating_basis')
+    return {'ran': True, 'count': count, 'count_basis': basis,
+            'buildable': buildable, 'verdict': doc.get('verdict'),
+            'conjuncts': conjuncts,
+            'conjuncts_unmeasured': unmeasured,
+            'conjuncts_fired': fired,
+            'live_conjuncts_fired': live,
+            'courtyard_gating_armed':
+                isinstance(conjuncts['courtyard_blocking_gating'], int),
+            'courtyard_gating_basis': _cg_basis,
+            'courtyard_gating_reason': (
+                None if isinstance(conjuncts['courtyard_blocking_gating'], int)
+                else 'no --baseline was passed, so check_assembly\'s fifth '
+                     'conjunct (moved-vs-baseline courtyard interpenetration) '
+                     'is unarmed and publishes null. board_score never passes '
+                     'one, so it is unarmed on every board this scorer grades'),
+            'advisory_pairs': int(doc.get('advisory') or 0),
+            'waived_pairs': int(doc.get('waived') or 0),
+            'pairs': doc.get('blocking_pairs') or [],
+            'locked_contact_pairs': doc.get('locked_contact_pairs') or [],
+            'coincident_origin_groups': doc.get('coincident_origin_groups') or [],
+            'containments': doc.get('containments') or []}
+
+
 def score_assembly(root: str, board: str, intent: str, tmp: str,
                    clearance=None) -> dict:
     """Blocking BODY pairs (run-6): two footprints' pad copper in the same
     space -- physically unbuildable, invisible to every copper checker (the
     shipped C14-on-R14 stack). Runs check_assembly.py, which needs NO
     intent to be meaningful (--intent only adds authored waivers), so this
-    component ALWAYS grades -- the floorplan path can be vacuous by
-    self-blessed budget; this one cannot."""
+    component grades on every board that the tool can read -- the floorplan
+    path can be vacuous by self-blessed budget; this one cannot.
+
+    It is no longer unconditional, and the exception is deliberate: an older
+    check_assembly that publishes no `buildable`, or one whose exit code and
+    verdict disagree, is REFUSED by `assembly_component` and lands in
+    `ungraded`. A different instrument reporting a number this scorer would
+    have to re-derive is not a measurement (#918).
+
+    Runs the tool; `assembly_component` reads its document (#918)."""
     out = os.path.join(tmp, 'assembly.json')
     args = [board, '--json', out]
     if intent:
@@ -378,10 +540,7 @@ def score_assembly(root: str, board: str, intent: str, tmp: str,
             doc = json.load(f)
     except Exception as exc:
         return skipped(f'check_assembly json unreadable: {exc}')
-    return {'ran': True, 'count': int(doc.get('blocking') or 0),
-            'advisory_pairs': int(doc.get('advisory') or 0),
-            'waived_pairs': int(doc.get('waived') or 0),
-            'pairs': doc.get('blocking_pairs') or []}
+    return assembly_component(doc, rc)
 
 
 def score_drc(root: str, board: str, clearance=None, sizes=None) -> tuple:
@@ -805,12 +964,66 @@ def quality(board: str) -> dict:
         from kicad_parser import parse_kicad_pcb
         import math
         pcb = parse_kicad_pcb(board)
+        # ROUTED copper only (#908). A footprint's own drawn copper -- a SOT89
+        # tab, a PCB antenna -- parses as `graphic=True` Segments, and it is
+        # identical in every candidate placement of the same board: counting
+        # it adds a constant to `copper_mm` and, worse, makes a copper-FREE
+        # board look like it has a quality key that can rank. A board carrying
+        # a meander antenna can reach dozens of such segments with not one
+        # routed track on it.
+        segs = [s for s in pcb.segments if not getattr(s, 'graphic', False)]
         mm = sum(math.dist((s.start_x, s.start_y), (s.end_x, s.end_y))
-                 for s in pcb.segments)
+                 for s in segs)
         return {'vias': len(pcb.vias), 'copper_mm': round(mm, 2),
-                'segments': len(pcb.segments)}
+                'segments': len(segs)}
     except Exception as e:
         return {'error': str(e)}
+
+
+def score_placement(root: str, board: str, tmp: str, intent: str = '',
+                    parent: dict = None) -> dict:
+    """Placement quality for a copper-free lap (#894). REPORT-ONLY.
+
+    NOT in `parts`, so not in `blocking`, not in `blocking_by`, not in
+    `ungraded`, not in `unknown`, and it cannot move the exit code. Three
+    reasons, and the first is the one to read: its terms are millimetres and
+    counts in four different currencies, and `blocking` is a sum. Adding
+    metres of pair length to a violation count produces a number with no unit.
+    The second is that `parts` is AST-scraped by
+    `tests/test_904_lens_components_cover_blocking.py`, which would then
+    demand a verifier lens for a component no lens grades. The third is that
+    keeping it out leaves every existing ledger's `blocking` untouched.
+
+    Run as a SUBPROCESS, like every other component here (see this module's
+    header): `placement_score` builds a quench state that PRINTS to stdout,
+    and this script's stdout carries `SCORE_JSON=` which every consumer parses
+    whole. The tool takes `--json`, so nothing of its own reaches this stream.
+    """
+    out = os.path.join(tmp, 'placement.json')
+    args = [board, '--json', out]
+    if intent:
+        args += ['--intent', intent]
+    rc, text = run_tool(root, 'placement_score.py', *args)
+    if rc != 0 or not os.path.exists(out):
+        return skipped(f'placement_score rc {rc}: {text.strip()[-200:]}')
+    try:
+        with open(out, encoding='utf-8') as f:
+            doc = json.load(f)
+    except Exception as exc:                                 # noqa: BLE001
+        return skipped(f'placement_score json unreadable: {exc}')
+    if parent is not None:
+        try:
+            sys.path.insert(0, os.path.join(root, 'py_placer'))
+            import placement_score as _ps
+            verdict, detail = _ps.compare_terms(
+                (parent.get('placement') or {}).get('terms'), doc['terms'])
+            doc['vs_parent'] = {
+                'verdict': verdict, 'terms': detail,
+                'board_sha': parent.get('board_sha'),
+                'label': parent.get('label')}
+        except Exception as exc:                             # noqa: BLE001
+            doc['vs_parent'] = {'error': f'{type(exc).__name__}: {exc}'}
+    return doc
 
 
 def build_parser():
@@ -848,8 +1061,24 @@ def build_parser():
                         'USB pair, 0.4mm rails) is invisible to it. First '
                         'matching glob wins')
     p.add_argument('--length-groups', metavar='JSON',
-                   help='{"group": {"nets": [...], "tolerance_mm": 0.1, '
-                        '"mode": "pin_pair"}} -- enables the length component')
+                   help='JSON FILE of {"group": {"nets": [...], '
+                        '"tolerance_mm": 0.1, "mode": "pin_pair"}} -- enables '
+                        'the length component. A PATH, like --net-min-widths: '
+                        'anything that is not an existing file leaves length '
+                        'matching UNGRADED (ran: false) and the board scoring '
+                        'exit 0, which reads as a pass')
+    p.add_argument('--placement-terms', action='store_true',
+                   help='grade the PLACEMENT terms (#894): worst diff-pair '
+                        'span, crossed pin orders, cluster distance, plane-cut '
+                        'proxy, pad-area balance. REPORT-ONLY -- never in '
+                        '`blocking`, never in the exit code. On a copper-free '
+                        'board `quality` is (0, 0.0, 0) for every placement, '
+                        'so this is the only thing that can rank two of them. '
+                        'Opt-in because it builds a quench state')
+    p.add_argument('--parent-score', metavar='PATH',
+                   help="the parent lap's board_score JSON. Each placement "
+                        "term is then reported raw AND as a delta against it. "
+                        "Ignored without --placement-terms")
     p.add_argument('--json', metavar='PATH', help='write the full score here')
     p.add_argument('--label', default='', help='free text carried into the JSON '
                                                '(the ledger uses it for the lever)')
@@ -889,6 +1118,18 @@ def main():
         imped = score_impedance(root, args.board, _imp_nets, tmp)
         length = score_length(args.board, args.length_groups)
         net_widths = score_net_widths(args.board, args.net_min_widths)
+        placement = None
+        if args.placement_terms:
+            _parent = None
+            if args.parent_score:
+                try:
+                    with open(args.parent_score, encoding='utf-8') as _f:
+                        _parent = json.load(_f)
+                except Exception as _exc:                    # noqa: BLE001
+                    print(f'--parent-score unreadable, so no delta is '
+                          f'reported: {_exc}', file=sys.stderr)
+            placement = score_placement(root, args.board, tmp, args.intent,
+                                        _parent)
 
     # Both connectivity components carry their work list, not just their count --
     # see score_connectivity. `unrouted` needs names; `broken` needs names, piece
@@ -937,6 +1178,10 @@ def main():
              'advisory': {k: v.get('count') for k, v in advisory.items()},
              'ungraded': sorted(k for k, v in parts.items() if v.get('ran') is False),
              'unknown': sorted(unknown), 'quality': quality(args.board),
+             # BESIDE `quality`, never inside `parts` -- see score_placement.
+             # Absent entirely without the flag, so a payload that carries the
+             # key is one that asked for it.
+             **({'placement': placement} if placement is not None else {}),
              'components': {**parts, **advisory},
              'floors': _floors(args.board, sizes),
              'connectivity_nets': conn.get('nets', [])}
@@ -958,6 +1203,38 @@ def main():
     _adv_bits = ' '.join(f'{k}={v}' for k, v in score['advisory'].items() if v)
     if _adv_bits:
         print(f"ADVISORY (floor-governed, not blocking): {_adv_bits}")
+    # PLACEMENT terms, and the note when they are missing on a board where
+    # nothing else can rank a lap.
+    if placement is not None:
+        _pt = placement.get('terms') or {}
+        _bits = ' '.join(
+            f"{k}={_pt[k]['value']}" for k in (placement.get('term_order') or [])
+            if _pt.get(k, {}).get('value') is not None)
+        _ungraded = [k for k in (placement.get('term_order') or [])
+                     if _pt.get(k, {}).get('ran') is False]
+        # A plain variable, not a multi-line expression inside the f-string:
+        # that spelling is PEP 701 and a SyntaxError before Python 3.12, and
+        # README.md says 3.9+. It would have broken the whole scorer at import
+        # on a supported interpreter.
+        _summary = _bits or 'nothing measured'
+        print(f"PLACEMENT (report-only, not blocking): {_summary}")
+        if _ungraded:
+            print(f"  placement terms UNGRADED (not scored, not passed): "
+                  f"{', '.join(_ungraded)}")
+        _vs = placement.get('vs_parent') or {}
+        if _vs.get('terms'):
+            sys.path.insert(0, os.path.join(root, 'py_placer'))
+            try:
+                import placement_score as _ps
+                print(f"  vs parent: {_vs.get('verdict')} -- "
+                      f"{_ps.format_delta(_vs['terms'])}")
+            except Exception:                                # noqa: BLE001
+                pass
+    elif (score['quality'] or {}).get('segments') == 0:
+        print("DEGENERATE QUALITY KEY: this board carries 0 copper segments, "
+              "so `quality` is (0, 0.0, 0) on EVERY such board and cannot "
+              "rank two placements. Re-score with --placement-terms to get a "
+              "key the placement half can compare.")
     # WHICH LEVER. `unrouted` looks the same whether the router had a path and
     # missed it (parameter-shaped) or the net has fewer than 2 pads ON the
     # board (placement-shaped, and no router setting will ever fix it). The

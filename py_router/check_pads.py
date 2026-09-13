@@ -18,6 +18,10 @@ Exit code is the number of overlapping pairs (0 = clean), so it gates a pipeline
 
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing'], 'kind': 'instrument'}
+
 import argparse
 import math
 import sys

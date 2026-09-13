@@ -61,6 +61,7 @@ PLACEMENT_SUPPORTED_BACKENDS = ("claude",)
 # Driver stage ids -> human progress text ("which type of work"), from the two
 # skills' driver --list output (placement_driver.py P*, loop_driver.py L*).
 STAGE_LABELS = {
+    "P-brief": "P-brief: what the board is FOR",
     "P0": "P0 gate: should placement be touched",
     "P1": "P1 seeding an unplaced board",
     "P2": "P2 locking mechanical parts",
@@ -77,7 +78,17 @@ STAGE_LABELS = {
 }
 
 # Tolerates --stage P4 / --stage=P4 / --stage "P4" spellings.
-_STAGE_RE = re.compile(r"--stage[=\s]+[\"']?(P-close|P[0-6]|L[1-5])\b")
+#
+# EVERY id the two drivers register, or the GUI reports "working..." for a
+# stage that is running. P-brief was missing here for the same reason it was
+# missing from placement_driver --list (#936 C2): it is the one id that is
+# neither P<digit> nor P-close, so a hand-written tuple and this pattern
+# skipped it alike -- and it is the stage that records the declared design
+# brief (#711). tests/test_placement_run.py derives the expected set by
+# importing both drivers, so a new stage id fails there rather than degrading
+# to "working..." in the GUI.
+_STAGE_RE = re.compile(
+    r"--stage[=\s]+[\"']?(P-brief|P-close|P[0-6]|L[1-5])\b")
 
 
 def create_workdir(board_filename, mode):
@@ -318,6 +329,36 @@ _ARTIFACT_STAGES = (
 )
 
 
+def _row_label(row):
+    """What a ledger row DID, in one line. `converge.row_label` is the AUTHORITY.
+
+    The import is guarded the same way `SIBLING_EXTS` above is, and for the same
+    reason: this module runs inside KiCad's plugin loader, which does not put
+    py_placer on sys.path. The fallback below is a copy, and a copy is a thing
+    that drifts -- `tests/test_904_lens_file_binding.py` compares the two on the
+    same rows so it cannot drift silently.
+
+    What it fixes: `ledger_row.get("lever") or "?"` ended the ladder at the
+    first field, so an `--exhausted` declaration -- which has `lever: null` by
+    construction, its whole content being the reason a person wrote -- rendered
+    in the GUI as `lap 31: systemic/?`.
+    """
+    try:
+        from converge import row_label
+        return row_label(row)
+    except Exception:                                      # noqa: BLE001
+        lever = str(row.get("lever") or "").strip()
+        if lever:
+            return lever
+        dec = row.get("exhausted")
+        if isinstance(dec, dict) and str(dec.get("reason") or "").strip():
+            return "declared exhausted: " + str(dec["reason"]).strip()
+        stop = str(row.get("stop_condition") or "").strip()
+        if stop:
+            return "close-out: " + stop
+        return "(no lever recorded)"
+
+
 def derive_stage(transcript_tail, ledger_row, newest_artifact_name):
     """Best human answer to "what is it doing right now".
 
@@ -332,8 +373,7 @@ def derive_stage(transcript_tail, ledger_row, newest_artifact_name):
     if ledger_row:
         lap = ledger_row.get("iteration")
         kind = ledger_row.get("kind") or "?"
-        lever = ledger_row.get("lever") or "?"
-        return f"lap {lap}: {kind}/{lever}"
+        return f"lap {lap}: {kind}/{_row_label(ledger_row)}"
     if newest_artifact_name:
         for rx, fmt in _ARTIFACT_STAGES:
             m = rx.search(newest_artifact_name)

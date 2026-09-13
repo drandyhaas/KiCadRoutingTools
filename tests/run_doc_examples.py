@@ -62,9 +62,87 @@ def gridrouteconfig_undocumented_fields():
     return [f for f in fields if f not in documented]
 
 
+def untracked_boards(doc, block):
+    """Board paths an EXECUTED example cites that git does not track.
+
+    Running the block already catches a board that is absent -- but only on a
+    machine where it is absent. Four examples cited boards no checkout has
+    (`test_diffpair_ram`, `fanout_output`), and a fifth cited
+    `fanout_starting_point.kicad_pcb`, which is gitignored: it resolved on the
+    author's machine, where an earlier run had left one, and failed in every
+    clean checkout and on the Modal image. A doc example is read by people who
+    have only what they cloned, so "it runs here" is not the bar.
+
+    Scoped to `kicad_files/` on purpose. The wide scan is what keeps
+    `test_803_cited_paths_are_tracked` to `.md`: most other paths in these docs
+    are artifacts a run WRITES or placeholders (`path/to/file.kicad_pcb`), so
+    demanding they exist would be wrong. A `kicad_files/` path is neither --
+    it is an input the example opens.
+    """
+    cited = set(re.findall(r'kicad_files/[\w.-]+', block))
+    return sorted(c for c in cited if c not in TRACKED_BOARDS)
+
+
+def _tracked_boards():
+    r = subprocess.run(['git', 'ls-files', 'kicad_files'],
+                       capture_output=True, text=True, cwd=REPO_ROOT)
+    return set(r.stdout.split())
+
+
+TRACKED_BOARDS = _tracked_boards()
+
+
+def gridrouteconfig_stale_values():
+    """#923: the VALUES `docs/configuration.md` shows for that same dataclass.
+
+    Its field-parity sibling above holds the NAMES, so a new knob cannot ship
+    undocumented -- and the doc went on quoting `heuristic_weight: float = 1.9`
+    after #586 made it 2.3, `via_cost: int = 50` after it became 75, and four
+    more, because nothing held the numbers. A reader reasons from the number,
+    not from the field's presence.
+
+    Returns [(field, documented, real)], empty when they agree.
+    """
+    src = open(os.path.join(REPO_ROOT, 'py_router', 'routing_config.py'),
+               encoding='utf-8').read()
+    real = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ClassDef) and node.name == 'GridRouteConfig':
+            for s in node.body:
+                if (isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)
+                        and s.value is not None):
+                    try:
+                        real[s.target.id] = ast.literal_eval(s.value)
+                    except (ValueError, SyntaxError):
+                        pass                 # a field_factory or an expression
+    doc = open(os.path.join(REPO_ROOT, 'docs/configuration.md'),
+               encoding='utf-8').read()
+    out = []
+    for m in re.finditer(r'^\s{4}([a-z_]+):\s*(?:int|float|bool|str)\s*='
+                         r'\s*([^\s#]+)', doc, re.M):
+        name, shown = m.group(1), m.group(2).rstrip(',')
+        if name not in real:
+            continue
+        try:
+            value = ast.literal_eval(shown)
+        except (ValueError, SyntaxError):
+            continue
+        if value != real[name]:
+            out.append((name, value, real[name]))
+    return out
+
+
 def main():
     failures = []
     ran = skipped = 0
+
+    stale = gridrouteconfig_stale_values()
+    if stale:
+        failures.append('GridRouteConfig value parity')
+        print('FAIL docs/configuration.md quotes stale defaults: '
+              + ', '.join(f'{n} = {d!r} (real {r!r})' for n, d, r in stale))
+    else:
+        print('PASS GridRouteConfig value parity (docs/configuration.md)')
 
     undoc = gridrouteconfig_undocumented_fields()
     if undoc:
@@ -103,6 +181,13 @@ def main():
                 os.unlink(path)
             ran += 1
             tag = f'{doc} block {i}'
+            loose = untracked_boards(doc, block)
+            if loose:
+                failures.append(tag + ' (untracked board)')
+                print(f'FAIL {tag} cites a board git does not track: '
+                      + ', '.join(loose)
+                      + '\n     It may resolve here and in no clean checkout. '
+                        'Point the example at a tracked board.')
             if r.returncode != 0:
                 failures.append(tag)
                 print(f'FAIL {tag}\n{r.stderr}')

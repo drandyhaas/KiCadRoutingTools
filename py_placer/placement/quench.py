@@ -45,12 +45,14 @@ from connectivity import compute_mst_edges
 from placement.parser import (courtyard_for_side, extract_courtyard_sides,
                               extract_locked_refs, warn_missing_courtyards)
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
+from placement.pair_order import pair_inversions, ref_inversions
 from placement.board_grid import (describe as describe_lattice,
                                   resolve_snap_lattice)
 from placement import legality
 from placement.legality import (CONTAINER_RATIO, CONTAINMENT_FRAC,
                                 BoardOutlineGate, containment_frac,
                                 footprint_has_through_pads,
+                                through_pad_bounds_local,
                                 footprint_side, pair_min_gap, rect_gap,
                                 rect_overlap_area,
                                 rotate_local_bounds, sides_occupied)
@@ -574,56 +576,14 @@ def _count_crossings_within(a: np.ndarray,
     return half, weighted / 2.0
 
 
-def _through_pad_bounds_local(fp):
-    """Local bbox over a footprint's DRILLED pads, or None if it has none.
-
-    This is the footprint's footprint on the OPPOSITE board side: its body and
-    courtyard live on its own side, but its leads pass through, so a part on the
-    far side may not sit inside this box (#456 item 1). Deliberately the drill
-    hole's own extent rather than the pad copper's -- the far side sees the
-    barrel and the lead, and the annular ring on that side is part of it.
-    """
-    # `local_x/local_y` is the pad ANCHOR in the footprint's frame, and for a
-    # drilled pad the anchor IS the hole: kicad_parser records hole_x/hole_y as
-    # the pre-offset position and only then shifts global_x/global_y to the
-    # copper centre. So the hole needs no offset correction at all -- an earlier
-    # version "corrected" local_* by (hole - global), which is minus the offset,
-    # landing the box one full offset on the WRONG side of the hole.
-    #
-    # size_x/size_y are BOARD-axis resolved (kicad_parser swaps them for a pad at
-    # ~90 degrees), so they cannot be used as local half-extents directly -- that
-    # transposed the box on every 90/270-degree footprint (kit-dev SW_ONOFF201
-    # modelled 2.54 x 13.97 where the truth is 3.81 x 12.70, under-blocking
-    # 1.27mm). Project them through the pad's local tilt exactly as
-    # placement/utility.compute_footprint_bbox_local does.
-    xs, ys = [], []
-    for p in (fp.pads or []):
-        d = getattr(p, 'drill', 0) or 0
-        if d <= 0:
-            continue
-        local_tilt = math.radians((getattr(p, 'rect_rotation', 0.0) or 0.0)
-                                  + (fp.rotation or 0.0))
-        c, s = abs(math.cos(local_tilt)), abs(math.sin(local_tilt))
-        hx, hy = (getattr(p, 'size_x', 0) or 0) / 2.0, (getattr(p, 'size_y', 0) or 0) / 2.0
-        # An oval/slotted hole is bounded by the pad extent it sits in; taking
-        # the larger of drill radius and half pad size keeps a slot covered.
-        r = d / 2.0
-        rx = max(r, hx * c + hy * s)
-        ry = max(r, hx * s + hy * c)
-        xs += [p.local_x - rx, p.local_x + rx]
-        ys += [p.local_y - ry, p.local_y + ry]
-    if not xs:
-        return None
-    return (min(xs), min(ys), max(xs), max(ys))
-
-
 class _Part:
     __slots__ = ('ref', 'pads_local', 'pin_count', 'bounds_by_rot',
                  'seed_x', 'seed_y', 'x', 'y', 'rot', 'locked',
                  'nets', 'halo', 'footprint_name', 'orig_rot',
                  'side', 'has_tht', 'sides', 'tht_by_rot')
 
-    def __init__(self, ref, fp, courtyard_sides, locked, halo_base, halo_coef):
+    def __init__(self, ref, fp, courtyard_sides, locked, halo_base, halo_coef,
+                 body_local=None):
         self.ref = ref
         self.footprint_name = fp.footprint_name
         self.pads_local = [(p.local_x, p.local_y, p.net_id)
@@ -634,11 +594,29 @@ class _Part:
         self.side = footprint_side(fp)
         self.has_tht = footprint_has_through_pads(fp)
         self.sides = sides_occupied(self.side, self.has_tht)
-        lb = courtyard_for_side(courtyard_sides.get(ref), self.side)
+        # #916. `body_local` is `placement.body`'s `occupancy_local` for this
+        # ref, supplied by QuenchState under `body_model=True`. None keeps the
+        # inlined ladder below, which is what every caller got before #916 and
+        # what the default still gets -- so the OFF arm of the A/B is this
+        # file unchanged, not a re-derivation that happens to agree.
+        #
+        # OCCUPANCY, not the bare body, and not the drawn body: this rect is
+        # what `pose_ok`/`candidate_valid` seat against, i.e. "what does this
+        # part occupy". `legality.part_local_bounds` already answers the same
+        # question with `occupancy_local` (legality.py:1213-1216), so before
+        # this the GRADER and the ENFORCER measured different rectangles for
+        # the same part -- the grader courtyard-union-pads, the search bare
+        # courtyard or a pad box. `QuenchState.fab_rect` deliberately does NOT
+        # move: containment is a different question with a fab-only
+        # calibration, and its own docstring calls a courtyard-based
+        # containment test a false-veto machine.
+        lb = body_local
         if lb is None:
-            lb = compute_footprint_bbox_local(fp)
+            lb = courtyard_for_side(courtyard_sides.get(ref), self.side)
+            if lb is None:
+                lb = compute_footprint_bbox_local(fp)
         self.bounds_by_rot = {r: _rotate_local_bounds(*lb, r) for r in ROTATIONS}
-        tlb = _through_pad_bounds_local(fp) if self.has_tht else None
+        tlb = through_pad_bounds_local(fp) if self.has_tht else None
         self.tht_by_rot = ({r: _rotate_local_bounds(*tlb, r) for r in ROTATIONS}
                            if tlb is not None else None)
         # A non-90-degree seed rotation brings its WHOLE 90-degree lattice:
@@ -781,7 +759,29 @@ class QuenchState:
                  # same empty-by-default bit-identity, and the quench itself
                  # never passes it -- its zone_exclusive enforcement stays
                  # where #702 put it, in `intent_ok`.
-                 exclusive_zones: Optional[Sequence[Dict]] = None):
+                 exclusive_zones: Optional[Sequence[Dict]] = None,
+                 # --- #916. The SEARCH's body currency. APPENDED for the same
+                 # positional-binding reason as the #548 block above, and False
+                 # by default so this commit moves NO number: at False every
+                 # part takes the inlined courtyard-or-pad-box ladder it took
+                 # before, so the A/B's OFF arm is the old code rather than a
+                 # re-derivation that happens to agree. #896 wired every
+                 # GRADING consumer to `placement.body` and deliberately left
+                 # the search behind, because `pose_ok` reads these baked
+                 # bounds and so the change moves which BASIN the anneal lands
+                 # in -- an engine change owing its own A/B, which is what
+                 # flipping this default is gated on.
+                 body_model: bool = False,
+                 # --- #893 pin-order facing term. APPENDED for the same
+                 # positional-binding reason as the #548 block above, and 0.0
+                 # by default: see `_facing_cost` for why the default is a
+                 # measurement question and not timidity.
+                 facing_weight: float = 0.0,
+                 # --- #893 declared rotations, from the intent gate. APPENDED
+                 # for the same positional-binding reason as the #548 block
+                 # above, and empty by default so an undeclared board keeps the
+                 # full lattice and is bit-identical.
+                 declared_rotations: Optional[Dict] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -813,6 +813,23 @@ class QuenchState:
         self._fab_cache = {}
 
         courtyards = extract_courtyard_sides(pcb_file)
+        # #916. One read for the whole board when armed, never per part:
+        # `board_bodies` makes three regex passes over the file, and the
+        # seeder builds states repeatedly. `{}` when off, so `.get(ref)`
+        # below yields None and `_Part` keeps its own ladder.
+        self.body_model = bool(body_model)
+        self.facing_weight = facing_weight
+        #: #893. {ref: (rotation, candidates)} from the intent gate. Empty when
+        #: nothing is declared, and every consumer falls back to the lattice --
+        #: so a board with no declaration is bit-identical.
+        self.declared_rotations: Dict[str, object] = dict(
+            declared_rotations or {})
+        body_locals: Dict[str, object] = {}
+        if self.body_model:
+            from placement import body as _body
+            for _ref, _geom in _body.board_bodies(pcb_data, pcb_file).items():
+                if _geom.occupancy_local is not None:
+                    body_locals[_ref] = _geom.occupancy_local
         locked_refs = set(extract_locked_refs(pcb_file))
         if extra_locked_refs:
             locked_refs |= extra_locked_refs
@@ -830,7 +847,8 @@ class QuenchState:
                 # obstacles; without one there is no geometry to respect.
                 if ref in courtyards:
                     self.parts[ref] = _Part(ref, fp, courtyards, True,
-                                            halo_base, halo_coef)
+                                            halo_base, halo_coef,
+                                            body_locals.get(ref))
                 continue
             # #829: a footprint that draws part of the BOARD's own boundary is
             # never this tool's to move -- its pose transforms that Edge.Cuts
@@ -856,7 +874,8 @@ class QuenchState:
             if ref not in courtyards:
                 no_courtyard.append(ref)
             self.parts[ref] = _Part(ref, fp, courtyards, locked,
-                                    halo_base, halo_coef)
+                                    halo_base, halo_coef,
+                                    body_locals.get(ref))
             # A part with NO connected pins (mounting hole, NPTH, fiducial) is
             # invisible to the airwire cost -- only halo/edge decide where it
             # goes, which is how holes wander. Frozen by default; the caller
@@ -1194,6 +1213,69 @@ class QuenchState:
             d = self.align_radius
         return self.align_weight * d * d
 
+    def _facing_cost(self, ref, x=None, y=None, rot=None,
+                     exclude: Optional[Set[str]] = None) -> float:
+        """Price the pin-ORDER a pose forces (#893). Off at weight 0.0.
+
+        `pair_order.ref_inversions` -- the SAME lower bound
+        `placement_score.pin_order_crossings` reports, called rather than
+        re-derived. For each partner sharing >= 2 scoring nets, project both
+        parts' escape pads onto the channel cross-section and count order
+        inversions: in a two-sided channel each inverted pair must cross at
+        least once, so this is a floor on the crossings any router must pay.
+
+        WHY THIS IS NOT `_orient_cost`, which already "rewards a pose whose
+        pads FACE the nets they serve": that term is a DIRECTION, summed per
+        pad against a net centroid, and it is blind to ORDER. Two parts can
+        point their pads straight at each other and still have every net
+        crossed -- which is exactly run 5's U3, where rotating 180 degrees took
+        the same nets from 4/7 routed to 7/7 while the airwire lengths barely
+        moved. `_orient_cost` cannot see that; this can. They are complementary
+        and both are off by default.
+
+        WHY IT IS OFF BY DEFAULT, and why that is not timidity:
+        `pair_order`'s own header records the standing decision that these
+        metrics "deliberately do NOT join quench.total_cost", and
+        `docs/placement-optimization.md` is a file-length negative result about
+        adding proxies to this objective -- "proxy-routability correlation is
+        weak", "proxies propose, the router disposes". A lower bound is a
+        better citizen than a correlational proxy (improving it cannot be
+        gamed), but "better citizen" is an argument, not a measurement. The
+        weight is the way to MEASURE it; `tests/test_placement_ab.py` is the
+        way to decide it.
+
+        Cost: `ref_inversions` is ~150-800 us/call depending on the board even
+        after the #893 hot-path work, so this is the most expensive term in
+        `part_geometry_cost` by an order of magnitude. It returns before
+        touching anything at weight 0, so a default run pays nothing.
+        """
+        if self.facing_weight <= 0.0:
+            return 0.0
+        if exclude:
+            # NUDGE ONLY, and this is a correctness bound rather than a
+            # simplification. Inversions are a PAIR quantity evaluated against
+            # the partner's LIVE pose, so the two multi-part evaluators cannot
+            # price it:
+            #
+            # * the SWAP passes `exclude={partner}` to each half and adds the
+            #   a-b halo and align pairs back at the candidate poses (see the
+            #   add-back below the swap loop). There is no such add-back for a
+            #   term that needs BOTH parts moved at once, and scoring `a` at
+            #   its candidate against `b` still at its PRE-swap pose is simply
+            #   the wrong geometry.
+            # * the GROUP translate passes `exclude=members - {r}` precisely
+            #   because intra-group geometry is invariant under a rigid move.
+            #   Facing is not: `r` would be displaced while its in-group
+            #   partners are not, turning an invariant into a bias on block
+            #   moves.
+            #
+            # `exclude` is non-empty only on those two paths, so returning 0.0
+            # here leaves the single-part nudge -- where `ref_inversions` IS
+            # the exact delta -- as the only consumer, and leaves the group and
+            # swap objectives bit-identical to their unarmed selves.
+            return 0.0
+        return self.facing_weight * ref_inversions(self, ref, x, y, rot)
+
     def _align_cost(self, ref, rect, exclude: Optional[Set[str]] = None
                     ) -> float:
         if self.align_weight <= 0.0:
@@ -1432,6 +1514,14 @@ class QuenchState:
         # so a default run is bit-identical and pays nothing.
         pen += self._align_cost(ref, rect, exclude)
         pen += self._orient_cost(ref, x, y, rot)
+        # #893. Same hook, same contract: 0.0 before touching geometry when the
+        # weight is 0, so a default run is bit-identical. Deliberately NOT a
+        # separate move phase -- a phase minimising `nets+geo+facing` while the
+        # nudge minimises `nets+geo` gives the loop two objectives, and the
+        # nudge's own rotation loop then reverts every rotation the phase makes
+        # (its candidate list always contains the current angle), so `moves`
+        # never reaches 0 and `improved` sums two currencies.
+        pen += self._facing_cost(ref, x, y, rot, exclude)
         return pen
 
     def violation(self, ref, x=None, y=None, rot=None,
@@ -2171,12 +2261,23 @@ class QuenchState:
                     align += self._align_pair_penalty(pa, rect_a, pb, pb.rect())
         cut = (_corridor_cut_np(all_aw, self._corridor_boxes)
                if self._corridor_boxes else 0.0)
+        # #893. Counted over UNORDERED pairs, like `halo` and `align` above and
+        # for the same reason: `ref_inversions` sums a symmetric PAIR quantity
+        # from one part's side, so summing it over every ref would count each
+        # physical pair twice. `part_geometry_cost` does sum from one side --
+        # that is the factor of 2 the evaluators need, and it cancels between
+        # candidates -- but a REPORT must show each pair once.
+        facing = (self.facing_weight
+                  * sum(m['inversions']
+                        for m in pair_inversions(self).values())
+                  if self.facing_weight > 0.0 else 0.0)
         total = (self.length_weight * length
                  + self.crossing_penalty * w_crossings + halo + edge
-                 + align + orient + self.corridor_weight * cut)
+                 + align + orient + facing + self.corridor_weight * cut)
         return {'total': total, 'length': length, 'crossings': crossings,
                 'halo': halo, 'edge': edge, 'hpwl': self.hpwl(),
-                'align': align, 'orient': orient, 'corridor_cut': cut}
+                'align': align, 'orient': orient, 'facing': facing,
+                'corridor_cut': cut}
 
     def hpwl(self, nets=None):
         """Half-perimeter wirelength: sum over nets of the pad bbox's width plus
@@ -2583,7 +2684,8 @@ def _candidate_positions(part: _Part, max_disp: float, step: float,
     return out
 
 
-def _candidate_rotations(part: _Part, allow_rotations: bool) -> List[float]:
+def _candidate_rotations(part: _Part, allow_rotations: bool,
+                         declared=None) -> List[float]:
     """Rotation candidates for a nudge move.
 
     The 90-degree lattice through the part's CURRENT angle, plus the lattice
@@ -2603,6 +2705,18 @@ def _candidate_rotations(part: _Part, allow_rotations: bool) -> List[float]:
     """
     if not allow_rotations:
         return [part.rot]
+    if declared is not None:
+        # #893. A DECLARED rotation outranks the lattice. `[angle]` for a
+        # decision -- the move loop then has no rotation to choose and the
+        # part keeps the angle the seeder was told to give it -- and the
+        # author's SET, order preserved, for `rotation_candidates`. This is
+        # what makes the declaration survive `place_seed -> place_optimize`;
+        # without it the intent was honoured once and undone by the next step,
+        # which is weaker than the locking it replaced.
+        rot, cands = declared
+        if rot is not None:
+            return [rot % 360]
+        return [c % 360 for c in cands]
     bases = [part.rot % 90]
     if part.orig_rot % 90 != bases[0]:
         bases.append(part.orig_rot % 90)
@@ -2644,7 +2758,13 @@ def quench(pcb_data: PCBData, pcb_file: str,
            corridor_specs: Optional[Sequence[Dict]] = None,
            intent_gate: Optional[Dict[str, object]] = None,
            cancel_check=None,
-           progress_callback=None) -> List[Dict]:
+           progress_callback=None,
+           # #916: the SEARCH's body currency. Appended, and False by default
+           # -- see QuenchState.__init__. Flipping it is an engine change
+           # gated on tests/test_placement_ab.py, not a tidy-up.
+           body_model: bool = False,
+           # #893: the pin-order facing term. Appended, 0.0 by default.
+           facing_weight: float = 0.0) -> List[Dict]:
     """Greedy quench: iterate over parts, accept only cost-reducing moves.
 
     align_weight / align_radius / align_span, orient_weight: the #548 tidiness
@@ -2748,7 +2868,10 @@ def quench(pcb_data: PCBData, pcb_file: str,
                         corridor_weight=corridor_weight,
                         corridor_specs=corridor_specs,
                         keepouts=(intent_gate or {}).get('keepouts'),
-                        intent_zones=(intent_gate or {}).get('zones'))
+                        intent_zones=(intent_gate or {}).get('zones'),
+                        declared_rotations=(intent_gate or {}).get('rotations'),
+                        body_model=body_model,
+                        facing_weight=facing_weight)
     # #708: the lattice candidate OFFSETS are multiples of. The board's own
     # pitch when one can be read off it, the `grid_step` raster otherwise.
     # There is deliberately no flag: the fallback IS the off state and the
@@ -2900,7 +3023,8 @@ def quench(pcb_data: PCBData, pcb_file: str,
                 return net_cost + geo_cost
 
             current_cost = eval_at(part.x, part.y, part.rot)
-            rotations = _candidate_rotations(part, allow_rotations)
+            rotations = _candidate_rotations(
+                part, allow_rotations, state.declared_rotations.get(ref))
             for rot in rotations:
                 # A swap can hand a part an angle from ANOTHER seed's lattice,
                 # in a group holding two different non-orthogonal seeds. Add

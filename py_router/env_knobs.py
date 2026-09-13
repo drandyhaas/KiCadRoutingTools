@@ -280,6 +280,14 @@ def refresh() -> None:
     # CLI/GUI parity story for a feature with no GUI control of its own.
     g['MOVIE_CAMERA'] = _s('KICAD_MOVIE_CAMERA', 'off')
 
+    # #887: the second movie panel. 'xray' (default) is the single full-frame
+    # board view every movie has always been; 'xray+iso' stacks a kicad-cli 3D
+    # render under it. Same shape and same reason as MOVIE_CAMERA above -- the
+    # GUI recorder passes no movie parameters at all (movie_recorder.py:160 is
+    # `make_movie(boards, out=out, quiet=True)`), so one variable is how a
+    # feature with no dialog control of its own reaches every front end at once.
+    g['MOVIE_PANELS'] = _s('KICAD_MOVIE_PANELS', 'xray')
+
     # --- truthy diagnostics / overrides -------------------------------------
     g['UNBLOCK_DEBUG'] = _truthy('KICAD_UNBLOCK_DEBUG')
     g['TAP_CROSS_SCAN'] = _truthy('KICAD_TAP_CROSS_SCAN')

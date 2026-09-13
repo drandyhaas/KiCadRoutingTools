@@ -131,13 +131,18 @@ half went to the instrument. A run once spent nine of eleven iterations on how t
 chain measures itself and finished with five nets carrying no copper — `status`
 says that out loud, and nothing else in the loop does.
 
-The shape below is what `record` ACTUALLY writes — one JSONL line per
-iteration (there is no wrapper object, no `convergence.json`; the ledger IS
-the `.jsonl` file):
+The shape below is the SUBSET of `record`'s line that carries weight — one
+JSONL line per iteration (there is no wrapper object, no `convergence.json`;
+the ledger IS the `.jsonl` file). A real row has **15** keys, not these 8:
+`accepted, defects, iteration, kind, lens_source, lenses, lever, lever_argv,
+parent_sha, renders, result_sha, scope_refs, score, shape, t` — measured by
+reading one back, which is the only way to know. `stop_condition` and
+`stop_reason` (#901, below) join them on a row that carries one. Read a row,
+do not trust a block:
 
 ```jsonc
 {"iteration": 3,                       // position in the ledger
- "kind": "completion",                 // or "systemic": budget went to the instrument
+ "kind": "completion",                 // completion | placement | systemic | classification
  "parent_sha": "9c41f0...",            // result_sha of the last ACCEPTED entry
  "result_sha": "2ab77e...",            // content hash; step-back checks it out byte-exact
  "lever": "rip lever: --rip-existing-nets GPIO7, width pinned",
@@ -149,15 +154,27 @@ the `.jsonl` file):
 Fields that carry weight:
 
 - **`parent_sha` / `result_sha`** — boards live in the content store, not at
-  paths; `converge.py step-back --to <sha>` checks one out byte-exact. The
+  paths; `converge.py step-back --ledger wk/ledger.jsonl --to <sha> --out
+  wk/stepback.kicad_pcb` checks one out byte-exact (`--ledger` and `--out`
+  are BOTH required; without them argparse exits 2 before anything runs).
+  The
   parent is the last *accepted* board, **not** iteration N−1 — it is what
   `render_placement --before` takes; using N−1 renders a delta that never
   existed.
 - **`lever` + `lever_argv`** — `lever` is the one-line intent; `lever_argv` is
   the reproducible command (`replay` refuses prose-only entries, exit 4).
-  Anything the schema has no field for — the verdict list, a stop-condition
-  claim — goes **into the `--lever` text by name** so `status`/the report can
-  quote it; do not invent fields the reader will never see.
+  Anything the schema has no field for — the verdict list, say — goes **into
+  the `--lever` text by name** so `status`/the report can quote it; do not
+  invent fields the reader will never see.
+- **`stop_condition` + `stop_reason`** (#901) — the stop condition now HAS a
+  field of its own, and it is a TOKEN: `1 | 2 | 3 | 4 | DONE-EXHAUSTED | STUCK
+  | BUDGET`, checked on every `record` that carries one, not only when a lens
+  failed. Write the reason after it (`--stop-condition "3: five laps, no new
+  copper"`) or in `--stop-reason`; either way the token and the prose land in
+  separate keys. It was moved out of `--lever` because the token has to be
+  machine-checkable: with all lenses passing, ANY string used to be accepted,
+  so run 25 recorded ~500 characters of prose as a stop condition in one place
+  while an identically shaped `4 (this half): …` was refused in another.
 - **`kind`** — `systemic` marks iterations spent on the instrument (grader
   fixes, reconciliation); `status` warns when at least half the budget went
   there.
@@ -170,7 +187,7 @@ Fields that carry weight:
 |---|---|---|
 | 1 | `blocking == 0` **and** every lens passes | done — quote the score and the lens list |
 | 2 | budget exhausted — **100 ledger entries actually written** | the best-scoring board **and** every remaining blocker, itemised with measurements |
-| 3 | **5** consecutive iterations with `unrouted` AND `broken` both unchanged, after trying the rip lever, a finer grid and a layer change on the failing nets | floorplan-limited or spec-limited — say which, with the number |
+| 3 | **5** RECORDED laps of one half — accepted OR rejected — with `(blocking, quality)` not improving, after trying the rip lever, a finer grid and a layer change on the failing nets. `converge.py verdict --flat 5` decides it; this is NOT `unrouted` and `broken` read separately, and a lap whose `blocking` is null is dropped as unjudged rather than counted flat | floorplan-limited or spec-limited — say which, with the number |
 | 4 | a blocker is geometrically unsatisfiable | a finding **about the requirement**, with the measurement that proves it |
 
 Stop condition 4, worked: a requirement asked for 2.4 mm edge-to-edge clearance
@@ -207,8 +224,9 @@ python3 -X utf8 py_router/make_movie.py \
 
 - `.mp4` needs `imageio` + `imageio-ffmpeg` and silently falls back to a sibling
   `.gif`. Ask for `.gif` directly when you know they are missing.
-- Hand it over with `SendUserFile`. **Do not `Read` it** — show-without-reading,
-  and its frames would spend the ≤3-image budget for nothing.
+- Hand it over with `SendUserFile`. **Do not `Read` it** — show-without-reading.
+  Reading a movie pulls every frame into context to be looked at once, and
+  the frames are the panels the renders already reported in words.
 
 ## 5. What the final report must contain
 

@@ -337,8 +337,15 @@ harmless.
    only. On 4+ layer boards you MUST pass the board's inner copper layers too,
    e.g. `--layers F.Cu In1.Cu In2.Cu B.Cu`, or deep balls can't escape and are
    silently dropped (only the ~2 outer layers' worth of nets fan out — this
-   capped ottercast_audio at ~23%). qfn_fanout.py is perimeter-only and
-   doesn't need this.
+   capped ottercast_audio at ~23%). When an inner layer carries a solid plane,
+   keep the escapes off it with `--layer-costs` (a NEGATIVE value forbids the
+   layer, #288) rather than by shortening `--layers`. Either forbids it -- a
+   negative entry filters the layer out of the engine's list exactly as
+   omitting it would -- but the cost vector is the one `route.py` also takes,
+   so the plane map is derived once, and a positive weight can price a layer
+   instead of deleting it. `--layers[0]` cannot be forbidden at all (the top
+   escape layer is where edge escapes are placed). qfn_fanout.py is
+   perimeter-only and doesn't need this.
    ESCAPE COMPLETENESS (issue #122): bga_fanout.py ends with
    `JSON_SUMMARY: {"requested","escaped","failed","unescaped_nets",...}`.
    ALWAYS parse it. If `failed > 0`, balls were DROPPED (removed from output;
@@ -1267,6 +1274,25 @@ The declaration of what it withheld is written to `_truth/draw.json` under
 `staged_project`, not into the work dir, because naming the withheld strings
 inside the fence would be the leak itself.
 
+### Staging unaided, in one call
+
+`tests/stress/stage_unaided.py` puts every non-exempt footprint at the board
+centre at ROTATION 0 -- the placement is gone, angle included, which is the
+place-from-scratch task rather than a damaged-placement one:
+
+```bash
+python3 -X utf8 tests/stress/stage_unaided.py     kicad_files/esp_prog.kicad_pcb wk/run25/esp_prog wk/run25/_truth/esp_prog
+python3 -X utf8 tests/stress/fence_audit.py     --control wk/run25/_truth/esp_prog/control.kicad_pcb     --workdir wk/run25/esp_prog --mode create
+```
+
+Mechanical parts keep their true pose and are DECLARED, per ref with a reason,
+in `<workdir>/mechanical.json` -- an input the run may read, and legitimate
+precisely because it is written down. Truth goes to a SIBLING directory, never
+a child. The source is recorded by HASH, not by path.
+
+It also ARMS the unaided regime as its last act (see below), so run it BEFORE
+`fence_audit --mode create`, as above.
+
 ### Auditing that every pose came from the engine
 
 `fence_audit` answers "did the answer key get in". It cannot answer "did a
@@ -1281,9 +1307,25 @@ python3 -X utf8 tests/stress/provenance_audit.py --workdir wk/run12/tigard
 # 5 UNPROVEN  nothing was measured (no regime, or no board)
 ```
 
-Arm it by staging the work dir with `placement.provenance.start_regime`; the
-CLIs in `LEVER_REGISTRY` then record every pose they write to
-`.pose-provenance.jsonl`, and an undeclared write RAISES instead of landing.
+BOTH STAGERS ARM IT. `stage_unaided.py` and `stage_blind.py` write
+`.unaided-manifest.json` into the work dir as their last act. (The library
+call they make is `placement.provenance.start_regime`; while NOTHING in
+production called it, this audit printed UNPROVEN on every real run, the
+ledger was never written, and the gate that refuses an undeclared pose writer
+was installed and never armed -- #903.) The CLIs in `LEVER_REGISTRY` then
+record every pose they write to `.pose-provenance.jsonl`, and an undeclared
+write RAISES instead of landing, before the file exists.
+
+A staging row in that ledger is REDACTED to "a staging happened": the ledger
+lives inside the fence, and an unredacted row named the source board and the
+truth dir in its argv and carried the control's own poses.
+
+`5 UNPROVEN` has three live causes now that a staged dir is armed, and the
+`cheats` watcher names them: the dir was staged by neither stager; it was
+MOVED after staging (the manifest holds an absolute path); or no delivered
+board sits beside the staged one at the top level -- pass `--delivered`. A
+fourth is a manifest whose `staged_sha256` no longer matches the board it
+names, which means the baseline every verdict is measured against is stale.
 
 ### Watching a long run
 
@@ -1302,6 +1344,13 @@ scope narrowed to the failing nets, a grader floor overridden, a waiver spent)
 and ends when the `DONE` marker appears, running `fence_audit` and
 `provenance_audit` as it goes. Neither budgets on a clock.
 
+`RESTAGE` counts invocations of EITHER stager, from two sources: a teed `CMD:`
+line, and a pose-provenance row. The second is the one that works -- neither
+stager installs `cli_banner`, and the first staging creates the work dir, so
+there is nowhere to tee it to yet. A `PROVENANCE VERDICT: UNPROVEN` on a dir a
+stager armed is itself a finding and `cheats` says so; it still exits 0,
+because "I cannot prove it" and "I proved it false" are different numbers.
+
 `cheats` reads a tool's argv from its `CMD:` banner line. The two skill
 drivers install no banner, so wrap timed invocations in
 `tests/stress/tee_cmd.py`, which tees the output and appends one
@@ -1315,3 +1364,56 @@ python3 -X utf8 tests/stress/tee_cmd.py --workdir wk/run12/tigard \
 
 Wait on `logs/<label>.done`, which appears exactly when the child exits and
 holds its exit code. Nothing else is a completion signal.
+
+**Reading it back is a script, not a watch subagent.** The end-of-run timing
+audit — the step table, the stage subtotals, tool time vs total run time with
+the difference reported as "time outside the tools", and the three longest steps
+— is deterministic, so run it:
+
+```bash
+python3 -X utf8 py_router/cmd_timing.py wk/run12/tigard          # markdown
+python3 -X utf8 py_router/cmd_timing.py wk/run12/tigard --json   # the same, as data
+```
+
+It reproduces run 24's hand-written audit to the digit and cannot get the sums
+wrong, which a subagent doing arithmetic over 153 JSONL rows at the end of a run
+demonstrably can: that audit's "16 of its 81 steps are the Pclose placement
+close-out" is 21. The same reader drives the movie's run-clock overlay, so the
+number in the report and the number in the frame come from one place.
+
+Labels bucket by PREFIX (`staging`, `fence`/`close` → close-out, then `P`/`L`/
+`R`/`V`), case-sensitively. A run that labels its steps by another convention
+lands in `other` and the report says so at the top rather than leaving an
+unexplained zero.
+
+### Agent watchers: prompts at the start, one agent at the end
+
+`run_watch.py` is a shell and costs nothing to leave running. An AGENT watcher
+is not: each spawn pays a fixed preamble — system prompt, CLAUDE.md, memory
+index, skill listing — before it does anything. One measured run spawned three
+watchers twice over, the first time only to arm a file monitor the background
+shell above already provides, and the six spawns plus their reports came to
+about 1.3 M tokens.
+
+Split what arming actually PROTECTS from what it costs:
+
+1. **At the start, write each watcher's prompt to `<workdir>/watch/`** —
+   `<name>_prompt.md`, one per lens. That file's mtime IS the arming evidence,
+   and it is what pre-registration protects: a brief written after the outcome
+   is a brief tailored to it. The boundary verification's contemporaneity check
+   reads exactly this kind of timestamp, so the prompts are checkable by an
+   instrument that already exists.
+2. **Spawn at the end, once, as ONE agent with one section per brief.** Three
+   agents re-reading the same logs derive the same numbers three times and bind
+   to nothing; one agent with three headed sections produces three verdicts from
+   one preamble and one read.
+3. **Override the model.** Reading a report and a JSONL and reporting
+   discrepancies is not the task the largest model exists for; set the Agent
+   tool's `model` field to a smaller one for that spawn. It is one field.
+4. **Feed it the DERIVED files first and the raw logs on demand**: `REPORT.md`,
+   `cmd_timing.jsonl` and `ledger.jsonl` are the run in three files. Hand it the
+   hundreds of `logs/*.log` only when a section names one. A watcher that starts
+   from raw logs re-derives what the ledger already states.
+
+A watcher that finds nothing is a result. A watcher that ran out of window
+before it reported is not.

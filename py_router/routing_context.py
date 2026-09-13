@@ -490,6 +490,26 @@ def prepare_obstacles_inplace(
     # sibling routes and third nets stays intact; pads are never ripped and
     # the partner trunk's base stamps are only mutated by this balanced
     # remove / restore re-add pair. Via blocking is not recorded, not lifted.
+    # #908: a footprint's own copper must not seal the pad it was drawn
+    # around. The base map stamps it for everyone (it IS foreign copper to
+    # every other net); here the rows it contributed are lifted for the ONE
+    # net whose pad it touches, and restore_obstacles_inplace puts them back.
+    # Recorded rows, not recomputed geometry, so the remove/re-add is exactly
+    # balanced and cannot desync a refcount.
+    # ... UNLESS the base build already baked this net's lift into the map
+    # this one was cloned from (it does that when it was built for a single
+    # net -- see obstacle_map's `_graphic_own_pad_lift_baked`). Lifting again
+    # is not a no-op: a cell two obstacles blocked goes 2 -> 0 instead of
+    # 2 -> 1, and the restore below returns it at 1, so the map stops
+    # matching the copper it stands for.
+    _op_lift = (getattr(pcb_data, '_graphic_own_pad_lift', None)
+                or {}).get(net_id)
+    if (_op_lift is not None and len(_op_lift)
+            and net_id != getattr(pcb_data,
+                                  '_graphic_own_pad_lift_baked', None)):
+        working_obstacles.remove_blocked_cell_spans_batch(_op_lift)
+        _OWNPAD_LIFTED[(id(working_obstacles), net_id)] = _op_lift
+
     _tie_lift = getattr(pcb_data, '_net_tie_lift', None)
     if _tie_lift:
         _lifted = [a for a in _tie_lift.get(net_id, []) if len(a)]
@@ -661,6 +681,8 @@ def prepare_obstacles_inplace(
 # strictly paired per net route on one thread, so entries live only across
 # that window; keying by map id keeps cloned maps independent.
 _TIE_LIFTED: Dict[tuple, list] = {}
+#: #908 own-pad lift, same lifetime and keying as _TIE_LIFTED.
+_OWNPAD_LIFTED: Dict[tuple, object] = {}
 
 
 def restore_obstacles_inplace(
@@ -704,6 +726,11 @@ def restore_obstacles_inplace(
     if _lifted:
         for _arr in _lifted:
             working_obstacles.add_blocked_cells_batch(_arr)
+
+    # #908: and the own-pad graphic lift, the same balanced way.
+    _op = _OWNPAD_LIFTED.pop((id(working_obstacles), net_id), None)
+    if _op is not None and len(_op):
+        working_obstacles.add_blocked_cell_spans_batch(_op)
 
     # Restore current net's obstacles (from cache - original stubs)
     # Note: If routing succeeded, caller should update cache first with new route data

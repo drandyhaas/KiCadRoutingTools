@@ -5,6 +5,7 @@ instruction + RESULT= contracts, the monitor's pollers (ledger tail, board
 artifacts, stage derivation), the scavenge fallback, and the build_cmd
 allowed_tools/add_dirs extension the placement runs depend on.
 """
+import importlib.util
 import json
 import os
 import shutil
@@ -202,6 +203,41 @@ check('--stage "quoted" form matched',
 check("P-close mapped",
       derive_stage(["--stage P-close"], None, None)
       == placement_run.STAGE_LABELS["P-close"])
+
+# EVERY registered stage, derived from the drivers themselves rather than
+# listed here (#936 C2). A hand-written list is what produced the defect: the
+# regex covered P<digit> and P-close, so P-brief -- the stage that records the
+# declared design brief (#711) -- rendered as "working..." for its whole
+# duration, and no pin noticed because every pin named a stage the regex
+# already matched. Importing the registries means a NEW stage id fails here.
+_DRIVERS = {
+    "placement_driver": os.path.join(
+        os.path.dirname(__file__), "..", ".claude", "skills",
+        "plan-pcb-placement", "scripts", "placement_driver.py"),
+    "loop_driver": os.path.join(
+        os.path.dirname(__file__), "..", ".claude", "skills",
+        "plan-pcb-placement-and-routing", "scripts", "loop_driver.py"),
+}
+_registered = set()
+for _name, _path in _DRIVERS.items():
+    _spec = importlib.util.spec_from_file_location("krt_" + _name, _path)
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    _stages = set(getattr(_mod, "STAGES", {}))
+    check(f"{_name} registers stages at all", len(_stages) >= 5)
+    _registered |= _stages
+_unmatched = sorted(s for s in _registered
+                    if derive_stage([f"--stage {s}"], None, None)
+                    != placement_run.STAGE_LABELS.get(s, s))
+check("every registered stage id is recognised and labelled",
+      not _unmatched, f"unrecognised: {_unmatched}")
+_unlabelled = sorted(_registered - set(placement_run.STAGE_LABELS))
+check("every registered stage id has progress text", not _unlabelled,
+      f"unlabelled: {_unlabelled}")
+# ...and the labels invent nothing the drivers do not register.
+_extra = sorted(set(placement_run.STAGE_LABELS) - _registered)
+check("no label for a stage that does not exist", not _extra, f"extra: {_extra}")
+
 check("ledger row formatted",
       derive_stage([], row, None) == "lap 7: reseat/COL4")
 check("artifact heuristic route log",

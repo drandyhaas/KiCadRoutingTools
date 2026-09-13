@@ -20,6 +20,11 @@ no residual pad conflicts; 3 the board cannot be reconstructed here (no
 outline / carries copper); 4 residual violations remain (board still written
 for inspection).
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json
@@ -669,6 +674,11 @@ Examples:
                               intent_waivers=(intent.waiver_pairs()
                                               if intent is not None else ()),
                               pcb_file=args.output_file)
+    # #897: the other consumer that passes authored waivers, and so the other
+    # one that can be handed a stale pair. Same words as check_assembly.
+    from placement.legality import format_waiver_warnings
+    for _line in format_waiver_warnings(body):
+        print("  " + _line, file=sys.stderr)
     report['final']['body_blocking'] = body['blocking']
     report['final']['body_advisory'] = body['advisory']
     report['final']['body_pairs'] = [q._asdict() for q in body['pairs']

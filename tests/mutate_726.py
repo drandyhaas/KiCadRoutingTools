@@ -60,8 +60,14 @@ T_KEYS = os.path.join(TESTS, 'test_726_duplicate_reference_keys.py')
 T_WRITER = os.path.join(TESTS, 'test_726_writer_resolves_one_block.py')
 T_CONS = os.path.join(TESTS, 'test_726_consumers_see_both_blocks.py')
 T_PARITY = os.path.join(TESTS, 'test_parser_pcbnew_parity.py')
-T_GUI = os.path.join(TESTS, 'gui_parity', 'test_726_parse_path_parity.py')
-T_SYNC = os.path.join(TESTS, 'gui_parity', 'test_726_gui_sync.py')
+# The IPC port removed both SWIG live-board halves #726 also fixed: the
+# pcbnew builder (this branch's `build_pcb_data_from_board` walks a kipy board)
+# and `gui_utils.sync_footprint_positions_from_board`. Their two gates --
+# `gui_parity/test_726_parse_path_parity.py` and `gui_parity/test_726_gui_sync.py`
+# -- compare against a live pcbnew BOARD and so cannot run here. The keying
+# those rows were about is graded instead by `test_726_kipy_reference_keys.py`,
+# on `kipy_raw_references`, which is a function for exactly that reason.
+T_KIPY = os.path.join(TESTS, 'test_726_kipy_reference_keys.py')
 
 #: (name, target, old, new, tests, expectation)
 ROWS = [
@@ -72,19 +78,38 @@ ROWS = [
      "        _block_key = _raw_reference",
      (T_KEYS, T_PARITY), 'KILLED'),
 
-    ('pcbnew-path-reverts-to-last-wins', 'p',
-     "    _live_keys = disambiguate_references(_raw_refs)",
-     "    _live_keys = list(_raw_refs)",
-     (T_GUI,), 'KILLED'),
-
-    # Mutates ONLY the pcbnew path while the text path stays fixed. If nothing
-    # goes red here, the parity gate is not doing its job -- a one-sided fix is
-    # exactly what it exists to catch.
-    ('only-the-text-path-disambiguates', 'p',
-     "    _dups_live = duplicate_reference_counts(_raw_refs)",
+    # The IPC twin of the row above: the kipy builder used to key by the bare
+    # reference, which is last-wins. Mutates ONLY that path -- the text path
+    # stays fixed -- so a one-sided fix is what this catches.
+    #
+    # DECLARED SURVIVOR, and the reason is a property of the front, not a test
+    # hole to fix: the mutation is INSIDE `build_pcb_data_from_board`, which
+    # reaches a running KiCad over a kipy socket, so no in-process gate can
+    # execute it (`fake_ipc_board` serves reads by re-parsing the file, which
+    # would grade the text parser twice). The row stays because it is a change
+    # DETECTOR for the composition -- if someone re-inlines or renames the
+    # keying, the anchor goes stale and `mutation_anchors.py` says so in one
+    # second -- and the keying it composes IS killed, by the two rows below.
+    ('kipy-path-reverts-to-last-wins', 'p',
+     "    _raw_refs = kipy_raw_references(_live_fps)\n"
      "    _dups_live = duplicate_reference_counts(_raw_refs)\n"
-     "    _raw_refs = ['%s#%d' % (r, i) for i, r in enumerate(_raw_refs)]",
-     (T_GUI,), 'KILLED'),
+     "    _live_keys = disambiguate_references(_raw_refs)",
+     "    _raw_refs = kipy_raw_references(_live_fps)\n"
+     "    _dups_live = duplicate_reference_counts(_raw_refs)\n"
+     "    _live_keys = list(_raw_refs)",
+     (T_KIPY,), 'SURVIVED'),
+
+    ('kipy-raw-refs-drop-the-uuid-fallback', 'p',
+     "            r = (\"#\" + uid) if uid else \"?\"",
+     "            r = \"?\"",
+     (T_KIPY,), 'KILLED'),
+
+    ('kipy-raw-refs-report-a-name-nobody-claimed', 'p',
+     "        r = _fp_reference(fp)\n"
+     "        if not r:",
+     "        r = _fp_reference(fp) or 'X'\n"
+     "        if not r:",
+     (T_KIPY,), 'KILLED'),
 
     ('the-ordinal-starts-at-the-wrong-block', 'p',
      "        if n == 1:\n            out.append(ref)\n            issued.add(ref)\n            continue",
@@ -182,9 +207,20 @@ ROWS = [
      "        yield _raw_ref, fp_text",
      (T_CONS,), 'KILLED'),
 
+    # RE-ANCHORED (#892). `stamp_unlocked` landed beside `stamp_locked` with
+    # the same loop head, so `        if key not in want:` began matching
+    # TWICE and `replace(..., 1)` pointed this row at whichever copy comes
+    # first in the file -- an anchor that silently stops testing what it
+    # names. `tests/test_718_static_test_hygiene.py` is what caught it. The
+    # windows below each carry the line only ONE half has.
     ('stamp_locked-locks-every-namesake', 's',
-     "        if key not in want:",
-     "        if _raw_ref not in want:",
+     "        if key not in want:\n            continue\n        if re.search",
+     "        if _raw_ref not in want:\n            continue\n        if re.search",
+     (T_WRITER,), 'KILLED'),
+
+    ('stamp_unlocked-unlocks-every-namesake', 's',
+     "        if key not in want:\n            continue\n        head_end",
+     "        if _raw_ref not in want:\n            continue\n        head_end",
      (T_WRITER,), 'KILLED'),
 
     ('footprint-blocks-uses-the-old-formula', 'a',
@@ -199,11 +235,26 @@ ROWS = [
     # with 61 distinct references. That is a passing gate on a board that
     # cannot express the defect. `test_726_gui_sync.py` was written because
     # this row said so.
-    ('gui-sync-matches-by-bare-reference', 'u',
-     "        for bfp, ref in zip(_live, _keys):",
-     "        for bfp, ref in zip(_live, _raw):",
-     (T_SYNC,), 'KILLED'),
+    # ('gui-sync-matches-by-bare-reference', 'u', ...) is deliberately absent.
+    # It mutated `gui_utils.sync_footprint_positions_from_board`, the live
+    # pcbnew position refresh between plan steps, which the IPC port deleted
+    # outright -- the plan executor re-reads the board through the adapter
+    # instead. There is no code here to revert, so the row would be a stale
+    # anchor: it would match nothing, and a row that matches nothing reports
+    # every mutation as killed, which is the most flattering possible bug
+    # (#877). Restore it with the function if the sync ever comes back.
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+# `repo_wide=True` because THIS battery's own check was the strictest in the
+# tree: `verify_anchors` below also refuses an anchor that occurs in another
+# tracked file, the prose trap its docstring describes. `preflight` handles
+# `--verify-anchors` itself, so without this the shared check would have
+# SHADOWED the stricter one and quietly dropped that column.
+preflight(__file__, repo_wide=True)
 
 
 def _uncache(path):

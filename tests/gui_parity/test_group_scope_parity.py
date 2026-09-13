@@ -30,7 +30,13 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
-
+# py_router, or `main()`'s very first import dies: `group_routing` and
+# `kicad_parser` both live there since the #522 reorg, and REPO alone does not
+# reach them. Every sibling gate in this directory inserts it; this one did
+# not, so it exited 1 on EVERY machine -- cloud and local alike -- before it
+# checked anything. `run_all.py`'s flat glob does not collect this directory,
+# which is why a permanently red gate went unnoticed.
+sys.path.insert(0, os.path.join(REPO, 'py_router'))
 sys.path.insert(0, os.path.join(REPO, 'py_placer'))  # placement split
 KICAD_PYTHONS = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",

@@ -1284,7 +1284,8 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
                                          min_width: float = 0.0,
                                          coplanar_gap: float = 0.0,
                                          floor_desc: str = "--track-width; lower it to reach the target",
-                                         clamp_report: Optional[Dict[str, List[float]]] = None) -> Dict[str, float]:
+                                         clamp_report: Optional[Dict[str, List[float]]] = None,
+                                         unsolved_report: Optional[List[str]] = None) -> Dict[str, float]:
     """
     Calculate trace widths for each layer to achieve target impedance.
 
@@ -1312,6 +1313,16 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
             recorded as {layer: [solved_mm, floor_mm]} so the run summary can
             surface the clamp (#610 -- it was loud on a terminal and invisible
             in JSON_SUMMARY).
+        unsolved_report: optional LIST the caller owns; every layer that fell
+            back to ``fallback_width`` because the model could not solve it is
+            appended (#906). The return value alone cannot say this -- a
+            fallback and a genuine solve are the same kind of number, and a
+            solved width may coincide with the fallback -- so a caller deciding
+            whether an impedance was actually ACHIEVED must read this rather
+            than compare widths. "The board has a stackup" is not the same
+            question: a stackup listing copper with no adjacent dielectric, or
+            with names that do not match the routed layers, solves nothing and
+            every layer lands here.
 
     Returns:
         Dict mapping layer name to trace width in mm
@@ -1328,6 +1339,8 @@ def calculate_layer_widths_for_impedance(pcb: PCBData, layers: List[str], target
         if 'error' in result or result.get('calculated_width_mm', 0) <= 0:
             # Use fallback width if calculation fails
             layer_widths[layer_name] = fallback_width
+            if unsolved_report is not None:      # #906
+                unsolved_report.append(layer_name)
         else:
             # Apply scaling factor to match online calculators
             calculated_width = result['calculated_width_mm'] * IMPEDANCE_WIDTH_SCALE
@@ -1497,6 +1510,161 @@ def get_layer_epsilon_eff(pcb: PCBData, layer_name: str,
 
     # Microstrip, width unknown: field partially in air, partially in dielectric
     return (er + 1) / 2
+
+
+#: A nominal FR4 stackup, for the ONE question that can be answered without a
+#: real one: "is this target impedance achievable on a board like this at all?"
+#: (#909). These are KiCad's own defaults for a 1.6 mm two-layer board -- see
+#: `kicad_files/flat_hierarchy.kicad_pcb`, which stores exactly 0.035 mm copper
+#: over a 1.51 mm er-4.5 core plus 0.01 mm masks. Nothing here WRITES a stackup;
+#: the board's author owns that (`/recommend-stackup`), and a written default
+#: would only make the width solver print a number and clamp it straight back.
+NOMINAL_BOARD_THICKNESS_MM = 1.6
+NOMINAL_COPPER_THICKNESS_MM = 0.035
+NOMINAL_MASK_THICKNESS_MM = 0.01
+NOMINAL_EPSILON_R = 4.5
+
+
+def nominal_stackup(n_copper_layers: int = 2,
+                    board_thickness: float = NOMINAL_BOARD_THICKNESS_MM):
+    """A synthetic `List[StackupLayer]` for a board that declares none (#909).
+
+    Copper of `NOMINAL_COPPER_THICKNESS_MM`, masks of
+    `NOMINAL_MASK_THICKNESS_MM`, and the remaining height split evenly into
+    er-`NOMINAL_EPSILON_R` dielectric between the copper layers. It is an
+    ASSUMPTION and every caller must print it as one.
+    """
+    from kicad_parser import StackupLayer
+    n = max(2, int(n_copper_layers))
+    cu = NOMINAL_COPPER_THICKNESS_MM
+    msk = NOMINAL_MASK_THICKNESS_MM
+    diel_total = max(0.05, board_thickness - n * cu - 2 * msk)
+    each = diel_total / (n - 1)
+    names = (['F.Cu'] + [f'In{i}.Cu' for i in range(1, n - 1)] + ['B.Cu'])
+    out = [StackupLayer('F.Mask', 'solder_mask', msk, 3.3, 0.0, 'mask')]
+    for i, nm in enumerate(names):
+        out.append(StackupLayer(nm, 'copper', cu, 0.0, 0.0, 'copper'))
+        if i < n - 1:
+            out.append(StackupLayer(f'dielectric {i + 1}',
+                                    'core' if n == 2 else 'prepreg',
+                                    each, NOMINAL_EPSILON_R, 0.02, 'FR4'))
+    out.append(StackupLayer('B.Mask', 'solder_mask', msk, 3.3, 0.0, 'mask'))
+    return out
+
+
+def _impedance_scope_net_ids(pcb: PCBData, net_names) -> list:
+    """Net ids the caller's `net_names` selects, globs included (#909).
+
+    The scope is resolved here rather than reused from the routing loop
+    because this note is printed BEFORE the loop resolves anything, and an
+    empty/None selection means "every net", which is what the CLIs mean by it.
+    """
+    import fnmatch as _fn
+    nets = getattr(pcb, 'nets', None) or {}
+    if not net_names:
+        return [nid for nid in nets if nid]
+    out = []
+    for nid, net in nets.items():
+        if not nid:
+            continue
+        nm = getattr(net, 'name', '') or ''
+        if any(nm == pat or _fn.fnmatch(nm, pat) for pat in net_names):
+            out.append(nid)
+    return out
+
+
+def tightest_pin_gap(pcb: PCBData, net_ids) -> float:
+    """Smallest edge-to-edge gap a trace of these nets has to leave through.
+
+    For every pad of `net_ids`, the gap to the NEAREST OTHER PAD OF THE SAME
+    FOOTPRINT -- i.e. the channel between the pins of the part it escapes
+    from. That is the number the impedance width has to be compared against
+    (#909): a 90 ohm leg is meaningless if it is three times the pin gap,
+    because it necks down at both ends anyway. Returns 0.0 when it cannot be
+    computed.
+    """
+    want = {int(n) for n in (net_ids or []) if n}
+    if not want or not getattr(pcb, 'footprints', None):
+        return 0.0
+    best = 0.0
+    for fp in pcb.footprints.values():
+        pads = list(getattr(fp, 'pads', None) or [])
+        if len(pads) < 2:
+            continue
+        mine = [p for p in pads if p.net_id in want]
+        for a in mine:
+            for b in pads:
+                if b is a:
+                    continue
+                dx = abs(a.global_x - b.global_x) - (a.size_x + b.size_x) / 2
+                dy = abs(a.global_y - b.global_y) - (a.size_y + b.size_y) / 2
+                gap = max(dx, dy)
+                if gap > 0 and (best == 0.0 or gap < best):
+                    best = gap
+    return best
+
+
+def achievability_note(pcb: PCBData, layer_name: str, target_z0: float, *,
+                       is_differential: bool = False, spacing: float = 0.0,
+                       min_pitch_gap: float = 0.0,
+                       board_thickness: float = NOMINAL_BOARD_THICKNESS_MM):
+    """"Is `target_z0` reachable on a board like this?" -- with NUMBERS (#909).
+
+    A board with no `(stackup ...)` gets one line today: "No stackup found in
+    PCB file. Using fixed track width." True, and it tells the reader nothing
+    about whether authoring a stackup would have helped. The repo's own
+    solvers can answer that in one call against a NOMINAL stackup, and the
+    answer is usually decisive: on a 2-layer 1.6 mm FR4 board a 90 ohm
+    differential leg is 1.13 mm wide, against the 0.325 mm gap between the
+    0.65 mm-pitch pins it has to leave from -- not achievable, and on a run
+    that short not needed either.
+
+    Returns `(text, detail_dict)`; `('', None)` when the board HAS a stackup
+    (then the real solver runs and this has nothing to add) or when the
+    solver cannot answer.
+    """
+    import copy as _copy
+    if pcb is None or not target_z0:
+        return '', None
+    bi = getattr(pcb, 'board_info', None)
+    if bi is None or getattr(bi, 'stackup', None):
+        return '', None            # a real stackup: the real path runs
+    n_cu = len(getattr(bi, 'copper_layers', None) or []) or 2
+    probe = _copy.copy(pcb)
+    probe_bi = _copy.copy(bi)
+    probe_bi.stackup = nominal_stackup(n_cu, board_thickness)
+    probe.board_info = probe_bi
+    try:
+        res = calculate_width_for_impedance(
+            probe, layer_name, target_z0, spacing=spacing,
+            is_differential=is_differential)
+    except Exception:
+        return '', None
+    width = (res or {}).get('calculated_width_mm')
+    if not width:
+        return '', None
+    kind = 'differential leg' if is_differential else 'trace'
+    channel = (2 * width + spacing) if is_differential else width
+    text = (f"No stackup declared, so no impedance pass runs. On a NOMINAL "
+            f"{n_cu}-layer {board_thickness:g}mm FR4 stack (er "
+            f"{NOMINAL_EPSILON_R:g}, {NOMINAL_COPPER_THICKNESS_MM * 1000:.0f}um "
+            f"Cu) {target_z0:g} ohm on {layer_name} would need a "
+            f"{width:.3f}mm {kind}"
+            + (f" ({channel:.3f}mm for the pair)" if is_differential else ""))
+    detail = {'assumed': 'nominal', 'copper_layers': n_cu,
+              'board_thickness_mm': board_thickness,
+              'epsilon_r': NOMINAL_EPSILON_R, 'target_ohms': float(target_z0),
+              'layer': layer_name, 'width_mm': round(float(width), 4),
+              'channel_mm': round(float(channel), 4),
+              'differential': bool(is_differential)}
+    if min_pitch_gap and min_pitch_gap > 0:
+        ratio = channel / min_pitch_gap
+        detail['pin_gap_mm'] = round(float(min_pitch_gap), 4)
+        detail['channel_over_pin_gap'] = round(ratio, 2)
+        text += (f", against a {min_pitch_gap:.3f}mm gap between the pins it "
+                 f"leaves from -- {ratio:.1f}x. Not achievable here")
+    text += ". Author a stackup (/recommend-stackup) if you need it graded."
+    return text, detail
 
 
 def get_layer_ps_per_mm(pcb: PCBData, layer_name: str) -> float:

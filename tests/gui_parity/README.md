@@ -325,6 +325,16 @@ skip cleanly without KiCad python). Run any directly:
   carrying keys a newer version dropped, and re-save key parity. Deleting or
   renaming a control without updating persistence crashes on CLOSE and loses
   the user's settings -- this gate is what catches that.
+- `test_900_live_class_clearance.py` -- `apply_targets_to_board` must write the
+  net classes at the ROUTED clearance, never at the `rules.min_clearance` value
+  capped at a pad's `(clearance ...)` override (#530/#900). The signal, planes
+  and differential tabs all reach that writer with live minima carrying the
+  override, and the correct `update_live_drc_floors` write that follows is
+  only-lower, so it can never undo a capped class. `flat_hierarchy` (Default
+  0.2 / Wide 0.4) with a 0.0508 override set through pcbnew's own setter; a
+  second arm at a different routed value catches a writer that ignores its
+  argument. The wx-free half (`tests/test_900_class_clearance_not_capped.py`)
+  can only guard this writer by source text.
 - `test_plane_all_layers_parity.py` -- GUI create passes `all_layers` =
   outer+pour (the route_planes default), not all 6 copper layers (mocks
   create_plane to capture the kwarg).

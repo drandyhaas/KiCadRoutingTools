@@ -43,6 +43,11 @@ VERBS
         Iterations spent, split completion vs systemic. A budget going to the
         instrument rather than the board is the failure this makes visible.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing', 'combined'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json
@@ -288,17 +293,77 @@ def check_rip_invariants(nets, rip_set, power_nets=(), impedance_nets=()):
 
 #: lens name -> the score components a PASS on it CONTRADICTS.
 #:
-#: Only lenses whose subject is unambiguous are listed. `connectivity` asks "is
-#: every net actually joined", which is exactly `unrouted` + `broken`; `drc`
-#: asks "does the copper break a rule", which is `drc` + `undersized`. `spec` is
-#: deliberately ABSENT: it covers impedance, length and net widths, every one of
-#: which is routinely ungraded, and an ungraded component contradicts nothing.
+#: `connectivity` asks "is every net actually joined", which is exactly
+#: `unrouted` + `broken`; `drc` asks "does the copper break a rule", which is
+#: `drc` + `undersized`; `spec` asks "does the board meet what was ASKED for"
+#: (verifier-prompts.md lens 9: impedance, connector positions, length rules,
+#: track and pair widths), which is `impedance` + `floorplan` + `length` +
+#: `net_widths`.
+#:
+#: `spec` USED TO BE ABSENT, on the argument that its components are routinely
+#: ungraded and an ungraded component contradicts nothing. The premise is true
+#: and the conclusion does not follow: `score_component` already returns None
+#: for an ungraded component, so a mapping over them can only ever fire on a
+#: count something MEASURED. Leaving it out did not make the check
+#: conservative, it made it absent -- run 25 wrote two rows carrying
+#: `VERDICT=PASS:lens=spec` beside a score reporting `impedance 1`, and the
+#: end-to-end verifier returned FAIL on that same clause two hours later.
+#: Measured on that row: `[]` without the entry, `[('spec','impedance',1)]`
+#: with it.
+#:
+#: `intent` is lens 1, the PLACEMENT half's floorplan lens ("Does this board
+#: honour the declared floorplan? Report every violations[] entry"), which is
+#: the same `check_floorplan` count `spec` reaches from the other side. TWO
+#: lenses legitimately speak to one component, and a row carrying a PASS on
+#: both while `floorplan` is non-zero is wrong twice; the table is
+#: lens -> components, not a partition. Without this entry a
+#: `VERDICT=PASS:lens=intent` beside a measured `floorplan 3` was exactly
+#: #904's defect, one lens over.
+#:
+#: A consequence worth stating: these mappings bind ORDINARY LAPS too, not only
+#: close-outs -- the contradiction check runs on any row carrying a lens and a
+#: score. That is the intent (a lap that records a verdict its own numbers deny
+#: is no better than a close-out that does), but it is a wider behaviour change
+#: than the close-out this issue is about.
+#:
+#: `assembly` IS DELIBERATELY UNMAPPED, and this is the part to read before
+#: "completing" the table. `blocking` sums NINE components; the routed-board
+#: lenses are 7-9 and cover eight of them. `assembly` is graded at the
+#: PLACEMENT boundaries, by the boundary verifier's check 5
+#: (references/verifier-prompts.md, "Check 5 addendum"), which answers
+#: `VERDICT=...:check=<1-5>` -- a different grammar that `_LENS_RE` refuses on
+#: purpose. Mapping it onto one of these three would make a routed-board lens
+#: answerable for a check nobody asked it to run.
+#: `tests/test_904_lens_components_cover_blocking.py` re-derives the nine names
+#: from board_score.py's own source and fails when a new one has no home here.
 LENS_COMPONENTS = {
     'connectivity': ('unrouted', 'broken'),
     'drc': ('drc', 'undersized'),
+    'spec': ('impedance', 'floorplan', 'length', 'net_widths'),
+    'intent': ('floorplan',),
 }
 
 _LENS_RE = r'^VERDICT=(PASS|FAIL):lens=([A-Za-z0-9_-]+)'
+
+#: Lenses whose verdict a `--final --kind completion` row may not carry as a
+#: BARE `--lens`. A close-out is the run's terminal record and nothing reopens
+#: it, so every verdict in it must have an artifact behind it: a path and a
+#: sha256 a later reader can open, rather than a line somebody retyped from a
+#: reply. references/verifier-prompts.md has required that durable copy since
+#: run 23; this is what makes it load-bearing instead of advisory.
+#:
+#: All three, deliberately, and the counter-argument is worth keeping because
+#: it is a good one: `spec` is the lens the arithmetic usually CANNOT refute --
+#: impedance, floorplan, length and net_widths are ungraded on most boards, and
+#: an ungraded component contradicts nothing -- while `connectivity` and `drc`
+#: grade on essentially every board, so LENS_COMPONENTS is a live backstop for
+#: them. That argues for listing `spec` alone. Against it: one rule is easier
+#: to obey than two, a backstop is not a source, and a bare line for any of the
+#: three is a claim about the run rather than about a file. Narrowing this is
+#: one token if a measured row ever justifies it.
+#:
+#: NON-final rows are untouched. A lap's lenses are working notes.
+LENS_MUST_BE_SOURCED = ('connectivity', 'drc', 'spec')
 
 #: Stop conditions a `--final --kind completion` row may carry when a lens
 #: FAILED. Two vocabularies, both of record: the routing half's NUMBERS
@@ -307,6 +372,71 @@ _LENS_RE = r'^VERDICT=(PASS|FAIL):lens=([A-Za-z0-9_-]+)'
 #: DONE-EXHAUSTED is deliberately absent -- with a FAIL lens it is a
 #: contradiction, refused above the membership check.
 FAIL_COMPATIBLE_STOPS = ('2', '4', 'STUCK', 'BUDGET')
+
+#: The WHOLE stop-condition vocabulary (#901), checked on every `record` that
+#: carries one -- not only when a lens FAILED, which is what let ~500 characters
+#: of prose into rows 29/30 of run 25 while the orchestrator's `4 (this half):
+#: ...` was refused twice at close-out. One record, two rules, depending on a
+#: lens. The numbers are convergence.md §3 (1 done, 2 budget spent, 3 plateau,
+#: 4 measured-unfixable); the names are what `verdict` prints and L5
+#: interpolates. FAIL_COMPATIBLE_STOPS is the subset legal beside a FAIL lens.
+STOP_TOKENS = ('1', '2', '3', '4', 'DONE-EXHAUSTED', 'STUCK', 'BUDGET')
+
+#: MSYS2's argv-rewrite signature. Git Bash rewrites any argument starting with
+#: `/` into a Windows path unless MSYS2_ARG_CONV_EXCL is set, and EVERY KiCad
+#: net name is `/`-prefixed -- so `/D_P` reaches the tool as
+#: `C:/Program Files/Git/D_P`. Nothing warns, because a tool cannot tell a
+#: mangled net name from a net that does not exist (CLAUDE.md). Row 31 of run 25
+#: holds exactly this in its `lever_argv`; `replay` of it would grade impedance
+#: on two nets that do not exist and return null, i.e. a vacuous pass.
+#: `.search`, never `.match`, on BOTH argv tokens and lever prose. The rewrite
+#: is at position 0 of a bare token but NOT of `--impedance-nets=/D_P`, which
+#: MSYS rewrites in place; and prose cannot be split on whitespace to find it
+#: because the rewritten path itself contains a space ("Program Files").
+#:
+#: WHAT THIS DOES NOT CATCH, so its silence is not read as a clean bill: the
+#: MSYS root is the install directory, and this knows the three common ones.
+#: A portable Git, an unusual install path, or a rewrite whose root is none of
+#: these is NOT detected -- the guard is a detector for the shape that has
+#: actually bitten this repo, not a proof of absence. The reliable defence
+#: remains `export MSYS2_ARG_CONV_EXCL='*'` before any command carrying net
+#: names (CLAUDE.md).
+_MANGLED_RE = re.compile(
+    r'[A-Za-z]:[/\\](?:Program Files(?: \(x86\))?[/\\]Git|msys64|msys32)[/\\]')
+
+_MSYS_REMEDY = ("export MSYS2_ARG_CONV_EXCL='*' before the command, and pass "
+                "Windows-style paths (C:/Users/...) in the same command since "
+                "the variable also stops ~/ and /c/ paths being converted")
+
+
+def split_stop_condition(value):
+    """``"4 (this half): the pair is parity-fixed"`` -> ``('4', 'the pair ...')``.
+
+    The TOKEN is the first whitespace-delimited chunk with a trailing ``:``
+    stripped, so both shapes run 25 actually recorded are legal as printed --
+    a bare ``DONE-EXHAUSTED`` and a token carrying an aside and a reason. The
+    remainder is the REASON and goes in its own field rather than being
+    validated as if it were a token. Returns ``(None, raw)`` when the token is
+    not one of :data:`STOP_TOKENS`; the caller refuses.
+    """
+    raw = (value or '').strip()
+    if not raw:
+        return None, ''
+    # `split(None, 1)` and not `partition(' ')`: a tab between the token and its
+    # reason is not a parse error.
+    parts = raw.split(None, 1)
+    token = parts[0].rstrip(':')
+    if token not in STOP_TOKENS:
+        return None, raw
+    # EVERYTHING after the token is the reason, verbatim. The first cut
+    # partitioned it again on its own first ':' and kept only the tail, which
+    # deleted exactly the informative half: `4 (this half): ...` lost the aside
+    # that distinguishes the routing half's close from the orchestrator's,
+    # `3: plateau: five laps` lost "plateau", and stop condition 4 -- defined as
+    # "a finding about the requirement, with the measurement that proves it" --
+    # lost the finding and kept the measurement. The ledger is the terminal
+    # record; it does not get to silently drop half a sentence.
+    return token, (parts[1].strip() if len(parts) > 1 else '')
 
 
 def score_component(score, key):
@@ -352,6 +482,69 @@ def _grades_another_board(board, score):
         return False
 
 
+def read_lens_file(path):
+    """(line, lineno) -- the FIRST line of `path` that begins `VERDICT=`.
+
+    references/verifier-prompts.md has required every verifier to write its
+    verdict to disk since run 23 ("a reply is a notification and notifications
+    get lost"). Nothing read those files: the line was retyped into `--lens`
+    from a reply, so the ledger recorded a CLAIM ABOUT THE RUN where it could
+    have recorded a claim about a file. This is the reader.
+
+    SELECTION IS DELIBERATELY DUMB, and validation is left where it already
+    lives. Selecting "the first line matching `_LENS_RE`" instead would step
+    silently past a MALFORMED verdict to a well-formed one further down -- the
+    exact normalisation verifier-prompts.md forbids, and the one this file
+    already refuses to do with `--lens` ("stored RAW, so a malformed line stays
+    visible instead of being normalised into something that reads like a
+    pass"). So the first `VERDICT=`-prefixed line wins whatever it says, and
+    the grammar gate that already exists names it.
+
+    No size cap and no line cap: a cap is a place to bury a FAIL.
+
+    `utf-8-sig`, unlike `--score-file`'s plain utf-8. This is a line-PREFIX
+    test, so a BOM on line 1 would make the file report "no VERDICT= line"
+    about a file that visibly contains one -- a confusing message on a gate
+    nobody should want to work around. A JSON parser has its own BOM handling;
+    a startswith() does not.
+
+    Raises OSError (unreadable) or ValueError (no such line); the caller turns
+    both into a refusal that writes nothing.
+    """
+    n = 0
+    with open(path, encoding='utf-8-sig') as fh:
+        for n, line in enumerate(fh, 1):
+            if line.strip().startswith('VERDICT='):
+                return line.strip(), n
+    raise ValueError(
+        f"no line beginning 'VERDICT=' in {path} ({n} line(s) scanned). The "
+        f"token is case-sensitive, and the verifier's own reply format is "
+        f"`VERDICT=(PASS|FAIL):lens=<lens>` on a line of its own "
+        f"(references/verifier-prompts.md). A boundary-verification verdict "
+        f"spells `check=<1-5>` instead of `lens=<name>` and is not a lens: "
+        f"cite it in the report, not here.")
+
+
+def lens_name(raw):
+    """The lens a VERDICT= line speaks about, lower-cased, or None.
+
+    ONE definition, because there were three: this file's grammar check, its
+    --final lens-set loop (which re-inlined the pattern as a literal beside an
+    `__import__('re')`), and loop_driver._cross_check's own copy. Three regexes
+    for one grammar is three places for a `lens=Connectivity` to be handled
+    differently.
+
+    CASE-FOLDED. `_LENS_RE` accepts [A-Za-z0-9_-]+ and every table keyed by a
+    lens name here is lower-case, so `lens=Connectivity` used to pass the
+    format check, miss the table, and be written -- the whole gate bypassed by
+    a shift key. The verdict word (PASS/FAIL) is NOT returned: callers that
+    need it match `_LENS_RE` themselves, and folding two questions into one
+    return value is how the FAIL branch gets forgotten.
+    """
+    m = re.match(_LENS_RE, str(raw or '').strip())
+    return m.group(2).lower() if m else None
+
+
 def lens_contradictions(lenses, score):
     """[(lens, component, count)] where a PASS verdict contradicts the score.
 
@@ -373,10 +566,7 @@ def lens_contradictions(lenses, score):
         m = re.match(_LENS_RE, str(raw or '').strip())
         if not m or m.group(1) != 'PASS':
             continue
-        # CASE-FOLDED. The grammar accepts [A-Za-z0-9_-]+ and the table is
-        # lower-case, so `lens=Connectivity` matched the format check, missed
-        # the table, and was written -- the whole gate bypassed by a shift key.
-        for key in LENS_COMPONENTS.get(m.group(2).lower(), ()):
+        for key in LENS_COMPONENTS.get(lens_name(raw), ()):
             n = score_component(score, key)
             if isinstance(n, (int, float)) and n > 0:
                 out.append((m.group(2), key, n))
@@ -655,6 +845,57 @@ def cmd_record(a):
         except OSError as _e:
             print(f"record: --score-file unreadable: {_e}", file=sys.stderr)
             return 2
+    # --lens-file: the verdict as a PATH, beside --score-file and for the same
+    # reason -- the payload is materialised into the attribute the rest of this
+    # function already knows how to handle, so the grammar gate, the
+    # contradiction check, the --final lens-set gate and entry['lenses'] are
+    # all unchanged. What a path buys that a retyped line does not is
+    # PROVENANCE: the row stores where the verdict came from and the sha256 of
+    # the bytes it came from, so a reader can open the same file.
+    #
+    # Order: every bare --lens first, in the order given, then every
+    # --lens-file, in the order given. argparse keeps two independent append
+    # lists and loses their relative order, so rather than pretend otherwise
+    # the rule is written down here and in both --help strings.
+    #
+    # NOT mutually exclusive with --lens, unlike --score/--score-file: those
+    # name ONE payload, while a row carries one verdict per lens and a run may
+    # legitimately have a file for one and a typed line for another.
+    _lens_src = [None] * len(a.lens or [])
+    for _p in (getattr(a, 'lens_file', None) or []):
+        try:
+            _line, _no = read_lens_file(_p)
+        except UnicodeDecodeError as _e:
+            # BEFORE the ValueError arm: UnicodeDecodeError SUBCLASSES
+            # ValueError, so without its own branch a file that is not text at
+            # all was reported as "no line beginning 'VERDICT='" -- an answer
+            # about the content of a file nothing could read, with no path and
+            # no remedy in it.
+            print(f"record: --lens-file {_p} is not UTF-8 text ({_e}). A "
+                  f"verdict file holds one VERDICT= line; if this is a log, "
+                  f"pass the file the verifier wrote. Nothing was written.",
+                  file=sys.stderr)
+            return 2
+        except OSError as _e:
+            print(f"record: --lens-file unreadable: {_e}", file=sys.stderr)
+            return 2
+        except ValueError as _e:
+            print(f"record: {_e} Nothing was written.", file=sys.stderr)
+            return 2
+        from board_store import sha256_file
+        a.lens = (a.lens or []) + [_line]
+        # The WHOLE FILE is hashed, not the selected line. A verdict line is
+        # `finding=` and `evidence=` as much as it is PASS or FAIL, and hashing
+        # the line alone would let everything around it be rewritten with the
+        # row still verifying.
+        #
+        # TWO paths. `path` is as the caller spelled it, which is this repo's
+        # idiom everywhere else -- and on its own it is unresolvable, because
+        # the command L5 prints is relative to the work dir and a later reader
+        # is somewhere else. `abspath` is what the file WAS at record time. The
+        # sha256 remains the identity; the paths are where to look for it.
+        _lens_src.append({'path': _p, 'abspath': os.path.abspath(_p),
+                          'sha256': sha256_file(_p), 'line': _no})
     # Refuse an --argv that can never replay (run-7 F4: entries recorded with
     # placeholder script names made replay a reconstruction, which is exactly
     # what the ledger exists to prevent). Nothing is written on refusal.
@@ -668,6 +909,31 @@ def cmd_record(a):
                   f"produced the board), or omit --argv for a prose-only "
                   f"entry. Nothing was written.", file=sys.stderr)
             return 2
+        # ...and EVERY OTHER TOKEN, for the one corruption a replay cannot
+        # detect either (#901). The guard above only ever saw argv[0], which is
+        # `python3` for every invocation the doctrine teaches, so a mangled net
+        # name three tokens later sailed through -- and `replay` re-executes the
+        # stored list verbatim, so the row grades nets that do not exist and
+        # returns null: a vacuous pass nothing reports.
+        _bad = [t for t in a.argv if _MANGLED_RE.search(str(t))]
+        if _bad:
+            print(f"record: --argv contains {len(_bad)} token(s) rewritten by "
+                  f"MSYS2 -- {', '.join(repr(t) for t in _bad[:3])}"
+                  f"{' ...' if len(_bad) > 3 else ''}. Git Bash converts any "
+                  f"argument starting with '/' into a Windows path, and every "
+                  f"KiCad net name is '/'-prefixed, so this row records nets "
+                  f"that do not exist and would REPLAY as a vacuous pass. "
+                  f"Re-run the command with {_MSYS_REMEDY}, then record it. "
+                  f"Nothing was written.", file=sys.stderr)
+            return 2
+    # The same shape in --lever is a WARNING, not a refusal: the lever is prose
+    # for a human, so a mangled name there misleads a reader without making the
+    # row unreplayable.
+    if a.lever and _MANGLED_RE.search(str(a.lever)):
+        print(f"record: WARNING -- --lever contains an MSYS2-rewritten token "
+              f"(a '/'-prefixed net name turned into a Windows path). The row "
+              f"is still replayable; the prose is wrong. {_MSYS_REMEDY}.",
+              file=sys.stderr)
     # Lens verdicts are stored RAW, so the grammar stays owned by
     # verifier-prompts.md and a malformed line stays visible instead of being
     # normalised into something that reads like a pass. Refuse the shape at
@@ -756,51 +1022,138 @@ def cmd_record(a):
               "stop conditions ended it). Nothing was written.",
               file=sys.stderr)
         return 2
-    # A run-closing record must carry the routed-board lenses. `blocking == 0`
-    # and "every lens passes" are two different claims and the second had no
-    # mechanism at all -- verifier-prompts.md states the conjunct and nothing
-    # computed it, so a close-out could be written with no lens ever dispatched.
+    # ALWAYS, not only when a lens FAILED (#901). With every lens passing, any
+    # string was accepted and stored -- so the same record had two rules
+    # depending on a lens, and ~500 characters of prose went into the ledger as
+    # a "stop condition" while an orchestrator's `4 (this half): <reason>` was
+    # refused. The token is now checked wherever one is given, and the prose
+    # after it keeps its own field instead of being validated as a token.
+    _stop_token, _stop_reason = split_stop_condition(a.stop_condition)
+    if a.stop_condition and _stop_token is None:
+        print(f"record: --stop-condition {a.stop_condition!r} does not start "
+              f"with a stop condition. It must be one of "
+              f"{' | '.join(STOP_TOKENS)} -- the numbers are convergence.md "
+              f"S3 (1 done, 2 budget spent, 3 plateau, 4 measured-unfixable) "
+              f"and the names are what `verdict` prints. Prose about WHY goes "
+              f"after it (\"3: five laps, no new copper\") or in "
+              f"--stop-reason; both land in the row's stop_reason. Nothing "
+              f"was written.", file=sys.stderr)
+        return 2
+    if a.stop_reason and _stop_reason and a.stop_reason.strip() != _stop_reason:
+        print("record: a reason was given twice, in --stop-condition and in "
+              "--stop-reason, and they differ. Give it once. Nothing was "
+              "written.", file=sys.stderr)
+        return 2
+    _stop_reason = (a.stop_reason or '').strip() or _stop_reason
+    # #901: these two are about --final, NOT about which half it closes.
+    # They sat inside the `kind == 'completion'` gate below, so
+    # `--kind systemic --final --stop-condition DONE-EXHAUSTED --lens
+    # VERDICT=FAIL:...` was accepted -- a one-word bypass of the entire
+    # run-closing contradiction check, in the same shape ("one record, two
+    # rules, depending on something orthogonal") this issue is about. The
+    # THREE-LENS requirement stays completion-only: that one really is about
+    # the routed board.
+    _failed = [v for v in (a.lens or []) if v.strip().startswith('VERDICT=FAIL')]
+    # TWO STOP VOCABULARIES ARE OF RECORD, and both must be acceptable as
+    # printed: the routing half closes on the NUMBERS of convergence.md §3,
+    # and the outer loop's L5 interpolates the verdict NAMES this tool's
+    # own `verdict` subcommand prints. L5's command was refused verbatim
+    # here for exactly that gap -- a FAIL lens is the NORMAL case on the
+    # STUCK/BUDGET paths. DONE-EXHAUSTED is the exception: done-and-
+    # measured-done IS the all-lenses-pass claim.
+    # The extracted TOKEN, so `4 (this half): <reason>` is judged as a 4.
+    _sc = _stop_token or ''
+    if a.final and _failed and _sc == 'DONE-EXHAUSTED':
+        print(f"record: {len(_failed)} lens FAILED under --stop-condition "
+              f"DONE-EXHAUSTED. Done-and-measured-done IS the every-lens-"
+              f"passes claim, so a FAIL beside it is the contradiction "
+              f"L5's cross-check exists to refuse. Record STUCK or BUDGET "
+              f"(or fix the board and re-dispatch the lens), never a done "
+              f"a lens denies. Nothing was written.", file=sys.stderr)
+        return 2
+    if a.final and _failed and _sc not in FAIL_COMPATIBLE_STOPS:
+        print(f"record: {len(_failed)} lens FAILED, so this run did not "
+              f"finish clean -- --stop-condition must be 2 (budget spent), "
+              f"4 (measured-unfixable and said so), or the loop verdict "
+              f"naming the same thing (STUCK, BUDGET), not "
+              f"{a.stop_condition!r}. A FAIL means `blocking` was not "
+              f"really zero. Nothing was written.", file=sys.stderr)
+        return 2
+
+    # A run-closing COMPLETION record must carry the routed-board lenses.
+    # `blocking == 0` and "every lens passes" are two different claims and the
+    # second had no mechanism at all -- verifier-prompts.md states the conjunct
+    # and nothing computed it, so a close-out could be written with no lens ever
+    # dispatched. This one IS completion-only: it is about the routed board.
     if a.final and a.kind == 'completion':
-        _seen = set()
-        for v in (a.lens or []):
-            _m = __import__('re').match(r'^VERDICT=(PASS|FAIL):lens=([A-Za-z0-9_-]+)',
-                                        v.strip())
-            if _m:
-                _seen.add(_m.group(2))
+        _seen = {n for n in (lens_name(v) for v in (a.lens or [])) if n}
         _need = {'connectivity', 'drc', 'spec'}
         _miss = sorted(_need - _seen)
         if _miss:
+            # The old text said "routing_driver --stage V5 fans them out".
+            # There is no routing_driver.py on main, and V1-V5 survive here
+            # only as prose. (It DID exist -- created at 255af97d, grown to
+            # 19 stages, on 10 commits, none of them on main; the maintainer
+            # removed it twice by name because it forked before #562 and went
+            # on emitting two steps main had deleted. "Never has been" was
+            # wrong, and a refusal is the worst place to be wrong about what
+            # exists.) This is a REFUSAL, i.e. the
+            # one message whose entire job is to say what to do next, so it
+            # names a file the reader can open instead of a tool they cannot
+            # find.
+            # The path is on ONE line on purpose. Split across two f-string
+            # fragments it is still correct for a human and invisible to any
+            # grep -- including the cited-path guard this repo runs, whose
+            # citation pattern needs a '/' inside a single token.
+            _ref = ('.claude/skills/plan-pcb-placement-and-routing/references/verifier-prompts.md')
             print(f"record: --final needs the routed-board lenses and is "
-                  f"missing {', '.join(_miss)}. Dispatch them "
-                  f"(routing_driver --stage V5 fans them out) and pass each "
-                  f"VERDICT= line as --lens. `blocking == 0` is not `every "
-                  f"lens passes`. Nothing was written.", file=sys.stderr)
+                  f"missing {', '.join(_miss)}. Dispatch them -- {_ref}, "
+                  f"'The nine lenses' 7-9 -- and pass each VERDICT= line as "
+                  f"--lens-file. `blocking == 0` is not `every lens passes`. "
+                  f"Nothing was written.", file=sys.stderr)
             return 2
-        _failed = [v for v in (a.lens or []) if v.strip().startswith('VERDICT=FAIL')]
-        _sc = (a.stop_condition or '').strip()
-        # TWO STOP VOCABULARIES ARE OF RECORD, and both must be acceptable as
-        # printed: the routing half closes on the NUMBERS of convergence.md §3,
-        # and the outer loop's L5 interpolates the verdict NAMES this tool's
-        # own `verdict` subcommand prints. L5's command was refused verbatim
-        # here for exactly that gap -- a FAIL lens is the NORMAL case on the
-        # STUCK/BUDGET paths. DONE-EXHAUSTED is the exception: done-and-
-        # measured-done IS the all-lenses-pass claim.
-        if _failed and _sc == 'DONE-EXHAUSTED':
-            print(f"record: {len(_failed)} lens FAILED under --stop-condition "
-                  f"DONE-EXHAUSTED. Done-and-measured-done IS the every-lens-"
-                  f"passes claim, so a FAIL beside it is the contradiction "
-                  f"L5's cross-check exists to refuse. Record STUCK or BUDGET "
-                  f"(or fix the board and re-dispatch the lens), never a done "
-                  f"a lens denies. Nothing was written.", file=sys.stderr)
+    # ...and each routed-board lens on ANY --final row must have a FILE behind
+    # it. Placed after the missing-lens check (a lens you do not have is a more
+    # basic complaint than a lens you cannot trace) and before the
+    # stop-condition checks (those are about the board; this is about the
+    # record).
+    #
+    # NOT nested in the `kind == 'completion'` block above, and that is the
+    # point. The three-lens requirement is completion-only because it is about
+    # the routed board; THIS one is about provenance, and a lens verdict is
+    # exactly as unsourced on a `--kind systemic --final` row. That shape is
+    # not hypothetical: `_cross_check`'s per-lens supersession takes the LATEST
+    # final row that speaks to a lens, so a bare `--kind systemic --final
+    # --lens 'VERDICT=PASS:lens=spec'` silently overrides a sourced FAIL --
+    # which is #901's "one record, two rules depending on something orthogonal"
+    # rebuilt inside the new gate. One rule: a --final row's lens has a file.
+    #
+    # PASS *and* FAIL. Treating only PASS as needing a source would leave the
+    # mechanism unexercised on exactly the runs that print this command: a
+    # STUCK or BUDGET close-out normally carries a FAIL, and
+    # final_record_command would then have to print a conditional slot.
+    if a.final:
+        _unsourced = [v for v, s in zip(a.lens or [], _lens_src)
+                      if s is None and lens_name(v) in LENS_MUST_BE_SOURCED]
+        if _unsourced:
+            _list = '\n'.join(f'    {v}' for v in _unsourced)
+            print(f"record: this --final row carries "
+                  f"{len(_unsourced)} lens verdict(s) with no file behind "
+                  f"them:\n{_list}\n\n"
+                  f"A close-out is this run's terminal record and nothing "
+                  f"reopens a ledger, so every verdict in it needs an artifact "
+                  f"a later reader can open -- not a line retyped from a "
+                  f"reply. references/verifier-prompts.md already requires "
+                  f"every verifier to write its VERDICT= line to disk; pass "
+                  f"that file and the row stores its path and sha256:\n"
+                  f"    --lens-file <the verifier's file for that lens>\n\n"
+                  f"Measured (run 25): a close-out inherited "
+                  f"VERDICT=PASS:lens=spec from an earlier step, the "
+                  f"end-to-end verifier returned FAIL on the same clause two "
+                  f"hours later, and the terminal row had to be re-recorded. "
+                  f"Nothing was written.", file=sys.stderr)
             return 2
-        if _failed and _sc not in FAIL_COMPATIBLE_STOPS:
-            print(f"record: {len(_failed)} lens FAILED, so this run did not "
-                  f"finish clean -- --stop-condition must be 2 (budget spent), "
-                  f"4 (measured-unfixable and said so), or the loop verdict "
-                  f"naming the same thing (STUCK, BUDGET), not "
-                  f"{a.stop_condition!r}. A FAIL means `blocking` was not "
-                  f"really zero. Nothing was written.", file=sys.stderr)
-            return 2
+
     store = BoardStore(a.store or os.path.join(os.path.dirname(a.ledger), 'boards'))
     sha = store.put(a.board)
     # Run-3 B4: three ledger entries shipped carrying a PRIOR board's score
@@ -900,8 +1253,16 @@ def cmd_record(a):
     _half = _HALF.get(a.kind)
     if _half and isinstance(_score_doc, dict):
         _pacc = None
+        # _is_lap, not a bare _HALF match: the previous ACCEPTED LAP is
+        # what a new lap is commensurable with. A close-out row is graded
+        # over a different component set BY CONSTRUCTION -- that is the
+        # whole reason a --final row is not a lap -- so comparing the
+        # first ordinary lap after one against it produces exactly the
+        # 'different set of components' finding this block exists to
+        # report, and can reach the REFUSAL below: --accept-incommensurable
+        # demanded for a lap that is fine.
         for _r in reversed(_prior):
-            if _r.get('accepted') and _HALF.get(_r.get('kind')) == _half \
+            if _r.get('accepted') and _is_lap(_r, _half) \
                     and isinstance(_r.get('score'), dict):
                 _pacc = _r
                 break
@@ -962,6 +1323,22 @@ def cmd_record(a):
              # question the record could answer.
              'shape': a.shape,
              'lenses': list(a.lens) if a.lens else None,
+             # WHERE each lens verdict came from, positionally parallel to
+             # `lenses` -- {path, sha256, line} for a --lens-file, null for a
+             # line typed on the command line.
+             #
+             # A LIST, not a dict keyed by lens name: two lines may carry the
+             # same lens (a corrected re-record, a verifier that emitted two),
+             # and a dict drops one of them silently. `lenses` is already a
+             # positional raw list, and a parallel list is the only shape that
+             # cannot drift out of correspondence with it under append.
+             #
+             # Emitted whenever there are lenses at all, even when every entry
+             # is null: `lens_source: null` ("written by a converge that
+             # predates the field") and `[null, null, null]` ("every lens was
+             # typed") are different facts, and collapsing them recreates the
+             # silence-looks-like-compliance failure this file names elsewhere.
+             'lens_source': _lens_src if a.lens else None,
              # Split on whitespace and commas so `--scope-refs "$(cat locks.txt)"`
              # records 45 refs rather than one 45-ref string.
              'scope_refs': ([t for chunk in a.scope_refs
@@ -982,7 +1359,16 @@ def cmd_record(a):
               "no trigger.", file=sys.stderr)
     if a.final:
         entry['final'] = True
-        entry['stop_condition'] = a.stop_condition
+    # The TOKEN alone, so a reader (and `verdict`, and the film) can match it
+    # against the vocabulary instead of parsing prose (#901). The reason keeps
+    # its own key -- absent, not empty, when there is none. Recorded on ANY row
+    # that carries one, not only a --final row: the first cut stored both keys
+    # inside `if a.final:`, so `--stop-reason` on an ordinary lap was accepted,
+    # validated, and silently dropped -- a flag that does nothing.
+    if _stop_token:
+        entry['stop_condition'] = _stop_token
+    if _stop_reason:
+        entry['stop_reason'] = _stop_reason
     if a.exhausted:
         entry['exhausted'] = {'half': a.exhausted,
                               'reason': a.exhausted_reason.strip()}
@@ -1069,6 +1455,50 @@ CONTINUE, DONE, STUCK, BUDGET = 4, 0, 5, 6
 _HALF = {'placement': 'placement', 'completion': 'routing'}
 
 
+def _is_lap(row, half):
+    """Is this row a LAP of `half` -- a turn of the loop that could improve it?
+
+    THREE recorded shapes are not laps, and every one of them moved a verdict
+    it had no business moving:
+
+      * `kind systemic` / `kind classification`, which _HALF already excludes.
+      * a `--final` row. It is the RECORD OF a verdict, so a verdict computed
+        from it is computed from its own output. Measured: re-running the same
+        L5 command after its own close-out reads "routing improved within its
+        last 5 laps" -- the final row carries a score graded over different
+        components than the routing half's laps -- and answers "not done yet"
+        about a run that already shipped STUCK. The verdict of record was
+        reproducible only from the ledger state BEFORE the row recording it,
+        which is the wrong way round for a record.
+      * an `--exhausted` declaration. It changes no board and says so.
+        The shape this clause actually saves is a CROSS-HALF declaration --
+        `--kind placement --exhausted routing`, which is a row of the
+        placement half by kind and says nothing about placement at all, yet
+        used to retract a live placement declaration. (A SELF-declaring row,
+        `--kind placement --exhausted placement`, never reaches here:
+        `_declaration`'s first branch matches on `exhausted.half` and re-arms
+        the declaration before the `elif` runs. Measured both ways.)
+
+    ONE predicate, used by _declaration's supersession branch AND by
+    _half_state's window AND by cmd_record's commensurability lookback,
+    because the three disagreeing is what produced run 25's fourth
+    declaration: the L2 freeze row superseded three live declarations while
+    contributing an UNJUDGED lap to the window, so the half was neither
+    declared nor answerable and L5 printed "still improving" at a half that
+    had said three times it was finished.
+
+    A row with no `kind` is in neither half. (Ledger.counts defaults a missing
+    kind to `completion`; this does not, and that predates this function.)
+    """
+    if _HALF.get(row.get('kind')) != half:
+        return False
+    if row.get('final'):
+        return False
+    if isinstance(row.get('exhausted'), dict):
+        return False
+    return True
+
+
 def _score_key(score):
     """(blocking, quality) as a comparable tuple, or None if not gradeable.
 
@@ -1080,7 +1510,17 @@ def _score_key(score):
     if not isinstance(score, dict):
         return None
     b = score.get('blocking')
-    q = score.get('quality') or {}
+    q = score.get('quality')
+    # `quality` IS NOT NECESSARILY A DICT. `record` accepts any JSON for it, so
+    # `{"quality": [1, 2]}` reaches here and `q.get` raised AttributeError --
+    # the same crash class as #936 D1, in the same function, one line above the
+    # guard added for it. Worse than a one-off: the raising value lands in the
+    # LEDGER, and thereafter every `verdict` on that ledger tracebacks in the
+    # row comprehension no matter how good its `--score` is, so L5 reports "the
+    # score is not a measurement" about the wrong artifact. A quality that is
+    # not a mapping is unmeasured quality, which is what `inf` below means.
+    if not isinstance(q, dict):
+        q = {}
     # A quality tuple carrying None (board_score.quality returns {'error': ...}
     # when the board will not parse) makes min() raise TypeError the moment two
     # rows tie on `blocking`. Untested until now because the self-tests use a
@@ -1113,9 +1553,88 @@ def _declaration(rows, half):
         if isinstance(dec, dict) and dec.get('half') == half:
             found, live = (str(dec.get('reason') or '').strip()
                            or 'no reason recorded'), True
-        elif found is not None and _HALF.get(r.get('kind')) == half:
+        elif found is not None and _is_lap(r, half):
+            # _is_lap, not a bare _HALF match, and this is the sharper half of
+            # the fix: "the half went back to work" must mean a LAP was run.
+            # A freeze row and a close-out row are both `kind placement` /
+            # `kind completion` and neither turns the loop, so either one
+            # silently retracted a declaration a person had written down.
             live = False
     return None if found is None else (found, live)
+
+
+def placement_terms(score):
+    """The `placement.terms` block of a score, or None. #894."""
+    if not isinstance(score, dict):
+        return None
+    p = score.get('placement')
+    if not isinstance(p, dict):
+        return None
+    t = p.get('terms')
+    return t if isinstance(t, dict) else None
+
+
+def _placement_movement(runs_pairs):
+    """`(verdict, hint)` over a window's commensurable runs, or None.
+
+    Compares each run's LAST lap against its FIRST -- the same baseline
+    `min(r) < r[0]` uses one tier up, and for the same measured reason: "has
+    this half improved across its own last `flat` laps", never "has it beaten
+    the best lap ever seen", which one large early improvement pins forever.
+
+    Returns the strongest movement found: `better` if any run improved by
+    Pareto, else `mixed` if any run traded, else None. Delegates the
+    comparison to `placement_score.compare_terms` -- there is no ordering rule
+    here, and no weight anywhere.
+    """
+    try:
+        import placement_score as ps
+    except Exception as exc:                                 # noqa: BLE001
+        # NOT silently None. `None` here means "the terms did not move", and
+        # a half whose comparator could not even load would then report
+        # `plateau` -- the exact defect this tier exists to fix, arriving
+        # through the tier itself. `placement_score`'s own Vacuity rule is
+        # that an unmeasurable thing reports a REASON.
+        return 'unmeasured', (f'placement_score could not be imported, so the '
+                              f'terms were not compared: '
+                              f'{type(exc).__name__}: {exc}')
+    best = None
+    for run in runs_pairs:
+        first = placement_terms(run[0][1])
+        last = placement_terms(run[-1][1])
+        if not first or not last:
+            continue
+        verdict, detail = ps.compare_terms(first, last)
+        if verdict in ('better', 'mixed'):
+            hint = ps.format_delta(detail)
+            if verdict == 'better':
+                return 'better', hint
+            best = best or ('mixed', hint)
+    return best
+
+
+def parent_score(rows, row):
+    """The score of the row this one was recorded against, or None.
+
+    `cmd_record` has written `parent_sha` on every ledger row since the ledger
+    existed. `tests/stress/harvest_predictor_rows.py` walks it as a lineage
+    graph and `py_tools/make_film.py` names it, but nothing in converge itself
+    ever resolved it back to the parent's SCORE. This is that read side.
+
+    Returns None when there is no parent, when no row carries that
+    `result_sha`, or when MORE THAN ONE does -- a re-recorded board is not a
+    parent, and "I could not tell which" must not become an answer.
+    """
+    if not isinstance(row, dict):
+        return None
+    sha = row.get('parent_sha')
+    if not sha:
+        return None
+    hits = [r for r in rows
+            if isinstance(r, dict) and r.get('result_sha') == sha]
+    if len(hits) != 1:
+        return None
+    return hits[0].get('score')
 
 
 def _half_state(rows, half, flat):
@@ -1150,15 +1669,21 @@ def _half_state(rows, half, flat):
     the half as "still improving", which it was not.
     """
     dec = _declaration(rows, half)
-    ev = []                      # (accepted, key, score) in ledger order
+    # (iteration, accepted, key, score) in ledger order. The ITERATION is
+    # carried so a `no-comparison` verdict can NAME the rows it could not
+    # judge: "2 accepted laps recorded no blocking" tells a reader there is a
+    # problem and not where it is, and the remedy -- re-score them, or record
+    # them as the systemic rows they were -- needs the numbers.
+    ev = []
     for r in rows:
-        if _HALF.get(r.get('kind')) != half:
+        if not _is_lap(r, half):
             continue
         if not r.get('accepted'):
-            ev.append((False, None, r.get('score')))
+            ev.append((r.get('iteration'), False, None, r.get('score')))
             continue
-        ev.append((True, _score_key(r.get('score')), r.get('score')))
-    n_acc = sum(1 for e in ev if e[0])
+        ev.append((r.get('iteration'), True, _score_key(r.get('score')),
+                   r.get('score')))
+    n_acc = sum(1 for e in ev if e[1])
     out = {'laps': len(ev), 'accepted': n_acc, 'rejected': len(ev) - n_acc,
            'flat': False, 'why': 'too-few-laps'}
     if dec and dec[1]:
@@ -1174,7 +1699,14 @@ def _half_state(rows, half, flat):
         # because it was.
         return out
     window = ev[-flat:]
-    if not any(acc for acc, _k, _s in window):
+    # The evidence the verdict is read off, set HERE -- before any branch can
+    # return. It used to be attached at the bottom of the function, so the
+    # all-rejected `plateau` below returned without it: the one verdict shape
+    # where a reader most wants to know which laps were counted (it can drive
+    # DONE or STUCK) was the one that did not say. The docstring has promised
+    # "with the evidence it was decided from" since it was written.
+    out['window_iterations'] = [i for i, _a, _k, _s in window]
+    if not any(acc for _i, acc, _k, _s in window):
         # Every lap in the window was REJECTED. Nothing improved, by
         # construction -- that is a plateau stated by the half itself.
         out.update(flat=True, why='plateau')
@@ -1219,7 +1751,7 @@ def _half_state(rows, half, flat):
     # (78, 78, 78, REJ, 40 ended the run at STUCK on a half whose last lap took
     # blocking 78 -> 40), and 2313 flipped `plateau` -> unanswerable, on the
     # alternating accept/reject pattern that IS normal routing.
-    seq = [(k, s) for acc, k, s in window if acc and k is not None]
+    seq = [(k, s) for _i, acc, k, s in window if acc and k is not None]
     runs, cur, hints = [], [], []
     for k, s in seq:
         cm = commensurability(cur[-1][1], s) if cur else None
@@ -1229,7 +1761,8 @@ def _half_state(rows, half, flat):
             cur = []
         cur.append((k, s))
     runs.append(cur)
-    runs = [[k for k, _s in r] for r in runs if len(r) >= 2]
+    runs_pairs = [r for r in runs if len(r) >= 2]
+    runs = [[k for k, _s in r] for r in runs_pairs]
     # An ACCEPTED lap that recorded no `blocking` is unjudged, and a plateau
     # asserted over unjudged laps is the "reported clean because unexamined"
     # error this toolchain names everywhere else. An improvement, by contrast,
@@ -1237,11 +1770,46 @@ def _half_state(rows, half, flat):
     # improvement wins; a plateau requires every accepted lap to have been
     # judged; anything else is not answerable and says so. A REJECTION is not
     # unjudged -- the rejection is itself the measurement.
-    unjudged = sum(1 for acc, k, _s in window if acc and k is None)
+    unjudged_its = [i for i, acc, k, _s in window if acc and k is None]
+    unjudged = len(unjudged_its)
+    _place = _placement_movement(runs_pairs) if half == 'placement' else None
     if any(min(r) < r[0] for r in runs):
         out.update(flat=False, why='improving')
+    elif _place and _place[0] == 'better' and not unjudged:
+        # THE PLACEMENT TIER (#894). Reachable only when `blocking` and
+        # `quality` have ALREADY tied across the run -- which on a copper-free
+        # board is every lap, because `quality` is (0, 0.0, 0) for every
+        # placement of every board. So this turns `plateau` into `improving`
+        # and NOTHING else: it cannot make an improving half plateau, cannot
+        # reach the routing half (the `half ==` guard above), and `not
+        # unjudged` is what keeps it out of `no-comparison`.
+        #
+        # That last condition is LOAD-BEARING and was missing in the first
+        # version of this branch. Without it the tier also caught the window
+        # shape "some laps compare, and at least one ACCEPTED lap carries no
+        # `blocking`", which `no-comparison` owns: a review measured a
+        # five-lap window flipping from `no-comparison` to `improving` with
+        # `unjudged`, `blocked` and `unjudged_iterations` silently dropped --
+        # the exact diagnostic those keys exist to carry, and the shape
+        # test_904_not_a_lap.py pins. An unjudged lap is not evidence that a
+        # half improved, whatever the laps around it did on their terms.
+        #
+        # PARETO, not a score. `placement_score.compare_terms` says `better`
+        # only when no measured term regressed, so a lap that traded pair
+        # length for balance is NOT credited -- it reports `plateau` with
+        # `placement_traded` naming both sides. #694 is why there is no weight
+        # here: a corridor term's measured sign reversed while an aggregate
+        # verdict kept printing PASS, because a collapsed mark cannot say
+        # which of its inputs moved.
+        out.update(flat=False, why='improving', placement_improved=_place[1])
     elif runs and not unjudged:
         out.update(flat=True, why='plateau')
+        if _place and _place[0] == 'mixed':
+            out['placement_traded'] = _place[1]
+        elif _place and _place[0] == 'unmeasured':
+            # A plateau asserted while the placement comparator was broken is
+            # a plateau over something nobody measured. Say so on the record.
+            out['placement_unmeasured'] = _place[1]
     else:
         # Answerable again after one more comparable lap, after `flat`
         # rejections, or by declaring the half exhausted on the record. NAME
@@ -1250,6 +1818,23 @@ def _half_state(rows, half, flat):
         out.update(flat=False, why='no-comparison', unjudged=unjudged,
                    blocked=('unjudged' if unjudged else
                             'incommensurable' if hints else 'single-lap'))
+        # WHICH rows could not be judged, by the ledger's own word for them.
+        # "2 accepted laps recorded no blocking" tells a reader that there is a
+        # problem and not where it is, and both remedies -- re-score those laps,
+        # or record them as the systemic rows they always were -- need the
+        # numbers. `iterations` because that is what `replay --iteration` and
+        # `step-back --iteration` take.
+        #
+        # ONLY when there ARE unjudged rows, and UNFILTERED. Emitting `[]` on
+        # the incommensurable and single-lap branches made "no unjudged rows"
+        # and "unjudged rows I cannot name" the same value; and dropping the
+        # un-numbered ones made `unjudged: 2` sit beside an empty list, which
+        # is the count contradicting its own detail. A row with no `iteration`
+        # appears as `null` -- "this row is unjudged AND unnumbered" is a
+        # sharper finding than silence. (`cmd_record` always numbers a row, so
+        # this is about hand-built and foreign ledgers.)
+        if unjudged:
+            out['unjudged_iterations'] = list(unjudged_its)
     if hints:
         out['incommensurable'] = '; '.join(sorted(set(hints)))
         out['compared'] = sum(len(r) for r in runs)
@@ -1298,22 +1883,86 @@ def cmd_verdict(a):
     """
     from board_store import Ledger
     rows = Ledger(a.ledger).entries()
-    score, err = None, None
+    score, err, given = None, None, False
     if a.score:
+        given = True
         try:
             with open(a.score, encoding='utf-8') as fh:
                 score = json.load(fh)
         except Exception as exc:                            # noqa: BLE001
             err = f'{type(exc).__name__}: {exc}'
-    if score is None:
-        print(json.dumps({'verdict': 'NO-SCORE', 'reason': (
-            err or '--score is required: the verdict is about a board, and '
-            'without its score there is nothing to be blocked or done ABOUT.'
-        )}, indent=1, sort_keys=True))
+
+    def _names(k):
+        """`score[k]` as a sorted list of names, whatever the document holds.
+
+        A malformed score is the whole subject of this branch, so reading THIS
+        KEY must not be the thing that raises: `sorted(score.get(k) or [])` is
+        a TypeError on `{"ungraded": 5}` -- the same crash class this guard
+        exists to remove, which is why it is not spelled that way here. It says
+        nothing about the rest of the document; `_score_key` guards `quality`
+        separately, for the same reason and after the same kind of crash.
+        """
+        v = score.get(k) if isinstance(score, dict) else None
+        if isinstance(v, (list, tuple, set)):
+            return sorted(str(x) for x in v)
+        return [] if v is None else [f'<not a list: {v!r}>']
+
+    def _no_score(reason):
+        # ONE shape for every NO-SCORE document, so a consumer reading
+        # `doc['ungraded']` does not KeyError on half of them.
+        print(json.dumps({'verdict': 'NO-SCORE', 'reason': reason,
+                          'ungraded': _names('ungraded'),
+                          'unknown': _names('unknown')},
+                         indent=1, sort_keys=True))
         return 2
+
+    if score is None:
+        return _no_score(
+            err or
+            ('the file named by --score holds the JSON document `null`, which '
+             'names no board and no measurement.' if given else
+             '--score is required: the verdict is about a board, and without '
+             'its score there is nothing to be blocked or done ABOUT.'))
 
     scored = [r for r in rows if _score_key(r.get('score')) is not None]
     key = _score_key(score)
+    if key is None:
+        # The `--score` caller has to filter None exactly like the ledger-row
+        # caller on the line above -- and did not, so `key[0]` raised
+        # `TypeError: 'NoneType' object is not subscriptable`.
+        #
+        # A null-GUARD alone would be worse than the crash: on a plateaued
+        # ledger execution falls past `elif blocking == 0` into the terminal
+        # branch and prints `STUCK: blocking == None and neither half
+        # improved`, which reads as a measurement of a board nothing measured.
+        # NO-SCORE says what actually happened, and loop_driver's L5 routes
+        # that verdict back to re-scoring instead of the ship ceremony.
+        #
+        # _score_key returns None for THREE distinct documents and they are
+        # not the same fact, so none of them borrows another's sentence -- and
+        # the "a component could not answer" cause is only asserted when the
+        # score itself names one in `unknown`. Reporting an unmeasured cause
+        # is the defect this whole issue is about.
+        if not isinstance(score, dict):
+            why = (f'the score document is a {type(score).__name__}, not an '
+                   f'object: a verdict is about a board, and this names none.')
+        elif 'blocking' not in score:
+            why = ('the score document has no `blocking` key at all, so there '
+                   'is nothing to be blocked or done ABOUT. If this came from '
+                   'board_score, it did not finish.')
+        elif isinstance(score.get('unknown'), (list, tuple, set)) \
+                and _names('unknown'):
+            # The LIST test, not just truthiness: `{"unknown": "impedance"}`
+            # renders as `<not a list: 'impedance'>`, and asserting "a component
+            # RAN and could not answer" over that is claiming a cause the score
+            # never named -- which is the defect this whole issue is about.
+            why = ('`blocking` is null because a component RAN and could not '
+                   'answer (' + ', '.join(_names('unknown')) + '). Fix the '
+                   'instrument and re-score, then ask for a verdict.')
+        else:
+            why = ('`blocking` is null -- nothing measured it, and null is '
+                   'not zero. Re-score, then ask for a verdict.')
+        return _no_score(why)
     blocking = key[0]
     st = {h: _half_state(rows, h, a.flat) for h in ('placement', 'routing')}
     flat_p, flat_r = st['placement']['flat'], st['routing']['flat']
@@ -1375,7 +2024,11 @@ def cmd_verdict(a):
                     f'last {a.flat} can be COMPARED -- '
                     + {'unjudged': (
                         f'{st[h].get("unjudged")} accepted lap(s) in that '
-                        f'window recorded no `blocking`, and a lap that '
+                        f'window recorded no `blocking` -- iteration(s) '
+                        + (', '.join(str(i) for i in
+                                     (st[h].get('unjudged_iterations') or []))
+                           or 'not numbered')
+                        + ' -- and a lap that '
                         f'measured nothing is evidence in neither direction'),
                        'incommensurable': (
                         f'they were not graded over the same components '
@@ -1385,18 +2038,40 @@ def cmd_verdict(a):
                         'compared with nothing is not a trend')}[
                            st[h].get('blocked', 'single-lap')]
                     + f'. So whether it plateaued is NOT ANSWERABLE, which is '
-                      f'not "it did not". Re-score its laps the same way, or '
-                      f'declare the half exhausted on the record:\n'
+                      f'not "it did not". Score those laps the same way as the '
+                      f'rest and re-record them -- or, if they were never laps '
+                      f'(a freeze, a disposition, a close-out), record them '
+                      f'--kind systemic, which is what that kind is for: a row '
+                      f'that changed no pose must not be able to make a half '
+                      f'look unjudged. Or declare the half exhausted on the '
+                      f'record:\n'
                       f'    python3 -X utf8 py_placer/converge.py record --ledger '
                       f'{a.ledger} \\\n'
                       f'        --board <the board> --kind systemic \\\n'
                       f'        --exhausted {h} --exhausted-reason "<what was '
-                      f'tried and why nothing is left>"')
+                      f'tried and why nothing is left>" \\\n'
+                      # The --lever the too-few-laps remedy above has always
+                      # carried and this one never did. An --exhausted row has
+                      # `lever: null` by construction otherwise, and every
+                      # consumer that renders a lap -- the film's caption, the
+                      # GUI's stage label, the watcher's rejected-lap line --
+                      # then prints a blank or a literal "?" for the one row
+                      # whose whole content is a human's reason.
+                      f'        --lever "declaration: {h} has nothing further"')
             else:
                 _parts.append(
                     f'{h} improved within its last {a.flat} laps, so it has '
                     f'more to give')
-        doc.update(verdict='CONTINUE', improving=still,
+        # `improving` used to be every half that was not flat, which put a half
+        # whose plateau is NOT ANSWERABLE into a key named for a half that is
+        # getting better. The driver reads this key to write its headline, so a
+        # half that had declared itself exhausted three times was reported as
+        # "still improving". Two keys, two claims: `improving` is measured,
+        # `unanswerable` is the absence of a measurement.
+        _improving = [h for h in still if _why[h] == 'improving']
+        _unanswerable = [h for h in still if _why[h] != 'improving']
+        doc.update(verdict='CONTINUE', improving=_improving,
+                   unanswerable=_unanswerable,
                    why={h: _why[h] for h in still}, reason=(
             '; '.join(_parts) + '. Reaching blocking == 0 is the floor, not '
             'the finish -- keep pulling levers on quality until neither half '
@@ -1447,11 +2122,143 @@ def cmd_verdict(a):
     return code
 
 
+def row_label(row):
+    """What this ledger row DID, in one line, for a human reading a list.
+
+    A ladder, because the field that carries the answer depends on the kind of
+    row: `lever` for a lap, `exhausted.reason` for a declaration (which has
+    `lever: null` by construction -- the reason is the whole content of the
+    row), `stop_condition` for a close-out. Falling back on the first one and
+    stopping is why an `--exhausted` row rendered as a blank, or literally as
+    `lap 31: systemic/?`, in every consumer that prints a lap.
+
+    Never returns '' -- "this row says nothing" is itself a finding, and the
+    caller should print it rather than an empty column.
+    """
+    lever = str(row.get('lever') or '').strip()
+    if lever:
+        return lever
+    dec = row.get('exhausted')
+    if isinstance(dec, dict) and str(dec.get('reason') or '').strip():
+        return 'declared exhausted: ' + str(dec['reason']).strip()
+    stop = str(row.get('stop_condition') or '').strip()
+    if stop:
+        return 'close-out: ' + stop
+    return '(no lever recorded)'
+
+
+def lever_identity(entry):
+    """WHICH LEVER a ledger row pulled, or None when the row records none.
+
+    The basename of `lever_argv[0]` -- the command that produced the board.
+    Never `lever`, which is free prose: `run_watch.py` is explicit that the
+    prose field is "NEVER matched", because a gate that reads a disclosure
+    punishes disclosing.
+
+    None is a first-class answer and is REPORTED rather than guessed at. Most
+    rows without one have no command to record: an L2 freeze stamp, an
+    `--exhausted` declaration and an L5 close-out all change no board and say
+    so. `board_store.replay_command` takes the same line for the same reason
+    -- it raises rather than reconstructing, because "pretending otherwise is
+    how a ledger becomes prose".
+    """
+    argv = entry.get('lever_argv') if isinstance(entry, dict) else None
+    if not argv or not isinstance(argv, (list, tuple)):
+        return None
+    for tok in argv:
+        if isinstance(tok, str) and tok.endswith('.py'):
+            return os.path.basename(tok)
+    first = argv[0] if isinstance(argv[0], str) else None
+    return os.path.basename(first) if first else None
+
+
+def _lever_histogram(rows):
+    """{lever: n} over the rows that name one, sorted for a stable document."""
+    out = {}
+    for e in rows:
+        name = lever_identity(e)
+        if name:
+            out[name] = out.get(name, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def cmd_status(a):
     from board_store import Ledger
     lg = Ledger(a.ledger)
+    rows = lg.entries()
     c = lg.counts()
+    # ONE JSON DOCUMENT ON STDOUT, still: converge's stdout is an API that
+    # callers json.loads() whole, which is why this file installs no
+    # cli_banner. `unlevered` is additive; the per-row detail goes to stderr,
+    # where the systemic NOTE already lives.
+    _unlevered = [e for e in rows if not str(e.get('lever') or '').strip()]
+    c['unlevered'] = len(_unlevered)
+    # THE STRUCTURED LEVER CHANNEL, beside the free-text one (#937).
+    #
+    # `loop_driver.py:4-9` records the ONE documented reason the two drivers
+    # are separate: "placement accepts a lap when the named finding it aimed
+    # at is gone, routing accepts an iteration when `blocking` strictly
+    # decreased... The driver never emits both." That is an argument for an
+    # accept rule stated PER LEVER rather than per half -- and the first thing
+    # such a rule needs is to know which lever a row pulled.
+    #
+    # `lever` cannot answer that: it is free prose by design, and
+    # run_watch.py:544 is explicit that it is "NEVER matched" because
+    # reporting on a disclosure punishes the disclosure. `lever_argv` can, and
+    # this reports how far it reaches. Measured over the 28 recorded ledgers
+    # in this tree: 411 of 450 rows carry one (91%), by kind completion 98%,
+    # placement 86%, systemic 79% -- and the 39 that do not are almost all
+    # rows with NO COMMAND to record (L2 freeze stamps, `--exhausted`
+    # declarations, L5 close-outs), with 4 genuinely undocumented.
+    #
+    # REPORTED, NOT YET GATED. Making the accept rule per-lever moves DONE and
+    # STUCK verdicts, and this repo grades a verdict-moving change by a corpus
+    # A/B, never by reasoning -- so the identity ships first and the rule that
+    # would consume it is a separate, measured change.
+    c['lever_identities'] = _lever_histogram(rows)
+    c['unreplayable'] = sum(1 for e in rows if lever_identity(e) is None)
+    # #894: the placement terms per lap, and each lap's movement against the
+    # row it was recorded against. Additive, inside the one JSON document --
+    # this stdout is an API that callers json.loads() whole, which is why
+    # `unlevered` above is set the same way.
+    _place = []
+    for e in rows:
+        t = placement_terms(e.get('score'))
+        if not t:
+            continue
+        row = {'iteration': e.get('iteration'), 'kind': e.get('kind'),
+               'accepted': bool(e.get('accepted')),
+               'terms': {k: v.get('value') for k, v in t.items()}}
+        pt = placement_terms(parent_score(rows, e))
+        if pt:
+            try:
+                import placement_score as ps
+                verdict, detail = ps.compare_terms(pt, t)
+                row['vs_parent'] = verdict
+                # The ACCEPT RULE #894 asks converge status to print: "the
+                # named finding is gone AND no placement term regressed". The
+                # second conjunct is what this can see, so it is what it says.
+                row['no_term_regressed'] = verdict in ('better', 'same')
+                row['delta'] = ps.format_delta(detail)
+            except Exception:                                # noqa: BLE001
+                pass
+        _place.append(row)
+    if _place:
+        c['placement_terms'] = _place
     print(json.dumps(c, indent=1, sort_keys=True))
+    for r in _place:
+        if r.get('vs_parent') and not r.get('no_term_regressed'):
+            print(f"  i{r['iteration']}  placement {r['vs_parent']}: "
+                  f"{r.get('delta')}", file=sys.stderr)
+    # ITEMISE THE UNLEVERED ROWS, unconditionally -- not only when the systemic
+    # warning below fires. #904's inherited item is "an --exhausted row prints
+    # blank, and its reason lives in exhausted.reason": that is true of an
+    # ORDINARY ledger with one declaration in it, which is the common case and
+    # the one where nothing else is shouting. Nesting this under the
+    # systemic-share warning made it visible only on a ledger already in
+    # trouble.
+    for e in _unlevered:
+        print(f"  i{e.get('iteration')}  {row_label(e)[:80]}", file=sys.stderr)
     if c['total'] and c['systemic'] * 2 >= c['total']:
         print("NOTE: at least half of this budget went to SYSTEMIC iterations -- "
               "changes to how the chain measures or grades itself, not to the "
@@ -1552,12 +2359,31 @@ def build_parser():
                         'Repeatable; stored raw as entry["lenses"]. Same '
                         'reason as --render-json: a verdict that lives in '
                         'free-text --lever cannot be told from a lens nobody '
-                        'ran. --final requires the three routed-board lenses.')
-    r.add_argument('--scope-refs', action='append', default=None,
+                        'ran. --final requires the three routed-board lenses, '
+                        'and requires each of them as --lens-file.')
+    r.add_argument('--lens-file', action='append', default=None,
+                   metavar='PATH',
+                   help='the same verdict, read from the file the verifier '
+                        'wrote it to: the FIRST line beginning VERDICT= is '
+                        'taken, and the row records the path and the file\'s '
+                        'sha256 in entry["lens_source"]. Repeatable, one per '
+                        'lens. Prefer this: a retyped line is a claim about '
+                        'the run, a file is a claim about a file, and '
+                        'references/verifier-prompts.md already requires the '
+                        'copy on disk. --final --kind completion REQUIRES it '
+                        'for connectivity, drc and spec. Combines with --lens '
+                        '(bare verdicts first, then files, each in the order '
+                        'given).')
+    # nargs='+' with 'extend' (#901): the help promised a list and argparse
+    # took exactly one token per flag, so `--scope-refs R1 R2 R3` was an
+    # argparse error and the writer had to repeat the flag. Both spellings now
+    # work, and the whitespace/comma split below still reads a quoted lock file.
+    r.add_argument('--scope-refs', action='extend', nargs='+', default=None,
                    metavar='REF',
                    help='the refs this lap was ALLOWED to move -- its search '
-                        'scope. Repeatable; a whitespace/comma-separated list '
-                        'is split, so a lock file reads straight in. Stored as '
+                        'scope. Takes a list, repeatable, and a '
+                        'whitespace/comma-separated string is split, so a lock '
+                        'file reads straight in. Stored as '
                         'entry["scope_refs"]. Same reason as --lens and '
                         '--render-json: a scope that lives in free-text '
                         '--lever cannot be told from a lap that scoped nothing '
@@ -1592,7 +2418,16 @@ def build_parser():
     r.add_argument('--final', action='store_true',
                    help='mark the run-closing record; requires --stop-condition')
     r.add_argument('--stop-condition', default=None,
-                   help='which stop condition ended the run (with --final)')
+                   help='which stop condition ended the run (with --final). '
+                        'A TOKEN -- ' + ' | '.join(STOP_TOKENS) + ' -- checked '
+                        'on every record, not only when a lens failed. Prose '
+                        'about WHY may follow it ("3: five laps, no new '
+                        'copper"); it is split off into stop_reason.')
+    r.add_argument('--stop-reason', default=None, metavar='TEXT',
+                   help='why that stop condition fired, in words. The same '
+                        'text may instead ride after the token in '
+                        '--stop-condition; giving it twice, differently, is '
+                        'refused. Stored as entry["stop_reason"].')
     r.add_argument('--argv', nargs=argparse.REMAINDER, default=None,
                    help='the command that produced it -- what makes replay '
                         'possible. Refused (exit 2) when its first token is '

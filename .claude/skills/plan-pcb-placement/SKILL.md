@@ -58,8 +58,8 @@ it and search from its net centroid instead, holding everything else fixed:
     python3 -X utf8 py_placer/place_seed.py <board> <out> --intent fp.json --reseat \
         --clearance <floor>                     # bare --reseat = auto scope
 
-The auto scope is the off-outline pad-CENTRE census, which is zero on all 33
-corpus boards, so this is a no-op with exit 0 on a healthy board. It composes
+The auto scope is the off-outline pad-CENTRE census, which is zero on every
+corpus board git tracks, so this is a no-op with exit 0 on a healthy board. It composes
 with `--repair` and runs before it, and `place_reconstruct --stages
 ...,reseat,legalize` is the same engine as a ladder rung. **Read
 `witnesses_after`, not `reseated`** — the first predicts routability, the
@@ -158,12 +158,13 @@ re-emit if in doubt.
    -- if they do not fit, say so and stop. This holds today only by
    construction (no writer here emits an Edge.Cuts primitive), so it is
    written down rather than left implied. Three tools in the repo DO rewrite
-   Edge.Cuts and are not part of placement: `stress/fix_outline_gaps.py`,
-   `stress/strip_routing.py` and `stress/prep_set2.py`. They exist to prepare
+   Edge.Cuts and are not part of placement: `tests/stress/fix_outline_gaps.py`,
+   `tests/stress/strip_routing.py` and `tests/stress/prep_set2.py`. They exist to prepare
    corpus boards; never run them on a user's board.
 3. A part the file marks `(locked yes)` is never yours to move, whatever an
    intent says.
-4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's blocking pairs.
+4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's `buildable`
+   verdict — NOT `blocking == 0`, which is 1 of its 5 conjuncts (#918).
    REPORT `crossings` and aggregate courtyard overlap; never gate on them --
    both correlate POSITIVELY with **distance-to-truth**, which is the dependent
    variable that evidence was measured against. Against routed `blocking`,
@@ -174,10 +175,14 @@ re-emit if in doubt.
    the routed-blocking evidence is arm-dependent
    (`docs/placement-predictors.md`).
    WHICH pad-pad channel: the pad-INTERSECTION count, which is
-   `check_assembly`'s `blocking` and the routing loop's L2 refusal. The
+   `check_assembly`'s `blocking` and the routing loop's L2 refusal. **Gate on
+   `buildable`, not on that count** (#918): `blocking` is ONE of five
+   `not_buildable` conjuncts, so a board unbuildable through a locked contact,
+   a coincident-origin stack, a containment or a moved-vs-baseline courtyard
+   gate reads `blocking == 0` and is not buildable at all. The
    clearance-GRAZE count (`pad_conflicts`) is reported and not gated -- #788
    measured it as redundant with that refusal, not as unimportant, and the
-   reason is written beside the gate in `loop_driver.py`.
+   reason is written beside the gate in the combined skill's `scripts/loop_driver.py`.
 5. Every proposal is decided by a MEASUREMENT on the board in front of you, not
    by what a pattern suggests. If no instrument confirms it, do not apply it.
 6. Placement invalidates every downstream routed board. Never run it mid-chain.
@@ -192,7 +197,7 @@ one was supposed to produce.
 
 ```bash
 D=.claude/skills/plan-pcb-placement/scripts/placement_driver.py
-python3 -X utf8 $D --list                                  # the eight stages
+python3 -X utf8 $D --list                                  # every stage, from the registry
 python3 -X utf8 $D --stage P0 --board board.kicad_pcb      # always start here
 ```
 
@@ -212,10 +217,27 @@ The rest of this file is the reference the stages point into: the doctrine
 behind each rung, with the measurements that decided it. Read the part a stage
 names, when it names it.
 
-The instruments this skill decides with, all report-only until you accept:
+**Reading `<floor>`, which every command below wants.** It is not a number to
+pick: run `check_assembly.py <board> --json wk/assembly0.json` and read
+`clearance` from it. Read `clearance_source` in the same breath — `board
+netclass` means the board answered, `fixed default` means it declared nothing
+and the tool supplied 0.25, and `board_declares_no_floor` says so outright.
+Two grades are comparable only when that source agrees, because the scalar
+alone cannot say whether 0.25 was the board's answer or the tool's.
+`check_assembly` and `check_channels` resolve it themselves when `--clearance`
+is omitted; `check_drc` still wants it spelled out.
+
+The instruments this skill decides with, all report-only until you accept.
+**`check_drc` is graded at `--clearance-margin 0` everywhere in this skill**,
+which `check_drc.py` itself calls "the honest setting, and the one the
+perturbed-corpus runs grade at". The flag's default is 0.05 — a 5% suppression
+— and the P0 number decides whether repair happens at all: `_guard_damage`
+refuses P2 and P3 with "There is no damage for this stage to repair" when P0
+reports zero, so a margin that hides a graze closes the stages that would have
+fixed it.
 
 ```bash
-python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # on the COPPER-FREE board
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0   # on the COPPER-FREE board
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb [--baseline before.kicad_pcb]
 python3 -X utf8 py_tools/check_channels.py board.kicad_pcb [--baseline before.kicad_pcb --gate]
 python3 -X utf8 py_tools/check_pockets.py board.kicad_pcb [--nets <the route step's set>]
@@ -229,9 +251,13 @@ cannot: **where is the board empty**, ranked by contiguous area, and **does the
 part mass sit where the demand sits** (per quadrant, with the centroid weighted
 by courtyard area — the count-weighted form is printed as a control and
 disagrees on most boards). Pass it the net set the route step will carry. It
-also prints a ready-made `place_seed --reseat-region` command for its largest
-cold region; read the `aim:` line before running it, because a re-seat lands
-each part at its own net centroid and does not move anything INTO the region.
+also names its largest cold region as a DESTINATION, not a scope: a cold band
+holds no part by construction, so `--reseat-region` over it resolves to an
+empty scope on every board (#709 deleted the command it used to print, and
+the `aim:` line with it). Declare the region as an intent block `zone` -- the
+one thing in the stack that aims a re-seat at a rectangle -- and take the
+SCOPE from the parts the tool names as bounding the pocket, or from a CROWDED
+rectangle.
 
 Shared doctrine lives with the routing skill and applies here unchanged --
 read it when the step below points at it:
@@ -255,7 +281,9 @@ board that measures dirty is repaired at the rung its damage calls for. What
 is never an answer is not looking.
 
 ```bash
-# Is the board even placed? (report-only, writes nothing, exits 3 if not)
+# Is the board even placed? (report-only, writes nothing -- and it answers on
+# ANY board: --suggest-locks returns before the board-state gate, so read the
+# ADVICE, never the exit code)
 python3 -X utf8 py_placer/place_optimize.py board.kicad_pcb --suggest-locks
 ```
 
@@ -293,7 +321,7 @@ space for everything else.
 always (the R2 rule, applied to the gate itself):**
 
 ```bash
-python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # NOT piped
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0   # NOT piped
 echo "EXIT=$?"
 python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb   # reads the board's own floor
 echo "EXIT=$?"
@@ -313,17 +341,39 @@ clearance channel is structurally blind to when the pads share a net (run 5 SHIP
 two 0402s stacked, C14 on R14, both pads +3V3: `check_drc` 0, every gate green, KiCad's
 own courtyard check gagged by the project writeback). Both land in `board_score`'s
 `blocking` (`drc` and `assembly`). The channel calibration that makes `check_assembly`
-gateable: its blocking count reads **0 on all 33 healthy in-repo boards** in both exact
-and AABB currencies.
+gateable: its blocking count reads **0 on every healthy board git tracks under
+`kicad_files/`** (22 of them; `ls` returns more on a working copy that has run the
+suite, and `tests/run_utils.py` refuses to pin a threshold on that glob for exactly
+that reason) in both exact and AABB currencies.
 
 **Do not gate on the AGGREGATE `overlap_area`** — it has a legitimate nonzero floor on
 human boards (one human-routed 2-layer board in the corpus carries 5.375 mm2 of
-mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2 measured it positively correlated with **distance-to-truth** — a
-different question from routed `blocking`, which nothing here has measured it
-against (`docs/placement-predictors.md`). The
-per-pair blocking COUNT is the gateable quantity; courtyard/fab pairs are ADVISORY
-(`check_assembly` labels each with its waiver class), fix targets for the placement
-loop below, never a gate alone.
+mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2
+measured it positively correlated with **distance-to-truth** — a different question
+from routed `blocking`, which nothing here has measured it against
+(`docs/placement-predictors.md`). `check_assembly` does NOT emit `overlap_area` at
+all: it is `quench.legality_metrics` (so `place_optimize`'s `JSON_SUMMARY`),
+`render_placement`'s `metrics`, `check_floorplan` and the portfolio that do. Do not
+grep this tool's output for it and conclude the quantity is unmeasured.
+
+The per-pair blocking COUNT is the REPORTABLE quantity — the gate is
+`check_assembly`'s `buildable` verdict, of which that count is one of five
+conjuncts (non-negotiable 4, #918). What makes the count worth reporting is
+that it is 0-calibrated on every healthy corpus board, which the aggregate
+`overlap_area` is not; that is a property of the number, not a promotion to a
+gate. **A courtyard pair is not
+merely advisory:** it is the fifth `not_buildable` conjunct (rule 4 above, #918).
+It does NOT fire on every courtyard kiss. The pair must first survive
+`courtyard_blocking_pairs` (`py_placer/placement/legality.py`): unwaived (locked,
+marker-class and edge-class parts are exempt), area at or above
+`COURTYARD_BLOCKING_MIN_MM2` **or** `MIN_FRAC` of the courtyard, depth at or above
+`MIN_DEPTH_MM`, non-synthetic, and not silk-sourced — and only THEN does
+`check_assembly` gate it, and only for a pair whose member moved relative to
+`--baseline`. That is why the 5.375 mm2 of mount-hole kisses above ships: those are
+waived at the first step. Without `--baseline` the whole census is report-only and
+the tool says REPORT-ONLY; with it, a SURVIVING courtyard pair alone can make a
+board unbuildable. FAB pairs really are advisory. `check_assembly` labels each pair
+with its waiver class either way.
 
 **Then reconstruct, in this order. Each rung has an applicability test — run the test,
 and when it fails, say so and fall through to the next rung.** None of these invents
@@ -337,7 +387,7 @@ list:
 |---|---|---|
 | mounting holes, NPTH, drill-outs | the enclosure's standoff pattern | `pad.pad_type == 'np_thru_hole'`, or 0 connected pins. **The quench provably cannot place these** — the advisor says so itself: *"0 connected pin(s) → invisible to the airwire cost, so only the halo term decides where it goes"* |
 | edge connectors, castellations, card edges | the mating standard / the outline | courtyard must intersect (castellated: be centred on) the outline. `check_floorplan`'s `edge_connectors` block already computes the edge and overhang |
-| enclosure-referenced parts (USB/barrel/RF jacks, buttons, LEDs, displays) | an aperture in the spec | the EXACT position is spec-only, but the CLASS is board-derivable (run-4 `placement/part_class.py`): an `edge_receptacle`-class part (USB/HDMI/RJ45/card/jack by footprint name or CC1/CC2-style pinfunctions) with **no overhang AND edge clearance past the seat tolerance is implausibly posed** — the plug cannot reach it. NOT a bare distance threshold: run 3's displaced USB-C sat only 2.45 mm from a *different* edge, so "far from every edge" misses a swapped part. `check_floorplan --emit-intent --declare-classes` declares these automatically; the advisor DEMOTES an implausibly-posed receptacle out of the lock list (a lock is not a placement) |
+| enclosure-referenced parts (USB/barrel/RF jacks, buttons, LEDs, displays) | an aperture in the spec | the EXACT position is spec-only, but the CLASS is board-derivable (run-4 `py_placer/placement/part_class.py`): an `edge_receptacle`-class part (USB/HDMI/RJ45/card/jack by footprint name or CC1/CC2-style pinfunctions) with **no overhang AND edge clearance past the seat tolerance is implausibly posed** — the plug cannot reach it. NOT a bare distance threshold: run 3's displaced USB-C sat only 2.45 mm from a *different* edge, so "far from every edge" misses a swapped part. `check_floorplan --emit-intent --declare-classes` declares these automatically; the advisor DEMOTES an implausibly-posed receptacle out of the lock list (a lock is not a placement) |
 | fiducials, test points | a fab or test-fixture rule | usually spec; sometimes a symmetric pattern (see R2) |
 
 **R2 — Ask whether the board itself determines the position. Often it does, and then it
@@ -474,7 +524,7 @@ and the A/B recorded below found that widening the two deficit corridors bought
 no completion benefit at all — see `docs/placement-predictors.md`.
 
 So **do not expect `--halo-coef` to reserve the corridor**: it is a function of pin count,
-which is not the quantity that decides. The assignment you need already exists — `route.py
+which is not the quantity that decides. The assignment you need already exists — `py_router/route.py
 --list-groups --group-by decap` names which small parts belong to which IC — so the
 corridor between two anchors is *their* small parts, and its width is a number you can
 compute before placing anything.
@@ -513,7 +563,7 @@ UNSMEARED board). Declare the edge classes FIRST (`--declare-classes`) so
 the reconstruct sees the bands:
 
 ```bash
-python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>   # measure (R0)
+python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0   # measure (R0)
 python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb \
     --emit-intent auto.json --declare-classes   # part-class auto-declaration:
                                        # edge parts get bands; an implausibly-
@@ -544,7 +594,7 @@ Each lap:
 1. **Measure** — three instruments, JSONs kept as evidence:
 
    ```bash
-   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor>
+   python3 -X utf8 py_router/check_drc.py board.kicad_pcb --clearance <floor> --clearance-margin 0
    python3 -X utf8 py_tools/check_assembly.py board.kicad_pcb \
        --baseline <the ORIGINAL input board> --json wk/assembly_lapN.json
    python3 -X utf8 py_tools/check_channels.py board.kicad_pcb \
@@ -593,7 +643,7 @@ Each lap:
    and a routing failure later classified placement-shaped RE-ENTERS this loop —
    until the verifier passes.
 
-4. **Repeat** until: `check_assembly` blocking == 0 AND no undispositioned
+4. **Repeat** until: `check_assembly` reports `buildable: true` AND no undispositioned
    NEW-vs-baseline advisory pair AND bare `check_drc` == 0 — or a lap reports a
    finding **measured-unfixable** (locked pair, no legal slot), which stops the loop
    with the named pairs and reasons, never with "done". Cap: 5 laps (each is
@@ -620,7 +670,7 @@ pcb.board_info.board_bounds is None        # no Edge.Cuts outline to place INTO
 len({(round(f.x, 3), round(f.y, 3)) for f in pcb.footprints.values()}) < len(pcb.footprints) / 2
 ```
 
-`check_floorplan.py --emit-intent` is the other honest probe: it exits **3** with
+`py_tools/check_floorplan.py --emit-intent` is the other honest probe: it exits **3** with
 *"the board has no Edge.Cuts outline"*, and its `JSON_SUMMARY` carries
 `state_unplaced` / `state_partially_unplaced` / `state_spread_ratio` for the
 cases where an outline does exist.
@@ -632,9 +682,10 @@ order:
 1. **The repo has its own seeder** (a script that writes a starting floorplan
    and the outline from the spec): that is the placement step — run it, then
    treat its output as the "rough / generated placement" row of the table
-   above. If the seeder takes a `--seed`/`--variant` axis, that plus
+   above. `py_placer/place_seed.py` and `py_placer/place_portfolio.py` both
+   take `--seed` (there is no `--variant` flag on either), and that axis plus
    Step 0c-bis is how you offer the user OPTIONS instead of one take-it-or-
-   leave-it arrangement — but rank the SEEDS first (`compare_seeds.py`, next
+   leave-it arrangement — but rank the SEEDS first (`py_placer/compare_seeds.py`, next
    rung): the portfolio explores around ONE seed and cannot rank across
    them.
 2. **No seeder, but an intent exists — or the spec states placement facts**
@@ -645,6 +696,14 @@ order:
    python3 -X utf8 py_placer/place_seed.py board.kicad_pcb seed.kicad_pcb \
        --intent floorplan.json [--seed N]
    ```
+
+   The driver's P1 refuses to seed without a ZONE PLAN (`--zone-plan`): that
+   intent with a `zone` rectangle and a `note` on a block for every movable
+   part, `must_lock` and the declared edge connectors excepted. Run 26 seeded
+   from one zone and then hand-placed most of its parts; the plan is where
+   the arrangement is decided, and the seed only fills it -- and P1 ranks
+   SEVERAL seeds from it with `compare_seeds.py` (next) rather than taking
+   the first.
 
    The seeder turns the intent's constructs into placement (edge bands →
    edge poses, single-ref zones → the spec coordinate, multi-ref zones →
@@ -698,9 +757,18 @@ order:
    **For every must_lock part under a HARD geometric clause, run Step 0a-bis
    ON THE SEEDED OUTPUT before the portfolio** — the seeder keeps the pile's
    input rotation, which is a generator default, not a decision. If a
-   rotation wins on inversions, apply it with `write_placed_output` and
-   RE-SEAT the decaps that served its supply pins (`seeder._try_place` at
-   the relocated pin, zone-constrained), then re-run the pin-exact gate:
+   rotation wins on inversions, apply it with **`place_pose.py`** — never a
+   hand script around `write_placed_output`, which is what that instruction
+   used to say and what the cheats watcher flags every time it appears:
+
+   ```bash
+   python3 -X utf8 py_placer/place_pose.py seed.kicad_pcb posed.kicad_pcb \
+       rotate U3 180 lock U3
+   ```
+
+   Then RE-SEAT the decaps that served its supply pins
+   (`seeder._try_place` at the relocated pin, zone-constrained) and re-run
+   the pin-exact gate:
    rotating a part moves its pins, and a decap seated to the old pin
    silently breaks the proximity clause (measured, run 7: 7.74 mm vs the
    3 mm limit until the re-seat).
@@ -724,7 +792,8 @@ seeder writes a `.kicad_pcb` and, like `place_optimize.py`, usually nothing else
 — and it is the FIRST thing that touches the board, so a missing sibling there
 propagates through the entire chain: every later step reads no project, resolves
 its floor from the stock netclass instead of the spec, and stamps that looser
-floor over tighter copper. `copy_board.py` copies a board *with* its siblings,
+floor over tighter copper. `py_router/copy_board.py` copies a board *with* its
+siblings,
 but a seeder is not a copy, so this one is on you:
 
 ```bash
@@ -753,7 +822,8 @@ and its lexical rules "miss house libraries entirely". It is the **second** pass
 The spec is the first.
 
 **Where the spec goes so a tool can read it.** A `<board>.design-brief.json`
-sibling is the declared channel (#711). `check_floorplan.py` auto-discovers it
+sibling is the declared channel (#711). `py_tools/check_floorplan.py`
+auto-discovers it
 and `--emit-intent` COMPILES it into `edge_connectors` and `keepouts` — the
 constructs the grade and the seat search already act on — so the placement
 CLIs receive it through the `--intent` they already take, not through a flag
@@ -767,6 +837,58 @@ python3 -X utf8 py_tools/board_brief.py board.kicad_pcb --json wk/brief0.json
 whose `design_brief` section is the only DECLARED one in that document; every
 other section, `mechanical` included, is inference. `docs/design-brief.md` is
 the reference.
+
+**Read the component-context sheet before you decide any pose** (#891). It is
+the one document that prints what you actually need to reason from -- per part
+the body extent AND which geometry it came from, every pad grouped by the board
+face it escapes through at the current rotation with its net and pin function,
+which parts each net reaches, partners ranked by shared nets, and the
+pin-order-agreement table:
+
+```bash
+python3 -X utf8 py_tools/board_context.py board.kicad_pcb --md
+python3 -X utf8 py_tools/board_context.py board.kicad_pcb --panels wk/panels
+```
+
+(`-o PATH` writes it to a file, and `--json` gives the same document as data;
+the panels are referenced from the markdown by name.)
+
+Two rows to read first, because they are the ones a layout cannot recover from
+later:
+
+* **Pin-order agreement**, at BOTH scopes. A `CROSSED` pair forces at least
+  `inversions` crossings on any router, and on a two-layer board that is a via
+  per net or back-side copper under the pour. Rotation cannot fix it -- parity
+  flips only under a mirror or a via hop. Run 25 shipped a board whose USB pair
+  was crossed at every rotation of U1; the fact was visible before placement
+  started and was found after routing. `UNDETERMINED` means the two pads
+  project to one point on the channel axis, so the order is not a fact about
+  the board at that pose -- it is not a pass.
+* **Body source.** A part reading `pad_bbox` has no drawn body at all, and a
+  part reading `silk` was graded on a silkscreen marking, which a library may
+  draw as an assembly outline rather than the part. Neither is a defect; both
+  change how much a seam number is worth.
+
+Every derived column names its source and prints `unknown` where inference ran
+out, so a claim you carry forward can always be traced to the channel it came
+from.
+
+**On a FROM-SCRATCH board, that sheet is the input to a loop you drive
+yourself** (#892). The engine legalises; it does not decide:
+
+1. read the context sheet above — faces, partners, pin-order agreement;
+2. write the arrangement as `place_pose.py` verbs (poses, rotations, locks);
+3. `place_pose.py` applies it and grades it — exit 4 names what got worse and
+   the nearest legal pose, so a refusal tells you where to aim next;
+4. `render_placement.py --review-sheet --json-out ...` and LOOK at it;
+5. adjust with more `place_pose.py` calls;
+6. `place_seed --repair` / the quench only as the final polish.
+
+The zone-intent path below stays for the recovery task it was built for — a
+damaged placement, where the intent describes where things belonged. Do not
+hand-write a script that calls `write_placed_output` or `stamp_locked`: that
+is what `place_pose.py` is, it is a registered lever, and a hand script is
+refused under an armed regime and flagged by the cheats watcher.
 
 **1. List what the spec fixes, and cite the requirement next to each ref.**
 Read the board's requirements/spec before touching placement. Anything with a
@@ -877,13 +999,15 @@ reason nothing is auto-locked.
 
 **Then RE-SEAT the locked cluster instead of leaving it frozen.** Locking is the
 right answer to "the quench walks a different cap out every run"; it is the
-wrong answer to "these parts are in the wrong places". `placement/reseat.py`
+wrong answer to "these parts are in the wrong places". `py_placer/placement/reseat.py`
 gives the second one without giving up the first: it re-assigns a cluster's
 members among slots generated *around the anchor's own pins*, so every candidate
 satisfies the proximity rule by construction, and it accepts only when the
 cluster's exact objective improves.
 
 ```python
+import sys; sys.path.insert(0, 'py_placer')
+import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 from placement import reseat
 cl = reseat.clusters_from_tethers(pcb, state, radius_mm=3.0)
 for row in reseat.reseat(state, cl):
@@ -921,12 +1045,33 @@ not routing. Run 5 measured both directions of this:
   route **7/7 on the first plain call**. The optimizer's score was indifferent
   between the two poses.
 
-The mechanical tools: `converge.py poses --ref U3` ranks legal poses and its
-`components.inversions` carries the pin-order count (`placement/pair_order.py`
+The mechanical tools: `py_placer/converge.py poses --ref U3` ranks legal poses
+and its
+`components.inversions` carries the pin-order count (`py_placer/placement/pair_order.py`
 — a LOWER bound on crossings no router can remove, so trust it over the cost
 tie). A **series part in a matched chain** (source-termination resistor, AC
 cap) is a *free terminal*: its pose is the knob that sets where the chain's
 segment lands, so enumerate its poses too, not just the ICs'.
+
+**`place_pose.py` is what APPLIES the pose you chose** (#892) — the other
+half of `converge poses`, and the reason no run needs a hand pose writer:
+
+```bash
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    set U3 129.9 98.3 --rot 270            # exact; exit 4 if it grades worse
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    set U3 --near 130 98 --rot 270         # approximate: the engine seats it
+python3 -X utf8 py_placer/place_pose.py board.kicad_pcb posed.kicad_pcb \
+    face U1 W USB1 rotate CON2 180 lock U1 CON2
+```
+
+Several verbs in one call are ONE arrangement (every op reads the input
+board), the sibling `.kicad_pro`/`.kicad_dru` travel with the output, and
+the run is a REGISTERED lever, so an armed unaided regime accepts it.
+Read its refusals as information, not as an obstacle: exit 4 prints the
+categories that got worse and names the nearest legal pose. It refuses to
+move a part carrying KiCad's `(locked yes)` — say `unlock REF` in the same
+call when you mean to change your own earlier decision.
 
 **Read `poses` output with two caveats** (run-7 S4). The JSON now discloses
 its `knobs` (unset clearance/edge resolve from the BOARD's own floor) and a
@@ -940,6 +1085,8 @@ reading the ranked list — the cheapest and most common 0a-bis candidate,
 flip in place, can be absent from an otherwise-legal ranking (measured:
 U3 rot-180 legal in place on two seeds where the enumeration listed no
 rot-180 pose at all).
+
+### Step 0b: the lock advisor — what the BOARD suggests locking
 
 Run this **second**, after Step 0a, and read the reasons. Nothing is locked
 automatically, deliberately: a wrong auto-lock silently freezes a part that
@@ -1001,8 +1148,13 @@ discarded no matter how green its legality block reads.
 **Acceptance rule — apply it, do not skip it.** It is a CONJUNCTION, and all
 three parts are required:
 
-1. Read the `JSON_SUMMARY:` line from 0c. If `crossings_after > crossings_before`
-   or `hpwl_after > hpwl_before`, **discard the result.** **And add a third term the
+1. Read the `JSON_SUMMARY:` line from 0c. If `hpwl_after > hpwl_before`,
+   **discard the result.** `crossings_after > crossings_before` is measured and
+   reported (`rule1_advisory`) and **does not bar anything** — its half of this
+   rule was WITHDRAWN by #789, and `rule1_check` in `py_placer/placement/portfolio.py`
+   has no crossings branch at all. Obeying the withdrawn clause discards correct
+   repairs; the two paragraphs below say why, and this sentence used to contradict
+   them. **And add a third term the
    quench has no objective for: `check_drc` PAD-PAD must not rise.** Rule 1 as written is
    built entirely out of the quench's own cost function, so it can only measure whether
    the quench succeeded at being a quench. Measured across 29 candidates on one board,
@@ -1016,9 +1168,11 @@ three parts are required:
    candidate reached **233 crossings, better than the human original's 276**, while
    sitting 18.7 mm out of position. `hpwl` behaves (its minimum is at the truth) and is
    what actually does the work in this rule. **Gate on `hpwl`, on PAD-PAD DRC, and on
-   `check_assembly`'s blocking pairs; report `crossings` and the aggregate
+   `check_assembly`'s `buildable` verdict — of which the blocking-pair count is one of
+   five conjuncts (non-negotiable 4), NOT on that count; report `crossings` and the
+   aggregate
    `overlap_area` and never gate on those two.** (Run 6 measured why the blocking-pair
-   COUNT belongs with the gates while the aggregate area never can: hpwl is gameable by
+   COUNT is the one worth reporting while the aggregate area never can be: hpwl is gameable by
    body-STACKING exactly as PAD-PAD was gameable by evacuation — two parts moved into
    the same space lower hpwl — and the run-5 board shipped that way. The per-pair count
    is 0-calibrated on every healthy corpus board; the aggregate has a nonzero floor.)
@@ -1146,11 +1300,11 @@ renders (or the `--montage` grid) answer a single question — which
 arrangement — so read them together as one budgeted read, then quote
 `portfolio.json`'s numbers, not the pictures, as evidence.
 
-**Adopting a candidate:** copy it out WITH its siblings (`copy_board.py` —
+**Adopting a candidate:** copy it out WITH its siblings (`py_router/copy_board.py` —
 the portfolio writes `.kicad_pro`/`.kicad_dru` next to every candidate), and
 it becomes the input to the normal chain. With `--ledger`, every kept
 candidate is stored content-addressed with an exact `--only N` replay
-command (`converge.py replay` runs it); record your adoption as an
+command (`py_placer/converge.py replay` runs it); record your adoption as an
 `accepted: true` entry so the chain's provenance survives. Same `--seed` +
 same input reproduces the whole portfolio byte for byte.
 
@@ -1206,6 +1360,24 @@ are still WHOLE-BOARD, and the caption says so.
 `iterations`. Do **not** judge a placement by how much moved: "lots moved, looks
 broken" and "barely moved, looks safe" are both wrong.
 
+### Step 0d2: the movie, for the same reason as the still
+
+The review sheet above shows the placement you ENDED with. The movie shows how
+it got there — which round moved what, and which attempts were tried and thrown
+away — and it is the only artifact that answers "why is this part here?".
+
+Build it explicitly. `place_route_loop` makes one by default, but a hand-driven
+repair chain does **not**, and this is exactly the artifact that gets skipped
+under time pressure:
+
+```bash
+python3 -X utf8 py_tools/make_film.py --from-loop-dir <work-dir> -o placement.mp4
+```
+
+`make_film` rather than `make_movie` here because a placement step changes no
+copper: the film splices the REJECTED attempts in and badges them `TRIED`, so a
+round that was screened out is visible instead of absent.
+
 ### Step 0e: declare the floorplan, so it can be checked
 
 A placement judged only by `crossings` and `hpwl` is judged by two numbers that
@@ -1234,11 +1406,24 @@ you mean to grade at a different floor than the board's own.
 Worth declaring, in rough order of value: `must_lock` for the parts the lock
 advisor flagged; `edge_connectors` for anything that is *meant* to overhang
 (this is what stops `oob_count` reporting a card edge as a defect forever);
-`keepouts` for mounting holes and antenna clearances; `decaps.max_distance_mm`;
+`keepouts` for mounting holes and antenna clearances; **`proximity` for the
+pairs whose separation is a requirement rather than an outcome -- a crystal to
+its load pins, bulk caps to the regulator they feed -- because that is the one
+constraint the netlist implies and nothing here measures until it is declared
+(a 3mm crystal loop and a 30mm one have identical connectivity, and the decap
+rules cannot stand in: they elect their own partner and need four copper pads,
+so a 3-pad regulator is never one);** `decaps.max_distance_mm`;
 and `blocks` with a `zone` **only where the parts really are one contiguous
 area**. Schematic sheets usually are not: on one 4-layer corpus board all ten sheet
 bounding boxes overlap each other, so `--emit-intent` claims a zone for only 4 of 10 and
 says why for the rest.
+
+Declaring is half of it. A clause reaches a rule only if the **graded**
+document carries it, so after editing the brief, re-emit and read
+`brief_coverage` in the `--json` result: `rules_run` counts *rules*, not
+*clauses*, and one run closed clean with six rules run and every declared
+clause ungraded. `--require-brief-coverage` turns that into a non-zero exit
+instead of a paragraph nobody reads.
 
 A misspelled key is **refused**, at every level of the file and including
 `severity` keys — you will be told the key that was wrong and the ones that
@@ -1355,7 +1540,7 @@ python3 -X utf8 py_tools/check_floorplan.py board.kicad_pcb --intent fp.json --h
 ```
 
 Every `--health` run reports it, with no declaration needed, for every
-fine-pitch part on the board (`placement/escape.py`; `health_escape_deficit_parts`
+fine-pitch part on the board (`py_placer/placement/escape.py`; `health_escape_deficit_parts`
 and `health_escape_worst_deficit` reach `JSON_SUMMARY`). It counts lanes
 SUPPLIED (face span ÷ (track+clearance) **read from the board's own netclass**,
 minus span eaten by neighbours) against lanes DEMANDED (nets that must escape
@@ -1409,7 +1594,7 @@ Two fields to check before believing it:
   rather than a defect: the via row along the face fills before the layer count
   binds, so **more layers will not help that face**. The action is via geometry,
   underpad fanout, or freeing span — not a stackup change.
-  `check_capacity.py --only add_layers` says the same thing at board scale, and
+  `py_tools/check_capacity.py --only add_layers` says the same thing at board scale, and
   says "structurally blind" when the fab table cannot tell two layer counts
   apart at all.
 

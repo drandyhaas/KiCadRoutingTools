@@ -14,6 +14,11 @@ Examples:
 """
 
 from __future__ import annotations
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import sys

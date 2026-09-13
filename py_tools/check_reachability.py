@@ -34,6 +34,11 @@ an unreadable board file -- exits 2 with what it could not resolve. It used to
 exit 1, because `raise SystemExit(msg)` does, and a caller acting on exit 1
 re-enters placement and throws away every routed board.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import argparse
 import json

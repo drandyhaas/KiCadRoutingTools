@@ -63,14 +63,14 @@ python3 -X utf8 $D --list
 python3 -X utf8 $D --stage L1 --board board.kicad_pcb --ledger wk/ledger.jsonl
 ```
 
-Its guards are the three this skill exists to enforce:
+Its guards are the four this skill exists to enforce:
 
 | stage | refuses without | because |
 |---|---|---|
 | `L2` route | a placement close-out | routing cannot start on a placement nobody proved, and a board with a blocking pair fails for a reason routing cannot fix |
 | `L3` classify | a routing score | a retry without a classification is a guess |
 | `L4` re-enter | a measured `--shape` | the three shapes re-enter at three different points, and the cost of guessing is asymmetric |
-| `L5` close out | a `check_complete` close-out that **agrees** with `converge` | nothing refused to FINISH, so a run reached the terminal artifact having never entered routing's own V1–V5 loop, and shipped a power-to-signal short. Only the *contradiction* refuses: `DONE-EXHAUSTED` against `INCOMPLETE`/`UNSOUND` |
+| `L5` close out | a `check_complete` close-out that **agrees** with `converge` | nothing refused to FINISH, so a run reached the terminal artifact having never run routing's own close-out, and shipped a power-to-signal short. It builds FOUR refusals, not one: a `--final` lens PASS against that row's own score; all-PASS live lenses against an `INCOMPLETE`/`UNSOUND` close-out; `DONE-EXHAUSTED` against a non-`DONE` close-out; and, opt-in, the on-disk verdict file against the ledger's live claim under its own `verifier` waiver token. Prepare for all four |
 
 **Both inner halves go to a teammate. Always, at every board size.** You do not
 decide it and you cannot forget it — the driver reads the board, delegates, and
@@ -96,15 +96,66 @@ form of the default and changes nothing. A board that cannot be read still
 delegates; the size was never the decision, so failing to measure it changes
 only what can be said about it.
 
-Spawn the teammate with an agent type that **has the Agent tool** — `claude` or
-`general-purpose`, never `Explore` or `Plan`, whose definitions exclude it. Each
-half dispatches its own verification subagents at its close-out, and a half that
-cannot spawn cannot verify itself. (The older wording here said a subagent
-cannot spawn a subagent. That is false in this harness and has been retired; the
-constraint is the agent *type*.)
+Spawn the teammate with an agent type that **has the Agent tool** — `fork`,
+`claude` or `general-purpose`, never `Explore` or `Plan`, whose definitions
+exclude it. Each half dispatches its own verification subagents at its
+close-out, and a half that cannot spawn cannot verify itself. (The older
+wording here said a subagent cannot spawn a subagent. That is false in this
+harness and has been retired; the constraint is the agent *type*.)
+
+**The driver names the type in the tag it emits, so copy the tag verbatim.**
+`loop_driver.py` chooses `fork` and `--delegate-mode fresh` chooses `claude`;
+the reasoning is the paragraph below, and it is now a decision the tool takes
+rather than one left to whoever copies the prompt (#890).
+
+**A half's own verifiers are its own gate. The RUN-CLOSING verdict is dispatched
+once, by this loop, on the board it is about to ship — the same board is not
+verified by both halves.** The outer loop used to assert that the routing half
+fanned out the three routed-board lenses at its close-out; the routing skill
+contains no such instruction and never has, so the close-out was quoting a
+verification nobody had been asked to run. And a half closes out on the board it
+finished with: anything after that — a pour, a repair, a placement re-entry —
+leaves its verdicts stale, and a verdict recorded against a board it did not
+read is the defect this loop exists to catch.
+
+**The agent TYPE is a cost decision. The driver makes it for you, and you
+override it when the criterion says so — what you must not do is let it pass
+unread.** A fresh agent starts empty and will rebuild the context it was not
+given — one measured half spent its first hour writing read-only probe scripts
+for facts this loop already held. A fork starts with the parent's whole
+conversation and rebuilds nothing, but carries those tokens into every turn of
+its own, mostly cached, and is a bigger context to reason inside. The fork buys
+the REBUILD, not the per-turn cost.
+
+So the default is `fork`, and it is a measured default rather than a
+convenience. **The criterion for overriding it:** use `--delegate-mode fresh`
+when everything the half needs is in the files its brief names, so there is no
+rebuild to buy. Say in the report which you used and why.
+
+(This paragraph used to say "make it rather than default it" while the
+paragraph thirteen lines above said the tool now takes the decision, and the
+code has no path that evaluates the criterion at all — it reads one flag and
+falls back to `fork`. Two sentences that close together must not disagree;
+the tool proposing and the reader disposing is what both were reaching for.)
+
+**The END-TO-END VERIFIER is never a fork, in either mode.** Its prompt ends
+"Re-derive every number yourself. Do not trust the report", and
+`references/verifier-prompts.md` hands each lens only its slice — a fork is
+the largest slice there is, the parent's entire transcript including the report
+it is told to distrust. It is also the cheap-reader agent that most wants a
+smaller model, and a fork runs on the parent's and ignores a `model` override.
+This is the one delegation where a fresh agent is the point rather than the
+fallback.
 
 State crosses the boundary on DISK, in the converge ledger, never in a head.
 That is what makes a re-entry able to say what was already tried.
+
+The HAND-OFF itself is on disk too (#890). The driver writes what it emitted
+to `<workdir>/<half>_prompt.txt` as it emits it — so the file's mtime dates
+the delegation, the same property the watcher prompts have — and the prompt
+asks you to save what came back to `<workdir>/<half>_return.md`. Before this,
+the prompt a half was given and the prose it returned existed nowhere after
+the run, and a watcher had to reconstruct both from the transcript.
 
 ## The sequence
 
@@ -114,10 +165,12 @@ That is what makes a re-entry able to say what was already tried.
 2. **Freeze what the placement decided.** Lock the refs whose poses are
    decisions (mechanically fixed parts, anything a spec pins). A later step
    that moves them silently undoes the placement work.
-3. **Route.** Follow `/plan-pcb-routing` from Step 1 on the placed board. Its
-   Step 0 gate will pass, because you just did that work.
-4. **On a routing failure, classify before retrying** (the routing skill's
-   convergence section owns the classifier):
+3. **Route.** Follow `/plan-pcb-routing` from its Step 0 on the placed
+   board. That gate will pass, because you just did that work -- say so and
+   move on rather than re-deriving it.
+4. **On a routing failure, classify before retrying** (the classifier lives
+   in `references/convergence.md`, here -- `ca6bb455` moved it out of the
+   routing skill, and this line went on citing where it used to be):
 
    | the diagnosis says | re-enter at |
    |---|---|
@@ -153,7 +206,10 @@ connectors — while every key read clean. Its orchestrator viewed ONE image in
 4.7 hours, after the failure. So LOOK at each boundary (the placement close,
 the hand-off, after the first route lap, the final close), and look
 BLIND-FIRST: build the sheet with `render_placement.py --review-sheet
-<PATH>`, VIEW it, write your observations — connectors versus edges with
+<PATH> --json-out <PATH>.json --quiet` — the two extra flags are what keep the
+step blind, since `--quiet` suppresses the narrative and the JSON echo only
+when the keys are going to a FILE instead of your stdout. VIEW it, write your
+observations — connectors versus edges with
 distances, density pockets versus empty regions, anything wrong that no key
 names — **before reading any checklist key**, then write a reconciliation
 paragraph dispositioning each observation against a named number. Ordering is
@@ -163,21 +219,139 @@ because the keys had already said clean. Observations must carry distances or
 mm² the keys alone cannot produce; that is what separates a review from
 theater.
 
+Watchers are the other half of looking, and they are armed by their PROMPT, not
+by their process: write each one's brief to `<workdir>/watch/<name>_prompt.md`
+before the first tool runs — the mtime is the evidence that the brief was not
+tailored to the outcome — then spawn ONE agent with one section per brief at the
+end, on a smaller model, fed `REPORT.md`, `cmd_timing.jsonl` and `ledger.jsonl`
+first and the raw logs only when a section names one. `tests/stress/RUNBOOK.md`
+has the mechanics; `tests/stress/run_watch.py` is the part that costs nothing to
+leave running and should be started at the beginning.
+
+### The seven criteria, MEASURED and written down
+
+Looking is not enough on its own, and that is measured too: run 25's boundary
+review followed the mandate above to the letter -- sheet built with stdout
+suppressed, viewed, observations written first, then reconciled -- and passed a
+layout a human rejects at a glance. The bridge IC and its USB receptacle put their
+differential pair across an **8.10 mm** span with the pair needing a hop; the bridge
+and the crystal sit at a **-0.133 mm** body seam, which is not a gap at all --
+negative means the SSOP body end intrudes into the can; three
+nets forced onto the back. (Both figures are `references/boundary-criteria.md`,
+rows 25 and 102, measured with the shipped instruments. The journal reported 9.3 mm
+and 0.183 mm for these, and NEITHER reproduced -- read the denominator off the same
+document, because a span between pin rows is not a distance between parts.)
+Both reviewers looked for what the list above names,
+because that is what the text told them to look for. The run-23 lesson repeated
+one level up: numbers gate legality, nothing gates LOOKING, and now the LOOK has
+a list and nothing gates JUDGING.
+
+So the observations are not free-form. Answer all seven, in writing, each with
+its number and the instrument that produced it. A threshold here is a JUDGEMENT
+and not a tool's verdict -- the tools report measurements precisely so the
+reviewer has to decide -- and an unanswered criterion blocks the close.
+
+1. **Pair and bus length.** For every diff pair and every bus of two parts,
+   `span_mm` from `board_context.py --json` (`pin_order.rows[].span_mm`) is the
+   straight-line pad distance the connection is forced to run. Compare it with
+   the shortest the two bodies allow side by side -- `parts[].body_mm` is on
+   the same sheet. A ratio much above 1.5 is a finding you must explain or move.
+2. **Pin-order agreement.** `pin_order.rows[].verdict`. A `CROSSED` pair costs
+   back-side copper or a via per net on two layers, and rotation cannot fix it:
+   parity flips only under a mirror. Say WHICH nets.
+3. **Cluster distance.** Every decap and series part within N mm of the pin it
+   serves -- `check_floorplan`'s `decap_pin_distance` where the intent declares
+   a limit. For the parts its tether election cannot reach (a regulator with
+   fewer than four pads is never a tether target), declare `proximity` clauses
+   and read the `proximity` findings. The regulator's input cap belongs on its
+   input side and its output cap on its output side; nothing measures that, so
+   say it in words.
+4. **Facing.** Each IC's pad row that carries a connector's nets should face
+   that connector, and a crystal's pads should face the pins they load. Read
+   `parts[].pads_by_face` and `parts[].partners` from the same sheet. The
+   part of this criterion that HAS a number is a row facing the board
+   outline with nothing beyond it: `board_score --placement-terms` publishes
+   it as `placement.terms.edge_facing` (total pads, `by_part` per ref, a
+   2 mm edge gate) and `check_floorplan` prints it as `pins_to_edge` WARN
+   rows when the intent declares `edge_connectors`. Run 26's regulator read
+   3 of 3 there while the prose review had written PASS; a non-zero reading
+   is dispositioned by name, never rationalised as "the only free side".
+5. **Seams.** The tightest body-to-body seam on the board, in mm:
+   `checklist.b_body_seam` from `render_placement --review-sheet ... --json-out`.
+   Below 0.3mm is a finding -- ask whether a hand could place or rework it. The
+   sheet also names which rung each body came from, and a seam measured between
+   two silk markings is a much weaker claim than one between two drawn outlines.
+6. **Density and balance.** `check_pockets.py --bin 5 --json <PATH>`: the
+   emptiest region (`cold_regions[0].area_mm2`) against the densest window
+   (`windows[0].ratio` -- `windows` is already sorted by descending ratio),
+   and the centroid offset (`arrangement.sides[<layer>].offset_mm`).
+   That centroid is weighted by COURTYARD AREA, not pad area, and the tool says
+   so -- quote it as what it is.
+7. **The human question, written out.** "Would a competent engineer accept this
+   layout without changes? If not, the first thing they would move is ___."
+
+A worked example, with the numbers a real board produced, is in
+[references/boundary-criteria.md](references/boundary-criteria.md).
+
+### The sheet comes before any VERDICT, not merely before any key
+
+The mandate above says "before reading any checklist key". Its intent is
+stronger: before any verdict at all. At one close-out the three checker
+verdicts -- assembly, connectivity, DRC -- were read 16 seconds before the
+review sheet existed, which satisfies the letter and defeats the purpose. Build
+the sheet and answer the seven criteria FIRST, then run the checkers, then
+reconcile. Anything else is a reviewer with a closed question.
+
 ## What a run DELIVERS
 
-Four artifacts, every time, in the work dir. A run that produces the board alone
-is not finished — the other three are how anyone else can tell whether the board
-is good, and they are the first thing to get skipped under time pressure.
+Seven artifacts, every time, in the work dir, **AND IN THIS ORDER**. A run that
+produces the board alone is not finished — the rest are how anyone else can tell
+whether the board is good, and they are the first thing to get skipped under
+time pressure. The order is load-bearing, not housekeeping: each of the middle
+three is an input to the next, and two of them stop being evidence if they are
+written out of turn.
 
 1. **The board** — the final `.kicad_pcb` WITH its sibling `.kicad_pro` (the DRC
    floor rides in the project; a board without it is ungradeable, #441). State
    its sha256 and which chain step produced it.
-2. **The movie** — `python3 -X utf8 make_movie.py <work-dir>` over the chain
-   boards. `place_route_loop` makes one by default; a hand-driven chain does
-   NOT, so build it explicitly. `KICAD_ROUTE_TRACE=1` (the default) gives the
-   fine per-copper rip/restore animation.
-3. **The report** — `REPORT.md`, and it compares on TWO axes or it is not a
-   report:
+2. **The movie** — over the chain boards. `place_route_loop` makes one by
+   default; a hand-driven chain does NOT, so build it explicitly:
+
+   ```bash
+   python3 -X utf8 py_router/make_movie.py <work-dir> -o routing.mp4
+   ```
+
+   `KICAD_ROUTE_TRACE=1` gives the fine per-copper rip/restore animation and is
+   **OFF unless you export it** (`py_router/route_trace.py`) — only the stress
+   harness sets it, so a hand-driven run gets the coarse per-step delta while
+   believing it has the fine trace. Also optional, also costing real time:
+   `--panels xray+iso` stacks a 3D isometric render under the board view (needs
+   `kicad-cli`, ~2-4 s per render), and a run wrapped in `tee_cmd.py` gets a
+   run-clock overlay read from its `cmd_timing.jsonl`.
+3. **The verifiers' verdicts, on disk** — one file per routed-board lens
+   (`verdict_connectivity.txt`, `verdict_drc.txt`, `verdict_spec.txt`) and one
+   for the close-out boundary verification (`verdict_record.txt`), each holding
+   that verifier's `VERDICT=` line as its first line, beside the ledger. They
+   are written BEFORE the entry that records them, because that entry records
+   them: `converge.py record --lens-file` reads the line from the file and
+   stores the file's sha256 in the row. A verdict produced after the row that
+   must carry it can only be recorded by appending a second close-out.
+4. **The `--final` ledger entry** — the stop condition, named, with those files
+   attached. It is the LAST row: nothing in this toolchain reopens a ledger, so
+   every measurement it quotes has to exist before it is written, and its
+   verdict must be reproducible from the ledger as it stood the moment before.
+5. **The `DONE` marker** — written LAST of everything a machine waits on, and
+   citing only files that already exist. DONE means the copper is frozen, not
+   that the run is over: `run_watch.py cheats --done` blocks on it, runs the
+   fence and provenance audits when it appears, and then exits, so a marker
+   written early declares a run finished while its own auditors have not
+   started.
+6. **The report** — `REPORT.md`, written AFTER `DONE` so it can carry the two
+   verdicts that only exist by then: the fence audit's and the provenance
+   audit's, each quoted with its exit code. That makes the report the one
+   artifact the cheat watcher cannot audit, which is exactly why it quotes
+   those two verbatim instead of summarising them. And it compares on TWO axes
+   or it is not a report:
    - **against the human**, when a human-routed reference exists:
      `compare_to_original.py --ours <final> --orig <reference> --json` (vias,
      copper length, width spread, layer balance). The human layout is one
@@ -187,11 +361,37 @@ is good, and they are the first thing to get skipped under time pressure.
      with TODAY's graders. Never diff against numbers stored in an old report:
      the graders here drift within days, and a re-grade has moved rows in both
      directions.
+   - **against the run's own waivers**, by name. List every waiver token this
+     run spent, with the command that spent it and its one-line reason:
+     `--accept-residue` (`buildable`, `verdict`, `locked_contacts`, `blocking`,
+     `oob_pad_count`), `--accept-unclosed` (`instruments`, `fab_floors`,
+     `ungraded`, `agreement`, `verifier`), `--accept-congestion <reason>`,
+     `converge.py record --accept-incommensurable <reason>`, and the placement
+     half's `--waive <name>:<reason>`. Write `none` when none were spent. Every
+     one of those names a check that REFUSED and was overridden; an unlisted
+     waiver is a refusal that reached the report as a pass, and a report with no
+     waivers line does not say a run spent none — it says nobody looked.
+   - **against its own cost.** One table: per agent, its reported
+     `subagent_tokens` and tool-use count, plus the wall time and the total from
+     `cmd_timing.jsonl`'s `wall_s`. It is transcription, not measurement, and it
+     is the only artifact that tells the next run where the window went.
    Lead with `blocking`; quality (vias, copper_mm, segments) is the tie-break
    once blocking is 0.
-4. **The journal** — numbered entries, written as you go, each carrying the
+7. **The journal** — numbered entries, written as you go, each carrying the
    measurement behind it and the command that produced it. Batch-writing it
-   afterwards is detectable and has been detected.
+   afterwards is detectable and has been detected. Its last entry is the
+   close-out, written after the report it describes.
+
+**Every `converge.py record` a close-out writes goes through
+`tests/stress/tee_cmd.py`.** converge's `record`, `verdict` and `status` modes
+print JSON on stdout, so converge installs no `CMD:` banner and must not — a
+banner line would corrupt the document its own caller parses. The cheat watcher
+reads each tool's argv off those banners, so an unbannered tool is invisible to
+it unless something else writes its argv down; `tee_cmd` is that something,
+appending one `cmd_timing.jsonl` row per invocation with the argv, the exit code
+and the elapsed time. The close-out record is the call least able to afford
+being the one nobody can replay. Wait on `logs/<label>.done`, never on a log
+line.
 
 ## Blind subjects, and the fence
 
@@ -217,8 +417,11 @@ presenting them as a score would be a claim the fence no longer supports.
 <agent_identity>
 You run a board end to end. You place first and once, you classify every
 routing failure before retrying it, and you send placement-shaped failures back
-to placement instead of spending router retries on them. You finish with four
-artifacts — board, movie, report, journal — not one.
+to placement instead of spending router retries on them. You finish with the
+SEVEN artifacts of "What a run DELIVERS", not one and not four: board, movie,
+verdict files, `--final` ledger row, `DONE` marker, report, journal. The three
+this block used to drop are the run's whole auditability, and this is the part
+a delegated agent internalises.
 </agent_identity>
 
 <!-- Moved here from plan-pcb-routing/SKILL.md: the convergence loop scores a
@@ -244,9 +447,41 @@ python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_scor
     --min-track-width 0.15 --min-via-diameter 0.6 --min-via-drill 0.3 \
     --net-min-widths wk/net_min_widths.json \
     --impedance-nets '<every net with a reference-plane clause>' \
-    --length-groups '<every length-matched group>' \
+    --length-groups wk/length_groups.json \
     --json wk/score_iter3.json
 ```
+
+`--length-groups` takes a **PATH**, not a description:
+`{"GROUP": {"nets": [...], "tolerance_mm": 0.1, "mode": "pin_pair"}}`.
+`score_length` does `os.path.isfile()` on it and otherwise returns
+`skipped(...)`, so a string that is not a file leaves the component reporting
+`ran: false`, length matching **ungraded**, and the board scoring exit 0 — the
+exact vacuous pass the paragraph below warns about. `references/convergence.md`
+spells it correctly.
+
+**On a PLACEMENT lap — a board with no copper — add the placement terms**, or
+the lap cannot be ranked against the one before it:
+
+```bash
+python3 -X utf8 .claude/skills/plan-pcb-placement-and-routing/scripts/board_score.py \
+    placed.kicad_pcb --intent floorplan.json \
+    --placement-terms --parent-score wk/score_lap2.json \
+    --json wk/score_lap3.json
+```
+
+`placement` is REPORT-ONLY: it never enters `blocking`, never changes the exit
+code, and every other key of the document is identical with the flag and
+without. What it changes is that `converge verdict` can tell a placement half
+that has stopped moving from one whose laps it could not compare — on a
+copper-free board `quality` is `(0, 0.0, 0)` for every placement, so without
+it seven laps of one board scored the same number and the half read as
+finished while it was still moving. Scored without it, such a board now says
+so (`DEGENERATE QUALITY KEY`).
+
+The terms are compared PARETO, never summed: a lap that trades pair length for
+balance is not an improvement, and `converge status` prints both sides. There
+is deliberately no aggregate — #694 is the run where a collapsed verdict kept
+printing PASS while one of its inputs had reversed sign.
 
 **Every one of those flags is what makes its clause reach `blocking`. A component
 with no flag reports `ungraded`, which is not a pass.** The pattern is identical
@@ -257,6 +492,7 @@ each time, and it is how a HARD clause ships unmeasured:
 | `--net-min-widths` | `undersized` sees only BOARD-WIDE floors, so a clause naming ONE net — a 0.8 mm pair, a 0.4 mm rail — is invisible | `net_widths` 5, while `undersized` read 0 |
 | `--impedance-nets` | the component returns *"no --impedance-nets given"* and a plane-continuity clause is never checked at all | `impedance` 10 — 68 reference crossings, 63 segments over void |
 | `--length-groups` | length matching is ungraded | — |
+| `--placement-terms` | a COPPER-FREE lap is unrankable: `quality` is `(0, 0.0, 0)` for every placement of every board, so the plateau test has nothing to compare | seven laps of one board scored one number |
 
 Same board, same copper: **`blocking` 12 without those flags, 27 with them.** A
 run that reports 12 has not found a better board; it has looked at less of it.
@@ -270,7 +506,7 @@ of every chain: check `impedance.nets_analyzed` equals the number of nets you
 named, exactly as you assert `ran == true`. A vacuity discovered at iteration
 9 invalidates every earlier score.
 
-Also **read `net_widths.patterns_matching_no_routed_net`.** A width clause on a
+Also **read `components.net_widths.patterns_matching_no_routed_net`.** A width clause on a
 net with NO copper never appears in `net_widths` — the component only walks nets
 that HAVE segments — so an unrouted net's width requirement lands in that list
 and nowhere else.
@@ -284,7 +520,8 @@ when `blocking` reads 0, and wire it into `place_route_loop --accept-cmd` so the
 inner loop stops accepting rounds that break it.
 
 **Produce:** the command above, every iteration, on the board you just wrote.
-**Read:** `blocking`, `blocking_by`, `ungraded`, `unknown`, `quality`.
+**Read:** `blocking`, `blocking_by`, `ungraded`, `unknown`, `quality` — and
+`placement` on a copper-free lap.
 **Decide:** `blocking == 0` → go to 9.4. Otherwise pick the lever by **9.1a**,
 NOT by the largest `blocking_by` entry.
 
@@ -300,7 +537,7 @@ have booted.
 
 | order | component | why it outranks the rest |
 |---|---|---|
-| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). **And READ the focus panels** — image read-case 3: `render_placement --summary-json wk/routeN.json --focus` classifies pocket-vs-scattered in one look, BEFORE the first lever. Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
+| 1 | `unrouted` | a net with no copper is a dead wire. Nothing else matters while one exists. **Run `converge.py where BOARD --nets <names>` before touching a parameter** — it names the gap endpoints and the foreign copper walling them in, per layer, nearest-first (9.1b-ii). **And READ the focus panels** — this is a look you must take before the first lever, not after: `render_placement --summary-json wk/routeN.json --focus` classifies pocket-vs-scattered in one look, BEFORE the first lever. Guessing from the score is how eleven iterations went to clearances while five nets sat dead |
 | 2 | `broken` | a net in N pieces is N−1 dead wires. **Read `components.broken.nets`, not the count** — see below; the count alone is not a work list and a loop driven on it does not move |
 | 3 | `net_widths`, `undersized` | real copper, wrong size — fixable by re-routing what is already there |
 | 4 | `floorplan` | placement or intent |
@@ -336,7 +573,7 @@ you can see what each entry is worth. **Sort by it** — above, GND alone is 4 o
 the 14, and seven single-join nets are worth 1 each.
 
 **`handler` names the step, and it is a FACT off the board, not a guess:** it is
-`repair_planes` when the net has a zone (see `broken.poured_nets`,
+`repair_planes` when the net has a zone (see `components.broken.poured_nets`,
 read from the board's own `(zone (net "…"))` blocks) and `route` otherwise.
 `route.py` cannot tap a pour, so a stranded plane pad handed to it is work that
 cannot succeed. Measured: `broken` sat at **14 across two iterations** of
@@ -349,7 +586,7 @@ has at least one zone", which on a board that pours signal nets includes them:
 measured on neo6502, its 61 nets covered **332 of 545 pads (72%)**, all of
 `/A0`–`/A15` among them. A run read it as "the planes, ignore those" and removed
 most of the board from its own render. The field publishes this sentence itself,
-as `broken.poured_nets_meaning` — read it there rather than inferring from the
+as `components.broken.poured_nets_meaning` — read it there rather than inferring from the
 name. Every net name `board_score` publishes is now checked against the board
 (`net_name_audit`); a non-zero `unknown_count` is a bug in the instrument, not a
 finding about the board.
@@ -362,7 +599,7 @@ of them is why the count does not move:**
 | a **plane net** (GND, any poured rail): stranded pads that cannot reach the pour | `repair_planes --rip-blocker-nets`. `route.py` will not tap a pour |
 | a **multipoint** signal/power net: some MST edges landed, one did not | `route.py --nets <that net>` — and read **`failed_multipoint`**, which is where its failure is reported |
 | a break whose stranded pad sits on a **DNF / do-not-fit** part | **not a defect.** Chasing it never converges. Say so once, with the ref, and exclude it from the target set |
-| a break at a fine-pitch pad with no room for a tap via | smaller `--via-size`/`--via-drill`, then finer `--grid-step` — the Step 5 ladder |
+| a break at a fine-pitch pad with no room for a tap via | smaller `--via-size`/`--via-drill`, then finer `--grid-step` — the fine-pitch retry ladder under the routing skill's `### Step 2: Route ALL Nets` |
 
 The `ref` on each stranded pad is what tells these apart, which is why it is in
 the list. A break on `[R1]` where R1 is unpopulated and a break on `[U1]` are the
@@ -408,14 +645,15 @@ writing a script to answer a question, check whether one of them already does.
 |---|---|---|
 | where is the gap, and what is walling it in | `net_forensics.py --nets N --radius 1.0` | per net: the connected ISLANDS, the exact unclosed gap endpoints, and an inventory of the foreign copper around each gap — **named, per layer, nearest-first**. Better than a ratsnest, which tells you two pads are unjoined and nothing about why |
 | the honest unconnected count | `kicad_unconnected.py board --items` | KiCad's own DRC, and it **refills the zones itself** — which is 9.1c's whole problem, already solved. Exit 4 = items remain, 3 = no oracle (NOT clean) |
-| WHERE the DRC violations sit, as a picture | `check_drc.py board --render wk/drc/` | one cropped panel per spatial cluster, red rings at each violation, count/types/rect in the caption — image read-case 7. The panel shows WHERE; the violation records say how much |
+| WHERE the DRC violations sit, as a picture | `check_drc.py board --render wk/drc/` | one cropped panel per spatial cluster, red rings at each violation, count/types/rect in the caption — a look you must take whenever DRC is what moved. The panel shows WHERE; the violation records say how much |
 | the endgame work list, join by join | `kicad_unconnected.py board --pairs-json wk/pairs.json`, or `converge.py where BOARD --oracle` | each remaining join as an exact net + pad↔copper endpoint pair (x/y/layer/kind) — the JOIN SPEC for a scoped route, no re-deriving from prose. `where --oracle` prints the pairs then runs forensics on exactly those nets |
 | what kind of failure is this | `converge.py where` / the router's own hint | the hint names the flag and the nets (9.3b); it diagnoses better than the score does |
 | where should this part go, facing which way | `converge.py poses BOARD --ref R` | ranks legal (x, y, rotation) poses by placement cost in **milliseconds**, with a per-component breakdown, and `--route` pays for tier 3 on only the top few |
+| PUT it there, once you have decided | `place_pose.py IN OUT set R X Y --rot D` (also `rotate` / `face R FACE PARTNER` / `lock` / `unlock`) | the other half of `poses`: applies the decision through the same writer `place_seed` uses, carries the siblings, and grades it with `grade_pad_legality` against the INPUT board — exit 4 names what got worse and the nearest legal pose, exit 2 means the request names something that is not on the board. Several verbs in one call are ONE arrangement. **Never hand-write a script around `write_placed_output`**: this is that script, and it is a registered lever |
 | will this hand join fit, BEFORE committing it | `check_join.py BOARD NET x,y,layer ... via:x,y` | stages the candidate polyline+vias onto a copy of the board and diffs the REAL check_drc engine (netclasses, `.kicad_dru`, rotated pads, edge, hole-to-hole), plus missing-via and same-net-stack checks DRC omits. Exit 0 clean / 1 violations. Rung 8's condition 3 |
 | is this even the engine I pinned | `route.py --capabilities` / `krt_capabilities.py --require` | a chain can otherwise run green against a clone missing the module it depends on. **Spelling is `module:--flag`, WITH the dashes.** And ground-truth a PLANE-step flag with `--help`: `--require` scans imports one level to catch shared registrars, and both plane scripts import `route.py` — so they used to inherit its whole vocabulary and answer OK for flags argparse rejects with exit 2 (fixed, but the lesson stands: a capability gate is evidence, not proof) |
-| step back to iteration N | `converge.py step-back --iteration N` | byte-exact, because the board is addressed by content instead of by a path three iterations overwrote |
-| re-run what iteration N did | `converge.py replay --iteration N` | replays the recorded argv. If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
+| step back to iteration N | `converge.py step-back --ledger wk/ledger.jsonl --iteration N --out wk/iterN.kicad_pcb` | byte-exact, because the board is addressed by content instead of by a path three iterations overwrote |
+| re-run what iteration N did | `converge.py replay --ledger wk/ledger.jsonl --iteration N` | replays the recorded argv (`--ledger` is required; without it argparse exits 2). If it refuses, the ledger recorded prose instead of a command — fix the ledger, not the memory |
 
 **Trust order when instruments disagree on connectivity: the KiCad oracle
 (`kicad_unconnected`) > `net_forensics` islands > `board_score` components >
@@ -496,7 +734,10 @@ success message.
 Three rules about that number:
 
 - **`blocking` must reach 0 before a board is deliverable.** It is
-  `unrouted + broken + drc + undersized + floorplan + impedance + length`.
+  `unrouted + broken + drc + undersized + floorplan + assembly + impedance +
+  length + net_widths` -- NINE components, which is what `board_score.py`'s
+  `parts` dict sums (#918: this line said seven for as long as `assembly` and
+  `net_widths` had existed).
   `quality` (vias, copper length) is a **tie-break only**, compared once
   `blocking` is 0 — otherwise a router buys off a disconnected net with a lower
   via count.
@@ -509,7 +750,7 @@ Three rules about that number:
   never let it read as clean.
 
 **`place_route_loop`'s own `ACCEPTED` / `REJECTED` is NOT a quality verdict.**
-`better()` (`place_route_loop.py:358`) compares `failures` and `iterations`, both
+`better()` (`py_placer/place_route_loop.py:569`) compares `failures` and `iterations`, both
 from route.py's own `JSON_SUMMARY`; it never runs a checker. Treat it as a cheap
 pre-filter and **re-score with `board_score.py` before believing it.**
 
@@ -529,13 +770,14 @@ better; a non-zero exit or a missing SCORE rejects the round.
 full chain re-run, and that assumption is wrong (9.3a). A scoped retry takes
 seconds, so a hundred of them is an afternoon, not a week.
 
-**Count three kinds separately, and say which you are spending:**
+**Count four kinds separately, and say which you are spending:**
 
 | kind | what it does | example |
 |---|---|---|
 | **completion** | changes the copper: routes a net, heals a separation, fixes a width | `route.py --nets QSPI_SD1 ... --rip-existing-nets ...` |
 | **placement** | moves footprints: a quench, a repair, a reconstruction — connects nothing, tunes no instrument | `place_seed --repair`, `place_reconstruct`, a 0c quench, a loop round |
 | **systemic** | changes how the chain routes, measures or grades — no net gets connected by it | pinning the fab floor, restoring net classes, filling zones, fixing a checker |
+| **classification** | the L3 lap that DECIDES the shape of the next re-entry. It changes no board, so like `systemic` it belongs to neither half — and it had to be filed AS `systemic` before this kind existed, which made a decision look like a tool change. This skill's L3 stage produces exactly this lap | `converge.py record --kind classification --shape floorplan` |
 
 (`placement` exists because two runs had to file placement repairs as
 `systemic` for want of a kind, and `status`'s systemic-share warning cried
@@ -546,8 +788,11 @@ Systemic iterations are necessary and they are not progress. A run once spent
 nets carrying no copper. **If three consecutive iterations are systemic, stop and
 ask what is actually unconnected** — you are tuning the instrument, not the board.
 
-Record `"kind": "completion" | "placement" | "systemic"` in every ledger entry.
-The final report states all three counts.
+Record `"kind": "completion" | "placement" | "systemic" | "classification"` in
+every ledger entry. The final report states all four counts — the same four the
+table above says to count separately, `classification` included. Filing an L3
+lap as `systemic` is what "made a decision look like a tool change", and it
+then reads as budget spent on the instrument.
 
 ```bash
 python3 -X utf8 py_router/route.py board.kicad_pcb --list-groups --group-by auto
@@ -566,7 +811,9 @@ the common case — iterating per module there routes a fraction and reports
 success on that fraction, which is the same defect the `route.py --group` rule
 warns about.
 
-**`kicad` groups exist on 0 of 27 boards *in this repo's corpus*** — that figure
+**`kicad` groups exist on 0 of the 22 boards git tracks under `kicad_files/`** —
+(`ls` returns more on a working copy that has run the suite; `tests/run_utils.py`
+refuses to pin a threshold on that glob for exactly that reason). That figure
 is about KRT's own test boards, not about boards in general. A generated board
 (e.g. Zener `.zen`) carries one `kicad:` group **per module**, so the naive
 reading of "groups exist → per-group" authorised **8 × 20 = 160 iterations** on a
@@ -658,8 +905,13 @@ learn:
    the rip set contains a width-bearing net, pass its `--power-nets` /
    `--power-nets-widths` (or `--impedance`) in the same call.** And the rule
    does not extend to dru rules — a net routed under a staged/lifted dru
-   cannot be re-made by any call that reads the full sibling dru (see Step 5's
-   dru-has-no-pin bullet).
+   cannot be re-made by any call that reads the full sibling dru (see stop
+   condition 4's staged-sibling-dru bullet in §9.5 of THIS file — there is no
+   such bullet in the routing skill. The "Step 5" the old citation meant was
+   that skill's FORMER `### Step 5: Repair Disconnected Plane Regions`, which
+   #562 absorbed into the route step's in-run finalize. Do not follow it to the
+   `## Step 5` the routing skill still has — that one is "Review Power and
+   Ground Net Strategy", a live section that never carried this bullet).
 3. **One net per call.** Routing two nets together let the second rip the first —
    reported as `1/2 routed` twice running, a different net each time. Sequential
    single-net calls connected both.
@@ -679,7 +931,7 @@ learn:
    group's own QSPI pass; 7/7 without). Protect the group on the NEXT
    committing step instead; the `.kicad_pro` record carries it from there.
 5. **Tap passes over routed copper are a one-way door.** With the pour-first
-   order (#424) the Step 1c pour ambushes nobody — its taps land on an empty
+   order (#424) the Step 1 pour ambushes nobody — the fanout's plane drops land on an empty
    board and every later route sees them from the start. The door is the
    LATE tap passes: the plane FINALIZE (`--add-gnd-vias`/`--stitch-*`), the
    repair, and any re-pour over a routed board. Never name a
@@ -693,7 +945,7 @@ learn:
    and no gate stops you: the exit-3 refusal and its `--allow-bare-pads`
    override were removed in 5832e4eb (the empty-board 1c pour was the
    exempt case). Connect every pad first, or accept losing it. (Cross-ref:
-   the Step 5 ordering block says the same from the other side.)
+   the routing skill's `## Important Notes` item 3, "Order matters" (#424), says the same from the other side.)
 
 For plane-net pads that cannot reach their pour, the equivalent is
 `repair_planes --rip-blocker-nets` (out-of-chain only; it leaves the ripped
@@ -715,11 +967,11 @@ top blocker on the exact keys, not on impressions:
 | 2-layer board, heavy F.Cu skew, via count far above a hand layout | **parameters** | layer-cost rebalance, below |
 | `oob_count` or `overlap_area` rose after the last placement | **the placement is illegal** | discard it; do not route it |
 | `check_floorplan` exits 4 with `zone_containment` | **intent violated** | fix the placement to match, or say why the intent changed. Do not quietly rewrite the intent to match the board |
-| a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the Step 5b ledger — not a placement problem at all |
+| a whole net has no copper while `pad_pairs_connected` looks healthy | **coverage bug** | the routing skill's `## Step 5b: Net-Coverage Reconciliation` ledger — not a placement problem at all |
 | `undersized` non-zero | **parameters** | re-route at the spec's width/via. Placement is not the lever |
-| a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | 1.9 is inadmissible; it returns a path up to ~1.9× optimal. Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` (the #529 dynamic budget self-extends; do not pass `--max-iterations`), then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
+| a **maximum-length clause fails** and the net's own geometry pass ran at the default `--heuristic-weight` | **parameters — rung 1, seconds** | The default 2.3 is inadmissible: it returns a path up to ~2.3× optimal (#586 moved it from 1.9, and this row said 1.9 until #923 gave the gate a way to notice). Re-run **that pass**, on **its own input board**, at `--heuristic-weight 1.0` with a finer `--grid-step` (the #529 dynamic budget self-extends; do not pass `--max-iterations`), then re-measure routed:straight-line. Measured: 44.50 mm → 7.73 mm against a 7.71 mm direct. **Do not go to placement before this.** See Step 2c |
 | `--heuristic-weight 1.0` **on the net's own FIRST pass**, on a board carrying only what must precede it, did not change the length | **placement** | now the router genuinely had no shorter path. Signature: routed length far above the straight-line pad distance *and stable under an admissible search*. Go to `place_route_loop` — see the warning below, it needs BOTH `--target-nets` and `--accept-cmd` to see this at all. **A null measured on a SATURATED board proves nothing** — one run tested 1.0 at iteration 4, after fanout, USB and every signal were committed, got a byte-identical board, and recorded "no shorter path exists at this placement". Re-tested on the first pass that lays the net's copper, the same flag was worth 5.8× |
-| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1c (or the Step 3 finalize / Step 5 repair), not placement |
+| `unrouted` names a plane net | **the pour step** | it was excluded and never poured — Step 1 (the pour), or the in-run plane finalize the route step ends with (#562 absorbed the old separate repair step; `py_router/repair_planes.py` is the out-of-chain utility) — not placement |
 | the log names **pre-existing nets** it is "not allowed to rip" | **rip lever** | 9.3c — `--rip-existing-nets` with the set it named |
 | a net fails on ONE layer at every grid and rip set, and routes instantly with a second layer | **the single-layer constraint is the blocker** | not a router failure. Report it against the requirement that imposed the layer restriction, with both measurements |
 | `drc` is large, uniform, one net pair, one overlap value | **grading artifact** | 9.1b — re-grade at the right class. Not a lever at all |
@@ -730,7 +982,7 @@ top blocker on the exact keys, not on impressions:
 | the **same victim set recurs under every order** at every grid | **capacity, not order** | the lane ledger (`check_floorplan --health`) will show the deficit; that is stop condition 3 with the ledger as the measurement, not another ordering lap |
 | you are about to write **"this pad cannot be routed"** | **unproven until measured** | `check_reachability.py --pad REF.NUM`. PASSABLE means it is a ROUTER finding and placement is the wrong lever; CAGED means geometry. 9 of 14 such claims across four runs were later refuted — see the impossibility-claim rule |
 | one part carries most of a critical net while its BLOCK sits elsewhere | **floorplan, at PART granularity** | `health_net_affinity_offenders` names it and prints the `converge.py poses --ref` line. Block displacement averages this away, so a quiet block metric is not evidence of absence |
-| the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO can still be re-routed before the plane FINALIZE/repair taps land, while a stranded trace-fed rail pad tends to stay lost once they do (rule 5's one-way door; poured rails are already connected from Step 1c and out of this fight). Spend the strandings on the recoverable class. Measured (run 6, signals-first era): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
+| the **bulk pass keeps stranding fine-pitch RAIL pads** under mps | **ordering, before placement** | re-run the bulk with `--ordering original`, rails FIRST (netlist order puts power nets before GPIOs). Order cannot change how many strand — but it chooses WHICH, and a stranded leaf GPIO can still be re-routed before the plane FINALIZE/repair taps land, while a stranded trace-fed rail pad tends to stay lost once they do (rule 5's one-way door; poured rails are already connected from Step 1 (the pour) and out of this fight). Spend the strandings on the recoverable class. Measured (run 6, signals-first era): mps stranded 5 QFN rail pads; rails-first closed them and moved the fails to leaf nets |
 
 **Accept an iteration only if `blocking` strictly decreased**, or `blocking` is
 unchanged and `quality` improved. Otherwise **revert to the parent board** and
@@ -846,11 +1098,11 @@ drc3/cluster1]`). The image mandates are auditable only through the ledger: run
 5's breach — a produced-but-never-opened delta render — was invisible precisely
 because nothing recorded reads. An iteration whose score had `unrouted`/`broken`
 > 0 or a failed `check_drc`, with no `[read: ...]` in its entry, skipped
-read-case 3 or 7. **Record NON-triggers the same way**: when a mandate's
+the look its own row mandates. **Record NON-triggers the same way**: when a mandate's
 trigger is checked and absent, say so in the entry (`[checked: 0 B.Cu parts ->
 no --per-side]`) — an unrecorded non-trigger is indistinguishable from a
 skipped mandate to any later audit (run 6's watcher had to grep the board to
-tell them apart). **A pose decision is read-case 5 even when the arithmetic
+tell them apart). **A pose decision needs its side-by-side reads even when the arithmetic
 is decisive**: a rot-0-vs-rot-180 call made on `components.inversions` alone,
 with no side-by-side ratsnest reads in the ledger, is a mandate skipped —
 run 7 decided the U3 pose twice that way; the number was right, and the
@@ -915,17 +1167,29 @@ argv failure the next paragraph exists to stop.
 `record` now enforces both.** An `--argv` whose first token is neither an
 existing file nor on PATH is refused (exit 2, nothing written): run 7's
 endgame recorded `["python3","-X","utf8","dummy"]`, which `replay` can never
-run — a placeholder argv turns the ledger back into prose. The run-closing
-entry takes `--final --stop-condition '<which of 9.5 fired>'`; `--final`
-without a stop condition is refused the same way. And **before quoting a
+run — a placeholder argv turns the ledger back into prose. **Every other argv
+token is checked too**: an MSYS2-rewritten net name
+(`C:/Program Files/Git/D_P`, what Git Bash does to `/D_P` without
+`MSYS2_ARG_CONV_EXCL`) is refused, because `replay` would grade nets that do
+not exist and return a vacuous pass.
+
+The run-closing entry takes `--final --stop-condition '<which of 9.5 fired>'`.
+**That is a TOKEN, and it is checked on every record that carries one**, not
+only when a lens failed: `1 | 2 | 3 | 4 | DONE-EXHAUSTED | STUCK | BUDGET`.
+Write the reason after it — `--stop-condition "3: five laps, no new copper"` —
+or in `--stop-reason`; the token and the prose land in separate ledger keys and
+nothing is truncated. Prose alone (`"plateau: 3 iterations"`) is refused.
+`--final` without a stop condition is refused the same way. And **before quoting a
 headline in the lever text, diff it against the SAME entry's score payload**:
 run 7's final entry said "SWD closed, 5 opens" while its own score listed
 SWDIO among 6 unrouted — the prose shipped into the report and the correction
 cost a commit. The score is the record; the lever text is a caption of it.
 
-**Log the systemic/completion split in the final report**: *"41 iterations: 9
-systemic, 32 completion"* is a fact about how the budget was spent, and a run that
-cannot state it was not keeping a ledger.
+**Log the split across ALL FOUR kinds in the final report**: *"41 iterations:
+9 systemic, 30 completion, 1 placement, 1 classification"* is a fact about how
+the budget was spent, and a run that cannot state it was not keeping a ledger.
+Naming only two of the four is how a `classification` lap — a DECISION —
+disappears into the systemic count and reads as a tool change.
 
 #### 9.4b — Boundary verification: BLOCKING, at every accepted iteration and at close
 
@@ -936,10 +1200,17 @@ per-step timestamps said so), and one `[read:]` tag claiming a pixel read
 that never happened. Both were honest-looking entries a contemporaneous
 check would have bounced in seconds.
 
-**The rule: after every ACCEPTED iteration's ledger entry, and at close-out,
-an independent subagent verifies the entry against its artifacts BEFORE the
-next step may start. A FAIL blocks; remediate (fix the entry, re-read the
-artifact, or re-run the step) and re-verify.**
+**The rule: after every ACCEPTED iteration's ledger entry, and BEFORE the
+run-closing one, an independent subagent verifies against the artifacts, and
+nothing proceeds until it has answered. A FAIL blocks; remediate (fix the entry,
+re-read the artifact, or re-run the step) and re-verify.**
+
+**In-loop it verifies an entry that EXISTS. At close-out it verifies the ledger
+that is about to be closed** — every row except the `--final` one, which does
+not exist yet and whose content is this verifier's own answer. That asymmetry is
+the point: a boundary check that runs after the row it is meant to gate can only
+be recorded by appending a second close-out, and an append-only ledger with two
+close-outs has not recorded a verdict, it has recorded a disagreement.
 
 What the boundary verifier receives — and it must be ONLY this, never the
 raw board (it verifies the RECORD, not the routing):
@@ -969,7 +1240,9 @@ What it checks, each with the artifact that decides:
    with no names in the lever text is a FAIL (the whack-a-mole rule above).
 5. **Assembly-clean** (run 6; placement-phase and fix-loop boundaries) —
    the verifier additionally receives the fresh `check_assembly` JSON and
-   the render JSON, and FAILS unless `blocking == 0`, the checklist's
+   the render JSON, and FAILS unless the JSON's `buildable` is `true`
+   (NOT `blocking == 0` -- that is 1 of its 5 not_buildable conjuncts,
+   #918), the checklist's
    `b_body_overlap_pairs` is empty, and every NEW-vs-baseline advisory
    pair is either fixed or dispositioned in the entry. A claim of
    "placement done" with no attached `check_assembly` JSON is itself a
@@ -983,10 +1256,27 @@ Cadence discipline: REJECTED iterations do not get a boundary verification
 and the verifier is bounded to the slices above — handing it the whole work
 dir invites it to re-litigate routing decisions, which is the convergence
 loop's job, not the record-keeper's. The close-out boundary verification
-additionally walks the WHOLE ledger for checks 3 and 4 (monotone t-stamps
-end to end; the final entry's stop condition quoted against its score).
+additionally walks the WHOLE ledger for checks 3 and 4 — monotone t-stamps end
+to end, and every claim traced to an artifact. "The whole ledger" is every row
+that exists when it runs, which is every row but the `--final` one: it is
+dispatched to DECIDE that row, so it cannot read it. What it checks in that
+row's place is the stop condition the stage just printed against the score that
+stage measured — the same pair, one step earlier, and reproducible afterwards
+because both are on disk.
+
+**It writes its verdict to a file named for its lens, beside the ledger**
+(`verdict_connectivity.txt`, `verdict_drc.txt`, `verdict_spec.txt`, and
+`verdict_record.txt` for this boundary check — `references/verifier-prompts.md`),
+and the `--final` entry attaches those files with `--lens-file` rather than a
+retyped line. A verdict that reaches the row only through somebody's memory of a
+reply is not a second instrument; it is the first one paraphrased.
 
 #### 9.5 — Stop conditions. Only these four. Say which one fired, every time.
+
+They have TOKENS, and `converge.py record --stop-condition` takes the token:
+`1`, `2`, `3`, `4` for the four below, plus the loop verdicts `DONE-EXHAUSTED`,
+`STUCK` and `BUDGET` that `verdict` prints. The sentence explaining WHY goes
+after the token or in `--stop-reason`, never instead of it.
 
 1. **`blocking == 0`, the repo's own spec checker passes, and every verifier lens
    passes** → done. All three are required. `board_score` exits **0** at
@@ -997,11 +1287,20 @@ end to end; the final entry's stop condition quoted against its score).
 2. **Budget exhausted** — you have actually written **100** ledger entries for this
    board. Report the best-scoring board **and the remaining blockers itemised with
    measurements**. Do not present it as finished.
-3. **Five consecutive iterations with `unrouted` and `broken` both unchanged,
-   after trying the rip lever, a finer grid, and a layer change on the failing
-   nets** → floorplan-limited or spec-limited. Say which, with the number. (Five,
-   and on the connectivity components — three iterations of `drc` not moving means
-   nothing when the real blocker is a dead net.)
+3. **Five RECORDED laps of one half — accepted or rejected — with the score not
+   improving, after trying the rip lever, a finer grid, and a layer change on
+   the failing nets** → floorplan-limited or spec-limited. Say which, with the
+   number.
+
+   **Do not count this by eye, and do not count `unrouted` and `broken`.**
+   `converge.py verdict --flat 5` is what decides it, and it compares
+   `(blocking, quality)` lexicographically, per half, over the last five
+   RECORDED laps — rejected ones included, because a rejected lap is evidence
+   that a lever did nothing. Quality counts, so a lap that only moved vias is
+   not a plateau; and a lap whose `blocking` is null is dropped as unjudged
+   rather than read as flat. This page used to say "`unrouted` AND `broken`
+   both unchanged", which is a different test that agrees with the tool only
+   by accident. The number five is right everywhere; the currency was not.
 4. **A blocker is geometrically unsatisfiable** → stop and report it as a
    **finding about the requirement**, with the measurements that prove it. Worked
    example: a 2.4 mm clearance requirement written as a netclass also applies
@@ -1019,6 +1318,26 @@ end to end; the final entry's stop condition quoted against its score).
    pass (run 6's watcher caught exactly this before it shipped); (3) grade
    the residue against the registered floor and report the clause as a
    requirement finding. The rest of the chain keeps the full dru.
+
+##### The flags that decide, and who owns them
+
+L5 refuses with *"fewer than the 5 this test needs ... Lowering `--flat` is not
+one of the options"* and names `converge.py record --exhausted` as the way out.
+Until now this page named none of those flags, so a reader met a hard refusal
+with no documented route. Measured from `--help`:
+
+| flag | lives on | what it does |
+|---|---|---|
+| `--flat N` | `converge.py verdict` **and** `loop_driver.py` (default 5) | how many RECORDED laps of a half must fail to improve before it counts as plateaued. **Lowering it to reach DONE is falsifying the measurement** — that is what the refusal is about |
+| `--budget N` | `converge.py verdict` **and** `loop_driver.py` (default 100) | the iteration budget stop condition 2 is measured against |
+| `--exhausted {placement,routing}` | `converge.py record` only, and it REQUIRES `--exhausted-reason` | the honest way out of a plateau you cannot break: declare the half exhausted, in writing, with the reason. A later lap in that half RETRACTS the declaration — no flag, no edit |
+| `--score-file PATH` | `converge.py record` only | the score as a FILE. Prefer it: `--score "$(cat ...)"` exceeds the OS argv limit around 32 kB |
+| `--congestion-json PATH` (+ `--congestion-baseline PATH`) | `loop_driver.py` only | **L4, not the close-out.** `--shape parameter` is REFUSED without them: every placement test the classifier runs is per-NET, so global capacity is invisible to it, and the pair is the copper-free board the route ran on against the board placement started from. `--accept-congestion REASON` is the override |
+| `--verifier-verdict PATH` | `loop_driver.py` only | the on-disk verdict file L5 cross-checks against the ledger's live claim |
+
+`loop_driver` shells out to `converge verdict`, forwarding `--budget` and
+`--flat`, which is why those two appear on both. The other four appear on exactly
+one tool each; asking the wrong one is an argparse error, not a silent default.
 
 ##### These are NOT stop conditions
 

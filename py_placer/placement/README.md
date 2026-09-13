@@ -445,6 +445,37 @@ and will not be invented) and refuses a board that already looks placed
 legal seeds; the same seed reproduces byte for byte. The two compose:
 `place_seed --seed N` → `place_portfolio` diversifies and ranks.
 
+## place_pose.py — the sanctioned pose setter (issue #892)
+
+The engine's decision-makers all SEARCH; this is the one that takes an order.
+`converge.py poses` ranks legal (x, y, rot) candidates and `grade_pad_legality`
+grades a pose, but until #892 nothing applied one, so a model's own layout
+decision reached the board through a hand script around `placement.writer`
+(run 25's `pose_assist.py`) — the very thing the provenance regime refuses.
+
+```bash
+python py_placer/place_pose.py board.kicad_pcb out.kicad_pcb set U1 129.9 98.3 --rot 270
+python py_placer/place_pose.py board.kicad_pcb out.kicad_pcb face U1 W USB1 lock U1
+```
+
+Verbs: `set` (exact, or `--near X Y` which implies `--snap`), `rotate`
+(absolute, `--relative` for a delta), `face REF FACE PARTNER`, `lock`,
+`unlock`. Several verbs in one call are ONE arrangement — every op resolves
+against the input board and one `write_placed_output` call writes them all.
+
+The engine half is `placement/pose_ops.py`, so the writer, the sibling carry
+(#441), the grade and the snap are shared rather than living in a CLI `main()`
+the GUI cannot reach. `seeder.stamp_unlocked` is the inverse of `stamp_locked`,
+added here because the repo had a stamper and no un-stamper.
+
+Legality is RELATIVE: `grade_pad_legality` on the candidate against the same
+grade on the input, refusing (exit 4, nothing written) only a request that
+makes a category worse. An absolute gate would refuse poses no worse than
+where the part already sits — and would refuse to arrange the unplaced pile
+this tool exists for. `--strict-legal` is the absolute arm, `--force` the
+waiver, and a KiCad `(locked yes)` is refused unless the same call `unlock`s
+it. See `docs/utilities.md` for the full contract.
+
 ## place_fanout_clearance.py — decoupling-cap clearance repair (issue #130)
 
 Run **after** `bga_fanout.py`. Nudges decoupling caps near a BGA so their
@@ -1220,10 +1251,86 @@ is followed by a settle beat, so the moves only play once the camera has arrived
 | `cli_gates.py` | argparse shared by both placement CLIs so they cannot drift |
 | `../render_placement.py` | Headless PNG stills of placement status (#431) |
 | `legality.py` | Hard constraints shared by both engines: board side, real Edge.Cuts containment, and the OO/OoB graders (#456) |
-| `parser.py` | Courtyard boundary and locked-footprint extraction |
+| `body.py` | THE body model (#896): courtyard -> fab -> silk U pads -> pad bbox, with the occupancy rect and the source that answered |
+| `parser.py` | Courtyard, fab, silk and locked-footprint extraction |
 | `writer.py` | Writes new positions/rotations (rotates pad angles with the footprint, as KiCad stores pad angle = footprint + pad rotation). Resolves blocks through `kicad_parser.iter_footprint_blocks`, so one placement moves ONE block even when two share a reference (#726) |
 | `board_grid.py` | The pitch a board was laid out on, inferred from its footprint origins (#708). Pure; no engine imports |
 | `utility.py` | Shared utilities (bbox from pads, grid snapping) |
+
+## Body model (`body.py`, #896)
+
+What a footprint's *body* is, decided once. Before this module the answer lived
+in five places with three ladders, and the one most consumers reached through
+went straight from courtyard to the **pad bounding box** -- it never looked at
+`.Fab`. On a library that draws no courtyard, every placement instrument was
+therefore grading pad boxes. Measured on `esp_prog` (OLIMEX): **0 of 21**
+footprints draw a courtyard, and six of them -- CON1, CON2, U1, U2, Q1, Q2 --
+draw no `.Fab` either. Those six are the connector housings, the SSOP and the
+SOT89 whose collisions cost run 25 two laps, each found only by a reviewer
+writing its own geometry.
+
+**Two ladders, one reader**, because they answer different questions:
+
+```
+occupancy    courtyard -> fab -> silk U pad_bbox -> pad_bbox -> synthetic
+drawn body   fab -> silk U pad_bbox -> (nothing)
+```
+
+`occupancy_local` is *what does this part occupy* and never shrinks; it is what
+`part_local_bounds` publishes and what every consumer deciding whether
+something may be seated somewhere reads. `drawn_local` is *what did the library
+draw as this part's body*, and the courtyard is deliberately NOT on it -- a
+courtyard is a body plus an assembly margin plus any shell overhang, which is
+exactly why run 6 calibrated the courtyard channel and the fab channel apart. A
+part can have `source == 'courtyard'` and `drawn_source == 'fab'` at once.
+
+**Only the silk rung unions with the pads**, and that is measured rather than
+assumed. Silk is not an outline: on a stock KiCad footprint it is a pair of
+clipped side ticks. Over the 10 esp_prog footprints drawing both, the silk bbox
+is narrower than the `.Fab` body along the pad axis on 10 of 10 (Y1: 0.508 mm
+against a 3.200 mm body) and wider across it on 10 of 10, so no offset
+reconciles them -- the sign of the error differs per axis. Taken bare it would
+SHRINK parts (Q1/Q2 SOT23: a 3.610 x 2.902 pad box becomes 0.838 x 2.845),
+which is the unsafe direction. Unioning the courtyard and fab rungs too would
+be a different measurement: it moves lap-3 `U1<->Y1` from -0.1330 to -0.2830,
+because Y1's pads overhang its fab body.
+
+**A pad-less footprint gets no silk body.** Allowing it put 5 corpus pairs
+above the run-23 blocking floors and all five were logos (`logo`, `oshw:oshw`,
+`Glasgow:nono_hana_lines`).
+
+**A silk-sourced body never GATES**, structurally rather than by a census
+coming out clean. On the shipped esp_prog, U2's OLIMEX SOT89 draws four corner
+brackets at +/-2.5 mm plus a pin-1 dot -- a 5.2 x 5.2 mm assembly square
+centred on an origin its pads are not centred on -- and R1, which clears U2's
+real body by 2.1 mm, reads as 89% CONTAINED. The pair is reported, with its
+source; it does not decide. The exclusion is scoped per channel (containment
+reads `drawn_source`, the courtyard channel the occupancy source), because
+scoping it to one set threw away four pre-existing findings silk had nothing to
+do with.
+
+**There is no offset constant, deliberately.** #896 proposes expanding silk by
+"the silk-to-body offset the library uses, ~0.2 mm on OLIMEX"; that turns its
+own acceptance numbers -0.12 / -0.09 / -0.133 into -0.52 / -0.49 / -0.53. Silk
+at stroke centreline, unioned with the pads, reproduces all three exactly.
+
+Corpus effect over the 22 tracked boards, symmetric diff, nothing lost:
+
+| | before | after |
+|---|---|---|
+| `fab_unjudged` | 140 | **77** |
+| `blocking` | 0 | 0 |
+| `containment_blocking` | 0 | 0 |
+| `courtyard_blocking` | 118 | 119 |
+| `advisory` | 177 | 183 |
+
+Source mix over 1349 corpus parts: 1267 courtyard, 27 fab, 6 silk, 49 pad bbox,
+0 with no geometry at all; 2 silk boxes refused as tick marks.
+
+`tightest_body_seam` reports the closest drawn-body pair on a board, signed
+(negative is an overlap, the same convention as `rect_gap`) and naming the
+source each side rests on. `body_overlap_pairs` reports a depth only for pairs
+that already overlap, so a board a hair from a collision said nothing at all.
 
 ## Legality model (`legality.py`, #456)
 

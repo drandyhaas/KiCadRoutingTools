@@ -25,6 +25,11 @@ landing on a KiCad-locked part (see LOCKED-PART CONTACT) OR a coincident-
 origin stack (see COINCIDENT ORIGINS) OR a containment OR a moved-vs-
 baseline courtyard interpenetration (see COURTYARD BLOCKING).
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse
@@ -146,6 +151,12 @@ def main():
 
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
                            pcb_file=args.board)
+    # #897: a waiver that resolves to nothing excuses nothing, and said nothing.
+    # Formatted by the engine (`format_waiver_warnings`) rather than here, so
+    # place_reconstruct says the same words.
+    from placement.legality import format_waiver_warnings as _waiver_warnings
+    for _line in _waiver_warnings(g):
+        print("  " + _line, file=sys.stderr)
     leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board)
     # #697: name any pair graded ABOVE `clearance` and what raised it, or the
     # echo below reports a count the announced floor cannot explain.
@@ -253,6 +264,7 @@ def main():
           + (f"  new-vs-baseline {len(new_advisory)}"
              if new_advisory is not None else ""))
     _cb_keys = {(q.a, q.b) for q in g['courtyard_blocking_pairs']}
+    _body_src = g.get('body_sources') or {}
     for q in g['pairs']:
         label = ('BLOCKING' if q.kind == 'pad_intersection'
                  else ('COURTYARD-BLOCKING'
@@ -265,7 +277,17 @@ def main():
         cont = ''
         if q.contained:
             cont = f"  CONTAINED {q.contained_frac:.0%}"
-        print(f"    {q.a} <-> {q.b}  {q.kind}  {q.area_mm2}mm2 "
+        # #896. Name the geometry the claim rests on. `kind` says which
+        # CHANNEL judged the pair; it does not say whether the body came from
+        # a drawn .Fab outline or from silkscreen, and those are claims of
+        # very different strength -- a silk body may be an assembly marking,
+        # which is why it never gates.
+        kind = q.kind
+        if kind == 'fab':
+            _sa, _sb = _body_src.get(q.a, ''), _body_src.get(q.b, '')
+            if 'silk' in (_sa, _sb):
+                kind = f'body({_sa}/{_sb})'
+        print(f"    {q.a} <-> {q.b}  {kind}  {q.area_mm2}mm2 "
               f"side {q.side}  {label}{cont}{star}")
         # Different-net pads touching is a short on top of the overlap. Say so
         # here rather than making a reader re-derive it from the board.
@@ -302,6 +324,25 @@ def main():
           f"{leg['hole_conflicts']} hole conflict(s), "
           f"{leg['oob_pad_count']} part(s) with pad copper off-board"
           + (": " + _clause if _clause else ""))
+    # BOTH off-outline channels, side by side, whenever either fires (#937).
+    # The line above is the part AABB inflated by the grading clearance; this
+    # is the per-PAD measure at margin 0, which is the one CLAUDE.md
+    # designates for the top-priority placement defect. Printed together
+    # because their DISAGREEMENT is the useful signal: a coarse hit with an
+    # empty precise list is the bounding box of an edge-mounted part, not
+    # copper in the air, and a reader who sees only the count cannot tell.
+    _exact = leg.get('oob_pad_copper_refs') or []
+    if leg['oob_pad_count'] or _exact:
+        if _exact:
+            print("    pad copper genuinely off the outline (per-pad, "
+                  "margin 0): "
+                  + ', '.join(f'{r} ({a}mm)' for r, a in _exact))
+        else:
+            print("    ...but NO PAD crosses the real outline (per-pad, "
+                  "margin 0, is empty). The count above is the part's "
+                  "bounding box against an outline inflated by the grading "
+                  "clearance -- an edge-mounted part reports a breach its "
+                  "copper does not make.")
     # ONE predicate, used verbatim at all three sites (verdict, JSON
     # `buildable`, exit code). Three re-derivations of `blocking or
     # locked_contact` is how the coincident-origin channel would have reached
@@ -327,11 +368,31 @@ def main():
             print(f"    None of these BLOCK: each is a by-design containment "
                   f"(a marker or a board-sized container), which the corpus "
                   f"ships legitimately -- orangecrab FID2/J5 at 100%.")
+    # BODY COVERAGE (#896). Printed UNCONDITIONALLY, including the fully
+    # covered case: "which geometry was this board graded on" is a fact about
+    # every run, and a line that appears only when something is missing cannot
+    # tell a reader that a board was judged on silk rather than on drawn
+    # bodies. The mix comes from `grade_body_overlap`'s own `body_sources`, so
+    # the coverage claim and the geometry cannot drift apart.
+    _srcs = g.get('body_sources') or {}
+    _mix = {}
+    for _v in _srcs.values():
+        _mix[_v] = _mix.get(_v, 0) + 1
+    _judged = ', '.join(f"{_mix[k]} {k}" for k in ('fab', 'silk')
+                        if _mix.get(k))
+    print(f"  BODY COVERAGE: {len(_srcs)} of {len(pcb.footprints)} part(s) "
+          f"draw a body the containment channel can judge"
+          + (f" ({_judged})" if _judged else ""))
+    if _mix.get('silk'):
+        print(f"    A silk body is the LAST resort and never gates: a "
+              f"library may draw an assembly outline there rather than the "
+              f"part (esp_prog's SOT89 draws corner brackets 5.2mm apart "
+              f"around a 4.5mm part). Such pairs are reported, with their "
+              f"source, and excluded from the blocking channels.")
     if g['fab_unjudged']:
         _u = g['fab_unjudged_refs']
-        print(f"  BODY COVERAGE: {g['fab_unjudged']} of "
-              f"{len(pcb.footprints)} part(s) draw no .Fab outline, so the "
-              f"containment channel cannot judge them: "
+        print(f"    {g['fab_unjudged']} part(s) draw no body at all (no .Fab, "
+              f"no usable silk), so the channel cannot judge them: "
               + ', '.join(_u[:8]) + (' ...' if len(_u) > 8 else ''))
 
     # ASSEMBLY SIDES (#837). Report-only, and deliberately not a conjunct:
@@ -501,6 +562,16 @@ def main():
             'waived': g['waived'],
             'pairs': [q._asdict() for q in g['pairs']],
             'contained': g['contained'],
+            # The BLOCKING subset, published beside the total for exactly the
+            # reason `buildable` is published above: it is one of the five
+            # conjuncts of the verdict, and a consumer that wants to say WHICH
+            # conjunct fired otherwise has only `contained` -- which counts the
+            # by-design containments the corpus ships legitimately (orangecrab
+            # FID2/J5 at 100%) and so names a defect where there is none. The
+            # number has existed in the grade dict since the channel was added
+            # and has decided the verdict at :508-510 ever since; it just never
+            # reached a reader (#918).
+            'containment_blocking': g['containment_blocking'],
             'containments': [q._asdict() for q in g['containment_pairs']],
             'fab_unjudged': g['fab_unjudged'],
             'fab_unjudged_refs': g['fab_unjudged_refs'],
@@ -544,6 +615,16 @@ def main():
             # as copper in the air. Both facts now travel with the number.
             'oob_pad_refs': leg.get('oob_pad_refs') or [],
             'oob_pad_basis': leg.get('oob_pad_basis'),
+            # The PER-PAD channel beside the AABB one (#937). The gate in
+            # loop_driver's L2 reads `oob_pad_count` and is right to -- it is
+            # justified over 119 graded rows -- but a consumer holding only
+            # this document could not tell a real off-outline pad from the
+            # bounding box of an edge part, and the refusal it writes says
+            # "their nets cannot be routed at all", which is true of one and
+            # not the other. Both keys travel; neither replaces the other.
+            'oob_pad_copper_count': leg.get('oob_pad_copper_count', 0),
+            'oob_pad_copper_refs': leg.get('oob_pad_copper_refs') or [],
+            'oob_pad_copper_basis': leg.get('oob_pad_copper_basis'),
             'locked_contact_pairs': [q._asdict() for q in locked_contact],
             # run-19: parts stacked at one origin, marker classes exonerated.
             # Groups, not fake N*(N-1)/2 pair entries -- a stack is one

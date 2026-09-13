@@ -21,6 +21,11 @@ Track width and via geometry default from the board's own Default netclass.
 
 Exit 0 clean, 1 violations, 2 usage errors.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'conditional'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import argparse
 import json

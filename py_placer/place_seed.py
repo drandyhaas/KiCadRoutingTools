@@ -20,13 +20,64 @@ place_portfolio.py to diversify and rank what this emits.
 Exit codes: 0 seeded and graded clean; 2 bad arguments; 3 the board cannot be
 seeded (no Edge.Cuts outline -- the outline is spec-owned and will not be
 invented -- or the board is already placed / carries copper); 4 the seed was
-written but parts could not be seated or the intent grade has errors.
+written but parts could not be seated or the intent grade has errors ON
+PARTS THE SEED PLACED. A grade error on a part the seed was told not to move
+-- `(locked yes)` in the file, or matched by the intent's `must_lock` -- is
+printed and counted in `grade_errors_pinned`, and does not fail the gate:
+it is a contradiction between the board and the intent, which only their
+author can settle. Measured, run 27: a fixed USB socket declared
+`along_edge: center` within 0.6 mm sits 1.75 mm off centre, and every one of
+ten seeds failed on it, so nothing the seeder did could ever be ranked.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json
 import os
 import sys
+
+
+def _split_pinned(graded, output_file, intent):
+    """(own, pinned): the grade errors the seed is answerable for, and the
+    ones that sit on a part it was told not to move -- `(locked yes)` in the
+    written file (which is where `must_lock` lands after stamping) or matched
+    by a `must_lock` pattern. Block-level findings (no `ref`) are always own.
+    """
+    import fnmatch
+    from kicad_parser import parse_kicad_pcb
+    locked = {r for r, f in parse_kicad_pcb(output_file).footprints.items()
+              if getattr(f, 'locked', False)}
+    pats = tuple(getattr(intent, 'must_lock', ()) or ())
+
+    def pinned(v):
+        ref = getattr(v, 'ref', None)
+        return bool(ref) and (ref in locked
+                              or any(fnmatch.fnmatch(ref, p) for p in pats))
+    return ([v for v in graded.errors if not pinned(v)],
+            [v for v in graded.errors if pinned(v)])
+
+
+def _print_grade(own, pinned):
+    """The gate's errors, then the set-aside ones NAMED -- never silent."""
+    for v in own[:10]:
+        print(f"  GRADE ERROR [{v.rule}] {v.message}")
+    if pinned:
+        by = {}
+        for v in pinned:
+            by.setdefault(v.ref, set()).add(v.rule)
+        print(f"  {len(pinned)} grade error(s) sit on locked part(s) the seed "
+              f"did not place -- "
+              + '; '.join(f"{r}: {', '.join(sorted(rs))}"
+                          for r, rs in sorted(by.items()))
+              + ". Reported, not the seed's failure: a pinned pose that "
+              "breaks a declared clause is a contradiction between the board "
+              "and the intent, and only their author can say which is wrong.")
+        for v in pinned[:10]:
+            print(f"  GRADE ERROR (pinned) [{v.rule}] {v.message}")
 
 
 def main():
@@ -80,6 +131,16 @@ Examples:
                         "non-obstacles either way (the existing exclude "
                         "mechanism); this changes only WHO goes first "
                         "(run-4 C)")
+    p.add_argument("--rotate-by-facing", action="store_true",
+                   help="Among the rotations that fit, seat the one that leaves "
+                        "the fewest connected pads on a row facing the board "
+                        "outline with nothing beyond (placement.edge_facing, "
+                        "the same number placement_score reports). OFF by "
+                        "default, and measured: tests/test_placement_ab.py "
+                        "REJECTED it as a default on three boards (fewer "
+                        "pads face the edge, more crossings and pin-order "
+                        "inversions). Opt in when that trade is the one you "
+                        "want; a tie keeps the input rotation first.")
     p.add_argument("--evict-depth", type=int, default=0, choices=(0, 1, 2),
                    metavar="N",
                    help="Eviction rung (#630, #699). At every depth a part "
@@ -534,9 +595,10 @@ Examples:
                                      group_sources=sources,
                                      clearance=args.clearance,
                                      board_edge_clearance=args.board_edge_clearance)
-            for v in graded.errors[:10]:
-                print(f"  GRADE ERROR [{v.rule}] {v.message}")
-            summary['grade_errors'] = len(graded.errors)
+            own, pinned = _split_pinned(graded, args.output_file, intent)
+            _print_grade(own, pinned)
+            summary['grade_errors'] = len(own)
+            summary['grade_errors_pinned'] = len(pinned)
             summary['pad_conflicts_after'] = pads_after['pad_conflicts']
             # #697: the requirement each counted pair was graded at, when it
             # sits above args.clearance, so the count is explainable.
@@ -547,7 +609,7 @@ Examples:
                       f"{_req_cl(pads_after)}")
             summary['hole_conflicts_after'] = pads_after['hole_conflicts']
             summary['oob_pad_count_after'] = pads_after['oob_pad_count']
-            if graded.errors:
+            if own:
                 exit_rc = 4
         _stage.cleanup()
         summary.setdefault('complete', True)
@@ -622,12 +684,24 @@ Examples:
         grid_step=args.grid_step, seed_refs=seed_refs,
         anchors_first=args.anchors_first,
         anchor_rounds=args.anchor_rounds,
-        evict_depth=args.evict_depth)
+        evict_depth=args.evict_depth,
+        rotate_by_facing=args.rotate_by_facing)
     for note in result['notes']:
         print(f"  NOTE: {note}")
     print(f"Seeded {len(result['placements'])} part(s); "
           f"{len(result['unseated'])} unseated; "
           f"{len(result['lock_refs'])} to lock")
+    # #893. A DECLARED rotation that could not be seated is a different fact
+    # from a part that merely found no pose, and it is the one the author can
+    # act on -- their claim is the reason. Without this the operator saw a
+    # generic "no legal pose within any cap" and had no way to know which
+    # declaration caused it.
+    _rot_unseated = result.get('rotation_unseated') or {}
+    if _rot_unseated:
+        print(f"  {len(_rot_unseated)} declared rotation(s) could not be "
+              f"seated -- the angle is the claim, not a fallback:")
+        for _r in sorted(_rot_unseated):
+            print(f"    {_r}: declared {_rot_unseated[_r]}")
 
     write_placed_output(args.input_file, args.output_file,
                         result['placements'])
@@ -795,14 +869,18 @@ Examples:
         print(f"place_seed: outline cannot be trusted for grading: {exc}",
               file=sys.stderr)
         return UNPLACED_EXIT
-    for v in graded.errors[:10]:
-        print(f"  GRADE ERROR [{v.rule}] {v.message}")
+    own, pinned = _split_pinned(graded, args.output_file, intent)
+    _print_grade(own, pinned)
     after = ratsnest.get('after', {})
     summary = {'placed': len(result['placements']),
                'unseated': len(result['unseated']),
                # NAMES, not just a count. #629's complaint is that a verdict
                # you cannot act on is a dead end, and a count names nobody.
                'unseated_refs': list(result['unseated']),
+               # #893: WHICH declared angle was refused, by ref. A caller that
+               # sees only `unseated_refs` cannot tell a declaration it must
+               # revisit from a board that is simply full.
+               'rotation_unseated': result.get('rotation_unseated') or {},
                'no_pose_blockers': result.get('no_pose_blockers') or {},
                # WHY each of them has no pose, not just who is nearby (#699).
                # "nothing is near it" and "everything near it is locked" were
@@ -818,18 +896,23 @@ Examples:
                    1 for e in (result.get('evictions') or [])
                    if not e.get('accepted')),
                'locked': n_locked,
-               'grade_errors': len(graded.errors),
+               'grade_errors': len(own),
+               'grade_errors_pinned': len(pinned),
                'grade_warnings': len(graded.warnings),
                'crossings': after.get('crossings'),
                'hpwl': (round(after['hpwl'], 3)
                         if after.get('hpwl') is not None else None),
                'output': args.output_file}
     print("JSON_SUMMARY: " + json.dumps(summary, sort_keys=True))
-    if result['unseated'] or graded.errors:
+    if result['unseated'] or own:
         print("place_seed: the seed does NOT satisfy its intent -- see the "
               "errors above. It was still written, for inspection.",
               file=sys.stderr)
         return 4
+    if pinned:
+        print(f"place_seed: {len(pinned)} grade error(s) on locked part(s) set "
+              f"aside (named above); the seed's own work grades clean.",
+              file=sys.stderr)
     return 0
 
 

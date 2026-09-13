@@ -916,7 +916,15 @@ def rank_static(cands: Sequence[Candidate], q: int = 0) -> List[int]:
 
 def rule1_check(cand: Candidate, baseline: Candidate) -> List[str]:
     """Rule 1 of the Step-0c acceptance conjunction, applied K-way (run-7
-    S6): crossings and hpwl must be NO WORSE than the baseline row.
+    S6): **hpwl** must be NO WORSE than the baseline row.
+
+    HPWL ALONE. This sentence said "crossings and hpwl" while the code has
+    checked only hpwl since #789 withdrew the crossings clause -- so the
+    operative sentence of the rule stated a rule the function does not apply,
+    and a reader who acts on the first sentence is wrong while believing they
+    followed it. That is the defect family #936 catalogued, in the docstring
+    of the acceptance rule itself. The withdrawal is explained three
+    paragraphs down; it now also appears where the rule is defined (#937).
 
     The hard gates in score_candidate are legality + intent (rule 2). This
     metric clause was DOCUMENTED as pre-applied but never was, so a

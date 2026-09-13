@@ -15,6 +15,11 @@ footprints never move.
 
 See docs/placement-optimization.md for the background research.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
 import json
@@ -265,6 +270,7 @@ Examples:
         align_radius=args.align_radius,
         align_span=args.align_span,
         orient_weight=args.orient_weight,
+        facing_weight=args.facing_weight,
         metrics_out=ratsnest,
         groups=blocks,
         verbose=args.verbose,

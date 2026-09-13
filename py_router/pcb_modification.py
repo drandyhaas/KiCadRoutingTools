@@ -4335,308 +4335,320 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
              'segs_removed': 0, 'segs_added': 0, 'saved_mm': 0.0,
              'chains_reverted': 0}
 
-    for net_id in sorted(segs_by_net.keys()):
-        if net_id in skip_net_ids:
-            continue
-        net_segs = segs_by_net[net_id]
-        if len(net_segs) < 2:
-            continue
-        if len(net_segs) > max_net_segs:
-            stats['nets_skipped_large'] += 1
-            continue
-        stats['nets'] += 1
-        net_pads = pcb_data.pads_by_net.get(net_id, [])
-        net_vias = vias_by_net.get(net_id, [])
-
-        candidates = [s for s in net_segs
-                      if not getattr(s, 'graphic', False)
-                      and (not keep_input_copper or id(s) in routed_seg_result)
-                      and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-6]
-        if len(candidates) < 2:
-            continue
-
-        # Endpoint incidence over ALL same-net segments (any layer/width): an
-        # interior chain vertex must be touched by exactly its two chain
-        # segments -- a third endpoint there (other width, other layer via a
-        # barrel, a tee) makes it an anchor.
-        inc = defaultdict(int)
-        for s in net_segs:
-            inc[vk(s.start_x, s.start_y)] += 1
-            inc[vk(s.end_x, s.end_y)] += 1
-        via_pts = {vk(v.x, v.y) for v in net_vias}
-
-        def pad_reach(pad):
-            return math.hypot(pad.size_x, pad.size_y) / 2.0
-
-        def pad_on_layer(pad, layer):
-            return layer in pad.layers or any('*' in L for L in pad.layers)
-
-        groups = defaultdict(list)
-        for s in candidates:
-            groups[(s.layer, round(s.width, 4))].append(s)
-
-        before = None
-        net_changed = False
-        for (layer, w), gsegs in sorted(groups.items()):
-            if len(gsegs) < 2:
+    # This pass edits copper only by SPLICING pcb_data.segments, and drops
+    # the foreign-segment cache at every splice below, so between its own
+    # invalidations the cache is trusted (no per-query O(segments) digest,
+    # see _foreign_seg_arrays); the flag is cleared on every exit path.
+    _trust_prev = getattr(pcb_data, '_foreign_seg_arr_trust', False)
+    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+        pcb_data._foreign_seg_arr_cache = None
+    pcb_data._foreign_seg_arr_trust = True
+    try:
+        for net_id in sorted(segs_by_net.keys()):
+            if net_id in skip_net_ids:
                 continue
-            gadj = defaultdict(list)
-            for s in gsegs:
-                gadj[vk(s.start_x, s.start_y)].append(s)
-                gadj[vk(s.end_x, s.end_y)].append(s)
+            net_segs = segs_by_net[net_id]
+            if len(net_segs) < 2:
+                continue
+            if len(net_segs) > max_net_segs:
+                stats['nets_skipped_large'] += 1
+                continue
+            stats['nets'] += 1
+            net_pads = pcb_data.pads_by_net.get(net_id, [])
+            net_vias = vias_by_net.get(net_id, [])
 
-            def pad_anchored(x, y):
-                for pad in net_pads:
-                    if not pad_on_layer(pad, layer):
-                        continue
-                    r = pad_reach(pad) + w / 2.0 + COINCIDENCE_TOL
-                    if abs(x - pad.global_x) > r or abs(y - pad.global_y) > r:
-                        continue
-                    if point_to_pad_distance(x, y, pad) <= w / 2.0 + COINCIDENCE_TOL:
-                        return True
-                return False
+            candidates = [s for s in net_segs
+                          if not getattr(s, 'graphic', False)
+                          and (not keep_input_copper or id(s) in routed_seg_result)
+                          and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-6]
+            if len(candidates) < 2:
+                continue
 
-            def interior(v):
-                return (len(gadj[v]) == 2 and inc[v] == 2 and v not in via_pts
-                        and not pad_anchored(v[0], v[1]))
+            # Endpoint incidence over ALL same-net segments (any layer/width): an
+            # interior chain vertex must be touched by exactly its two chain
+            # segments -- a third endpoint there (other width, other layer via a
+            # barrel, a tee) makes it an anchor.
+            inc = defaultdict(int)
+            for s in net_segs:
+                inc[vk(s.start_x, s.start_y)] += 1
+                inc[vk(s.end_x, s.end_y)] += 1
+            via_pts = {vk(v.x, v.y) for v in net_vias}
 
-            anchors = [v for v in gadj if not interior(v)]
-            used = set()
-            for start_key in anchors:
-                for seg0 in list(gadj[start_key]):
-                    if id(seg0) in used:
-                        continue
-                    # Walk from this anchor to the next anchor, carrying the
-                    # ACTUAL endpoint coordinates (keys are only adjacency).
-                    chain = []
-                    if vk(seg0.start_x, seg0.start_y) == start_key:
-                        vpts = [(seg0.start_x, seg0.start_y)]
-                    else:
-                        vpts = [(seg0.end_x, seg0.end_y)]
-                    cur_key = start_key
-                    s = seg0
-                    while True:
-                        used.add(id(s))
-                        chain.append(s)
-                        if vk(s.start_x, s.start_y) == cur_key:
-                            nxt_pt = (s.end_x, s.end_y)
-                        else:
-                            nxt_pt = (s.start_x, s.start_y)
-                        vpts.append(nxt_pt)
-                        cur_key = vk(*nxt_pt)
-                        if cur_key == start_key:
-                            break                     # ring
-                        if not interior(cur_key) or len(chain) >= max_chain_segs:
-                            break
-                        nxt = [t for t in gadj[cur_key] if id(t) not in used]
-                        if not nxt:
-                            break
-                        s = nxt[0]
-                    if cur_key == start_key or len(chain) < 2:
-                        continue
-                    stats['chains'] += 1
-                    n = len(chain)
-                    cum = [0.0]
-                    for k in range(n):
-                        cum.append(cum[-1] + math.hypot(vpts[k + 1][0] - vpts[k][0],
-                                                        vpts[k + 1][1] - vpts[k][1]))
+            def pad_reach(pad):
+                return math.hypot(pad.size_x, pad.size_y) / 2.0
 
-                    # Same-net copper touching the chain mid-body: each touch
-                    # pins its span unless the touch sits at a kept endpoint.
-                    # (touch_x, touch_y, chain_seg_index, reach)
-                    chain_ids = {id(s) for s in chain}
-                    _cxs = [p[0] for p in vpts]
-                    _cys = [p[1] for p in vpts]
-                    _bb = (min(_cxs), min(_cys), max(_cxs), max(_cys))
-                    touches = []
-                    for v in net_vias:
-                        r = getattr(v, 'size', 0.0) / 2.0 + w / 2.0 + COINCIDENCE_TOL
-                        for k in range(n):
-                            if _pt_seg_dist(v.x, v.y, vpts[k][0], vpts[k][1],
-                                            vpts[k + 1][0], vpts[k + 1][1]) < r:
-                                touches.append((v.x, v.y, k, r))
-                    pad_touches = []  # (pad, chain_seg_index)
+            def pad_on_layer(pad, layer):
+                return layer in pad.layers or any('*' in L for L in pad.layers)
+
+            groups = defaultdict(list)
+            for s in candidates:
+                groups[(s.layer, round(s.width, 4))].append(s)
+
+            before = None
+            net_changed = False
+            for (layer, w), gsegs in sorted(groups.items()):
+                if len(gsegs) < 2:
+                    continue
+                gadj = defaultdict(list)
+                for s in gsegs:
+                    gadj[vk(s.start_x, s.start_y)].append(s)
+                    gadj[vk(s.end_x, s.end_y)].append(s)
+
+                def pad_anchored(x, y):
                     for pad in net_pads:
                         if not pad_on_layer(pad, layer):
                             continue
                         r = pad_reach(pad) + w / 2.0 + COINCIDENCE_TOL
-                        for k in range(n):
-                            if _pt_seg_dist(pad.global_x, pad.global_y,
-                                            vpts[k][0], vpts[k][1],
-                                            vpts[k + 1][0], vpts[k + 1][1]) < r:
-                                pad_touches.append((pad, k))
-                    for o in net_segs:
-                        if id(o) in chain_ids or o.layer != layer:
+                        if abs(x - pad.global_x) > r or abs(y - pad.global_y) > r:
                             continue
-                        r = (o.width + w) / 2.0 + COINCIDENCE_TOL
-                        # bbox prefilter: sibling nowhere near the chain
-                        if (max(o.start_x, o.end_x) < _bb[0] - r or
-                                min(o.start_x, o.end_x) > _bb[2] + r or
-                                max(o.start_y, o.end_y) < _bb[1] - r or
-                                min(o.start_y, o.end_y) > _bb[3] + r):
+                        if point_to_pad_distance(x, y, pad) <= w / 2.0 + COINCIDENCE_TOL:
+                            return True
+                    return False
+
+                def interior(v):
+                    return (len(gadj[v]) == 2 and inc[v] == 2 and v not in via_pts
+                            and not pad_anchored(v[0], v[1]))
+
+                anchors = [v for v in gadj if not interior(v)]
+                used = set()
+                for start_key in anchors:
+                    for seg0 in list(gadj[start_key]):
+                        if id(seg0) in used:
                             continue
-                        _obb = (min(o.start_x, o.end_x) - r,
-                                min(o.start_y, o.end_y) - r,
-                                max(o.start_x, o.end_x) + r,
-                                max(o.start_y, o.end_y) + r)
+                        # Walk from this anchor to the next anchor, carrying the
+                        # ACTUAL endpoint coordinates (keys are only adjacency).
+                        chain = []
+                        if vk(seg0.start_x, seg0.start_y) == start_key:
+                            vpts = [(seg0.start_x, seg0.start_y)]
+                        else:
+                            vpts = [(seg0.end_x, seg0.end_y)]
+                        cur_key = start_key
+                        s = seg0
+                        while True:
+                            used.add(id(s))
+                            chain.append(s)
+                            if vk(s.start_x, s.start_y) == cur_key:
+                                nxt_pt = (s.end_x, s.end_y)
+                            else:
+                                nxt_pt = (s.start_x, s.start_y)
+                            vpts.append(nxt_pt)
+                            cur_key = vk(*nxt_pt)
+                            if cur_key == start_key:
+                                break                     # ring
+                            if not interior(cur_key) or len(chain) >= max_chain_segs:
+                                break
+                            nxt = [t for t in gadj[cur_key] if id(t) not in used]
+                            if not nxt:
+                                break
+                            s = nxt[0]
+                        if cur_key == start_key or len(chain) < 2:
+                            continue
+                        stats['chains'] += 1
+                        n = len(chain)
+                        cum = [0.0]
                         for k in range(n):
-                            if (max(vpts[k][0], vpts[k + 1][0]) < _obb[0] or
-                                    min(vpts[k][0], vpts[k + 1][0]) > _obb[2] or
-                                    max(vpts[k][1], vpts[k + 1][1]) < _obb[1] or
-                                    min(vpts[k][1], vpts[k + 1][1]) > _obb[3]):
+                            cum.append(cum[-1] + math.hypot(vpts[k + 1][0] - vpts[k][0],
+                                                            vpts[k + 1][1] - vpts[k][1]))
+
+                        # Same-net copper touching the chain mid-body: each touch
+                        # pins its span unless the touch sits at a kept endpoint.
+                        # (touch_x, touch_y, chain_seg_index, reach)
+                        chain_ids = {id(s) for s in chain}
+                        _cxs = [p[0] for p in vpts]
+                        _cys = [p[1] for p in vpts]
+                        _bb = (min(_cxs), min(_cys), max(_cxs), max(_cys))
+                        touches = []
+                        for v in net_vias:
+                            r = getattr(v, 'size', 0.0) / 2.0 + w / 2.0 + COINCIDENCE_TOL
+                            for k in range(n):
+                                if _pt_seg_dist(v.x, v.y, vpts[k][0], vpts[k][1],
+                                                vpts[k + 1][0], vpts[k + 1][1]) < r:
+                                    touches.append((v.x, v.y, k, r))
+                        pad_touches = []  # (pad, chain_seg_index)
+                        for pad in net_pads:
+                            if not pad_on_layer(pad, layer):
                                 continue
-                            # Mid-body X-crossings connect copper too (#162
-                            # self-crossings exist) but have no close endpoint
-                            # pair -- take the true crossing point; collinear
-                            # overlaps pin at the sibling's midpoint.
-                            if segments_intersect(vpts[k][0], vpts[k][1],
-                                                  vpts[k + 1][0], vpts[k + 1][1],
-                                                  o.start_x, o.start_y,
-                                                  o.end_x, o.end_y):
-                                xp = _seg_cross_point(vpts[k][0], vpts[k][1],
+                            r = pad_reach(pad) + w / 2.0 + COINCIDENCE_TOL
+                            for k in range(n):
+                                if _pt_seg_dist(pad.global_x, pad.global_y,
+                                                vpts[k][0], vpts[k][1],
+                                                vpts[k + 1][0], vpts[k + 1][1]) < r:
+                                    pad_touches.append((pad, k))
+                        for o in net_segs:
+                            if id(o) in chain_ids or o.layer != layer:
+                                continue
+                            r = (o.width + w) / 2.0 + COINCIDENCE_TOL
+                            # bbox prefilter: sibling nowhere near the chain
+                            if (max(o.start_x, o.end_x) < _bb[0] - r or
+                                    min(o.start_x, o.end_x) > _bb[2] + r or
+                                    max(o.start_y, o.end_y) < _bb[1] - r or
+                                    min(o.start_y, o.end_y) > _bb[3] + r):
+                                continue
+                            _obb = (min(o.start_x, o.end_x) - r,
+                                    min(o.start_y, o.end_y) - r,
+                                    max(o.start_x, o.end_x) + r,
+                                    max(o.start_y, o.end_y) + r)
+                            for k in range(n):
+                                if (max(vpts[k][0], vpts[k + 1][0]) < _obb[0] or
+                                        min(vpts[k][0], vpts[k + 1][0]) > _obb[2] or
+                                        max(vpts[k][1], vpts[k + 1][1]) < _obb[1] or
+                                        min(vpts[k][1], vpts[k + 1][1]) > _obb[3]):
+                                    continue
+                                # Mid-body X-crossings connect copper too (#162
+                                # self-crossings exist) but have no close endpoint
+                                # pair -- take the true crossing point; collinear
+                                # overlaps pin at the sibling's midpoint.
+                                if segments_intersect(vpts[k][0], vpts[k][1],
                                                       vpts[k + 1][0], vpts[k + 1][1],
                                                       o.start_x, o.start_y,
-                                                      o.end_x, o.end_y)
-                                if xp is None:
-                                    xp = ((o.start_x + o.end_x) / 2.0,
-                                          (o.start_y + o.end_y) / 2.0)
-                                touches.append((xp[0], xp[1], k, r))
-                                continue
-                            d, pt_on_chain, _pt2 = segment_to_segment_closest_points(
-                                Segment(start_x=vpts[k][0], start_y=vpts[k][1],
-                                        end_x=vpts[k + 1][0], end_y=vpts[k + 1][1],
-                                        width=w, layer=layer, net_id=net_id), o)
-                            if d < r:
-                                touches.append((pt_on_chain[0], pt_on_chain[1], k, r))
-
-                    def span_free(i, j):
-                        ax, ay = vpts[i]
-                        bx, by = vpts[j]
-                        for tx, ty, k, r in touches:
-                            if i <= k < j:
-                                if math.hypot(tx - ax, ty - ay) >= r and \
-                                   math.hypot(tx - bx, ty - by) >= r:
-                                    return False
-                        # Pad touches are exempt only when the pad EXACTLY
-                        # touches a kept endpoint's capsule end -- a bounding-
-                        # radius "near the endpoint" test waived mid-span pad
-                        # contacts on big rect pads (anyshake GNDA: C75/C76
-                        # stranded, masked in-pass by pour outline credit).
-                        for pad, k in pad_touches:
-                            if i <= k < j:
-                                if point_to_pad_distance(ax, ay, pad) > w / 2.0 + COINCIDENCE_TOL and \
-                                   point_to_pad_distance(bx, by, pad) > w / 2.0 + COINCIDENCE_TOL:
-                                    return False
-                        return True
-
-                    # Greedy farthest-reachable-vertex shortcutting.
-                    spans = {}
-                    i = 0
-                    while i < n - 1:
-                        found = None
-                        for j in range(n, i + 1, -1):
-                            sub_len = cum[j] - cum[i]
-                            if sub_len <= min_gain:
-                                break                 # closer spans only shrink
-                            if not span_free(i, j):
-                                continue
-                            A, B = vpts[i], vpts[j]
-                            for inter in _octolinear_bends(A, B):
-                                pts = [A] + inter + [B]
-                                new_len = sum(math.hypot(pts[q + 1][0] - pts[q][0],
-                                                         pts[q + 1][1] - pts[q][1])
-                                              for q in range(len(pts) - 1))
-                                if new_len > sub_len - min_gain:
+                                                      o.end_x, o.end_y):
+                                    xp = _seg_cross_point(vpts[k][0], vpts[k][1],
+                                                          vpts[k + 1][0], vpts[k + 1][1],
+                                                          o.start_x, o.start_y,
+                                                          o.end_x, o.end_y)
+                                    if xp is None:
+                                        xp = ((o.start_x + o.end_x) / 2.0,
+                                              (o.start_y + o.end_y) / 2.0)
+                                    touches.append((xp[0], xp[1], k, r))
                                     continue
-                                if all(clears(pts[q][0], pts[q][1],
-                                              pts[q + 1][0], pts[q + 1][1],
-                                              layer, net_id, w)
-                                       for q in range(len(pts) - 1)):
-                                    found = (j, pts, sub_len - new_len)
+                                d, pt_on_chain, _pt2 = segment_to_segment_closest_points(
+                                    Segment(start_x=vpts[k][0], start_y=vpts[k][1],
+                                            end_x=vpts[k + 1][0], end_y=vpts[k + 1][1],
+                                            width=w, layer=layer, net_id=net_id), o)
+                                if d < r:
+                                    touches.append((pt_on_chain[0], pt_on_chain[1], k, r))
+
+                        def span_free(i, j):
+                            ax, ay = vpts[i]
+                            bx, by = vpts[j]
+                            for tx, ty, k, r in touches:
+                                if i <= k < j:
+                                    if math.hypot(tx - ax, ty - ay) >= r and \
+                                       math.hypot(tx - bx, ty - by) >= r:
+                                        return False
+                            # Pad touches are exempt only when the pad EXACTLY
+                            # touches a kept endpoint's capsule end -- a bounding-
+                            # radius "near the endpoint" test waived mid-span pad
+                            # contacts on big rect pads (anyshake GNDA: C75/C76
+                            # stranded, masked in-pass by pour outline credit).
+                            for pad, k in pad_touches:
+                                if i <= k < j:
+                                    if point_to_pad_distance(ax, ay, pad) > w / 2.0 + COINCIDENCE_TOL and \
+                                       point_to_pad_distance(bx, by, pad) > w / 2.0 + COINCIDENCE_TOL:
+                                        return False
+                            return True
+
+                        # Greedy farthest-reachable-vertex shortcutting.
+                        spans = {}
+                        i = 0
+                        while i < n - 1:
+                            found = None
+                            for j in range(n, i + 1, -1):
+                                sub_len = cum[j] - cum[i]
+                                if sub_len <= min_gain:
+                                    break                 # closer spans only shrink
+                                if not span_free(i, j):
+                                    continue
+                                A, B = vpts[i], vpts[j]
+                                for inter in _octolinear_bends(A, B):
+                                    pts = [A] + inter + [B]
+                                    new_len = sum(math.hypot(pts[q + 1][0] - pts[q][0],
+                                                             pts[q + 1][1] - pts[q][1])
+                                                  for q in range(len(pts) - 1))
+                                    if new_len > sub_len - min_gain:
+                                        continue
+                                    if all(clears(pts[q][0], pts[q][1],
+                                                  pts[q + 1][0], pts[q + 1][1],
+                                                  layer, net_id, w)
+                                           for q in range(len(pts) - 1)):
+                                        found = (j, pts, sub_len - new_len)
+                                        break
+                                if found:
                                     break
                             if found:
-                                break
-                        if found:
-                            spans[i] = found
-                            i = found[0]
-                        else:
-                            i += 1
-                    if not spans:
-                        continue
+                                spans[i] = found
+                                i = found[0]
+                            else:
+                                i += 1
+                        if not spans:
+                            continue
 
-                    new_chain_segs = []
-                    removed_chain = []
-                    gain = 0.0
-                    k = 0
-                    while k < n:
-                        if k in spans:
-                            j, pts, g = spans[k]
-                            gain += g
-                            for q in range(len(pts) - 1):
-                                # Drop degenerate elbow legs (near-diagonal
-                                # spans put the bend within a hair of an
-                                # endpoint); the sub-writer-precision gap is
-                                # far below SOFT_JOINT_MIN_GAP.
-                                if math.hypot(pts[q + 1][0] - pts[q][0],
-                                              pts[q + 1][1] - pts[q][1]) > 1e-5:
-                                    new_chain_segs.append(Segment(
-                                        start_x=pts[q][0], start_y=pts[q][1],
-                                        end_x=pts[q + 1][0], end_y=pts[q + 1][1],
-                                        width=w, layer=layer, net_id=net_id))
-                            removed_chain.extend(chain[k:j])
-                            k = j
-                        else:
-                            k += 1
-                    # NO pour credit in the guard (deliberate, unlike the graze
-                    # nudge): raw zone-OUTLINE credit overstates the real fill
-                    # (clearance carving), so it can bless a chain whose
-                    # removed span was the only REAL path to a pad (anyshake
-                    # GNDA). Endpoints are preserved by construction, so
-                    # requiring the track/via/pad graph alone not to degrade
-                    # costs nothing on genuinely pour-served nets.
-                    if before is None:
-                        before = check_net_connectivity(net_id, net_segs, net_vias,
-                                                        net_pads, [],
-                                                        pcb_data=pcb_data)
-                    _rm = {id(s) for s in removed_chain}
-                    trial = [s for s in net_segs if id(s) not in _rm] + new_chain_segs
-                    if worse(before, check_net_connectivity(net_id, trial, net_vias,
+                        new_chain_segs = []
+                        removed_chain = []
+                        gain = 0.0
+                        k = 0
+                        while k < n:
+                            if k in spans:
+                                j, pts, g = spans[k]
+                                gain += g
+                                for q in range(len(pts) - 1):
+                                    # Drop degenerate elbow legs (near-diagonal
+                                    # spans put the bend within a hair of an
+                                    # endpoint); the sub-writer-precision gap is
+                                    # far below SOFT_JOINT_MIN_GAP.
+                                    if math.hypot(pts[q + 1][0] - pts[q][0],
+                                                  pts[q + 1][1] - pts[q][1]) > 1e-5:
+                                        new_chain_segs.append(Segment(
+                                            start_x=pts[q][0], start_y=pts[q][1],
+                                            end_x=pts[q + 1][0], end_y=pts[q + 1][1],
+                                            width=w, layer=layer, net_id=net_id))
+                                removed_chain.extend(chain[k:j])
+                                k = j
+                            else:
+                                k += 1
+                        # NO pour credit in the guard (deliberate, unlike the graze
+                        # nudge): raw zone-OUTLINE credit overstates the real fill
+                        # (clearance carving), so it can bless a chain whose
+                        # removed span was the only REAL path to a pad (anyshake
+                        # GNDA). Endpoints are preserved by construction, so
+                        # requiring the track/via/pad graph alone not to degrade
+                        # costs nothing on genuinely pour-served nets.
+                        if before is None:
+                            before = check_net_connectivity(net_id, net_segs, net_vias,
                                                             net_pads, [],
-                                                            pcb_data=pcb_data)):
-                        stats['chains_reverted'] += 1
-                        continue
+                                                            pcb_data=pcb_data)
+                        _rm = {id(s) for s in removed_chain}
+                        trial = [s for s in net_segs if id(s) not in _rm] + new_chain_segs
+                        if worse(before, check_net_connectivity(net_id, trial, net_vias,
+                                                                net_pads, [],
+                                                                pcb_data=pcb_data)):
+                            stats['chains_reverted'] += 1
+                            continue
 
-                    stats['spans'] += len(spans)
-                    stats['segs_removed'] += len(removed_chain)
-                    stats['segs_added'] += len(new_chain_segs)
-                    stats['saved_mm'] += gain
-                    if dry_run:
-                        continue
+                        stats['spans'] += len(spans)
+                        stats['segs_removed'] += len(removed_chain)
+                        stats['segs_added'] += len(new_chain_segs)
+                        stats['saved_mm'] += gain
+                        if dry_run:
+                            continue
 
-                    res = None
-                    for s in removed_chain:
-                        if id(s) in routed_seg_result:
-                            removed_ids.add(id(s))
-                            res = res or routed_seg_result[id(s)]
-                        else:
-                            original_to_remove.append(s)
-                    if res is None:
-                        res = {'new_segments': [], 'new_vias': [],
-                               'cleanup': 'smooth_octolinear'}
-                        results.append(res)
-                    res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
-                    added_segments.extend(new_chain_segs)
-                    # Splice pcb_data NOW, per commit (#508 finding 5): later
-                    # chains/nets must see this one's copper at its new place.
-                    pcb_data.segments = [s for s in pcb_data.segments
-                                         if id(s) not in _rm] + new_chain_segs
-                    if hasattr(pcb_data, '_foreign_seg_arr_cache'):
-                        pcb_data._foreign_seg_arr_cache = None
-                    net_segs = trial
-                    net_changed = True
-        if net_changed:
-            nets_changed += 1
-
+                        res = None
+                        for s in removed_chain:
+                            if id(s) in routed_seg_result:
+                                removed_ids.add(id(s))
+                                res = res or routed_seg_result[id(s)]
+                            else:
+                                original_to_remove.append(s)
+                        if res is None:
+                            res = {'new_segments': [], 'new_vias': [],
+                                   'cleanup': 'smooth_octolinear'}
+                            results.append(res)
+                        res['new_segments'] = list(res.get('new_segments') or []) + new_chain_segs
+                        added_segments.extend(new_chain_segs)
+                        # Splice pcb_data NOW, per commit (#508 finding 5): later
+                        # chains/nets must see this one's copper at its new place.
+                        pcb_data.segments = [s for s in pcb_data.segments
+                                             if id(s) not in _rm] + new_chain_segs
+                        if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+                            pcb_data._foreign_seg_arr_cache = None
+                        net_segs = trial
+                        net_changed = True
+            if net_changed:
+                nets_changed += 1
+    finally:
+        pcb_data._foreign_seg_arr_trust = _trust_prev
+        if hasattr(pcb_data, '_foreign_seg_arr_cache'):
+            pcb_data._foreign_seg_arr_cache = None
     if removed_ids:
         for r in results:
             segs = r.get('new_segments')

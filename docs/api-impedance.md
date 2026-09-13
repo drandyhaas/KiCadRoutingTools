@@ -229,7 +229,7 @@ instead of being silently clamped to the 0.3 mm default width. Returns
 from kicad_parser import parse_kicad_pcb
 from impedance import calculate_layer_widths_for_impedance
 
-pcb = parse_kicad_pcb('kicad_files/test_diffpair_ram.kicad_pcb')
+pcb = parse_kicad_pcb('kicad_files/routed_output.kicad_pcb')
 layers = pcb.board_info.copper_layers
 widths = calculate_layer_widths_for_impedance(pcb, layers, target_z0=50.0)
 for layer, w in widths.items():
@@ -257,7 +257,7 @@ via barrel delays. Without `pcb_data` it assumes FR4 microstrip
 from kicad_parser import parse_kicad_pcb
 from impedance import get_layer_ps_per_mm, calculate_route_propagation_time_ps
 
-pcb = parse_kicad_pcb('kicad_files/test_diffpair_ram.kicad_pcb')
+pcb = parse_kicad_pcb('kicad_files/routed_output.kicad_pcb')
 for layer in pcb.board_info.copper_layers:
     print(f"{layer:8s} {get_layer_ps_per_mm(pcb, layer):.2f} ps/mm")
 
@@ -274,7 +274,7 @@ print(f"{net.name}: {calculate_route_propagation_time_ps(segs, vias, pcb):.1f} p
 from kicad_parser import parse_kicad_pcb
 from impedance import print_stackup_impedance_table, print_impedance_routing_plan
 
-pcb = parse_kicad_pcb('kicad_files/test_diffpair_ram.kicad_pcb')
+pcb = parse_kicad_pcb('kicad_files/routed_output.kicad_pcb')
 print_stackup_impedance_table(pcb, trace_width=0.15, spacing=0.15)
 print_impedance_routing_plan(pcb, pcb.board_info.copper_layers, target_z0=50.0)
 ```

@@ -140,6 +140,9 @@ whose resolved copper overlaps a different-net neighbour (a modelling error).
 | `net_id` | int | Net ID |
 | `uuid` | str | UUID from the file (`''` for newly created segments and for uuid-less file items — KiCad treats the token as optional, PR #534) |
 | `start_x_str`, … | str | Original coordinate strings, kept for exact file matching |
+| `graphic` | bool | This copper came from a **graphic**, not a track (issue #337, extended to footprint shapes by #908). It is real copper for obstacles and DRC, and it is immutable: cleanup passes must never prune it and writers cannot strip it, because there is no `(segment …)` block to match. It never conducts — connectivity gives a graphic no credit, so KiCad will keep calling such a net unconnected (#513 item 6). |
+| `locked` | bool | KiCad `(locked yes)`: the user pinned this copper. Its net is never rip-eligible (#521, no override); locked copper was already an obstacle (#150). Both parse paths set it. |
+| `owner_ref` | str | For copper drawn **inside a footprint**, the disambiguated footprint key that owns it (`'U2'`, `'TP4~2'`); `''` for board-level graphics and every routed track (#908). It is what lets a DRC report name the object the way KiCad does — `net_0 [Polygon(U2)]` beside KiCad's *"Polygon [\<no net\>] of U2 on F.Cu"* — and what scopes the own-pad obstacle lift to the owning part. |
 
 ### `Via`
 
@@ -184,6 +187,21 @@ default for vias you ADD.
 | `net_tie_groups` | List[List[str]] | Pad-number groups the footprint deliberately shorts (`(net_tie_pad_groups "1, 2")` — Kelvin shunts, net-ties). KiCad's clearance exemption between the grouped pads is **local**: a tied net's copper may contact the partner pad only where the contact lies on its own pad. Query per-net via `pcb.net_tie_exempt_pad_ids(net_id)`. |
 | `owns_edge_cuts` | bool | The footprint draws Edge.Cuts geometry of its own (`fp_line`/`fp_rect`/`fp_arc`/`fp_circle`/`fp_poly`/`fp_curve` on that layer, issue #829). Its `(at x y rot)` therefore transforms part of the board outline. |
 | `owns_board_outline` | bool | ...and that geometry is **the board's own boundary** rather than a relief the part carries, so moving the footprint would resize the board (issue #829). A footprint is *carried* (this stays `False`, and it remains movable) only when its Edge.Cuts segments **close on themselves** — a window, slot or milled relief — **and** that shape lies inside the outline the board draws without it. An open path cannot be a cut-out, so it is always the boundary. crkbd draws 184 per-LED windows as carried geometry, and #628 measured that freezing such a part costs it every legal pose it has. **Movers gate on this field, never on `owns_edge_cuts`.** Computed by `kicad_parser.footprint_outline_owners` (text) and `footprint_outline_owners_from_pcbnew` (live board), which share the one decision function `classify_outline_owners`. |
+
+
+**Footprint copper** (issue #908). A footprint may draw copper of its own on
+`F.Cu`/`B.Cu` — the tab of a SOT89/DPAK, a PCB antenna, a solder-jumper
+bridge. Those `fp_poly`/`fp_line`/`fp_arc`/`fp_rect`/`fp_circle` shapes are
+modelled exactly like board-level graphics: net-0 `Segment`s with
+`graphic=True` and an `owner_ref`, so they are obstacles and DRC copper for
+free. A footprint shape **cannot carry a `(net …)` in KiCad**, so #337's
+"net-tied copper is functional, net-less copper is a logo" rule cannot tell
+the two apart; `footprint_copper_is_functional(pad_count)` does, and the
+writer's silkscreen mover reads the same predicate — a footprint with copper
+pads owns a land pattern (modelled, kept on copper), a pad-less one is a logo
+(relocated to silk by the writer, as #146 has always done, and therefore not
+modelled). Only the **perimeter** is modelled, never the interior fill, which
+is the same limit board-level graphics have.
 
 ### `Zone`
 
@@ -315,7 +333,7 @@ from under BGAs.
 from kicad_parser import (parse_kicad_pcb, find_components_by_type,
                           detect_bga_pitch, auto_detect_bga_exclusion_zones)
 
-pcb = parse_kicad_pcb('kicad_files/fanout_starting_point.kicad_pcb')
+pcb = parse_kicad_pcb('kicad_files/routed_output.kicad_pcb')
 for fp in find_components_by_type(pcb, 'BGA'):
     print(f"{fp.reference}: pitch {detect_bga_pitch(fp)}mm, {len(fp.pads)} pads")
 for zone in auto_detect_bga_exclusion_zones(pcb):

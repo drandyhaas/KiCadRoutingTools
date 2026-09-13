@@ -108,6 +108,48 @@ def discover(filters):
     return out
 
 
+def shard(tests, index, count):
+    """The `index`-th of `count` disjoint slices of `tests` (0-based index).
+
+    STRIDED (`tests[index::count]`), not contiguous blocks, and that is the
+    whole point: `discover` returns the list SORTED BY NAME, so adjacent
+    entries are the related-and-similarly-priced ones (a `test_908_*` family
+    costs about the same as its siblings). Contiguous blocks would pile one
+    family onto one shard and hand the neighbours nothing, so the slowest
+    shard -- which is the wall-clock of the whole fan-out -- would be set by
+    whichever block happened to hold the integration tests. Striding spreads
+    each family across every shard.
+
+    The union of all `count` shards is exactly `tests`, with no overlap, for
+    any `count` -- including `count` > `len(tests)`, where the tail shards are
+    empty. An empty shard is a legitimate result, NOT "no tests matched": a
+    50-way fan-out over 30 files must report 20 empty shards green rather
+    than failing 20 times.
+    """
+    return tests[index::count]
+
+
+def _parse_shard(spec):
+    """`"I/N"` -> `(I, N)`, 0-based and validated.
+
+    Refuses out-of-range rather than silently clamping: a driver that computes
+    a shard index wrong would otherwise run shard 0 fifty times and report a
+    green suite that never ran 49/50ths of the tests.
+    """
+    try:
+        i_s, n_s = spec.split('/', 1)
+        i, n = int(i_s), int(n_s)
+    except (ValueError, AttributeError):
+        raise argparse.ArgumentTypeError(
+            f'--shard wants "I/N" (0-based), got {spec!r}')
+    if n < 1:
+        raise argparse.ArgumentTypeError(f'--shard count must be >= 1, got {n}')
+    if not (0 <= i < n):
+        raise argparse.ArgumentTypeError(
+            f'--shard index {i} is out of range for {n} shard(s) (want 0..{n - 1})')
+    return i, n
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -117,12 +159,34 @@ def main():
     ap.add_argument('--jobs', '-j', type=int, default=4,
                     help='run this many tests in parallel (default 4; 1 = serial)')
     ap.add_argument('--list', action='store_true', help='list tests + classification, run nothing')
+    ap.add_argument('--shard', type=_parse_shard, metavar='I/N', default=None,
+                    help='run only the I-th of N disjoint slices (0-based), '
+                         'for fanning the suite out across machines; see '
+                         'tests/stress/modal_suite/run_all_modal.py')
     args = ap.parse_args()
 
     tests = discover(args.filters)
     if not tests:
         print('No tests matched.')
         return 1
+
+    if args.shard is not None:
+        _i, _n = args.shard
+        _all = len(tests)
+        tests = shard(tests, _i, _n)
+        # Announced on its own line so a shard's log says what it covered --
+        # an aggregating driver that mis-sharded is otherwise invisible.
+        print(f'shard {_i}/{_n}: {len(tests)} of {_all} test file(s)')
+        if not tests:
+            # NOT the 'No tests matched' error above: more shards than files
+            # is a legitimate fan-out, and this shard passing vacuously is the
+            # correct answer. Say it asserted nothing, so nobody reads the
+            # green as coverage.
+            print('shard is EMPTY (more shards than test files) -- '
+                  'nothing to run, asserting nothing')
+            print('\n0 passed, 0 failed, 0 timed out, 0 skipped '
+                  '(+0 self-skipped) in 0.0s')
+            return 0
 
     if args.list:
         for f in tests:

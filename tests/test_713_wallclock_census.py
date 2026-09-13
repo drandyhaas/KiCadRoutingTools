@@ -71,6 +71,27 @@ REGISTRY = {
     # toolchain plus a worker join -- went with it. The registry is asserted
     # in BOTH directions, so leaving the entry here would fail as a stale
     # waiver, which is the behaviour we want.)
+    'py_tools/fill_for_delivery.py': (
+        'hang_detector',
+        'Two external children (#910): the kicad-cli DRC used for the '
+        'before/after unconnected line, and EXACT_FILL_TIMEOUT forwarded to '
+        "kicad_exact_fill's ZONE_FILLER child (`--timeout` overrides it). "
+        'Neither expiry can change the deliverable: the DRC one returns None '
+        'and the before/after line is simply not printed, and the fill one '
+        'returns RefillStatus(timeout), which is a REFUSAL -- the board is '
+        'not written and the run says so.'),
+    'py_router/kicad_iso_render.py': (
+        'hang_detector',
+        'ISO_RENDER_HANG_GUARD_S on the kicad-cli pcb render child (#887). Its '
+        'expiry returns a NAMED reason -- "kicad-cli pcb render timed out after '
+        'Ns" -- which the composer draws into the panel and counts as a failed '
+        'shot, so it never becomes a bare None. It is NOT the cost cap: that is '
+        '--iso-max-renders, a COUNT, chosen over a seconds budget so the same '
+        'chain composes the same movie on a fast machine and a slow one.'),
+    'py_router/movie_panels.py': (
+        'hang_detector',
+        'forwards ISO_RENDER_HANG_GUARD_S to the render child above; the value '
+        'is the only clock it touches, and it takes no decision from it.'),
     'kicad_routing_plugin/ai_gui.py': (
         'hang_detector', 'a stderr reader thread join.'),
     'kicad_routing_plugin/ai_plan.py': (
@@ -101,6 +122,16 @@ REGISTRY = {
     'py_placer/placement/provenance.py': ('record', 'provenance row timestamp'),
     'py_router/redo_record.py': (
         'record', 'wall seconds recorded into the redo manifest row'),
+    'py_router/cmd_timing.py': (
+        'record',
+        'reads back the clock tee_cmd already recorded, and formats it -- a '
+        'board mtime, to place a movie frame on the run\'s timeline, and a '
+        'strftime for the UTC stamp. Both DESCRIPTIVE (#887). Nothing here '
+        'compares a duration to a limit: it declares no threshold constant and '
+        'never exits non-zero for a slow run, inheriting tee_cmd.py:14-16 -- '
+        '"no budget, no cap and no timeout" -- and two AST tests assert exactly '
+        'that, one forbidding a MAX_/LIMIT/BUDGET/TIMEOUT constant and one '
+        'forbidding any predicting identifier.'),
 
     # --- a claim about time itself ------------------------------------------
     'py_placer/converge.py': (

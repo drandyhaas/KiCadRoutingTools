@@ -78,10 +78,22 @@ def t_area_weighting_and_the_count_control_disagree():
     # fiducial has almost no courtyard). The issue's finding is unchanged and
     # in fact slightly sharper: the count form still points the wrong way, now
     # by 14x rather than 11x.
-    report('esp_prog: the area form is ~1.1% of span',
-           abs(area_x - 0.011) < 0.004, 'got %.4f' % area_x)
-    report('esp_prog: the count control is ~14.9% of span',
-           abs(count_x - 0.149) < 0.008, 'got %.4f' % count_x)
+    # RE-RECORDED AGAIN for #896. The AREA form is weighted by each part's
+    # extent, and that extent stopped being a pad bounding box on a board
+    # whose library draws no courtyards: esp_prog's parts now carry their
+    # drawn .Fab and silk bodies, so the area-weighted centroid moved
+    # 0.0107 -> 0.0205 while the COUNT form barely moved (0.1494 -> 0.1515),
+    # which is what a weighting change should do.
+    #
+    # The issue's finding survives and the number that carries it is stated
+    # rather than hidden: the separation is now 7.4x, not 14x. It narrowed
+    # because the area form grew, not because the count form shrank -- the
+    # two are still different statistics pointing different ways, which is
+    # the whole claim, but a reader is owed the direction of travel.
+    report('esp_prog: the area form is ~2.1% of span',
+           abs(area_x - 0.021) < 0.004, 'got %.4f' % area_x)
+    report('esp_prog: the count control is ~15.2% of span',
+           abs(count_x - 0.152) < 0.008, 'got %.4f' % count_x)
     report('the two forms differ by more than 4x -- they are NOT the same '
            'statistic', count_x > 4 * area_x, '%.4f vs %.4f' % (count_x, area_x))
     report('the weight is declared, not implied',

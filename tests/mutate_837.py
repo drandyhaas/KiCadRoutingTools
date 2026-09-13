@@ -45,14 +45,33 @@ FLOOR = os.path.join(_ROOT, 'py_placer', 'placement', 'floorplan.py')
 OPTS = os.path.join(_ROOT, 'py_placer', 'placement', 'options.py')
 CA = os.path.join(_ROOT, 'py_tools', 'check_assembly.py')
 CC = os.path.join(_ROOT, 'py_tools', 'check_capacity.py')
-TARGETS = {'le': LEG, 'fp': FLOOR, 'op': OPTS, 'ca': CA, 'cc': CC}
+#: #896. The body model. Its rows land here rather than in a battery of their
+#: own because they are witnessed by the same assembly gates as everything
+#: above -- `grade_body_overlap` reads the model and `check_assembly` prints
+#: it -- and a second runner would be a second copy of the contract stated in
+#: this file's docstring.
+BODY = os.path.join(_ROOT, 'py_placer', 'placement', 'body.py')
+TARGETS = {'le': LEG, 'fp': FLOOR, 'op': OPTS, 'ca': CA, 'cc': CC,
+           'bo': BODY}
 
 CEN = os.path.join(_TESTS, 'test_837_assembly_sides.py')
 CAP = os.path.join(_TESTS, 'test_capacity_options.py')
 SCH = os.path.join(_TESTS, 'test_549_floorplan_schema.py')
 CLI = os.path.join(_TESTS, 'test_549_floorplan_cli.py')
+#: #878. The corpus-level witness: it re-RUNS the far-face sweep and its NC1
+#: compares `grow_board` against the arm the engine is supposed to implement,
+#: on nine fields per (board, basis) over every tracked board. A per-board
+#: assertion can miss a charge that moves one board it does not look at; this
+#: cannot.
+FFC = os.path.join(_TESTS, 'test_878_far_face_currency.py')
 
-BASELINE = (CEN, CAP, SCH, CLI)
+#: #896. The body-model witness: the run-25 acceptance numbers with their
+#: source pair, both silk refusals, and two corpus-wide monotonicity claims.
+#: In BASELINE because a battery whose witness is already red scores every row
+#: KILLED and exits 0.
+BOD = os.path.join(_TESTS, 'test_896_body_model.py')
+
+BASELINE = (CEN, CAP, SCH, CLI, FFC, BOD)
 
 ROWS = [
     # ------------------------------------------------- the census's two rules
@@ -105,6 +124,70 @@ ROWS = [
      "            zero_pad[side].append(ref) if side == 'B' else None\n",
      (CEN,), 'KILLED'),
 
+    # ------------------------------------------------------ #896 body model
+    # The silk rung itself. Without it the six esp_prog parts that draw no
+    # .Fab -- the connector housings, the SSOP, the SOT89 -- have no body at
+    # all, which is the state the issue was filed about.
+    ('the-silk-rung-does-not-exist', 'bo',
+     "    elif silk is not None:\n        if pads is None:",
+     "    elif False:\n        if pads is None:",
+     (BOD,), 'KILLED'),
+
+    # Rule 1. Silk is a pair of clipped side ticks, not an outline, so taken
+    # bare it SHRINKS parts. Neither the acceptance numbers nor the occupancy
+    # arm can see that -- CON1/CON2/U2's silk already contains their pad
+    # field, and occupancy unions with the pads again regardless -- so only
+    # `test_a_silk_body_is_never_smaller_than_its_pads` watches it. That arm
+    # exists BECAUSE this row SURVIVED the first run of this battery.
+    ('the-silk-rung-does-not-union-with-the-pads', 'bo',
+     "            body = _union(silk, pads)",
+     "            body = silk",
+     (BOD,), 'KILLED'),
+
+    # Rule 2. Allowing a pad-less footprint a silk body put 5 corpus pairs
+    # above the run-23 blocking floors, and all five were logos.
+    ('a-pad-less-footprint-may-claim-a-silk-body', 'bo',
+     "        if pads is None:\n            # Rule 2:",
+     "        if False:\n            # Rule 2:",
+     (BOD,), 'KILLED'),
+
+    # The tick-mark test, inverted: it would accept exactly the fragments it
+    # exists to refuse and refuse the outlines it exists to accept.
+    ('the-tick-mark-test-is-inverted', 'bo',
+     "            if _contained(silk, pads):",
+     "            if not _contained(silk, pads):",
+     (BOD,), 'KILLED'),
+
+    # The two ladders re-merged. A courtyard is a body PLUS an assembly margin
+    # plus any shell overhang, and run-6 calibrated the courtyard channel and
+    # the fab channel apart for exactly that reason. esp_prog cannot witness
+    # this at all (no part on it draws a courtyard), which is why the witness
+    # sweeps the corpus for parts drawing both.
+    ('the-courtyard-joins-the-drawn-ladder', 'bo',
+     "    if fab is not None:\n        drawn_local, drawn_source = fab, SOURCE_FAB",
+     "    _c0 = _for_side(courtyard_sides, side)\n"
+     "    if _c0 is not None:\n"
+     "        drawn_local, drawn_source = _c0, SOURCE_COURTYARD\n"
+     "    elif fab is not None:\n"
+     "        drawn_local, drawn_source = fab, SOURCE_FAB",
+     (BOD,), 'KILLED'),
+
+    # Occupancy stops being monotone. Unmutated, this line is what keeps three
+    # ulx3s and two esp_prog run-23 findings alive: a .Fab body is routinely
+    # narrower than the pads it sits between (ulx3s AUDIO1 0.59x).
+    ('occupancy-stops-unioning-with-the-pads', 'bo',
+     "    occupancy = (body_local if pads is None else _union(body_local, pads))",
+     "    occupancy = body_local",
+     (BOD,), 'KILLED'),
+
+    # A silk body must never GATE. esp_prog's R1 clears U2's real body by
+    # 2.1mm and reads 89% contained inside U2's silk square, which without
+    # this exclusion gates the board NOT BUILDABLE.
+    ('a-silk-body-may-gate-containment', 'le',
+     "                            and not _silk_drawn_pair(p)]",
+     "                            ]",
+     (BOD,), 'KILLED'),
+
     # ------------------------------------------------------------- the rule
     # `ctx.sev` hard-defaults to ERROR. Nothing in the engine can move a part
     # between faces, so an error here is a red mark no run can clear -- the
@@ -146,9 +229,13 @@ ROWS = [
      "'both',\n",
      (CEN,), 'KILLED'),
 
+    # RE-ANCHORED for #902 (3 -> 4) and again for #893 (4 -> 5). The MUTATION is
+    # unchanged in kind -- fail to move the reader when a declarable field
+    # arrives -- so it reverts 4 to the version before this key, exactly as it
+    # used to revert 3 to the version before `assembly.sides`.
     ('the-reader-version-does-not-move', 'fp',
-     "READER_VERSION = 3\n",
-     "READER_VERSION = 2\n",
+     "READER_VERSION = 5\n",
+     "READER_VERSION = 4\n",
      (CEN,), 'KILLED'),
 
     # ------------------------------------------------------- the arithmetic
@@ -187,9 +274,51 @@ ROWS = [
      "            'assembly_sides': 'F',\n",
      (CEN,), 'KILLED'),
 
+    # ----------------------------------------------- #878, the far face
+    # The charge itself. Without it `grow_board` is back to charging a
+    # through-hole part to its footprint layer only, which is the defect.
+    ('the-far-face-charge-goes-away', 'op',
+     "        far = _far_face_area(fp, clearance)\n",
+     "        far = 0.0\n",
+     (CAP, FFC), 'KILLED'),
+
+    # WHICH dict the verdict rests on. This row restores the exact pre-#878
+    # behaviour while leaving the far charge computed and reported, so a gate
+    # that only checks `far_face_area_mm2` is non-zero cannot kill it -- the
+    # number is still right, it has just stopped reaching the answer.
+    ('the-busiest-side-reads-the-population-charge', 'op',
+     "    busiest = max(obstructed.values()) if obstructed else 0.0\n",
+     "    busiest = max(per_side.values()) if per_side else 0.0\n",
+     (CAP, FFC), 'KILLED'),
+
+    # The half that is easy to get wrong in the OTHER direction: charging the
+    # leads into the one-face sum, where each part is meant to appear exactly
+    # once. Measured, this double-charges 10 of the 15 one-face boards.
+    # Shares its anchor with the two #837 rows above -- the anchor must match
+    # its TARGET once, not be unique across rows.
+    ('the-one-face-charge-double-counts-the-leads', 'op',
+     "    charged = sum(per_side.values()) if one_face else busiest\n",
+     "    charged = sum(obstructed.values()) if one_face else busiest\n",
+     (CAP, FFC), 'KILLED'),
+
+    # The far charge landing on the near face: the total is unchanged and
+    # `far_face_area_mm2` still reports the right number, so only an arm that
+    # compares the two per-side dicts can see it.
+    ('the-far-face-charge-lands-on-the-near-face', 'op',
+     "            other = 'F.Cu' if layer == 'B.Cu' else 'B.Cu'\n",
+     "            other = layer\n",
+     (CAP, FFC), 'KILLED'),
+
+    # Commensurability: the near charge is grown by `clearance` on each axis,
+    # so a far charge that is not is a smaller number added to the same sum.
+    ('the-far-face-charge-omits-the-clearance', 'op',
+     "    return (tx1 - tx0 + clearance) * (ty1 - ty0 + clearance)\n",
+     "    return (tx1 - tx0) * (ty1 - ty0)\n",
+     (CAP, FFC), 'KILLED'),
+
     # ------------------------------------------------- disclosed SURVIVORS
     # Every tracked board's footprints are on F.Cu or B.Cu, so reading the raw
-    # layer string and calling `footprint_side` agree on all 23. The helper is
+    # layer string and calling `footprint_side` agree on all 22. The helper is
     # used because the partition must not be ABLE to grow a third key that
     # `max()` would rank against the other two -- an invariant no corpus board
     # can exercise, which is exactly why it is stated here rather than left as
@@ -200,7 +329,7 @@ ROWS = [
      (CAP, CEN), 'SURVIVED'),
 
     # `ctx.parts` (the graded-part population) and the census's pad-bearing
-    # refs agree on every tracked board -- measured, 0 disagreements over 23.
+    # refs agree on every tracked board -- measured, 0 disagreements over 22.
     # They are NOT the same set by construction: `QuenchState` admits a
     # zero-pad footprint that draws a courtyard, and the census excludes it.
     # No corpus board carries one, so this row cannot be killed without a
@@ -256,6 +385,12 @@ ROWS = [
      "",
      (CEN,), 'KILLED'),
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
 
 
 def _git_clean(paths):
@@ -382,17 +517,46 @@ def main(argv=None):
     print(f"baseline: {why}")
 
     rows = [r for r in ROWS if not a.row or r[0] in set(a.row)]
-    originals = {k: io.open(v, encoding='utf-8').read()
-                 for k, v in TARGETS.items()}
+    # RAW BYTES for the restore, decoded text for the match (#877). Every write
+    # below lacked `newline=''`, so on Windows a single run rewrote all five
+    # targets in CRLF. `.gitattributes` pins `*.py text eol=lf`, so that is a
+    # real corruption of the working tree, and `git status --porcelain` shows
+    # all five as modified afterwards.
+    #
+    # It does NOT trip this battery's own refusal, which is `git diff --quiet`
+    # (:267): that applies the `text eol=lf` clean filter and reports a pure
+    # CRLF rewrite as CLEAN. So the damage was silent to the one guard that
+    # might have caught it -- worse than the first draft of this comment
+    # claimed, not better.
+    raws = {k: io.open(v, 'rb').read() for k, v in TARGETS.items()}
+    originals = {k: v.decode('utf-8').replace('\r\n', '\n')
+                 for k, v in raws.items()}
     wrong = broken = 0
     try:
         for name, target, old, new, tests, expect in rows:
             src = originals[target]
+            # The count, checked BEFORE the write. This battery had none --
+            # every other one counts here -- so its ONLY protection was the
+            # pre-flight at the top of main(). Belt and braces, not a live
+            # bug: with the pre-flight in place this branch is unreachable.
+            #
+            # What a stale anchor here would produce is SURVIVED, not KILLED:
+            # `replace` of an absent needle is a no-op, the witnesses pass, and
+            # `_run` reports not-killed. Of the 31 rows, 29 expect KILLED and
+            # would print `BAD SURVIVED` and exit 1; only the 2 that expect
+            # SURVIVED would pass silently. #877's title says such a row
+            # "reports KILLED", and that direction is wrong -- `mutate_702`'s
+            # own docstring has it right.
+            n = src.count(old)
+            if n != 1:
+                print(f"  BROKEN    {name}  (anchor matched {n} times)")
+                broken += 1
+                continue
             _drop_pyc()
-            io.open(TARGETS[target], 'w', encoding='utf-8').write(
+            io.open(TARGETS[target], 'w', encoding='utf-8', newline='').write(
                 src.replace(old, new, 1))
             killed, why = _run(tests)
-            io.open(TARGETS[target], 'w', encoding='utf-8').write(src)
+            io.open(TARGETS[target], 'wb').write(raws[target])
             _drop_pyc()
             got = 'KILLED' if killed else 'SURVIVED'
             mark = 'ok ' if got == expect else 'BAD'
@@ -401,7 +565,7 @@ def main(argv=None):
             print(f"  {mark} {got:9} {name}  ({why})")
     finally:
         for k, v in TARGETS.items():
-            io.open(v, 'w', encoding='utf-8').write(originals[k])
+            io.open(v, 'wb').write(raws[k])   # byte-exact, from what was read
         _drop_pyc()
 
     killed = sum(1 for r in rows if r[5] == 'KILLED')

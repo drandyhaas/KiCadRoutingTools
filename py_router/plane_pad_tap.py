@@ -393,7 +393,13 @@ def make_local_window(pcb_data: PCBData, cx: float, cy: float,
     # pad-array cache did exactly that -- 24 through-pad DRC violations).
     # The pad/seg/via caches are signature-versioned now; drop the rest of
     # the geometry-derived caches so the window rebuilds them locally.
+    # `_foreign_seg_arr_trust` rides along, though it is not a cache but a
+    # CALLER's promise (smooth_octolinear_chains) that it drops the seg cache
+    # itself at every splice of its own. The window is a DIFFERENT object with
+    # rebound segments, so it inherits no such promise and must re-earn the
+    # #803 digest.
     for _cattr in ('_foreign_pad_arr_cache', '_foreign_seg_arr_cache',
+                   '_foreign_seg_arr_trust',
                    '_foreign_via_arr_cache', '_foreign_hole_cap_cache',
                    '_edge_grid_cache', '_edge_mask_cache',
                    '_cutout_mask_cache', '_tap_spatial_index_cache',

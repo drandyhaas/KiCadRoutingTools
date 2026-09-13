@@ -15,6 +15,20 @@ import shutil
 import subprocess
 import sys
 
+# This battery's runner is at MODULE SCOPE, so `import mutate_713_census`
+# RUNS THE GATE AND REWRITES ENGINE FILES. #877 was filed after a census did
+# exactly that to six batteries, rewrote 13 files under py_router/ and
+# py_placer/, and then reported numbers measured against its own damage.
+# Refusing the import outright, rather than hiding the runner behind
+# `if __name__`, keeps the reason visible and names the API that answers the
+# question the importer actually had.
+if __name__ != '__main__':                                 # pragma: no cover
+    raise ImportError(
+        'tests/mutate_713_census.py is a SCRIPT, not a module: importing it '
+        'runs the battery and rewrites engine files in place. To read its '
+        'rows, use tests/mutation_anchors.resolve_static(path), which parses '
+        'the file instead of executing it.')
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GATE = os.path.join(ROOT, 'tests', 'test_713_wallclock_census.py')
 
@@ -84,6 +98,12 @@ ROWS = [
      'rather than discovered later'),
 ]
 
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
+
 
 #: Rows that MUST survive, with the reason. A recorded expected survivor is a
 #: stated limit of the gate; an unrecorded one is a hole nobody looked at.
@@ -131,6 +151,15 @@ for label, rel, old, new, why in ROWS:
             broken += 1
             continue
     else:
+        # RAW BYTES for the restore, decoded text for the match (#877).
+        # Writing without `newline=''` translates every '\n' to os.linesep, so
+        # on Windows one run rewrote the whole target in CRLF and left it
+        # modified in `git status`. `.gitattributes` pins `*.py text eol=lf`,
+        # so that is a real corruption, not a preference -- and this battery
+        # has NO dirty-tree refusal to notice it. `mutate_711.py` has the same
+        # raw/decoded pair and records the other half: matching a multi-line
+        # anchor against a RAW decode silently found nothing in three rows.
+        raw = open(path, 'rb').read()
         with open(path, encoding='utf-8') as f:
             original = f.read()
         if original.count(old) != 1:
@@ -139,7 +168,7 @@ for label, rel, old, new, why in ROWS:
             broken += 1
             continue
     try:
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, 'w', encoding='utf-8', newline='') as f:
             f.write(new if created else original.replace(old, new))
         _clear_pyc()
         rc, out = run_gate()
@@ -147,8 +176,7 @@ for label, rel, old, new, why in ROWS:
         if created:
             os.unlink(path)
         else:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(original)
+            open(path, 'wb').write(raw)      # byte-exact, from what was read
         _clear_pyc()
     expected = label in EXPECTED_SURVIVORS
     if rc != 0:

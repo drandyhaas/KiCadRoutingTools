@@ -148,6 +148,76 @@ from the board's own Default netclass; override with `--width` /
 `--via-size` / `--via-drill`. `--keep-staged PATH` writes the staged board
 for inspection in KiCad. Exit 0 clean, 1 violations, 2 usage errors.
 
+## Pose Setter (`place_pose.py`)
+
+Applies a pose the MODEL chose, and lets the engine grade it (#892). The
+ranking half already existed (`converge.py poses` over `pose_score.rank_poses`);
+this is the verb that applies one, so a rotation or a lock is a registered
+lever rather than a hand script around `placement.writer`.
+
+```bash
+python py_placer/place_pose.py BOARD OUT set U1 129.9 98.3 --rot 270
+python py_placer/place_pose.py BOARD OUT set U1 --near 130 98 --rot 270
+python py_placer/place_pose.py BOARD OUT rotate CON2 180 [--relative]
+python py_placer/place_pose.py BOARD OUT face U1 W USB1
+python py_placer/place_pose.py BOARD OUT lock U1 CON1
+python py_placer/place_pose.py BOARD OUT set U1 129.9 98.3 rotate CON2 180 lock U1
+```
+
+Several verbs in one call describe ONE arrangement: every op is resolved
+against the INPUT board and written in a single pass, so no op sees another's
+effect. `set` takes exact coordinates positionally; `--near X Y` is the same
+point read as approximate and implies `--snap`, which takes the best legal
+pose within `--radius` (ranked by `pose_score`, then RE-GRADED here — the
+ranker's legality is an AABB gate and this verb's verdict is exact geometry,
+so a candidate is verified, never trusted). `face REF FACE PARTNER` names a
+pad row by the face it is on NOW and turns the part until that row points at
+the named partner; the rotation is predicted from the rigid body and then
+MEASURED on the board actually written, because `escape.face_of` takes an
+argmin against a box that is not square and a corner pad can change sides
+under a rotation that carries the row.
+
+The verdict is `placement.legality.grade_pad_legality` — the same numbers
+`place_seed` and the review sheet print, netclass- and `.kicad_dru`-aware
+(#697) — on the candidate board against the same grade on the input. A
+request is refused when it makes a category worse — the counts (pad conflicts,
+hole conflicts, pads off-board) **and their magnitudes** (`pad_shortfall`,
+`oob_pad_amount`; a count arm alone accepted a part moved from 2.0 mm off the
+board to 204.66 mm off it, measured on `flat_hierarchy`) — and **never for
+damage the board already had**:
+an absolute gate is False for a large share of parts on a real board before
+anything moves, so it would refuse poses no worse than where the part already
+sits, and would make this tool useless on the unplaced pile it exists to
+arrange. The summary carries the two facts under different names: `no_worse`
+is the verdict the verb acts on, `legal` is whether the board is clean at this
+pose. `--strict-legal` refuses unless the result is clean; `--force` writes
+anyway and records `forced`. A KiCad `(locked yes)` refuses a
+direct move — name the ref in `unlock` in the same call if you mean it;
+`--force` deliberately does not open that, and the unlock is verified on the
+staged board before anything is promoted.
+
+`--snap` is a two-rung ladder, because one rung was not enough: `pose_score`
+ranks first (it knows about wirelength and crossings), then the bare lattice
+around the aimed point, and **every** candidate from either rung is re-graded
+in this verb's own currency before it is written. Measured on
+`flat_hierarchy`: the ranker alone returned zero candidates for
+`set C4 --near 128.0 49.53 --radius 3`, because its gate is the absolute one,
+while 236 poses inside the same radius graded no worse — the nearest 0.354 mm
+away. `snap_census` reports both rungs and `snapped.rung` says which answered.
+
+Knobs come from the board (`list_nets.board_floor_knobs`) unless given — a
+CLI-supplied `--clearance` loosens the verdict on a tool whose job is to
+refuse, so it is disclosed on stderr — and the siblings are carried (#441).
+Exit 0 written; 2 the request does not name a thing on this board (a typo you
+rewrite); 3 the board carries copper (`--allow-routed` to override); 4 well
+formed, and the board said no (a measurement you act on), nothing written —
+note that 4 departs from `place_seed`, where it means "written, but the grade
+found errors". Every exit the tool itself decides prints one `JSON_SUMMARY:`
+line; argparse's own usage errors exit 2 from inside argparse, before there is
+a board to summarise. There is no `--allow-unplaced`: this tool has no
+unplaced gate, because arranging a pile one decision at a time is what it is
+for.
+
 ## Seed Comparator (`compare_seeds.py`)
 
 Ranks `place_seed.py` seeds by ONE identical full-board probe route each —
@@ -200,6 +270,41 @@ happened to score. `JSON_SUMMARY.plane_score` records which.
 python py_placer/plane_score.py board.kicad_pcb --plane-nets GND 3V3:F.Cu
 ```
 
+## Placement Quality Terms (`placement_score.py`)
+
+Five terms a COPPER-FREE placement lap can be ranked by, because nothing else
+can rank one: `blocking` on such a board is the unrouted count (the routing
+half's number, identical on every lap) and `quality` is `(0, 0.0, 0)` for every
+placement of every board.
+
+```bash
+python3 -X utf8 py_placer/placement_score.py board.kicad_pcb --json wk/terms.json
+python3 -X utf8 py_placer/placement_score.py board.kicad_pcb --intent floorplan.json
+```
+
+| term | what it measures |
+|---|---|
+| `pair_length` | worst straight-line span of a declared differential pair, mm |
+| `pin_order_crossings` | part pairs whose pad order CROSSES, so a router must pay a via or a detour |
+| `cluster_to_pin` | worst distance from a passive to the pin it serves, mm — declared `proximity` claims first, the decap election for the rest |
+| `plane_cut_proxy` | length of each net's chord lying INSIDE a locked part's body, summed. Two-layer boards only; ground and rails excluded |
+| `balance` | pad-area first moment along the board's long axis, as a fraction of span |
+
+**There is no aggregate and no weight.** Laps are compared by `compare_terms`,
+which is PARETO: `better` only when no measured term regressed, `mixed` naming
+both sides when two terms trade. A term that could not be measured reports
+`ran: false` with a reason and `value: null` — never 0.
+
+Each term publishes a `basis` when its population is not fixed by the board
+(which parts are locked, which claims were declared). When that basis moves
+between laps the term is **not judged**: a total over a different population is
+not a larger or smaller version of the first.
+
+`board_score.py --placement-terms` embeds this document at a top-level
+`placement` key, report-only — it never enters `blocking` and never changes the
+exit code. `converge status` prints each lap's terms and its movement against
+the row it was recorded against.
+
 ## Capacity Options (`check_capacity.py`)
 
 Answers "can this board hold its parts, and if not, what are the levers?" with
@@ -240,6 +345,35 @@ resolved value and its source are printed, and `charged_area_is_sum` says which
 rule produced `utilisation` in both the text digest and `JSON_SUMMARY` — a
 utilisation whose basis you cannot see is a number that cannot be compared with
 another one.
+
+Since [#878](https://github.com/drandyhaas/KiCadRoutingTools/issues/878) the
+**busier face is the busier _obstructed_ face**, not the busier populated one. A
+through-hole part's leads come out on the face it is not mounted on and block it
+there, so they are charged to it, at the drilled-pad rect — the same rect
+`legality.rect_on` presents on the far side for the placement search. Four keys
+report it: `obstructed_area_by_side_mm2` beside the unchanged
+`part_area_by_side_mm2`, plus `far_face_area_mm2`, `far_face_parts` and
+`far_face_basis` (a string, so it stays out of the text digest — the prose
+channel for the basis is the `NOT MODELLED` line).
+
+**Reconcile `utilisation` against `obstructed_area_by_side_mm2`**, not against
+`part_area_by_side_mm2`, whenever no `assembly.sides` is declared. The two
+differ on any board carrying a drilled part, and the second is the populated
+area, which is no longer what the busier-face verdict divides.
+
+The `F + B` row above is deliberately **not** affected. That sum is each part
+exactly once — the demand on the single face the fab populates — and a part's
+leads land on the face nobody populates, so charging them there would be the
+same area twice. Measured over the tracked corpus: the far-face charge moves the
+busier face's **area** on **1 of 22** boards (`rp2350_fpga_eensy_prePlane`,
+utilisation 0.6220 → 0.6566) and flips **no** board's verdict. It changes
+*which* face is busier on **none** of them — the only board where the binding
+face moves at all is `ulx3s`, and only under the whole-courtyard currency that
+was not adopted. Folding the charge into the one-face
+sum instead would double-charge 10 of the 15 one-face boards, worst
+`flat_hierarchy` 5927.41 → 9404.40 mm². `tests/measure_878_far_face_area.py`
+regenerates all of that, and `tests/878_far_face_currency.json` is the recorded
+argument for which rect was chosen.
 
 The face has to be **named**: `single` is refused, because single-sided does not
 mean front-sided. `ulx3s` is back-dominant (163 of its 226 pad-bearing parts),
@@ -1101,7 +1235,28 @@ defaults, which produce noise in two ways:
 The script sets the relevant **Constraints** to the per-object minima the board
 uses — copper `min_clearance` (+ the Default net-class **clearance**),
 `min_hole_to_hole`, `min_hole_clearance`, `min_copper_edge_clearance`, and the
-min track / via / drill / annular sizes. The net-class `track_width`,
+min track / via / drill / annular sizes.
+
+**The board floor and the net-class clearance are two different numbers**
+(#900). `rules.min_clearance` is an *absolute* floor KiCad applies underneath
+everything, including a pad's own `(clearance …)` override and a `.kicad_dru`
+rule — so it is capped at the smallest copper-pad clearance override on the
+board (#530); leaving it above one would flag copper routed correctly at that
+value. The net classes carry the clearance the board was actually **routed** to
+and are capped by **neither** that override nor a `.kicad_dru` rule: a class
+lowered to one part's 2 mil library override would declare every pair in that
+class legal at 0.05 mm, and the next chain step reads that class back as the
+board's own floor and routes the whole board at it. Both writebacks — the file
+one and the live-`pcbnew` one — record the two apart.
+
+> A second cap, at the smallest `.kicad_dru` layer-rule clearance (#498),
+> applies to `rules.min_clearance` in the writeback the ROUTING steps use
+> (`fix_project_for_output`, and its live-board twin). This standalone CLI has
+> never applied it: run it on a board with a relaxing rule and the recorded
+> floor is your `--clearance`, not the rule. Pre-existing, and named here
+> because the paragraph above would otherwise imply otherwise.
+
+The net-class `track_width`,
 `via_diameter`, `via_drill` and `diff_pair_*` values are **never written**: KiCad
 loads them as draw defaults (`opt`), not DRC minimums, so lowering them prevents
 no violation and rewrites the designer's intent — one 0.127 mm neck used to make
@@ -1643,6 +1798,58 @@ python3 -X utf8 py_tools/check_pockets.py placed.kicad_pcb \
 # Every window, including the empty ones, at a finer bin
 python3 -X utf8 py_tools/check_pockets.py placed.kicad_pcb --bin 1.0 --top 16
 ```
+
+## Fill for Delivery (`fill_for_delivery.py`)
+
+A routed board ships zone **outlines** with no `(filled_polygon ...)`: the
+writer emits the `(fill yes ...)` properties, and nothing in the plane path
+ever writes a fill. Opened in KiCad before a refill — or graded by `kicad-cli
+pcb drc` **without** `--refill-zones` — such a board reports plane-net opens
+that are not real. Measured on `lvds_converter_dualclk_gnd` with its fills
+stripped: **54 unconnected without the flag, 42 with the fill written** — 12
+phantom opens that were never a routing defect.
+
+This is the opt-in delivery step (issue #910). It runs KiCad's own
+`ZONE_FILLER` through the bundled interpreter and saves with
+`aSkipSettings=True`, so the sibling `.kicad_pro` — and every non-Default net
+class in it — survives; the tool re-reads the classes afterwards and
+**refuses**, deleting its own output, if any went missing.
+
+### Usage
+
+```bash
+python3 py_tools/fill_for_delivery.py routed.kicad_pcb -o delivered.kicad_pcb
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-o, --output` | Destination board. Its siblings (`.kicad_pro`, `.kicad_prl`, `.kicad_dru`, design brief) are copied first, via `copy_board`. |
+| `--timeout N` | Seconds to allow the KiCad fill (default: the exact-fill budget). |
+| `--exit-zero` | Report problems but exit 0. |
+
+`route.py --write-fill` does the same thing in place, at the very end of a
+run, after the DRC-floor writeback — so the fill is graded against the
+project's real net classes.
+
+### Output
+
+```
+Filled: delivered.kicad_pcb
+  filled_polygon blocks: 1
+  net classes preserved: 2
+  unconnected (no --refill-zones): 54 -> 42
+```
+
+The before/after line is the record that the fill **revealed** connectivity
+rather than changing it.
+
+### Requirements and exit codes
+
+Needs KiCad's bundled python (`KICAD_PYTHON` overrides the search). Without
+it the step refuses with `no_kicad_python` and writes nothing — the copied
+board is simply unfilled, and `kicad-cli pcb drc --refill-zones` (or **B** in
+KiCad) still grades it correctly. Exit 0 when filled with classes intact,
+1 when the fill did not run or a class went missing.
 
 ## Common Workflows
 

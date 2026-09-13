@@ -23,6 +23,10 @@ dumps raw frames for external encoding.
 """
 from __future__ import annotations
 
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing'], 'kind': 'instrument'}
+
 import argparse
 import glob
 import os
@@ -404,10 +408,32 @@ def _write_mp4(frames, out, fps) -> bool:
         return False
 
 
-def save_movie(frames, out, fps, end_hold, png_dir=None):
+def _png_info(meta):
+    """A Pillow PngInfo for one frame's metadata block (#887)."""
+    from PIL import PngImagePlugin
+    info = PngImagePlugin.PngInfo()
+    for k, v in (meta or {}).items():
+        info.add_text(str(k), '' if v is None else str(v))
+    return info
+
+
+def save_movie(frames, out, fps, end_hold, png_dir=None, frame_meta=None):
     """Write the frames to ``out``. Format follows the extension: `.mp4`
     (imageio-ffmpeg; falls back to a sibling `.gif` if unavailable) or `.gif`
-    (native Pillow, no dependency)."""
+    (native Pillow, no dependency).
+
+    ``frame_meta`` (#887), when given, is one dict per frame written into the
+    dumped PNGs' text chunks. It is indexed against ``frames``, NOT against
+    the ``seq`` built below: ``seq`` appends the end-hold repeats, while the
+    PNG loop iterates ``frames``. A short list raises rather than silently
+    misattributing every frame after the gap.
+
+    Only the PNG dump carries it. The .mp4 hands numpy arrays to imageio and
+    Pillow's GIF writer has no per-frame text channel, so there is nowhere
+    else for it to go."""
+    if frame_meta is not None and len(frame_meta) != len(frames):
+        raise ValueError('save_movie: frame_meta has %d entries for %d '
+                         'frames' % (len(frame_meta), len(frames)))
     if not frames:
         print("animate_route: no frames", file=sys.stderr)
         return False
@@ -443,7 +469,11 @@ def save_movie(frames, out, fps, end_hold, png_dir=None):
     if png_dir:
         os.makedirs(png_dir, exist_ok=True)
         for i, fr in enumerate(frames):
-            fr.save(os.path.join(png_dir, f'frame_{i:05d}.png'))
+            # pnginfo=None is Pillow's own PNG default, so the
+            # no-metadata path is byte-for-byte what it always was.
+            fr.save(os.path.join(png_dir, f'frame_{i:05d}.png'),
+                    pnginfo=(_png_info(frame_meta[i]) if frame_meta
+                             else None))
         print(f"animate_route: dumped {len(frames)} PNG frames to {png_dir}")
     return True
 

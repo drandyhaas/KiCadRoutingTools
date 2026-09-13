@@ -133,10 +133,10 @@ source, suspect, suspect_reason
 
 | object | keys |
 |---|---|
-| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `assembly`, `context` |
+| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `assembly`, `proximity`, `context` |
 | `envelope` | `rect`, `tolerance_mm` |
 | `defaults` | `zone_tolerance_mm` |
-| `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `note`, `context` |
+| `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `rotation`, `rotation_candidates`, `note`, `context` |
 | `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `note`, `context` |
 | `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `center_on_edge`, `along_edge_band`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
 | `edge_connectors[].overhang_mm` | `min`, `max` |
@@ -144,24 +144,28 @@ source, suspect, suspect_reason
 | `edge_connectors[].along_edge_band` | `from`, `to` |
 | `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm`, `max_pin_distance_mm`, `pin_functions`, `same_side` |
 | `assembly` | `sides` (`"F"`, `"B"` or `"both"`), `why`, `context` |
+| `proximity[]` | `ref`, `near`, `max_mm`, `basis` (`"pad_edge"` or `"body"`), `pads`, `note`, `context`, and the compiler-written `source` |
 | `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
 | `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids`, `plane_layers` |
 | `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
-| `severity` | any of the 19 rule names below |
+| `severity` | any of the 21 rule names below |
 | `overlap_waivers[]` | `pair`, `reason`, `context` |
 | `must_lock` | a list of reference globs (no nested keys) |
 
-`severity` keys are checked too. The settable names are the twelve rules —
+`severity` keys are checked too. The settable names are the thirteen rules —
 `envelope`, `zone_containment`, `zone_side`, `assembly_side`, `zone_exclusive`, `keepout`,
 `edge_connector`, `decap_distance`, `decap_ungraded`, `decap_pin_distance`,
-`must_lock`, `legality` — plus the five findings raised outside the rule
-loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
+`proximity`, `must_lock`, `legality` — plus the five findings raised outside
+the rule loop: `intent_zone_outside_envelope`, `intent_zone_overlap`,
 `block_unresolved`, `intent_zone_in_keepout`, `keepout_allow_unresolved`,
-plus two more that `rule_decap_pin_distance` raises BESIDE its own name —
-`decap_pin_distance_inferred` and `decap_pin_uncovered` (#705). One
-measurement can support several claims, and an author must be able to set
-their severities apart: a pin inferred from a net name and a pin the pad
-declares are not the same evidence. `assembly_side` (#837), `decap_ungraded`,
+plus three more raised BESIDE a rule's own name —
+`decap_pin_distance_inferred` and `decap_pin_uncovered` (#705), and
+`proximity_unresolved` (#902). One measurement can support several claims, and
+an author must be able to set their severities apart: a pin inferred from a net
+name and a pin the pad declares are not the same evidence, and a proximity
+claim naming a part the board does not have is a different finding from one
+whose parts are simply too far apart — a DNP-variant board can demote the first
+without demoting the second. `assembly_side` (#837), `decap_ungraded`,
 `decap_pin_distance_inferred` and `decap_pin_uncovered` default to
 **warn**; all but those and the last of the five default to **error**;
 `keepout_allow_unresolved` defaults to **warn** and is upgraded by writing
@@ -364,6 +368,8 @@ for it, and the reason is printed:
 | `decap_pin_distance` | a DECLARED supply pin is further than `max_pin_distance_mm` from the nearest decoupling cap on its own rail, pad edge to pad edge ([#705](https://github.com/drandyhaas/KiCadRoutingTools/issues/705)) | `floorplan.supply_pins`, `legality.pad_rect` + `rect_gap` |
 | `decap_pin_distance_inferred` | the same measurement for a pin inferred from a net NAME rather than from a `pintype` or `pinfunction`. **warn** by default, because the pin set is the inference | same |
 | `decap_pin_uncovered` | a declared supply pin's rail carries no decoupling cap at all, anywhere. A design fact, not a placement failure, so **warn** and per (IC, rail) rather than per pin | same |
+| `proximity` | two DECLARED parts are further apart than `max_mm` ([#902](https://github.com/drandyhaas/KiCadRoutingTools/issues/902)). Per SUBJECT pad when the claim names `pads`, once per pair when it does not | `legality.pad_rect` + `rect_gap`, or `placement.body`'s DRAWN body for `basis: "body"` |
+| `proximity_unresolved` | a proximity claim names a ref, or a pad number, this board does not have. A separate NAME so a DNP-variant board can demote it without demoting the distance claim | same |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
 | `block_unresolved` | a block matched no footprint | — |
@@ -411,6 +417,7 @@ reports the whole picture in `accept_basis`.
 | `decap_ungraded`, `decap_pin_*` | yes | — | no | `decap_ungraded` is a claim about what the GRADE covers rather than about any pose, so there is nothing for a search to refuse. The pin rules are a THIRD currency — pad edge to pad edge on one net — and the objection below applies to them more strongly, not less |
 | `decap_distance` | yes | scope stage | no | graded in a currency the optimizer does not carry — pad centroid to an IC's pad bbox inflated 0.5 mm, not courtyard to courtyard. A gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. And the cap→IC tether is re-elected from live poses, so a per-move form would have the `corridor_weight` non-stationarity problem too |
 | `legality` | yes | — | no | a whole-board aggregate against a BUDGET, so a per-pose form is non-local: whether A's move is admissible would depend on B's violation |
+| `proximity` | yes | — | no | the pad-edge form is a FOURTH currency (pad edge to pad edge between two DECLARED refs) and the body form a fifth, so a gate in either would be the wrong currency -- and the `decap_distance` row above already records what that costs: a gate in the wrong currency can *admit what the grade flags*, which is worse than no gate. Unlike a decap tether the pair is DECLARED and stationary, so a per-move attraction term is genuinely constructible and `reseat.clusters_from_tethers` is already generic over (member, anchor, radius) -- but it has no production caller today, so wiring one would ship a new engine path with no consumer under a grading fix. Separable work, named rather than silently absent |
 
 The two zone rows reach the seat search by **different channels**, and the
 difference is the reason one of them could be gated and the other could not.
@@ -487,6 +494,46 @@ the pad-bearing population: `glasgow_revC` declared `F` reports **92**, not the
 Its leads pass through. `keepout` tests the courtyard **and** the drilled-pad
 rect against every face the part occupies, so a mounting-hole keep-out cannot be
 walked through from the back.
+
+### Four instruments charge a through-hole part per face, and they differ
+
+A drilled part's body is on one face and its leads come out on the other, so
+every per-face instrument has to decide what the far face costs. They do not all
+answer the same way, and that is deliberate — they are not all asking the same
+question. Written down here because until
+[#878](https://github.com/drandyhaas/KiCadRoutingTools/issues/878) the only
+place any of it was recorded was a code comment, and that comment was wrong
+about one of them.
+
+| instrument | its question | near face | far face |
+|---|---|---|---|
+| `legality.rect_on` | may these two parts overlap? | courtyard | **drilled-pad rect** |
+| `options.grow_board`, undeclared | does the area fit on the busier face? | courtyard | **drilled-pad rect** (#878) |
+| `options.grow_board`, declared `F`/`B` | does every part fit on the one populated face? | courtyard | **nothing** — see below |
+| `check_pockets.courtyard_cover` | is this window clear? | courtyard | **whole courtyard** |
+| `floorplan.rule_assembly_side` | how many reflow passes? | body face only | **nothing** |
+
+`grow_board` charges the far face **only when no face is declared**. Under a
+declared `F`/`B` the number is `sum` over the populated dict — each part exactly
+once, on the one face the fab builds — and a part's leads come out on the face
+nobody populates, where they compete with nothing. Charging them there would be
+the same area twice; measured, it would double-charge 10 of the 15 one-face
+boards. The `NOT MODELLED` line on such a run says so explicitly.
+
+`check_pockets` charges the whole courtyard because a window under a part is not
+clear on either face — it asks about *cover*, never about a sum, so overstating
+cannot double-count anything. `rule_assembly_side` charges nothing because a
+through-hole part on the front demands wave or hand soldering, not a second
+reflow pass.
+
+**`floorplan.rule_keepout` is not a fifth model**, though #878's own table listed
+it as one. It uses `part.sides` only to decide *which* keep-outs bind, then hands
+`keepout_hit` both rects and takes a `max` over them, consulting no face at all.
+
+`splitflap_driver` is the board where all four answers are visibly different: 65
+parts, every one on `F.Cu`, 24 of them drilled. Its populated back area is
+`0.00 mm²`, its obstructed back area is `558.34 mm²`, `sides_occupied` calls it
+two-sided, and `rule_assembly_side` calls it `F`.
 
 ### A zone a keep-out leaves no room in is refused
 

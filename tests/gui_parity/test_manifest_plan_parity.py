@@ -695,11 +695,21 @@ def check_refused_tools():
     discards legitimate upstream steps.
     """
     bad = []
-    for tool in ('place_optimize.py', 'place_route_loop.py', 'render_placement.py',
-                 'beautify_labels.py'):
+    # EVERY registered refusal is exercised, not a hand-picked four: the list
+    # here used to name four of the seven entries, so a new placement CLI could
+    # join REFUSED_TOOLS and never be checked (#892 added the eighth). The
+    # membership assertion below keeps the deletion half of the gate that the
+    # hardcoded tuple provided.
+    for tool in sorted(m2p.REFUSED_TOOLS):
         step = m2p.parse_command(['python3', tool, 'a.kicad_pcb', 'b.kicad_pcb'])
         if not step or '_refused' not in step:
             bad.append((tool, f"NOT refused -- converted to {step!r}"))
+    for tool in ('place_optimize.py', 'place_route_loop.py',
+                 'place_seed.py', 'place_reconstruct.py', 'place_portfolio.py',
+                 'place_pose.py', 'render_placement.py', 'beautify_labels.py'):
+        if tool not in m2p.REFUSED_TOOLS:
+            bad.append((tool, "dropped from REFUSED_TOOLS -- a placement tool "
+                              "that converts silently breaks the replay chain"))
 
     # Chain integrity: a placement step between a fanout and a route must not
     # take either of them with it.

@@ -8,6 +8,21 @@ then connects disconnected plane regions.
 import argparse
 from run_utils import run
 
+#: A four-step chain on interf_u (25 footprints, 174 nets, 379 pads): planes on
+#: both layers, a PGA120 fan-out, a full signal route at --max-iterations
+#: 1000000 --max-ripup 10, then plane repair and two checkers. It carried NO
+#: budget, so `run_all` gave it the 600 s default and killed it there (#930) --
+#: and an undeclared budget cannot tell "this chain is long" from "this chain
+#: wedged", so every full-suite run ended on a non-pass a reader had to spend
+#: another ten minutes re-running by hand to dismiss.
+#:
+#: MEASURED: 111.5 s wall, alone, on a fast 2026 arm64 macOS machine
+#: (`/usr/bin/time -p`, 2026-09-09). 1200 s is ~10x that -- the suite runs four
+#: tests in parallel, and the reporting machine that hit the 600 s wall is a
+#: slower Windows box. The figure is a claim about the CHAIN, not the machine:
+#: if this file ever times out at 1200 s, something wedged.
+RUN_ALL_TIMEOUT = 1200
+
 
 def main():
     parser = argparse.ArgumentParser(description='Test routing on interf_u board')

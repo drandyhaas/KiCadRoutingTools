@@ -347,9 +347,19 @@ def _foreign_seg_arrays(pcb_data, layer):
     sig = (len(segs), len(vias), id(segs), id(vias),
            (tail.start_x, tail.start_y, tail.end_x, tail.end_y,
             tail.layer, tail.width, tail.net_id) if tail is not None else None,
-           (vtail.x, vtail.y, vtail.size, vtail.net_id) if vtail is not None else None,
-           sum(map(id, segs)), sum(map(id, vias)),
-           hash(tuple(sg.layer for sg in segs)))
+           (vtail.x, vtail.y, vtail.size, vtail.net_id) if vtail is not None else None)
+    # The whole-list digest below is O(segments) per call. A caller that
+    # never edits copper in place and DROPS the cache itself at every
+    # splice (smooth_octolinear_chains: `_foreign_seg_arr_cache = None`
+    # per commit) may declare the cache TRUSTED between its own
+    # invalidations, and the digest is skipped: 23.6k calls on a
+    # 2.5k-segment board spent 16 s of a 46 s braid validating a cache
+    # that was never stale (2026-09-06). The identity of the list, its
+    # length and its tail are still checked. Unset (the default), every
+    # call pays the #803 digest as before.
+    if not getattr(pcb_data, '_foreign_seg_arr_trust', False):
+        sig = sig + (sum(map(id, segs)), sum(map(id, vias)),
+                     hash(tuple(sg.layer for sg in segs)))
     cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
     if cache is None or cache[0] != sig:
         cache = (sig, {})
@@ -373,7 +383,23 @@ def _foreign_seg_arrays(pcb_data, layer):
                np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
                np.asarray(by, dtype=float), np.asarray(hw, dtype=float))
         per_layer[layer] = arr
+        # the per-item bounding boxes _seg_foreign_seg_dist windows on,
+        # once per rebuild instead of four array ops per query (23.6k
+        # queries per braid smoothing pass, 2026-09-06)
+        _n, _ax, _ay, _bx, _by, _hw = arr
+        per_layer[(layer, 'bbox')] = (np.minimum(_ax, _bx) - _hw,
+                                      np.maximum(_ax, _bx) + _hw,
+                                      np.minimum(_ay, _by) - _hw,
+                                      np.maximum(_ay, _by) + _hw)
     return arr
+
+
+def _foreign_seg_bboxes(pcb_data, layer):
+    """(min_x, max_x, min_y, max_y) arrays of the foreign segments+vias
+    on `layer`, built with -- and valid exactly as long as -- the arrays
+    of _foreign_seg_arrays."""
+    _foreign_seg_arrays(pcb_data, layer)
+    return pcb_data._foreign_seg_arr_cache[1][(layer, 'bbox')]
 
 
 def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
@@ -403,8 +429,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
     R = _FOREIGN_PAD_WINDOW
-    fminx = np.minimum(fax, fbx) - fhw; fmaxx = np.maximum(fax, fbx) + fhw
-    fminy = np.minimum(fay, fby) - fhw; fmaxy = np.maximum(fay, fby) + fhw
+    fminx, fmaxx, fminy, fmaxy = _foreign_seg_bboxes(pcb_data, layer)
     near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
             (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
     if not near.any():
@@ -2438,6 +2463,15 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     _allow_in_pad = getattr(config, 'same_net_pad_clearance', -1.0) <= 0
     _escape_radius = max(0.0, env_knobs.ESCAPE_STUB_RADIUS)
     if not _allow_in_pad and _escape_radius <= 0:
+        # #907 filed this as "no fallback by design". There IS a fallback --
+        # the off-pad escape-stub rung below -- and this is the one
+        # configuration that has none: the flag forbids the in-pad arm and
+        # KICAD_ESCAPE_STUB_RADIUS=0 turns off the compliant replacement. Say
+        # so; a bare `return None` here reads as "no site fits", which sends
+        # the reader looking at geometry instead of at two settings.
+        print("    (no via-in-pad rescue: --same-net-pad-clearance forbids "
+              "the in-pad arm and KICAD_ESCAPE_STUB_RADIUS=0 disables the "
+              "off-pad escape stub that replaces it)")
         return None
     if hasattr(pad_obj, 'layers') and '*.Cu' in pad_obj.layers:
         return None

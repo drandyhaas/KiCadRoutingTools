@@ -70,14 +70,21 @@ def _facing_pair(order_b):
 def test_identity_is_planar():
     st = _facing_pair([1, 2, 3, 4, 5])
     m = pair_metrics(st, 'A', 'B')
-    assert m == {'inversions': 0, 'lis': 5, 'nets': 5}, m
-    print("  PASS: matched order -> 0 inversions, all 5 nets planar")
+    # #896/#891: `ties` is an additive key -- how many pads project to the
+    # same point on the channel axis, where the sort falls back to the net
+    # id and INVENTS an order. Asserted here rather than filtered out,
+    # because a synthetic fixture with 0 ties is what makes the inversion
+    # count above mean anything at all.
+    assert m == {'inversions': 0, 'lis': 5, 'nets': 5, 'ties': 0}, m
+    print("  PASS: matched order -> 0 inversions, all 5 nets planar, "
+          "no ties")
 
 
 def test_full_reversal_is_maximal():
     st = _facing_pair([5, 4, 3, 2, 1])
     m = pair_metrics(st, 'A', 'B')
-    assert m == {'inversions': 10, 'lis': 1, 'nets': 5}, m  # n(n-1)/2, LIS 1
+    assert m == {'inversions': 10, 'lis': 1, 'nets': 5,
+                 'ties': 0}, m               # n(n-1)/2, LIS 1, no ties
     print("  PASS: reversed order -> n(n-1)/2 inversions, LIS 1")
 
 

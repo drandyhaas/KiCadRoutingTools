@@ -1484,6 +1484,20 @@ def move_copper_graphics_to_silkscreen(board) -> int:
 
     Mirrors move_copper_text_to_silkscreen but inverts the text filter, so only
     PCB_SHAPE-equivalents (not text) are touched.
+
+    #908 does not apply here, and that is a property of the API rather than a
+    decision: `get_shapes()` asks for top-level KOT_PCB_SHAPE items, so a
+    footprint's own children are not in the list and a part's land-pattern
+    copper -- an SOT89 tab, a PCB antenna, a solder-jumper bridge -- is never
+    relocated to silk. The SWIG front walked `fp.GraphicalItems()` and did
+    relocate it, which is the defect #908 fixed there by exempting a
+    pad-BEARING footprint. If this walk is ever widened to footprint children,
+    it must take that exemption with it, through the shared scalar predicate
+    `kicad_parser.footprint_copper_is_functional` (pads excluding NPTH) --
+    never a second hand-written rule. See the #337/#908 gap note in
+    `build_pcb_data_from_board`: this front does not MODEL that copper either,
+    so the two halves must be ported together or a part's copper would be
+    kept on copper and still invisible to the obstacle map.
     """
     BoardLayer = _ensure_kipy().BoardLayer
     moved = []

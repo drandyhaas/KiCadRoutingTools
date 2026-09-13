@@ -835,6 +835,12 @@ class TestTheWritebackWritesWhatWasPriced(unittest.TestCase):
     def test_a_class_BETWEEN_the_default_and_the_ceiling_ships_at_the_ceiling(self):
         """The writeback clamps to the CEILING, not to the resolved base.
 
+        (#900 note: this is the arm designed to catch "a class shipped below
+        what was priced", and its fixture blinds it to the pad-override form of
+        exactly that -- flat_hierarchy has no pad clearance override, and every
+        orangecrab arm runs at a clearance below that board's 0.375 overrides,
+        so the cap never fires. See tests/test_900_class_clearance_not_capped.py.)
+
         This is the one case the two differ, and my battery could not see it:
         `_priced` is `min(Default, ceiling)`, so on a board whose Default sits
         BELOW the ceiling, a class BETWEEN them is priced at the ceiling and was

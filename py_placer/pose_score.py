@@ -61,7 +61,7 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
                edge_weight: float = 2.0,
                ignore_net_ids=None, net_weights=None, move_refs=None,
                extra_locked_refs=None, keepouts=None, intent_zones=None,
-               exclusive_zones=None):
+               exclusive_zones=None, body_model=False):
     """A QuenchState used purely as an oracle -- built, queried, thrown away.
 
     Defaults mirror the placement guidance rather than quench's own library
@@ -96,7 +96,13 @@ def make_state(pcb_data, board_path: str, *, clearance: float = 0.25,
         # start from a violating pose; this is a must-be-OUTSIDE claim whose
         # target is clean by definition, so an absolute gate on it cannot
         # refuse a repair its own target. See `quench.exclusive_spec`.
-        exclusive_zones=exclusive_zones)
+        exclusive_zones=exclusive_zones,
+        # #916. `make_state` is what the SEEDER, the repair path and
+        # `reseat_scope` build their state from, so without this the flag
+        # reached `quench()` and nothing that actually SEATS a part -- half a
+        # fix for an issue whose whole subject is `pose_ok`. False keeps every
+        # existing caller bit-identical.
+        body_model=body_model)
 
 
 def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
@@ -138,6 +144,13 @@ def rank_poses(pcb_data, board_path: str, ref: str, *, radius: float = 2.0,
     # ranked total -- the objective must not chase a bound it can't trade off
     # (fact (a): proxies mislead optimizers). rot-0 vs rot-180 ties in `cost`
     # are exactly where this number decides (test-board U3: 9 -> 0).
+    #
+    # STILL TRUE HERE after #893, and not by accident: that issue added a
+    # `facing_weight` which DOES put this bound into `total_cost`, but
+    # `make_state` never sets it, so a state built by this module ranks on a
+    # total with no facing term and the sentence above holds. A caller that
+    # passes its own armed state via `state=` gets a ranked total that includes
+    # it -- which is a deliberate choice by that caller, not this default.
     from placement.pair_order import ref_inversions
     base_inv = ref_inversions(st, ref)
 

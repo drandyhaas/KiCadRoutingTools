@@ -23,6 +23,11 @@ produces no verdict carries a `status` naming why. Output: a ranked table, seeds
 Exit 0 when at least one seed was probed; 4 when every seed failed its
 intent gate (nothing rankable); 2 for usage errors.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement'], 'kind': 'actor'}
+
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 import argparse
 import json

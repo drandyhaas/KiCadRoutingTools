@@ -34,6 +34,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from kicad_parser import _global_to_local, local_to_global
 from placement.legality import (BoardOutlineGate, build_part_pads,
+                                side_of_layer,
                                 footprint_side, rect_gap, rect_overlap_area,
                                 rotate_local_bounds)
 from placement.parser import courtyard_for_side, extract_courtyard_sides
@@ -121,7 +122,7 @@ def label_side(label) -> str:
     """'F' or 'B' from the label's own layer (a B-side part CAN carry an
     F-side label; the layer, not the footprint, decides what it collides
     with)."""
-    return 'B' if str(label.layer).startswith('B') else 'F'
+    return side_of_layer(label.layer)
 
 
 def label_world_rect(fp, label, text: Optional[str] = None,

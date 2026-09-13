@@ -27,6 +27,11 @@ Do not delete this without rewriting the recorded corpus -- and note that
 rewriting it would make those chains replayable ONLY on branches that carry the
 #522 layout, so main and placement could no longer be A/B'd on the same corpus.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'routing'], 'kind': 'actor'}
+
 import os
 import runpy
 import sys

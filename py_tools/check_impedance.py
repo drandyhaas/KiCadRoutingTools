@@ -31,6 +31,11 @@ build the way check_drc.py does), 0 otherwise. ``--exit-zero`` suppresses that.
 """
 
 from __future__ import annotations
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['routing', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (#522: makes ../py_router importable)
 
 import argparse
@@ -861,6 +866,18 @@ def main() -> int:
         from protected_nets import read_impedance_specs, pro_path_for_board
         _specs = read_impedance_specs(pro_path_for_board(args.input))
         if _specs:
+            # #906: a declaration recorded `applied: false` is a statement of
+            # INTENT whose width was never solved -- the router fell back to
+            # the plain track width, so the copper is not impedance-controlled
+            # and grading it against the declared ohms reports a promise the
+            # run never made. The record is kept so a later step with a usable
+            # stackup can recompute it; this audit skips it. A record written
+            # before #906 has no `applied` key at all and is treated as applied,
+            # which is what it meant then.
+            _unapplied = sorted(nm for nm, sp in _specs.items()
+                                if sp.get('applied') is False)
+            _specs = {nm: sp for nm, sp in _specs.items()
+                      if sp.get('applied') is not False}
             _n2i = {n.name: nid for nid, n in pcb.nets.items() if n.name}
             net_declared_gaps = {
                 _n2i[nm]: float(sp.get('coplanar_gap', 0) or 0)
@@ -869,6 +886,12 @@ def main() -> int:
             print(f"Auto-read {len(net_declared_gaps)} net impedance "
                   f"declaration(s) from the sibling .kicad_pro "
                   f"({_cop} coplanar) -- per-net gaps outrank --coplanar-gap")
+            if _unapplied:
+                print(f"  {len(_unapplied)} declaration(s) recorded as NOT "
+                      f"APPLIED are skipped -- no width was solved for them, so "
+                      f"their copper is not impedance-controlled: "
+                      f"{', '.join(_unapplied[:6])}"
+                      f"{' ...' if len(_unapplied) > 6 else ''}")
     except Exception:
         pass
 

@@ -275,3 +275,14 @@ def add_tidiness_args(parser) -> None:
                              "airwire cost already uses exact pad positions, "
                              "but a ~1mm pad offset is noise against a ~20mm "
                              "net, so the signal needs its own weight. Try 1")
+    parser.add_argument("--facing-weight", type=float, default=0.0,
+                        help="Price the pin ORDER a pose forces: for every "
+                             "part pair sharing 2+ nets, the count of net "
+                             "pairs whose pad order is crossed (a proven lower "
+                             "bound on the crossings any router must pay). "
+                             "0 = off (default). Distinct from "
+                             "--orient-weight, which scores DIRECTION and is "
+                             "blind to order: two parts can point straight at "
+                             "each other with every net crossed. Costly -- it "
+                             "is the most expensive term in the objective. "
+                             "Try 1")

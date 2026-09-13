@@ -51,7 +51,13 @@ CLI_MAINS = ["py_router/route.py", "py_router/route_diff.py",
              "py_router/route_planes.py", "py_router/repair_planes.py",
              "py_router/bga_fanout/__init__.py",
              "py_router/qfn_fanout/__init__.py",
-             "py_placer/place_fanout_clearance.py"]
+             "py_placer/place_fanout_clearance.py",
+             # #892: the pose setter WRITES boards, so a finalization pass
+             # added to its main() would be the same CLI-only drift. It has
+             # none today by construction -- the sibling carry and the legality
+             # grade live in `placement/pose_ops.py`, which both fronts call --
+             # and scanning it is what keeps that true.
+             "py_placer/place_pose.py"]
 
 # Known post-engine passes -> GUI counterpart symbol(s). A pass is "covered" if
 # ANY listed symbol appears anywhere under kicad_routing_plugin/. Keep the RHS
@@ -103,6 +109,12 @@ REGISTRY = {
 # writers, so parity there comes from a HAND-WRITTEN twin -- on IPC that is the
 # adapter's move_copper_graphics_to_silkscreen (kipy), called from the route and
 # planes apply paths. Any new writer-level pass needs the same treatment.
+#
+# #908 made that twin pair carry a DECISION as well as a walk (a footprint with
+# pads owns functional copper and is exempt from the move). Both fronts read the
+# one predicate kicad_parser.footprint_copper_is_functional rather than each
+# counting pads its own way, and tests/test_908_writer_owner_gate.py measures
+# the two fronts against each other on real boards.
 #
 # OPEN GAP (2026-07-28): kicad_writer.strip_zero_length_edge_cuts sits in exactly
 # that position -- wired into output_writer / plane_io / kicad_writer beside the
@@ -158,6 +170,14 @@ DISCOVERY_EXEMPT = {'add_drc_fix_args', 'drc_fix_kwargs', 'find_kicad_cli',
 KNOWN_CLI_ONLY = {
     'run_drc': 'bga/qfn fanout post-engine DRC graze audit -> JSON_SUMMARY '
                'drc_grazes (report-only, no board mutation)',
+    # #910. OPT-IN (--write-fill) and CLI-only ON PURPOSE: it writes
+    # `filled_polygon` blocks into the DELIVERED FILE, and the GUI has no
+    # delivered file -- it applies copper to the user's open board, where
+    # KiCad fills live and pressing B is the same operation. A GUI twin would
+    # be a button that does what the application already does.
+    'write_filled_board': 'route.py --write-fill: fills the WRITTEN board for '
+                          'delivery; the GUI mutates a live board KiCad fills '
+                          'itself, so there is no file to fill',
 }
 
 

@@ -80,6 +80,33 @@ Validate routed boards against the *real* spec, with the right checker — most
   is missing tests nothing — and process substitution (`<(echo ...)`) is not a
   file on Windows. Measured: a negative control copied to a temp dir died on
   `ModuleNotFoundError` and was read as "the gate refused".
+- **A skill's claims are gated three ways, and each gate says what it cannot
+  see (#923).** `tests/test_431_skill_commands.py` holds every cited `--flag`
+  to the real argparse, every quoted DEFAULT to the real default (read from
+  `--help` where the parser is built under `if __name__ == '__main__'` and
+  cannot be imported), and every `exits N` annotation to whether that flag can
+  reach `gate_or_exit` at all. It reads a driver through BOTH dumps:
+  `--dump-all` shows the instructions with every guard satisfied, and
+  **`--dump-refusals` shows the other branch** -- the commands a STUCK reader
+  is handed, which were unscanned until it existed (one of them exited 2).
+  `--dump-refusals` audits itself: refusal sites come from the driver's own
+  AST, and every string literal of 12+ characters a refusal can print must
+  appear in the dump, so an unrendered ARM of a four-arm refusal fails too.
+  `tests/test_923_output_key_claims.py` is the third: it RUNS `board_context`,
+  `check_pockets`, `check_floorplan`, `render_placement` and `board_score` on a
+  tracked fixture and resolves every cited key against what they really wrote
+  (`hot[].ratio` was never an emitted key; `broken.poured_nets_meaning` is
+  written under `components.`). A claim about a tool it does not run, or one
+  in prose naming no instrument, is still invisible -- both files say so.
+- **A mutation battery calls `preflight(__file__)` from
+  `tests/mutation_anchors.py`, right after its `ROWS`.** A stale anchor then
+  refuses in one second instead of reporting BROKEN after the witnesses are
+  paid for -- and `mutation_anchors.py` run bare reports every battery's stale
+  and NEWLINE-SENSITIVE anchors. The newline case is real on Windows: a
+  multi-line anchor against a CRLF file resolves differently depending on how
+  the target is read, so prefer a SINGLE-LINE anchor for a `.md` target, and
+  read and write with `newline=''` on both sides or a restored file still
+  leaves the tree dirty.
 - **Read the failure buckets by their real definitions.** `failed_single` = "no
   result at all"; `open_single` = a KEPT result whose pads are still disconnected
   (non-multipoint only — a multipoint shortfall is already the pad deficit). A
@@ -234,6 +261,11 @@ Validate routed boards against the *real* spec, with the right checker — most
   the staged kicad-cli grade read the same file, `copy_board`/
   `fix_project_for_output` carry it as a sibling, and the DRC writeback caps
   `min_clearance` at the smallest rule so a relaxing rule isn't floored away.
+  **That cap, and #530's pad-override cap, reach `rules.min_clearance` ONLY
+  (#900)** — the net classes carry the clearance the board was routed to. They
+  used to share one key, so one part with a 2 mil pad override turned a
+  requested `--clearance 0.15` into a 0.0508 board, which the next step then
+  read back as the board's own Default class.
   Grade a ruled board with plain `check_drc.py` (it auto-reads); a hand-rolled
   checker that ignores the dru will manufacture phantom flags on relaxed layers
   and miss real ones on tightened layers.
@@ -248,6 +280,39 @@ Validate routed boards against the *real* spec, with the right checker — most
   `--no-clamp-netclasses` flags are **removed** (the `--clearance` ceiling replaces
   both; `--net-clearances <json>` gives explicit per-net control). Grade multi-class
   boards at the netclasses that survived (`kicad_drc_compare._staged_copy`).
+
+- **The whole suite is `python3 tests/run_all.py`, and it fans out onto Modal.**
+  ~594 files, ~40 minutes of one laptop -- so on battery, or when you just want
+  the answer, use `modal run tests/stress/modal_suite/run_all_modal.py`
+  (default 50 shards, about the length of the slowest shard). `--shards N`,
+  `--filters "908 910"` for one family, `--fast` for the unit lane.
+  `run_all.py --shard I/N` does the splitting, so a local run and a 50-way
+  fan-out cover the SAME set -- the driver never globs `test_*.py` itself.
+  Three things that decide whether you can trust the result:
+  - **The verdict is each shard's own exit code, never the parsed counts.** A
+    container that OOMs prints no summary line at all, so a driver deciding on
+    counts would read that silence as zero failures. A shard that never
+    reported fails the run and is named.
+  - **The cloud image has NO KiCad**, so every pcbnew/wx test self-skips
+    (exit 77) into its own bucket and is NOT a pass -- and `tests/gui_parity/`
+    is not collected by `run_all` at all. Those still need a local
+    KiCad-python session (see the parity-gates list below).
+  - The image is a clean checkout of HEAD, so it is reproducible and you can
+    keep editing while it runs; `KICAD_SWEEP_DIRTY=1` ships the working tree
+    instead and stamps the provenance `+dirty` (use it to run the suite over
+    an uncommitted change).
+  - **When a cloud run fails tests that pass locally, suspect the IMAGE before
+    the code.** The first full run reported 15 such failures and not one was a
+    code defect: a missing git INDEX (`corpus_boards()` asks `git ls-files`, so
+    with no `.git` it returns `[]` and corpus tests grade an empty set instead
+    of skipping), missing Pillow, missing pytest, and a Python version
+    mismatch. The image now rebuilds the index from `git ls-files --force`
+    (never `git add -A`, which honours .gitignore and drops a
+    tracked-before-the-rule board), installs `requirements.txt`, and matches
+    the interpreter you launched with -- and it ASSERTS the board count against
+    the host at build time, so a short corpus fails the build rather than
+    quietly shrinking what the tests grade. See `tests/README.md` for the
+    table.
 
 ## What a placement run is FOR (read before grading one)
 
@@ -638,6 +703,27 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   on how the outline was spelled; and a round window's bounding-box CORNER
   escapes a round board while the circle does not. Both parse paths fill these,
   sharing one decision function (`kicad_parser.classify_outline_owners`).
+- **A footprint's own COPPER is copper (#908).** `fp_poly`/`fp_line`/`fp_arc`/
+  `fp_rect`/`fp_circle` on `F.Cu`/`B.Cu` inside a footprint block — a SOT89
+  tab, a PCB antenna, a solder-jumper bridge — parse as net-0
+  `Segment(graphic=True, owner_ref=<footprint key>)`, exactly like #337's
+  board-level `gr_*`, in BOTH parse paths. A footprint shape cannot carry a
+  `(net ...)` in KiCad, so #337's "net-tied is functional, net-less is a logo"
+  guard cannot split them: **`footprint_copper_is_functional(pad_count)` does,
+  and the writer's silkscreen mover reads the same predicate** — a footprint
+  with copper pads owns a land pattern (modelled, and NOT relocated to silk any
+  more; it used to be, on every write, on both fronts), a pad-less one is a
+  logo (relocated, as #146 has always done, and therefore not modelled). NPTH
+  pads do not count. Only the PERIMETER is modelled, never the interior fill.
+  **The obstacle map's own-pad lift is the half that is not free**: net-0
+  copper is foreign to every net including the pad it was drawn around, so
+  `check_drc.graphic_own_pad_nets` lifts the graphic segments that touch a pad
+  of their OWN footprint, per SEGMENT — never the whole cluster, or a GND route
+  would cross watchy's whole antenna. It is a subset of
+  `graphic_effective_nets(include_mutable=False)` (attrs + pads), which is a
+  subset of the checker's `include_mutable=True` answer, so **the generator can
+  never be more permissive than the checker**; do not "simplify" it onto the
+  full answer.
 - `footprint.ref_label` - Optional[RefLabel]: the Reference silkscreen text's
   geometry (#481): `at_x/at_y` (footprint-LOCAL mm), `rotation` (the stored
   angle, which is ABSOLUTE board angle — probed on KiCad 10, `% 360`

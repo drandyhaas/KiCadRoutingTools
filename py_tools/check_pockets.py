@@ -49,6 +49,11 @@ or refuse the handoff itself.
 
 Exit codes: 0 always (report), 2 usage/load error.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 
 import argparse

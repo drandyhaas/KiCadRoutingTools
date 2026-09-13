@@ -3538,6 +3538,16 @@ class RoutingDialog(wx.Dialog):
                     from shapely.geometry import Polygon
                 except ImportError:
                     missing.append('shapely')
+                # Pillow is deliberately NOT probed here (#887). This block
+                # re-implements startup_checks.check_python_dependencies BY
+                # HAND, so it must mirror that list and no more -- and Pillow
+                # is not on it, because routing does not need Pillow. The GUI's
+                # only raster consumer is the movie recorder, which is inert
+                # until the Advanced tab's checkbox is ticked (unchecked by
+                # default), so blocking the whole routing dialog on it would
+                # refuse a board this GUI can route. The raster gate lives in
+                # startup_checks.check_render_dependencies, at the render entry
+                # points.
 
                 if missing:
                     msg = f"Missing Python dependencies: {', '.join(missing)}\n\n"

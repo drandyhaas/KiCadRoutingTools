@@ -93,12 +93,13 @@ ROWS = [
      "        return all(c <= u + legality.EPS for c, u in zip(cand, cur))",
      (T797S,), 'KILLED'),
 
+    # RE-ANCHORED for #893/#916, which inserted `body_model=` between the
+    # exclusive zones and `bounds = state.board`. The MUTATION is unchanged in
+    # kind: hand the seed state no exclusive zones at all.
     ('the-seed-state-drops-the-exclusive-zones', 's',
      "        exclusive_zones=(floorplan.zone_entries(intent, blocks)\n"
-     "                         if intent else ()))\n"
-     "    bounds = state.board",
-     "        exclusive_zones=())\n"
-     "    bounds = state.board",
+     "                         if intent else ()),",
+     "        exclusive_zones=(),",
      (T797S,), 'KILLED'),
 
     ('the-external-caller-drops-them', 'ps',
@@ -337,6 +338,12 @@ ROWS = [
      (T797P, T797S), 'SURVIVED'),
 
 ]
+
+# Every anchor must match its target exactly once BEFORE anything is
+# rewritten. A stale anchor otherwise reports BROKEN mid-run, after the
+# witnesses have been paid for; this is the one second (#877).
+from mutation_anchors import preflight   # noqa: E402
+preflight(__file__)
 
 
 def _uncache(path):

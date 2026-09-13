@@ -39,6 +39,11 @@ looks like the board redrawing itself between beats.
     python3 make_film.py seed.kicad_pcb \\
         'delta.png=what moved, and by how much' placed.kicad_pcb -o film.gif
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': ['placement', 'combined'], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (py_tools -> py_router/py_placer on sys.path)
 import argparse
 import fnmatch
@@ -116,6 +121,11 @@ def shots_from_ledger(ledger_path, store_root=None, work=None,
     description of it.
     """
     from board_store import BoardStore, Ledger
+    # CALL the ladder, do not mirror it: converge writes these rows and owns
+    # what each field means. Function-scope only to keep this module importable
+    # by anything that does not need the ledger reader; `import _path` at the
+    # top has already put py_placer on sys.path.
+    from converge import row_label as _row_label
     entries = Ledger(ledger_path).entries()
     # `boards`, not `store`: `converge.py record` is the only writer of a ledger
     # and it puts the content-addressed boards in `<ledger dir>/boards`
@@ -146,7 +156,13 @@ def shots_from_ledger(ledger_path, store_root=None, work=None,
         except Exception:
             continue
         argv = e.get('lever_argv') or []
-        lever = ' '.join(str(a) for a in argv[:6]) if argv else (e.get('lever') or '')
+        # `or ''` used to end the ladder here, so a row whose whole content
+        # is a human's reason -- an --exhausted declaration, which carries
+        # `lever: null` by construction -- got a blank caption in the film
+        # that is meant to be the ledger read out loud. converge.row_label
+        # is the one ladder (lever -> exhausted.reason -> stop_condition).
+        lever = (' '.join(str(a) for a in argv[:6]) if argv
+                 else _row_label(e))
         head = f"i{e.get('iteration', '?')} {e.get('kind', 'completion')}"
         if acc:
             shots.append(board_shot(dest, f"{head}  {lever}".strip(), True))

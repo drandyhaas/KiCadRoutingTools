@@ -432,6 +432,19 @@ def get_net_history_summary(state: RoutingState, net_id: int, pcb_data: 'PCBData
                          f"{iters} iteration(s)"
                          + (f" ({', '.join(bits)} mm)" if bits else ""))
 
+        elif event == "sealed_by_snpc":
+            # #907. The remedy is a FLAG, so name the flag and its value --
+            # an event with no arm here prints bare and loses its details,
+            # which is exactly how this cause stayed invisible.
+            lines.append(
+                f"[{seq}] Pad {details.get('pad', '?')} sealed by "
+                f"--same-net-pad-clearance "
+                f"{details.get('same_net_pad_clearance', '?')}: every via "
+                f"site within {details.get('escape_reach_mm', '?')}mm is banned "
+                f"by that flag alone (needs "
+                f"{details.get('required_surround_mm', '?')}mm of clear pad "
+                f"surround)")
+
         elif event == "fanout_dropped":
             # The fix for this one is UPSTREAM (re-run the fanout), which is
             # the point of naming it apart from the two above.

@@ -17,8 +17,14 @@ default install paths); pass boards as arguments:
 
 Exit status: 0 = all boards match, 1 = differences found, 2 = error.
 """
+
+#: #937 registry: which door(s) show this tool, and whether it changes
+#: the board. Read by krt_registry.py -- by AST, never imported.
+KRT_TOOL = {'scope': [], 'kind': 'instrument'}
+
 import _path  # noqa: F401  (#522: makes ../py_router importable)
 
+import argparse
 import os
 import sys
 
@@ -45,9 +51,21 @@ def _reexec_with_kicad_python():
 
 
 def main() -> int:
-    boards = [a for a in sys.argv[1:] if not a.startswith('-')]
+    # A REAL parser. This printed its docstring and exited 2 on `--help`, so a
+    # capability probe could not tell it from a tool that had crashed (#937) --
+    # and it is the parser-parity gate, the one tool whose absence from a
+    # catalogue would be least noticed. Parsed BEFORE the pcbnew re-exec, so
+    # `--help` answers under a plain python3 as well as KiCad's.
+    ap = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='Exit status: 0 = all boards match, 1 = differences found, '
+               '2 = error.')
+    ap.add_argument('boards', nargs='*',
+                    help='the .kicad_pcb file(s) to compare, both ways')
+    boards = ap.parse_args().boards
     if not boards:
-        print(__doc__)
+        ap.print_help()
         return 2
 
     try:
