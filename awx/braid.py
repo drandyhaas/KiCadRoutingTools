@@ -409,7 +409,27 @@ HEAD_L5 = int(os.environ.get('BRAID_HEAD_L5', '0') or 0)
 # with the seed on, the search hill-climbs a target that moves under it.
 # The judge call is also faster without it (K41 6.82 s vs 7.15 s). If the
 # K28 loss can be explained or recovered, this is worth revisiting.
-L5_SEED = int(os.environ.get('BRAID_L5_SEED', '1') or 0)    # 0: cold solves, no cross-trial coupling
+#   0 = cold solves (no warm start at all; falls back to level 4's residue)
+#   1 = warm start keyed on the NET-SET -- today's behaviour, and the leaky
+#       one: a rejected trial's answer seeds the next plan's judgment
+#   2 = warm start keyed on the PLAN's own geometry hash -- the reuse the
+#       seed was bought for, without the cross-trial leak.
+#       MEASURED AND IT DOES NOT PAY. Full local ladder, against mode 1 /
+#       mode 0:
+#           K15  12/518   12/518    -> 12/507
+#           K28  34/1154  36/1459   -> 40/1259   WORST OF THE THREE
+#           K35  76/1376  76/1376   -> 76/1376   (repeat: identical)
+#           K41 107/2open 102/1open -> 107/2open (mode 1's answer, not 0's)
+#       Two things that says. At K41 the plan-keyed seed still HITS and
+#       reproduces mode 1 exactly, so mode 0's K41 gain came from having NO
+#       seed -- not from removing the cross-trial leak. And K28 across
+#       net-set / none / plan is 34 / 36 / 40, which is not monotone in how
+#       much leakage is removed: the seed perturbs a near-tie and which way
+#       it falls is arbitrary. The COUPLING is still real (the judge moved
+#       5 times out of 5 after rejected trials), so this stays available --
+#       but purity here is not worth 6 vias at K28, and a fix that made the
+#       judge pure would have to pay for itself some other way.
+L5_SEED = int(os.environ.get('BRAID_L5_SEED', '1') or 0)
 # The BERTH CHOICE inside the solve (2026-09-11, latest; _alts5): a plan
 # being ranked may offer candidate berths for its residue nets (the
 # fanout loop's residue search, DST_RESIDUE=2). Each candidate is a
@@ -2874,7 +2894,23 @@ class Corridor:
         mkey = ('L5', h.hexdigest(), PROX_TRACK, TAIL_MAXCH, RESIDUE_W, VIA_NEED, VIA_SEP, ISLAND_W,
                 SLOT_REACH, SLOT_BG, cap, nodes, self._via_room_mode())
         memo = _PROFILE_MEMO
-        seed_key = frozenset(M)
+        # THE SEED'S KEY IS THE PLAN, NOT THE NET-SET (2026-09-12,
+        # BRAID_L5_SEED=2). Keyed on `frozenset(M)` -- mode 1 -- one slot
+        # serves every plan over the same nets, so a trial the search then
+        # REJECTED still seeded the next judgment. Measured: judging the
+        # IDENTICAL plan after five different rejected trials moved the
+        # answer 5 times out of 5 at K41, and clearing the global restored
+        # the cold answer exactly. A judge that is not a pure function of
+        # the plan it is handed cannot rank plans.
+        # `h.hexdigest()` already identifies the plan's GEOMETRY exactly --
+        # every lane's samples, walls and room, plus its tooth and dest
+        # layers -- so keying on it confines a seed to the plan that
+        # produced it. Note it deliberately EXCLUDES `cap`/`nodes`, which
+        # the memo key carries: that is what still lets the LAY pass warm
+        # start from the JUDGE pass's answer FOR THE SAME PLAN, which is
+        # the reuse the seed was bought for. What it stops is reuse across
+        # DIFFERENT plans, which is the leak.
+        seed_key = h.hexdigest() if L5_SEED >= 2 else frozenset(M)
         solve_note = 'memo'
         if mkey in memo:
             x, msg = memo[mkey]
