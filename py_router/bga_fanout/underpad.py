@@ -1976,7 +1976,10 @@ def generate_underpad_escape(footprint: Footprint,
                 return True
         return False
 
-    escaped = set()      # id(pad) of balls already committed (top-layer escapes)
+    # (an `escaped` set of id(pad) lived here and was WRITE-ONLY -- never
+    # read. Removed 2026-09-12: provably inert, and an id()-keyed set one
+    # edit away from being iterated, which is the defect class that
+    # produced the address-ordered rip list fixed in this same file.)
 
     def try_coupled_endon(pp, nn, candidates):
         """Escape a 'stacked' pair (the two balls in line toward the nearest edge)
@@ -2065,7 +2068,6 @@ def generate_underpad_escape(footprint: Footprint,
                                            'layer': layers[L], 'net_id': pad.net_id})
                         if use_via:
                             _drop_escape_via(pad)
-                    escaped.update((id(pp), id(nn)))
                     return True
         return False
 
@@ -2099,7 +2101,6 @@ def generate_underpad_escape(footprint: Footprint,
         if (try_coupled(pp, nn, [(top_idx, False)])
                 or try_coupled_endon(pp, nn, [(top_idx, False)])):
             n_coupled += 1
-            escaped.update((id(pp), id(nn)))
         else:
             remaining_pairs.append((base, pp, nn))  # try an inner coupled escape
 
@@ -2984,6 +2985,21 @@ def generate_underpad_escape(footprint: Footprint,
                                 f'{NEG_MAX_BLOCKERS} limit'))
                 continue
             n_tried += 1
+            # DETERMINISTIC BLOCKER ORDER (2026-09-12). `bl` is a SET of
+            # id(pad) -- memory addresses -- so iterating it, or letting a
+            # stable sort break ties with it, orders the rip and the re-lay
+            # by whatever the allocator did that run. Measured: two runs of
+            # IDENTICAL code on the identical board printed
+            # ripped ['SDQ14','SBA0','SDQ6'] and ['SDQ14','SDQ6','SBA0'].
+            # The re-lay order is load-bearing (which blocker gets its gap
+            # back first decides the copper), so this was a wall-clock-class
+            # defect: the same input could give different output. Tie-break
+            # on the pad's own identity instead, which is a property of the
+            # board rather than of the process.
+            def _bl_key(i):
+                q = by_id[i]
+                return (-depth(q), str(q.net_name), str(q.pad_number))
+            bl = sorted(bl, key=_bl_key)
             _bl_names = [by_id[i].net_name.split('/')[-1] for i in bl]
             before = dict(alive)
             s0 = score(alive)
@@ -2997,7 +3013,7 @@ def generate_underpad_escape(footprint: Footprint,
                 apply_state(alive)
                 continue
             alive[id(p)] = do_commit(p, mv, mode, path, carve, 0)
-            for pid in sorted(bl, key=lambda i: -depth(by_id[i])):
+            for pid in bl:          # already in _bl_key order
                 q = by_id[pid]
                 mq = _move_of(q)
                 for lvl in range(max_level + 1):
