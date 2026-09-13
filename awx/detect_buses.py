@@ -42,13 +42,22 @@ Pt = Tuple[float, float]
 # file per two-hex-digit prefix of the signature under tmp/taut_memo/,
 # loaded on first touch, only dirty shards written, merged with what is
 # on disk first (a parallel chain's additions survive), entries untouched
-# for TAUT_MAX_AGE days dropped at write time. The old single file is
+# beyond TAUT_MAX_ENTRIES per shard dropped oldest-first at write time.
+# The old single file is
 # migrated into shards once and renamed.
 _TAUT_MEMO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'tmp', 'taut_memo')
 _TAUT_MEMO_LEGACY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  'tmp', 'taut_memo.json')
-TAUT_MAX_AGE = 14 * 86400
+# WORK-BOUNDED, NOT CLOCK-BOUNDED (2026-09-12). This was
+# `TAUT_MAX_AGE = 14 * 86400`: whether a cached string survived a write was
+# decided by the CALENDAR. The memo is a pure cache so it could not change
+# an answer, but a wall clock deciding what the next process sees is
+# exactly what the repo's no-timeouts rule forbids, and it made "what is
+# in the memo" depend on when you last ran. A shard is now capped by ENTRY
+# COUNT, oldest-inserted first, which is deterministic given the same
+# sequence of runs.
+TAUT_MAX_ENTRIES = int(os.environ.get('TAUT_MAX_ENTRIES', '20000'))
 _TAUT_SHARDS: Dict[str, dict] = {}
 _TAUT_DIRTY = set()
 _TAUT_MIGRATED = False
@@ -185,10 +194,16 @@ def _memo_put(key, pts):
     prefix = _shard_of(key)
     _memo_shard(prefix)[key] = (array('d', (c for pt in pts for c in pt)), _t.time())
     _TAUT_DIRTY.add(prefix)
+    _TAUT_SINCE_SAVE[0] += 1
 
 
-_TAUT_SAVE_EVERY = 60.0     # s between writes: the judge's trials each add strings, and 111 writes of a K41 search were 24 s
-_TAUT_LAST_SAVE = [0.0]
+# ...and the WRITE trigger is a count of new entries, not a 60-second
+# clock. Same reason: the old rule made which entries reached disk for the
+# NEXT process a function of wall time. 111 writes of a K41 search cost
+# 24 s, so the point of the throttle was to batch them -- a count batches
+# them just as well and reproducibly.
+_TAUT_SAVE_EVERY_N = int(os.environ.get('TAUT_SAVE_EVERY_N', '400'))
+_TAUT_SINCE_SAVE = [0]
 
 
 def _memo_save(force=False):
@@ -199,10 +214,10 @@ def _memo_save(force=False):
     import time as _t
     if not _TAUT_DIRTY:
         return
-    now = _t.time()
-    if not force and now - _TAUT_LAST_SAVE[0] < _TAUT_SAVE_EVERY:
+    if not force and _TAUT_SINCE_SAVE[0] < _TAUT_SAVE_EVERY_N:
         return
-    _TAUT_LAST_SAVE[0] = now
+    _TAUT_SINCE_SAVE[0] = 0
+    now = _t.time()          # still STAMPED, for a human reading a shard
     try:
         os.makedirs(_TAUT_MEMO_DIR, exist_ok=True)
         for prefix in sorted(_TAUT_DIRTY):
@@ -213,8 +228,9 @@ def _memo_save(force=False):
                     disk[k] = v
                 elif k not in disk:
                     disk[k] = (v[0], now)
-            keep = {k: v for k, v in disk.items()
-                    if v[1] is None or now - v[1] <= TAUT_MAX_AGE}
+            keep = disk
+            if len(disk) > TAUT_MAX_ENTRIES:      # oldest INSERTED first
+                keep = dict(list(disk.items())[-TAUT_MAX_ENTRIES:])
             _write_shard(prefix, keep, now)
             _TAUT_SHARDS[prefix] = keep
     except OSError:
