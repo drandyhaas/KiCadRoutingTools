@@ -139,7 +139,11 @@ KEEP = re.compile(
 # just later. The one thing speed can still change is whether an arm
 # finishes inside `timeout` -- and that timeout is itself a wall clock, so
 # a starved arm surfaces as NO GRADE rather than as wrong copper.
-@app.function(cpu=(0.125, 4), memory=(1024, 3072), timeout=7200, max_containers=200)
+# RESERVED memory is what you PAY for; the second number is only a CEILING,
+# and a ceiling costs nothing until it is used. (1024, 3072) was the worst of
+# both -- a gigabyte reserved per container AND a 3 GB cap over a 169k-row
+# CP-SAT solve that ratchets its arena. Reserve little, cap generously.
+@app.function(cpu=(0.125, 4), memory=(256, 8192), timeout=7200, max_containers=200)
 def run_arm(arm: dict) -> dict:
     """One (tag, K) chain, graded, with the lines worth reading back."""
     tag, K = arm["tag"], int(arm["K"])
