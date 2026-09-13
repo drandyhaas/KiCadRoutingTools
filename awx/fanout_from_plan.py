@@ -36,6 +36,7 @@ import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 import detect_buses as db  # noqa: E402
 import plan_ends as pe  # noqa: E402
+import schedule as sch  # noqa: E402  -- lis_keep, for plan_lis
 import source_realize as sr  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
 
@@ -380,6 +381,90 @@ def _spent():
     return PLAN_CALLS[0]
 
 
+# SF_ESC_W (2026-09-12, README TODO 1b): the weight on the ESCAPE half of
+# the judge -- tooth vias + berth vias + the ride. 1.0 is the judge exactly
+# as it has always been; 0.0 keeps only the CORRIDOR half (the braid
+# planner's own layer changes and cross-corridor dives).
+# WHY THIS KNOB EXISTS. Pairwise rank agreement with the ROUTED via count,
+# over the distinct plans on disk:
+#     statistic                     K41    K35
+#     pred (the judge as it stands)  59%    51%
+#     its CORRIDOR half alone        62%    64%
+#     its ESCAPE half alone          53%    41%
+# The judge is WORSE THAN ITS OWN CORRIDOR HALF at both K, and the reason
+# is a SIGN, not a scale: at K35 pearson(escape, LIS) = +0.57 while
+# pearson(escape, routed) = -0.34. A plan that spends more escape vias has
+# a longer crossing-free chain and routes BETTER -- the human's trade, a
+# dogbone at the ball bought to fix the order -- and the judge charges it
+# +1 per via. Sweeping corridor + w*escape at K35 goes 64% (w=0) to 51%
+# (w=1). This is the reason a 51-64% comparator makes MORE SEARCH WORSE,
+# and it is a level the swimmer-price work could not reach.
+# Default 1.0 until the K ladder says otherwise.
+SF_ESC_W = float(os.environ.get('SF_ESC_W', '1'))
+
+# SF_ACCEPT_MARGIN (2026-09-12, README TODO 1c): how much a candidate must
+# BEAT the incumbent by before the search takes it. 0 = off, the plain
+# tuple compare this search has always done.
+# WHY. Over the K35/K41 logs the search took 965 moves with a median
+# improvement of 2.00 judged vias, 527 of 823 under 3 -- and 142 of them
+# with the judged cost RISING, because the key is lexicographic on the
+# residue count and a residue drop trumps any cost. A comparator right
+# 51-64% of the time (see SF_ESC_W), accepting at 1e-6, is a random walk
+# with a drift. That is why deleting the wall clock cost K35 58 -> 66:
+# THE CLOCK WAS AN EARLY STOP, and an early stop is a crude regulariser.
+# This is the same regulariser made work-free and deterministic, so it
+# keeps the no-clocks rule. It also gives a free control: a margin large
+# enough to accept nothing reproduces the pre-search plan exactly.
+ACCEPT_MARGIN = float(os.environ.get('SF_ACCEPT_MARGIN', '0') or 0)
+
+# SF_LIS_GUARD (2026-09-12, README TODO 1b): refuse a move that SHORTENS the
+# longest crossing-free chain. 0 = off, the default.
+# WHY A GUARD AND NOT A COST. LIS of launch->target is the best single
+# statistic measured against the routed via count (K41 64%, K35 76%, against
+# the judge's own 59%/51%) -- but the settled table is full of correlations
+# that became objectives and lost, and this one has a mechanism for it: two
+# pages hold at most twice the chain, so chain length is a CAPACITY, and
+# buying capacity you already have costs vias for nothing (measured at K41,
+# where slack is 1: DST_XING bought chain 21 -> 22 and paid 80 -> 98 vias).
+# A guard spends nothing when the capacity is not binding and refuses the
+# moves that eat it when it is.
+# Summed PER CORRIDOR, because lanes only cross inside one.
+LIS_GUARD = int(os.environ.get('SF_LIS_GUARD', '0') or 0)
+
+
+def plan_lis(bp):
+    """Total longest crossing-free chain of a braid plan: per corridor, the
+    lanes in LAUNCH order, the LIS of their TARGET ranks. `bp` is
+    braid.plan_braid's answer, which carries both indices per net."""
+    by_c = {}
+    for nm, d in bp.items():
+        li, ti = d.get('launch_idx'), d.get('target_idx')
+        if li is None or ti is None:
+            continue
+        by_c.setdefault(d.get('corridor'), []).append((li, ti))
+    tot = 0
+    for pairs in by_c.values():
+        pairs.sort()
+        tot += len(sch.lis_keep([t for _l, t in pairs]))
+    return tot
+
+
+def accept_key(k1, k0, lis1=None, lis0=None):
+    """Is k1 = (residue, judged) worth taking over the incumbent k0?
+    At margin 0 this is `k1 < k0` -- unchanged. Above it, a move must win
+    by the margin on the judged cost, and a residue drop must no longer
+    trump a cost rise of any size: it may cost at most the margin.
+    `lis1`/`lis0` are the two plans' crossing-free chains (plan_lis); under
+    LIS_GUARD a move that shortens the chain is refused whatever it costs."""
+    if LIS_GUARD and lis1 is not None and lis0 is not None and lis1 < lis0:
+        return False
+    if not ACCEPT_MARGIN:
+        return k1 < k0
+    if k1[0] != k0[0]:
+        return k1[0] < k0[0] and k1[1] <= k0[1] + ACCEPT_MARGIN
+    return k1[1] < k0[1] - ACCEPT_MARGIN
+
+
 def judge_by_braid(st, choice, board, achieved=None, bp=None):
     """THE judgment of a candidate plan: the braid's own planner
     (braid.plan_braid) on the plan's ends -- corridors as the braid forms
@@ -400,7 +485,16 @@ def judge_by_braid(st, choice, board, achieved=None, bp=None):
                               changes=chg, cross=xv, swim_changes=swc)
     ride = pe.sm.ride_mm(choice, st['launch'], st['dboxes'],
                          st['sgrid'].bbox) / pe.sm.VIA_MM
-    return sum(pred.values()) + ride, pred, bp, plan
+    if SF_ESC_W == 1.0:
+        return sum(pred.values()) + ride, pred, bp, plan
+    # split pred back into its two halves. Per net vias_from_pages emits
+    # tooth_vias + cross + (changes | SWIM) + m.vias, so the escape half is
+    # exactly the tooth and berth vias and everything else is corridor --
+    # cross-corridor dives included, which is where they belong.
+    esc = (sum(st['tooth_vias'].get(n, 0) for n in choice)
+           + sum(m.vias for m in choice.values()))
+    cor = sum(pred.values()) - esc
+    return cor + SF_ESC_W * (esc + ride), pred, bp, plan
 
 
 # DST_SEARCH=1 (2026-09-10): after the greedy selection, a LOCAL SEARCH over
@@ -839,8 +933,8 @@ def residue_search(st, choice, board, log=print, sweeps=4):
     def judge(ch):
         f, pred, bp, _pl = judge_by_braid(st, ch, board)
         res = [nm for nm in ch if bp.get(nm, {}).get('page') is None]
-        return (len(res), f), res, pred
-    key0, res, pred = judge(choice)
+        return (len(res), f), res, pred, (plan_lis(bp) if LIS_GUARD else None)
+    key0, res, pred, lis0 = judge(choice)
     f0, n0 = key0[1], key0[0]
     n_moves = n_judged = 0
     pool = None
@@ -897,21 +991,21 @@ def residue_search(st, choice, board, log=print, sweeps=4):
                         k = (len(r2), f)
                         n_judged += 1
                         if best is None or k < best[0]:
-                            best = (k, m, r2, p2)
+                            best = (k, m, r2, p2, plan_lis(bp) if LIS_GUARD else None)
                     cands = []
             for m in cands:
                 trial = dict(choice)
                 trial[nm] = m
-                k, r2, p2 = judge(trial)
+                k, r2, p2, l2 = judge(trial)
                 n_judged += 1
                 if best is None or k < best[0]:
-                    best = (k, m, r2, p2)
-            if best is not None and best[0] < key0:
+                    best = (k, m, r2, p2, l2)
+            if best is not None and accept_key(best[0], key0, best[4], lis0):
                 log(f'    residue search: {nm} {sr.fmt_ask(choice[nm])} -> {sr.fmt_ask(best[1])}: '
                     f'residue {key0[0]} -> {best[0][0]}, judged {key0[1]:.2f} -> {best[0][1]:.2f}')
                 choice = dict(choice)
                 choice[nm] = best[1]
-                key0, res, pred = best[0], best[2], best[3]
+                key0, res, pred, lis0 = best[0], best[2], best[3], best[4]
                 n_moves += 1
                 improved = True
         if not improved:
@@ -1462,6 +1556,149 @@ def _st_with_src(st, nm, m):
     return st2
 
 
+# SRC_EXCHANGE (2026-09-12, README TODO 12 / audit item c1): the source
+# 2-OPT, as a PROBE. Every arm runs SRC_ROUNDS=0, so U1's teeth are the
+# bench's own fanout and the source disagreement with the human is an
+# INPUT rather than a result -- but a tooth is physical copper, so a plan
+# that exchanges two nets' launch points is not realizable without a
+# re-fan, and three sessions of source arms have measured null.
+# This asks the cheap question FIRST: under the braid's own judge, does
+# ANY pairwise exchange of two nets' launch points improve the plan at
+# all? If none does, the realize build is not worth writing and the source
+# lever is dead on the merits rather than dead on the engine. If some do,
+# the gains name exactly which pairs a re-fan should target.
+# It changes NOTHING -- it judges and logs. Cost is one planner call per
+# pair tried, so it is capped.
+SRC_EXCHANGE = int(os.environ.get('SRC_EXCHANGE', '0') or 0)
+
+
+# SF_ROUTE_SCREEN (2026-09-12): THE ROUTE AS THE PASS'S OWN JUDGE.
+#
+# The destination pass loop accepts and re-plans on `planner judge of the
+# LAID board` -- the surrogate. Measured, that surrogate ranks plans at
+# ~50% against the routed via count, has no resolution where the search
+# works (28 of 39 K41 boards share ONE judged cost while spanning 54-86
+# routed vias), and -- the part that matters -- is BLIND TO REFUSALS,
+# which carry ~80% of its error. A lane the router refuses is where the
+# model is cheapest and the copper is dearest, so optimising the surrogate
+# walks INTO the refused region.
+#
+# The refusals are not mysterious: every one of 174 rip min-cut probes
+# names a cut set of THIS RUN'S OWN LANES (mean 5.2), never static copper.
+# The model's lanes coexist; the router lays them sequentially and the
+# loser pays (+1.45 vias at K41 over its plan, 527 cases).
+#
+# So: run the real braid on the laid board and read its refusal set. Not
+# the full braid -- ATTEMPT 0 ONLY (BRAID_ATTEMPTS=1), which is the first
+# pass with no rip ladder and no re-plan. That is the cheap half: ~30 s at
+# K41 against ~1.3 min for the full braid, and refusals are exactly what
+# attempt 0 already reports.
+#
+# HOW THIS DIFFERS FROM replan.py, which also uses the route as judge:
+# replan is an OUTER driver over a FINISHED board, moving ONE NET at a
+# time and re-braiding to confirm. This is INSIDE the chain's own pass
+# loop, judging the WHOLE PLAN, and it replaces the surrogate rather than
+# repairing what the surrogate chose. They compose: fewer bad passes
+# shipped means less for replan to repair.
+#
+# 1 = MEASURE ONLY: run the screen, log refused-vs-swimmers, change
+#     nothing. What that answers before any behaviour depends on it: what
+#     the screen costs, and whether its refusal set differs from the
+#     planner's swimmer set usefully enough to be worth deciding on.
+# 2 = DECIDE: also feed the refused lanes back as the nets to free.
+# 0 = off (default).
+SF_ROUTE_SCREEN = int(os.environ.get('SF_ROUTE_SCREEN', '0') or 0)
+# work-based budget: screens, never seconds.
+SF_ROUTE_SCREEN_CALLS = int(os.environ.get('SF_ROUTE_SCREEN_CALLS', '8'))
+_SCREEN_CALLS = [0]
+
+
+def route_screen(board_path, names, dref, log=print):
+    """Braid `board_path` for ONE attempt and return the refused nets.
+
+    Runs the production braid as a subprocess, exactly as the chain's own
+    braid stage does, so the screen sees what the chain will see -- no
+    second implementation to drift. Returns None when the budget is spent
+    or the braid could not be read, so a caller can tell "no answer" from
+    "nothing refused"."""
+    import re, subprocess, tempfile   # `re` is not a module-level import here
+    if _SCREEN_CALLS[0] >= SF_ROUTE_SCREEN_CALLS:
+        return None
+    _SCREEN_CALLS[0] += 1
+    env = dict(os.environ)
+    env['BRAID_ATTEMPTS'] = '1'          # attempt 0 only: no rip ladder
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, 'screen')
+        r = subprocess.run(
+            [sys.executable, '-u', os.path.join(HERE, 'braid.py'),
+             '--board', board_path, '--dest', dref,
+             '--nets', ','.join(names), '--out', out],
+            capture_output=True, text=True, env=env)
+    # SILENCE IS NOT SUCCESS, and here it is also not FAILURE. The braid
+    # prints "REFUSED nets (left open): [...]" ONLY when something was
+    # refused (braid.py:8005, guarded by `if refused:`), so an absent line
+    # means EITHER a clean route OR a braid that died. Those must not
+    # collapse to the same answer -- an empty refusal set is the best
+    # possible result and a dead screen is no result at all. Decide on a
+    # positive success marker ("wrote <board>:", printed on every completed
+    # braid) and treat its absence as no verdict.
+    ok = (r.returncode == 0) and ('wrote ' in r.stdout)
+    if not ok:
+        tail = [l for l in r.stdout.splitlines()[-3:] if l.strip()]
+        log(f'    route screen: NO VERDICT (rc={r.returncode}) {tail}')
+        return None
+    m = re.findall(r'REFUSED nets \(left open\): \[(.*?)\]', r.stdout)
+    if not m:
+        return []                       # routed clean: nothing refused
+    return [x.strip().strip("'\"") for x in m[-1].split(',') if x.strip()]
+SRC_EXCHANGE_PAIRS = int(os.environ.get('SRC_EXCHANGE_PAIRS', '60'))
+
+
+def _st_swap_src(st, a, b):
+    """`st` with nets `a` and `b` trading launch points -- the same four
+    fields _st_with_src touches, exchanged rather than replaced."""
+    st2 = dict(st)
+    for key in ('launch', 'tooth0', 'tooth_vias'):
+        d = dict(st[key])
+        if a in d and b in d:
+            d[a], d[b] = d[b], d[a]
+        st2[key] = d
+    so = dict(st.get('src_over') or {})
+    if a in so or b in so:
+        so[a], so[b] = so.get(b), so.get(a)
+        so = {k: v for k, v in so.items() if v is not None}
+    st2['src_over'] = so
+    return st2
+
+
+def src_exchange_probe(st, choice, board, f0, log=print):
+    """Judge every pairwise source exchange among the nets the schedule
+    could not page. Reports the improving ones; changes nothing."""
+    res = [nm for nm in choice if nm in st.get('launch', {})]
+    gains = []
+    tried = 0
+    for i, a in enumerate(sorted(res)):
+        for b in sorted(res)[i + 1:]:
+            if tried >= SRC_EXCHANGE_PAIRS:
+                break
+            tried += 1
+            try:
+                f, _p, _bp, _pl = judge_by_braid(_st_swap_src(st, a, b), choice, board)
+            except Exception as e:                      # a swap the planner refuses
+                log(f'    source exchange: {a}<->{b} refused ({type(e).__name__})')
+                continue
+            if f < f0 - 1e-6:
+                gains.append((f0 - f, a, b))
+    gains.sort(reverse=True)
+    if gains:
+        log(f'  source exchange: {len(gains)} of {tried} pair(s) improve the judge; '
+            + ', '.join(f'{a}<->{b} {g:+.2f}' for g, a, b in gains[:6]))
+    else:
+        log(f'  source exchange: NO pair of {tried} improves the judge '
+            f'(judged {f0:.2f}) -- the source order is not the lever here')
+    return gains
+
+
 def _src_screen(st, nm, moves, cap, tabu):
     """The candidate teeth worth a planner call: one per distinct geometry
     (exit point, layer, face -- the kind and via site are not something the
@@ -1619,6 +1856,8 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
     key0, res, pred, bp = judge(choice)
     f0, n0 = key0[1], key0[0]
     log(f'  residue choice: {len(res)} residue net(s) {res}, judged {f0:.2f}')
+    if SRC_EXCHANGE:
+        src_exchange_probe(st, choice, board, f0, log=log)
     src_done = set()           # nets whose source move this search chose (realized by the caller)
     r0_of = {nm: ride_of(nm, choice[nm]) for nm in choice}
     n_moves = n_solves = n_judged = 0
@@ -1872,7 +2111,8 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
                                               for nm in sorted(moves))
             + f': residue {key0[0]} -> {key1[0]}, judged {key0[1]:.2f} -> {key1[1]:.2f}')
         taken = None
-        if key1 < key0:
+        if accept_key(key1, key0, plan_lis(bp1) if LIS_GUARD else None,
+                      plan_lis(bp) if LIS_GUARD else None):
             taken = (trial, key1, res1, pred1, bp1, len(moves))
         elif len(moves) > 1:
             # the joint move held the neighbours' lines; one net at a time
@@ -1882,7 +2122,9 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
                 t1[nm] = cands[nm][j - 1]
                 k1, r1, p1, b1 = judge(t1)
                 n_judged += 1
-                if k1 < key0 and (taken is None or k1 < taken[1]):
+                if accept_key(k1, key0, plan_lis(b1) if LIS_GUARD else None,
+                              plan_lis(bp) if LIS_GUARD else None) \
+                        and (taken is None or k1 < taken[1]):
                     taken = (t1, k1, r1, p1, b1, 1)
             if taken is not None:
                 nm_ = next(nm for nm in moves if taken[0][nm] is not choice[nm])
@@ -2398,6 +2640,23 @@ def fanout_equivalent(out_path, names, choice, dst_pad, dref, byname, board,
               f'vias {j["vias"]} (plan {plan_j["vias"]})'
               + (f'; unlaid {j["unlaid"]}' if j['unlaid'] else '')
               + (f'; DRC nets {sorted(drc)}' if drc else ''))
+        if SF_ROUTE_SCREEN:
+            # THE ROUTE'S OWN VERDICT on the board this pass just laid --
+            # attempt 0 of the real braid, no rip ladder. Measure-only at
+            # SF_ROUTE_SCREEN=1: what the surrogate calls a swimmer and
+            # what the router actually REFUSES are different sets, and the
+            # refused set is the one carrying ~80% of the judge's error.
+            _ref = route_screen(out_path, names, dref)
+            if _ref is None:
+                print(f'  destination pass {it}: route screen unavailable '
+                      f'(budget {_SCREEN_CALLS[0]}/{SF_ROUTE_SCREEN_CALLS})')
+            else:
+                _sw = set(j['skipped'])
+                _rf = set(_ref)
+                print(f'  destination pass {it}: ROUTE SCREEN refused {len(_rf)} '
+                      f'{sorted(_rf)}; planner swimmers {len(_sw)}; '
+                      f'refused-not-swimmer {sorted(_rf - _sw)}; '
+                      f'swimmer-not-refused {sorted(_sw - _rf)}')
         final = (dict(kept), dict(sub), st, got, ok)
         # AN ASK THE ENGINE ANSWERED WITH A STRUCTURALLY DIFFERENT BERTH is
         # banned here, whatever the judge then makes of the net. Until now a
