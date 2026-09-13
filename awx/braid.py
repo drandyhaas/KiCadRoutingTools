@@ -51,6 +51,7 @@ global allocation (which corridor yields, pushing corridors outward to
 leave the middle for a wide one) is the next thing to build.
 """
 import argparse
+import contextlib
 import math
 import re
 import os
@@ -665,6 +666,23 @@ def _note_solve(bound=None, gap=None, nodes=None, obj=None, how=''):
     _h.append((how, obj, bound, gap, nodes, SOLVE_INFO.get('tag', '')))
     if len(_h) > 200000:
         del _h[:100000]
+
+
+@contextlib.contextmanager
+def _solve_tag(tag):
+    """Name the POPULATION a solve belongs to, for BRAID_SOLVE_DUMP's `tag`
+    column. That column shipped with the dump and nothing ever wrote it, so
+    every solve in every dump read as one anonymous population -- and the
+    question the dump exists to answer ("did the choice model run at all, and
+    how often?") could not be asked of it. It matters because the residue
+    search's log is passed as `log or (lambda *a: None)`, so a choice solve
+    can run with its log DISCARDED: silence there is not absence."""
+    old = SOLVE_INFO.get('tag', '')
+    SOLVE_INFO['tag'] = tag
+    try:
+        yield
+    finally:
+        SOLVE_INFO['tag'] = old
 
 
 # BRAID_SOLVE_DUMP=<path>: append every solve's (solver, incumbent, dual
@@ -3496,15 +3514,17 @@ class Corridor:
                                 lo_n[v] = hi_n[v] = float(round(float(xs[v])))
                             elif key[0] == 'w' and key[1] != nm and key[1] in todo:
                                 lo_n[v] = hi_n[v] = float(round(float(xs[v])))
-                        xn, msg_n, ok_n = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
-                                                      lo_n, hi_n, min(L5_ALT_TIME, 10.0), L5_GAP, x0=xs,
-                                                      pscost=L5_PSCOST, nodes=200, solver=ALT_SOLVER)
+                        with _solve_tag('altsPN'):
+                            xn, msg_n, ok_n = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
+                                                          lo_n, hi_n, min(L5_ALT_TIME, 10.0), L5_GAP, x0=xs,
+                                                          pscost=L5_PSCOST, nodes=200, solver=ALT_SOLVER)
                         if ok_n and float(inst['cvec'] @ xn) < float(inst['cvec'] @ xs) - 1e-9:
                             xs = xn
                             n_pn += 1
-                xa, msg_a, ok_a = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
-                                              lo_a, hi_a, L5_ALT_TIME, L5_GAP, x0=xs, pscost=L5_PSCOST,
-                                              nodes=max(L5_ALT_NODES, 1000), solver=ALT_SOLVER)
+                with _solve_tag('altsA'):
+                    xa, msg_a, ok_a = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
+                                                  lo_a, hi_a, L5_ALT_TIME, L5_GAP, x0=xs, pscost=L5_PSCOST,
+                                                  nodes=max(L5_ALT_NODES, 1000), solver=ALT_SOLVER)
                 if not ok_a or (xs is not x0 and float(inst['cvec'] @ xa) > float(inst['cvec'] @ xs) + 1e-9):
                     xa, msg_a, ok_a = xs, 'per-net sweep', True
                 t_a = _t.time() - t_s
@@ -3522,9 +3542,10 @@ class Corridor:
                 if L5_ALT_NODES > 0:
                     # stage B: everything free, from stage A's answer
                     t_s = _t.time()
-                    xb, msg_b, ok_b = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
-                                                  np.zeros(nv), np.ones(nv), L5_ALT_TIME, L5_GAP,
-                                                  x0=xa, pscost=L5_PSCOST, nodes=L5_ALT_NODES, solver=ALT_SOLVER)
+                    with _solve_tag('altsB'):
+                        xb, msg_b, ok_b = _milp_solve(inst['cvec'], inst['rows'], inst['lb'], inst['ub'], inst['integ'],
+                                                      np.zeros(nv), np.ones(nv), L5_ALT_TIME, L5_GAP,
+                                                      x0=xa, pscost=L5_PSCOST, nodes=L5_ALT_NODES, solver=ALT_SOLVER)
                     note += f', B {_t.time() - t_s:.1f} s {msg_b[:16]}'
                     if ok_b and float(inst['cvec'] @ xb) <= obj_a + 1e-9:
                         x, msg = xb, msg_b
