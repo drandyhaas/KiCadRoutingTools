@@ -84,6 +84,15 @@ BASE_ENV = {
 # -- two identical runs of the K35 baseline came back 72 vias / 1436
 # segs and 58 / 1840.
 
+# What to read back from a replan round. `replan: best` is the verdict;
+# the round lines say KEPT or rejected and why; the audit lines are the
+# ones that decide --apply=refan vs strip, because they are where a probe
+# and its apply DISAGREE (asked one berth, laid another).
+RP_KEEP = re.compile(
+    r"replan: best|round \d+:|KEPT|rejected|not exact|CO-MOVED|"
+    r"unfaithful|not clean|ends DIFFER|LAYER |KIND |GAP off|braid \d+ s:")
+
+
 KEEP = re.compile(
     # Error/Traceback FIRST: a cloud arm that dies returns "NO GRADE" and
     # chain_k.sh prints only the File line, so without these the actual
@@ -99,6 +108,16 @@ KEEP = re.compile(
     # it. Without the ask, a sweep cannot tell an upstream (berth CHOICE)
     # divergence from a downstream (fanout LAY) one.
     r"plan \(destination pass|residue choice: \d+ residue|"
+    # WHERE THE VIAS CAME FROM. A cloud via count could be READ but never
+    # ATTRIBUTED, because the lines that say which lanes were closed by the
+    # rescue chain -- and at what price -- were all filtered out. The excess
+    # over the human is concentrated in exactly that TAIL population (lanes
+    # refused on the first pass, then closed by the x4 budget, the last call,
+    # or a blocker rip, at 5-8 vias where a first-pass lane costs 2), so a
+    # sweep without these lines cannot tell a plan change from a tail change
+    # and reads as noise.
+    r"lanes: \d+/\d+|rescued at x4|last call|kept attempt|rip \[|econ re-lay|"
+    r"unplaced|NOT escaped|cannot be reached by the spine|"
     r"destination pass \d+: planner judge|destination re-plan|berth audit|"
     r"launch order:|target order:|re-lay rungs|dp: |wrote ")
 
@@ -175,6 +194,26 @@ def run_arm(arm: dict) -> dict:
             txt = f.read_text(errors="replace").splitlines()
             logs[suffix] = [ln for ln in txt if KEEP.search(ln)][-400:]
     grade = next((ln for ln in reversed(out.splitlines()) if "GRADE" in ln), "")
+    # THE REPLAN ROUND, optional (arm["replan"] = extra argv for replan.py).
+    # replan.py reads the chain's own outputs -- tmp/TAG_fo_kK.kicad_pcb and
+    # tmp/TAG_kK.kicad_pcb -- so it can only run AFTER the chain, in the same
+    # container, and only if the chain produced them.
+    rp = arm.get("replan")
+    rp_grade, rp_secs, rp_lines, rp_rc = "", 0, [], None
+    if rp and p.returncode == 0:
+        t1 = time.time()
+        q = subprocess.run(["python3", "-u", "replan.py", tag, str(K)] + [str(a) for a in rp],
+                           cwd=wd, env=env, capture_output=True, text=True, errors="replace")
+        rp_secs, rp_rc = round(time.time() - t1), q.returncode
+        rtxt = (q.stdout + q.stderr).splitlines()
+        rp_grade = next((ln for ln in reversed(rtxt) if ln.startswith("replan: best")), "")
+        rp_lines = [ln for ln in rtxt if RP_KEEP.search(ln)][-300:]
+        # A FILTER CANNOT REPORT WHAT IT FILTERS OUT. RP_KEEP keeps the
+        # round verdicts, so a traceback matched nothing and a crashed
+        # replan came back as rc1 with an EMPTY line list -- silence where
+        # the error was. On a non-zero rc keep the raw tail as well.
+        if q.returncode != 0:
+            rp_lines = rp_lines + ["--- tail (rc %d) ---" % q.returncode] + rtxt[-25:]
     # WHERE it ran (2026-09-12). Three empty-env arms in ONE sweep from ONE
     # image returned K35 60/1583, 60/1583 and 70/1561 -- same experiment,
     # different answers. CP-SAT is pinned (num_workers=4, deterministic
@@ -197,8 +236,33 @@ def run_arm(arm: dict) -> dict:
              "cpus": os.cpu_count(), "model": model[:80],
              "fma": "fma" in flags, "avx512": "avx512f" in flags,
              "py": platform.python_version()}
+    # RETURN THE BOARD when asked. Without this a cloud arm's copper can be
+    # counted but never LOOKED AT -- and the cloud is the pipeline that plans
+    # better, so its boards are the ones worth rendering. Base64 because the
+    # result is JSON; ~300 KB a board, so ask per-arm, not by default.
+    board_b64 = None
+    if arm.get("return_board"):
+        import base64
+        bf = Path(wd) / "tmp" / f"{tag}_k{K}.kicad_pcb"
+        if bf.exists():
+            board_b64 = base64.b64encode(bf.read_bytes()).decode()
+    # ...and ANY other artifact the arm names, as tmp/-relative globs, so a
+    # DIAGNOSIS on the cloud is possible at all: the filtered `logs` above
+    # cannot carry a plan sidecar or a judge dump, and the cloud is the only
+    # place some phenomena exist (K44's SF_KEY_COST regression is inert
+    # locally -- both arms bit-identical -- so it can only be debugged here).
+    files_b64 = {}
+    for pat in (arm.get("return_files") or []):
+        import base64
+        for f in sorted((Path(wd) / "tmp").glob(pat)):
+            if f.is_file() and f.stat().st_size < 40_000_000:
+                files_b64[f.name] = base64.b64encode(f.read_bytes()).decode()
     return {"tag": tag, "K": K, "secs": secs, "rc": p.returncode,
+            "board_b64": board_b64, "files_b64": files_b64,
             "grade": grade.strip(), "env": arm.get("env") or {},
+            "replan": list(rp) if rp else None, "replan_rc": rp_rc,
+            "replan_secs": rp_secs, "replan_grade": rp_grade.strip(),
+            "replan_lines": rp_lines,
             "where": where,
             "chain_out": out.splitlines()[-60:], "logs": logs}
 
@@ -206,7 +270,9 @@ def run_arm(arm: dict) -> dict:
 @app.local_entrypoint()
 def main(arms: str = "awx/arms.example.json", out: str = "", dedupe: bool = True):
     spec = json.loads(Path(arms).read_text())
-    jobs = [{"tag": a["tag"], "K": k, "env": a.get("env") or {}}
+    jobs = [{"tag": a["tag"], "K": k, "env": a.get("env") or {},
+             "replan": a.get("replan"), "return_board": a.get("return_board"),
+             "return_files": a.get("return_files")}
             for a in spec for k in a["K"]]
     # DEDUPE BY (env, K), NOT BY (tag, K) (2026-09-12). Merging three arms
     # files that each carried their own baseline queued the SAME experiment
@@ -220,7 +286,12 @@ def main(arms: str = "awx/arms.example.json", out: str = "", dedupe: bool = True
     # collapse such a sweep to one arm and quietly answer nothing.
     seen, uniq, dropped = {}, [], []
     for j in (jobs if dedupe else []):
-        sig = (tuple(sorted(j["env"].items())), j["K"])
+        # the REPLAN ARGV is part of the experiment too: two replan arms can
+        # differ only there (--apply=refan vs strip) with an identical env,
+        # and keying on (env, K) alone would silently drop one of them --
+        # the same class of mistake as keying on the tag.
+        sig = (tuple(sorted(j["env"].items())), j["K"],
+               tuple(j["replan"]) if j["replan"] else None)
         if sig in seen:
             dropped.append(f'{j["tag"]}/K{j["K"]} (= {seen[sig]})')
             continue
