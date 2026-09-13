@@ -104,7 +104,7 @@ def _reexec_into_kicad():
         if cand == sys.executable:
             continue
         if os.path.exists(cand):
-            r = subprocess.run([cand, '-c', 'import wx, kipy'],
+            r = subprocess.run([cand, '-c', 'import wx, kipy, pcbnew'],
                                capture_output=True)
             if r.returncode == 0:
                 argv = [cand, os.path.abspath(__file__)] + sys.argv[1:]
@@ -115,7 +115,7 @@ def _reexec_into_kicad():
                     # subprocess quotes it correctly.
                     sys.exit(subprocess.run(argv).returncode)
                 os.execv(cand, argv)
-    print("ERROR: no python with wx + kipy found")
+    print("ERROR: no python with wx + kipy + pcbnew found")
     sys.exit(2)
 
 
@@ -400,8 +400,18 @@ def main():
 
 
 if __name__ == '__main__':
+    # Probe ALL THREE, not kipy alone. This gate needs wx (the real dialog),
+    # kipy (the adapter) AND pcbnew: `stage_board` authors a `.kicad_pro` with pcbnew when the fixture has none -- and `kicad_files/splitflap_driver.kicad_pcb` has none, which is deliberate (a project-less board makes the two fronts legitimately
+    # diverge, so the gate gives it one).
+    # With `kipy` as the only condition, an ordinary python3 that happens to
+    # have kicad-python installed -- which is any machine where someone ran
+    # `pip install kicad-python` -- satisfies the guard, never re-execs, and
+    # dies later on `ModuleNotFoundError: No module named 'pcbnew'`. That is
+    # the flagship parity gate reporting an ENVIRONMENT accident with the same
+    # exit code as a real divergence, on the machine most likely to be able to
+    # run it.
     try:
-        import kipy  # noqa: F401
+        import wx, kipy, pcbnew  # noqa: F401
     except ImportError:
         _reexec_into_kicad()
     sys.exit(main())
