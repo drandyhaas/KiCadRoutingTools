@@ -45,8 +45,9 @@ class ConnectorContract(unittest.TestCase):
         return path
 
     def test_public_margin_matrix_and_nonbinding_zero(self):
-        self.assertEqual(hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
-            '165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e')
+        # Git checkouts differ only by LF/CRLF; pin identical source content.
+        self.assertEqual(hashlib.sha256(SOURCE.read_bytes().replace(b'\r\n', b'\n')).hexdigest(),
+            'a9945bb0940f79672b7c6e32b7a6b9d0b135bf78030e19fcdb88e65c2139903f')
         for dx in (0., -1.45, -2.1, .4, -.1):
             path = self.board(dx)
             for copper, edge in ((.25, .25), (.55, .55), (.25, 0.), (.55, .25)):
