@@ -138,7 +138,10 @@ changing the board/requirements while the caller computed its candidate.
         candidate = temps[0][0]
         row = pv.record_write(input_file, output, [], pending=True, candidate_file=candidate)
         state = dict(output=output, input=input_file, candidate_sha256=pv.sha256_file(candidate),
-                     backups=backups, candidates=dict(temps), phase='prepared')
+                     backups=backups, candidates=dict(temps), phase='prepared',
+                     before_sha256={dst: pv.sha256_file(backup) if backup else None
+                                    for dst, backup in backups.items()},
+                     candidate_sha256s={dst: pv.sha256_file(tmp) for tmp, dst in temps})
         with open(journal, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2, sort_keys=True)
             f.flush()
@@ -170,7 +173,8 @@ changing the board/requirements while the caller computed its candidate.
                 errors.append(dict(path=dst, error=str(restore_error), backup=backups[dst]))
         # record_write can be interrupted after storing the row but before
         # returning. Cancel by ownership identity, not a post-call flag.
-        if pv._PENDING.get(pv._key(output)) is not prior_pending:
+        if output + '.krt-publish-lock' in acquired and (
+                pv._PENDING.get(pv._key(output)) is not prior_pending):
             pv.cancel_write(output)
         retain = bool(errors)
         if errors:

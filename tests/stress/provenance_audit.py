@@ -97,11 +97,21 @@ def moved_refs(a, b):
 
 
 def audit(workdir, delivered=None):
+    """Serialize the read with cooperating publishers, including final readback."""
+    lock = os.path.join(workdir, '.pose-publication-lock')
+    try:
+        os.mkdir(lock)
+    except FileExistsError:
+        return UNPROVEN, {'verdict': 'UNPROVEN', 'recovery_journal': lock,
+                          'reason': 'publication in progress or recovery required: ' + lock}
+    try:
+        return _audit(workdir, delivered)
+    finally:
+        os.rmdir(lock)
+
+
+def _audit(workdir, delivered=None):
     from placement import provenance as PV
-    journal = os.path.join(workdir, '.pose-publication-lock')
-    if os.path.exists(journal):
-        return UNPROVEN, {'verdict': 'UNPROVEN', 'recovery_journal': journal,
-                          'reason': 'publication in progress or recovery required: ' + journal}
     manifest = os.path.join(workdir, PV.REGIME_NAME)
     if not os.path.isfile(manifest):
         return UNPROVEN, {'verdict': 'UNPROVEN',

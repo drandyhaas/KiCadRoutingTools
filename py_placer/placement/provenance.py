@@ -1,4 +1,11 @@
-"""Was every pose in this board produced by a registered engine lever?
+"""Was every changed pose applied through a registered placement lever?
+
+Execution provenance does not identify who selected the coordinates. In
+particular, place_pose applies caller decisions (often a model's) and is not
+evidence of optimizer authorship. `decision_source` is a separate declaration,
+not an inference from the application tool. No provenance verdict certifies
+engineering validity. Outside an armed benchmark regime, other adapters and
+model-authored arrangements remain ordinary supported work.
 
 `fence_audit` asks a different question, correctly, and answers it every time:
 *does any file in this work dir carry the control's poses?* That is the BLIND
@@ -192,6 +199,11 @@ def commit_write(output_file: str) -> Optional[Dict]:
     Split in two so the REFUSAL can happen before the write. The gate used to
     run after it, which made refusing decorative -- the poses were already on
     disk and the exception only described a file it had helped produce.
+
+    Low-level API: callers must hold the publication lock and provide recovery
+    for both board and ledger. Production writers use publication.publish_board.
+    A missing output or failed ledger replacement retains the pending record
+    until cancellation; no successful row is appended for a missing file.
     """
     row = _PENDING.get(_key(output_file))
     if row is None:
