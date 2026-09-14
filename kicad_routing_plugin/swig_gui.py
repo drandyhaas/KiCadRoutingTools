@@ -817,8 +817,9 @@ class RoutingDialog(wx.Dialog):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
         the board's own value -- Default net-class for track/clearance/via,
-        board Constraint for the hole floor. Falls back to the control value
-        when the board value is unavailable, and is pinned UP to the fab floor."""
+        board Constraint for the hole floor. Clearance falls back to the shared
+        CLI default only when absent; other unavailable values use the control.
+        Every result is pinned UP to the fab floor."""
         if getattr(self, name + '_check').GetValue():
             val = getattr(self, name).GetValue()
             # #530 (decision 2): the Min Clearance override is the DEFAULT
@@ -836,12 +837,17 @@ class RoutingDialog(wx.Dialog):
             else:
                 netclass = _get_netclass_parameters('Default') or {}
                 board_val = netclass.get(name)
-            # A declared 0 is UNSET, not a floor of zero -- KiCad writes 0 into
-            # these fields for "not configured". Every other resolver in the
-            # tree applies that rule (list_nets.board_floor / board_floor_knobs,
-            # resolve_cli_floor, and _effective_plane_edge_clearance just above,
-            # which already guarded `> 1e-9`); this branch tested only
-            # `is not None` and so diverged from the CLI.
+            # #966: the routing CLIs retain a declared zero Default clearance
+            # as the base, then enforce_fab_floors pins it to the selected fab
+            # capability. Do not replace it with the unchecked control's value.
+            # An ABSENT class value uses the same constant as those CLIs; a
+            # stale control from an earlier override must not supply a default.
+            if name == 'clearance':
+                val = board_val if board_val is not None else defaults.CLEARANCE
+                return self._fab_floored(name, val)
+            # A declared 0 is UNSET for the other geometry controls. KiCad writes 0 into
+            # these fields for "not configured". In particular, the CLI hole
+            # resolver (resolve_cli_floor) substitutes its fixed default.
             #
             # Masked in the default tier, because _fab_floored then pins a 0.0
             # up to the 0.2 fab hole-to-hole floor and the CLI lands on 0.2

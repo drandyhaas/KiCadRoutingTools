@@ -2144,10 +2144,18 @@ class FanoutTab(wx.Panel):
             wx.Yield()
 
             pcb_data = build_pcb_data_from_board(board)
+            # #966: routing retains a declared zero then fab-floors it, but
+            # placement treats that declaration as unset (fallback 0.25).
+            # Preserve omission so the cap engine resolves its own contract;
+            # a resolved routing floor must not become a placement override.
+            # Checked overrides keep the existing fab-floored value.
+            placement_override = fanout_config.get(
+                'placement_clearance_ceiling', fanout_config.get('clearance_ceiling'))
             result = repair_fanout_clearance(
                 pcb_data,
                 pcb_file=self.board_filename,
-                clearance=fanout_config.get('clearance', defaults.BGA_CLEARANCE),
+                clearance=(fanout_config.get('clearance', defaults.BGA_CLEARANCE)
+                           if placement_override is not None else None),
                 # #768: the --clearance ceiling. The CLI switches it on the
                 # PRESENCE of the flag; a dialog has no "absent", so the switch
                 # is the control that already MEANS "I am overriding the board's

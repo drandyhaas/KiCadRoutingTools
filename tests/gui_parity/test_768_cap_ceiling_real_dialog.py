@@ -98,7 +98,13 @@ def main():
     # flat_hierarchy is the repo's only tracked board declaring a NON-Default
     # class (Default 0.2, Wide 0.4). A board with one class cannot tell a
     # working ceiling from a broken one, because there is nothing to cap.
-    board = os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pcb')
+    # #966 also parameterizes the project's Default class below. Never mutate
+    # the public fixture or strand its rule/brief siblings.
+    import tempfile
+    from copy_board import copy_board
+    workspace = tempfile.TemporaryDirectory(prefix='krt-cap-clearance-')
+    board = os.path.join(workspace.name, 'board.kicad_pcb')
+    copy_board(os.path.join(REPO, 'kicad_files', 'flat_hierarchy.kicad_pcb'), board)
     from kicad_parser import parse_kicad_pcb
     from kicad_routing_plugin.swig_gui import RoutingDialog
 
@@ -153,6 +159,7 @@ def main():
     if live is None:
         print("SKIP: pcbnew could not load the fixture board")
         return 0
+    _pcbnew.GetBoard = lambda: live
 
     ABSENT = '<<absent>>'
 
@@ -395,15 +402,53 @@ def main():
     check("an absent clearance_ceiling defaults to NO ceiling",
           got is None, "got %r" % (got,))
 
-    # -- 6. and the flat floor is unaffected by the switch ------------------
-    # The operator's number stays the pair floor either way; only whether the
-    # net CLASSES are capped by it moves.
+    # -- 6. omission reaches the placement resolver, not a routing floor ----
     cfg = dict(shared)
     cfg['clearance_ceiling'] = None
     cfg['clearance'] = 0.2
     kw = _drive(cfg)
-    check("the flat clearance is handed over regardless of the switch",
-          kw.get('clearance') == 0.2, "got %r" % (kw.get('clearance'),))
+    check("an omitted override lets placement resolve its own board floor",
+          'clearance' in kw and kw['clearance'] is None,
+          "got %r" % (kw.get('clearance', ABSENT),))
+    check("the positive board still resolves to its declared 0.2",
+          _near(_fc.resolve_pair_clearance(board, kw['clearance'])[0], 0.2))
+
+    # #966: raw Default zero routes at the physical 0.1 floor but cap repair
+    # intentionally uses its own 0.25 fallback. Exercise BOTH real producers
+    # then execute the actual placement resolver on the delivered parameter.
+    import json
+    from pathlib import Path
+    project_path = Path(board).with_suffix('.kicad_pro')
+    original_project = project_path.read_bytes()
+    native_class = live.GetDesignSettings().m_NetSettings.GetDefaultNetclass()
+    original_clearance = native_class.GetClearance()
+    try:
+        project = json.loads(original_project)
+        next(c for c in project['net_settings']['classes']
+             if c['name'] == 'Default')['clearance'] = 0.0
+        project_path.write_text(json.dumps(project), encoding='utf-8')
+        native_class.SetClearance(0)
+        for ticked, typed, routing, placement in (
+                (False, 0.73, 0.1, 0.25),
+                (True, 0.3, 0.3, 0.3),
+                # Preserve existing checked sub-fab override behavior.
+                (True, 0.05, 0.1, 0.1)):
+            dlg.clearance_check.SetValue(ticked)
+            dlg.clearance.SetValue(typed)
+            check(f"zero class: routing override={ticked}, typed={typed}",
+                  _near(dlg._effective_clearance(), routing))
+            for path, delivered in (('inline', _drive(_inline_cfg())),
+                                    ('standalone', _standalone_kw())):
+                check(f"zero class: {path} received clearance explicitly",
+                      'clearance' in delivered)
+                resolved, source = _fc.resolve_pair_clearance(
+                    board, delivered['clearance'])
+                check(f"zero class: {path} cap requirement override={ticked}, typed={typed}",
+                      _near(resolved, placement),
+                      f"resolved={resolved}, source={source}")
+    finally:
+        project_path.write_bytes(original_project)
+        native_class.SetClearance(original_clearance)
 
     # -- 7. the plan executor must not turn OMITTED into GIVEN --------------
     # `optimize_caps` deliberately skips the per-step reset so it inherits the
