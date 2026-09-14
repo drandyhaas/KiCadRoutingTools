@@ -1,0 +1,160 @@
+[
+  {
+    "field": "min",
+    "value": "nan",
+    "refused": true,
+    "reason": "overhang_mm limits must be finite and nonnegative"
+  },
+  {
+    "field": "min",
+    "value": "inf",
+    "refused": true,
+    "reason": "overhang_mm limits must be finite and nonnegative"
+  },
+  {
+    "field": "min",
+    "value": "-inf",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.min: expected >= 0.0, got -inf"
+  },
+  {
+    "field": "min",
+    "value": "-0.01",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.min: expected >= 0.0, got -0.01"
+  },
+  {
+    "field": "min",
+    "value": "True",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.min: expected a number, got True"
+  },
+  {
+    "field": "min",
+    "value": "False",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.min: expected a number, got False"
+  },
+  {
+    "field": "min",
+    "value": "'0.1'",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.min: expected a number, got '0.1'"
+  },
+  {
+    "field": "max",
+    "value": "nan",
+    "refused": true,
+    "reason": "overhang_mm limits must be finite and nonnegative"
+  },
+  {
+    "field": "max",
+    "value": "inf",
+    "refused": true,
+    "reason": "overhang_mm limits must be finite and nonnegative"
+  },
+  {
+    "field": "max",
+    "value": "-inf",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.max: expected >= 0.0, got -inf"
+  },
+  {
+    "field": "max",
+    "value": "-0.01",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.max: expected >= 0.0, got -0.01"
+  },
+  {
+    "field": "max",
+    "value": "True",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.max: expected a number, got True"
+  },
+  {
+    "field": "max",
+    "value": "False",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.max: expected a number, got False"
+  },
+  {
+    "field": "max",
+    "value": "'0.1'",
+    "refused": true,
+    "reason": "edge_connectors[0].overhang_mm.max: expected a number, got '0.1'"
+  },
+  {
+    "field": "max_setback_mm",
+    "value": "nan",
+    "refused": true,
+    "reason": "max_setback_mm must be finite and nonnegative"
+  },
+  {
+    "field": "max_setback_mm",
+    "value": "inf",
+    "refused": true,
+    "reason": "max_setback_mm must be finite and nonnegative"
+  },
+  {
+    "field": "max_setback_mm",
+    "value": "-inf",
+    "refused": true,
+    "reason": "edge_connectors[0].max_setback_mm: expected >= 0.0, got -inf"
+  },
+  {
+    "field": "max_setback_mm",
+    "value": "-0.01",
+    "refused": true,
+    "reason": "edge_connectors[0].max_setback_mm: expected >= 0.0, got -0.01"
+  },
+  {
+    "field": "max_setback_mm",
+    "value": "True",
+    "refused": true,
+    "reason": "edge_connectors[0].max_setback_mm: expected a number, got True"
+  },
+  {
+    "field": "max_setback_mm",
+    "value": "False",
+    "refused": true,
+    "reason": "edge_connectors[0].max_setback_mm: expected a number, got False"
+  },
+  {
+    "field": "max_setback_mm",
+    "value": "'0.1'",
+    "refused": true,
+    "reason": "edge_connectors[0].max_setback_mm: expected a number, got '0.1'"
+  },
+  {
+    "field": "band",
+    "value": ".3>.2",
+    "refused": true,
+    "reason": "overhang_mm minimum exceeds maximum"
+  },
+  {
+    "field": "valid",
+    "value": {
+      "min": 0
+    },
+    "refused": false,
+    "preserved": true
+  },
+  {
+    "field": "valid",
+    "value": {
+      "min": 0,
+      "max": 0
+    },
+    "refused": false,
+    "preserved": true
+  },
+  {
+    "field": "valid",
+    "value": {
+      "min": 0.05,
+      "max": 0.2
+    },
+    "refused": false,
+    "preserved": true
+  }
+]

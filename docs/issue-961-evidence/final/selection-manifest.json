@@ -1,0 +1,597 @@
+[
+  {
+    "source": "docs\\issue-961-evidence\\final\\assert_geometry.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\assert_geometry.py",
+    "sha256": "06c7f3af9bba8c7674b14bb83b0733de1e67fa39300e09e92915184fd070032d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run_parent_checks.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\run_parent_checks.py",
+    "sha256": "25e0a45c48f3143c2caab9dff38cfe9b326bc86398316470a057d67a576e2467"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_candidate_publication.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_candidate_publication.py",
+    "sha256": "f4dfb0fd65542905e029c1dbfd3ecca33f2d8894076085812dad10ccd4783b2b"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_exploratory.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_exploratory.py",
+    "sha256": "4611f7e8bd2b27a2c9dc3755c935c55cef9ed829bf62c09a24a5b252a1fdd784"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_gate_publication.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_gate_publication.py",
+    "sha256": "723c04c9642eccfdc9cae236a99eb414cdc991ce6986e6f9926d242bc8db848f"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_gate_recovery.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_gate_recovery.py",
+    "sha256": "7ca5fc4f3839f6ac4c8ad8a1a6536452f2f835f80367044ae3ca7926edad704f"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_geometry_cli.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_geometry_cli.py",
+    "sha256": "57f876de897beb1b290467747f2581c3cdee3fb07a96f6bf0e7acd2d6843210d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_publication.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_publication.py",
+    "sha256": "767c1c737545917b951caa462aa28d86f2d515426335cc27963720ac12bce365"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_publication_identity.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_publication_identity.py",
+    "sha256": "3851162a8f523ab030076cb9f0cf903b273765b831c00d6d95e772e409eb798e"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\verify_unmeasured.py",
+    "committed_path": "docs\\issue-961-evidence\\final\\verify_unmeasured.py",
+    "sha256": "f30b90a19fcfb6876e6fff06ed0f8671b9ac12a92a763b10ec7900e51cce0b25"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\REPORT.md",
+    "committed_path": "docs\\issue-961-evidence\\final\\REPORT.md",
+    "sha256": "99f49d27511c5364d51adcfd0dd751e0e16162ce23a8cef6411134e588efee4f"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-113819\\dx0-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\dx0-drc.log",
+    "sha256": "3303c07491714223c726836519c921219b976712d6ce8e088c9ecef5a31fd7ef"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-113819\\dx0p4-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\dx0p4-drc.log",
+    "sha256": "0f291f44c12a803ec00b6ac57f0b1ae84cb30cea0ab98f911603e636c8f9202a"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-113819\\dxminus0p1-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\dxminus0p1-drc.log",
+    "sha256": "575cc2d9fc3d45d70f2462718a9e6b85d1dde3487aba9ee72e69e28dfde2e655"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-113819\\dxminus1p0-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\dxminus1p0-drc.log",
+    "sha256": "0ba4f8cab1a646f842e84784a854ac00553fead42874a3dbf7544a1203f7c675"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-113819\\dxminus1p45-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\dxminus1p45-drc.log",
+    "sha256": "6b444c91f7259e61bb57b451b7fb39d02dad1b7f95b64b20674491f5e79736de"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-113819\\dxminus2p1-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\dxminus2p1-drc.log",
+    "sha256": "5cd65b3889438632fc9497633e949925809bc183ae2e4c327b7655669168e302"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-113819\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\results.json",
+    "sha256": "b85b459ac4decaeca96b32384ee3c11c4e325dee4e9b56754d61ffda4a1408af"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\dx0-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\dx0-drc.log",
+    "sha256": "b4c778cdb56f3163c2308de7edec02d7ae66bf873705106517ae73375457fadb"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\dx0p4-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\dx0p4-drc.log",
+    "sha256": "622bf752d4f7e01e4ecc48e39001ab17e068bac4172a916080880e67852cc91d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\dxminus0p1-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\dxminus0p1-drc.log",
+    "sha256": "e07ec28a6fdeb88ab76d877a5f70b84f18e6820d0f6825763a6957ecf12208b7"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\dxminus1p0-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\dxminus1p0-drc.log",
+    "sha256": "ba6bc6d8aa7fbd56300659ff3a750ce93d62ebcad507870166f05c2732b297b3"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\dxminus1p45-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\dxminus1p45-drc.log",
+    "sha256": "fb693e80a25316cc6d71b5939bb27618f9be399ccda9f0bdd1948b9bcae95a7c"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\dxminus2p1-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\dxminus2p1-drc.log",
+    "sha256": "5b9783997c3723719577382841b26bbd2ea5ada974e3b99e44c7f2c0819da79b"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\independent-assertions.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\independent-assertions.json",
+    "sha256": "4cde1d7226aa74bacb353c6777e0075e84d0a910db802da6406d2ca93414eea2"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\geometry-20260914-121122\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\geometry\\results.json",
+    "sha256": "df9caf716d0fb05ac62aea12d10c3493a039c9ff8bf724ef8679e3859a5a8dce"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\.unaided-manifest.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\.unaided-manifest.json",
+    "sha256": "5bafc3b0b128e6863eef45c022969f89d8948a6bfda891d23f66a3e5508311c3"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\accepted-audit.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\accepted-audit.log",
+    "sha256": "c8fc9eaed3eb4f98a0829bc860c3c304d4ad75fdf449b97343764091d082a20b"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\accepted-drc.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\accepted-drc.log",
+    "sha256": "258caa2b37da8063b00f60b34c6c695cb46aeb5131acdd01b0230ecd4c01ab29"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\accepted-floorplan.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\accepted-floorplan.json",
+    "sha256": "f5558f4395323c0c3b2a0ba86be2cad8fdc4e448ce629064dd4f5e61ab6493d6"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\accepted-floorplan.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\accepted-floorplan.log",
+    "sha256": "f7fdddc8780ea38f6b355ccb6aac6dd1346c83c9070c5b884d990e71d529d4bd"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\accepted.kicad_pcb",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\accepted.kicad_pcb",
+    "sha256": "d75ecfede3183982bd92d404df9cf5a5d244d68457c2b281f99cdb829e7792d3"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\accepted.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\accepted.log",
+    "sha256": "b8896043679d9a750e4c012f79b57b10cfb4f8181e104f1c2d70cf2a37166ef5"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\audit.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\audit.json",
+    "sha256": "92c455d1dd46973f064bb31160f5387ab3ee6863d59c87ec53c0532ef7c27dd6"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\declared.intent.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\declared.intent.json",
+    "sha256": "3acd2a02bebd88f9edaf7254e9156bd8e3aa19b803714d5074a5d1301c3168b2"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\dry.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\dry.log",
+    "sha256": "1aa5bc534bc2df4e6816755d570e0c8fc1412f3d47f449e5a8d60cee988c9628"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\refused.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\refused.log",
+    "sha256": "e34963d9201066f2c4846fe9012f2474b33061eaeab5728415479ece77bd7284"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-121713\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication\\results.json",
+    "sha256": "db0f242f659f7d281319dec1f3ae0932318585e7f95f9195f390d57ac5dfacce"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\reconstruct-floorplan.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\reconstruct-floorplan.json",
+    "sha256": "2d9d7020c805c6abc0db83d8ce83894bf915b02702a711412ec998ba26637c63"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\reconstruct-grade.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\reconstruct-grade.log",
+    "sha256": "b0ddb96b671f3260ab581652a8bb673e0b1af7c413007cbeacdd1a06892091f7"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\reconstruct.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\reconstruct.log",
+    "sha256": "da7c96943f9da193921e0d62d0be6d22ad0c2934f910ac6dbed6dd1dd5d4ac0e"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\results.json",
+    "sha256": "0d8283b48a6353033113b0d270b9bab4b9a73dcde3b6ac7b3ee7e3df07a8e227"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\seed-force-floorplan.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\seed-force-floorplan.json",
+    "sha256": "05819964e4ea6670e99919c3986d65234bff29f210db8e154dd2cbe0487cab96"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\seed-force-grade.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\seed-force-grade.log",
+    "sha256": "591ed769fa9cba4d9144ab0ace496eed3ecf4c5a5c879366de4901faae87a863"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\seed-force.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\seed-force.log",
+    "sha256": "721fc7471303a58528e3dbfad2dc29b4a73921127931c0ce63b45eb57be6ee57"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\seed-repair-floorplan.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\seed-repair-floorplan.json",
+    "sha256": "fc1ba2a40d75a523c934044a32340b719ad53592acf4285bbb828dd09832aff2"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\seed-repair-grade.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\seed-repair-grade.log",
+    "sha256": "a2a389ae016947df035001232240579c4902562256ac7484fcdf55558cd64c39"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-115442\\seed-repair.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\publication-gap-before\\seed-repair.log",
+    "sha256": "5f5c24cf412ebf997c5b655ff5f879ac39c4e5759a6f115a93a3a9e6d07f619e"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\reconstruct-existing-floorplan.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\reconstruct-existing-floorplan.json",
+    "sha256": "ee7d4557d0ac1b146dc3888f45cd07ef36ed387af0153a35eecf5cad29273ee4"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\reconstruct-existing-grade.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\reconstruct-existing-grade.log",
+    "sha256": "9931fc67d013051a6f4c6e9820c040882210b0130d4fe6953c7d2b21b82b56b8"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\reconstruct-existing.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\reconstruct-existing.log",
+    "sha256": "6d0455295050548ed45f0075d859b7835837f42d14dfcb994663ce05cb36765d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\reconstruct-fresh.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\reconstruct-fresh.log",
+    "sha256": "3fb7c45b822a23f99cd26d6fd471e009f7cd17e1692c9ee4bb19092fdb4d79f6"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\results.json",
+    "sha256": "9d111738c109ad01faef85cee8d1a03cd0e1a87785b7729758b9aaee7eff9b3c"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-force-existing-floorplan.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-force-existing-floorplan.json",
+    "sha256": "390ad02a19e4a0208a3858090c565e7953291a6265dff89d208f7b95cfa87a34"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-force-existing-grade.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-force-existing-grade.log",
+    "sha256": "d31112b804a63db0b2041d09949b5f5b62704439885f6fa302448e53dec651c7"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-force-existing.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-force-existing.log",
+    "sha256": "2e9903b050b2c16fe21dc2411c01550dbb789986fa6bd2994c838226c1215aeb"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-force-fresh.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-force-fresh.log",
+    "sha256": "fa4c29ba25582ef5d913f21aa038cc3752a17a03e36ec4104ce80c6cde6cd673"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-repair-existing-floorplan.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-repair-existing-floorplan.json",
+    "sha256": "4a1479ffb4ee9cfeeb30d66445b7768e7a079d6af476c020c7b0f61a5e37b035"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-repair-existing-grade.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-repair-existing-grade.log",
+    "sha256": "6332d5ca6120062e25ff5d96f7e1acd7eda3f5ea05ee4ad991b035fad4b12224"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-repair-existing.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-repair-existing.log",
+    "sha256": "4f1156b0a7829b1b7882228282b4192ea97c525f8637ece19c69fa7e6b8758b4"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\candidate-20260914-121056\\seed-repair-fresh.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\refusals\\seed-repair-fresh.log",
+    "sha256": "fc7b64510f588cb25e678927078403f1f2d2da4530eac84bc7f3045d6cbb7186"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_reconstruct-accepted.log",
+    "sha256": "83f83c8d5ffdc71c129a5a44f82d16c8ecf0f88f3801718f66487e14725329a7"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-dry.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_reconstruct-dry.log",
+    "sha256": "ab46ad71652f0861780376878ea86109a07ac1d5862fc860ec4bb3fe605b65b8"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_reconstruct-inplace.log",
+    "sha256": "318e1c43ed5f6ac77e4726569a0b7d1310ff40274aa00f94a7f7f4e378858f08"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-readonly.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_reconstruct-readonly.log",
+    "sha256": "eedc8868539e85871c2e9a9d6230f65041c589ae077a1a5fcca0206d0ba18135"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_seed-accepted.log",
+    "sha256": "dac084cac3cf3aa0103816668fca73633f9b819b3589b1da834b89407442f054"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-dry.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_seed-dry.log",
+    "sha256": "6795ca424d6a6475ff1322cbf41930f40bbedb41cd8c0b0f8a3b9eb18b8a1f28"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_seed-inplace.log",
+    "sha256": "e64f1f67efaa872d05d5dacac62377cd98c29a2980a51e8e53716e7ff2260635"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-readonly.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\place_seed-readonly.log",
+    "sha256": "1f8370d06262af66a1f5b8c3dedef513cebb9a738c4a00bf92c0f7976c5fe4a4"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\gate-20260914-121034\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\gates\\results.json",
+    "sha256": "351367b8fd2d42df21f6ab9ec39e7953dce24fe84adfdb5f3da775bdd4f54724"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\place_reconstruct-committed-cleanup.log",
+    "sha256": "41b06584afa9cf7af7cbd7e14e8a0e6e224facbfd192ecd803e700e1af88473f"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-partial.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\place_reconstruct-partial.log",
+    "sha256": "b76e9ecf4d51f9fbc244fc1e5cce12337307b119d427fcbb1a23e621b116d283"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-undeclared.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\place_reconstruct-undeclared.log",
+    "sha256": "220f9bca2e9b8cfc0a3b96641f1a7c911e3e9964278fbea70a3dcbabce47707a"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_seed-committed-cleanup.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\place_seed-committed-cleanup.log",
+    "sha256": "cd55de78e40a73b86bff6f933ac7b8ee07c0be6b820b6b5f5ce77bd5be3dcf0f"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_seed-partial.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\place_seed-partial.log",
+    "sha256": "3d4e18e2ebc507e26f53c4fd38f691b58bf5753607e44191b7b0bd3305d8406a"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_seed-undeclared.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\place_seed-undeclared.log",
+    "sha256": "55ddd0ac1c521f2dc3686eca7f9f2def859de645c8f80164023aedc9e5838dd4"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\results.json",
+    "sha256": "b65fe77c531af0bf89a540106afd9b69f38ab95aca81f06de559ba278d7ba7f0"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\exploratory-20260914-121113\\audit.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\exploratory\\audit.log",
+    "sha256": "f626c140e38d7077b103fd78e3ab2eddcfc830634394ddbbb84e7dff2fc17541"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\exploratory-20260914-121113\\classify.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\exploratory\\classify.log",
+    "sha256": "0fd6111420956528057ebdaa242cb76b1df5a4f4fe1fb0b9fb5ff31f8a27ea37"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\exploratory-20260914-121113\\grade.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\exploratory\\grade.json",
+    "sha256": "a5e23d40b6661e3f42b6c2dd265e1f43f2783fc8bf5b8367de39fb4f1e652e64"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\exploratory-20260914-121113\\grade.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\exploratory\\grade.log",
+    "sha256": "bac84f119eb212528e7eecd403dd9a48ecf1ab6c488cd212fb8ea7f09d72e058"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\exploratory-20260914-121113\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\exploratory\\results.json",
+    "sha256": "9fbb25e92c75c667d622eb4ed75db9c6de05bedf5cea708c886fc04902c80b5b"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\exploratory-20260914-121113\\stage.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\exploratory\\stage.log",
+    "sha256": "1d056984adc829946fce4d029bf0cbe1918ceb4df0398e63ccda701e2188a308"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\unmeasured-20260914-120835\\explicit-exit-zero.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\unmeasured\\explicit-exit-zero.json",
+    "sha256": "4212e1b8989ba1816d98ad9c48d1f39acecd4ce6ba8170817fa039000f5150e1"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\unmeasured-20260914-120835\\explicit-exit-zero.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\unmeasured\\explicit-exit-zero.log",
+    "sha256": "a94ef3db9c020735a404c2bc2e71163ca8f1941ba35fd48fa6ccff7c0caa39d0"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\unmeasured-20260914-120835\\missing.kicad_pcb",
+    "committed_path": "docs\\issue-961-evidence\\final\\unmeasured\\missing.kicad_pcb",
+    "sha256": "79977a338a1998820bba15e5042e3b03e32ea1bec369e648d99e3e3c4787ecaa"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\unmeasured-20260914-120835\\required.intent.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\unmeasured\\required.intent.json",
+    "sha256": "07046c443aa81121a4b81f30830a78402c196e9cf9b3622516c61321f9d4cce9"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\unmeasured-20260914-120835\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\unmeasured\\results.json",
+    "sha256": "83f2161ebfafd3cc135da483a8828dc2eadc6ac20e9bcc152d1df35ef288087f"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\unmeasured-20260914-120835\\strict.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\unmeasured\\strict.json",
+    "sha256": "4212e1b8989ba1816d98ad9c48d1f39acecd4ce6ba8170817fa039000f5150e1"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\unmeasured-20260914-120835\\strict.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\unmeasured\\strict.log",
+    "sha256": "922e9c6332974a77d00ccfc3d53be0d86ad90687925dbd685ce23e7753b0e0a7"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\alternate-results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\alternate-results.json",
+    "sha256": "dd527dc4804422ad192d1d75f946e4e090c780c6f103fb180291c2605d13f381"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\alternate.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\alternate.log",
+    "sha256": "a0ade30884915224a4b473f9debea356296912dbde1b4e2d55fb50b35b6bd62d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\commands.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\commands.json",
+    "sha256": "f3886ff1bfcd737c90dead4e01202e1ea23eb57d8e94b6b07cbd10686e994cf8"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_768_cap_ceiling_real_dialog.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\test_768_cap_ceiling_real_dialog.log",
+    "sha256": "dece57ef3b7f3216515f1c3876f042c0e92f36fc2576f5b55de655f6646754dd"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_960_pose_publication.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\test_960_pose_publication.log",
+    "sha256": "fd85cd7e60d186f62b648e48534b46790b1afdc829e94187e82a65f31130f13f"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_966_unset_clearance.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\test_966_unset_clearance.log",
+    "sha256": "44c33297ae3606a45d813363730698cbe6a3c2b614977237d08eb4b8e60cc5bf"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_967_edge_floor.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\test_967_edge_floor.log",
+    "sha256": "96fef6dcf7e6a9ee2d1d4a3e22ee380bf38f69982006ae6a5493a263b7c0857c"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_967_pad_geometry_coverage.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\test_967_pad_geometry_coverage.log",
+    "sha256": "f255dd7db18eb41f736d23d9f678cd11ea26c352e239e2561c50601b8446234d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_cli_postpass_coverage.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\test_cli_postpass_coverage.log",
+    "sha256": "c3202aa2701d864ccfc80afc9c09fad33c2b8a7051c6f27372d3c2ce3061b61d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_manifest_plan_parity.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\test_manifest_plan_parity.log",
+    "sha256": "653ed5589db5e66b553566607c90b8d9629bea14fbbceae1399df70cfd8f39d8"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify-results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\verify-results.json",
+    "sha256": "bbc38a69bf0e1674491b8c72b5086ac326336f36b6c02368f495581af26a6983"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\verify.log",
+    "sha256": "ff714855661a61c5ee9f295b79296d6232daf38d662ec8476b2bd51196262638"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify_cap_boundary.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\verify_cap_boundary.log",
+    "sha256": "6a82751b9929f320564eec1236e9750600633e9ff6bc345a4200fadd30b65982"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify_reader_matrix-flat_hierarchy.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\verify_reader_matrix-flat_hierarchy.log",
+    "sha256": "011b0851f23474b5fc3534f46d9b1706c74df067abbe9a9643a2b92a5cf439eb"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify_reader_matrix-glasgow_revC.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\verify_reader_matrix-glasgow_revC.log",
+    "sha256": "38f1bd1d5912aa089279bbcee9542cea61f01748f988d6450ec605200e8eb2d8"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\final-checks\\help.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\final-checks\\help.log",
+    "sha256": "861bd9fe0e1e8b2c643170917cbc6605a32c5440bc623228a7f4c5583f732d6d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\final-checks\\identity-and-checks.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\final-checks\\identity-and-checks.json",
+    "sha256": "433136f957dbe7fd0a3341f7567a84b7ede0a6b65048a04e26b4bc82d86fe380"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\final-checks\\publication-test.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\final-checks\\publication-test.log",
+    "sha256": "d3cefcb4bcbc383d95d60108d908fd20738df58d9f0f43a5a00e2966f94c7f23"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\reader-2\\matrix.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\reader-2\\matrix.json",
+    "sha256": "c33052dcd882c12fe84a94865e7238262a13d6629bc5c96b2a0f123ae37d8fc8"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\reader-4\\matrix.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\reader-4\\matrix.json",
+    "sha256": "342b65e670db4c6e637a47e8ab7a59d904a461eb8dd7af776713e49b7a7b147d"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\cap\\cap-controls.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\cap\\cap-controls.json",
+    "sha256": "c5b0dc2122725473518e6e4fe2b5d6f2b15cb1247c9c7112e73a5633fe84bfb6"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\cap\\cap.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\cap\\cap.json",
+    "sha256": "3f6dc18f65aed875e96a745058f6e13d4270d58a3a53e5075c131981947625e4"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\run-20260914-121053\\cap\\cap.log",
+    "committed_path": "docs\\issue-961-evidence\\final\\parent-checks\\cap\\cap.log",
+    "sha256": "0e239bfb84185f9b7e4ad3a09155ebee521f5b7592ee4f22f570e26bd2891093"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_seed-partial\\.pose-publication-lock\\journal.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\journal-0.json",
+    "sha256": "84915f54782246714ef9672b8e9fd511260647e258246d0031062e618f4bbc58"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_seed-committed-cleanup\\.pose-publication-lock\\journal.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\journal-1.json",
+    "sha256": "81d3c927b074babc17976e49e8c75fedd3ca129dbd3249028f31113afa26132c"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-partial\\.pose-publication-lock\\journal.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\journal-3.json",
+    "sha256": "6215878252a0383ab5a4b97e80144793b2819c870f8fd8fc6b27c1f83ddb7ac3"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup\\.pose-publication-lock\\journal.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\recovery\\journal-4.json",
+    "sha256": "3a35ed86c7034f6a746c8d827cd7a5eb28156222ce099104adfc234fe13d9183"
+  },
+  {
+    "source": "review_final\\run-20260914-113557\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\parent-publication-results.json",
+    "sha256": "5bdba2db34d821f55a81d44daeaf9e7222691a5775f775196e93950d58a79cc2"
+  },
+  {
+    "source": "docs\\issue-961-evidence\\final\\publication-20260914-114502\\results.json",
+    "committed_path": "docs\\issue-961-evidence\\final\\baseline\\publication-results.json",
+    "sha256": "1e7952680f8e84b9ebd8d9a0ba5edca51c8adae4b4c6b525210c148abf4793a0"
+  }
+]

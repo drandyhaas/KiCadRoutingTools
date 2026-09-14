@@ -1,0 +1,11 @@
+{
+  "corrected": [
+    2.700901066398682,
+    10,
+    true
+  ],
+  "native_overhang": 0.1,
+  "native_angle": 37.0,
+  "native_face": "F.Cu",
+  "fixture_sha256": "85f2fcf8e6d9a047ea955ab660bdb324db4745ea396bfaa3fd8573183cf5a85f"
+}

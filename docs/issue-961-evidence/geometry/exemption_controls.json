@@ -1,0 +1,26 @@
+[
+  {
+    "label": "inboard_positive",
+    "exemptions": {},
+    "body_overhang_mm": 0.0,
+    "violations": [
+      "J1 body overhang 0.0000mm outside declared limit {'min': 0.05, 'max': 0.2} (F.Fab; west edge)"
+    ]
+  },
+  {
+    "label": "outside_band",
+    "exemptions": {},
+    "body_overhang_mm": 0.30000000000000004,
+    "violations": [
+      "J1 body overhang 0.3000mm outside declared limit {'min': 0.05, 'max': 0.2} (F.Fab; west edge)"
+    ]
+  },
+  {
+    "label": "two_edges",
+    "exemptions": {},
+    "body_overhang_mm": 0.10000000000000009,
+    "violations": [
+      "J1 body also crosses undeclared north edge by 0.1000mm"
+    ]
+  }
+]

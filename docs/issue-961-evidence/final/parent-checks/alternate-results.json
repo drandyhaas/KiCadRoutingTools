@@ -1,0 +1,3069 @@
+{
+  "revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+  "source_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+  "commands": [
+    {
+      "name": "stage",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\stage_unaided.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\kicad_files\\esp_prog.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\truth"
+      ],
+      "exit": 0,
+      "stdout": "Modified 21 footprint positions\nSuccessfully wrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb\nStaged C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb\n  3 ref(s) declared mechanical and carried at their source pose; everything else at the board centre, rotation 0\n    Ref*: fiducial (confidence medium): its position is a mechanical fact a real new board would already know\n    Ref*~2: fiducial (confidence medium): its position is a mechanical fact a real new board would already know\n    USB1: edge_receptacle (confidence medium): its position is a mechanical fact a real new board would already know\n  truth in C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\truth (a sibling; nothing in the work dir names the source)\n  regime armed: C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\.unaided-manifest.json -- an undeclared pose write in this dir now RAISES, and every declared one is recorded in C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\.pose-provenance.jsonl\nJSON_SUMMARY: {\"board\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\seed\\\\board.kicad_pcb\", \"exempt\": 3, \"mechanical\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\seed\\\\mechanical.json\", \"regime\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\seed\\\\.unaided-manifest.json\"}\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "seed-intent",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_tools\\check_floorplan.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb",
+        "--emit-intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\intent.json"
+      ],
+      "exit": 0,
+      "stdout": "CMD: python.exe -X utf8 C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_tools\\check_floorplan.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb --emit-intent C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\intent.json\nENV KNOBS: none\ncheck_floorplan: WARNING - 15 footprint(s) are stacked on another (C1, C2, C3, C4, CON1, CON2, Q1, Q2) -- typically a netlist re-import dropping new parts at one spot on an otherwise-placed board\ndesign brief: none beside this board (looked for board.design-brief.json). Every `edge` below is INFERRED from the part's current pose by _nearest_edge; nothing here declares design intent.\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\nWrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\intent.json\n  0 block(s), 0 with a zone, 0 edge connector(s), 0 locked part(s)\n  envelope [114.0, 91.0, 145.75, 105.5] -- read from the board. The outline is not editable by this toolchain\n  decap census: 1 rail-sharing cap(s) lie beyond the 5.0mm search radius (worst 8.655mm), so the limit was not derived from them -- decap_ungraded reports them at WARN\nEXIT=0\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "seed",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\seeded.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\intent.json",
+        "--no-polish",
+        "--anchors-first"
+      ],
+      "exit": 0,
+      "stdout": "CMD: python.exe -X utf8 C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\seeded.kicad_pcb --intent C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\intent.json --no-polish --anchors-first\nENV KNOBS: none\nlegality at clearance 0.25 (fixed default), edge 0.55 (fixed default)\nLoading C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb...\nplace_seed: partially unplaced -- seeding only the 15 stacked part(s) that look like a pile; the rest stand as placed (--force re-seeds everything unlocked)\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\n  NOTE: anchors-first: 6 anchor(s) (extent >= 3.61mm) seed before 9 small(s): CON2, U1, CON1, U2, Q2, Q1\nSeeded 18 part(s); 0 unseated; 0 to lock\nModified 18 footprint positions\nSuccessfully wrote C:\\Users\\rob\\AppData\\Local\\Temp\\place_seed_final_upudwx6k\\candidate.kicad_pcb\nStamped (locked yes) on 0 part(s)\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\nJSON_SUMMARY: {\"crossings\": null, \"evictions\": 0, \"evictions_reverted\": 0, \"grade_errors\": 0, \"grade_errors_pinned\": 0, \"grade_warnings\": 0, \"hole_conflicts_added\": 0, \"hpwl\": null, \"locked\": 0, \"no_pose_blockers\": {}, \"no_pose_census\": {}, \"no_pose_verdict\": {}, \"output\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\seed\\\\seeded.kicad_pcb\", \"pad_conflicts_inherited\": 0, \"pad_conflicts_seeded\": 0, \"pad_conflicts_seeded_pairs\": [], \"pad_edge_after\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_by_edge_mm\": {\"east\": 4.050000000000011, \"north\": 0.8100000000000023, \"south\": 0.9384999999999906, \"west\": 1.5120000000000005}, \"minimum_gap_mm\": 0.8100000000000023, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"caller argument\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"pad_edge_before\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_by_edge_mm\": {\"east\": 4.050000000000011, \"north\": 2.9954999999999927, \"south\": 1.3000000000000114, \"west\": 1.5999999999999943}, \"minimum_gap_mm\": 1.3000000000000114, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"caller argument\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"placed\": 18, \"rotation_unseated\": {}, \"unseated\": 0, \"unseated_refs\": []}\nEXIT=0\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "seed-audit",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\seeded.kicad_pcb",
+        "--json",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-audit.json"
+      ],
+      "exit": 0,
+      "stdout": "VERDICT: CLEAN\n  all 15 moved pose(s) trace to place_seed.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 15, \"ledger_rows\": 1, \"levers\": [\"place_seed.py\"], \"moved\": 15, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "reconstruct",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\baseline.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb",
+        "--stages",
+        "classify"
+      ],
+      "exit": 0,
+      "stdout": "CMD: python.exe -X utf8 C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\baseline.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb --stages classify\nENV KNOBS: none\nlegality at clearance 0.25 (fixed default), edge 0.55 (fixed default)\nLoading C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\baseline.kicad_pcb...\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\nTiers: 0 locked, 2 zero-net (frame), 5 anchors (extent >= 3.8mm), 11 smalls\nGate before: locked_contacts=0 pad_pairs=1 hole=0 oob=0 stacks=0 hpwl=253.981 overlap=1.14\nModified 0 footprint positions\nSuccessfully wrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb.staging.kicad_pcb\nFinal (exact): 0 pad conflict pair(s), 0 hole conflict(s), 0 part(s) with pad copper off-board, 0 blocking body pair(s)\nJSON_SUMMARY: {\"assign_moved\": [], \"assign_pruned\": [], \"complete\": true, \"edge_bands\": {}, \"final\": {\"body_advisory\": 6, \"body_blocking\": 0, \"body_pairs\": [{\"a\": \"CON2\", \"area_mm2\": 1.456, \"b\": \"U2\", \"contained\": false, \"contained_frac\": 0.0538, \"depth_mm\": 0.28, \"kind\": \"courtyard\", \"locked_ref\": \"\", \"overlap_rect\": [131.64, 93.99, 136.84, 94.27], \"shorts\": [], \"side\": \"F\", \"waived\": false, \"waiver\": \"\"}, {\"a\": \"CON2\", \"area_mm2\": 1.456, \"b\": \"U2\", \"contained\": false, \"contained_frac\": 0.0538, \"depth_mm\": 0.28, \"kind\": \"fab\", \"locked_ref\": \"\", \"overlap_rect\": null, \"shorts\": [], \"side\": \"F\", \"waived\": false, \"waiver\": \"\"}, {\"a\": \"R1\", \"area_mm2\": 0.6314, \"b\": \"U2\", \"contained\": false, \"contained_frac\": 0.7573, \"depth_mm\": 0.55, \"kind\": \"courtyard\", \"locked_ref\": \"\", \"overlap_rect\": [136.125, 98.042, 136.675, 99.19], \"shorts\": [], \"side\": \"F\", \"waived\": false, \"waiver\": \"\"}, {\"a\": \"R1\", \"area_mm2\": 0.442, \"b\": \"U2\", \"contained\": true, \"contained_frac\": 0.8917, \"depth_mm\": 0.4978, \"kind\": \"fab\", \"locked_ref\": \"\", \"overlap_rect\": null, \"shorts\": [], \"side\": \"F\", \"waived\": false, \"waiver\": \"\"}, {\"a\": \"Q1\", \"area_mm2\": 0.07, \"b\": \"R4\", \"contained\": false, \"contained_frac\": 0.084, \"depth_mm\": 0.125, \"kind\": \"courtyard\", \"locked_ref\": \"\", \"overlap_rect\": [140.242, 98.25, 140.8024, 98.375], \"shorts\": [], \"side\": \"F\", \"waived\": false, \"waiver\": \"\"}, {\"a\": \"Q2\", \"area_mm2\": 0.07, \"b\": \"R3\", \"contained\": false, \"contained_frac\": 0.084, \"depth_mm\": 0.125, \"kind\": \"courtyard\", \"locked_ref\": \"\", \"overlap_rect\": [140.242, 101.65, 140.8024, 101.775], \"shorts\": [], \"side\": \"F\", \"waived\": false, \"waiver\": \"\"}], \"exact\": true, \"hole_conflicts\": 0, \"oob_pad_amount\": 0.0, \"oob_pad_count\": 0, \"pad_conflicts\": 0, \"pad_edge\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_by_edge_mm\": {\"east\": 1.070999999999998, \"north\": 1.1110000000000042, \"south\": 0.7000000000000028, \"west\": 1.5999999999999943}, \"minimum_gap_mm\": 0.7000000000000028, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"caller argument\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"pad_edge_conflicts\": 0, \"pad_edge_shortfall\": 0, \"pad_edge_unmeasured\": 0, \"pad_shortfall\": 0.0}, \"gate_after_assign\": [0, 1, 0.0, 0.0, 0, 253.981, 1.14], \"gate_before\": [0, 1, 0.0, 0.0, 0, 253.981, 1.14], \"output\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\reconstruct\\\\out.kicad_pcb\", \"stages_requested\": [\"classify\"], \"status\": \"ok\", \"tiers\": {\"anchor_extent_mm\": 3.8, \"anchors\": [\"CON1\", \"CON2\", \"U1\", \"U2\", \"USB1\"], \"edge\": [], \"locked\": [], \"smalls\": [\"C1\", \"C2\", \"C3\", \"C4\", \"Q1\", \"Q2\", \"R1\", \"R2\", \"R3\", \"R4\", \"Y1\"], \"zero_net\": [\"Ref*\", \"Ref*~2\"]}}\nEXIT=0\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "reconstruct-audit",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb",
+        "--json",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct-audit.json"
+      ],
+      "exit": 0,
+      "stdout": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_reconstruct.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 2, \"levers\": [\"place_reconstruct.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "repair-intent",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_tools\\check_floorplan.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\baseline.kicad_pcb",
+        "--emit-intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\intent.json"
+      ],
+      "exit": 0,
+      "stdout": "CMD: python.exe -X utf8 C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_tools\\check_floorplan.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\baseline.kicad_pcb --emit-intent C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\intent.json\nENV KNOBS: none\ndesign brief baseline.design-brief.json: 0 interface(s), 0 keep-out(s), 3 tier-0 field(s) not declared\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\nWrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\intent.json\n  0 block(s), 0 with a zone, 0 edge connector(s), 0 locked part(s)\n  envelope [114.0, 91.0, 145.75, 105.5] -- read from the board. The outline is not editable by this toolchain\n  decap census: 1 rail-sharing cap(s) lie beyond the 5.0mm search radius (worst 17.24mm), so the limit was not derived from them -- decap_ungraded reports them at WARN\nEXIT=0\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "seed-repair",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\baseline.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb",
+        "--repair",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\intent.json"
+      ],
+      "exit": 0,
+      "stdout": "CMD: python.exe -X utf8 C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\baseline.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb --repair --intent C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\intent.json\nENV KNOBS: none\nlegality at clearance 0.25 (fixed default), edge 0.55 (fixed default)\nLoading C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\baseline.kicad_pcb...\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\n  Repair census: 0 conflict pair(s), all listed\n  Containment census: 1 part(s) inside another part's body, all listed\nRepair: 1 violator(s), 1 repaired (0 moved, max 0.00mm), 0 unresolved, 0 unrepairable\nModified 0 footprint positions\nSuccessfully wrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb\n  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...\nJSON_SUMMARY: {\"complete\": true, \"dry_run\": false, \"grade_errors\": 0, \"grade_errors_pinned\": 0, \"hole_conflicts_after\": 0, \"hole_conflicts_before\": 0, \"max_move_mm\": 0.0, \"moved_refs\": [], \"oob_pad_count_after\": 0, \"oob_pad_count_before\": 0, \"output\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\seed-repair\\\\out.kicad_pcb\", \"pad_clearance_required\": [], \"pad_conflicts_after\": 0, \"pad_conflicts_before\": 0, \"pad_edge_after\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_by_edge_mm\": {\"east\": 1.070999999999998, \"north\": 1.1110000000000042, \"south\": 0.7000000000000028, \"west\": 1.5999999999999943}, \"minimum_gap_mm\": 0.7000000000000028, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"caller argument\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"repaired\": 1, \"status\": \"ok\", \"unrepairable\": 0}\nEXIT=0\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "seed-repair-audit",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb",
+        "--json",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair-audit.json"
+      ],
+      "exit": 0,
+      "stdout": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_seed.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_seed.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "route-loop",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_route_loop.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\baseline.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\out.kicad_pcb",
+        "--rounds",
+        "0",
+        "--route-args",
+        "--nets \"Net-(Q2-Pad1)\" --max-iterations 1000"
+      ],
+      "exit": 0,
+      "stdout": "Round 0: routing initial placement...\n  failures=0 iterations=16 vias=0\nFinal: failures=0 iterations=16 vias=0\nWrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\out.kicad_pcb\nJSON_SUMMARY: {\"failed_nets_after\": [], \"failed_nets_before\": [], \"failures_after\": 0, \"failures_before\": 0, \"group_by\": \"none\", \"iterations_after\": 16, \"iterations_before\": 16, \"max_displacement\": 3.0, \"max_target_pins\": 40, \"output\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\route-loop\\\\out.kicad_pcb\", \"relocate\": false, \"rounds\": 0, \"rounds_accepted\": 0, \"rounds_run\": 0, \"rounds_screened\": 0, \"target_select\": \"pins\", \"vias_after\": 0, \"vias_before\": 0, \"work_dir\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\route-loop\"}\nanimate_route: wrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\placement.gif (19 frames, 166ms each, 1000x457)\nMovie: C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\placement.gif\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nanimate_route: mp4 unavailable (No module named 'imageio'); falling back to GIF. `pip install imageio imageio-ffmpeg` for mp4.\n"
+    },
+    {
+      "name": "route-loop-audit",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\out.kicad_pcb",
+        "--json",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop-audit.json"
+      ],
+      "exit": 0,
+      "stdout": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_route_loop.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_route_loop.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "ordinary",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_pose.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\ordinary\\input.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\ordinary\\out.kicad_pcb",
+        "rotate",
+        "R1",
+        "90"
+      ],
+      "exit": 0,
+      "stdout": "CMD: python.exe -X utf8 C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_pose.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\ordinary\\input.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\ordinary\\out.kicad_pcb rotate R1 90\nENV KNOBS: none\nModified 1 footprint positions\nSuccessfully wrote C:\\Users\\rob\\AppData\\Local\\Temp\\place_pose_9gz1beg1\\candidate.kicad_pcb\nlegality at clearance 0.25 (fixed default), edge 0.55 (fixed default)\n  rotate R1       [136.4, 98.8, 270.0] -> [136.4, 98.8, 90.0]\npad legality: conflicts 0 -> 0, holes 0 -> 0, coarse outline 0 -> 0\npad-edge clearance: 0 -> 0 violations; shortfall 0 mm; coverage complete\nJSON_SUMMARY: {\"board_edge_clearance\": 0.55, \"clearance\": 0.25, \"dry_run\": false, \"forced\": false, \"hole_conflicts_after\": 0, \"hole_conflicts_before\": 0, \"input\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\ordinary\\\\input.kicad_pcb\", \"knobs\": {\"board_edge_clearance\": {\"requested\": null, \"source\": \"fixed default\", \"units\": \"mm\", \"value\": 0.55}, \"clearance\": {\"requested\": null, \"source\": \"fixed default\", \"units\": \"mm\", \"value\": 0.25}}, \"legal\": true, \"legal_basis\": \"legal = measured pad/hole/outline channels are clean and edge coverage is complete; no_worse = no measured category worsened relative to the input board. Neither verifies bodies, routing or fill.\", \"locked\": [], \"locked_count\": null, \"moved\": [{\"from\": [136.4, 98.8, 270.0], \"kind\": \"rotate\", \"moved\": true, \"ref\": \"R1\", \"to\": [136.4, 98.8, 90.0]}], \"nearest_legal\": null, \"no_worse\": true, \"oob_pad_amount_after\": 0.0, \"oob_pad_amount_before\": 0.0, \"oob_pad_basis\": \"part pad AABB vs outline inflated by the grading clearance (NOT the per-pad outline measure; see render_placement checklist.a_off_outline.pad_copper)\", \"oob_pad_copper_count_after\": 0, \"oob_pad_copper_count_before\": 0, \"oob_pad_copper_refs_after\": [], \"oob_pad_count_after\": 0, \"oob_pad_count_before\": 0, \"ops\": [{\"from\": [136.4, 98.8, 270.0], \"kind\": \"rotate\", \"moved\": true, \"ref\": \"R1\", \"to\": [136.4, 98.8, 90.0]}], \"output\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\ordinary\\\\out.kicad_pcb\", \"pad_clearance_required\": [], \"pad_conflicts_after\": 0, \"pad_conflicts_before\": 0, \"pad_edge_after\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_by_edge_mm\": {\"east\": 1.070999999999998, \"north\": 1.1110000000000042, \"south\": 0.7000000000000028, \"west\": 1.5999999999999943}, \"minimum_gap_mm\": 0.7000000000000028, \"requested_mm\": null, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"fixed default\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"pad_edge_before\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_by_edge_mm\": {\"east\": 1.070999999999998, \"north\": 1.1110000000000042, \"south\": 0.7000000000000028, \"west\": 1.5999999999999943}, \"minimum_gap_mm\": 0.7000000000000028, \"requested_mm\": null, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"fixed default\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"pad_edge_conflicts_after\": 0, \"pad_edge_conflicts_before\": 0, \"pad_edge_shortfall_after\": 0, \"pad_edge_shortfall_before\": 0, \"pad_edge_unmeasured_after\": 0, \"pad_edge_unmeasured_before\": 0, \"pad_shortfall_after\": 0.0, \"pad_shortfall_before\": 0.0, \"provenance\": {\"applied_by\": \"place_pose.py\", \"board_sha256\": null, \"decision_source\": \"caller\", \"engineering_validity\": \"reported separately in legal and no_worse\", \"scope\": \"ordinary model-assisted placement\"}, \"refused\": null, \"snapped\": null, \"track_width\": 0.3, \"unlocked\": [], \"unlocked_count\": null, \"worst\": [], \"would_write\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\review_final\\\\alternate-20260914-121253\\\\ordinary\\\\out.kicad_pcb\"}\nEXIT=0\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+    },
+    {
+      "name": "ordinary-audit",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\ordinary",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\ordinary\\out.kicad_pcb"
+      ],
+      "exit": 5,
+      "stdout": "VERDICT: UNPROVEN\n  no .unaided-manifest.json: this work dir was not staged for an unaided run, so there is no claim to check\nJSON_SUMMARY: {\"claimed\": null, \"ledger_rows\": null, \"levers\": null, \"moved\": null, \"unverifiable_claims\": null, \"verdict\": \"UNPROVEN\"}\n",
+      "stderr": ""
+    }
+  ],
+  "checks": [
+    {
+      "name": "seed wrote final output",
+      "passed": true,
+      "detail": 0
+    },
+    {
+      "name": "seed final ledger identity",
+      "passed": true,
+      "detail": {
+        "applied_by": "place_seed.py",
+        "board_sha256": "29497045665ae58e2c77c6e3ee9b9cae704bbfae5783b2fd1ef484992e7e893c",
+        "caller": "place_seed.py:752 in _execute",
+        "candidate_sha256": "29497045665ae58e2c77c6e3ee9b9cae704bbfae5783b2fd1ef484992e7e893c",
+        "decision_source": "unspecified",
+        "declared": true,
+        "final_snapshot": true,
+        "lever": "place_seed.py",
+        "lever_argv": [
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\seeded.kicad_pcb",
+          "--intent",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\intent.json",
+          "--no-polish",
+          "--anchors-first"
+        ],
+        "locks_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": false,
+          "#00000000-0000-0000-0000-00005d8c51dd": false,
+          "#00000000-0000-0000-0000-00005e7dd057": false,
+          "C1": false,
+          "C2": false,
+          "C3": false,
+          "C4": false,
+          "CON1": false,
+          "CON2": false,
+          "Q1": false,
+          "Q2": false,
+          "R1": false,
+          "R2": false,
+          "R3": false,
+          "R4": false,
+          "Ref*": false,
+          "Ref*~2": false,
+          "U1": false,
+          "U2": false,
+          "USB1": false,
+          "Y1": false
+        },
+        "parent_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+        "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\seeded.kicad_pcb",
+        "poses_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": [
+            129.875,
+            98.25,
+            0.0
+          ],
+          "#00000000-0000-0000-0000-00005d8c51dd": [
+            129.875,
+            98.25,
+            0.0
+          ],
+          "#00000000-0000-0000-0000-00005e7dd057": [
+            129.875,
+            98.25,
+            0.0
+          ],
+          "C1": [
+            123.584,
+            92.318,
+            0.0
+          ],
+          "C2": [
+            134.962,
+            103.903,
+            0.0
+          ],
+          "C3": [
+            130.18,
+            92.428,
+            0.0
+          ],
+          "C4": [
+            137.052,
+            98.315,
+            0.0
+          ],
+          "CON1": [
+            132.978,
+            96.831,
+            0.0
+          ],
+          "CON2": [
+            124.021,
+            94.543,
+            0.0
+          ],
+          "Q1": [
+            131.555,
+            102.622,
+            0.0
+          ],
+          "Q2": [
+            134.93,
+            93.566,
+            0.0
+          ],
+          "R1": [
+            132.08,
+            98.118,
+            0.0
+          ],
+          "R2": [
+            134.945,
+            98.714,
+            0.0
+          ],
+          "R3": [
+            126.939,
+            93.003,
+            0.0
+          ],
+          "R4": [
+            120.216,
+            92.952,
+            0.0
+          ],
+          "Ref*": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "Ref*~2": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "U1": [
+            125.664,
+            100.307,
+            0.0
+          ],
+          "U2": [
+            131.334,
+            97.93,
+            0.0
+          ],
+          "USB1": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "Y1": [
+            135.9,
+            101.072,
+            0.0
+          ]
+        },
+        "provenance_scope": "registered execution; coordinate selection is separately declared",
+        "refs_moved": [
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "CON1",
+          "CON2",
+          "Q1",
+          "Q2",
+          "R1",
+          "R2",
+          "R3",
+          "R4",
+          "U1",
+          "U2",
+          "Y1"
+        ],
+        "refs_written": [
+          "#00000000-0000-0000-0000-00005a3b5201",
+          "#00000000-0000-0000-0000-00005d8c51dd",
+          "#00000000-0000-0000-0000-00005e7dd057",
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "CON1",
+          "CON2",
+          "Q1",
+          "Q2",
+          "R1",
+          "R2",
+          "R3",
+          "R4",
+          "Ref*",
+          "Ref*~2",
+          "U1",
+          "U2",
+          "USB1",
+          "Y1"
+        ],
+        "schema": 1,
+        "sides_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": "B",
+          "#00000000-0000-0000-0000-00005d8c51dd": "B",
+          "#00000000-0000-0000-0000-00005e7dd057": "B",
+          "C1": "F",
+          "C2": "F",
+          "C3": "F",
+          "C4": "F",
+          "CON1": "F",
+          "CON2": "F",
+          "Q1": "F",
+          "Q2": "F",
+          "R1": "F",
+          "R2": "F",
+          "R3": "F",
+          "R4": "F",
+          "Ref*": "F",
+          "Ref*~2": "F",
+          "U1": "F",
+          "U2": "F",
+          "USB1": "F",
+          "Y1": "F"
+        },
+        "t": 1789380776.6017635
+      }
+    },
+    {
+      "name": "seed native pose locks sides reconcile",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "seed audit CLEAN",
+      "passed": true,
+      "detail": "VERDICT: CLEAN\n  all 15 moved pose(s) trace to place_seed.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 15, \"ledger_rows\": 1, \"levers\": [\"place_seed.py\"], \"moved\": 15, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n"
+    },
+    {
+      "name": "reconstruct wrote final output",
+      "passed": true,
+      "detail": 0
+    },
+    {
+      "name": "reconstruct final ledger identity",
+      "passed": true,
+      "detail": {
+        "applied_by": "place_reconstruct.py",
+        "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "caller": "place_reconstruct.py:38 in _promote_staged",
+        "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "decision_source": "unspecified",
+        "declared": true,
+        "final_snapshot": true,
+        "lever": "place_reconstruct.py",
+        "lever_argv": [
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\baseline.kicad_pcb",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb",
+          "--stages",
+          "classify"
+        ],
+        "locks_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": false,
+          "#00000000-0000-0000-0000-00005d8c51dd": false,
+          "#00000000-0000-0000-0000-00005e7dd057": false,
+          "C1": false,
+          "C2": false,
+          "C3": false,
+          "C4": false,
+          "CON1": false,
+          "CON2": false,
+          "Q1": false,
+          "Q2": false,
+          "R1": false,
+          "R2": false,
+          "R3": false,
+          "R4": false,
+          "Ref*": false,
+          "Ref*~2": false,
+          "U1": false,
+          "U2": false,
+          "USB1": false,
+          "Y1": false
+        },
+        "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb",
+        "poses_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": [
+            115.25,
+            95.75,
+            90.0
+          ],
+          "#00000000-0000-0000-0000-00005d8c51dd": [
+            119.2,
+            100.9,
+            0.0
+          ],
+          "#00000000-0000-0000-0000-00005e7dd057": [
+            130.0,
+            99.0,
+            180.0
+          ],
+          "C1": [
+            138.46,
+            96.23,
+            90.0
+          ],
+          "C2": [
+            131.7,
+            103.9,
+            270.0
+          ],
+          "C3": [
+            132.55,
+            100.22,
+            180.0
+          ],
+          "C4": [
+            136.4,
+            103.8,
+            90.0
+          ],
+          "CON1": [
+            143.4,
+            100.0,
+            270.0
+          ],
+          "CON2": [
+            136.17,
+            93.0,
+            180.0
+          ],
+          "Q1": [
+            139.0,
+            99.7,
+            180.0
+          ],
+          "Q2": [
+            139.0,
+            103.1,
+            180.0
+          ],
+          "R1": [
+            136.4,
+            98.8,
+            270.0
+          ],
+          "R2": [
+            136.4,
+            101.6,
+            90.0
+          ],
+          "R3": [
+            141.0,
+            101.5,
+            180.0
+          ],
+          "R4": [
+            141.0,
+            98.1,
+            180.0
+          ],
+          "Ref*": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "Ref*~2": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "U1": [
+            127.0,
+            100.0,
+            0.0
+          ],
+          "U2": [
+            134.34,
+            96.69,
+            270.0
+          ],
+          "USB1": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "Y1": [
+            133.98,
+            103.0,
+            90.0
+          ]
+        },
+        "provenance_scope": "registered execution; coordinate selection is separately declared",
+        "refs_moved": [],
+        "refs_written": [
+          "#00000000-0000-0000-0000-00005a3b5201",
+          "#00000000-0000-0000-0000-00005d8c51dd",
+          "#00000000-0000-0000-0000-00005e7dd057",
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "CON1",
+          "CON2",
+          "Q1",
+          "Q2",
+          "R1",
+          "R2",
+          "R3",
+          "R4",
+          "Ref*",
+          "Ref*~2",
+          "U1",
+          "U2",
+          "USB1",
+          "Y1"
+        ],
+        "schema": 1,
+        "sides_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": "B",
+          "#00000000-0000-0000-0000-00005d8c51dd": "B",
+          "#00000000-0000-0000-0000-00005e7dd057": "B",
+          "C1": "F",
+          "C2": "F",
+          "C3": "F",
+          "C4": "F",
+          "CON1": "F",
+          "CON2": "F",
+          "Q1": "F",
+          "Q2": "F",
+          "R1": "F",
+          "R2": "F",
+          "R3": "F",
+          "R4": "F",
+          "Ref*": "F",
+          "Ref*~2": "F",
+          "U1": "F",
+          "U2": "F",
+          "USB1": "F",
+          "Y1": "F"
+        },
+        "t": 1789380778.7664623
+      }
+    },
+    {
+      "name": "reconstruct native pose locks sides reconcile",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reconstruct audit CLEAN",
+      "passed": true,
+      "detail": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_reconstruct.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 2, \"levers\": [\"place_reconstruct.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n"
+    },
+    {
+      "name": "reconstruct requirements .kicad_dru",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reconstruct requirements .design-brief.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reconstruct baseline preserved",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "seed-repair wrote final output",
+      "passed": true,
+      "detail": 0
+    },
+    {
+      "name": "seed-repair final ledger identity",
+      "passed": true,
+      "detail": {
+        "applied_by": "place_seed.py",
+        "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "caller": "place_seed.py:625 in _execute",
+        "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "decision_source": "unspecified",
+        "declared": true,
+        "final_snapshot": true,
+        "lever": "place_seed.py",
+        "lever_argv": [
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\baseline.kicad_pcb",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb",
+          "--repair",
+          "--intent",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\intent.json"
+        ],
+        "locks_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": false,
+          "#00000000-0000-0000-0000-00005d8c51dd": false,
+          "#00000000-0000-0000-0000-00005e7dd057": false,
+          "C1": false,
+          "C2": false,
+          "C3": false,
+          "C4": false,
+          "CON1": false,
+          "CON2": false,
+          "Q1": false,
+          "Q2": false,
+          "R1": false,
+          "R2": false,
+          "R3": false,
+          "R4": false,
+          "Ref*": false,
+          "Ref*~2": false,
+          "U1": false,
+          "U2": false,
+          "USB1": false,
+          "Y1": false
+        },
+        "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb",
+        "poses_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": [
+            115.25,
+            95.75,
+            90.0
+          ],
+          "#00000000-0000-0000-0000-00005d8c51dd": [
+            119.2,
+            100.9,
+            0.0
+          ],
+          "#00000000-0000-0000-0000-00005e7dd057": [
+            130.0,
+            99.0,
+            180.0
+          ],
+          "C1": [
+            138.46,
+            96.23,
+            90.0
+          ],
+          "C2": [
+            131.7,
+            103.9,
+            270.0
+          ],
+          "C3": [
+            132.55,
+            100.22,
+            180.0
+          ],
+          "C4": [
+            136.4,
+            103.8,
+            90.0
+          ],
+          "CON1": [
+            143.4,
+            100.0,
+            270.0
+          ],
+          "CON2": [
+            136.17,
+            93.0,
+            180.0
+          ],
+          "Q1": [
+            139.0,
+            99.7,
+            180.0
+          ],
+          "Q2": [
+            139.0,
+            103.1,
+            180.0
+          ],
+          "R1": [
+            136.4,
+            98.8,
+            270.0
+          ],
+          "R2": [
+            136.4,
+            101.6,
+            90.0
+          ],
+          "R3": [
+            141.0,
+            101.5,
+            180.0
+          ],
+          "R4": [
+            141.0,
+            98.1,
+            180.0
+          ],
+          "Ref*": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "Ref*~2": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "U1": [
+            127.0,
+            100.0,
+            0.0
+          ],
+          "U2": [
+            134.34,
+            96.69,
+            270.0
+          ],
+          "USB1": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "Y1": [
+            133.98,
+            103.0,
+            90.0
+          ]
+        },
+        "provenance_scope": "registered execution; coordinate selection is separately declared",
+        "refs_moved": [],
+        "refs_written": [
+          "#00000000-0000-0000-0000-00005a3b5201",
+          "#00000000-0000-0000-0000-00005d8c51dd",
+          "#00000000-0000-0000-0000-00005e7dd057",
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "CON1",
+          "CON2",
+          "Q1",
+          "Q2",
+          "R1",
+          "R2",
+          "R3",
+          "R4",
+          "Ref*",
+          "Ref*~2",
+          "U1",
+          "U2",
+          "USB1",
+          "Y1"
+        ],
+        "schema": 1,
+        "sides_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": "B",
+          "#00000000-0000-0000-0000-00005d8c51dd": "B",
+          "#00000000-0000-0000-0000-00005e7dd057": "B",
+          "C1": "F",
+          "C2": "F",
+          "C3": "F",
+          "C4": "F",
+          "CON1": "F",
+          "CON2": "F",
+          "Q1": "F",
+          "Q2": "F",
+          "R1": "F",
+          "R2": "F",
+          "R3": "F",
+          "R4": "F",
+          "Ref*": "F",
+          "Ref*~2": "F",
+          "U1": "F",
+          "U2": "F",
+          "USB1": "F",
+          "Y1": "F"
+        },
+        "t": 1789380781.9043317
+      }
+    },
+    {
+      "name": "seed-repair native pose locks sides reconcile",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "seed-repair audit CLEAN",
+      "passed": true,
+      "detail": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_seed.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_seed.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n"
+    },
+    {
+      "name": "seed-repair requirements .kicad_dru",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "seed-repair requirements .design-brief.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "seed-repair baseline preserved",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "route-loop wrote final output",
+      "passed": true,
+      "detail": 0
+    },
+    {
+      "name": "route-loop final ledger identity",
+      "passed": true,
+      "detail": {
+        "applied_by": "place_route_loop.py",
+        "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "caller": "place_route_loop.py:1351 in main",
+        "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "decision_source": "unspecified",
+        "declared": true,
+        "final_snapshot": true,
+        "lever": "place_route_loop.py",
+        "lever_argv": [
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_route_loop.py",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\baseline.kicad_pcb",
+          "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\out.kicad_pcb",
+          "--rounds",
+          "0",
+          "--route-args",
+          "--nets \"Net-(Q2-Pad1)\" --max-iterations 1000"
+        ],
+        "locks_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": false,
+          "#00000000-0000-0000-0000-00005d8c51dd": false,
+          "#00000000-0000-0000-0000-00005e7dd057": false,
+          "C1": false,
+          "C2": false,
+          "C3": false,
+          "C4": false,
+          "CON1": false,
+          "CON2": false,
+          "Q1": false,
+          "Q2": false,
+          "R1": false,
+          "R2": false,
+          "R3": false,
+          "R4": false,
+          "Ref*": false,
+          "Ref*~2": false,
+          "U1": false,
+          "U2": false,
+          "USB1": false,
+          "Y1": false
+        },
+        "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+        "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\out.kicad_pcb",
+        "poses_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": [
+            115.25,
+            95.75,
+            90.0
+          ],
+          "#00000000-0000-0000-0000-00005d8c51dd": [
+            119.2,
+            100.9,
+            0.0
+          ],
+          "#00000000-0000-0000-0000-00005e7dd057": [
+            130.0,
+            99.0,
+            180.0
+          ],
+          "C1": [
+            138.46,
+            96.23,
+            90.0
+          ],
+          "C2": [
+            131.7,
+            103.9,
+            270.0
+          ],
+          "C3": [
+            132.55,
+            100.22,
+            180.0
+          ],
+          "C4": [
+            136.4,
+            103.8,
+            90.0
+          ],
+          "CON1": [
+            143.4,
+            100.0,
+            270.0
+          ],
+          "CON2": [
+            136.17,
+            93.0,
+            180.0
+          ],
+          "Q1": [
+            139.0,
+            99.7,
+            180.0
+          ],
+          "Q2": [
+            139.0,
+            103.1,
+            180.0
+          ],
+          "R1": [
+            136.4,
+            98.8,
+            270.0
+          ],
+          "R2": [
+            136.4,
+            101.6,
+            90.0
+          ],
+          "R3": [
+            141.0,
+            101.5,
+            180.0
+          ],
+          "R4": [
+            141.0,
+            98.1,
+            180.0
+          ],
+          "Ref*": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "Ref*~2": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "U1": [
+            127.0,
+            100.0,
+            0.0
+          ],
+          "U2": [
+            134.34,
+            96.69,
+            270.0
+          ],
+          "USB1": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "Y1": [
+            133.98,
+            103.0,
+            90.0
+          ]
+        },
+        "provenance_scope": "registered execution; coordinate selection is separately declared",
+        "refs_moved": [],
+        "refs_written": [
+          "#00000000-0000-0000-0000-00005a3b5201",
+          "#00000000-0000-0000-0000-00005d8c51dd",
+          "#00000000-0000-0000-0000-00005e7dd057",
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "CON1",
+          "CON2",
+          "Q1",
+          "Q2",
+          "R1",
+          "R2",
+          "R3",
+          "R4",
+          "Ref*",
+          "Ref*~2",
+          "U1",
+          "U2",
+          "USB1",
+          "Y1"
+        ],
+        "schema": 1,
+        "sides_written": {
+          "#00000000-0000-0000-0000-00005a3b5201": "B",
+          "#00000000-0000-0000-0000-00005d8c51dd": "B",
+          "#00000000-0000-0000-0000-00005e7dd057": "B",
+          "C1": "F",
+          "C2": "F",
+          "C3": "F",
+          "C4": "F",
+          "CON1": "F",
+          "CON2": "F",
+          "Q1": "F",
+          "Q2": "F",
+          "R1": "F",
+          "R2": "F",
+          "R3": "F",
+          "R4": "F",
+          "Ref*": "F",
+          "Ref*~2": "F",
+          "U1": "F",
+          "U2": "F",
+          "USB1": "F",
+          "Y1": "F"
+        },
+        "t": 1789380786.5927231
+      }
+    },
+    {
+      "name": "route-loop native pose locks sides reconcile",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "route-loop audit CLEAN",
+      "passed": true,
+      "detail": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_route_loop.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_route_loop.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n"
+    },
+    {
+      "name": "route-loop baseline preserved",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ordinary model-assisted CLI accepted",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ordinary model rotation exact",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ordinary no benchmark ledger fabricated",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ordinary benchmark claim UNPROVEN",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "source unchanged",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "outputs": {
+    "seed": {
+      "sha256": "29497045665ae58e2c77c6e3ee9b9cae704bbfae5783b2fd1ef484992e7e893c",
+      "native": {
+        "00000000-0000-0000-0000-00005d8a3efb": {
+          "ref": "C1",
+          "pose": [
+            123.584,
+            92.318,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f0f": {
+          "ref": "C2",
+          "pose": [
+            134.962,
+            103.903,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f22": {
+          "ref": "C3",
+          "pose": [
+            130.18,
+            92.428,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f36": {
+          "ref": "C4",
+          "pose": [
+            137.052,
+            98.315,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f44": {
+          "ref": "CON1",
+          "pose": [
+            132.978,
+            96.831,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f57": {
+          "ref": "Q1",
+          "pose": [
+            131.555,
+            102.622,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f6a": {
+          "ref": "Q2",
+          "pose": [
+            134.93,
+            93.566,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f7e": {
+          "ref": "R1",
+          "pose": [
+            132.08,
+            98.118,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fa6": {
+          "ref": "R3",
+          "pose": [
+            126.939,
+            93.003,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fba": {
+          "ref": "R4",
+          "pose": [
+            120.216,
+            92.952,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fd8": {
+          "ref": "U1",
+          "pose": [
+            125.664,
+            100.307,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a4001": {
+          "ref": "USB1",
+          "pose": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c45a4": {
+          "ref": "R2",
+          "pose": [
+            134.945,
+            98.714,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55cd": {
+          "ref": "Ref*",
+          "pose": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55f6": {
+          "ref": "Ref*",
+          "pose": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e748049": {
+          "ref": "CON2",
+          "pose": [
+            124.021,
+            94.543,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd2a7": {
+          "ref": "U2",
+          "pose": [
+            131.334,
+            97.93,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7ddfaf": {
+          "ref": "Y1",
+          "pose": [
+            135.9,
+            101.072,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005a3b5201": {
+          "ref": "",
+          "pose": [
+            129.875,
+            98.25,
+            0.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c51dd": {
+          "ref": "",
+          "pose": [
+            129.875,
+            98.25,
+            0.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd057": {
+          "ref": "",
+          "pose": [
+            129.875,
+            98.25,
+            0.0
+          ],
+          "side": "B",
+          "locked": false
+        }
+      },
+      "ledger": [
+        {
+          "applied_by": "place_seed.py",
+          "board_sha256": "29497045665ae58e2c77c6e3ee9b9cae704bbfae5783b2fd1ef484992e7e893c",
+          "caller": "place_seed.py:752 in _execute",
+          "candidate_sha256": "29497045665ae58e2c77c6e3ee9b9cae704bbfae5783b2fd1ef484992e7e893c",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_seed.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\board.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\seeded.kicad_pcb",
+            "--intent",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\intent.json",
+            "--no-polish",
+            "--anchors-first"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed\\seeded.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              129.875,
+              98.25,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              129.875,
+              98.25,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              129.875,
+              98.25,
+              0.0
+            ],
+            "C1": [
+              123.584,
+              92.318,
+              0.0
+            ],
+            "C2": [
+              134.962,
+              103.903,
+              0.0
+            ],
+            "C3": [
+              130.18,
+              92.428,
+              0.0
+            ],
+            "C4": [
+              137.052,
+              98.315,
+              0.0
+            ],
+            "CON1": [
+              132.978,
+              96.831,
+              0.0
+            ],
+            "CON2": [
+              124.021,
+              94.543,
+              0.0
+            ],
+            "Q1": [
+              131.555,
+              102.622,
+              0.0
+            ],
+            "Q2": [
+              134.93,
+              93.566,
+              0.0
+            ],
+            "R1": [
+              132.08,
+              98.118,
+              0.0
+            ],
+            "R2": [
+              134.945,
+              98.714,
+              0.0
+            ],
+            "R3": [
+              126.939,
+              93.003,
+              0.0
+            ],
+            "R4": [
+              120.216,
+              92.952,
+              0.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              125.664,
+              100.307,
+              0.0
+            ],
+            "U2": [
+              131.334,
+              97.93,
+              0.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              135.9,
+              101.072,
+              0.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "U1",
+            "U2",
+            "Y1"
+          ],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380776.6017635
+        }
+      ]
+    },
+    "reconstruct": {
+      "sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "native": {
+        "00000000-0000-0000-0000-00005d8a3efb": {
+          "ref": "C1",
+          "pose": [
+            138.46,
+            96.23,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f0f": {
+          "ref": "C2",
+          "pose": [
+            131.7,
+            103.9,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f22": {
+          "ref": "C3",
+          "pose": [
+            132.55,
+            100.22,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f36": {
+          "ref": "C4",
+          "pose": [
+            136.4,
+            103.8,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f44": {
+          "ref": "CON1",
+          "pose": [
+            143.4,
+            100.0,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f57": {
+          "ref": "Q1",
+          "pose": [
+            139.0,
+            99.7,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f6a": {
+          "ref": "Q2",
+          "pose": [
+            139.0,
+            103.1,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f7e": {
+          "ref": "R1",
+          "pose": [
+            136.4,
+            98.8,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fa6": {
+          "ref": "R3",
+          "pose": [
+            141.0,
+            101.5,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fba": {
+          "ref": "R4",
+          "pose": [
+            141.0,
+            98.1,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fd8": {
+          "ref": "U1",
+          "pose": [
+            127.0,
+            100.0,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a4001": {
+          "ref": "USB1",
+          "pose": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c45a4": {
+          "ref": "R2",
+          "pose": [
+            136.4,
+            101.6,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55cd": {
+          "ref": "Ref*",
+          "pose": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55f6": {
+          "ref": "Ref*",
+          "pose": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e748049": {
+          "ref": "CON2",
+          "pose": [
+            136.17,
+            93.0,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd2a7": {
+          "ref": "U2",
+          "pose": [
+            134.34,
+            96.69,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7ddfaf": {
+          "ref": "Y1",
+          "pose": [
+            133.98,
+            103.0,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005a3b5201": {
+          "ref": "",
+          "pose": [
+            115.25,
+            95.75,
+            90.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c51dd": {
+          "ref": "",
+          "pose": [
+            119.2,
+            100.9,
+            0.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd057": {
+          "ref": "",
+          "pose": [
+            130.0,
+            99.0,
+            180.0
+          ],
+          "side": "B",
+          "locked": false
+        }
+      },
+      "ledger": [
+        {
+          "applied_by": "place_reconstruct.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_reconstruct.py:635 in _execute",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_reconstruct.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\baseline.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb",
+            "--stages",
+            "classify"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb.staging.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380778.6056068
+        },
+        {
+          "applied_by": "place_reconstruct.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_reconstruct.py:38 in _promote_staged",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_reconstruct.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\baseline.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb",
+            "--stages",
+            "classify"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\reconstruct\\out.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380778.7664623
+        }
+      ]
+    },
+    "seed-repair": {
+      "sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "native": {
+        "00000000-0000-0000-0000-00005d8a3efb": {
+          "ref": "C1",
+          "pose": [
+            138.46,
+            96.23,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f0f": {
+          "ref": "C2",
+          "pose": [
+            131.7,
+            103.9,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f22": {
+          "ref": "C3",
+          "pose": [
+            132.55,
+            100.22,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f36": {
+          "ref": "C4",
+          "pose": [
+            136.4,
+            103.8,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f44": {
+          "ref": "CON1",
+          "pose": [
+            143.4,
+            100.0,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f57": {
+          "ref": "Q1",
+          "pose": [
+            139.0,
+            99.7,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f6a": {
+          "ref": "Q2",
+          "pose": [
+            139.0,
+            103.1,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f7e": {
+          "ref": "R1",
+          "pose": [
+            136.4,
+            98.8,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fa6": {
+          "ref": "R3",
+          "pose": [
+            141.0,
+            101.5,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fba": {
+          "ref": "R4",
+          "pose": [
+            141.0,
+            98.1,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fd8": {
+          "ref": "U1",
+          "pose": [
+            127.0,
+            100.0,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a4001": {
+          "ref": "USB1",
+          "pose": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c45a4": {
+          "ref": "R2",
+          "pose": [
+            136.4,
+            101.6,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55cd": {
+          "ref": "Ref*",
+          "pose": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55f6": {
+          "ref": "Ref*",
+          "pose": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e748049": {
+          "ref": "CON2",
+          "pose": [
+            136.17,
+            93.0,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd2a7": {
+          "ref": "U2",
+          "pose": [
+            134.34,
+            96.69,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7ddfaf": {
+          "ref": "Y1",
+          "pose": [
+            133.98,
+            103.0,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005a3b5201": {
+          "ref": "",
+          "pose": [
+            115.25,
+            95.75,
+            90.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c51dd": {
+          "ref": "",
+          "pose": [
+            119.2,
+            100.9,
+            0.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd057": {
+          "ref": "",
+          "pose": [
+            130.0,
+            99.0,
+            180.0
+          ],
+          "side": "B",
+          "locked": false
+        }
+      },
+      "ledger": [
+        {
+          "applied_by": "place_seed.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_seed.py:625 in _execute",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_seed.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\baseline.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb",
+            "--repair",
+            "--intent",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\intent.json"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\seed-repair\\out.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380781.9043317
+        }
+      ]
+    },
+    "route-loop": {
+      "sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "native": {
+        "00000000-0000-0000-0000-00005d8a3efb": {
+          "ref": "C1",
+          "pose": [
+            138.46,
+            96.23,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f0f": {
+          "ref": "C2",
+          "pose": [
+            131.7,
+            103.9,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f22": {
+          "ref": "C3",
+          "pose": [
+            132.55,
+            100.22,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f36": {
+          "ref": "C4",
+          "pose": [
+            136.4,
+            103.8,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f44": {
+          "ref": "CON1",
+          "pose": [
+            143.4,
+            100.0,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f57": {
+          "ref": "Q1",
+          "pose": [
+            139.0,
+            99.7,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f6a": {
+          "ref": "Q2",
+          "pose": [
+            139.0,
+            103.1,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3f7e": {
+          "ref": "R1",
+          "pose": [
+            136.4,
+            98.8,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fa6": {
+          "ref": "R3",
+          "pose": [
+            141.0,
+            101.5,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fba": {
+          "ref": "R4",
+          "pose": [
+            141.0,
+            98.1,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a3fd8": {
+          "ref": "U1",
+          "pose": [
+            127.0,
+            100.0,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8a4001": {
+          "ref": "USB1",
+          "pose": [
+            117.5,
+            100.0,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c45a4": {
+          "ref": "R2",
+          "pose": [
+            136.4,
+            101.6,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55cd": {
+          "ref": "Ref*",
+          "pose": [
+            141.2,
+            95.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c55f6": {
+          "ref": "Ref*",
+          "pose": [
+            118.1,
+            99.9,
+            0.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e748049": {
+          "ref": "CON2",
+          "pose": [
+            136.17,
+            93.0,
+            180.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd2a7": {
+          "ref": "U2",
+          "pose": [
+            134.34,
+            96.69,
+            270.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7ddfaf": {
+          "ref": "Y1",
+          "pose": [
+            133.98,
+            103.0,
+            90.0
+          ],
+          "side": "F",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005a3b5201": {
+          "ref": "",
+          "pose": [
+            115.25,
+            95.75,
+            90.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005d8c51dd": {
+          "ref": "",
+          "pose": [
+            119.2,
+            100.9,
+            0.0
+          ],
+          "side": "B",
+          "locked": false
+        },
+        "00000000-0000-0000-0000-00005e7dd057": {
+          "ref": "",
+          "pose": [
+            130.0,
+            99.0,
+            180.0
+          ],
+          "side": "B",
+          "locked": false
+        }
+      },
+      "ledger": [
+        {
+          "applied_by": "place_route_loop.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_route_loop.py:1351 in main",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_route_loop.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_route_loop.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\baseline.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\out.kicad_pcb",
+            "--rounds",
+            "0",
+            "--route-args",
+            "--nets \"Net-(Q2-Pad1)\" --max-iterations 1000"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\review_final\\alternate-20260914-121253\\route-loop\\out.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380786.5927231
+        }
+      ]
+    }
+  },
+  "selected_route_net": "Net-(Q2-Pad1)",
+  "passed": 28,
+  "failed": 0
+}

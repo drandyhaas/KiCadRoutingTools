@@ -1,0 +1,30 @@
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'source.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'source.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'source.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'out.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'source.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'source.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'out.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'source.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'source.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'source.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'out.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'source.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'source.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'out.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+
+STDERR
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+.
+----------------------------------------------------------------------
+Ran 1 test in 7.402s
+
+OK

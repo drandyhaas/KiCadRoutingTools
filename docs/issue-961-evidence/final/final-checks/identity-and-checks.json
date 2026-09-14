@@ -1,0 +1,33 @@
+{
+  "behavior_revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+  "final_checked_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+  "check_floorplan_ast_identical_except_help": true,
+  "unchanged_trees": {
+    "py_placer": true,
+    "py_router": true,
+    "kicad_routing_plugin": true,
+    "rust_router": true,
+    "kicad_files": true
+  },
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "py_tools/check_floorplan.py",
+        "--help"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_961_connector_publication.py"
+      ],
+      "exit": 0
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+CMD: python.exe -X utf8 C:\Users\rob\Documents\prive\git\KRT-961-review-repro\py_tools\check_floorplan.py C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\baseline-preserved\minus145\esp_prog.kicad_pcb --intent C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\baseline-preserved\legal_body.intent.json --clearance 0.25 --board-edge-clearance 0.0 --json C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\baseline-preserved\minus145\legal_body-c0.25-e0.0.cli.json
+ENV KNOBS: none
+design brief: none beside this board (looked for esp_prog.design-brief.json). Every `edge` below is INFERRED from the part's current pose by _nearest_edge; nothing here declares design intent.
+grading at clearance 0.25 (cli), edge 0.0 (cli)
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+Floorplan: esp_prog.kicad_pcb vs legal_body.intent.json
+  21 footprints, 0 block(s), 0 part(s) covered
+  outline: 0 ring(s), 0 cutout(s), 0 milled contour(s)
+  1 error(s), 4 warning(s) from 2 rule(s)
+    [ERROR] edge_connector: USB1 overhangs the outline by 0.10mm, under the declared minimum 1.40mm
+    [warn ] pins_to_edge: CON2: 7 of 7 connected pads sit on a row facing the north edge (2.00mm) with no partner beyond -- their nets can only leave along the edge strip or under the part
+    [warn ] pins_to_edge: Q2: 1 of 3 connected pads sit on a row facing the south edge (1.45mm) with no partner beyond -- their nets can only leave along the edge strip or under the part
+    [warn ] pins_to_edge: U1: 8 of 17 connected pads sit on a row facing the south edge (1.88mm) with no partner beyond -- their nets can only leave along the edge strip or under the part
+    [warn ] pins_to_edge: Y1: 2 of 4 connected pads sit on a row facing the south edge (1.40mm) with no partner beyond -- their nets can only leave along the edge strip or under the part
+  along-edge seating (measured, not a verdict -- a violation needs a declared center_on_edge or along_edge_band):
+    USB1 west: +1.75mm (+12.1% of the 14.50mm edge, bbox)
+  12 rule(s) did not run:
+    - assembly_side: the intent declares no assembly.sides
+    - decap_distance: the intent declares no decaps.max_distance_mm
+    - decap_pin_distance: the intent declares no decaps.max_pin_distance_mm
+    - decap_ungraded: the intent declares no decaps.max_distance_mm
+    - envelope: the intent declares no envelope.rect
+    - keepout: the intent declares no keepouts
+    - legality: the intent declares no legality_budget
+    - must_lock: the intent declares no must_lock patterns
+    - proximity: the intent declares no proximity claims
+    - zone_containment: no block declares a zone
+    - zone_exclusive: no block is marked exclusive
+    - zone_side: no block declares a side
+  wrote C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\baseline-preserved\minus145\legal_body-c0.25-e0.0.cli.json
+JSON_SUMMARY: {"blocks": 0, "blocks_resolved": 0, "board": "esp_prog.kicad_pcb", "brief": null, "brief_absent": 0, "brief_declared": 0, "brief_drift": 0, "brief_unknown": 0, "brief_unknown_keys": [], "budget_abstained": 0, "budget_abstained_keys": [], "clearance_used": {"source": "cli", "value": 0.25}, "complete": true, "cutouts": 0, "decap_pins_by_channel": {}, "decap_pins_graded": 0, "edge_clearance_used": {"source": "cli", "value": 0.0}, "edge_contours": 0, "edge_seating_abstained": 0, "edge_seating_declared": 0, "edge_seating_rows": 1, "edge_seating_worst_offset_pct": 12.07, "errors": 1, "hole_shortfall": 0.0, "hpwl": 259.7809, "intent": "legal_body.intent.json", "locked_contact_pairs": 0, "not_graded": {}, "oob_amount": 0.1, "oob_area": 0.84, "oob_count": 1, "overlap_area": 1.14, "pad_conflict_pairs": 2, "pad_intersection_pairs": 1, "pad_overlap_pairs": 1, "pad_shortfall": 4.121, "parts_covered": 0, "parts_total": 21, "pass": false, "rules_run": 2, "rules_skipped": 12, "state_duplicate_fraction": 0.0, "state_has_copper": false, "state_outside_fraction": 0.0, "state_partially_unplaced": false, "state_spread_ratio": 0.8435, "state_unplaced": false, "violations": 5, "violations_by_rule": {"edge_connector": 1, "pins_to_edge": 4}, "warnings": 4}
+EXIT=4
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

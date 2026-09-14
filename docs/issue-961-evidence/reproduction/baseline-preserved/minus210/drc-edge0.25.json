@@ -1,0 +1,170 @@
+{
+ "accepted": 0,
+ "board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\baseline-preserved\\minus210\\esp_prog.kicad_pcb",
+ "by_type": {
+  "pad-board-edge": 2,
+  "pad-pad": 5
+ },
+ "contacts_by_type": {
+  "pad-board-edge": 2,
+  "pad-pad": 2
+ },
+ "graded_at": {
+  "board_declares_no_floor": true,
+  "board_edge_clearance": 0.25,
+  "clearance": 0.2,
+  "clearance_margin": 0.0,
+  "hole_to_hole_clearance": 0.2,
+  "per_net_clearances": false,
+  "size_checks": true
+ },
+ "items": [
+  {
+   "closest_pt": [
+    118.1,
+    99.4
+   ],
+   "layer": "F.Cu",
+   "net1": "Net-(C1-Pad1)",
+   "net2": "net_0",
+   "no_net": true,
+   "overlap_mm": 0.4784999999999915,
+   "pad_loc": [
+    118.55,
+    98.6125
+   ],
+   "pad_loc2": [
+    118.1,
+    99.9
+   ],
+   "pad_ref": "USB1.1",
+   "pad_ref2": "Ref*~2.Fid1",
+   "required_mm": 1.016,
+   "short": false,
+   "type": "pad-pad"
+  },
+  {
+   "closest_pt": [
+    118.1,
+    100.4
+   ],
+   "layer": "F.Cu",
+   "net1": "GND",
+   "net2": "net_0",
+   "no_net": true,
+   "overlap_mm": 0.27850000000000286,
+   "pad_loc": [
+    118.55,
+    101.3875
+   ],
+   "pad_loc2": [
+    118.1,
+    99.9
+   ],
+   "pad_ref": "USB1.5",
+   "pad_ref2": "Ref*~2.Fid1",
+   "required_mm": 1.016,
+   "short": false,
+   "type": "pad-pad"
+  },
+  {
+   "closest_pt": [
+    118.6,
+    99.9
+   ],
+   "layer": "F.Cu",
+   "net1": "net_0",
+   "net2": "/D_P",
+   "no_net": true,
+   "overlap_mm": 1.016,
+   "pad_loc": [
+    118.1,
+    99.9
+   ],
+   "pad_loc2": [
+    118.55,
+    100.0
+   ],
+   "pad_ref": "Ref*~2.Fid1",
+   "pad_ref2": "USB1.3",
+   "required_mm": 1.016,
+   "short": true,
+   "type": "pad-pad"
+  },
+  {
+   "closest_pt": [
+    118.1,
+    99.4
+   ],
+   "layer": "F.Cu",
+   "net1": "net_0",
+   "net2": "/D_N",
+   "no_net": true,
+   "overlap_mm": 1.016,
+   "pad_loc": [
+    118.1,
+    99.9
+   ],
+   "pad_loc2": [
+    118.55,
+    99.35
+   ],
+   "pad_ref": "Ref*~2.Fid1",
+   "pad_ref2": "USB1.2",
+   "required_mm": 1.016,
+   "short": true,
+   "type": "pad-pad"
+  },
+  {
+   "closest_pt": [
+    118.1,
+    100.4
+   ],
+   "layer": "F.Cu",
+   "net1": "net_0",
+   "net2": "Net-(USB1-Pad4)",
+   "no_net": true,
+   "overlap_mm": 0.9285,
+   "pad_loc": [
+    118.1,
+    99.9
+   ],
+   "pad_loc2": [
+    118.55,
+    100.65
+   ],
+   "pad_ref": "Ref*~2.Fid1",
+   "pad_ref2": "USB1.4",
+   "required_mm": 1.016,
+   "short": false,
+   "type": "pad-pad"
+  },
+  {
+   "edge": "left",
+   "net1": "GND",
+   "overlap_mm": 0.75,
+   "pad_loc": [
+    114.0,
+    101.5
+   ],
+   "pad_ref": "USB1.0",
+   "short": true,
+   "type": "pad-board-edge"
+  },
+  {
+   "edge": "left",
+   "net1": "GND",
+   "overlap_mm": 0.75,
+   "pad_loc": [
+    114.0,
+    98.5
+   ],
+   "pad_ref": "USB1.0",
+   "short": true,
+   "type": "pad-board-edge"
+  }
+ ],
+ "schema": 1,
+ "tool": "check_drc.py",
+ "violations": 7
+}

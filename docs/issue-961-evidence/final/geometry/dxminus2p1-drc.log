@@ -1,0 +1,73 @@
+CMD: python.exe -X utf8 C:\Users\rob\Documents\prive\git\KRT-961-review-final\py_router\check_drc.py C:\Users\rob\Documents\prive\git\KRT-961-review-final\docs\issue-961-evidence\final\geometry-20260914-121122\dxminus2p1.kicad_pcb --check-pad-edge --board-edge-clearance .25 --clearance-margin 0
+ENV KNOBS: none
+Grading at clearance 0.2 mm (no project clearance found; pass -c to override)
+  WARNING: dxminus2p1.kicad_pcb has NO sibling .kicad_pro. Opening it in KiCad will auto-create a project with DEFAULT constraints and report hundreds of phantom annular/track/hole violations on a fine-pitch board (#295). Generate one with:
+    python3 py_router/fix_kicad_drc_settings.py C:\Users\rob\Documents\prive\git\KRT-961-review-final\docs\issue-961-evidence\final\geometry-20260914-121122\dxminus2p1.kicad_pcb
+  NOTE: dxminus2p1.kicad_pcb declares NO net class and NO board constraint (no sibling .kicad_pro, no (net_class) block). Every floor here is a FALLBACK, not this board's own: clearance 0.2 mm (check_drc default), hole-to-hole 0.2 mm, board-edge 0.25 mm. Whether they match what the copper was routed to is unverified HERE -- read the route step's --clearance from redo_commands.sh.
+Loading C:\Users\rob\Documents\prive\git\KRT-961-review-final\docs\issue-961-evidence\final\geometry-20260914-121122\dxminus2p1.kicad_pcb...
+Found 8 segments and 0 vias
+Size floors (2-layer fab): track >= 0.1mm, via dia >= 0.25mm, via drill >= 0.15mm
+Building spatial index...
+
+Checking segment-to-segment clearances...
+Checking for same-net segment crossings...
+Checking for same-net soft joints (dangling free ends)...
+Checking via-to-segment clearances...
+Checking via-to-via clearances...
+Checking pad-to-segment clearances...
+Checking pad-to-via clearances...
+Checking pad-to-pad clearances...
+Checking via drill hole-to-hole clearances...
+Checking via drill to pad drill clearances...
+Checking copper-to-hole (track <-> NPTH drill) clearances...
+Checking board edge clearances (bounding box)...
+Checking pad-to-board-edge clearances (--check-pad-edge is on)...
+Checking track widths and via/hole sizes...
+
+============================================================
+FOUND 7 DRC VIOLATIONS:
+
+
+PAD-PAD violations (5) -- 2 in CONTACT:
+----------------------------------------
+  Pad:Net-(C1-Pad1) (USB1.1) <-> Pad:net_0 (Ref*~2.Fid1)
+    Layer: F.Cu, Overlap: 0.478mm
+    Pad1: (118.55,98.61)
+    Pad2: (118.10,99.90)
+    Required clearance: 1.0160mm (local/netclass override; global 0.2000mm)
+  Pad:GND (USB1.5) <-> Pad:net_0 (Ref*~2.Fid1)
+    Layer: F.Cu, Overlap: 0.279mm
+    Pad1: (118.55,101.39)
+    Pad2: (118.10,99.90)
+    Required clearance: 1.0160mm (local/netclass override; global 0.2000mm)
+  Pad:net_0 (Ref*~2.Fid1) <-> Pad:/D_P (USB1.3)
+    Layer: F.Cu, Overlap: 1.016mm
+    Pad1: (118.10,99.90)
+    Pad2: (118.55,100.00)
+    Required clearance: 1.0160mm (local/netclass override; global 0.2000mm)
+  Pad:net_0 (Ref*~2.Fid1) <-> Pad:/D_N (USB1.2)
+    Layer: F.Cu, Overlap: 1.016mm
+    Pad1: (118.10,99.90)
+    Pad2: (118.55,99.35)
+    Required clearance: 1.0160mm (local/netclass override; global 0.2000mm)
+  Pad:net_0 (Ref*~2.Fid1) <-> Pad:Net-(USB1-Pad4) (USB1.4)
+    Layer: F.Cu, Overlap: 0.928mm
+    Pad1: (118.10,99.90)
+    Pad2: (118.55,100.65)
+    Required clearance: 1.0160mm (local/netclass override; global 0.2000mm)
+
+PAD-BOARD-EDGE violations (2) -- 2 in CONTACT:
+----------------------------------------
+  Pad:GND (USB1.0) too close to left board edge
+    Overlap: 0.750mm
+    Pad: (114.00,101.50)
+  Pad:GND (USB1.0) too close to left board edge
+    Overlap: 0.750mm
+    Pad: (114.00,98.50)
+
+LISTING: 7 of 7 violation(s) shown
+============================================================
+EXIT=1
+
+STDERR
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

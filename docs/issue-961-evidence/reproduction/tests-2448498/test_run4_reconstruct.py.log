@@ -1,0 +1,11 @@
+sssssssssC:\Users\rob\Documents\prive\git\KRT-961-review-repro\tests\test_run4_reconstruct.py:355: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmpootahmi_\\b.kicad_pcb' mode='w' encoding='utf-8'>
+  open(bp, 'w', encoding='utf-8').write(board)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+C:\Users\rob\Documents\prive\git\KRT-961-review-repro\tests\test_run4_reconstruct.py:356: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmpootahmi_\\i.json' mode='w' encoding='utf-8'>
+  open(ip, 'w', encoding='utf-8').write(intent)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.
+----------------------------------------------------------------------
+Ran 10 tests in 0.984s
+
+OK (skipped=9)

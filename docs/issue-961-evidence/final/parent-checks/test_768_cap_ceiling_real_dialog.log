@@ -1,0 +1,232 @@
+  PASS the fanout tab's shared params carry clamp_netclasses  keys=21
+  PASS inline: _run_bga_fanout CARRIES the ceiling, override unchecked  got None
+  PASS inline: override unchecked -> ceiling None
+  PASS inline: _run_bga_fanout CARRIES the ceiling, override CHECKED  got 0.2
+  PASS inline: override CHECKED -> ceiling 0.2
+  PASS shared params export the RAW override, not min(Default, override)
+  PASS and the engine receives the raw override
+  PASS standalone: shared params report override unchecked  clamp_netclasses=False
+  PASS standalone: run_cap_optimization CARRIES the ceiling, override unchecked  got None
+  PASS standalone: shared params report override CHECKED  clamp_netclasses=True
+Non-Default net classes clamped to the 0.2mm ceiling: net_class[Wide].SetClearance -> 0.2 mm
+  PASS standalone: run_cap_optimization CARRIES the ceiling, override CHECKED  got 0.2
+  PASS fix_drc_settings=False cannot conjure a ceiling on its own
+  PASS fix_drc_settings=True cannot conjure a ceiling on its own
+  PASS an absent clearance_ceiling defaults to NO ceiling
+  PASS an omitted override lets placement resolve its own board floor
+  PASS the positive board still resolves to its declared 0.2
+  PASS zero class: routing override=False, typed=0.73
+  --escalation board: the board's declared minimum clearance 0.2 mm is above the requested clearance 0.1 mm; treating that minimum as stale for this run (descents bound at the fab floor for it)
+  PASS zero class: inline received clearance explicitly
+  PASS zero class: inline cap requirement override=False, typed=0.73
+  PASS zero class: standalone received clearance explicitly
+  PASS zero class: standalone cap requirement override=False, typed=0.73
+  PASS zero class: routing override=True, typed=0.3
+  PASS zero class: inline received clearance explicitly
+  PASS zero class: inline cap requirement override=True, typed=0.3
+  PASS zero class: standalone received clearance explicitly
+  PASS zero class: standalone cap requirement override=True, typed=0.3
+  PASS zero class: routing override=True, typed=0.05
+  --escalation board: the board's declared minimum clearance 0.2 mm is above the requested clearance 0.1 mm; treating that minimum as stale for this run (descents bound at the fab floor for it)
+Non-Default net classes clamped to the 0.05mm ceiling: net_class[Wide].SetClearance -> 0.05 mm
+  PASS zero class: inline received clearance explicitly
+  PASS zero class: inline cap requirement override=True, typed=0.05
+  PASS zero class: standalone received clearance explicitly
+  PASS zero class: standalone cap requirement override=True, typed=0.05
+  PASS plan: optimize_caps with NO clearance param clears the override
+  PASS plan: optimize_caps WITH a clearance param keeps it
+  PASS plan: fanout+optimize_caps with NO clearance clears the override
+  PASS plan: fanout+optimize_caps WITH a clearance param keeps it
+  PASS plan: a plain fanout step does NOT clear it
+  PASS the executor actually carries that rule, verbatim
+
+ALL PASS
+
+STDERR
+Element wxPanel@00000170A9AA2DC0 ("panel", HWND=00000000001D0D28) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4800 ("panel", HWND=00000000002D08A2).
+Element wxScrolledWindow@00000170A8338770 ("panel", HWND=0000000000250BEA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4800 ("panel", HWND=00000000002D08A2).
+Element wxScrolledWindow@00000170A8337DB0 ("panel", HWND=0000000000260830) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4800 ("panel", HWND=00000000002D08A2).
+Element wxButton@00000170A9AA8460 ("Check Stackup (AI)", HWND=00000000002609D0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4800 ("panel", HWND=00000000002D08A2).
+Element wxScrolledWindow@00000170A83363B0 ("panel", HWND=0000000000290800) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4800 ("panel", HWND=00000000002D08A2).
+Element wxGauge@00000170A9AA92C0 ("gauge", HWND=00000000001C0D34) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4800 ("panel", HWND=00000000002D08A2).
+Element wxStaticText@00000170A7E9D2A0 ("Ready", HWND=00000000001C0D38) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4800 ("panel", HWND=00000000002D08A2).
+Element wxPanel@00000170A9AA4AA0 ("panel", HWND=00000000002B0A34) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4FE0 ("panel", HWND=00000000001C0DDE).
+Element wxCheckBox@00000170A68C6180 ("Update schematic with swaps", HWND=000000000024054A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4FE0 ("panel", HWND=00000000001C0DDE).
+Element wxScrolledWindow@00000170A83366F0 ("panel", HWND=00000000002B0A8E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4FE0 ("panel", HWND=00000000001C0DDE).
+Element wxScrolledWindow@00000170A8339130 ("panel", HWND=00000000001C0E04) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA4FE0 ("panel", HWND=00000000001C0DDE).
+Element wxPanel@00000170A9AA3300 ("panel", HWND=00000000001B10CC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA5FA0 ("panel", HWND=0000000000171192).
+Element wxCheckBox@00000170A7C71ED0 ("Add GND vias", HWND=0000000000171156) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA5FA0 ("panel", HWND=0000000000171192).
+Element wxCheckBox@00000170A7C721C0 ("Intra-pair length matching", HWND=0000000000171170) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA5FA0 ("panel", HWND=0000000000171192).
+Element wxCheckBox@00000170A7C6E9F0 ("AC-coupled end-to-end matching", HWND=0000000000171178) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA5FA0 ("panel", HWND=0000000000171192).
+Element wxCheckBox@00000170A7C6F5B0 ("Hide short routes", HWND=000000000016117E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA5FA0 ("panel", HWND=0000000000171192).
+Element wxStaticText@00000170A8274DA0 ("Ready", HWND=00000000001D0D9E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA5FA0 ("panel", HWND=0000000000171192).
+Element wxGauge@00000170A8374D60 ("gauge", HWND=0000000000141232) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A9AA5FA0 ("panel", HWND=0000000000171192).
+Element wxPanel@00000170A6AE2D70 ("panel", HWND=000000000014127A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE3A90 ("panel", HWND=00000000001711A2).
+Element wxRadioBox@00000170A7E60910 ("radioBox", HWND=00000000001413A4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE3A90 ("panel", HWND=00000000001711A2).
+Element wxCheckBox@00000170A7C70A40 ("Differential pairs", HWND=00000000001513D0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxRadioBox@00000170A839DDF0 ("radioBox", HWND=00000000001413E6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxCheckBox@00000170A82F0540 ("Force escape direction", HWND=00000000001413FE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxCheckBox@00000170A82F1FB0 ("Rebalance escape directions", HWND=00000000001413F4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxCheckBox@00000170A82F19D0 ("Skip pads with existing fanout", HWND=0000000000141404) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxCheckBox@00000170A82F0830 ("No inner pads on top layer", HWND=0000000000141408) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxCheckBox@00000170A82F22A0 ("Drop plane-net balls to vias", HWND=0000000000151400) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxCheckBox@00000170A82F3A20 ("Optimize decoupling cap placement", HWND=0000000000B9053A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxCheckBox@00000170A82F13F0 ("Allow cap rotation", HWND=0000000000141370) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxStaticText@00000170A8285810 ("Ready", HWND=00000000001512F0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE3A90 ("panel", HWND=00000000001711A2).
+Element wxGauge@00000170A7BEC210 ("gauge", HWND=0000000000141352) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE3A90 ("panel", HWND=00000000001711A2).
+Element wxStaticText@00000170A827D770 ("Exit Margin (mm):", HWND=0000000000260BB0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8F60 ("panel", HWND=00000000001D0D80).
+Element wxPanel@00000170A6AE3010 ("panel", HWND=000000000014129E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE1090 ("panel", HWND=00000000001512FC).
+Element wxPanel@00000170A6AE32B0 ("panel", HWND=0000000000141254) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE1090 ("panel", HWND=00000000001512FC).
+Element wxCheckBox@00000170A82F3150 ("Thermal relief pad connections", HWND=00000000001711DA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE0DF0 ("panel", HWND=000000000015126C).
+Element wxCheckBox@00000170A82F3440 ("Thermal via arrays under exposed pads", HWND=0000000000300886) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE0DF0 ("panel", HWND=000000000015126C).
+Element wxCheckBox@00000170A82F3730 ("Stitch plane layers with a via lattice", HWND=00000000001711C2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE0DF0 ("panel", HWND=000000000015126C).
+Element wxCheckBox@00000170A82EFF60 ("Board-edge via fence (EMI guard ring)", HWND=00000000001611DC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE0DF0 ("panel", HWND=000000000015126C).
+Element wxCheckBox@00000170A8237720 ("Add GND vias near signal vias", HWND=00000000001710FC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE0DF0 ("panel", HWND=000000000015126C).
+Element wxStaticText@00000170A8283F90 ("Ready", HWND=0000000000151258) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE1090 ("panel", HWND=00000000001512FC).
+Element wxGauge@00000170A825F9C0 ("gauge", HWND=0000000000151506) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE1090 ("panel", HWND=00000000001512FC).
+Element wxCheckListBox@00000170A6B1BA20 ("listBox", HWND=0000000000141526) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxStaticText@00000170A82817C0 ("staticText", HWND=00000000001710B8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxStaticLine@00000170A6E5A040 ("staticLine", HWND=00000000001515FA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A825FCA0 ("Plan Routing", HWND=0000000000151606) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A8260540 ("Cancel", HWND=0000000000141602) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxStaticLine@00000170A6E5BC60 ("staticLine", HWND=00000000001415F8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A8260260 ("Run Selected Steps", HWND=00000000001515F0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A8261680 ("Run All Selected Steps", HWND=00000000001415EC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A8261960 ("Stop", HWND=00000000001515DA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxStaticLine@00000170A6E5DB50 ("staticLine", HWND=00000000001515D6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A8262D80 ("Review Routed Board", HWND=00000000001415D4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A8261F20 ("Diagnose Routing Failures", HWND=00000000001415CE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxStaticLine@00000170A6E5D5B0 ("staticLine", HWND=00000000001515C2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxButton@00000170A8262AA0 ("Close", HWND=00000000001415BC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE2830 ("panel", HWND=000000000014154E).
+Element wxPanel@00000170A6AE2AD0 ("panel", HWND=0000000000151556) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE3FD0 ("panel", HWND=0000000000141632).
+Element wxStaticText@00000170A826DC50 ("staticText", HWND=00000000001516A8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8260 ("panel", HWND=0000000000151684).
+Element wxStaticText@00000170A8269F10 ("Extra instructions:", HWND=00000000001516A4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8260 ("panel", HWND=0000000000151684).
+Element wxTextCtrl@00000170A6E43E70 ("text", HWND=00000000001516E2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8260 ("panel", HWND=0000000000151684).
+Element wxButton@00000170A695C3F0 ("Place (AI)", HWND=000000000015174E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8260 ("panel", HWND=0000000000151684).
+Element wxButton@00000170A695CF70 ("Place + Route (AI)", HWND=00000000001416EC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8260 ("panel", HWND=0000000000151684).
+Element wxPanel@00000170A6AE2050 ("panel", HWND=000000000014175E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8260 ("panel", HWND=0000000000151684).
+Element wxButton@00000170A695C6D0 ("Beautify Labels", HWND=00000000001517D0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@00000170A7BE8260 ("panel", HWND=0000000000151684).
+Element wxGauge@00000170A695BE30 ("gauge", HWND=00000000001412DA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@00000170A6AE3FD0 ("panel", HWND=0000000000141632).
+Adding duplicate image handler for 'Windows bitmap file'
+Adding duplicate animation handler for '1' type
+Adding duplicate animation handler for '2' type
+Adding duplicate animation handler for '3' type
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+Traceback (most recent call last):
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\kicad_routing_plugin\fanout_gui.py", line 2154, in _optimize_decoupling_caps
+    result = repair_fanout_clearance(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\rob\Documents\prive\git\KRT-961-review-final\tests\gui_parity\test_768_cap_ceiling_real_dialog.py", line 138, in _spy
+    raise _Stop()
+main.<locals>._Stop
+C:\vcpkg\buildtrees\wxwidgets-33\src\45ed8e7d5e-47ab0af4b4.clean\include\wx/msw/private.h(880): 'UnregisterClass' failed with error 0x00000584 (De klasse heeft nog geopende vensters.).

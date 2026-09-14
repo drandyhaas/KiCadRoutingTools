@@ -1,0 +1,5 @@
+CLI post-pass coverage: 9 registered, 17 in active CLI use, 2 CLI-only acknowledged, 0 unreachable call(s), 0 failure(s), 0 warning(s).
+  CLI-ONLY: write_filled_board in ['py_router/route.py']: route.py --write-fill: fills the WRITTEN board for delivery; the GUI mutates a live board KiCad fills itself, so there is no file to fill
+  CLI-ONLY: run_drc in ['py_router/bga_fanout/__init__.py', 'py_router/qfn_fanout/__init__.py']: bga/qfn fanout post-engine DRC graze audit -> JSON_SUMMARY drc_grazes (report-only, no board mutation)
+
+STDERR

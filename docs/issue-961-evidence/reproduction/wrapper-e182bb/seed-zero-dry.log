@@ -1,0 +1,13 @@
+CMD: python.exe -X utf8 C:\Users\rob\Documents\prive\git\KRT-961-review-repro\py_placer\place_seed.py C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\wrapper-e182bb\fixed.kicad_pcb C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\wrapper-e182bb\seed-zero-dry.kicad_pcb --intent C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\wrapper-e182bb\zero.intent.json --clearance .25 --board-edge-clearance .25 --repair --dry-run
+ENV KNOBS: none
+legality at clearance 0.25 (cli), edge 0.25 (cli)
+Loading C:\Users\rob\Documents\prive\git\KRT-961-review-repro\docs\issue-961-evidence\reproduction\wrapper-e182bb\fixed.kicad_pcb...
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+  Repair census: 0 conflict pair(s), all listed
+  Containment census: 1 part(s) inside another part's body, all listed
+  NOTE: containment R1<->U2 (89% of the smaller body): both file-locked -- not repairable here
+Repair: 0 violator(s), 0 repaired (0 moved, max 0.00mm), 0 unresolved, 0 unrepairable
+JSON_SUMMARY: {"complete": false, "connector_requirements": {"accepted": null, "complete": false, "reason": "no written final candidate to measure"}, "dry_run": true, "engineering_clean": false, "hole_conflicts_before": 0, "max_move_mm": 0.0, "moved_refs": [], "oob_pad_count_before": 0, "output": null, "pad_conflicts_before": 0, "published": false, "repaired": 0, "status": "dry_run", "unrepairable": 0}
+EXIT=0
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

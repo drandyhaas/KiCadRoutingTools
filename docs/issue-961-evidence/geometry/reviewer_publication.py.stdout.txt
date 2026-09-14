@@ -1,0 +1,1 @@
+Independent wrapper native-candidate publication controls passed: 7

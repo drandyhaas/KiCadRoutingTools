@@ -1,0 +1,55 @@
+{
+  "integration_base": "3f343981ae3fdbc82a60c0d41d693a03ccca98de",
+  "edges": {
+    "tigard": {
+      "J1": "west",
+      "J5": "east",
+      "J7": "south",
+      "J2": null,
+      "J3": null,
+      "J4": null,
+      "J6": null
+    },
+    "ulx3s": {
+      "AE1": "south",
+      "AUDIO1": "north",
+      "B4": "south",
+      "B5": "south",
+      "B6": "south",
+      "BAT1": "south",
+      "J1": "west",
+      "J2": "east",
+      "US1": "north",
+      "US2": "north",
+      "J3": null,
+      "J4": null,
+      "J5": null
+    },
+    "interf_u_unrouted_placed": {
+      "BUS1": "south",
+      "JP1": null
+    },
+    "watchy": {
+      "C11": "east",
+      "D3": "west",
+      "J2": "east",
+      "M1": "west",
+      "R11": "west",
+      "R4": "east",
+      "R8": "east",
+      "R9": "east",
+      "SW1": "east",
+      "SW2": "east",
+      "SW3": "west",
+      "SW4": "west",
+      "U3": "east",
+      "J1": null,
+      "J3": null
+    },
+    "esp_prog": {
+      "CON1": null,
+      "CON2": null,
+      "USB1": null
+    }
+  }
+}

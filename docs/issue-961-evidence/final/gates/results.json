@@ -1,0 +1,2573 @@
+{
+  "revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+  "production_files": {
+    "py_placer/placement/connector_publication.py": "65f1588f55fab257341418880d65e5cbd77b5bf6da4da3c78ee59804a593bf48",
+    "py_placer/place_seed.py": "5ec32da15a1d7685dc2127d94e6a24cee293315a82ef31079fec31f1b6ebc75c",
+    "py_placer/place_reconstruct.py": "5ae38aa4b1ba4c365daec5fd23a84042e8452d27b0d5a9cf55f339d2de2551fb"
+  },
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\out.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--repair"
+      ],
+      "exit": 0,
+      "summary": {
+        "complete": true,
+        "connector_requirements": {
+          "accepted": true,
+          "complete": true,
+          "edge_seating": [
+            {
+              "along_edge_fraction": 0.6207,
+              "along_edge_offset_mm": 1.75,
+              "along_edge_offset_pct": 12.07,
+              "basis": "bbox",
+              "body_bounds_mm": [
+                114.0,
+                96.3,
+                121.12,
+                103.7
+              ],
+              "body_measured": true,
+              "body_overhang_basis": "F.Fab",
+              "body_overhang_mm": 0.0,
+              "body_requirement_declared": true,
+              "body_setback_mm": 0.0,
+              "body_signed_position_mm": 0.0,
+              "boundary_basis": "rectangular Edge.Cuts centreline",
+              "clearance_parameters": {
+                "board_edge_clearance_mm": 0.25,
+                "copper_clearance_mm": 0.2,
+                "effective_occupancy_margin_mm": 0.25,
+                "physical_body_margin_mm": 0.0
+              },
+              "copper_edge_complete": true,
+              "copper_edge_findings": [],
+              "copper_edge_shortfall_mm": 0.0,
+              "copper_edge_unmeasured": [],
+              "copper_rules_unmeasured": [],
+              "declared": false,
+              "edge": "west",
+              "mating_face_basis": "drawn envelope support line toward declared edge",
+              "measurements": {
+                "body_overhang": {
+                  "declared_limit": {
+                    "max": 0.65,
+                    "min": 0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "body_setback": {
+                  "declared_limit": {
+                    "max": 0.1
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "copper_edge_shortfall": {
+                  "declared_limit": {
+                    "max": 0.0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "pad_copper_edge_gap": {
+                  "declared_limit": {
+                    "min": 0.25
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 1.3000000000000114
+                }
+              },
+              "other_body_edge_overhang_mm": {
+                "east": 0.0,
+                "north": 0.0,
+                "south": 0.0
+              },
+              "overhang_basis": "F.Fab",
+              "overhang_mm": 0.0,
+              "pad_copper_declared_edge_gap_mm": 1.5999999999999943,
+              "pad_copper_edge_gap_mm": 1.3000000000000114,
+              "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+              "ref": "USB1",
+              "required_copper_edge_gap_mm": 0.25,
+              "span_mm": 14.5,
+              "units": "mm"
+            }
+          ],
+          "errors": [],
+          "unmeasured": {}
+        },
+        "dry_run": false,
+        "engineering_clean": false,
+        "grade_errors": 0,
+        "grade_errors_pinned": 0,
+        "hole_conflicts_after": 0,
+        "hole_conflicts_before": 0,
+        "max_move_mm": 0.0,
+        "moved_refs": [],
+        "oob_pad_count_after": 0,
+        "oob_pad_count_before": 0,
+        "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\out.kicad_pcb",
+        "pad_clearance_required": [],
+        "pad_conflicts_after": 0,
+        "pad_conflicts_before": 0,
+        "pad_edge_after": {
+          "argument_mm": 0.25,
+          "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+          "complete": true,
+          "findings": [],
+          "measured_pads": 75,
+          "minimum_gap_by_edge_mm": {
+            "east": 1.070999999999998,
+            "north": 1.1110000000000042,
+            "south": 0.7000000000000028,
+            "west": 1.5999999999999943
+          },
+          "minimum_gap_mm": 0.7000000000000028,
+          "required_mm": 0.25,
+          "rules_unmeasured": [],
+          "source": "caller argument",
+          "tolerance_mm": 1e-06,
+          "units": "mm",
+          "unmeasured": []
+        },
+        "published": true,
+        "repaired": 1,
+        "status": "ok",
+        "unrepairable": 0
+      },
+      "output_exists": true,
+      "ledger": [
+        {
+          "applied_by": "place_seed.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_seed.py:331 in main",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_seed.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\board.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\out.kicad_pcb",
+            "--intent",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\intent.json",
+            "--clearance",
+            ".2",
+            "--board-edge-clearance",
+            ".25",
+            "--repair"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\out.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380635.5592217
+        }
+      ],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false,
+      "native_USB1": [
+        117.5,
+        100.0,
+        180.0
+      ],
+      "audit_argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-accepted\\out.kicad_pcb"
+      ],
+      "audit_exit": 0,
+      "audit_stdout": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_seed.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_seed.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-dry\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-dry\\out.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-dry\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--repair",
+        "--dry-run"
+      ],
+      "exit": 0,
+      "summary": {
+        "complete": false,
+        "connector_requirements": {
+          "accepted": null,
+          "complete": false,
+          "reason": "no written final candidate to measure"
+        },
+        "dry_run": true,
+        "engineering_clean": false,
+        "hole_conflicts_before": 0,
+        "max_move_mm": 0.0,
+        "moved_refs": [],
+        "oob_pad_count_before": 0,
+        "output": null,
+        "pad_conflicts_before": 0,
+        "published": false,
+        "repaired": 1,
+        "status": "dry_run",
+        "unrepairable": 0
+      },
+      "output_exists": false,
+      "ledger": [],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\board.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--repair"
+      ],
+      "exit": 0,
+      "summary": {
+        "complete": true,
+        "connector_requirements": {
+          "accepted": true,
+          "complete": true,
+          "edge_seating": [
+            {
+              "along_edge_fraction": 0.6207,
+              "along_edge_offset_mm": 1.75,
+              "along_edge_offset_pct": 12.07,
+              "basis": "bbox",
+              "body_bounds_mm": [
+                114.0,
+                96.3,
+                121.12,
+                103.7
+              ],
+              "body_measured": true,
+              "body_overhang_basis": "F.Fab",
+              "body_overhang_mm": 0.0,
+              "body_requirement_declared": true,
+              "body_setback_mm": 0.0,
+              "body_signed_position_mm": 0.0,
+              "boundary_basis": "rectangular Edge.Cuts centreline",
+              "clearance_parameters": {
+                "board_edge_clearance_mm": 0.25,
+                "copper_clearance_mm": 0.2,
+                "effective_occupancy_margin_mm": 0.25,
+                "physical_body_margin_mm": 0.0
+              },
+              "copper_edge_complete": true,
+              "copper_edge_findings": [],
+              "copper_edge_shortfall_mm": 0.0,
+              "copper_edge_unmeasured": [],
+              "copper_rules_unmeasured": [],
+              "declared": false,
+              "edge": "west",
+              "mating_face_basis": "drawn envelope support line toward declared edge",
+              "measurements": {
+                "body_overhang": {
+                  "declared_limit": {
+                    "max": 0.65,
+                    "min": 0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "body_setback": {
+                  "declared_limit": {
+                    "max": 0.1
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "copper_edge_shortfall": {
+                  "declared_limit": {
+                    "max": 0.0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "pad_copper_edge_gap": {
+                  "declared_limit": {
+                    "min": 0.25
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 1.3000000000000114
+                }
+              },
+              "other_body_edge_overhang_mm": {
+                "east": 0.0,
+                "north": 0.0,
+                "south": 0.0
+              },
+              "overhang_basis": "F.Fab",
+              "overhang_mm": 0.0,
+              "pad_copper_declared_edge_gap_mm": 1.5999999999999943,
+              "pad_copper_edge_gap_mm": 1.3000000000000114,
+              "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+              "ref": "USB1",
+              "required_copper_edge_gap_mm": 0.25,
+              "span_mm": 14.5,
+              "units": "mm"
+            }
+          ],
+          "errors": [],
+          "unmeasured": {}
+        },
+        "dry_run": false,
+        "engineering_clean": false,
+        "grade_errors": 0,
+        "grade_errors_pinned": 0,
+        "hole_conflicts_after": 0,
+        "hole_conflicts_before": 0,
+        "max_move_mm": 0.0,
+        "moved_refs": [],
+        "oob_pad_count_after": 0,
+        "oob_pad_count_before": 0,
+        "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\board.kicad_pcb",
+        "pad_clearance_required": [],
+        "pad_conflicts_after": 0,
+        "pad_conflicts_before": 0,
+        "pad_edge_after": {
+          "argument_mm": 0.25,
+          "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+          "complete": true,
+          "findings": [],
+          "measured_pads": 75,
+          "minimum_gap_by_edge_mm": {
+            "east": 1.070999999999998,
+            "north": 1.1110000000000042,
+            "south": 0.7000000000000028,
+            "west": 1.5999999999999943
+          },
+          "minimum_gap_mm": 0.7000000000000028,
+          "required_mm": 0.25,
+          "rules_unmeasured": [],
+          "source": "caller argument",
+          "tolerance_mm": 1e-06,
+          "units": "mm",
+          "unmeasured": []
+        },
+        "published": true,
+        "repaired": 1,
+        "status": "ok",
+        "unrepairable": 0
+      },
+      "output_exists": true,
+      "ledger": [
+        {
+          "applied_by": "place_seed.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_seed.py:331 in main",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_seed.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\board.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\board.kicad_pcb",
+            "--intent",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\intent.json",
+            "--clearance",
+            ".2",
+            "--board-edge-clearance",
+            ".25",
+            "--repair"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\board.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380639.3372889
+        }
+      ],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false,
+      "native_USB1": [
+        117.5,
+        100.0,
+        180.0
+      ],
+      "audit_argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\board.kicad_pcb"
+      ],
+      "audit_exit": 0,
+      "audit_stdout": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_seed.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_seed.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n",
+      "manifest": {
+        "kind": "unaided-regime",
+        "lever_registry": [
+          "place_seed.py",
+          "place_optimize.py",
+          "place_reconstruct.py",
+          "place_portfolio.py",
+          "place_route_loop.py",
+          "place_fanout_clearance.py",
+          "converge.py",
+          "place_pose.py",
+          "route.py",
+          "perturb.py",
+          "stage_blind.py",
+          "stage_unaided.py"
+        ],
+        "schema": 1,
+        "staged_board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-inplace\\.pose-baseline-75a17b29a29041f899e59f6f164ea2a7.kicad_pcb",
+        "staged_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e"
+      }
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_seed.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-readonly\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-readonly\\out.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-readonly\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--repair"
+      ],
+      "exit": 4,
+      "summary": {
+        "complete": false,
+        "connector_requirements": {
+          "accepted": true,
+          "complete": true,
+          "edge_seating": [
+            {
+              "along_edge_fraction": 0.6207,
+              "along_edge_offset_mm": 1.75,
+              "along_edge_offset_pct": 12.07,
+              "basis": "bbox",
+              "body_bounds_mm": [
+                114.0,
+                96.3,
+                121.12,
+                103.7
+              ],
+              "body_measured": true,
+              "body_overhang_basis": "F.Fab",
+              "body_overhang_mm": 0.0,
+              "body_requirement_declared": true,
+              "body_setback_mm": 0.0,
+              "body_signed_position_mm": 0.0,
+              "boundary_basis": "rectangular Edge.Cuts centreline",
+              "clearance_parameters": {
+                "board_edge_clearance_mm": 0.25,
+                "copper_clearance_mm": 0.2,
+                "effective_occupancy_margin_mm": 0.25,
+                "physical_body_margin_mm": 0.0
+              },
+              "copper_edge_complete": true,
+              "copper_edge_findings": [],
+              "copper_edge_shortfall_mm": 0.0,
+              "copper_edge_unmeasured": [],
+              "copper_rules_unmeasured": [],
+              "declared": false,
+              "edge": "west",
+              "mating_face_basis": "drawn envelope support line toward declared edge",
+              "measurements": {
+                "body_overhang": {
+                  "declared_limit": {
+                    "max": 0.65,
+                    "min": 0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "body_setback": {
+                  "declared_limit": {
+                    "max": 0.1
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "copper_edge_shortfall": {
+                  "declared_limit": {
+                    "max": 0.0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "pad_copper_edge_gap": {
+                  "declared_limit": {
+                    "min": 0.25
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 1.3000000000000114
+                }
+              },
+              "other_body_edge_overhang_mm": {
+                "east": 0.0,
+                "north": 0.0,
+                "south": 0.0
+              },
+              "overhang_basis": "F.Fab",
+              "overhang_mm": 0.0,
+              "pad_copper_declared_edge_gap_mm": 1.5999999999999943,
+              "pad_copper_edge_gap_mm": 1.3000000000000114,
+              "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+              "ref": "USB1",
+              "required_copper_edge_gap_mm": 0.25,
+              "span_mm": 14.5,
+              "units": "mm"
+            }
+          ],
+          "errors": [],
+          "unmeasured": {}
+        },
+        "dry_run": false,
+        "error": "cannot write C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_seed-readonly\\out.kicad_pcb: [WinError 5] Toegang geweigerd: 'C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\docs\\\\issue-961-evidence\\\\final\\\\gate-20260914-121034\\\\place_seed-readonly\\\\.krt-candidate-h3ssuk14' -> 'C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\docs\\\\issue-961-evidence\\\\final\\\\gate-20260914-121034\\\\place_seed-readonly\\\\out.kicad_pcb'. Nothing was written: previous output files were preserved or restored.",
+        "grade_errors": 0,
+        "grade_errors_pinned": 0,
+        "hole_conflicts_after": 0,
+        "hole_conflicts_before": 0,
+        "max_move_mm": 0.0,
+        "moved_refs": [],
+        "oob_pad_count_after": 0,
+        "oob_pad_count_before": 0,
+        "output": null,
+        "output_state": "unchanged",
+        "pad_clearance_required": [],
+        "pad_conflicts_after": 0,
+        "pad_conflicts_before": 0,
+        "pad_edge_after": {
+          "argument_mm": 0.25,
+          "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+          "complete": true,
+          "findings": [],
+          "measured_pads": 75,
+          "minimum_gap_by_edge_mm": {
+            "east": 1.070999999999998,
+            "north": 1.1110000000000042,
+            "south": 0.7000000000000028,
+            "west": 1.5999999999999943
+          },
+          "minimum_gap_mm": 0.7000000000000028,
+          "required_mm": 0.25,
+          "rules_unmeasured": [],
+          "source": "caller argument",
+          "tolerance_mm": 1e-06,
+          "units": "mm",
+          "unmeasured": []
+        },
+        "published": false,
+        "recovery_journal": null,
+        "repaired": 1,
+        "rollback_errors": [],
+        "status": "error",
+        "unrepairable": 0
+      },
+      "output_exists": true,
+      "ledger": [],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\out.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--stages",
+        "classify"
+      ],
+      "exit": 0,
+      "summary": {
+        "assign_moved": [],
+        "assign_pruned": [],
+        "complete": true,
+        "connector_requirements": {
+          "accepted": true,
+          "complete": true,
+          "edge_seating": [
+            {
+              "along_edge_fraction": 0.6207,
+              "along_edge_offset_mm": 1.75,
+              "along_edge_offset_pct": 12.07,
+              "basis": "bbox",
+              "body_bounds_mm": [
+                114.0,
+                96.3,
+                121.12,
+                103.7
+              ],
+              "body_measured": true,
+              "body_overhang_basis": "F.Fab",
+              "body_overhang_mm": 0.0,
+              "body_requirement_declared": true,
+              "body_setback_mm": 0.0,
+              "body_signed_position_mm": 0.0,
+              "boundary_basis": "rectangular Edge.Cuts centreline",
+              "clearance_parameters": {
+                "board_edge_clearance_mm": 0.25,
+                "copper_clearance_mm": 0.2,
+                "effective_occupancy_margin_mm": 0.25,
+                "physical_body_margin_mm": 0.0
+              },
+              "copper_edge_complete": true,
+              "copper_edge_findings": [],
+              "copper_edge_shortfall_mm": 0.0,
+              "copper_edge_unmeasured": [],
+              "copper_rules_unmeasured": [],
+              "declared": false,
+              "edge": "west",
+              "mating_face_basis": "drawn envelope support line toward declared edge",
+              "measurements": {
+                "body_overhang": {
+                  "declared_limit": {
+                    "max": 0.65,
+                    "min": 0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "body_setback": {
+                  "declared_limit": {
+                    "max": 0.1
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "copper_edge_shortfall": {
+                  "declared_limit": {
+                    "max": 0.0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "pad_copper_edge_gap": {
+                  "declared_limit": {
+                    "min": 0.25
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 1.3000000000000114
+                }
+              },
+              "other_body_edge_overhang_mm": {
+                "east": 0.0,
+                "north": 0.0,
+                "south": 0.0
+              },
+              "overhang_basis": "F.Fab",
+              "overhang_mm": 0.0,
+              "pad_copper_declared_edge_gap_mm": 1.5999999999999943,
+              "pad_copper_edge_gap_mm": 1.3000000000000114,
+              "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+              "ref": "USB1",
+              "required_copper_edge_gap_mm": 0.25,
+              "span_mm": 14.5,
+              "units": "mm"
+            }
+          ],
+          "errors": [],
+          "unmeasured": {}
+        },
+        "edge_bands": {
+          "USB1": 0.65
+        },
+        "engineering_clean": false,
+        "final": {
+          "body_advisory": 6,
+          "body_blocking": 0,
+          "body_pairs": [
+            {
+              "a": "CON2",
+              "area_mm2": 1.456,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.0538,
+              "depth_mm": 0.28,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                131.64,
+                93.99,
+                136.84,
+                94.27
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "CON2",
+              "area_mm2": 1.456,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.0538,
+              "depth_mm": 0.28,
+              "kind": "fab",
+              "locked_ref": "",
+              "overlap_rect": null,
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "R1",
+              "area_mm2": 0.6314,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.7573,
+              "depth_mm": 0.55,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                136.125,
+                98.042,
+                136.675,
+                99.19
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "R1",
+              "area_mm2": 0.442,
+              "b": "U2",
+              "contained": true,
+              "contained_frac": 0.8917,
+              "depth_mm": 0.4978,
+              "kind": "fab",
+              "locked_ref": "",
+              "overlap_rect": null,
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "Q1",
+              "area_mm2": 0.07,
+              "b": "R4",
+              "contained": false,
+              "contained_frac": 0.084,
+              "depth_mm": 0.125,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                140.242,
+                98.25,
+                140.8024,
+                98.375
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "Q2",
+              "area_mm2": 0.07,
+              "b": "R3",
+              "contained": false,
+              "contained_frac": 0.084,
+              "depth_mm": 0.125,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                140.242,
+                101.65,
+                140.8024,
+                101.775
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            }
+          ],
+          "exact": true,
+          "hole_conflicts": 0,
+          "oob_pad_amount": 0.0,
+          "oob_pad_count": 0,
+          "pad_conflicts": 0,
+          "pad_edge": {
+            "argument_mm": 0.25,
+            "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "complete": true,
+            "findings": [],
+            "measured_pads": 75,
+            "minimum_gap_by_edge_mm": {
+              "east": 1.070999999999998,
+              "north": 1.1110000000000042,
+              "south": 0.7000000000000028,
+              "west": 1.5999999999999943
+            },
+            "minimum_gap_mm": 0.7000000000000028,
+            "required_mm": 0.25,
+            "rules_unmeasured": [],
+            "source": "caller argument",
+            "tolerance_mm": 1e-06,
+            "units": "mm",
+            "unmeasured": []
+          },
+          "pad_edge_conflicts": 0,
+          "pad_edge_shortfall": 0,
+          "pad_edge_unmeasured": 0,
+          "pad_shortfall": 0.0
+        },
+        "gate_after_assign": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "gate_before": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\out.kicad_pcb",
+        "published": true,
+        "stages_requested": [
+          "classify"
+        ],
+        "status": "ok",
+        "tiers": {
+          "anchor_extent_mm": 3.8,
+          "anchors": [
+            "CON1",
+            "CON2",
+            "U1",
+            "U2",
+            "USB1"
+          ],
+          "edge": [
+            "USB1"
+          ],
+          "locked": [],
+          "smalls": [
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Y1"
+          ],
+          "zero_net": [
+            "Ref*",
+            "Ref*~2"
+          ]
+        }
+      },
+      "output_exists": true,
+      "ledger": [
+        {
+          "applied_by": "place_reconstruct.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_reconstruct.py:150 in main",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_reconstruct.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\board.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\out.kicad_pcb",
+            "--intent",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\intent.json",
+            "--clearance",
+            ".2",
+            "--board-edge-clearance",
+            ".25",
+            "--stages",
+            "classify"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\out.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380643.3344672
+        }
+      ],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false,
+      "native_USB1": [
+        117.5,
+        100.0,
+        180.0
+      ],
+      "audit_argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-accepted\\out.kicad_pcb"
+      ],
+      "audit_exit": 0,
+      "audit_stdout": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_reconstruct.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_reconstruct.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-dry\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-dry\\out.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-dry\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--stages",
+        "classify",
+        "--dry-run"
+      ],
+      "exit": 0,
+      "summary": {
+        "assign_moved": [],
+        "assign_pruned": [],
+        "complete": false,
+        "connector_requirements": {
+          "accepted": null,
+          "complete": false,
+          "reason": "no written final candidate to measure"
+        },
+        "dry_run": true,
+        "edge_bands": {
+          "USB1": 0.65
+        },
+        "engineering_clean": false,
+        "gate_after_assign": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "gate_before": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "output": null,
+        "published": false,
+        "stages_requested": [
+          "classify"
+        ],
+        "status": "dry_run",
+        "tiers": {
+          "anchor_extent_mm": 3.8,
+          "anchors": [
+            "CON1",
+            "CON2",
+            "U1",
+            "U2",
+            "USB1"
+          ],
+          "edge": [
+            "USB1"
+          ],
+          "locked": [],
+          "smalls": [
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Y1"
+          ],
+          "zero_net": [
+            "Ref*",
+            "Ref*~2"
+          ]
+        },
+        "would_move": []
+      },
+      "output_exists": false,
+      "ledger": [],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\board.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--stages",
+        "classify"
+      ],
+      "exit": 0,
+      "summary": {
+        "assign_moved": [],
+        "assign_pruned": [],
+        "complete": true,
+        "connector_requirements": {
+          "accepted": true,
+          "complete": true,
+          "edge_seating": [
+            {
+              "along_edge_fraction": 0.6207,
+              "along_edge_offset_mm": 1.75,
+              "along_edge_offset_pct": 12.07,
+              "basis": "bbox",
+              "body_bounds_mm": [
+                114.0,
+                96.3,
+                121.12,
+                103.7
+              ],
+              "body_measured": true,
+              "body_overhang_basis": "F.Fab",
+              "body_overhang_mm": 0.0,
+              "body_requirement_declared": true,
+              "body_setback_mm": 0.0,
+              "body_signed_position_mm": 0.0,
+              "boundary_basis": "rectangular Edge.Cuts centreline",
+              "clearance_parameters": {
+                "board_edge_clearance_mm": 0.25,
+                "copper_clearance_mm": 0.2,
+                "effective_occupancy_margin_mm": 0.25,
+                "physical_body_margin_mm": 0.0
+              },
+              "copper_edge_complete": true,
+              "copper_edge_findings": [],
+              "copper_edge_shortfall_mm": 0.0,
+              "copper_edge_unmeasured": [],
+              "copper_rules_unmeasured": [],
+              "declared": false,
+              "edge": "west",
+              "mating_face_basis": "drawn envelope support line toward declared edge",
+              "measurements": {
+                "body_overhang": {
+                  "declared_limit": {
+                    "max": 0.65,
+                    "min": 0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "body_setback": {
+                  "declared_limit": {
+                    "max": 0.1
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "copper_edge_shortfall": {
+                  "declared_limit": {
+                    "max": 0.0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "pad_copper_edge_gap": {
+                  "declared_limit": {
+                    "min": 0.25
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 1.3000000000000114
+                }
+              },
+              "other_body_edge_overhang_mm": {
+                "east": 0.0,
+                "north": 0.0,
+                "south": 0.0
+              },
+              "overhang_basis": "F.Fab",
+              "overhang_mm": 0.0,
+              "pad_copper_declared_edge_gap_mm": 1.5999999999999943,
+              "pad_copper_edge_gap_mm": 1.3000000000000114,
+              "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+              "ref": "USB1",
+              "required_copper_edge_gap_mm": 0.25,
+              "span_mm": 14.5,
+              "units": "mm"
+            }
+          ],
+          "errors": [],
+          "unmeasured": {}
+        },
+        "edge_bands": {
+          "USB1": 0.65
+        },
+        "engineering_clean": false,
+        "final": {
+          "body_advisory": 6,
+          "body_blocking": 0,
+          "body_pairs": [
+            {
+              "a": "CON2",
+              "area_mm2": 1.456,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.0538,
+              "depth_mm": 0.28,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                131.64,
+                93.99,
+                136.84,
+                94.27
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "CON2",
+              "area_mm2": 1.456,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.0538,
+              "depth_mm": 0.28,
+              "kind": "fab",
+              "locked_ref": "",
+              "overlap_rect": null,
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "R1",
+              "area_mm2": 0.6314,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.7573,
+              "depth_mm": 0.55,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                136.125,
+                98.042,
+                136.675,
+                99.19
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "R1",
+              "area_mm2": 0.442,
+              "b": "U2",
+              "contained": true,
+              "contained_frac": 0.8917,
+              "depth_mm": 0.4978,
+              "kind": "fab",
+              "locked_ref": "",
+              "overlap_rect": null,
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "Q1",
+              "area_mm2": 0.07,
+              "b": "R4",
+              "contained": false,
+              "contained_frac": 0.084,
+              "depth_mm": 0.125,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                140.242,
+                98.25,
+                140.8024,
+                98.375
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "Q2",
+              "area_mm2": 0.07,
+              "b": "R3",
+              "contained": false,
+              "contained_frac": 0.084,
+              "depth_mm": 0.125,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                140.242,
+                101.65,
+                140.8024,
+                101.775
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            }
+          ],
+          "exact": true,
+          "hole_conflicts": 0,
+          "oob_pad_amount": 0.0,
+          "oob_pad_count": 0,
+          "pad_conflicts": 0,
+          "pad_edge": {
+            "argument_mm": 0.25,
+            "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "complete": true,
+            "findings": [],
+            "measured_pads": 75,
+            "minimum_gap_by_edge_mm": {
+              "east": 1.070999999999998,
+              "north": 1.1110000000000042,
+              "south": 0.7000000000000028,
+              "west": 1.5999999999999943
+            },
+            "minimum_gap_mm": 0.7000000000000028,
+            "required_mm": 0.25,
+            "rules_unmeasured": [],
+            "source": "caller argument",
+            "tolerance_mm": 1e-06,
+            "units": "mm",
+            "unmeasured": []
+          },
+          "pad_edge_conflicts": 0,
+          "pad_edge_shortfall": 0,
+          "pad_edge_unmeasured": 0,
+          "pad_shortfall": 0.0
+        },
+        "gate_after_assign": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "gate_before": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\board.kicad_pcb",
+        "published": true,
+        "stages_requested": [
+          "classify"
+        ],
+        "status": "ok",
+        "tiers": {
+          "anchor_extent_mm": 3.8,
+          "anchors": [
+            "CON1",
+            "CON2",
+            "U1",
+            "U2",
+            "USB1"
+          ],
+          "edge": [
+            "USB1"
+          ],
+          "locked": [],
+          "smalls": [
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Y1"
+          ],
+          "zero_net": [
+            "Ref*",
+            "Ref*~2"
+          ]
+        }
+      },
+      "output_exists": true,
+      "ledger": [
+        {
+          "applied_by": "place_reconstruct.py",
+          "board_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "caller": "place_reconstruct.py:150 in main",
+          "candidate_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "decision_source": "unspecified",
+          "declared": true,
+          "final_snapshot": true,
+          "lever": "place_reconstruct.py",
+          "lever_argv": [
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\board.kicad_pcb",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\board.kicad_pcb",
+            "--intent",
+            "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\intent.json",
+            "--clearance",
+            ".2",
+            "--board-edge-clearance",
+            ".25",
+            "--stages",
+            "classify"
+          ],
+          "locks_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": false,
+            "#00000000-0000-0000-0000-00005d8c51dd": false,
+            "#00000000-0000-0000-0000-00005e7dd057": false,
+            "C1": false,
+            "C2": false,
+            "C3": false,
+            "C4": false,
+            "CON1": false,
+            "CON2": false,
+            "Q1": false,
+            "Q2": false,
+            "R1": false,
+            "R2": false,
+            "R3": false,
+            "R4": false,
+            "Ref*": false,
+            "Ref*~2": false,
+            "U1": false,
+            "U2": false,
+            "USB1": false,
+            "Y1": false
+          },
+          "parent_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+          "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\board.kicad_pcb",
+          "poses_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": [
+              115.25,
+              95.75,
+              90.0
+            ],
+            "#00000000-0000-0000-0000-00005d8c51dd": [
+              119.2,
+              100.9,
+              0.0
+            ],
+            "#00000000-0000-0000-0000-00005e7dd057": [
+              130.0,
+              99.0,
+              180.0
+            ],
+            "C1": [
+              138.46,
+              96.23,
+              90.0
+            ],
+            "C2": [
+              131.7,
+              103.9,
+              270.0
+            ],
+            "C3": [
+              132.55,
+              100.22,
+              180.0
+            ],
+            "C4": [
+              136.4,
+              103.8,
+              90.0
+            ],
+            "CON1": [
+              143.4,
+              100.0,
+              270.0
+            ],
+            "CON2": [
+              136.17,
+              93.0,
+              180.0
+            ],
+            "Q1": [
+              139.0,
+              99.7,
+              180.0
+            ],
+            "Q2": [
+              139.0,
+              103.1,
+              180.0
+            ],
+            "R1": [
+              136.4,
+              98.8,
+              270.0
+            ],
+            "R2": [
+              136.4,
+              101.6,
+              90.0
+            ],
+            "R3": [
+              141.0,
+              101.5,
+              180.0
+            ],
+            "R4": [
+              141.0,
+              98.1,
+              180.0
+            ],
+            "Ref*": [
+              141.2,
+              95.9,
+              0.0
+            ],
+            "Ref*~2": [
+              118.1,
+              99.9,
+              0.0
+            ],
+            "U1": [
+              127.0,
+              100.0,
+              0.0
+            ],
+            "U2": [
+              134.34,
+              96.69,
+              270.0
+            ],
+            "USB1": [
+              117.5,
+              100.0,
+              180.0
+            ],
+            "Y1": [
+              133.98,
+              103.0,
+              90.0
+            ]
+          },
+          "provenance_scope": "registered execution; coordinate selection is separately declared",
+          "refs_moved": [],
+          "refs_written": [
+            "#00000000-0000-0000-0000-00005a3b5201",
+            "#00000000-0000-0000-0000-00005d8c51dd",
+            "#00000000-0000-0000-0000-00005e7dd057",
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "CON1",
+            "CON2",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Ref*",
+            "Ref*~2",
+            "U1",
+            "U2",
+            "USB1",
+            "Y1"
+          ],
+          "schema": 1,
+          "sides_written": {
+            "#00000000-0000-0000-0000-00005a3b5201": "B",
+            "#00000000-0000-0000-0000-00005d8c51dd": "B",
+            "#00000000-0000-0000-0000-00005e7dd057": "B",
+            "C1": "F",
+            "C2": "F",
+            "C3": "F",
+            "C4": "F",
+            "CON1": "F",
+            "CON2": "F",
+            "Q1": "F",
+            "Q2": "F",
+            "R1": "F",
+            "R2": "F",
+            "R3": "F",
+            "R4": "F",
+            "Ref*": "F",
+            "Ref*~2": "F",
+            "U1": "F",
+            "U2": "F",
+            "USB1": "F",
+            "Y1": "F"
+          },
+          "t": 1789380646.565473
+        }
+      ],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false,
+      "native_USB1": [
+        117.5,
+        100.0,
+        180.0
+      ],
+      "audit_argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\board.kicad_pcb"
+      ],
+      "audit_exit": 0,
+      "audit_stdout": "VERDICT: CLEAN\n  all 0 moved pose(s) trace to place_reconstruct.py, and each is where its lever put it\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 1, \"levers\": [\"place_reconstruct.py\"], \"moved\": 0, \"unverifiable_claims\": [], \"verdict\": \"CLEAN\"}\n",
+      "manifest": {
+        "kind": "unaided-regime",
+        "lever_registry": [
+          "place_seed.py",
+          "place_optimize.py",
+          "place_reconstruct.py",
+          "place_portfolio.py",
+          "place_route_loop.py",
+          "place_fanout_clearance.py",
+          "converge.py",
+          "place_pose.py",
+          "route.py",
+          "perturb.py",
+          "stage_blind.py",
+          "stage_unaided.py"
+        ],
+        "schema": 1,
+        "staged_board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-inplace\\.pose-baseline-03b4be2d287c4802981e514bc74d2824.kicad_pcb",
+        "staged_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e"
+      }
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\py_placer\\place_reconstruct.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-readonly\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-readonly\\out.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-readonly\\intent.json",
+        "--clearance",
+        ".2",
+        "--board-edge-clearance",
+        ".25",
+        "--stages",
+        "classify"
+      ],
+      "exit": 4,
+      "summary": {
+        "assign_moved": [],
+        "assign_pruned": [],
+        "complete": false,
+        "connector_requirements": {
+          "accepted": true,
+          "complete": true,
+          "edge_seating": [
+            {
+              "along_edge_fraction": 0.6207,
+              "along_edge_offset_mm": 1.75,
+              "along_edge_offset_pct": 12.07,
+              "basis": "bbox",
+              "body_bounds_mm": [
+                114.0,
+                96.3,
+                121.12,
+                103.7
+              ],
+              "body_measured": true,
+              "body_overhang_basis": "F.Fab",
+              "body_overhang_mm": 0.0,
+              "body_requirement_declared": true,
+              "body_setback_mm": 0.0,
+              "body_signed_position_mm": 0.0,
+              "boundary_basis": "rectangular Edge.Cuts centreline",
+              "clearance_parameters": {
+                "board_edge_clearance_mm": 0.25,
+                "copper_clearance_mm": 0.2,
+                "effective_occupancy_margin_mm": 0.25,
+                "physical_body_margin_mm": 0.0
+              },
+              "copper_edge_complete": true,
+              "copper_edge_findings": [],
+              "copper_edge_shortfall_mm": 0.0,
+              "copper_edge_unmeasured": [],
+              "copper_rules_unmeasured": [],
+              "declared": false,
+              "edge": "west",
+              "mating_face_basis": "drawn envelope support line toward declared edge",
+              "measurements": {
+                "body_overhang": {
+                  "declared_limit": {
+                    "max": 0.65,
+                    "min": 0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "body_setback": {
+                  "declared_limit": {
+                    "max": 0.1
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "F.Fab",
+                  "requirement_source": "intent.edge_connectors",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "copper_edge_shortfall": {
+                  "declared_limit": {
+                    "max": 0.0
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 0.0
+                },
+                "pad_copper_edge_gap": {
+                  "declared_limit": {
+                    "min": 0.25
+                  },
+                  "disposition": "pass",
+                  "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                  "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                  "units": "mm",
+                  "value": 1.3000000000000114
+                }
+              },
+              "other_body_edge_overhang_mm": {
+                "east": 0.0,
+                "north": 0.0,
+                "south": 0.0
+              },
+              "overhang_basis": "F.Fab",
+              "overhang_mm": 0.0,
+              "pad_copper_declared_edge_gap_mm": 1.5999999999999943,
+              "pad_copper_edge_gap_mm": 1.3000000000000114,
+              "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+              "ref": "USB1",
+              "required_copper_edge_gap_mm": 0.25,
+              "span_mm": 14.5,
+              "units": "mm"
+            }
+          ],
+          "errors": [],
+          "unmeasured": {}
+        },
+        "edge_bands": {
+          "USB1": 0.65
+        },
+        "error": "cannot write C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\gate-20260914-121034\\place_reconstruct-readonly\\out.kicad_pcb: [WinError 5] Toegang geweigerd: 'C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\docs\\\\issue-961-evidence\\\\final\\\\gate-20260914-121034\\\\place_reconstruct-readonly\\\\.krt-candidate-s19z2bk6' -> 'C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-961-review-final\\\\docs\\\\issue-961-evidence\\\\final\\\\gate-20260914-121034\\\\place_reconstruct-readonly\\\\out.kicad_pcb'. Nothing was written: previous output files were preserved or restored.",
+        "final": {
+          "body_advisory": 6,
+          "body_blocking": 0,
+          "body_pairs": [
+            {
+              "a": "CON2",
+              "area_mm2": 1.456,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.0538,
+              "depth_mm": 0.28,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                131.64,
+                93.99,
+                136.84,
+                94.27
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "CON2",
+              "area_mm2": 1.456,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.0538,
+              "depth_mm": 0.28,
+              "kind": "fab",
+              "locked_ref": "",
+              "overlap_rect": null,
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "R1",
+              "area_mm2": 0.6314,
+              "b": "U2",
+              "contained": false,
+              "contained_frac": 0.7573,
+              "depth_mm": 0.55,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                136.125,
+                98.042,
+                136.675,
+                99.19
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "R1",
+              "area_mm2": 0.442,
+              "b": "U2",
+              "contained": true,
+              "contained_frac": 0.8917,
+              "depth_mm": 0.4978,
+              "kind": "fab",
+              "locked_ref": "",
+              "overlap_rect": null,
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "Q1",
+              "area_mm2": 0.07,
+              "b": "R4",
+              "contained": false,
+              "contained_frac": 0.084,
+              "depth_mm": 0.125,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                140.242,
+                98.25,
+                140.8024,
+                98.375
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            },
+            {
+              "a": "Q2",
+              "area_mm2": 0.07,
+              "b": "R3",
+              "contained": false,
+              "contained_frac": 0.084,
+              "depth_mm": 0.125,
+              "kind": "courtyard",
+              "locked_ref": "",
+              "overlap_rect": [
+                140.242,
+                101.65,
+                140.8024,
+                101.775
+              ],
+              "shorts": [],
+              "side": "F",
+              "waived": false,
+              "waiver": ""
+            }
+          ],
+          "exact": true,
+          "hole_conflicts": 0,
+          "oob_pad_amount": 0.0,
+          "oob_pad_count": 0,
+          "pad_conflicts": 0,
+          "pad_edge": {
+            "argument_mm": 0.25,
+            "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "complete": true,
+            "findings": [],
+            "measured_pads": 75,
+            "minimum_gap_by_edge_mm": {
+              "east": 1.070999999999998,
+              "north": 1.1110000000000042,
+              "south": 0.7000000000000028,
+              "west": 1.5999999999999943
+            },
+            "minimum_gap_mm": 0.7000000000000028,
+            "required_mm": 0.25,
+            "rules_unmeasured": [],
+            "source": "caller argument",
+            "tolerance_mm": 1e-06,
+            "units": "mm",
+            "unmeasured": []
+          },
+          "pad_edge_conflicts": 0,
+          "pad_edge_shortfall": 0,
+          "pad_edge_unmeasured": 0,
+          "pad_shortfall": 0.0
+        },
+        "gate_after_assign": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "gate_before": [
+          0,
+          1,
+          0.0,
+          0.0,
+          0,
+          253.981,
+          1.14
+        ],
+        "output": null,
+        "output_state": "unchanged",
+        "published": false,
+        "recovery_journal": null,
+        "rollback_errors": [],
+        "stages_requested": [
+          "classify"
+        ],
+        "status": "error",
+        "tiers": {
+          "anchor_extent_mm": 3.8,
+          "anchors": [
+            "CON1",
+            "CON2",
+            "U1",
+            "U2",
+            "USB1"
+          ],
+          "edge": [
+            "USB1"
+          ],
+          "locked": [],
+          "smalls": [
+            "C1",
+            "C2",
+            "C3",
+            "C4",
+            "Q1",
+            "Q2",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "Y1"
+          ],
+          "zero_net": [
+            "Ref*",
+            "Ref*~2"
+          ]
+        }
+      },
+      "output_exists": true,
+      "ledger": [],
+      "input_before_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "input_after_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+      "intent_preserved": true,
+      "traceback": false
+    }
+  ]
+}

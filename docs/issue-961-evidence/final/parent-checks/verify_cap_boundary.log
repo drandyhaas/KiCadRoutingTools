@@ -1,0 +1,93 @@
+{
+  "revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+  "routed_clearance": 0.1,
+  "cli_omitted_cap_clearance": [
+    0.25,
+    "fixed default"
+  ],
+  "returned": "Decoupling caps optimized: 0 moved",
+  "engine_log": "  cap pair clearance: 0.25mm (fixed default)\n  board-edge margin for caps: 0.55mm (fixed default)\nCopper-to-hole clearance 0.25mm (from the board's own min_hole_clearance, above the 0.2mm fab floor)\nBGAs: (none)  fanout vias: 0  movable near-BGA caps: 0\nNo vias on the board - run this AFTER bga_fanout.py.\n"
+}
+
+STDERR
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+Element wxPanel@000001734F0D32C0 ("panel", HWND=00000000002E086A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D64A0 ("panel", HWND=0000000000280AB0).
+Element wxScrolledWindow@000001734E529270 ("panel", HWND=0000000000290810) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D64A0 ("panel", HWND=0000000000280AB0).
+Element wxScrolledWindow@000001734E52AC70 ("panel", HWND=0000000000280C04) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D64A0 ("panel", HWND=0000000000280AB0).
+Element wxButton@000001734DFC5930 ("Check Stackup (AI)", HWND=00000000002E0AFE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D64A0 ("panel", HWND=0000000000280AB0).
+Element wxScrolledWindow@000001734E5295B0 ("panel", HWND=0000000000280BD0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D64A0 ("panel", HWND=0000000000280AB0).
+Element wxGauge@000001734DFC75F0 ("gauge", HWND=00000000001F0DDE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D64A0 ("panel", HWND=0000000000280AB0).
+Element wxStaticText@000001734DFA1A10 ("Ready", HWND=00000000002E0A8E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D64A0 ("panel", HWND=0000000000280AB0).
+Element wxPanel@000001734F0D3020 ("panel", HWND=00000000004D03BC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D3FE0 ("panel", HWND=0000000000280C1A).
+Element wxCheckBox@000001734F5B2300 ("Update schematic with swaps", HWND=00000000005C09BC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D3FE0 ("panel", HWND=0000000000280C1A).
+Element wxScrolledWindow@000001734E5298F0 ("panel", HWND=00000000002D07B2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D3FE0 ("panel", HWND=0000000000280C1A).
+Element wxScrolledWindow@000001734E5271F0 ("panel", HWND=00000000001A0F46) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D3FE0 ("panel", HWND=0000000000280C1A).
+Element wxPanel@000001734F0D4520 ("panel", HWND=00000000001F0F6A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D5A20 ("panel", HWND=0000000000191182).
+Element wxCheckBox@000001734F62FC70 ("Add GND vias", HWND=0000000000330992) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D5A20 ("panel", HWND=0000000000191182).
+Element wxCheckBox@000001734F62EDC0 ("Intra-pair length matching", HWND=0000000000200D0E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D5A20 ("panel", HWND=0000000000191182).
+Element wxCheckBox@000001734F6316E0 ("AC-coupled end-to-end matching", HWND=00000000001E10E2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D5A20 ("panel", HWND=0000000000191182).
+Element wxCheckBox@000001734F631100 ("Hide short routes", HWND=00000000001E10D0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D5A20 ("panel", HWND=0000000000191182).
+Element wxStaticText@000001734DFAB330 ("Ready", HWND=0000000000171510) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D5A20 ("panel", HWND=0000000000191182).
+Element wxGauge@000001734DFC8170 ("gauge", HWND=00000000001A11E6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D5A20 ("panel", HWND=0000000000191182).
+Element wxPanel@000001734F0D4A60 ("panel", HWND=0000000000290B4C) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D47C0 ("panel", HWND=0000000000290BB0).
+Element wxRadioBox@000001734F274660 ("radioBox", HWND=0000000000181284) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D47C0 ("panel", HWND=0000000000290BB0).
+Element wxCheckBox@000001734F62F3A0 ("Differential pairs", HWND=00000000002B10E0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxRadioBox@000001734F273580 ("radioBox", HWND=00000000001B1116) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxCheckBox@000001734F6322A0 ("Force escape direction", HWND=0000000000320872) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxCheckBox@000001734F632590 ("Rebalance escape directions", HWND=00000000001A11A6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxCheckBox@000001734F630E10 ("Skip pads with existing fanout", HWND=00000000001911A8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxCheckBox@000001734F632880 ("No inner pads on top layer", HWND=00000000001A11AE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxCheckBox@000001734F630830 ("Drop plane-net balls to vias", HWND=00000000001A11B2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxCheckBox@000001734F631CC0 ("Optimize decoupling cap placement", HWND=00000000001A117A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxCheckBox@000001734F678750 ("Allow cap rotation", HWND=0000000000171340) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxStaticText@000001734DF95920 ("Ready", HWND=00000000001712F6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D47C0 ("panel", HWND=0000000000290BB0).
+Element wxGauge@000001734F2F5BE0 ("gauge", HWND=0000000000181354) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D47C0 ("panel", HWND=0000000000290BB0).
+Element wxStaticText@000001734DF93150 ("Exit Margin (mm):", HWND=0000000000181258) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E529C30 ("panel", HWND=0000000000171232).
+Element wxPanel@000001734E702240 ("panel", HWND=0000000000171372) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D4FA0 ("panel", HWND=0000000000171374).
+Element wxPanel@000001734E702F60 ("panel", HWND=00000000001813D0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D4FA0 ("panel", HWND=0000000000171374).
+Element wxCheckBox@000001734F679600 ("Thermal relief pad connections", HWND=0000000000181442) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F331F80 ("panel", HWND=0000000000171408).
+Element wxCheckBox@000001734F679020 ("Thermal via arrays under exposed pads", HWND=0000000000171436) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F331F80 ("panel", HWND=0000000000171408).
+Element wxCheckBox@000001734F6798F0 ("Stitch plane layers with a via lattice", HWND=0000000000181434) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F331F80 ("panel", HWND=0000000000171408).
+Element wxCheckBox@000001734F67A4B0 ("Board-edge via fence (EMI guard ring)", HWND=0000000000181448) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F331F80 ("panel", HWND=0000000000171408).
+Element wxCheckBox@000001734F67B070 ("Add GND vias near signal vias", HWND=000000000017138A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F331F80 ("panel", HWND=0000000000171408).
+Element wxStaticText@000001734DF93A80 ("Ready", HWND=000000000017141A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D4FA0 ("panel", HWND=0000000000171374).
+Element wxGauge@000001734F65B910 ("gauge", HWND=0000000000171412) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F0D4FA0 ("panel", HWND=0000000000171374).
+Element wxCheckListBox@000001734DFBE660 ("listBox", HWND=000000000017137C) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxStaticText@000001734E026AE0 ("staticText", HWND=00000000004C03B4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxStaticLine@000001734F6F88B0 ("staticLine", HWND=00000000001815A6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F65D5D0 ("Plan Routing", HWND=00000000001815A0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F65A4F0 ("Cancel", HWND=00000000001815C2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxStaticLine@000001734F6F8040 ("staticLine", HWND=00000000001715CE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F65D8B0 ("Run Selected Steps", HWND=00000000001715D4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F65DB90 ("Run All Selected Steps", HWND=00000000001815D6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F65A7D0 ("Stop", HWND=00000000001815DA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxStaticLine@000001734F6F7AA0 ("staticLine", HWND=00000000001715EC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F65B070 ("Review Routed Board", HWND=00000000001815F0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F749770 ("Diagnose Routing Failures", HWND=00000000001715F8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxStaticLine@000001734F6F8B80 ("staticLine", HWND=00000000001815FA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxButton@000001734F74A010 ("Close", HWND=0000000000171602) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B5CB0 ("panel", HWND=000000000018154C).
+Element wxPanel@000001734F6B4510 ("panel", HWND=0000000000181548) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B4F90 ("panel", HWND=0000000000181556).
+Element wxStaticText@000001734E02B460 ("staticText", HWND=00000000001716A0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E52A930 ("panel", HWND=0000000000181684).
+Element wxStaticText@000001734E024930 ("Extra instructions:", HWND=00000000001716E0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E52A930 ("panel", HWND=0000000000181684).
+Element wxTextCtrl@000001734F642800 ("text", HWND=00000000001716E6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E52A930 ("panel", HWND=0000000000181684).
+Element wxButton@000001734F75FC40 ("Place (AI)", HWND=00000000001716EC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E52A930 ("panel", HWND=0000000000181684).
+Element wxButton@000001734F75FF20 ("Place + Route (AI)", HWND=00000000001716F8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E52A930 ("panel", HWND=0000000000181684).
+Element wxPanel@000001734F6B2D70 ("panel", HWND=000000000018174E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E52A930 ("panel", HWND=0000000000181684).
+Element wxButton@000001734F75F0C0 ("Beautify Labels", HWND=00000000001817D0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001734E52A930 ("panel", HWND=0000000000181684).
+Element wxGauge@000001734F75CB60 ("gauge", HWND=00000000001817DA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001734F6B4F90 ("panel", HWND=0000000000181556).
+Adding duplicate image handler for 'Windows bitmap file'
+Adding duplicate animation handler for '1' type
+Adding duplicate animation handler for '2' type
+Adding duplicate animation handler for '3' type

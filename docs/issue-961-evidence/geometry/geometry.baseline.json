@@ -1,0 +1,878 @@
+{
+  "revision": "3f343981ae3fdbc82a60c0d41d693a03ccca98de",
+  "native_kicad": "10.0.0",
+  "rows": [
+    {
+      "name": "fab_flush",
+      "native_points": [
+        [
+          0.0,
+          8.0
+        ],
+        [
+          4.0,
+          8.0
+        ],
+        [
+          0.0,
+          12.0
+        ],
+        [
+          0.0,
+          8.0
+        ],
+        [
+          4.0,
+          8.0
+        ],
+        [
+          4.0,
+          12.0
+        ],
+        [
+          4.0,
+          12.0
+        ],
+        [
+          0.0,
+          12.0
+        ]
+      ],
+      "native_angle": 0.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        0.0,
+        8.0,
+        4.0,
+        12.0
+      ],
+      "old_basis": "fab",
+      "native_west_overhang": 0,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "silk_pads_extend",
+      "native_points": [
+        [
+          0.0,
+          8.0
+        ],
+        [
+          4.0,
+          8.0
+        ],
+        [
+          0.0,
+          12.0
+        ],
+        [
+          0.0,
+          8.0
+        ],
+        [
+          4.0,
+          8.0
+        ],
+        [
+          4.0,
+          12.0
+        ],
+        [
+          4.0,
+          12.0
+        ],
+        [
+          0.0,
+          12.0
+        ]
+      ],
+      "native_angle": 0.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        -1.25,
+        8.0,
+        4.0,
+        12.0
+      ],
+      "old_basis": "silk",
+      "native_west_overhang": 0,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 1.50mm, past the declared maximum 0.20mm",
+                "measured": {
+                  "overhang_mm": 1.5
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 1.80mm, past the declared maximum 0.20mm",
+                "measured": {
+                  "overhang_mm": 1.8
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing",
+      "native_points": [],
+      "native_angle": 0.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        1.75,
+        9.75,
+        2.25,
+        10.25
+      ],
+      "old_basis": "pad_bbox",
+      "native_west_overhang": null,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "open_fab_line",
+      "native_points": [
+        [
+          0.0,
+          8.0
+        ],
+        [
+          4.0,
+          12.0
+        ]
+      ],
+      "native_angle": 0.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        0.0,
+        8.0,
+        4.0,
+        12.0
+      ],
+      "old_basis": "fab",
+      "native_west_overhang": 0,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "triangle_45",
+      "native_points": [
+        [
+          2.5,
+          7.171573
+        ],
+        [
+          5.328427,
+          10.0
+        ],
+        [
+          2.5,
+          12.828427
+        ],
+        [
+          2.5,
+          7.171573
+        ],
+        [
+          5.328427,
+          10.0
+        ],
+        [
+          2.5,
+          12.828427
+        ]
+      ],
+      "native_angle": 45.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        -0.3284271247461903,
+        7.17157287525381,
+        5.32842712474619,
+        12.82842712474619
+      ],
+      "old_basis": "fab",
+      "native_west_overhang": 0,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "fab_back_37",
+      "native_points": [
+        [
+          -0.300901,
+          10.393641
+        ],
+        [
+          2.893641,
+          12.800901
+        ],
+        [
+          2.106359,
+          7.199099
+        ],
+        [
+          -0.300901,
+          10.393641
+        ],
+        [
+          2.893641,
+          12.800901
+        ],
+        [
+          5.300901,
+          9.606359
+        ],
+        [
+          5.300901,
+          9.606359
+        ],
+        [
+          2.106359,
+          7.199099
+        ]
+      ],
+      "native_angle": 143.0,
+      "native_face": "B.Cu",
+      "old_drawn_rect": [
+        -0.3009010663986822,
+        7.199098933601318,
+        5.300901066398682,
+        12.800901066398682
+      ],
+      "old_basis": "fab",
+      "native_west_overhang": 0.300901,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "fab_front_37",
+      "native_points": [
+        [
+          -0.300901,
+          9.606359
+        ],
+        [
+          2.893641,
+          7.199099
+        ],
+        [
+          2.106359,
+          12.800901
+        ],
+        [
+          -0.300901,
+          9.606359
+        ],
+        [
+          2.893641,
+          7.199099
+        ],
+        [
+          5.300901,
+          10.393641
+        ],
+        [
+          5.300901,
+          10.393641
+        ],
+        [
+          2.106359,
+          12.800901
+        ]
+      ],
+      "native_angle": 37.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        -0.3009010663986822,
+        7.199098933601318,
+        5.300901066398682,
+        12.800901066398682
+      ],
+      "old_basis": "fab",
+      "native_west_overhang": 0.300901,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "bbox",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "concave_notch",
+      "native_points": [
+        [
+          6.0,
+          8.0
+        ],
+        [
+          10.0,
+          8.0
+        ],
+        [
+          6.0,
+          12.0
+        ],
+        [
+          6.0,
+          8.0
+        ],
+        [
+          10.0,
+          8.0
+        ],
+        [
+          10.0,
+          12.0
+        ],
+        [
+          10.0,
+          12.0
+        ],
+        [
+          6.0,
+          12.0
+        ]
+      ],
+      "native_angle": 0.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        6.0,
+        8.0,
+        10.0,
+        12.0
+      ],
+      "old_basis": "fab",
+      "native_west_overhang": 0,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "abstained": "the west edge of this outline is 2 separate runs (8.00mm, 8.00mm), not one span, so 'along the edge' has no single meaning here"
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "abstained": "the west edge of this outline is 2 separate runs (8.00mm, 8.00mm), not one span, so 'along the edge' has no single meaning here"
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 0.00mm, under the declared minimum 0.05mm",
+                "measured": {
+                  "overhang_mm": 0.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "cutout",
+      "native_points": [
+        [
+          5.0,
+          8.0
+        ],
+        [
+          9.0,
+          8.0
+        ],
+        [
+          5.0,
+          12.0
+        ],
+        [
+          5.0,
+          8.0
+        ],
+        [
+          9.0,
+          8.0
+        ],
+        [
+          9.0,
+          12.0
+        ],
+        [
+          9.0,
+          12.0
+        ],
+        [
+          5.0,
+          12.0
+        ]
+      ],
+      "native_angle": 0.0,
+      "native_face": "F.Cu",
+      "old_drawn_rect": [
+        5.0,
+        8.0,
+        9.0,
+        12.0
+      ],
+      "old_basis": "fab",
+      "native_west_overhang": 0,
+      "grades": [
+        {
+          "requested_clearance": 0.25,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "ring",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 4.00mm, past the declared maximum 0.20mm",
+                "measured": {
+                  "overhang_mm": 4.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        },
+        {
+          "requested_clearance": 0.55,
+          "requested_edge_clearance": 0,
+          "result": {
+            "edge_seating": [
+              {
+                "ref": "J1",
+                "edge": "west",
+                "declared": false,
+                "basis": "ring",
+                "span_mm": 20.0,
+                "along_edge_offset_mm": 0.0,
+                "along_edge_offset_pct": 0.0,
+                "along_edge_fraction": 0.5
+              }
+            ],
+            "violations": [
+              {
+                "rule": "edge_connector",
+                "message": "J1 overhangs the outline by 4.00mm, past the declared maximum 0.20mm",
+                "measured": {
+                  "overhang_mm": 4.0
+                }
+              }
+            ],
+            "abstained": null
+          }
+        }
+      ]
+    }
+  ]
+}

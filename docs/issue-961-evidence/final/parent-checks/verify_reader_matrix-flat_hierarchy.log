@@ -1,0 +1,195 @@
+{"case": "standard/declared=0.0/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.0/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.0/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.0/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.0/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "standard/declared=0.0/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.099999/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.099999/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.099999/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.099999/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.099999/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "standard/declared=0.099999/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.1/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.1/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.1/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.1/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.1/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "standard/declared=0.1/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.100001/unchecked-typed=0.25", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "standard/declared=0.100001/unchecked-typed=0.73", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "standard/declared=0.100001/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.100001/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.100001/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "standard/declared=0.100001/ceiling=0.3", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "standard/declared=0.2/unchecked-typed=0.25", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "standard/declared=0.2/unchecked-typed=0.73", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "standard/declared=0.2/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.2/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.2/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "standard/declared=0.2/ceiling=0.3", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "standard/declared=0.4/unchecked-typed=0.25", "expected": 0.4, "actual": 0.4, "pass": true}
+{"case": "standard/declared=0.4/unchecked-typed=0.73", "expected": 0.4, "actual": 0.4, "pass": true}
+{"case": "standard/declared=0.4/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.4/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "standard/declared=0.4/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "standard/declared=0.4/ceiling=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "advanced/declared=0.0/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.0/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.0/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.0/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.0/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "advanced/declared=0.0/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.099999/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.099999/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.099999/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.099999/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.099999/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "advanced/declared=0.099999/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.1/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.1/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.1/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.1/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.1/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "advanced/declared=0.1/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.100001/unchecked-typed=0.25", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "advanced/declared=0.100001/unchecked-typed=0.73", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "advanced/declared=0.100001/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.100001/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.100001/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "advanced/declared=0.100001/ceiling=0.3", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "advanced/declared=0.2/unchecked-typed=0.25", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "advanced/declared=0.2/unchecked-typed=0.73", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "advanced/declared=0.2/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.2/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.2/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "advanced/declared=0.2/ceiling=0.3", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "advanced/declared=0.4/unchecked-typed=0.25", "expected": 0.4, "actual": 0.4, "pass": true}
+{"case": "advanced/declared=0.4/unchecked-typed=0.73", "expected": 0.4, "actual": 0.4, "pass": true}
+{"case": "advanced/declared=0.4/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.4/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "advanced/declared=0.4/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "advanced/declared=0.4/ceiling=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "auto/declared=0.0/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.0/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.0/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.0/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.0/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "auto/declared=0.0/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.099999/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.099999/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.099999/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.099999/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.099999/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "auto/declared=0.099999/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.1/unchecked-typed=0.25", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.1/unchecked-typed=0.73", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.1/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.1/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.1/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "auto/declared=0.1/ceiling=0.3", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.100001/unchecked-typed=0.25", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "auto/declared=0.100001/unchecked-typed=0.73", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "auto/declared=0.100001/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.100001/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.100001/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "auto/declared=0.100001/ceiling=0.3", "expected": 0.100001, "actual": 0.100001, "pass": true}
+{"case": "auto/declared=0.2/unchecked-typed=0.25", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "auto/declared=0.2/unchecked-typed=0.73", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "auto/declared=0.2/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.2/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.2/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "auto/declared=0.2/ceiling=0.3", "expected": 0.2, "actual": 0.2, "pass": true}
+{"case": "auto/declared=0.4/unchecked-typed=0.25", "expected": 0.4, "actual": 0.4, "pass": true}
+{"case": "auto/declared=0.4/unchecked-typed=0.73", "expected": 0.4, "actual": 0.4, "pass": true}
+{"case": "auto/declared=0.4/explicit=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.4/ceiling=0.09", "expected": 0.1, "actual": 0.1, "pass": true}
+{"case": "auto/declared=0.4/explicit=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "auto/declared=0.4/ceiling=0.3", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "custom physical clearance=0.083, declared zero", "expected": 0.083, "actual": 0.083, "pass": true}
+{"case": "plan explicit clearance", "expected": 0.3, "actual": 0.3, "pass": true}
+{"case": "plan reset then omitted clearance", "expected": 0.1, "actual": 0.1, "pass": true}
+{"revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128", "passed": 112, "failed": 0}
+
+STDERR
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+Element wxPanel@000001B50D4565C0 ("panel", HWND=00000000002C0B2C) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D455DE0 ("panel", HWND=00000000002C0A12).
+Element wxScrolledWindow@000001B510784130 ("panel", HWND=0000000000270A32) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D455DE0 ("panel", HWND=00000000002C0A12).
+Element wxScrolledWindow@000001B510787870 ("panel", HWND=0000000000260C00) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D455DE0 ("panel", HWND=00000000002C0A12).
+Element wxButton@000001B50D40CA40 ("Check Stackup (AI)", HWND=0000000000260C22) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D455DE0 ("panel", HWND=00000000002C0A12).
+Element wxScrolledWindow@000001B510787BB0 ("panel", HWND=0000000000260C1A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D455DE0 ("panel", HWND=00000000002C0A12).
+Element wxGauge@000001B50DC8A390 ("gauge", HWND=00000000004B03BC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D455DE0 ("panel", HWND=00000000002C0A12).
+Element wxStaticText@000001B50D220C50 ("Ready", HWND=00000000001D0DCC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D455DE0 ("panel", HWND=00000000002C0A12).
+Element wxPanel@000001B50D2461C0 ("panel", HWND=0000000000270C4A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247180 ("panel", HWND=00000000001E0DAA).
+Element wxCheckBox@000001B50DC824B0 ("Update schematic with swaps", HWND=000000000028082C) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247180 ("panel", HWND=00000000001E0DAA).
+Element wxScrolledWindow@000001B5107820B0 ("panel", HWND=0000000000270B54) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247180 ("panel", HWND=00000000001E0DAA).
+Element wxScrolledWindow@000001B5107823F0 ("panel", HWND=00000000001D0F6A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247180 ("panel", HWND=00000000001E0DAA).
+Element wxPanel@000001B50D246460 ("panel", HWND=000000000018116C) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247960 ("panel", HWND=0000000000181170).
+Element wxCheckBox@000001B50D7D06F0 ("Add GND vias", HWND=00000000001811A2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247960 ("panel", HWND=0000000000181170).
+Element wxCheckBox@000001B50D7D2450 ("Intra-pair length matching", HWND=00000000001E0D80) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247960 ("panel", HWND=0000000000181170).
+Element wxCheckBox@000001B50D7D1B80 ("AC-coupled end-to-end matching", HWND=0000000000270B66) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247960 ("panel", HWND=0000000000181170).
+Element wxCheckBox@000001B50D7D0400 ("Hide short routes", HWND=0000000000BA053A) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247960 ("panel", HWND=0000000000181170).
+Element wxStaticText@000001B50E2C2480 ("Ready", HWND=0000000000270BB0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247960 ("panel", HWND=0000000000181170).
+Element wxGauge@000001B50E4C3D20 ("gauge", HWND=00000000002D09DC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D247960 ("panel", HWND=0000000000181170).
+Element wxPanel@000001B50D7C2350 ("panel", HWND=0000000000151232) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C5530 ("panel", HWND=00000000001711D6).
+Element wxRadioBox@000001B50D61CCC0 ("radioBox", HWND=00000000001612F0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C5530 ("panel", HWND=00000000001711D6).
+Element wxCheckBox@000001B50D7CF550 ("Differential pairs", HWND=00000000001810FC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxRadioBox@000001B50D61D6E0 ("radioBox", HWND=0000000000181124) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxCheckBox@000001B50D7D2A30 ("Force escape direction", HWND=00000000001711A8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxCheckBox@000001B50D7CEF70 ("Rebalance escape directions", HWND=00000000001811AE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxCheckBox@000001B50DD11EE0 ("Skip pads with existing fanout", HWND=00000000001711B0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxCheckBox@000001B50D7224A0 ("No inner pads on top layer", HWND=00000000001E116E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxCheckBox@000001B50D721300 ("Drop plane-net balls to vias", HWND=00000000001E1088) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxCheckBox@000001B50D722D70 ("Optimize decoupling cap placement", HWND=00000000001711E0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxCheckBox@000001B50D7218E0 ("Allow cap rotation", HWND=0000000000161328) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxStaticText@000001B50E2C4320 ("Ready", HWND=0000000000151370) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C5530 ("panel", HWND=00000000001711D6).
+Element wxGauge@000001B50E4C0C40 ("gauge", HWND=0000000000151372) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C5530 ("panel", HWND=00000000001711D6).
+Element wxStaticText@000001B50E2C0F10 ("Exit Margin (mm):", HWND=000000000016126C) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B510784470 ("panel", HWND=0000000000151216).
+Element wxPanel@000001B50D7C4810 ("panel", HWND=0000000000151392) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C2B30 ("panel", HWND=000000000015137C).
+Element wxPanel@000001B50D7C5290 ("panel", HWND=00000000001613EE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C2B30 ("panel", HWND=000000000015137C).
+Element wxCheckBox@000001B50E2D0330 ("Thermal relief pad connections", HWND=0000000000151446) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C57D0 ("panel", HWND=000000000015141A).
+Element wxCheckBox@000001B50E2D3B00 ("Thermal via arrays under exposed pads", HWND=0000000000161434) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C57D0 ("panel", HWND=000000000015141A).
+Element wxCheckBox@000001B50E2D0C00 ("Stitch plane layers with a via lattice", HWND=000000000015144C) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C57D0 ("panel", HWND=000000000015141A).
+Element wxCheckBox@000001B50E2D0910 ("Board-edge via fence (EMI guard ring)", HWND=00000000011907F4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C57D0 ("panel", HWND=000000000015141A).
+Element wxCheckBox@000001B50E2D0EF0 ("Add GND vias near signal vias", HWND=00000000001514E0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C57D0 ("panel", HWND=000000000015141A).
+Element wxStaticText@000001B50E2C6AF0 ("Ready", HWND=0000000000151540) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C2B30 ("panel", HWND=000000000015137C).
+Element wxGauge@000001B50E4C2BE0 ("gauge", HWND=000000000015154E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C2B30 ("panel", HWND=000000000015137C).
+Element wxCheckListBox@000001B50E4DDA00 ("listBox", HWND=00000000004A03B4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxStaticText@000001B510793740 ("staticText", HWND=0000000000280C4E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxStaticLine@000001B5107D4990 ("staticLine", HWND=00000000001615C2) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CDE20 ("Plan Routing", HWND=00000000001515CE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CDB40 ("Cancel", HWND=00000000001515D4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxStaticLine@000001B5107D54D0 ("staticLine", HWND=00000000001615D6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CD580 ("Run Selected Steps", HWND=00000000001615DA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CE3E0 ("Run All Selected Steps", HWND=00000000001515EC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CD860 ("Stop", HWND=00000000001615F0) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxStaticLine@000001B5107D3E50 ("staticLine", HWND=00000000001515F8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CE100 ("Review Routed Board", HWND=00000000001615FA) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CBBA0 ("Diagnose Routing Failures", HWND=0000000000151602) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxStaticLine@000001B5107D4C60 ("staticLine", HWND=0000000000161606) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxButton@000001B5107CBE80 ("Close", HWND=000000000017160E) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D7C20B0 ("panel", HWND=0000000000161548).
+Element wxPanel@000001B50D246C40 ("panel", HWND=00000000001613BE) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D244F60 ("panel", HWND=00000000001D0DFA).
+Element wxStaticText@000001B510791EC0 ("staticText", HWND=00000000001616A4) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B51076AE30 ("panel", HWND=000000000016169A).
+Element wxStaticText@000001B5107918A0 ("Extra instructions:", HWND=00000000001516E6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B51076AE30 ("panel", HWND=000000000016169A).
+Element wxTextCtrl@000001B50E7AB8B0 ("text", HWND=00000000001516EC) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B51076AE30 ("panel", HWND=000000000016169A).
+Element wxButton@000001B5107CC440 ("Place (AI)", HWND=00000000001516F8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B51076AE30 ("panel", HWND=000000000016169A).
+Element wxButton@000001B5107CCA00 ("Place + Route (AI)", HWND=0000000000151706) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B51076AE30 ("panel", HWND=000000000016169A).
+Element wxPanel@000001B510840510 ("panel", HWND=0000000000151758) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B51076AE30 ("panel", HWND=000000000016169A).
+Element wxButton@000001B510841FE0 ("Beautify Labels", HWND=00000000001617D6) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxScrolledWindow@000001B51076AE30 ("panel", HWND=000000000016169A).
+Element wxGauge@000001B5108422C0 ("gauge", HWND=00000000001617E8) of wxStaticBoxSizer should be created as child of its wxStaticBox and not of wxPanel@000001B50D244F60 ("panel", HWND=00000000001D0DFA).
+Adding duplicate image handler for 'Windows bitmap file'
+Adding duplicate animation handler for '1' type
+Adding duplicate animation handler for '2' type
+Adding duplicate animation handler for '3' type

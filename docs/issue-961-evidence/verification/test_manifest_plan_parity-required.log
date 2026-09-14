@@ -1,0 +1,15 @@
+
+Converter parity: 37 flag-checks across 1 manifest(s), 0 mismatch(es).
+
+Param->control resolution: 13 params checked, 0 unresolved.
+
+Cap-optimization flags: OK (--board-edge-clearance and the cap_* knobs survive).
+
+Owner-scoped resolution: OK (each param resolves on the owners its ACTION searches).
+
+Placement-block flags: OK (--group survives, --undo/--preview refused).
+Placement tools: OK (refused loudly, chain intact).
+
+WARNING: 1 command(s) have NO faithful plan representation and were NOT converted:
+  - place_optimize.py: moves footprints; the plan format has no placement step. Run it BEFORE the plan and start the plan from the placed board
+  The replayed plan will DIVERGE from the recorded chain at these steps. Run them on the CLI.

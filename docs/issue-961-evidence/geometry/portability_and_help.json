@@ -1,0 +1,36 @@
+{
+  "revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+  "commands": [
+    {
+      "label": "native_publication",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-geometry\\tests\\test_961_connector_publication.py"
+      ],
+      "exit_code": 0
+    },
+    {
+      "label": "no_native_publication",
+      "argv": [
+        "C:/Python313/python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-geometry\\tests\\test_961_connector_publication.py"
+      ],
+      "exit_code": 77
+    },
+    {
+      "label": "floorplan_help",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-geometry\\py_tools\\check_floorplan.py",
+        "--help"
+      ],
+      "exit_code": 0
+    }
+  ]
+}

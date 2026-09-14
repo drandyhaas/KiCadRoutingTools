@@ -1,0 +1,10 @@
+pad 0 netted True gap 1.65 seat True
+pad -1.2 netted True gap 0.44999999999999996 seat False
+pad -1.5 netted True gap 0.1499999999999999 seat False
+pad -1.2 netted False gap 0.44999999999999996 seat False
+pad -1.5 netted False gap 0.1499999999999999 seat False
+Native written rotation correction: (2.700901066398682, 10, True) 0.1
+Consumer assertions passed: 48; exemption refusal cases: 3
+nonbinding_class passed True complete True declared False
+edge_only_missing passed False complete False declared False
+along_only passed True complete True declared True

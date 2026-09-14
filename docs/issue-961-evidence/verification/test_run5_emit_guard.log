@@ -1,0 +1,9 @@
+
+ssssC:\Users\rob\Documents\prive\git\KRT-961\tests\test_run5_emit_guard.py:92: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmp2gqhyjui\\i.json' mode='r' encoding='utf-8'>
+  doc = json.load(open(ip, encoding='utf-8'))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.s
+----------------------------------------------------------------------
+Ran 6 tests in 3.245s
+
+OK (skipped=5)

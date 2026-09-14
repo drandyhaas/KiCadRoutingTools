@@ -1,0 +1,57 @@
+{
+  "behavior_tested_revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+  "test_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+  "trees": {
+    "py_placer": {
+      "behavior_tested": "9f48a8232329ed71f244d0e62304324f2180ea2b",
+      "current": "9f48a8232329ed71f244d0e62304324f2180ea2b",
+      "identical": true
+    },
+    "py_router": {
+      "behavior_tested": "c1f94185bbe16eced655a6bb047768549031fdb0",
+      "current": "c1f94185bbe16eced655a6bb047768549031fdb0",
+      "identical": true
+    },
+    "py_tools": {
+      "behavior_tested": "c4589f06d71246ed9f043f9b43d15ed9b87fea01",
+      "current": "0d610643524f5237be64e5969efbae7d0b4c9a9e",
+      "identical": false,
+      "only_help_keywords_changed": true,
+      "actual_help_cli_verified": true
+    },
+    "kicad_files": {
+      "behavior_tested": "4434f5bd38b8211c7e486110255e9f8e0934553b",
+      "current": "4434f5bd38b8211c7e486110255e9f8e0934553b",
+      "identical": true
+    }
+  },
+  "test_tree": "803fabce03ab98cc054137b88e772ef64d547879",
+  "test_diff": "A\ttests/fixtures/961-inherited-edge-intents.json\nM\ttests/test_549_floorplan_cli.py\nM\ttests/test_549_floorplan_grade.py\nM\ttests/test_706_seat_edge_target.py\nM\ttests/test_712_edge_centering.py\nA\ttests/test_961_connector_publication.py\nM\ttests/test_place_edge_containment.py\nM\ttests/test_run23_connector_affinity.py\nM\ttests/test_run26_edge_seat_body_basis.py\nM\ttests/test_run27_edge_seat_clears_placed.py\nM\ttests/test_run4_reconstruct.py",
+  "fixture_diff": "A\ttests/fixtures/961-inherited-edge-intents.json",
+  "review": "All nine migrated tests reviewed independently; frozen edge map exactly re-emitted on real integration base; public boards and original fixtures unchanged.",
+  "repository_test_runs": [
+    {
+      "revision": "2448498c762e0c5a5807ff02554cf4faa72a536d",
+      "argv": [
+        "C:/Program Files/KiCad/10.0/bin/python.exe",
+        "-X",
+        "utf8",
+        "tests/test_706_seat_edge_target.py"
+      ],
+      "exit_code": 0,
+      "result": "ALL PASS",
+      "test_file_unchanged_at_current": true
+    },
+    {
+      "revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "argv": [
+        "C:/Program Files/KiCad/10.0/bin/python.exe",
+        "-X",
+        "utf8",
+        "tests/test_961_connector_publication.py"
+      ],
+      "exit_code": 0,
+      "result": "1 test / 6 actual CLI subcases passed; actual native board and ledger assertions"
+    }
+  ]
+}

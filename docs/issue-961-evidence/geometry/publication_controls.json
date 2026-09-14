@@ -1,0 +1,631 @@
+[
+  {
+    "name": "accepted",
+    "exit_code": 0,
+    "summary": {
+      "complete": true,
+      "connector_requirements": {
+        "accepted": true,
+        "complete": true,
+        "edge_seating": [
+          {
+            "along_edge_fraction": 0.5,
+            "along_edge_offset_mm": 0.0,
+            "along_edge_offset_pct": 0.0,
+            "basis": "bbox",
+            "body_bounds_mm": [
+              -0.10000000000000009,
+              8.0,
+              3.9,
+              12.0
+            ],
+            "body_measured": true,
+            "body_overhang_basis": "F.Fab",
+            "body_overhang_mm": 0.10000000000000009,
+            "body_requirement_declared": true,
+            "body_setback_mm": 0.0,
+            "body_signed_position_mm": 0.10000000000000009,
+            "boundary_basis": "rectangular Edge.Cuts centreline",
+            "clearance_parameters": {
+              "board_edge_clearance_mm": 0.55,
+              "copper_clearance_mm": 0.25,
+              "effective_occupancy_margin_mm": 0.55,
+              "physical_body_margin_mm": 0.0
+            },
+            "copper_edge_complete": true,
+            "copper_edge_findings": [],
+            "copper_edge_shortfall_mm": 0.0,
+            "copper_edge_unmeasured": [],
+            "copper_rules_unmeasured": [],
+            "declared": false,
+            "edge": "west",
+            "mating_face_basis": "drawn envelope support line toward declared edge",
+            "measurements": {
+              "body_overhang": {
+                "declared_limit": {
+                  "max": 0.2,
+                  "min": 0.05
+                },
+                "disposition": "pass",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.10000000000000009
+              },
+              "body_setback": {
+                "declared_limit": null,
+                "disposition": "not_declared",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.0
+              },
+              "copper_edge_shortfall": {
+                "declared_limit": {
+                  "max": 0.0
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 0.0
+              },
+              "pad_copper_edge_gap": {
+                "declared_limit": {
+                  "min": 0.55
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 1.65
+              }
+            },
+            "other_body_edge_overhang_mm": {
+              "east": 0.0,
+              "north": 0.0,
+              "south": 0.0
+            },
+            "overhang_basis": "F.Fab",
+            "overhang_mm": 0.10000000000000009,
+            "pad_copper_declared_edge_gap_mm": 1.65,
+            "pad_copper_edge_gap_mm": 1.65,
+            "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+            "ref": "J1",
+            "required_copper_edge_gap_mm": 0.55,
+            "span_mm": 20.0,
+            "units": "mm"
+          }
+        ],
+        "errors": [],
+        "unmeasured": {}
+      },
+      "engineering_clean": false,
+      "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-geometry\\reviewer-evidence\\publication_accepted.published.kicad_pcb",
+      "published": true,
+      "status": "ok"
+    },
+    "input_sha256": "212135b129633d8825dc701f881c15ba557712b3aacbe5b1a594068d460111be",
+    "intent_sha256": "51090c32f6284adbf8ca886679a8b9720265d6434196d9c6697d1aad044d20c8",
+    "output_before_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "output_after_sha256": "212135b129633d8825dc701f881c15ba557712b3aacbe5b1a594068d460111be",
+    "native_written_pose": [
+      1.9,
+      10.0,
+      0.0,
+      "F.Cu"
+    ]
+  },
+  {
+    "name": "body_rejected",
+    "exit_code": 4,
+    "summary": {
+      "complete": false,
+      "connector_requirements": {
+        "accepted": false,
+        "complete": true,
+        "edge_seating": [
+          {
+            "along_edge_fraction": 0.5,
+            "along_edge_offset_mm": 0.0,
+            "along_edge_offset_pct": 0.0,
+            "basis": "bbox",
+            "body_bounds_mm": [
+              -0.30000000000000004,
+              8.0,
+              3.7,
+              12.0
+            ],
+            "body_measured": true,
+            "body_overhang_basis": "F.Fab",
+            "body_overhang_mm": 0.30000000000000004,
+            "body_requirement_declared": true,
+            "body_setback_mm": 0.0,
+            "body_signed_position_mm": 0.30000000000000004,
+            "boundary_basis": "rectangular Edge.Cuts centreline",
+            "clearance_parameters": {
+              "board_edge_clearance_mm": 0.55,
+              "copper_clearance_mm": 0.25,
+              "effective_occupancy_margin_mm": 0.55,
+              "physical_body_margin_mm": 0.0
+            },
+            "copper_edge_complete": true,
+            "copper_edge_findings": [],
+            "copper_edge_shortfall_mm": 0.0,
+            "copper_edge_unmeasured": [],
+            "copper_rules_unmeasured": [],
+            "declared": false,
+            "edge": "west",
+            "mating_face_basis": "drawn envelope support line toward declared edge",
+            "measurements": {
+              "body_overhang": {
+                "declared_limit": {
+                  "max": 0.2,
+                  "min": 0.05
+                },
+                "disposition": "fail",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.30000000000000004
+              },
+              "body_setback": {
+                "declared_limit": null,
+                "disposition": "not_declared",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.0
+              },
+              "copper_edge_shortfall": {
+                "declared_limit": {
+                  "max": 0.0
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 0.0
+              },
+              "pad_copper_edge_gap": {
+                "declared_limit": {
+                  "min": 0.55
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 1.45
+              }
+            },
+            "other_body_edge_overhang_mm": {
+              "east": 0.0,
+              "north": 0.0,
+              "south": 0.0
+            },
+            "overhang_basis": "F.Fab",
+            "overhang_mm": 0.30000000000000004,
+            "pad_copper_declared_edge_gap_mm": 1.45,
+            "pad_copper_edge_gap_mm": 1.45,
+            "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+            "ref": "J1",
+            "required_copper_edge_gap_mm": 0.55,
+            "span_mm": 20.0,
+            "units": "mm"
+          }
+        ],
+        "errors": [
+          "J1 body overhang 0.3000mm outside declared limit {'min': 0.05, 'max': 0.2} (F.Fab; west edge)"
+        ],
+        "unmeasured": {}
+      },
+      "output": null,
+      "output_state": "unchanged",
+      "published": false,
+      "refusal": "declared connector requirements failed or unmeasured",
+      "status": "refused"
+    },
+    "input_sha256": "33dd4ae847c0dbb5f808655fad5290a343200c8f00376d3649582016627cf7b5",
+    "intent_sha256": "51090c32f6284adbf8ca886679a8b9720265d6434196d9c6697d1aad044d20c8",
+    "output_before_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "output_after_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "native_written_pose": null
+  },
+  {
+    "name": "copper_rejected",
+    "exit_code": 4,
+    "summary": {
+      "complete": false,
+      "connector_requirements": {
+        "accepted": false,
+        "complete": true,
+        "edge_seating": [
+          {
+            "along_edge_fraction": 0.5,
+            "along_edge_offset_mm": 0.0,
+            "along_edge_offset_pct": 0.0,
+            "basis": "bbox",
+            "body_bounds_mm": [
+              -0.10000000000000009,
+              8.0,
+              3.9,
+              12.0
+            ],
+            "body_measured": true,
+            "body_overhang_basis": "F.Fab",
+            "body_overhang_mm": 0.10000000000000009,
+            "body_requirement_declared": true,
+            "body_setback_mm": 0.0,
+            "body_signed_position_mm": 0.10000000000000009,
+            "boundary_basis": "rectangular Edge.Cuts centreline",
+            "clearance_parameters": {
+              "board_edge_clearance_mm": 0.55,
+              "copper_clearance_mm": 0.25,
+              "effective_occupancy_margin_mm": 0.55,
+              "physical_body_margin_mm": 0.0
+            },
+            "copper_edge_complete": true,
+            "copper_edge_findings": [
+              {
+                "edge": "left",
+                "gap_mm": 0.44999999999999996,
+                "pad_index": 0,
+                "pad_loc": [
+                  0.7,
+                  10.0
+                ],
+                "pad_ref": "J1.1",
+                "required_mm": 0.55,
+                "shortfall_mm": 0.10000000000000009
+              }
+            ],
+            "copper_edge_shortfall_mm": 0.10000000000000009,
+            "copper_edge_unmeasured": [],
+            "copper_rules_unmeasured": [],
+            "declared": false,
+            "edge": "west",
+            "mating_face_basis": "drawn envelope support line toward declared edge",
+            "measurements": {
+              "body_overhang": {
+                "declared_limit": {
+                  "max": 0.2,
+                  "min": 0.05
+                },
+                "disposition": "pass",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.10000000000000009
+              },
+              "body_setback": {
+                "declared_limit": null,
+                "disposition": "not_declared",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.0
+              },
+              "copper_edge_shortfall": {
+                "declared_limit": {
+                  "max": 0.0
+                },
+                "disposition": "fail",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 0.10000000000000009
+              },
+              "pad_copper_edge_gap": {
+                "declared_limit": {
+                  "min": 0.55
+                },
+                "disposition": "fail",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 0.44999999999999996
+              }
+            },
+            "other_body_edge_overhang_mm": {
+              "east": 0.0,
+              "north": 0.0,
+              "south": 0.0
+            },
+            "overhang_basis": "F.Fab",
+            "overhang_mm": 0.10000000000000009,
+            "pad_copper_declared_edge_gap_mm": 0.44999999999999996,
+            "pad_copper_edge_gap_mm": 0.44999999999999996,
+            "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+            "ref": "J1",
+            "required_copper_edge_gap_mm": 0.55,
+            "span_mm": 20.0,
+            "units": "mm"
+          }
+        ],
+        "errors": [
+          "J1 pad copper edge clearance fail: 1 pad violation(s), required 0.55mm"
+        ],
+        "unmeasured": {}
+      },
+      "output": null,
+      "output_state": "unchanged",
+      "published": false,
+      "refusal": "declared connector requirements failed or unmeasured",
+      "status": "refused"
+    },
+    "input_sha256": "af5ba81d690f414103f0778f95fe7543c11d652b8bdc0a96f79c8e79bc78f4d6",
+    "intent_sha256": "51090c32f6284adbf8ca886679a8b9720265d6434196d9c6697d1aad044d20c8",
+    "output_before_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "output_after_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "native_written_pose": null
+  },
+  {
+    "name": "body_unmeasured",
+    "exit_code": 4,
+    "summary": {
+      "complete": false,
+      "connector_requirements": {
+        "accepted": false,
+        "complete": false,
+        "edge_seating": [
+          {
+            "along_edge_fraction": 0.5,
+            "along_edge_offset_mm": 0.0,
+            "along_edge_offset_pct": 0.0,
+            "basis": "bbox",
+            "body_measured": false,
+            "body_overhang_basis": null,
+            "body_overhang_mm": null,
+            "body_requirement_declared": true,
+            "body_setback_mm": null,
+            "body_signed_position_mm": null,
+            "body_unmeasured_reason": "no body drawing on the footprint face",
+            "boundary_basis": "rectangular Edge.Cuts centreline",
+            "clearance_parameters": {
+              "board_edge_clearance_mm": 0.55,
+              "copper_clearance_mm": 0.25,
+              "effective_occupancy_margin_mm": 0.55,
+              "physical_body_margin_mm": 0.0
+            },
+            "copper_edge_complete": true,
+            "copper_edge_findings": [],
+            "copper_edge_shortfall_mm": 0.0,
+            "copper_edge_unmeasured": [],
+            "copper_rules_unmeasured": [],
+            "declared": false,
+            "edge": "west",
+            "mating_face_basis": "drawn envelope support line toward declared edge",
+            "measurements": {
+              "body_overhang": {
+                "declared_limit": {
+                  "max": 0.2,
+                  "min": 0.05
+                },
+                "disposition": "unmeasured",
+                "geometry_basis": null,
+                "reason": "no body drawing on the footprint face",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": null
+              },
+              "body_setback": {
+                "declared_limit": null,
+                "disposition": "unmeasured",
+                "geometry_basis": null,
+                "reason": "no body drawing on the footprint face",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": null
+              },
+              "copper_edge_shortfall": {
+                "declared_limit": {
+                  "max": 0.0
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 0.0
+              },
+              "pad_copper_edge_gap": {
+                "declared_limit": {
+                  "min": 0.55
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 1.65
+              }
+            },
+            "overhang_basis": null,
+            "overhang_mm": null,
+            "pad_copper_declared_edge_gap_mm": 1.65,
+            "pad_copper_edge_gap_mm": 1.65,
+            "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+            "ref": "J1",
+            "required_copper_edge_gap_mm": 0.55,
+            "span_mm": 20.0,
+            "units": "mm"
+          }
+        ],
+        "errors": [
+          "J1 body_overhang unmeasured: no body drawing on the footprint face"
+        ],
+        "unmeasured": {
+          "edge_connectors[J1].body_overhang": "no body drawing on the footprint face",
+          "edge_connectors[J1].edge": "no body drawing on the footprint face"
+        }
+      },
+      "output": null,
+      "output_state": "unchanged",
+      "published": false,
+      "refusal": "declared connector requirements failed or unmeasured",
+      "status": "refused"
+    },
+    "input_sha256": "a98b4627ccb251d14e46454a442b7989f223fb25ab7d9342525dc6f1e504757f",
+    "intent_sha256": "51090c32f6284adbf8ca886679a8b9720265d6434196d9c6697d1aad044d20c8",
+    "output_before_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "output_after_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "native_written_pose": null
+  },
+  {
+    "name": "dry",
+    "exit_code": 0,
+    "summary": {
+      "complete": false,
+      "connector_requirements": {
+        "accepted": null,
+        "complete": false,
+        "reason": "no written final candidate to measure"
+      },
+      "engineering_clean": false,
+      "output": null,
+      "published": false,
+      "status": "dry_run"
+    },
+    "input_sha256": "080d1cadf711d98108998adac04ab78f0d1a3a1bc82f7eb9f95d06e69848d454",
+    "intent_sha256": "51090c32f6284adbf8ca886679a8b9720265d6434196d9c6697d1aad044d20c8",
+    "output_before_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "output_after_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "native_written_pose": null
+  },
+  {
+    "name": "unwritten",
+    "exit_code": 0,
+    "summary": {
+      "complete": false,
+      "connector_requirements": {
+        "accepted": null,
+        "complete": false,
+        "reason": "no written final candidate to measure"
+      },
+      "engineering_clean": false,
+      "output": null,
+      "published": false,
+      "status": "refused"
+    },
+    "input_sha256": "af7db72a6a5a0f57fe6ba4bba321bb6d39e2ddbcd7f44e259fa701ccf6d20236",
+    "intent_sha256": "51090c32f6284adbf8ca886679a8b9720265d6434196d9c6697d1aad044d20c8",
+    "output_before_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "output_after_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "native_written_pose": null
+  },
+  {
+    "name": "exploratory",
+    "exit_code": 4,
+    "summary": {
+      "complete": true,
+      "connector_requirements": {
+        "accepted": true,
+        "complete": true,
+        "edge_seating": [
+          {
+            "along_edge_fraction": 0.5,
+            "along_edge_offset_mm": 0.0,
+            "along_edge_offset_pct": 0.0,
+            "basis": "bbox",
+            "body_bounds_mm": [
+              -0.10000000000000009,
+              8.0,
+              3.9,
+              12.0
+            ],
+            "body_measured": true,
+            "body_overhang_basis": "F.Fab",
+            "body_overhang_mm": 0.10000000000000009,
+            "body_requirement_declared": true,
+            "body_setback_mm": 0.0,
+            "body_signed_position_mm": 0.10000000000000009,
+            "boundary_basis": "rectangular Edge.Cuts centreline",
+            "clearance_parameters": {
+              "board_edge_clearance_mm": 0.55,
+              "copper_clearance_mm": 0.25,
+              "effective_occupancy_margin_mm": 0.55,
+              "physical_body_margin_mm": 0.0
+            },
+            "copper_edge_complete": true,
+            "copper_edge_findings": [],
+            "copper_edge_shortfall_mm": 0.0,
+            "copper_edge_unmeasured": [],
+            "copper_rules_unmeasured": [],
+            "declared": false,
+            "edge": "west",
+            "mating_face_basis": "drawn envelope support line toward declared edge",
+            "measurements": {
+              "body_overhang": {
+                "declared_limit": {
+                  "max": 0.2,
+                  "min": 0.05
+                },
+                "disposition": "pass",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.10000000000000009
+              },
+              "body_setback": {
+                "declared_limit": null,
+                "disposition": "not_declared",
+                "geometry_basis": "F.Fab",
+                "requirement_source": "intent.edge_connectors",
+                "units": "mm",
+                "value": 0.0
+              },
+              "copper_edge_shortfall": {
+                "declared_limit": {
+                  "max": 0.0
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 0.0
+              },
+              "pad_copper_edge_gap": {
+                "declared_limit": {
+                  "min": 0.55
+                },
+                "disposition": "pass",
+                "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+                "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+                "units": "mm",
+                "value": 1.65
+              }
+            },
+            "other_body_edge_overhang_mm": {
+              "east": 0.0,
+              "north": 0.0,
+              "south": 0.0
+            },
+            "overhang_basis": "F.Fab",
+            "overhang_mm": 0.10000000000000009,
+            "pad_copper_declared_edge_gap_mm": 1.65,
+            "pad_copper_edge_gap_mm": 1.65,
+            "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+            "ref": "J1",
+            "required_copper_edge_gap_mm": 0.55,
+            "span_mm": 20.0,
+            "units": "mm"
+          }
+        ],
+        "errors": [],
+        "unmeasured": {}
+      },
+      "engineering_clean": false,
+      "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-geometry\\reviewer-evidence\\publication_exploratory.published.kicad_pcb",
+      "published": true,
+      "status": "exploratory"
+    },
+    "input_sha256": "b001d963f019ecf505e86b88b23dfd0fe50e0ecb6f20b2509e479f981193fdf2",
+    "intent_sha256": "51090c32f6284adbf8ca886679a8b9720265d6434196d9c6697d1aad044d20c8",
+    "output_before_sha256": "fcbc5f76bef8c8c3df1230c98a76d27b5ad5348f15e9236c368092426aaa9e50",
+    "output_after_sha256": "b001d963f019ecf505e86b88b23dfd0fe50e0ecb6f20b2509e479f981193fdf2",
+    "native_written_pose": [
+      1.9,
+      10.0,
+      0.0,
+      "F.Cu"
+    ]
+  }
+]
