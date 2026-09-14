@@ -38,7 +38,14 @@ and K51 (+26), and it grows with congestion -- that is the shape of the
 problem, not "we match at K35".
 
 **2026-09-13, LOCAL, and the K51 line moved a long way -- but read the open
-column.** `BRAID_LAY_ORDER=xing` then `replan.py`:
+column.** `BRAID_LAY_ORDER=xing` then `replan.py`. **Its arm is NEITHER of
+the two above**: it was `env SF_KEY_COST=1 BRAID_LAY_ORDER=xing bash
+chain_k.sh xing51 51` -- the PLAIN defaults (8 source rounds, no exit guard,
+no ONE_DIVE, no CP-SAT) plus the uncommitted `SF_KEY_COST`. Verified
+2026-09-13 evening by re-braiding its fanout board: the plain env gives its
+99 / SA1 copper-IDENTICAL in 119 s, and the joint arm's BRAID_* env over the
+same fanout board gives 159 / 2 open. The fanout board and the braid env
+must match; a braid-only re-run needs the env the fanout was planned under.
 
 | board | vias | open | how |
 |---|---|---|---|
@@ -416,6 +423,9 @@ campaign made routinely, and it closes off a whole class of work.
 > | `SF_LDS_W` | inert (wired and verified live; it just decides nothing) |
 > | `SF_RIDE_W` | correct and default-inert, but NEVER exercised through a chain |
 > | `SF_REPAIR_CALLS` | a counter from the CP-SAT repair probe |
+> | `BRAID_RIP_ONBOARD` | the phantom-victim fix (2026-09-13 evening): closes K51 SA1 at 3 vias and opens SA11+SDQ11 -- moves the refusal, 97/2 against 99/1; inert at K41 |
+> | `BRAID_RIP_SOFT` | rip trials with the victims' old copper PRICED: K51 116/2 against 99/1 -- harmful |
+> | `BRAID_RESCUES` | the per-attempt failed-rescue cap (was a hard-coded 3): lifting it is K41 91->100, K51 99/1 -> 104/**5** -- the cap is a load-bearing regulariser |
 >
 > The FINDINGS they produced are real and are recorded here. Everything else
 > this file names is committed. **This list is auditable** -- every
@@ -727,6 +737,236 @@ the thing none of these touch: change what SA1 is ASKED for (its berth face
 or its tooth layer, so the ends stop disagreeing), or move SA4, which is the
 net actually in the way. `blockers_of` names the movable-vs-pinned split.
 
+## SA1 corrected: the loss is the VICTIM RE-LAY, and the tail is a capacity wall (2026-09-13 evening)
+
+The section above says the corridor "has no room for this lane's dive at
+all". **Its own transcript says otherwise.** In the xing braid's last call:
+
+```
+rip for SA1: min-cut probe 3 via(s) crosses ['SBA1', 'SDQ4', 'SA12']
+rip ['SBA1']: SA1 still refused
+rip ['SBA1', 'SDQ4']: SA1 routed (3 via(s)) but SBA1 lost -- put back
+rip ['SBA1', 'SDQ4', 'SA12']: SA1 routed (9 via(s)) but SBA1 lost -- put back
+```
+
+SA1 routes at 3 vias the moment SBA1 and SDQ4 are lifted. What fails is
+SBA1's RE-LAY, and its nested negotiation was reading a phantom:
+
+```
+rip for SBA1: min-cut probe 3 via(s) crosses ['SDQ4', 'SA15', 'SDQ1', 'SDQ13', 'SDQ0', 'SDQM1']
+rip ['SDQ4']: SBA1 still refused
+rip ['SDQ4', 'SA15']: SBA1 still refused
+rip ['SDQ4', 'SA15', 'SDQ1']: SBA1 routed (1 via(s)) but SDQ4 lost -- put back
+```
+
+SDQ4 was ALREADY lifted for SA1 -- its copper was off the board -- but
+`rip_for` builds its candidates from `out_segs`, which still named it, so
+the nested probe priced it as a soft obstacle, the cut set led with it, one
+of three victim slots went on a no-op rip, and SDQ4 was re-laid INSIDE
+SBA1's negotiation (before SBA1's own victims were back) at depth 0, where
+it was lost. **`BRAID_RIP_ONBOARD=1`** (NOT COMMITTED) requires a nested
+rip's candidates to have copper on the board. With it SBA1's cut leads
+with SDQ1, one rip re-lays SBA1 at 1 via, and the trial closes:
+`rip ['SBA1', 'SDQ4']: SA1 routed (3 via(s)); re-laid SBA1 1 -> 1, SDQ4 0 -> 2`.
+
+**And then SA11 and SDQ11 are open.** Every arm on the tail, all braid-only
+re-runs of the `xing51` fanout board under its own (plain + xing) env, all
+flag-off parity verified copper-identical, all inert at K41 (bs41 base 91/0,
+whose four rip trials never lose a victim), times under 2-3 concurrent runs:
+
+| arm | vias | open | s |
+|---|---|---|---|
+| base | 99 | 1 (SA1) | 119 |
+| `BRAID_RIP_DEPTH=2` | 142 | 2 (SA11; **SDQ9 SILENT** -- 6 via-less layer changes, not in the refused list) | 259 |
+| `BRAID_RIP_ONBOARD=1` | 97 | 2 (SA11, SDQ11) | 121 |
+| `BRAID_RIP_ONBOARD=1 BRAID_RIP_DEPTH=2` | **141** | **0** -- the first COMPLETE board on this line | 173 |
+| `BRAID_RIP_SOFT=5` (victims' old copper priced in the trial route, with or without ONBOARD) | 116 | 2 (SDQ11, SDQ15) | 105 |
+| `BRAID_RESCUES=99` (the per-attempt failed-rescue cap lifted) | 104 | **5** | 150 |
+| `BRAID_BUDGET_X=8` (earlier today) | 97 | 2 (SA11, SDQ11) | |
+
+Read together: **the region SA1 / SA11 / SDQ11 / SBA1 / SDQ4 is over
+capacity in this PLAN.** Every fix to the tail's mechanics closes SA1 and
+evicts a neighbour -- the same two neighbours as the deeper search budget --
+and the only arm that completes negotiates so deeply that it pays 42 vias
+for it. The failed trials in every arm have one shape, `X routed (N vias)
+but Y lost -- put back`: the refused lane, given its victims' room for
+nothing, sprawls through all of it, and a victim has nowhere to go. Pricing
+that room (`RIP_SOFT`) makes the refused lane detour instead (SA1 at 7 vias,
+SA8 re-laid 1 -> 6), which is worse. So the tail cannot be tuned into a
+complete cheap board here; the PLAN must move a berth, which is the
+replan's job -- and at the DEFAULT width the replan does not do it either:
+
+| replan (`--rounds=4`, default `--worst=3 --probes=1`, `BRAID_RIP_ONBOARD=1` in its braids) | result |
+|---|---|
+| from the `ONBOARD` board (97 / SA11+SDQ11) | round 1 KEPT (strip): SDQ11 closed, **100 / SA11 open**; round 2 nothing judged better, stopped (304 s) |
+| from the base (99 / SA1) | round 1 KEPT (refan, a source move stood): **95 / SA1 open**; round 2 nothing judged better, stopped (241 s) |
+
+| the WIDE recipe (`--worst=48 --probes=2 --rounds=6`) from the ONBOARD board (`rpQ51`) | round 1 KEPT (refan): SDQ11 closed, **101 / SA11 open** (617 s); round 2 nothing judged better, 8 unjudged moves "would need the full braid", stopped (1005 s in all) |
+
+So on this plan the replan closes SDQ11 for 3-4 vias and cannot close SA11
+at either width. The K51 line as it stands: base 99 / SA1 -> phantom fix
+97 / SA11+SDQ11 -> replan 100-101 / SA11 -> and the only complete board is
+141 / 0 (depth 2). A replan FROM that complete board (`rpR51`, default
+width, the way the recorded 137 -> 107 line was made, `ONBOARD` + depth 2 in
+its braids) went **141 -> 134 / 0 open** in one kept round (185 s in all;
+re-graded 134 / 0 open / 0 DRC) and stopped. A valid complete K51 board on
+the xing line, and 27 vias short of the 107 record, so not a line -- the
+wide recipe from it is the obvious next step if this line is continued.
+
+Two things the rescue-cap arm teaches. The base logs carry ZERO `rescued at
+x4` lines at K41 and K51 -- the first three rescues fail and the cap stops
+the rest -- and lifting it rescues 25-27 lanes into WORSE positions (K41
+91 -> 100, K51 5 open). **The cap is the fourth accidental regulariser**
+after the wall clock, `CPSAT_SCALE` and the swimmer count: a lane forced
+through at 4x the budget takes a path the plain budget refused for a reason.
+And `BRAID_RIP_DEPTH=2` re-opens the nested-rollback bookkeeping defect the
+rip section above describes (SDQ9 shipped open with via-less layer changes
+and was not in the refused list) -- not chased, because depth 2 is harmful
+anyway, but do not ship a depth-2 board without reading the WARNING line.
+
+## How the human routes the congested region (2026-09-13 evening)
+
+Measured on `~/Downloads/bus/00_human_original.kicad_pcb` (same frame as
+the bench: U1 at (120.29,63.93), DU1 at (139.93,64.56) rot 90) against our
+`xing` board (`rb1`, 99 / SA1 open), scoped to the K51 net set. Scripts in
+the session scratchpad: `human_vs_ours.py`, `group_census.py`,
+`xing_census.py`, `layer_census.py`, `berth_kind.py`.
+
+**What is the SAME -- the topology.** Address group (29 nets): two ring
+roads round DU1, human N 11 / S 16 / both 2, ours N 7 / S 17 / both 3;
+DU1 exit faces human E10 N6 S11 W2, ours E8 N7 S11 W3; layer share human
+B58/F42, ours B56/F44; copper under DU1 human B 90 / F 75 mm, ours 94 / 72;
+lane crossings human **338** (addr-addr 150, addr-data 135), ours 333
+(209 / 77). Data group (18 nets): human enters the west face 9, ours 7;
+copper human 309 mm, ours 284 mm (ours is SHORTER -- the human carries
+length-matching meanders in the gap, which is how much room they have left).
+So the human does not avoid crossings and does not go round where we go
+through. The difference is entirely WHERE THE LAYER CHANGES SIT.
+
+**What is DIFFERENT -- the via discipline and the berth kind.**
+
+| | human | ours (rb1) | record (rp6b, 107) |
+|---|---|---|---|
+| max vias on any net | **2** | 6 | 10 |
+| address nets constant-layer (exactly 2 END vias) | **22 of 29** | 11 | 4 |
+| address nets with one MID change | 7 | 8 | 14 |
+| address nets with 3+ vias | **0** | 7 | 10 |
+| data vias / net | **1.22** | 1.89 | -- |
+| data nets with 0-1 via (single layer) | 7 | 5 | 6 |
+| data nets with 4 vias | 0 | **4** (SDQ0, SDQ11, SDQ15, SDQM1) | 2 |
+
+The four 4-via data nets dive INSIDE the 6.5 mm gap between the arrays:
+SDQ0's vias sit at x 128.6, 130.3, 132.0, 133.1 -- four layer changes in
+5 mm to thread past other lanes -- where the human's SDQ15 is a pure F
+lane with no via at all. That is +10 of the data group's +12.
+
+| DU1 berth kind (47 balls) | human | ours (rb1) | record (rp6b) |
+|---|---|---|---|
+| edge dog-bone (via 0.7-3.5 mm from the ball, the stub on the ball's layer) | **22** | 5 | 11 |
+| between-ball dog-bone (via 0.1-0.7 mm) | **14** | 2 | 1 |
+| via-IN-pad | **0** | 16 | 15 |
+| bare stub (no via within 6 mm) | 8 | 14 | 15 |
+| far via (3.5-6 mm) | 3 | 10 | 5 |
+
+36 of the human's 47 DU1 ends are dog-bones, none via-in-pad. Our fanout
+answers the same balls with via-in-pad (16) or a bare stub (14) or a via
+3.5-6 mm out (10). A via-in-pad berth forces the lane to arrive on B at the
+ball's exact position, through the field; a bare F stub forces an F arrival
+on the surface every other stub is on; either way the ONLY place left for
+the lane's layer change is the corridor, which is where our excess vias
+are. The human's dog-bone puts the change at the array's edge, in room that
+belongs to that ball, and the stub direction picks the face. The human's
+DU1 dog-bones point NE 11, SW 7, SE 5, N 4, E 4, NW 3 -- every ball gets
+its own exit.
+
+**The contested balls, one by one** (SA1 P7, SBA1 N8, SA11 R7, SA4 P8 --
+the east half of the array, rows 7-8): human SA1 and SBA1 leave on F 2.8-3.0
+mm NORTH to vias just outside the array's top edge, then ride B round the
+north ring to a 0.5-0.8 mm dog-bone at U1 -- 2 vias, 31 mm, B 88%. SA11
+leaves EAST 1.6 mm to an edge via (its column is the east-most). SA4 goes
+WEST 1.25 mm to a between-ball via. Ours: SA1's berth is a bare F stub 2 mm
+EAST (`stub_dir [1,0]`) with its tooth a via-in-pad on B at U1, so the
+lane's ends disagree on layer and the change has to happen in the corridor
+that has no room for it; SA4 is a 47-segment F loop over the north caps.
+
+**What this says to the plan, generally.** (1) The 2-via rule is the
+human's whole method: a lane is one layer with a dog-bone at each end, and
+the plan should price a corridor dive as what it costs the neighbours, not
+as one via. (2) The berth menu's `dogbone` kind is what the human uses 36
+times in 47; the judge chooses `via_in_pad` and `surface` (bare stub) for
+30 of ours. A plan that reads "via-in-pad = 1 via, cheapest" is pricing the
+forced arrival layer at zero. (3) The data group wants a crossing-free
+order across the gap (0-2 vias); that is a SOURCE exit-order question, and
+the source is frozen in the arms. Nothing here is a face rule or a ref: it
+is a berth KIND and a via budget per lane.
+
+## Routing ONE net of a chain board from the GUI / route.py (2026-09-13 evening)
+
+Andy opened `xing51_k51` (99 / SA1 open) in the plugin, selected SA1 alone,
+and the log (`scratch_15.txt` in the worktree root) read as if it routed
+much more. What it did, and what it found:
+
+- **It routed only SA1** (`MPS Round 1: 1 units: SA1`, `Routing 1
+  single-ended net(s)`). Everything else in the log is the production
+  router's main-pass RIP of pre-existing copper: 25 nets registered as rip
+  candidates, SA14 then SBA1 ripped for SA1, both reroutes failed, the #134
+  recovery re-routed the two left ripped, that failed too, and the
+  IMPROVEMENT GATE rejected the run ("broke 1, connected 0") and
+  **discarded everything -- the board was not changed.**
+- **Why the victims could not be re-laid -- a real defect.** A pre-existing
+  net is registered with ALL its copper (`route.py` ~2250: every segment
+  and via of the net), so the rip removes its fanout ESCAPE too, and the
+  reroute then starts from a bare ball inside the BGA field: `Hint: pad
+  U1.T18 is a fanout-dropped ball (no escape stub) ... no rip authority or
+  retry can reach it`. The braid's `rip_for` keeps the stubs (it re-lays the
+  LANE between tooth and berth); `route.py`'s rip cannot, so on a fanned-out
+  board every pre-existing rip of a BGA net is unrecoverable. Reproduced
+  from the CLI: `route.py ... --nets '/DDR3 16x1/SA1' --rip-existing-nets
+  SBA1 SDQ4` (the braid's own victims) rips both and fails, "Restoring 2
+  net(s)".
+- **The GUI asked for 0.25 mm clearance, the CLI for 0.1, on the same
+  project** -- and the chain laid this copper at 0.1, so at 0.25 (used
+  0.2193 after descents in the main pass, 0.127 in the recovery pass: the
+  run's `JSON_SUMMARY` says `"clearance": 0.25, "min_clearance_used":
+  0.2193`) no channel on the board is legal and every ball is "boxed in by
+  static obstacles". The bench projects (`fb_t2q_fresh`, every chain output)
+  carry a Default net-class clearance of **0.0** (KiCad's "not configured")
+  with `min_clearance` 0.0889. The CLI takes base 0.0 and pins it UP to the
+  physical 2-layer floor 0.1 (`enforce_fab_floors`, "pinning up to 0.1");
+  the GUI's `_effective_geometry_floor` treats 0 as unset and falls back to
+  its Min Clearance CONTROL, whose default is `routing_defaults.CLEARANCE`
+  0.25. Same project, 0.1 against 0.25: a CLI/GUI parity gap for any board
+  whose Default class clearance is 0 -- and the bench IS such a board, so
+  the chain's DRC-floor writeback (which should stamp the routed 0.1 into
+  the class, #900) is not doing so here either. To repeat the experiment in
+  the GUI, check Min Clearance and enter 0.1.
+  **FIXED the same evening, on the writer side**: `fix_kicad_drc_settings
+  .apply_targets_to_project` read a Default class clearance of 0.0 as
+  "already below the target" (its write is lower-only) and never stamped
+  it, so `make_bench`'s `fix_project_for_output(clearance=0.1)` reported
+  "already consistent" and the 0.0 rode down every step. It now treats a
+  declared 0 as UNSET, the rule every reader in that module already
+  applies, and stamps `net_class[Default].clearance: None -> 0.1`
+  (`tests/test_fix_drc_settings.py` + the `test_530_*` clearance tests
+  pass). And the chain no longer bare-copies the project: `braid.write_out`
+  and `fanout_from_plan.copy_pro` call `fix_project_for_output` with the
+  SPEC (`braid.SPEC_CLEARANCE` 0.1 / track 0.1 / via 0.25 / 0.15 -- not
+  `CLEAR` 0.105, the router's private margin over the spec, which the
+  first cut stamped); `AWX_STAMP_PRO=0` is the flag-off control. The
+  tracked bench project `fb_t2q_fresh.kicad_pro` still carries the 0.0 (not
+  re-stamped, to leave the bench article as recorded); every chain output
+  from it now records 0.1, and the copy in `~/Downloads/bus` was re-stamped
+  by hand. Copper is unaffected (both engines route from their own
+  cfg, never from the project) -- verified by re-braiding `xing51_fo_k51`
+  (copper-identical to `rb1`, output project Default 0.1) and by a K15 chain
+  pair with the stamp on and off. The READER divergence (an unset class
+  still resolves to 0.1 on the CLI and 0.25 in the GUI on any board this
+  tool has not written) is **issue #966**.
+- **Even at 0.1 the production router does not route SA1** (`Boxed in at
+  this geometry after 862 iterations (grid 0.1, clearance 0.1, track 0.1)`),
+  which agrees with the braid: SA1 needs SBA1 and SDQ4 lifted AND re-laid,
+  the negotiation `route.py` cannot do.
+
 ## The pages-first planner (`PLAN_PAGES=1`, 2026-09-13 night)
 
 Andy's directive: **no net may need more than two vias.** A page lane costs
@@ -957,6 +1197,10 @@ crossing term is the next lever.
 | `BRAID_SOLVER=cpsat` (plain solves) | **never** -- K41 98. `BRAID_ALT_SOLVER=cpsat` (choice solves) is the good one |
 | `BRAID_VIA_ROOM_REFUSED=2` | breaks K51 (3 open / 30 DRC) on the OLD 137-via baseline. **Re-measured 2026-09-13 on the 99-via `xing` board: bit-identical to the base -- INERT, not harmful, in that regime.** Read the verdict WITH its board; this one is congestion-dependent. Default 0 |
 | `BRAID_ATTEMPTS=10` / `BRAID_BUDGET_X=8` | on K51's refused net: `ATTEMPTS=10` bit-identical, `BUDGET_X=8` gives 97 vias but **2 open** instead of 1. More search does not close a lane with no room; it moves which lane refuses |
+| `BRAID_RIP_DEPTH=2` | K51 xing: 142 vias / SA11 open / SDQ9 silently broken, 259 s; with `BRAID_RIP_ONBOARD=1` **141 / 0 open** (complete, 173 s). Inert at K41 (no trial there loses a victim). Completion at +42 vias is not a line |
+| `BRAID_RIP_ONBOARD=1` (NOT COMMITTED) | the phantom-victim fix. Correct locally (SA1 closes at 3 vias) and 97/2 against 99/1 on the board: the refusal moves to SA11+SDQ11, the same pair `BUDGET_X=8` evicts. Inert at K41 |
+| `BRAID_RIP_SOFT=5` (NOT COMMITTED) | the refused lane routed with its victims' old copper priced: it detours instead (SA1 7 vias, SA8 1 -> 6); K51 116 / 2 open. Harmful |
+| `BRAID_RESCUES=99` (NOT COMMITTED) | K41 91 -> 100, K51 99/1 -> 104/**5 open**; the base logs have ZERO successful rescues, so the cap of 3 is what keeps the x4 rescue from forcing 25 lanes through bad paths. A regulariser, keep it |
 | `SEL_XLAYER=1` | crossings WORSE (K41 196 -> 301) -- but that arm ran through a `zip` desync pairing trial legs with stale nets, so the verdict is **not evidence**; unmeasured |
 | `DST_XING` per-candidate | pairwise deltas are not additive; the pairwise MILP form fixes the bug and still beats nothing |
 | `DST_XING_SCREEN` | helps nothing, alone or with the pattern seed |
@@ -998,13 +1242,14 @@ file and is in the bundle only.
 PLAN side is closed (item 1d); what is left is completion and the search's
 acceptance rule.
 
-1. **Close SA1** (item 2) -- K51's 91-via board is invalid for one net and
-   nothing in the search budget or via-room family touches it. The untried
-   lever is the ASK (its berth face / tooth layer, so the ends stop
-   disagreeing on layer) or moving SA4, the net actually in the way.
-2. **`SF_ACCEPT_MARGIN`** (item 1c) -- the most promising UNMEASURED knob in
-   this file, now that three separate regularisers have each been found to
-   be load-bearing by removing them.
+1. **Close K51** (item 2) -- but read "SA1 corrected" first: SA1 itself
+   closes at 3 vias with the phantom-victim fix, and the refusal then moves
+   to SA11 + SDQ11, so the tail cannot be tuned into a complete cheap board
+   on this plan. The lever is the PLAN (a berth in the SA1 / SA11 / SDQ11 /
+   SBA1 / SDQ4 region must move), i.e. the replan; the tail's mechanics are
+   measured out (depth, phantom, soft, rescues -- the table in that section).
+2. ~~**`SF_ACCEPT_MARGIN`** (item 1c)~~ -- MEASURED 2026-09-13 evening on the
+   cloud: neutral at 1, harmful at 2-3 (K41 88 -> 122 / 1 open). See 1c.
 3. **`BRAID_LAY_ORDER=xing` as a slack-GATED arm** (item 10) -- the largest
    single-knob win measured (K51 -13) and a loss where there is slack
    (K41 +6), exactly like the pattern seed.
@@ -1169,6 +1414,41 @@ acceptance rule.
    board at the same 73.0 -- accepting at 1e-6 is the disease all three are
    treating. `SF_ACCEPT_MARGIN` is the principled, deterministic form of the
    same medicine and nobody has run it.
+   **RUN 2026-09-13 evening, on Modal (`awx/tmp/sweep_margin_0913.json`;
+   `cb` baseline, `e0m<M>` = `SF_ESC_W=0 SF_ACCEPT_MARGIN=<M>`, `mo<M>` =
+   the margin alone, K35/K41/K51 each), and it is NOT the medicine:**
+
+   | | K35 | K41 | K51 |
+   |---|---|---|---|
+   | `cb` (margin 0) / `e0m0` (`SF_ESC_W=0`, margin 0) | 60 / 60 | 88 / 88 | **129, 1 open** (= the recorded cloud baseline, a third time) / **124, 0 open** |
+   | margin 1 (`mo1` / `e0m1`) | 60 / 68 | 88 / **110, 1 open** | 114, **2 open** / 114, **2 open** |
+   | margin 2 (`mo2` / `e0m2`) | 70 / 68 | **122, 1 open** / **110, 1 open** | 118, **4 open** / 118, 4 open |
+   | margin 3 (`mo3` / `e0m3`) | 70 / 80 | **122, 1 open** / **110, 1 open** | 118, 4 open / 118, 4 open |
+   | `stk` (`SF_ESC_W=0`, margin 2, `BRAID_L5_SEED=0`) | 68 | 102 | 123, 2 open |
+
+   **Verdict: not the medicine.** Margin 1 is neutral where it is not worse
+   (K35 60 = 60, K41 88 = 88; with `SF_ESC_W=0` K35 +8 and K51 trades 10
+   vias for two OPEN nets, which under-count). Margins 2-3 are HARMFUL at
+   every K: K41 +34 vias and an open net, K51 four open nets, and the K51
+   outcome is IDENTICAL (118 / SA1, SCS1, SDQ11, SRST) for margin 2 and 3
+   with or without `SF_ESC_W=0`, so the margin, not the escape weight, is
+   what decides it (and at K41 margins 1-3 under `SF_ESC_W=0` are all the
+   same 110 / SBA2 open). So the three accidental regularisers were not
+   "accepting at 1e-6" in disguise: a margin that refuses the small judged
+   wins refuses REAL ones, because the judge's 2-via median improvement is
+   where its signal lives as much as its noise. (Six arms died with the
+   Modal client -- the harness killed it for host memory while a K51 replan
+   ran beside it; `--out` resumes, and those cells are re-running.)
+   One number in that table is NOT about the margin and is worth its own
+   line: **`e0m0`, i.e. `SF_ESC_W=0` alone, gives K51 124 / 0 open on the
+   cloud**, and `cb`/K51 in the SAME sweep is 129 / 1 open (SDQ3) -- the
+   recorded cloud baseline for the third time. So on the cloud instance
+   `SF_ESC_W=0` is -5 vias AND closes the open net: **the first complete
+   cloud K51 from a one-knob arm**, where locally the same knob was
+   bit-identical at K51. Read it as the local-vs-cloud divergence says to:
+   a different instance, so a lead to confirm with repeats (K51 baselines
+   reproduce exactly on the cloud, so one repeat is evidence there), not a
+   local result.
 
 1d. **The swimmer count is a closed form, and the human has MORE.**
    `n - (lambda1 + lambda2)` of the RSK shape of the launch->target
