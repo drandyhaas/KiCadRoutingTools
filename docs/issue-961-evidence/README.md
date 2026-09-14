@@ -113,10 +113,17 @@ rows and audit outputs are retained in the linked bundles.
 - Publication gate: `52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1`.
 - Final gate/dry behavior: `e182bbfe4c3ec19ad65999de9ff023dc84035128`.
 - Migrated test controls: `2448498c762e0c5a5807ff02554cf4faa72a536d`.
-- Final production/test revision: `9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100`.
+- Reviewed production/test revision: `9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100`.
   This last change updates help, documents the contract and adds native-test
   skip handling; grading/publication behavior is identical to e182bbfe.
-- Subsequent evidence-only commits preserve the trees recorded in
+- Final portable test revision: `7909abaccbe58221187cf41782a48e79af91debd`.
+  Only the new geometry test's source-content hash assertion changes: LF and
+  CRLF checkouts normalize to SHA256
+  `a9945bb0940f79672b7c6e32b7a6b9d0b135bf78030e19fcdb88e65c2139903f`.
+  The raw Windows source remains the historical `165302...` board; production,
+  fixture content and all numerical/verdict assertions are unchanged. The
+  reproduction reviewer independently reran the four tests on both byte forms.
+- The final evidence-only commit preserves the trees recorded in
   [tree-identity.json](verification/tree-identity.json). Final reviewer identity
   confirmations are linked from the publication PR, avoiding a self-referential
   commit hash inside its own evidence.

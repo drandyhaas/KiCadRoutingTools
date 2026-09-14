@@ -1,7 +1,7 @@
 {
   ".gitattributes": "b9c85dd47e2e7793e50ebc3f89d758eef7f0b486a2ddf131ac09e994a41e5a00",
   "CONTRACT.md": "0f0c6ee560df2cb2ba39e4d1dc92885673b42153ff44eb929f06a0251c6f8e29",
-  "README.md": "1616b15119f0d51a5d61f665ba00d3d7a9cefe97a43bbb95645a019a87e178a6",
+  "README.md": "2cc9a72164d9a0fa6b3565188c9b23285b790ed6cd44fb544ef76842ff346f74",
   "final/REPORT.md": "99f49d27511c5364d51adcfd0dd751e0e16162ce23a8cef6411134e588efee4f",
   "final/assert_geometry.py": "06c7f3af9bba8c7674b14bb83b0733de1e67fa39300e09e92915184fd070032d",
   "final/baseline/dx0-drc.log": "3303c07491714223c726836519c921219b976712d6ce8e088c9ecef5a31fd7ef",
@@ -182,6 +182,13 @@
   "github/970-review-comments.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "github/970.json": "4c350e6a2ea261d2c82ea60928fc7cc622f2d50c7d32e14566aa150de7c03c70",
   "github/integration-verification.json": "a63c26bb2429686542a4563b32c7e33e845d82955b9f6b37012911dffe5fc1a1",
+  "portability/README.md": "58e6b6e2f4d6eabef6d67790e738db07f40ea2d50f6ed7d7cae9f23ab633abae",
+  "portability/results/executed_test_source.py": "f67e3f71fae517d4bed85e444d862a0c900c3e16aa4ddd5bc4f803ce796544c6",
+  "portability/results/lf-source.kicad_pcb": "a9945bb0940f79672b7c6e32b7a6b9d0b135bf78030e19fcdb88e65c2139903f",
+  "portability/results/lf.log": "a165db1dfa442f15fa1207bf495b35817dec91c9c1903c62b10c15b56b65bca2",
+  "portability/results/normal.log": "40f0fddc0c10c209d0b926fdfde9be59fea5ea69232c70862175e33cf2f0bf06",
+  "portability/results/results.json": "bc086d1f499ed1d73b0ecf77741c499d9ab7e837ab8666238d7945615544f2f5",
+  "portability/verify_line_endings.py": "a37de77bc95380259874e47d47661344c55362cb86177847eeef36b13e9a048a",
   "reproduction/README.md": "de95a918f9f118f5be71cce6b72a5033e5d5f763a61b55ce9a013d880d5b899f",
   "reproduction/baseline-preserved/legal_body.intent.json": "ab136ce149ec32215972c283a20e791928dbc41cf7d91bb8f142ff35968d0524",
   "reproduction/baseline-preserved/minus145/drc-edge0.1.json": "ff4f395978017703ff3414a73d4e022355ba3f7cd7948cf53241a45692077c56",
@@ -650,6 +657,7 @@
   "reproduction/wrapper-e182bb/zero.intent.json": "7bcc33e11af3c71a194498cf072c76dca4f7035a915cf9fabe231680d117bdbd",
   "verification/2448498c-results.json": "8a4eff2a4ae40ce629555a76137bb60f6d8b0e242da09c840758bcce2641bda1",
   "verification/docs-venv.log": "9955e498c8a6936f06d83b0beb8e5d8cf0fe1584b9e4d258761cc3217ed0fa60",
+  "verification/geometry-7909abac.log": "2c3378c57139d0300665e09d280d6cd6c9aa1d0a970e8342d981741e1f0fb627",
   "verification/help-9e65e44b.log": "204ea9fdc2bc31d5fdf9d1f91d13b42070b647189aa6de9653e4df9fc781d4e1",
   "verification/mutation-9e65e44b.log": "74d5d8ec713b1cacbfd53c290f4bdfdb4c59b356c2841fb9200aa87bd4f9808d",
   "verification/publication-9e65e44b.log": "5065b441f07aedaf27cf272eef3a8f5cfd550eadf8ef360daf5b50d9ecfd7fba",
@@ -669,5 +677,5 @@
   "verification/test_run27_edge_seat_clears_placed-2448498c.log": "c1259932feaeedb1c9debdcf98d2aecf446a0500c71fe363148e6a7bdd610d66",
   "verification/test_run4_reconstruct-2448498c.log": "2bf1caca587600b2d3ead4e9671abf21a25b3940f0190a9b8c52584ad9f7ac8b",
   "verification/test_run5_emit_guard.log": "54063e5c0d9cd22279a2fd4cc5ba69aa42c32d26be5214bde96279f0fb0aaf67",
-  "verification/tree-identity.json": "7562b8ee74aeb64a458fdf94e00155b96ff501ade35fe124e00bff57790c2364"
+  "verification/tree-identity.json": "ccbbddfb79f990589a7cbe90c2283cd0f915d647a242951bf64fb1a83ef30bd9"
 }
