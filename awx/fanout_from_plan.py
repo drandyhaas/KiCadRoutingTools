@@ -87,6 +87,19 @@ def copy_pro(src_board, dst_board):
     pro = os.path.splitext(src_board)[0] + '.kicad_pro'
     if os.path.exists(pro):
         shutil.copy(pro, os.path.splitext(dst_board)[0] + '.kicad_pro')
+    # ...and stamp the floor this stage fans out at (0.1 / 0.1 / the braid's
+    # via, the numbers fanout_once is called with below), lower-only, as the
+    # production CLIs do -- see braid.write_out for why a bare copy was not
+    # enough (a Default class clearance of 0.0 rode down every chain step).
+    if os.environ.get('AWX_STAMP_PRO', '1') == '0':   # the flag-off parity control
+        return
+    try:
+        from fix_kicad_drc_settings import fix_project_for_output
+        fix_project_for_output(dst_board, src_board, clearance=te.SPEC_CLEARANCE, track_width=0.1,
+                               via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL,
+                               verbose=False)
+    except Exception as e:
+        print(f'  project floor NOT stamped: {e}', flush=True)
 
 
 ROUNDS = int(os.environ.get('SRC_ROUNDS', '8'))   # realized source rounds (feasibility bans need re-plans); 0 = the teeth as they stand
