@@ -177,6 +177,15 @@ VIA_NEED = VIA_SIZE / 2 + CLEAR + TRACK / 2 + 0.03   # a via's room to a
                                # neighbouring track centre, plus a cell
 PACK_MODE = int(os.environ.get('BRAID_PACK', '0') or 0)  # pack.py at write time (opt-in)
 FLANK_COMB = int(os.environ.get('BRAID_FLANK_COMB', '0') or 0)
+# PLAN_PAGES_SIDERS=1 (2026-09-14, pages-first plans only -- the plan sidecar's
+# `pages_first` marker): a stub whose direction is ACROSS the spine (a side
+# face) is always a side exit, never head-on. classify's head-on test is
+# relative (the most upstream stub of a face parallel to the spine is head-on,
+# every other one a side exit), so a candidate's class -- and its slot in the
+# target order -- flipped with which neighbours the plan chose, and no planner
+# key could follow it (K28: 26/378 target pairs off). With every side-face
+# stub in its side's comb, the order on a face is a function of position alone.
+PAGES_SIDERS = int(os.environ.get('PLAN_PAGES_SIDERS', '1') or 0)   # default 1: measured best on the K28/K35/K41 ladder (2026-09-14); inert without the plan marker
 # ^ arrivals on a face that runs ALONG the spine are a comb ordered along
 # the face (#622, 2026-09-10 evening). 1: a stub standing beside its
 # destination array (outside the ball field across the spine, at an s
@@ -1657,6 +1666,18 @@ class Corridor:
         self.guarded = guarded
 
         def head_exit(nm):
+            if PAGES_SIDERS and getattr(ctx, 'pages_first', False):
+                dn = sp.d[-1]
+                sd = ctx.stub_dir[nm]
+                al = sd[0] * dn[0] + sd[1] * dn[1]
+                if al > 0.7 or (PAGES_SIDERS == 1 and al > -0.5):
+                    # mode 2 (default): a FAR-face stub is always a side exit
+                    # (it rides round, outermost of its side) -- head-on
+                    # through the array at its row is a different place in
+                    # the order and the relative test flipped it. Mode 1:
+                    # side-face stubs too (measured K35 +18 vias: their legs
+                    # then ran on the other layer, 2 vias each).
+                    return False
             return self._head_exit(nm, se[nm], self.stubs[nm], ctx.dest_layer[nm],
                                    self._band_line_of(nm))
 
@@ -3224,6 +3245,11 @@ class Corridor:
         ref = ctx.ends[nm][2]
         bl = self._band_line_at(pt, ref)
         head = (nm not in self.flank) and self._head_exit(nm, so, pt, L_a, bl, record=False)
+        if head and PAGES_SIDERS and getattr(ctx, 'pages_first', False):
+            dn_ = sp.d[-1]
+            al_ = sdir[0] * dn_[0] + sdir[1] * dn_[1]
+            if al_ > 0.7 or (PAGES_SIDERS == 1 and al_ > -0.5):
+                head = False                # PLAN_PAGES_SIDERS: a far-face (mode 1: or side-face) candidate is a side exit
         sg, far = None, False
         if not head:
             sg = self._side_of(o_e, ref)
@@ -7619,6 +7645,13 @@ def setup(board, names, dest, log, plan=None):
         log(f'pair frame: chirality -1, the board turned over about '
             f'y = {CY:.3f} for the braid (copper mirrored back on write)')
     planned = {nm for nm in names if plan and nm in plan.get('ends', {})}
+    ctx.pages_first = bool(plan and plan.get('pages_first'))
+    if ctx.pages_first:
+        # a PAGES-FIRST plan (fanout_from_plan PLAN_PAGES): its two chains
+        # were chosen to cover every lane, so the schedule pages it exactly
+        import schedule as _sch
+        _sch.EXACT_PAGES = 1
+
     ends = endpoints(pcb, [nm for nm in names if nm not in planned], byname,
                      dest_ref=dest) if len(planned) < len(names) else {}
     for nm in planned:

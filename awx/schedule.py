@@ -48,9 +48,16 @@ def exact_pages(launch: Sequence[str], ranks: Sequence[int], cost) -> Optional[D
     # split traded five back-page lanes (2 vias each) for one swimmer,
     # K35 69 -> 72 and K41 86 -> 90 (2026-09-11)
     SWIM = _pr.PAGES          # ONE source: prices.py
+    # ...and the "little for the refusals it seeds" the comment above
+    # promises: with SWIM exactly 2 a lane whose BOTH ends miss its page
+    # (cost 2) tied with swimming, and the programme was free to leave it
+    # a swimmer -- band-free, weaving -- at no gain (2026-09-13, K28: four
+    # of six swimmers on a pages-first plan were F-F lanes planned on B).
+    # A page lane at the same price is always preferred.
+    SWIM_TIE = 0.01
     for i, nm in enumerate(launch):
         for p, P in enumerate(L):
-            c[2 * i + p] = -SWIM + float(cost(nm, P))
+            c[2 * i + p] = -(SWIM + SWIM_TIE) + float(cost(nm, P))
     A = lil_matrix((n + 2 * len(inv), nv))
     r = 0
     for i in range(n):

@@ -727,6 +727,229 @@ the thing none of these touch: change what SA1 is ASKED for (its berth face
 or its tooth layer, so the ends stop disagreeing), or move SA4, which is the
 net actually in the way. `blockers_of` names the movable-vs-pinned split.
 
+## The pages-first planner (`PLAN_PAGES=1`, 2026-09-13 night)
+
+Andy's directive: **no net may need more than two vias.** A page lane costs
+at most two (one at each end whose layer is not its page); only a SWIMMER
+costs more. So the plan must hand the braid orders two crossing-free chains
+cover, and that is a property of the ENDS. Measured first (`two_chain.py`,
+`one_change.py` in the c79d1062 scratchpad; `hbn_k41/51` = the human's
+copper stripped to a fanout, `human_bench.py` rewritten): on our recorded
+K41 / K51 plans the best any two-page schedule can page is 28 of 41 / 28 of
+47 (13 / 19 must swim); on the human's ends 35 / 41 (6 / 6). Why the human's
+ends are orderable: once a net has a B end its page is free at no cost, and
+a B end makes its RANK free (a dog-bone climbs under the array); an F end
+pins it. Our chain froze the source, had no destination climb class, and
+every chooser priced a swimmer at 2 vias and took it.
+
+`pages_first.py` (opt-in, the old planner byte-identical at 0 -- K15 and
+K28 flag-off copper IDENTICAL to the recorded boards): ONE CP-SAT chooses a
+destination move, a source move ({the tooth as it stands} + `smenu`) and a
+page for every net; HARD: two nets on one page are never inverted between
+the launch and target orders; a net may still swim at 100 vias. Keys = the
+braid's own slots (`braid_slots`: corridors built on the seed plan,
+`_alt_geo` + `_alt_slot` / `_alt_src_slot`, the current tooth by `launch_o`);
+`verify` runs the braid's planner on the answer and a DAMPED loop re-solves
+only the nets it swims (each barred from the berth that swam) with every
+other net held, PLAN_PAGES_ITERS times. Exclusions from `_conflict`,
+bucketed. Deterministic (interleaved CP-SAT under PLAN_PAGES_DET). Hooks:
+`dest_choice` (after the greedy; `src_free` only where a source move can be
+realized), `plan()` realizes the planner's teeth through the existing
+realize-confirm loop and skips the paper refine, `fanout_destination`
+re-plans with the exactly-laid berths FIXED, the judge under the flag is
+(braid residue with EXACT pages, the planner's own vias), the sidecar
+carries `pages_first` and `braid.setup` pages such a plan exactly.
+`DST_CLIMB=k` enumerates destination climbs (off; the class that frees a
+B berth's rank -- not yet measured).
+
+| K | base (this tree) | first pages-first | after the night's fixes (arm) | human |
+|---|---|---|---|---|
+| 15 | 16 / 0 | **14** (0 swimmers) | 14 | 22 |
+| 28 | 36 / 0 | 44 (2 swimmers) | **32** (siders=1 + joined key, 31 s) / 34 (far-only) | 46 |
+| 35 | 62 / 0 | **58** (8 swimmers shipped) | 60 (siders=1 + joined key, 60 s) | 58 |
+| 41 | 91 / 0, 174 s | 122 (19 swimmers), 132 s | 96 clean (conflict fixes, 113 s); 92 with 2 open (siders=1 + joined key) | 70 |
+| 51 | 112 / SBA2 open, 266 s | 134 / 0 open, 234 s | -- | 85 |
+
+The night's fixes, in order (each measured, all opt-in under the flag except
+the two shared bugs): (1) a strict, sticky destination loop; (2) keys from
+the braid's own slots with a damped verify loop; (3) the judge = braid
+residue with exact pages + the planner's vias; (4) `schedule.exact_pages`
+tie-break (shared); (5) `select_moves._site_in_lane` tests ANY via, not
+only dog-bones (shared; standard planner's K15/K28 copper identical);
+(6) the full row-vs-column crossing test under the flag (`sm.SEL_XING=2`)
+plus crossing BUCKETS in the planner's own conflict finder -- K41 122 -> 96;
+(7) `PLAN_PAGES_SIDERS` (2 = far-face stubs always side exits; 1 = side
+faces too, which costs 2 vias per formerly head-on F arrival: K35 58 -> 76);
+(8) `PLAN_PAGES_JOINKEY`: a side exit's slot depends on its SOURCE class
+(the braid's exit block: ports innermost by stub s, then the lanes whose
+tooth is a joiner outermost by tooth s) -- with (7) the K28 keys match the
+braid on 378/378 launch and 377-378/378 target pairs, 0 swimmers, and the
+chain gives 32. Open at K41: the SOURCE side's relative head-on test (a
+tooth chosen downstream on the same line turns a tooth into a joiner) and
+the moved teeth's insertion slots -- 37/820 launch pairs off. Generality:
+every rule is geometric (direction against the spine, face lines, comb
+order along the spine, a via on a lane); no net, face or bench name; the
+joined shift is derived per corridor.
+
+All 0 open / 0 DRC. Two findings the ladder exposed, both open:
+- **The braid's relative head-on test** (`_head_exit`: on a face parallel
+  to the spine the most upstream stub is head-on, every other a side exit)
+  makes a candidate's class -- and with the spine relaxed on a new stub set,
+  every (s, o) -- flip with which neighbours are chosen. Launch order agreed
+  378/378 at K28, target 26/378 off, all up face and far face. The damped
+  loop gets K28 from 4 to 2 braid swimmers; keying side faces by the comb
+  rule directly (`PLAN_PAGES_SIDEKEY=1`) measured WORSE (2 -> 4), off.
+- **The destination loop erodes the plan.** K35 started at 1 braid swimmer;
+  every pass banned the berths the engine did not lay as asked and re-planned
+  with the rest fixed, and the shipped plan had 8 (5 -> 7 -> 10 in the log).
+  Faithfulness of the engine to the asked berth (EXACT_LANE legs, the
+  bans' scope) is the next lever.
+- **Fixed on the way, in the shared code:** `schedule.exact_pages` priced a
+  swimmer at exactly the price of a lane with both ends off its page and was
+  free to leave it swimming (4 of 6 on one plan); `SWIM_TIE=0.01` prefers the
+  page lane. Applies to the old planner's opt-in `BRAID_EXACT_PAGES` arm; the
+  default greedy pager is untouched.
+- **Applied to the standard planner too (Andy, 2026-09-14):** (1) the
+  source is frozen wherever it cannot be realized -- `residue_choice` offers
+  a candidate tooth only when its caller has an outlet (`src_out`), so the
+  destination re-plan loop no longer solves with teeth that never move
+  (DST_RESIDUE_SRC arms; the default proposes none, byte-identical); (2) the
+  exact pager's tie-break is shared code, so the standard planner has it
+  wherever `BRAID_EXACT_PAGES=1` is on (its default greedy pager pages
+  whenever it can and has no tie). Still standard-planner-only defects:
+  sched_first's Frame keys carry the order defect the braid slots fix; the
+  realize-confirm acceptance key is shared by the DST_RESIDUE_SRC arms.
+
+### 2026-09-14 (day): the base re-measured, determinism, the unplaced nets
+
+Three findings, in the order they were forced.
+
+1. **The flag-off ladder had regressed at K35+ and nobody had looked.**
+   Andy asked for the OLD planner's numbers first. K15 16 / K28 36 matched
+   the record; **K35 82 (record 62), K41 103 (91), K51 126 / 2 open (112 /
+   1 open)**. The first divergence is round 0's braid-judged cost on the
+   untouched bench, i.e. the greedy seed itself, and the cause is the
+   night's "shared bug fix" to `select_moves._site_in_lane` (any via, not
+   only a dog-bone's). The pair it catches is real -- 9 via-in-pad barrels
+   on other nets' row-line B runs at K41 pass 0 -- but the standard
+   planner's engine loop catches it too (the DRC gate bans them), and the
+   changed seed lost 20 / 12 / 14 vias. Now `SEL_SITE_ANY` (default 0),
+   set to 1 by `fanout_from_plan` at import under PLAN_PAGES, from the
+   FIRST select. Re-verified (bs1): K35 62 / 1339 segs, K41 91 / 2486, K51
+   112 / SBA2 open / 2625 -- the recorded boards, so the flag-off ladder is
+   16 / 36 / 62 / 91 / 112 again. The rule this teaches: "K15 and K28 copper identical"
+   is not "byte-identical" -- a fix that can change the seed is measured
+   on the whole ladder.
+2. **The pages-first solve was not reproducible across processes.**
+   `_conflicts` bucketed on a `set()` of string-keyed tuples, whose
+   iteration order follows the process's hash seed; the exclusions reached
+   the CP-SAT in that order, and a `max_deterministic_time` solve that
+   stops FEASIBLE lands on a different answer per order. Measured at K41,
+   one model (728 + 244 candidates, 595 pairs, 31102 exclusions): obj
+   1784.3 / 1726.8 / 1809.0 in three processes, three tooth sets; in ONE
+   process three solves identical. Sorted (`sorted(keys, key=repr)`, the
+   `learned` set likewise); `PYTHONHASHSEED=1` and `=2` now agree exactly.
+   **Every pfB / pfC number of the night was one sample** (pg0 re-ran K28
+   at 35 where pfB had 32). The braid's own CP-SAT paths were already
+   order-stable (the Modal reproducibility check).
+3. **The source-side disagreement was the greedy's UNPLACED nets, not the
+   relative head-on test.** `src_diag.py` (scratchpad 38603fde) classifies
+   every launch pair the keys and the braid order differently: at K41, 28
+   of 40 off pairs involved SA0, SDQ7, SA2, SA9, SWE, SA7 -- nets the
+   greedy seed leaves unplaced, so the braid's plan phase on the seed never
+   sees them: no corridor, frame keys, `corr = -1`, hence OUTSIDE every
+   planarity pair and free to swim in the model at no cost. They were the
+   braid's verify swimmers. Fix: for KEYING only, an unplaced net is seeded
+   at its cheapest berth (the greedy's own ranking, conflicts ignored); the
+   solve still chooses among all its candidates. **K41 launch pairs off:
+   40/780 -> 1/706**, and the braid's planner now swims exactly the nets
+   the model swims (4 = 4). The line-mate flips (SDQ8 / SDQ15 made joiners
+   by SDQ10 chosen downstream on their line) inverted NO pair: a flipped
+   tooth keeps its s-order on its side, so the "source-side relative test"
+   was never the gap. The one remaining pair (SA8-SA5) is the join block
+   ordered by the LEG's s (`_leg_s` jogs), not the tooth's.
+
+With the keys right, the limiter is the SOLVE: at DET 20 the CP-SAT stops
+FEASIBLE with 4 swimmers against a bound near 0 (obj 2359.8, bound 1163.6;
+each swimmer is 300 in the objective). `PLAN_PAGES_HINT=1` (the seed as a
+solution hint) measured WORSE at DET 20 (2659.4 / 5 swimmers) -- the hint
+steers the search into the greedy's neighbourhood -- and is off. The
+deterministic-time sweep at K41 (one process; `det_sweep.py`, scratchpad
+38603fde; the standalone first solve, seed = the greedy, unplaced nets
+keyed at their cheapest berth):
+
+| DET | hint | status | obj | bound | wall | model swimmers | braid swims on it |
+|---|---|---|---|---|---|---|---|
+| 20 | 0 | FEASIBLE | 2359.8 | 1163.6 | 12.6 s | 4 | 4 (the same four) |
+| 20 | 1 | FEASIBLE | 2659.4 | 1140.5 | 13.6 s | 5 | 5 |
+| 40 | 0 | FEASIBLE | 2036.6 | 1440.5 | 27.1 s | 3 | 3 |
+| 40 | 1 | FEASIBLE | **1777.4** | 1440.5 | 26.1 s | 2 | 3 |
+| 80 | 0 | FEASIBLE | 1841.7 | 1440.5 | 50.4 s | 2 | 5 (model vias 66) |
+| 80 | 1 | FEASIBLE | 1777.4 | 1440.5 | 52.5 s | 2 | 3 |
+
+So the bound proves at least ONE swimmer (1440 = 1140 + 300) and the search
+finds 2 given 40 det-seconds; 80 adds nothing; the hint is worth a swimmer
+at 40 and costs one at 20 -- local optima, not a trend. Arms on the ladder:
+pg1 = DET 20 no hint (the night's budget), pg2 = DET 40 + hint, pg3 = DET
+40 no hint. The fanout stage's wall time is the other axis (edict 2).
+
+**Ladder, 2026-09-14 (all 0 DRC; vias / open, wall s of the whole chain
+stage pair; base = flag off after the gate, timed alone at K35+; human =
+`via_census` of the original):**
+
+| K | base (bs1) | pg1: DET 20, no hint | pg2: DET 40 + hint (= the defaults now) | pg3: DET 40 | pg4: DET 20 + seed crossing test | human |
+|---|---|---|---|---|---|---|
+| 15 | 16, 12 s | 16, 12 s | 16, 23 s | 16, 22 s | 16 | 22 |
+| 28 | 36, 28 s | **34**, 28 s | **34**, 37 s | 34, 29 s | 34 | 46 |
+| 35 | 62, 53 s | 65, 56 s | 65, 58 s | 65, 54 s | 76 | 58 |
+| 41 | 91, 128 s | 87, 61 s | **79**, 92 s | 81, 75 s | 89 / 2 open | 70 |
+| 51 | 112 / SBA2 open, 241 s | 125 / 0 open, 123 s | **115 / 0 open**, 136 s | 106 / SA2 open, 147 s | 131 / SDQ1 open | 85 |
+
+pg4 (`PLAN_PAGES_XING_SEED=1`, the row-vs-column crossing test for the
+seed select as well as the re-plans) loses everywhere it matters (K35 +11,
+two open at K41, one at K51); pg5 (the same on top of pg2's stack) gives
+16 / 34 / **60** / 85 / 116 with THREE open at K51 -- one bench up (K35
+60, below the base's 62 and two above the human), K41 +6, K51 broken.
+Not a default by edict 3. Off, kept as the record. **`PLAN_PAGES=1`
+alone now runs pg2's stack** (`PLAN_PAGES_DET` 40, `PLAN_PAGES_HINT` 1).
+
+pg3 (DET 40, no hint) says the budget is the main effect (K41 87 -> 81)
+and the hint is worth two more vias at K41 and COMPLETION at K51 (106 with
+SA2 open against pg2's 115 complete). pg2 (DET 40 + hint) is the arm to beat: K41 **79 clean is the best K41
+this chain has produced** (the recorded best was 88; 84 with one open),
+K51 115 complete, K28 34 below the base, K15 equal, K35 +3 -- within the
+time budget (92 s at K41, 136 s at K51, both under the base's own). K41
+histogram 0:8 2:29 4:2 5:1 8:1 -- 37 of 41 nets at two vias or fewer, the
+human 41 of 41; K51 0:9 1:1 2:23 4:11 6:4 with the model itself swimming
+11 (over the two-page capacity). pg1 is the night's stack made
+reproducible plus the unplaced-net keying:
+below the base at K28 / K41, complete at K51 (the recorded plain K51 was
+99 / SA1 open, the record complete 107), K15 equal, K35 +3, and about
+HALF the base's wall time at K41 / K51 (the planner replaces the
+realize-confirm rounds the paper refine used to spend). At K51 the model
+itself swims 10-12 nets (the plan is over the two-page capacity, as
+measured on 2026-09-12) and the braid 10-14.
+
+**Where the vias are (`weave_census.py` / `via_where.py`, scratchpad
+38603fde), K41:**
+
+| board | vias | via-in-pad | dog-bone | weave pairs | other (dives) | per-net histogram |
+|---|---|---|---|---|---|---|
+| pg1 | 87 | 21 | 23 | 4 (8 vias) | 35 | 0:8 2:22 3:1 4:10 |
+| base | 91 | 20 | 22 | 5 (10) | 39 | 0:7 2:24 4:8 5:1 6:1 |
+| human | 70 | **0** | 29 | **0** | 41 | 0:6 **2:35** |
+
+By region (source x<128 / corridor / destination x>132): pg1 25 / 11 / 51,
+base 14 / 13 / 64, human 14 / 5 / 51. So the destination now costs what the
+human pays; the remaining 17 are 11 at the SOURCE (the planner's moved
+teeth are via-in-pad teeth, 1 via each, on top of the bench's F stubs) and
+6 in the corridor (weaves: a lane crossed BY LAYER by a side exit's leg
+pays 2). The human has no net over 2 because every net is F at one end and
+pays its dive + dog-bone at the other; ours ship 11 nets at 3-4 because a
+via-in-pad tooth (1) + dive (1) + dog-bone (1) + a weave or a leg crossing
+is 4 -- the model prices the first three and not the fourth. That leg
+crossing term is the next lever.
+
 ## Settled -- do not re-run these
 
 | arm | verdict |

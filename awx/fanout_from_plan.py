@@ -46,6 +46,20 @@ from coherent_nets import coherent_nets  # noqa: E402
 # north riders at K51; escape_moves.enumerate_moves climb=). 0 = off, the
 # menu byte-identical. replan.py runs with 14.
 SRC_CLIMB = int(os.environ.get('SRC_CLIMB', '0'))
+# PLAN_PAGES=1 (2026-09-13): the PAGES-FIRST planner (pages_first.py) chooses
+# BOTH ends and the page of every net in one CP-SAT with hard two-page
+# planarity, so no net needs more than two vias by construction. 0 = the
+# recorded planner, byte-identical. DST_CLIMB=k enumerates destination
+# dog-bones whose run climbs along the array up to k pitches before it
+# leaves (escape_moves climb=), the class that makes a B berth's rank free.
+PLAN_PAGES = int(os.environ.get('PLAN_PAGES', '0'))
+if PLAN_PAGES:
+    # the planner's conflict tests, from the FIRST select (the greedy seed the
+    # corridors are keyed on) -- see select_moves.SEL_SITE_ANY / SEL_XING
+    pe.sm.SEL_SITE_ANY = 1
+    # (Raising SEL_XING for the seed select as well was measured worse on the
+    # ladder, 2026-09-14: K35 65 -> 76, K41 87 -> 89 with 2 open.)
+DST_CLIMB = int(os.environ.get('DST_CLIMB', '0'))
 
 # SPLIT_BLOCKS=1 (2026-09-10): a destination array whose ball grid has a
 # depopulated BAND (a DDR3/DDR4 FBGA: two blocks of three ball columns
@@ -190,7 +204,7 @@ def plan_state(pcb, names, banned=frozenset()):
         pad = min(fp.pads, key=lambda p: (p.global_x - bx) ** 2
                   + (p.global_y - by) ** 2)
         dst_pad[nm] = pad
-        moves = menu(pad, em.grid_of(fp), nid, walk=DST_WALK)
+        moves = menu(pad, em.grid_of(fp), nid, walk=DST_WALK, climb=DST_CLIMB)
         if ends[nm][2] == dref and len(dblocks) > 1:
             # the BLOCK's moves too: its band faces are moves the whole
             # array does not have; its outer faces are the array's own
@@ -814,6 +828,22 @@ def dest_choice(st, board, log=print, fixed=None, learned=None, src_out=None):
         choice, un = pe.sm.select(seed_menu(st), st['launch'],
                                   keep_out=st['dboxes'], buses=st['buses'],
                                   tooth_layer=st['tooth0'], log=None, pads=pads, chi=st['chi'])
+    if choice and PLAN_PAGES:
+        import pages_first
+        # the destination re-plan loop realizes no source move: there the
+        # tooth as it stands is the only source candidate (src_free False)
+        pf_choice, pf_src, rep = pages_first.choose(st, board, log=log or (lambda *a: None),
+                                                    fixed=fixed, learned=learned,
+                                                    src_free=(src_out is not None), seed=choice)
+        for ln in rep:
+            (log or (lambda *a: None))(ln)
+        if pf_choice:
+            for nm, mv in choice.items():
+                pf_choice.setdefault(nm, mv)
+            un = [nm for nm in un if nm not in pf_choice]
+            choice = pf_choice
+            if src_out is not None and pf_src:
+                src_out.update(pf_src)
     if choice and SCHED_FIRST:
         import sched_first
         order = None
@@ -1980,7 +2010,13 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
                                   + DST_SWIM * (swim_of(nm, m, choice, bp, _movers) - s0))}
                         for m in cs]
         src_cands = {}
-        if DST_RESIDUE_SRC:
+        if DST_RESIDUE_SRC and src_out is not None:
+            # ...only where the caller can REALIZE one (`src_out` is its
+            # outlet): the destination re-plan loop (fanout_destination ->
+            # dest_choice) has none, and a solve there that chose a tooth
+            # logged it, dropped it, and applied the berths chosen beside a
+            # launch end that never moved (2026-09-14, Andy: fix in the
+            # standard planner too). With no outlet the source is frozen.
             # the residue nets' SOURCE moves (see DST_RESIDUE_SRC): one per
             # (face, layer), cheapest by vias then by ride from the new tooth
             for nm in res:
@@ -2200,7 +2236,7 @@ def plan(base, names, work):
                                     log=print, tabu=banned)
             if _pick:
                 src_out[_pick[1]] = _pick[2]
-        if src_out and (DST_RESIDUE_SRC or SRC_REPLAN):
+        if src_out and (DST_RESIDUE_SRC or SRC_REPLAN or PLAN_PAGES):
             # the choice solve asked for source moves: realize them with the
             # engine, choose the destination again on the new board, and
             # KEEP the new board only if the full judge (residue, then
@@ -2210,6 +2246,13 @@ def plan(base, names, work):
             # cost 141 -> 147). A rejected round's moves are banned.
             def _key(ch):
                 f_, _p, bp_, _pl = judge_by_braid(st, ch, board)
+                if PLAN_PAGES:
+                    # the planner's objective: the braid's residue (exact
+                    # pages), then the pages-first model's vias of the plan
+                    # just chosen -- not the old judge's ride-priced cost,
+                    # which reverted a batch of teeth this plan needed
+                    import pages_first
+                    f_ = getattr(pages_first.choose, 'last', {}).get('vias', f_)
                 return (sum(1 for nm in ch if bp_.get(nm, {}).get('page') is None), f_)
             best_key = _key(dst_choice)
             for _k in range(SRC_RESIDUE_ROUNDS):
@@ -2265,6 +2308,9 @@ def plan(base, names, work):
                 if not ch2:
                     print(line + '; no destination choice on the new board -- reverted'); break
                 f2, _p2, bp2, _pl2 = judge_by_braid(st2, ch2, new_board)
+                if PLAN_PAGES:
+                    import pages_first
+                    f2 = getattr(pages_first.choose, 'last', {}).get('vias', f2)
                 key2 = (sum(1 for nm in ch2 if bp2.get(nm, {}).get('page') is None), f2)
                 if key2 < best_key:
                     print(line + f'; judged residue {best_key[0]} -> {key2[0]}, cost {best_key[1]:.2f} -> {f2:.2f}: KEPT')
@@ -2297,6 +2343,10 @@ def plan(base, names, work):
         line += f'  ({n_corr} corridor(s) by the braid\'s planner)'
         print(line)
         if r == ROUNDS:
+            break
+        if PLAN_PAGES:
+            # the pages-first planner chose the source itself (realized and
+            # confirmed above); the paper refinement is the old planner's
             break
         sub = {n: ms for n, ms in st['smenu'].items() if n in dst_choice and ms}
         if not sub:
@@ -2376,6 +2426,8 @@ def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
           f'(braid-judged cost {cost:.2f} incl. ride)')
     if out_path:
         side = os.path.splitext(out_path)[0] + '.plan.json'
+        if PLAN_PAGES:
+            plan['pages_first'] = True      # the braid stage pages this plan EXACTLY
         with open(side, 'w', encoding='utf-8') as f:
             json.dump(plan, f, indent=1, sort_keys=True)
         print(f'  plan written to {os.path.basename(side)}')
@@ -2477,8 +2529,11 @@ def fanout_destination(out_path, names, choice, dst_pad, dref, byname, board,
         # the refused nets around them; the greedy re-selects everything)
         laid_ok = {nm: sr.move_sig(choice[nm]) for nm in choice
                    if audit_d.get(nm, {}).get('exact')}
+        # pages-first: the berths laid exactly stay FIXED, only the missed
+        # nets are re-planned -- a re-plan from scratch asked for 5-6 new
+        # berths every pass and never converged (K28, 8 passes, 27 bans)
         new_choice, un = dest_choice(st, board,
-                                     fixed=laid_ok if (SCHED_FIRST and SF_FIXED) else None,
+                                     fixed=laid_ok if ((SCHED_FIRST and SF_FIXED) or PLAN_PAGES) else None,
                                      learned=learned)
         if not new_choice or new_choice == choice:
             print('  destination: the re-plan changed nothing -- stopping')
@@ -2923,7 +2978,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
         if nm in choice:
             p = dst_pad[nm]
             hints[(round(p.global_x, 3), round(p.global_y, 3))] = sr.full_move(choice[nm])
-            if SF_EQUIV >= 2:
+            if SF_EQUIV >= 2 or PLAN_PAGES:
                 # STRICT plan-follow (underpad._follow_plan): a negotiation
                 # is kept only when the count of exact berths rises, and a
                 # ball with no berth on its asked face is left unescaped
