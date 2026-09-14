@@ -46,12 +46,12 @@ public USB1 geometry:
 | -1.45 | 1.45 | +0.15 | .10 / .40 | 1.45 |
 | -2.10 | 2.10 | -.50 | .75 / 1.05 | 2.10 |
 
-The inherited -1.45 board passes the positive `0.05?0.20 mm` overhang band at .25
+The inherited -1.45 board passes the positive `0.05-0.20 mm` overhang band at .25
 but fails at .55 without any geometry change. The corrected clause fails both
 settings on its actual 1.45 mm body overhang. The unchanged flush body fails a
 positive minimum and passes a zero minimum. A fully inboard translated control
 has zero overhang and a separately measured positive setback; only an explicit
-setback limit requires seating. A legal -.10 body control passes `0.05?0.20 mm`.
+setback limit requires seating. A legal -.10 body control passes `0.05-0.20 mm`.
 
 A separate -1.30 control has body overhang 1.30 within its declared `1.25..1.35`
 band and copper gap .30: copper passes .25 and fails .55. This proves allowed
