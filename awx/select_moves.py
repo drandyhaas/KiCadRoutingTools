@@ -349,6 +349,16 @@ def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
 # open unit question is that plan_floor counts CROSSINGS (a dive is
 # ~2 vias), so the honest rate for the floor+ride sum may be 2x.
 VIA_MM = 7.5
+# SEL_SITE_ANY (2026-09-14): `_site_in_lane` tests ANY via, not only a
+# dog-bone's -- a via-in-pad's barrel stands on the ball's row line, where
+# another net's run along that line on the back layer passes (K41 pages-first
+# pass 0: 9 such pairs laid as asked, every one a DRC short). It is a real
+# conflict, and the pages-first planner turns it on (fanout_from_plan sets it
+# under PLAN_PAGES) -- but on the STANDARD planner it is an opt-in, because
+# measured on the ladder it moved the greedy choice and the chain lost:
+# K35 62 -> 82 vias, K41 91 -> 103 (2026-09-14, bs0 vs pf0). The standard
+# planner's engine loop catches those pairs itself (the DRC gate bans them).
+SEL_SITE_ANY = int(os.environ.get('SEL_SITE_ANY', '0') or 0)
 
 # SEL_CONTEND (2026-09-11): vias charged for the ROOM THEY TAKE, in vias per
 # contending net (escape_moves.site_contention). 0 = off, the cost unchanged.
@@ -846,9 +856,13 @@ _VIA_REACH = 0.30   # via radius + clearance + half a track, rounded up
 
 
 def _site_in_lane(dm: Move, key, a, b) -> bool:
-    """Does dm's dog-bone via (any layer) sit inside the lane `key`
-    over [a, b]?"""
-    if dm.kind != 'dogbone' or dm.site is None:
+    """Does dm's via (any layer) sit inside the lane `key` over [a, b]?
+    ANY via: a via-in-pad's barrel stands at the ball's centre, exactly
+    where another net's run along that row LINE on the back layer passes
+    (2026-09-14, K41 pages-first pass 0: SDQ14's via-in-pad at (135.53,
+    66.16) on SA0's row run, 9 such pairs, every one laid as asked and then
+    a DRC short). Only dog-bone sites were tested before."""
+    if dm.site is None or (dm.kind != 'dogbone' and not SEL_SITE_ANY):
         return False
     sx, sy = dm.site
     if key[0] == 'row':

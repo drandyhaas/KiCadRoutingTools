@@ -131,7 +131,9 @@ def full_move(m):
         # a WALKED dog-bone: the surface stub's polyline, ball -> elbow ->
         # site (underpad._dogbone_path_valid lays exactly it)
         d['path'] = [tuple(m.legs[0][0]), tuple(m.legs[0][1]), tuple(m.site)]
-    if os.environ.get('EXACT_LANE') and m.legs:
+    if (os.environ.get('EXACT_LANE') or os.environ.get('PLAN_PAGES', '0') not in ('', '0')) and m.legs:
+        # (PLAN_PAGES: the pages-first plan's berths are laid verbatim -- measured
+        # K41 122 -> 96 with the planner's own conflict test made complete)
         # EXACT_LANE (2026-09-10): the move's own legs, laid verbatim by
         # underpad.attempt before its search -- the engine's "exact" was
         # the exact EXIT, and a stub audited exact ran four rows down the
