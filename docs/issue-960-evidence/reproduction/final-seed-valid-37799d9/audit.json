@@ -1,0 +1,25 @@
+{
+ "added_refs": [],
+ "callers": [
+  "place_seed.py:747 in main"
+ ],
+ "claimed": 15,
+ "decision_sources": [
+  "unspecified"
+ ],
+ "delivered": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-37799d9\\work\\seed.kicad_pcb",
+ "drifted_refs": [],
+ "ledger_rows": 1,
+ "levers": [
+  "place_seed.py"
+ ],
+ "moved": 15,
+ "provenance_scope": "registered execution; not optimizer or engineering certification",
+ "reason": "all 15 moved pose(s) trace to place_seed.py, and each is where its lever put it",
+ "staged": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-37799d9\\work\\board.kicad_pcb",
+ "unclaimed_refs": [],
+ "undeclared_refs": {},
+ "unverifiable_claims": [],
+ "verdict": "CLEAN",
+ "workdir": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-37799d9\\work"
+}

@@ -1,0 +1,508 @@
+{
+  "revision": "cbc819b6b862f6ec14ecb30b8659819e800fce76",
+  "source": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\kicad_files\\esp_prog.kicad_pcb",
+  "source_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+  "python": "3.11.5 (main, Jan 23 2026, 07:39:48) [MSC v.1944 64 bit (AMD64)]",
+  "kicad": "10.0.0",
+  "baseline": {
+    "files": {
+      ".kicad_pcb": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034"
+    },
+    "manifest": {
+      "kind": "unaided-regime",
+      "lever_registry": [
+        "place_seed.py",
+        "place_optimize.py",
+        "place_reconstruct.py",
+        "place_portfolio.py",
+        "place_route_loop.py",
+        "place_fanout_clearance.py",
+        "converge.py",
+        "place_pose.py",
+        "route.py",
+        "perturb.py",
+        "stage_blind.py",
+        "stage_unaided.py"
+      ],
+      "mechanical": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\mechanical.json",
+      "prior_ledger_rows": 0,
+      "prior_stagings": 0,
+      "schema": 1,
+      "staged_board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\board.kicad_pcb",
+      "staged_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034"
+    },
+    "mechanical": {
+      "kind": "mechanical-declaration",
+      "note": "the ONLY poses carried over from the source. Everything else is at the board centre at rotation 0. A run may read this; it is an input, not a leak, BECAUSE it is written down. `project` names the floors the run will be graded at, for the same reason.",
+      "project": {
+        "carried": false,
+        "dropped_prl": false,
+        "floors": {
+          "board_edge_clearance": {
+            "source": "fixed default",
+            "value": 0.55
+          },
+          "clearance": {
+            "source": "fixed default",
+            "value": 0.25
+          }
+        },
+        "kicad_dru": false,
+        "kicad_prl": false,
+        "sanitized_keys": []
+      },
+      "reasons": {
+        "Ref*": "fiducial (confidence medium): its position is a mechanical fact a real new board would already know",
+        "Ref*~2": "fiducial (confidence medium): its position is a mechanical fact a real new board would already know",
+        "USB1": "edge_receptacle (confidence medium): its position is a mechanical fact a real new board would already know"
+      },
+      "refs": {
+        "Ref*": [
+          141.2,
+          95.9,
+          0.0
+        ],
+        "Ref*~2": [
+          118.1,
+          99.9,
+          0.0
+        ],
+        "USB1": [
+          117.5,
+          100.0,
+          180.0
+        ]
+      },
+      "schema": 1
+    }
+  },
+  "commands": [
+    {
+      "label": "stage",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\tests\\stress\\stage_unaided.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\kicad_files\\esp_prog.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\truth"
+      ],
+      "exit": 0,
+      "stdout": "Modified 21 footprint positions\nSuccessfully wrote C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\board.kicad_pcb\nStaged C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\board.kicad_pcb\n  3 ref(s) declared mechanical and carried at their source pose; everything else at the board centre, rotation 0\n    Ref*: fiducial (confidence medium): its position is a mechanical fact a real new board would already know\n    Ref*~2: fiducial (confidence medium): its position is a mechanical fact a real new board would already know\n    USB1: edge_receptacle (confidence medium): its position is a mechanical fact a real new board would already know\n  truth in C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\truth (a sibling; nothing in the work dir names the source)\n  regime armed: C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\.unaided-manifest.json -- an undeclared pose write in this dir now RAISES, and every declared one is recorded in C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\.pose-provenance.jsonl\nJSON_SUMMARY: {\"board\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-final-verifier\\\\review_final\\\\run-20260914-105150\\\\pile\\\\board.kicad_pcb\", \"exempt\": 3, \"mechanical\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-final-verifier\\\\review_final\\\\run-20260914-105150\\\\pile\\\\mechanical.json\", \"regime\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-final-verifier\\\\review_final\\\\run-20260914-105150\\\\pile\\\\.unaided-manifest.json\"}\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n",
+      "summary": {
+        "board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\board.kicad_pcb",
+        "exempt": 3,
+        "mechanical": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\mechanical.json",
+        "regime": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\.unaided-manifest.json"
+      }
+    },
+    {
+      "label": "improving-pile",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\py_placer\\place_pose.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\pose.kicad_pcb",
+        "set",
+        "R1",
+        "136.4",
+        "98.8",
+        "--rot",
+        "270"
+      ],
+      "exit": 0,
+      "stdout": "CMD: python.exe -X utf8 C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\py_placer\\place_pose.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\board.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\pose.kicad_pcb set R1 136.4 98.8 --rot 270\nENV KNOBS: none\nModified 1 footprint positions\nSuccessfully wrote C:\\Users\\rob\\AppData\\Local\\Temp\\place_pose_wdt42zij\\candidate.kicad_pcb\nlegality at clearance 0.25 (fixed default), edge 0.55 (fixed default)\n  set    R1       [129.875, 98.25, 0.0] -> [136.4, 98.8, 270.0]\npad legality: conflicts 83 -> 72, holes 0 -> 0, coarse outline 0 -> 0\npad-edge clearance: 0 -> 0 violations; shortfall 0 mm; coverage complete\nJSON_SUMMARY: {\"board_edge_clearance\": 0.55, \"clearance\": 0.25, \"dry_run\": false, \"forced\": false, \"hole_conflicts_after\": 0, \"hole_conflicts_before\": 0, \"input\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-final-verifier\\\\review_final\\\\run-20260914-105150\\\\pile\\\\board.kicad_pcb\", \"knobs\": {\"board_edge_clearance\": {\"requested\": null, \"source\": \"fixed default\", \"units\": \"mm\", \"value\": 0.55}, \"clearance\": {\"requested\": null, \"source\": \"fixed default\", \"units\": \"mm\", \"value\": 0.25}}, \"legal\": false, \"legal_basis\": \"legal = measured pad/hole/outline channels are clean and edge coverage is complete; no_worse = no measured category worsened relative to the input board. Neither verifies bodies, routing or fill.\", \"locked\": [], \"locked_count\": null, \"moved\": [{\"from\": [129.875, 98.25, 0.0], \"kind\": \"set\", \"moved\": true, \"ref\": \"R1\", \"to\": [136.4, 98.8, 270.0]}], \"nearest_legal\": null, \"no_worse\": true, \"oob_pad_amount_after\": 0.0, \"oob_pad_amount_before\": 0.0, \"oob_pad_basis\": \"part pad AABB vs outline inflated by the grading clearance (NOT the per-pad outline measure; see render_placement checklist.a_off_outline.pad_copper)\", \"oob_pad_copper_count_after\": 0, \"oob_pad_copper_count_before\": 0, \"oob_pad_copper_refs_after\": [], \"oob_pad_count_after\": 0, \"oob_pad_count_before\": 0, \"ops\": [{\"from\": [129.875, 98.25, 0.0], \"kind\": \"set\", \"moved\": true, \"ref\": \"R1\", \"to\": [136.4, 98.8, 270.0]}], \"output\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-final-verifier\\\\review_final\\\\run-20260914-105150\\\\pile\\\\pose.kicad_pcb\", \"pad_clearance_required\": [], \"pad_conflicts_after\": 72, \"pad_conflicts_before\": 83, \"pad_edge_after\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_mm\": 1.3000000000000114, \"requested_mm\": null, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"fixed default\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"pad_edge_before\": {\"argument_mm\": 0.55, \"basis\": \"analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check\", \"complete\": true, \"findings\": [], \"measured_pads\": 75, \"minimum_gap_mm\": 1.3000000000000114, \"requested_mm\": null, \"required_mm\": 0.55, \"rules_unmeasured\": [], \"source\": \"fixed default\", \"tolerance_mm\": 1e-06, \"units\": \"mm\", \"unmeasured\": []}, \"pad_edge_conflicts_after\": 0, \"pad_edge_conflicts_before\": 0, \"pad_edge_shortfall_after\": 0, \"pad_edge_shortfall_before\": 0, \"pad_edge_unmeasured_after\": 0, \"pad_edge_unmeasured_before\": 0, \"pad_shortfall_after\": 22.5783, \"pad_shortfall_before\": 27.1331, \"refused\": null, \"snapped\": null, \"track_width\": 0.3, \"unlocked\": [], \"unlocked_count\": null, \"worst\": [[\"CON1\", \"Y1\", 1.75], [\"CON2\", \"Y1\", 1.5], [\"CON1\", \"CON2\", 1.0], [\"R2\", \"Y1\", 1.0], [\"R3\", \"Y1\", 1.0], [\"R4\", \"Y1\", 1.0], [\"C2\", \"Y1\", 0.75], [\"C2\", \"R4\", 0.5], [\"C2\", \"R3\", 0.5], [\"C2\", \"R2\", 0.5]], \"would_write\": \"C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-final-verifier\\\\review_final\\\\run-20260914-105150\\\\pile\\\\pose.kicad_pcb\"}\nEXIT=0\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n",
+      "summary": {
+        "board_edge_clearance": 0.55,
+        "clearance": 0.25,
+        "dry_run": false,
+        "forced": false,
+        "hole_conflicts_after": 0,
+        "hole_conflicts_before": 0,
+        "input": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\board.kicad_pcb",
+        "knobs": {
+          "board_edge_clearance": {
+            "requested": null,
+            "source": "fixed default",
+            "units": "mm",
+            "value": 0.55
+          },
+          "clearance": {
+            "requested": null,
+            "source": "fixed default",
+            "units": "mm",
+            "value": 0.25
+          }
+        },
+        "legal": false,
+        "legal_basis": "legal = measured pad/hole/outline channels are clean and edge coverage is complete; no_worse = no measured category worsened relative to the input board. Neither verifies bodies, routing or fill.",
+        "locked": [],
+        "locked_count": null,
+        "moved": [
+          {
+            "from": [
+              129.875,
+              98.25,
+              0.0
+            ],
+            "kind": "set",
+            "moved": true,
+            "ref": "R1",
+            "to": [
+              136.4,
+              98.8,
+              270.0
+            ]
+          }
+        ],
+        "nearest_legal": null,
+        "no_worse": true,
+        "oob_pad_amount_after": 0.0,
+        "oob_pad_amount_before": 0.0,
+        "oob_pad_basis": "part pad AABB vs outline inflated by the grading clearance (NOT the per-pad outline measure; see render_placement checklist.a_off_outline.pad_copper)",
+        "oob_pad_copper_count_after": 0,
+        "oob_pad_copper_count_before": 0,
+        "oob_pad_copper_refs_after": [],
+        "oob_pad_count_after": 0,
+        "oob_pad_count_before": 0,
+        "ops": [
+          {
+            "from": [
+              129.875,
+              98.25,
+              0.0
+            ],
+            "kind": "set",
+            "moved": true,
+            "ref": "R1",
+            "to": [
+              136.4,
+              98.8,
+              270.0
+            ]
+          }
+        ],
+        "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\pose.kicad_pcb",
+        "pad_clearance_required": [],
+        "pad_conflicts_after": 72,
+        "pad_conflicts_before": 83,
+        "pad_edge_after": {
+          "argument_mm": 0.55,
+          "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+          "complete": true,
+          "findings": [],
+          "measured_pads": 75,
+          "minimum_gap_mm": 1.3000000000000114,
+          "requested_mm": null,
+          "required_mm": 0.55,
+          "rules_unmeasured": [],
+          "source": "fixed default",
+          "tolerance_mm": 1e-06,
+          "units": "mm",
+          "unmeasured": []
+        },
+        "pad_edge_before": {
+          "argument_mm": 0.55,
+          "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+          "complete": true,
+          "findings": [],
+          "measured_pads": 75,
+          "minimum_gap_mm": 1.3000000000000114,
+          "requested_mm": null,
+          "required_mm": 0.55,
+          "rules_unmeasured": [],
+          "source": "fixed default",
+          "tolerance_mm": 1e-06,
+          "units": "mm",
+          "unmeasured": []
+        },
+        "pad_edge_conflicts_after": 0,
+        "pad_edge_conflicts_before": 0,
+        "pad_edge_shortfall_after": 0,
+        "pad_edge_shortfall_before": 0,
+        "pad_edge_unmeasured_after": 0,
+        "pad_edge_unmeasured_before": 0,
+        "pad_shortfall_after": 22.5783,
+        "pad_shortfall_before": 27.1331,
+        "refused": null,
+        "snapped": null,
+        "track_width": 0.3,
+        "unlocked": [],
+        "unlocked_count": null,
+        "worst": [
+          [
+            "CON1",
+            "Y1",
+            1.75
+          ],
+          [
+            "CON2",
+            "Y1",
+            1.5
+          ],
+          [
+            "CON1",
+            "CON2",
+            1.0
+          ],
+          [
+            "R2",
+            "Y1",
+            1.0
+          ],
+          [
+            "R3",
+            "Y1",
+            1.0
+          ],
+          [
+            "R4",
+            "Y1",
+            1.0
+          ],
+          [
+            "C2",
+            "Y1",
+            0.75
+          ],
+          [
+            "C2",
+            "R4",
+            0.5
+          ],
+          [
+            "C2",
+            "R3",
+            0.5
+          ],
+          [
+            "C2",
+            "R2",
+            0.5
+          ]
+        ],
+        "would_write": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\pose.kicad_pcb"
+      }
+    },
+    {
+      "label": "improving-pile-audit",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\tests\\stress\\provenance_audit.py",
+        "--workdir",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile",
+        "--delivered",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\pile\\pose.kicad_pcb",
+        "--json",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-final-verifier\\review_final\\run-20260914-105150\\improving-pile-audit.json"
+      ],
+      "exit": 4,
+      "stdout": "VERDICT: UNAIDED VIOLATION\n  1 pose(s) differ from the staged board and there is NO ledger at all -- nothing engine-side wrote them. This is the hand-placed case, not an unmeasured one: the board is the witness.\n  unclaimed: R1\nJSON_SUMMARY: {\"claimed\": 0, \"ledger_rows\": 0, \"levers\": [], \"moved\": 1, \"unverifiable_claims\": null, \"verdict\": \"UNAIDED VIOLATION\"}\n",
+      "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n",
+      "summary": {
+        "claimed": 0,
+        "ledger_rows": 0,
+        "levers": [],
+        "moved": 1,
+        "unverifiable_claims": null,
+        "verdict": "UNAIDED VIOLATION"
+      }
+    }
+  ],
+  "written_output": {
+    "identities": {
+      ".kicad_pcb": "3ed5a9a2b280cd5f38d93e34c8d0677bb8deffa7c36d79b343f9b432ca5b2c24"
+    },
+    "native": {
+      "C1": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "C2": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "C3": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "C4": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "CON1": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "Q1": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "Q2": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "R1": {
+        "pose": [
+          136.4,
+          98.8,
+          270.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "R3": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "R4": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "U1": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "USB1": {
+        "pose": [
+          117.5,
+          100.0,
+          180.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "R2": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "Ref*": {
+        "pose": [
+          118.1,
+          99.9,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "CON2": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "U2": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "Y1": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "F"
+      },
+      "#00000000-0000-0000-0000-00005a3b5201": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "B"
+      },
+      "#00000000-0000-0000-0000-00005d8c51dd": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "B"
+      },
+      "#00000000-0000-0000-0000-00005e7dd057": {
+        "pose": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "locked": false,
+        "side": "B"
+      }
+    },
+    "ledger": []
+  },
+  "scope": "Independent exact issue move reproduction only. No invalid exploratory controls included."
+}

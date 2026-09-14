@@ -1,0 +1,21 @@
+  PASS: a pad conflict the seed left behind fails the gate
+  PASS: ...counted as the seed's own
+  PASS: ...the PAIR is named, not just counted
+  PASS: ...and the pairs ride in the summary for a caller to read
+  PASS: ...with the intent grade itself still clean, so the two channels are distinguishable
+  PASS: a seed that leaves no short passes
+  PASS: a short between parts the seed never placed is not charged
+  PASS: ...but it IS counted and reported
+  PASS: ...and none of it lands in the seeded count
+  PASS: [shorted] seeded + inherited accounts for every short
+  PASS: [inherited] seeded + inherited accounts for every short
+  PASS: [clean] seeded + inherited accounts for every short
+  PASS: nothing fired -> no refusal line at all
+  PASS: a seed that misses its intent says so
+  PASS: a pad-only refusal names pads and points at the pairs
+  PASS: a HOLE-only refusal names holes, not pads, and promises no pairs
+  PASS: both channels are named when both fired
+
+ALL PASS
+
+STDERR:

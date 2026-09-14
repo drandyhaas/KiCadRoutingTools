@@ -1,0 +1,308 @@
+{
+  "candidate_regime": null,
+  "commands": [
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 tests/stress/stage_unaided.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\kicad_files\\esp_prog.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\truth",
+      "exit": 0,
+      "name": "stage"
+    },
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 py_placer/place_pose.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\board.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\pose.kicad_pcb set R1 136.4 98.8 --rot 270",
+      "exit": 0,
+      "name": "registered_pose"
+    },
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 tests/stress/provenance_audit.py --workdir C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work --delivered C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\pose.kicad_pcb --json C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\registered_audit.json",
+      "exit": 4,
+      "name": "registered_audit"
+    },
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 tests/stress/provenance_audit.py --workdir C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work --delivered C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\undeclared_promoted.kicad_pcb --json C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\bypass_audit.json",
+      "exit": 4,
+      "name": "bypass_audit"
+    },
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 tests/stress/provenance_audit.py --workdir C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work --delivered C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\direct_registered.kicad_pcb --json C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\direct_registered_audit.json",
+      "exit": 0,
+      "name": "direct_registered_audit"
+    }
+  ],
+  "direct_registered_ledger": [
+    {
+      "board_sha256": "3ed5a9a2b280cd5f38d93e34c8d0677bb8deffa7c36d79b343f9b432ca5b2c24",
+      "caller": "reproduce.py:34 in <module>",
+      "declared": true,
+      "lever": "place_pose.py",
+      "lever_argv": [
+        "reviewer direct writer control"
+      ],
+      "parent_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+      "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\direct_registered.kicad_pcb",
+      "poses_written": {
+        "R1": [
+          136.4,
+          98.8,
+          270.0
+        ]
+      },
+      "refs_moved": [
+        "R1"
+      ],
+      "refs_written": [
+        "R1"
+      ],
+      "schema": 1,
+      "sides_written": {},
+      "t": 1789375792.5086517
+    }
+  ],
+  "direct_registered_native": {
+    "layer": "F.Cu",
+    "locked": false,
+    "rot": 270.0,
+    "sha256": "3ed5a9a2b280cd5f38d93e34c8d0677bb8deffa7c36d79b343f9b432ca5b2c24",
+    "x": 136.4,
+    "y": 98.8
+  },
+  "initial_files_preserved": {
+    ".unaided-manifest.json": true,
+    "board.kicad_pcb": true,
+    "mechanical.json": true
+  },
+  "initial_work_identities": {
+    ".unaided-manifest.json": "e74258ed3e11bf4a30686125516517c7ab7603d0e0d409572e8558e1f0dd5848",
+    "board.kicad_pcb": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+    "mechanical.json": "c917a7c927d86b9ea144badedd306069186f8a6bf53cb924b56682050499c945"
+  },
+  "kicad": "10.0.0",
+  "manifest": {
+    "kind": "unaided-regime",
+    "lever_registry": [
+      "place_seed.py",
+      "place_optimize.py",
+      "place_reconstruct.py",
+      "place_portfolio.py",
+      "place_route_loop.py",
+      "place_fanout_clearance.py",
+      "converge.py",
+      "place_pose.py",
+      "route.py",
+      "perturb.py",
+      "stage_blind.py",
+      "stage_unaided.py"
+    ],
+    "mechanical": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\mechanical.json",
+    "prior_ledger_rows": 0,
+    "prior_stagings": 0,
+    "schema": 1,
+    "staged_board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\board.kicad_pcb",
+    "staged_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034"
+  },
+  "python": "3.11.5 (main, Jan 23 2026, 07:39:48) [MSC v.1944 64 bit (AMD64)]",
+  "registered_ledger": [],
+  "registered_native": {
+    "layer": "F.Cu",
+    "locked": false,
+    "rot": 270.0,
+    "sha256": "3ed5a9a2b280cd5f38d93e34c8d0677bb8deffa7c36d79b343f9b432ca5b2c24",
+    "x": 136.4,
+    "y": 98.8
+  },
+  "registered_summary": {
+    "board_edge_clearance": 0.55,
+    "clearance": 0.25,
+    "dry_run": false,
+    "forced": false,
+    "hole_conflicts_after": 0,
+    "hole_conflicts_before": 0,
+    "input": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\board.kicad_pcb",
+    "knobs": {
+      "board_edge_clearance": {
+        "requested": null,
+        "source": "fixed default",
+        "units": "mm",
+        "value": 0.55
+      },
+      "clearance": {
+        "requested": null,
+        "source": "fixed default",
+        "units": "mm",
+        "value": 0.25
+      }
+    },
+    "legal": false,
+    "legal_basis": "legal = measured pad/hole/outline channels are clean and edge coverage is complete; no_worse = no measured category worsened relative to the input board. Neither verifies bodies, routing or fill.",
+    "locked": [],
+    "locked_count": null,
+    "moved": [
+      {
+        "from": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "kind": "set",
+        "moved": true,
+        "ref": "R1",
+        "to": [
+          136.4,
+          98.8,
+          270.0
+        ]
+      }
+    ],
+    "nearest_legal": null,
+    "no_worse": true,
+    "oob_pad_amount_after": 0.0,
+    "oob_pad_amount_before": 0.0,
+    "oob_pad_basis": "part pad AABB vs outline inflated by the grading clearance (NOT the per-pad outline measure; see render_placement checklist.a_off_outline.pad_copper)",
+    "oob_pad_copper_count_after": 0,
+    "oob_pad_copper_count_before": 0,
+    "oob_pad_copper_refs_after": [],
+    "oob_pad_count_after": 0,
+    "oob_pad_count_before": 0,
+    "ops": [
+      {
+        "from": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "kind": "set",
+        "moved": true,
+        "ref": "R1",
+        "to": [
+          136.4,
+          98.8,
+          270.0
+        ]
+      }
+    ],
+    "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\pose.kicad_pcb",
+    "pad_clearance_required": [],
+    "pad_conflicts_after": 72,
+    "pad_conflicts_before": 83,
+    "pad_edge_after": {
+      "argument_mm": 0.55,
+      "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+      "complete": true,
+      "findings": [],
+      "measured_pads": 75,
+      "minimum_gap_mm": 1.3000000000000114,
+      "requested_mm": null,
+      "required_mm": 0.55,
+      "rules_unmeasured": [],
+      "source": "fixed default",
+      "tolerance_mm": 1e-06,
+      "units": "mm",
+      "unmeasured": []
+    },
+    "pad_edge_before": {
+      "argument_mm": 0.55,
+      "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+      "complete": true,
+      "findings": [],
+      "measured_pads": 75,
+      "minimum_gap_mm": 1.3000000000000114,
+      "requested_mm": null,
+      "required_mm": 0.55,
+      "rules_unmeasured": [],
+      "source": "fixed default",
+      "tolerance_mm": 1e-06,
+      "units": "mm",
+      "unmeasured": []
+    },
+    "pad_edge_conflicts_after": 0,
+    "pad_edge_conflicts_before": 0,
+    "pad_edge_shortfall_after": 0,
+    "pad_edge_shortfall_before": 0,
+    "pad_edge_unmeasured_after": 0,
+    "pad_edge_unmeasured_before": 0,
+    "pad_shortfall_after": 22.5783,
+    "pad_shortfall_before": 27.1331,
+    "refused": null,
+    "snapped": null,
+    "track_width": 0.3,
+    "unlocked": [],
+    "unlocked_count": null,
+    "worst": [
+      [
+        "CON1",
+        "Y1",
+        1.75
+      ],
+      [
+        "CON2",
+        "Y1",
+        1.5
+      ],
+      [
+        "CON1",
+        "CON2",
+        1.0
+      ],
+      [
+        "R2",
+        "Y1",
+        1.0
+      ],
+      [
+        "R3",
+        "Y1",
+        1.0
+      ],
+      [
+        "R4",
+        "Y1",
+        1.0
+      ],
+      [
+        "C2",
+        "Y1",
+        0.75
+      ],
+      [
+        "C2",
+        "R2",
+        0.5
+      ],
+      [
+        "C2",
+        "R4",
+        0.5
+      ],
+      [
+        "C2",
+        "R3",
+        0.5
+      ]
+    ],
+    "would_write": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work\\pose.kicad_pcb"
+  },
+  "revision": "cbc819b6b862f6ec14ecb30b8659819e800fce76",
+  "source_preserved": true,
+  "source_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+  "source_siblings": {},
+  "truth_identities": {
+    "control.kicad_pcb": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+    "stage.json": "fe267b4c7cd468d7aa47fb2ddf0e60d684d7bf650329527ea11572ac88ce6b1e"
+  },
+  "undeclared_direct": {
+    "exception": "UnaidedViolation",
+    "output_exists": false,
+    "reason": "undeclared_direct.kicad_pcb: poses were written with no registered lever, under the unaided regime at C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent\\work. The caller was reproduce.py:24 in <module>. A run that claims the engine placed this board cannot contain a pose this tool did not author -- see placement/provenance.py."
+  },
+  "undeclared_promote": {
+    "exception": null,
+    "ledger": [],
+    "native": {
+      "layer": "F.Cu",
+      "locked": false,
+      "rot": 270.0,
+      "sha256": "3ed5a9a2b280cd5f38d93e34c8d0677bb8deffa7c36d79b343f9b432ca5b2c24",
+      "x": 136.4,
+      "y": 98.8
+    },
+    "output_exists": true
+  }
+}

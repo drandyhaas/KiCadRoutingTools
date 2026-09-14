@@ -1,0 +1,7 @@
+VERDICT: CLEAN
+  all 1 moved pose(s) trace to place_pose.py, and each is where its lever put it
+JSON_SUMMARY: {"claimed": 1, "ledger_rows": 1, "levers": ["place_pose.py"], "moved": 1, "unverifiable_claims": [], "verdict": "CLEAN"}
+
+STDERR:
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

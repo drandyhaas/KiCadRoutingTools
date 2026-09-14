@@ -1,0 +1,21 @@
+﻿import argparse,hashlib,json,pathlib,subprocess,sys,tempfile
+p=argparse.ArgumentParser();p.add_argument('--repo',default='.');p.add_argument('--output',required=True);a=p.parse_args();repo=pathlib.Path(a.repo).resolve();out=pathlib.Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True)
+for d in ['py_placer','py_router','py_tools']:sys.path.insert(0,str(repo/d))
+import pcbnew
+from placement import provenance as pv
+from placement.writer import write_placed_output
+from placement.pose_ops import _promote
+result={'revision':subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip(),'commands':[]}
+def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+def run(name,args):
+ cmd=[sys.executable,'-X','utf8']+list(map(str,args));r=subprocess.run(cmd,cwd=repo,capture_output=True,text=True,encoding='utf-8');(out/(name+'.log')).write_text(r.stdout+'\nSTDERR:\n'+r.stderr,encoding='utf-8');result['commands'].append({'name':name,'command':subprocess.list2cmdline(cmd),'exit':r.returncode});assert r.returncode==0,r.stdout+r.stderr;return r
+def native(path):
+ b=pcbnew.LoadBoard(str(path));f=next(x for x in b.GetFootprints() if x.GetReference()=='R1');return {'pose':[pcbnew.ToMM(f.GetPosition().x),pcbnew.ToMM(f.GetPosition().y),f.GetOrientationDegrees()%360],'locked':f.IsLocked(),'side':f.GetLayerName(),'sha256':sha(path)}
+work=out/'work';truth=out/'truth';run('stage',['tests/stress/stage_unaided.py',repo/'kicad_files/esp_prog.kicad_pcb',work,truth]);board=work/'board.kicad_pcb';baseline_sha=sha(board);manifest_before=json.loads((work/pv.REGIME_NAME).read_text());result['baseline_before_sha256']=baseline_sha
+run('inplace_lock',['py_placer/place_pose.py',board,board,'set','R1','136.4','98.8','--rot','270','lock','R1']);rows=pv.read_ledger(str(work));n=native(board);manifest_after=json.loads((work/pv.REGIME_NAME).read_text());frozen=pathlib.Path(manifest_after['staged_board']);assert frozen!=board and sha(frozen)==baseline_sha==manifest_after['staged_sha256'];assert len(rows)==1 and rows[-1]['parent_sha256']==baseline_sha and rows[-1]['board_sha256']==n['sha256'];assert n['pose']==[136.4,98.8,270.0] and n['locked'] and rows[-1]['locks_written']['R1'];result['lock']={'native':n,'ledger':rows,'manifest':manifest_after,'frozen_sha256':sha(frozen)};run('lock_audit',['tests/stress/provenance_audit.py','--workdir',work,'--delivered',board,'--json',out/'lock_audit.json'])
+prior_sha=sha(board);run('inplace_unlock_rotate',['py_placer/place_pose.py',board,board,'unlock','R1','rotate','R1','90']);rows=pv.read_ledger(str(work));n=native(board);assert len(rows)==2 and rows[-1]['parent_sha256']==prior_sha and rows[-1]['board_sha256']==n['sha256'];assert n['pose']==[136.4,98.8,90.0] and not n['locked'] and not rows[-1]['locks_written']['R1'];assert sha(frozen)==baseline_sha;result['unlock_rotate']={'native':n,'ledger':rows};run('unlock_audit',['tests/stress/provenance_audit.py','--workdir',work,'--delivered',board,'--json',out/'unlock_audit.json'])
+ordinary=out/'ordinary';ordinary.mkdir();candidate=ordinary/'candidate.kicad_pcb';delivered=ordinary/'delivered.kicad_pcb';write_placed_output(str(frozen),str(candidate),[{'reference':'R1','new_x':136.4,'new_y':98.8,'new_rotation':270}]);_promote(str(candidate),str(delivered));assert pv.regime_for(str(delivered)) is None and not (ordinary/pv.LEDGER_NAME).exists();n=native(delivered);assert n['pose']==[136.4,98.8,270.0];result['ordinary_undeclared']={'native':n,'regime':None,'ledger_exists':False}
+model=work/'model_declared.kicad_pcb'
+with pv.declare_lever('place_pose.py',['independent explicit known-model metadata test'],decision_source='model'):write_placed_output(str(board),str(model),[{'reference':'R1','new_x':136.4,'new_y':98.8,'new_rotation':270}])
+row=pv.read_ledger(str(work))[-1];assert row['decision_source']=='model' and row['applied_by']=='place_pose.py';result['explicit_model_metadata']=row
+(out/'results.json').write_text(json.dumps(result,indent=2,sort_keys=True),encoding='utf-8');print('PASS: in-place locks + unlock/rotate, exact baseline SHA retained, final hash reconciliation, actual audit CLEAN, ordinary undeclared publication, explicit model decision metadata separate from execution')

@@ -1,0 +1,26 @@
+{
+  "reviewed_revision": "4d7d2947d4af3d91c66f5680a535e06e75f7d841",
+  "parent_revision": "cbc819b6b862f6ec14ecb30b8659819e800fce76",
+  "tree_ids": {
+    "py_placer": "8bbde66a16fba2686742fa532522adbdbf3a19d8",
+    "py_router": "c1f94185bbe16eced655a6bb047768549031fdb0",
+    "py_tools": "1bae2317936d27c73f64bd903d0f32cb58e62853",
+    "tests": "7f6b6ca1d62990fcdfdc653d6dbb66a5d9a8538a"
+  },
+  "rust_binary_sha256": "a23dfecccd873c074e4fd27289913ab0909685925df874526a1f9e33df1e0c02",
+  "evidence_sha256": {
+    "alternate.py": "5f092ba455acf9ea12cfd4a26217baffdc4080c7d9f2c32b57db6c1b10c590df",
+    "final-alternate.json": "dc8d08b361d171ba287eb6eca14c808d4d779dd62e92c545a299bfdfd52c03b5",
+    "final-main.json": "d1512dfd21911919645d823a585c8dab6d30e187e2d0d812d614e5a4a9974b96",
+    "parent-reproduction.json": "e18a97bbb1047df862e3b1780136a0be0fe9685bba398293bafcc05bd43a4fc3",
+    "report.md": "d2fc93a6afeeacac6833fae69213e616cc5019fc743281b7454b3b486985502a",
+    "test-audit.log": "ab9a2e65d7c574f3a11bfe6c340c5dbbc8156228e3b410d32a68a6c582d62435",
+    "test892.log": "605bb164e277fe06db01f4c2be9f46d1c204072c15b459cd6eb96cce93c62320",
+    "test960.log": "fbfe95ba52d28c17c08e0515be81301968e074d2b05b25bc972db833ad0aa92d",
+    "test967.log": "084ab68c90af2350b47f765a6bdfb1e8d779b380237a89e50b423ef1cd5d9715",
+    "verify.py": "cd4d12066aa0c2794b2c3b7660f035d760ad22b587cd6285a849e82a76bce271"
+  },
+  "source_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+  "prior_892_967_revision": "37799d98982b33394dbb2d7cd5ddeb5e3354080b",
+  "prior_892_967_py_placer_tree": "8bbde66a16fba2686742fa532522adbdbf3a19d8"
+}

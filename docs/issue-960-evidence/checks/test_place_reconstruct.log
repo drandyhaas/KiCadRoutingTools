@@ -1,0 +1,17 @@
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp462x66hy\dmg.kicad_pcb
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+
+STDERR:
+ssss<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+C:\Program Files\KiCad\10.0\bin\Lib\site-packages\pcbnew.py:63: DeprecationWarning: The SWIG-based Python interface to the PCB editor is deprecated and will be removed in a future version of KiCad.  Please plan to move to the new IPC API and/or make use of the kicad-cli tool for your KiCad automation needs.
+  warnings.warn("The SWIG-based Python interface to the PCB editor is deprecated and will be removed "
+.
+----------------------------------------------------------------------
+Ran 5 tests in 1.811s
+
+OK (skipped=4)

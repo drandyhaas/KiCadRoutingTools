@@ -1,0 +1,256 @@
+FACE_CYCLE against a real rotation (the arithmetic nobody can eyeball)
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp8zmiub2t\r90.kicad_pcb
+  OK   delta 90: every multi-pad row keeps its predicted face by majority -- worst row agreement 0.8
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp8zmiub2t\r180.kicad_pcb
+  OK   delta 180: every multi-pad row keeps its predicted face by majority -- worst row agreement 0.9
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp8zmiub2t\r270.kicad_pcb
+  OK   delta 270: every multi-pad row keeps its predicted face by majority -- worst row agreement 0.8888888888888888
+  OK   rotate_face is a 4-cycle
+  OK   face_delta inverts rotate_face
+  OK   bearing_face reads y-down as north/south
+worsened(): the guard itself, arm by arm
+  OK   a clean-to-clean move is not a regression
+  OK   pad_conflicts +1 is caught
+  OK   pad_conflicts -1 is NOT a refusal (an improvement is welcome)
+  OK   hole_conflicts +1 is caught
+  OK   hole_conflicts -1 is NOT a refusal (an improvement is welcome)
+  OK   oob_pad_count +1 is caught
+  OK   oob_pad_count -1 is NOT a refusal (an improvement is welcome)
+  OK   a deeper overlap at the same COUNT is caught
+  OK   float noise in the shortfall is not a regression
+  OK   inherited damage carried forward unchanged is not charged
+set: the pose asked for is the pose in the file
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+  OK   exits 0 -- rd parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   summary records the move
+  OK   the file carries the requested pose -- 131.05 98.22 270.0
+  OK   legality did not get worse
+  OK   two ops in one call exit 0 (forced past legality) -- rd parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   op B landed on op A's INPUT pose, not its output pose -- C4 at 132.55,100.22 want 132.55,100.22
+  OK   op A moved too
+  OK   C4 really did move
+refusal: worse than the input, nothing written
+  OK   exits 4 (well-formed, the board said no) --  meant to be distinct parts.
+place_pose REFUSED, nothing written: this pose makes the board's pad legality WORSE (pad_conflicts 0 -> 2, pad_edge_conflicts 0 -> 1, pad_shortfall 0.0 -> 0.0566, pad_edge_shortfall 0 -> 0.24699999999998856); the board's inherited violations are not counted against you.
+
+  OK   nothing was written
+  OK   the refusal names the categories that got worse
+  OK   the refusal carries its exit code
+  OK   --force writes anyway
+  OK   --force is disclosed
+inherited damage is not charged to the caller
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp5txj2k3l\dirty.kicad_pcb
+  OK   the fixture really is dirty -- 1
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+  OK   a good move on a dirty board is ACCEPTED -- eant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   and the inherited conflicts are reported, not charged
+  OK   --strict-legal refuses it -- edge_conflicts 1) The pose ranker's nearest candidate for this part is x=131.05 y=97.97 rot=90 (0.250 mm away), but --strict-legal is a condition on the WHOLE board, so that pose need not satisfy it.
+
+  OK   --strict-legal wrote nothing
+--near/--snap seats what the exact request could not
+  OK   --near snapped -- {"candidates_tried": 7, "dist_mm": 6.8237, "ref": "C3", "rung": "ranked", "to": [135.4, 97.05, 180.0]}
+  OK   the snapped pose is inside the radius, as a DISTANCE -- 6.8237
+  OK   the snapped board grades no worse
+  OK   --radius 4 refuses rather than overshooting -- 4
+  OK   the file carries the SNAPPED pose, not the requested one
+rotate: absolute by default, --relative for a delta
+  OK   rotate exits 0 -- eant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   absolute rotation lands exactly -- 90.0
+  OK   x/y are untouched
+  OK   --relative adds to the current rotation -- 0.0 from -90.0
+face: aimed, then MEASURED on the board it wrote
+  OK   face exits 0 under --force -- eant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   the op records the aim and the measurement -- {"face": "south", "from": [127.0, 100.0, 0.0], "kind": "face", "moved": true, "partner": "USB1", "ref": "U1", "rotation_delta": 270.0, "row_landed": {"north": 1, "west": 8}, "row_on_target": [8, 9], "row_pad_ix": [0, 1, 2, 3, 4, 5, 6, 7, 8], "row_pads": ["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+  OK   the measured row IS the named face's row on the input board -- 9 vs 9
+  OK   the CLI's count matches an independent recount -- 8 vs 8
+lock / unlock are inverses, and a lock refuses a move
+  OK   stamp_unlocked inverts stamp_locked byte for byte
+  OK   unlocking what was never locked changes nothing
+  OK   lock exits 0 and stamps
+  OK   a locked part refuses a direct move (exit 4) -- FUSED, nothing written: C3 is locked in the board (KiCad `(locked yes)`), and a lock is a decision, not a preference. Unlock in the same call if you mean it: place_pose.py IN OUT unlock C3 set C3 ...
+
+  OK   the refusal is about the LOCK, not legality
+  OK   and wrote nothing
+  OK   unlock in the SAME call opens it -- eant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   the move landed and the lock is gone
+--dry-run writes nothing at all
+  OK   dry-run exits 0 -- eant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   dry-run wrote no board
+  OK   dry-run left nothing else behind
+  OK   dry-run says so and reports no output path
+  OK   dry-run still grades
+siblings travel with the output (#441)
+  OK   run on a board with siblings exits 0 -- eant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   the .kicad_pro travelled
+  OK   the .kicad_dru travelled
+  OK   the knobs came from the BOARD, not a constant -- {"board_edge_clearance": {"requested": null, "source": "board constraint", "units": "mm", "value": 0.5}, "clearance": {"requested": null, "source": "board netclass", "units": "mm", "value": 0.2}}
+the copper gate
+  OK   the copper gate wrote nothing
+  OK   --allow-routed proceeds -- t"}, "refused": null, "snapped": null, "track_width": 0.3, "unlocked": [], "unlocked_count": null, "worst": [], "would_write": "C:\\Users\\rob\\AppData\\Local\\Temp\\tmpr0qf06jc\\r.kicad_pcb"}
+EXIT=0
+
+usage-shaped refusals exit 2, with the reason
+  OK   no usage refusal wrote a board
+every exit prints exactly one JSON_SUMMARY
+  OK   success prints one JSON_SUMMARY -- 1 found, rc=0
+  OK   legality refusal prints one JSON_SUMMARY -- 1 found, rc=4
+  OK   usage refusal prints one JSON_SUMMARY -- 1 found, rc=2
+the provenance regime accepts this lever and still refuses a hand script
+  OK   place_pose.py is a registered lever
+  OK   a place_pose write is accepted under an armed regime -- rd parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   an undeclared write is still refused -- publication refused before writing: no registered lever in LEVER_REGISTRY for armed destination C:\Users\rob\AppData\Loc
+the OFF-BOARD magnitude is an arm, not just the count
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp6rltyxc7\off.kicad_pcb
+  OK   the fixture starts off-board -- 1
+  OK   further off-board at the same COUNT is refused -- ard's pad legality WORSE (oob_pad_amount 2.008 -> 101.008, pad_edge_shortfall 3.5999999999999996 -> 201.6); the board's inherited violations are not counted against you. The pose ranker's nearest candidate is x=16 y=100.25 rot=0 (2.828 mm away) -- try it with --snap, which re-grades before writing.
+
+  OK   nothing was written
+  OK   and the refusal names the AMOUNT -- this pose makes the board's pad legality WORSE (oob_pad_amount 2.008 -> 101.008, pad_edge_shortfall 3.5999999999999996 -> 201.6); the board's inherited violations are not counted against you. The pose ranker's nearest candidate is x=16 y=100.25 rot=0 (2.828 mm away) -- try it with --snap, which re-grades before writing.
+  OK   the summary reports the amount both sides
+  OK   worsened() names it directly
+`legal` means clean; `no_worse` is the verdict the verb acts on
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpaw70ppnc\dirty.kicad_pcb
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+  OK   accepted -- k is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   no_worse is true (that is what it was accepted on)
+  OK   legal is FALSE, because the board still is not clean -- legal=False conflicts=1
+  OK   and the summary says which is which
+a refusal never names an output path
+  OK   output is null on a legality refusal -- None
+  OK   output is null on a usage refusal too
+  OK   neither wrote
+every exit THIS TOOL decides carries a summary
+  OK   the copper gate exits 3 with a summary -- rc=3 summaries=1
+  OK   and the summary says why
+  OK   a missing input exits 2 with a summary -- rc=2 summaries=1
+  OK   and it says the file is not there, not that it is unreadable -- C:\Users\rob\AppData\Local\Temp\tmp98no0pq_\nope.kicad_pcb is not a file
+  OK   an unwritable output path exits 2, not a traceback -- rc=2
+  OK   with a summary and a reason
+the snap ladder: the lattice rung answers where the ranker does not
+  OK   the snap seats it -- opped_early": false}, "snapped": {"candidates_tried": 5, "dist_mm": 0.3536, "ref": "C4", "rung": "lattice", "to": [127.75, 49.28, 0.0]}, "track_width": 0.2, "unlocked": [], "unlocked_count": null, "worst": [], "would_write": "C:\\Users\\rob\\AppData\\Local\\Temp\\tmpaben696b\\lad.kicad_pcb"}
+EXIT=0
+
+  OK   the census reports BOTH rungs -- {"candidates_tried": 5, "dropped_in_place": [0.0], "dropped_total": 625, "lattice": 440, "radius_mm": 3.0, "ranked": 0, "ranked_before_radius": 0, "rotations": [0.0], "step_mm": 0.25, "stopped_early": false}
+  OK   and the answer says which rung produced it -- {"candidates_tried": 5, "dist_mm": 0.3536, "ref": "C4", "rung": "lattice", "to": [127.75, 49.28, 0.0]}
+  OK   inside the radius, as a distance
+  OK   and the written board grades no worse
+a symmetric row is named, not reported as a near miss
+  OK   a 2-pad row that cannot be aimed is refused -- lace_pose REFUSED, nothing written: C1: the north row cannot be aimed by rotating -- it reads north at every rotation this measured (a 2-pad row is often 180-degree symmetric). Move the part instead.
+
+  OK   and the refusal says WHY, not just where it landed -- lace_pose REFUSED, nothing written: C1: the north row cannot be aimed by rotating -- it reads north at every rotation this measured (a 2-pad row is often 180-degree symmetric). Move the part instead.
+
+  OK   the op records the symmetry as a fact -- {"face": "north", "from": [110.49, 78.74, 180.0], "kind": "face", "moved": true, "partner": "C2", "ref": "C1", "rotation_delta": 180.0, "row_landed": {"north": 2}, "row_on_target": [0, 2], "row_pad_ix
+a face row is identified by PAD, not by pad number
+  OK   the fixture has a part with duplicate pad numbers -- ['USB1', 'Y1']
+  OK   face on it exits 0 -- eant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+
+  OK   the row is measured by pad index, not by number
+  OK   and it lands where the prediction says -- 2 of 2, landed {'east': 2}
+  OK   a row that MOVED is not called symmetric
+  OK   a local-coordinate recount agrees with the CLI -- 2 vs 2
+a failed promote leaves the PREVIOUS output untouched
+  OK   the run refuses rather than half-writing -- rc=2
+  OK   the OLD board is still there, byte for byte -- OLD-OUTPUT
+
+  OK   and the summary says nothing was written -- publication busy or recovery required: C:\Users\rob\AppData\Local\Temp\tmpmv5vlo7e\out.kicad_pcb.krt-publish-lock
+  OK   the existing exclusion marker is preserved
+  OK   no .krt-tmp file is left behind -- ['in.kicad_pcb', 'in.kicad_pro', 'out.kicad_pcb', 'out.kicad_pcb.krt-publish-lock', 'out.kicad_pro']
+a write-protected SIBLING is replaced (POSIX), or refuses cleanly (Windows)
+  OK   the run refuses: Windows honours the read-only destination -- rc=2
+  OK   the OLD board is still there, byte for byte -- OLD-OUTPUT
+
+  OK   and the summary says nothing was written -- cannot write C:\Users\rob\AppData\Local\Temp\tmpphur9s1h\out.kicad_pcb: [WinError 5] Toegang geweigerd: 'C:\\Users\\rob\
+  OK   no .krt-tmp file is left behind -- ['in.kicad_pcb', 'in.kicad_pro', 'out.kicad_pcb', 'out.kicad_pro']
+lock and unlock hygiene
+  OK   neither wrote a board
+  OK   staged a locked board
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\place_pose_snk8o8dw\candidate.kicad_pcb
+  OK   a silent unlock failure is refused -- unlock did not take on C3: the board still carries `(locked yes)` for it after stamping, so a move guarded by that lock 
+  OK   and nothing was promoted
+the knobs that used to crash, and the ones that do not
+  OK   no knob refusal wrote a board
+a face naming an empty row is a TYPO (2), not a measurement (4)
+  OK   and it wrote nothing
+a forced run reports EVERY finding, not the last one
+  OK   the legality finding is there -- C1: the north row cannot be aimed by rotating -- it reads north at every rotatio
+  OK   and the face finding survived beside it -- C1: the north row cannot be aimed by rotating -- it reads north at every rotation this measured (a 2-pad row is often 180-degree symmetric). Move the part instead.; this pose makes the board's pad leg
+  OK   the run is marked forced
+what a refusal hands back for the next attempt
+  OK   the refusal names a nearest candidate -- {"dropped_in_place": [90.0], "dropped_total": 289, "ranked": 0, "rotations": [90.0], "stopped_early": false, "sweep_radius_mm": 2.0}
+  OK   and says what currency that is in
+--near on a call carrying several ops says it did not apply
+  OK   the run proceeds -- . Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+note: --snap/--near did not apply -- snap applies to exactly one pose op; this call carries 2
+
+  OK   and the census says the snap was skipped, with the count -- {"skipped": "snap applies to exactly one pose op; this call carries 2"}
+  OK   the operator sees it on stderr
+two parts on one coordinate have no direction to aim
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpgj2gp351\stacked.kicad_pcb
+  OK   bearing_face breaks a diagonal tie on the x axis, deterministically
+  OK   a dry run reports the path it would have written
+  OK   would_write names the output path a dry run declined -- C:\Users\rob\AppData\Local\Temp\tmpjsdcw_e5\w.kicad_pcb / None
+  OK   and the lock keys are present even though none were asked for
+
+134 passed, 0 failed
+
+STDERR:
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

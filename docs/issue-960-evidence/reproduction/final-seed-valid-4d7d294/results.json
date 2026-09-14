@@ -1,0 +1,302 @@
+{
+  "baseline_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+  "commands": [
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 tests/stress/stage_unaided.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\kicad_files\\esp_prog.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\truth",
+      "exit": 0,
+      "name": "stage"
+    },
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 py_placer/place_seed.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work\\board.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work\\seed.kicad_pcb --intent C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\intent.json --seed 0 --no-polish",
+      "exit": 0,
+      "name": "seed"
+    },
+    {
+      "command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 tests/stress/provenance_audit.py --workdir C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work --delivered C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work\\seed.kicad_pcb --json C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\audit.json",
+      "exit": 0,
+      "name": "audit"
+    }
+  ],
+  "intent_sha256": "6de6c86700dfd6217668f7a7c17b31e97f85bac3259a81b563358b51b6743818",
+  "ledger": [
+    {
+      "applied_by": "place_seed.py",
+      "board_sha256": "fbb81d89e8da8a4a4cf8c7e0c76eb1cd972219c12d96a1440035158a53fefadb",
+      "caller": "place_seed.py:747 in main",
+      "candidate_sha256": "fbb81d89e8da8a4a4cf8c7e0c76eb1cd972219c12d96a1440035158a53fefadb",
+      "decision_source": "unspecified",
+      "declared": true,
+      "final_snapshot": true,
+      "lever": "place_seed.py",
+      "lever_argv": [
+        "py_placer/place_seed.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work\\board.kicad_pcb",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work\\seed.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\intent.json",
+        "--seed",
+        "0",
+        "--no-polish"
+      ],
+      "locks_written": {
+        "#00000000-0000-0000-0000-00005a3b5201": false,
+        "#00000000-0000-0000-0000-00005d8c51dd": false,
+        "#00000000-0000-0000-0000-00005e7dd057": false,
+        "C1": false,
+        "C2": false,
+        "C3": false,
+        "C4": false,
+        "CON1": false,
+        "CON2": false,
+        "Q1": false,
+        "Q2": false,
+        "R1": true,
+        "R2": false,
+        "R3": false,
+        "R4": false,
+        "Ref*": false,
+        "Ref*~2": false,
+        "U1": false,
+        "U2": false,
+        "USB1": false,
+        "Y1": false
+      },
+      "parent_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+      "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work\\seed.kicad_pcb",
+      "poses_written": {
+        "#00000000-0000-0000-0000-00005a3b5201": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "#00000000-0000-0000-0000-00005d8c51dd": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "#00000000-0000-0000-0000-00005e7dd057": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "C1": [
+          129.26,
+          92.152,
+          0.0
+        ],
+        "C2": [
+          134.272,
+          102.386,
+          0.0
+        ],
+        "C3": [
+          123.674,
+          92.411,
+          0.0
+        ],
+        "C4": [
+          134.032,
+          103.727,
+          0.0
+        ],
+        "CON1": [
+          132.794,
+          96.853,
+          0.0
+        ],
+        "CON2": [
+          123.96,
+          94.482,
+          0.0
+        ],
+        "Q1": [
+          135.337,
+          94.24,
+          0.0
+        ],
+        "Q2": [
+          134.812,
+          100.291,
+          0.0
+        ],
+        "R1": [
+          129.875,
+          98.25,
+          0.0
+        ],
+        "R2": [
+          132.373,
+          92.436,
+          0.0
+        ],
+        "R3": [
+          126.394,
+          93.008,
+          0.0
+        ],
+        "R4": [
+          120.732,
+          92.603,
+          0.0
+        ],
+        "Ref*": [
+          141.2,
+          95.9,
+          0.0
+        ],
+        "Ref*~2": [
+          118.1,
+          99.9,
+          0.0
+        ],
+        "U1": [
+          125.017,
+          100.587,
+          0.0
+        ],
+        "U2": [
+          130.782,
+          101.702,
+          0.0
+        ],
+        "USB1": [
+          117.5,
+          100.0,
+          180.0
+        ],
+        "Y1": [
+          130.79,
+          100.807,
+          0.0
+        ]
+      },
+      "provenance_scope": "registered execution; coordinate selection is separately declared",
+      "refs_moved": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "CON1",
+        "CON2",
+        "Q1",
+        "Q2",
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "U1",
+        "U2",
+        "Y1"
+      ],
+      "refs_written": [
+        "#00000000-0000-0000-0000-00005a3b5201",
+        "#00000000-0000-0000-0000-00005d8c51dd",
+        "#00000000-0000-0000-0000-00005e7dd057",
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "CON1",
+        "CON2",
+        "Q1",
+        "Q2",
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "Ref*",
+        "Ref*~2",
+        "U1",
+        "U2",
+        "USB1",
+        "Y1"
+      ],
+      "schema": 1,
+      "sides_written": {
+        "#00000000-0000-0000-0000-00005a3b5201": "B",
+        "#00000000-0000-0000-0000-00005d8c51dd": "B",
+        "#00000000-0000-0000-0000-00005e7dd057": "B",
+        "C1": "F",
+        "C2": "F",
+        "C3": "F",
+        "C4": "F",
+        "CON1": "F",
+        "CON2": "F",
+        "Q1": "F",
+        "Q2": "F",
+        "R1": "F",
+        "R2": "F",
+        "R3": "F",
+        "R4": "F",
+        "Ref*": "F",
+        "Ref*~2": "F",
+        "U1": "F",
+        "U2": "F",
+        "USB1": "F",
+        "Y1": "F"
+      },
+      "t": 1789376920.5200229
+    }
+  ],
+  "native": {
+    "locked": true,
+    "pose": [
+      129.875,
+      98.25,
+      0.0
+    ],
+    "sha256": "fbb81d89e8da8a4a4cf8c7e0c76eb1cd972219c12d96a1440035158a53fefadb"
+  },
+  "revision": "4d7d2947d4af3d91c66f5680a535e06e75f7d841",
+  "seed_summary": {
+    "crossings": null,
+    "evictions": 0,
+    "evictions_reverted": 0,
+    "grade_errors": 0,
+    "grade_errors_pinned": 0,
+    "grade_warnings": 0,
+    "hole_conflicts_added": 0,
+    "hpwl": null,
+    "locked": 1,
+    "no_pose_blockers": {},
+    "no_pose_census": {},
+    "no_pose_verdict": {},
+    "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-4d7d294\\work\\seed.kicad_pcb",
+    "pad_conflicts_inherited": 0,
+    "pad_conflicts_seeded": 0,
+    "pad_conflicts_seeded_pairs": [],
+    "pad_edge_after": {
+      "argument_mm": 0.55,
+      "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+      "complete": true,
+      "findings": [],
+      "measured_pads": 75,
+      "minimum_gap_mm": 0.6440000000000055,
+      "required_mm": 0.55,
+      "rules_unmeasured": [],
+      "source": "caller argument",
+      "tolerance_mm": 1e-06,
+      "units": "mm",
+      "unmeasured": []
+    },
+    "pad_edge_before": {
+      "argument_mm": 0.55,
+      "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+      "complete": true,
+      "findings": [],
+      "measured_pads": 75,
+      "minimum_gap_mm": 1.3000000000000114,
+      "required_mm": 0.55,
+      "rules_unmeasured": [],
+      "source": "caller argument",
+      "tolerance_mm": 1e-06,
+      "units": "mm",
+      "unmeasured": []
+    },
+    "placed": 18,
+    "rotation_unseated": {},
+    "unseated": 0,
+    "unseated_refs": []
+  },
+  "source_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e"
+}

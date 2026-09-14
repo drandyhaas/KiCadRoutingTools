@@ -1,0 +1,93 @@
+python.exe : WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in fil
+e order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct
+ parts.
+At line:2 char:120
++ ... est892.log; & 'C:/Program Files/KiCad/10.0/bin/python.exe' -X utf8 te ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (WARNING: 2 foot...distinct parts.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so 
+this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so t
+his board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+.
+----------------------------------------------------------------------
+Ran 11 tests in 46.983s
+
+OK
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'bad.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_3ckxg6sf\bad.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'bad.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_2p89slhi\bad.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'bad.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_b3ty0sch\bad.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'bad.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_u431a_i5\bad.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'control.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_u431a_i5\control.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'control.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_kxqspist\control.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'control.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_czsbfv0f\control.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'control.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_6yxx6uto\control.kicad_pcb
+WARNING: 'control.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'existing.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'bad.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_puc_x9b4\bad.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'bad.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_0c2vws46\bad.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'control.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_b70bks1h\control.kicad_pcb
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'bad.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt967_ynjw52y9\bad.kicad_pcb

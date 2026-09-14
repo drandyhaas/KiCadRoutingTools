@@ -1,0 +1,17 @@
+  OK               footprint-internal (zone) [rp2350 J2, the only corpus witness]
+  OK               custom pad (primitives) [orangecrab U9]
+  OK               named refusal (fp_text_box)
+  OK               a head in neither the refusal table nor the whitelist
+  OK               (chamfer ...) corner names
+  OK               F&B.Cu in a pad (layers)
+  OK               In<n>.Cu in a pad (layers)
+  OK               a KiCad 6/7 four-token `(at x y a unlocked)`
+  OK               a text with no (effects (font ...)) to carry the mirror flag
+  OK               a pad child outside the whitelist (KiCad 9/10 padstack)
+  OK               a footprint block with no top-level (layer ...)
+  OK               coordinate outside the literal grammar
+  OK               new_side="B.Cu" (the mistake a caller makes)
+PASS: 13 refusals hold and name their construct
+
+STDERR:
+WARNING: 3 footprint block(s) share 1 reference(s) -- G*** x3. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 167 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

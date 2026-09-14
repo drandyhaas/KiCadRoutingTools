@@ -1,0 +1,22 @@
+--- test_a_torn_line_does_not_lose_the_ledger
+  PASS: a torn final line costs only that line
+--- test_an_unknown_sha_raises_rather_than_returning_nothing
+  PASS: an unknown sha raises
+--- test_best_pose_says_leave_it_alone_when_nothing_wins
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  PASS: 'leave it alone' is an answer, and hysteresis is honoured
+--- test_poses_are_ranked_and_legal_only
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  PASS: 12 legal poses, ranked, position+rotation together
+--- test_same_content_is_one_entry_and_round_trips
+  PASS: same content -> one entry; checkout is byte-identical
+--- test_scoring_leaves_the_board_where_it_found_it
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  PASS: ranking is side-effect free
+--- test_siblings_travel_with_the_board
+  PASS: .kicad_pro and .kicad_dru travel with the board
+--- test_the_ledger_is_replayable_not_merely_readable
+  PASS: lever_argv replays; prose refuses; counts split the budget
+ALL PASS
+
+STDERR:

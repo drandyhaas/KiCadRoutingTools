@@ -1,0 +1,8 @@
+CMD: python.exe -X utf8 py_placer/place_pose.py C:\Users\rob\Documents\prive\git\KRT-960-reproduction\reviewer_evidence\final-controls-37799d9\work\board.kicad_pcb C:\Users\rob\Documents\prive\git\KRT-960-reproduction\reviewer_evidence\final-controls-37799d9\work\multi_invalid.kicad_pcb set R1 136.4 98.8 --rot 270 set DOES_NOT_EXIST 136 99
+ENV KNOBS: none
+JSON_SUMMARY: {"dry_run": false, "exit_code": 2, "input": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-controls-37799d9\\work\\board.kicad_pcb", "legal": null, "moved": [], "ops": [], "output": null, "refused": "DOES_NOT_EXIST is not a footprint on this board (the parser names duplicate references TP4 / TP4~2, #726)"}
+EXIT=2
+
+STDERR:
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+place_pose REFUSED, nothing written: DOES_NOT_EXIST is not a footprint on this board (the parser names duplicate references TP4 / TP4~2, #726)

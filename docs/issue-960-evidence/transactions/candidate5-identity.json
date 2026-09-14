@@ -1,0 +1,12 @@
+{
+  "revision": "4d7d2947d4af3d91c66f5680a535e06e75f7d841",
+  "trees": {
+    "py_placer": "8bbde66a16fba2686742fa532522adbdbf3a19d8",
+    "py_router": "c1f94185bbe16eced655a6bb047768549031fdb0",
+    "py_tools": "1bae2317936d27c73f64bd903d0f32cb58e62853",
+    "tests": "7f6b6ca1d62990fcdfdc653d6dbb66a5d9a8538a",
+    "kicad_files": "4434f5bd38b8211c7e486110255e9f8e0934553b"
+  },
+  "tracked_diff": "",
+  "source_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e"
+}

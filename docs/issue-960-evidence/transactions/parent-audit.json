@@ -1,0 +1,16 @@
+{
+ "added_refs": [],
+ "callers": [],
+ "claimed": 0,
+ "delivered": "reviewer-runtime/work/pose.kicad_pcb",
+ "ledger_rows": 0,
+ "levers": [],
+ "moved": 1,
+ "reason": "1 pose(s) differ from the staged board and there is NO ledger at all -- nothing engine-side wrote them. This is the hand-placed case, not an unmeasured one: the board is the witness.",
+ "staged": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\work\\board.kicad_pcb",
+ "unclaimed_refs": [
+  "R1"
+ ],
+ "undeclared_refs": {},
+ "verdict": "UNAIDED VIOLATION"
+}

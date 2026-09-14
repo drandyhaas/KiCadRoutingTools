@@ -1,0 +1,217 @@
+{
+  "revision": "4d7d2947d4af3d91c66f5680a535e06e75f7d841",
+  "python": "3.11.5 (main, Jan 23 2026, 07:39:48) [MSC v.1944 64 bit (AMD64)]",
+  "checks": [
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_960_pose_publication.py"
+      ],
+      "exit": 0,
+      "seconds": 5.91
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_provenance_audit.py"
+      ],
+      "exit": 0,
+      "seconds": 44.29
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_892_place_pose.py"
+      ],
+      "exit": 0,
+      "seconds": 79.86
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_892_registries.py"
+      ],
+      "exit": 0,
+      "seconds": 0.23
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_903_stagers_arm_the_regime.py"
+      ],
+      "exit": 0,
+      "seconds": 24.35
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_967_edge_floor.py"
+      ],
+      "exit": 0,
+      "seconds": 63.15
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_714_perturb_layer_flip.py"
+      ],
+      "exit": 0,
+      "seconds": 8.2
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_714_identity_write_unchanged.py"
+      ],
+      "exit": 0,
+      "seconds": 9.93
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_714_refusals.py"
+      ],
+      "exit": 0,
+      "seconds": 5.75
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_829_edge_cuts_owner.py"
+      ],
+      "exit": 0,
+      "seconds": 3.16
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_place_seed.py"
+      ],
+      "exit": 0,
+      "seconds": 88.53
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_place_reconstruct.py"
+      ],
+      "exit": 0,
+      "seconds": 2.1
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_run4_reconstruct.py"
+      ],
+      "exit": 0,
+      "seconds": 1.69
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_run27_seed_gate_pinned.py"
+      ],
+      "exit": 0,
+      "seconds": 10.24
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_run27_seed_gate_shorts.py"
+      ],
+      "exit": 0,
+      "seconds": 3.33
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_board_store_and_pose_score.py"
+      ],
+      "exit": 0,
+      "seconds": 3.55
+    },
+    {
+      "command": [
+        "C:/Python313/python.exe",
+        "-X",
+        "utf8",
+        "tests/test_718_static_test_hygiene.py"
+      ],
+      "exit": 0,
+      "seconds": 50.3
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_manifest_plan_parity.py"
+      ],
+      "exit": 0,
+      "seconds": 0.8
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_cli_postpass_coverage.py"
+      ],
+      "exit": 0,
+      "seconds": 1.64
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_967_pad_geometry_coverage.py"
+      ],
+      "exit": 0,
+      "seconds": 2.64
+    },
+    {
+      "command": [
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960\\.venv-960-docs\\Scripts\\python.exe",
+        "-X",
+        "utf8",
+        "tests/run_doc_examples.py"
+      ],
+      "exit": 0,
+      "seconds": 10.15,
+      "PYTHONPATH": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960\\py_router;C:\\Users\\rob\\Documents\\prive\\git\\KRT-960\\py_placer;C:\\Users\\rob\\Documents\\prive\\git\\KRT-960\\py_tools"
+    }
+  ]
+}

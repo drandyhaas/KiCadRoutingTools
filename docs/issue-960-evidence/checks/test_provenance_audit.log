@@ -1,0 +1,108 @@
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpnpot7309\wk\seeded.kicad_pcb
+  OK   a run through a registered lever is CLEAN -- 0 all 3 moved pose(s) trace to place_optimize.py, and each is where its lever put it
+  OK   and it says which lever -- ['place_optimize.py']
+  OK   it reconciles the moved refs, not merely the row count -- {'workdir': 'C:\\Users\\rob\\AppData\\Local\\Temp\\tmpnpot7309\\wk', 'staged': 'C:\\Users\\rob\\AppData\\Local\\Temp\\tmpnpot7309\\wk\\board.kicad_pcb', 'delivered': 'C:\\Users\\rob\\AppData\\Local\\Temp\\tmpnpot7309\\wk\\seeded.kicad_pcb', 'ledger_rows': 1, 'moved': 3, 'added_refs': [], 'claimed': 3, 'unclaimed_refs': [], 'drifted_refs': [], 'unverifiable_claims': [], 'undeclared_refs': {}, 'levers': ['place_optimize.py'], 'provenance_scope': 'registered execution; not optimizer or engineering certification', 'decision_sources': ['unspecified'], 'callers': ['test_provenance_audit.py:111 in <module>'], 'verdict': 'CLEAN', 'reason': 'all 3 moved pose(s) trace to place_optimize.py, and each is where its lever put it'}
+  OK   an undeclared write through the funnel is refused at write time -- publication refused before writing: no registered lever in LEVER_REGISTRY for armed destination C:\Users\rob\AppData\Loc
+  OK   and the refusal names the CALLER, which is the run-19 detector -- publication refused before writing: no registered lever in LEVER_REGISTRY for armed destination C:\Users\rob\AppData\Local\Temp\tmp426s2gqt\wk\x.kicad_pcb; declared=None; caller=test_provenance_audit.
+  OK   an unregistered lever is refused, naming itself -- publication refused before writing: no registered lever in LEVER_REGISTRY for armed destination C:\Users\rob\AppData\Local\Temp\tmppeayxce7\
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmphomr0z97\wk\seeded.kicad_pcb
+  OK   the hand edit moved exactly the victim (else the case proves nothing) -- substitutions 1, moved ['C12'], victim C12
+  OK   a raw-text hand edit is a VIOLATION, not CLEAN -- 4 UNAIDED VIOLATION
+  OK   and it names the ref nothing authored -- C12 vs ['C12']
+  OK   the reason says why the log could not have caught it -- 1 moved pose(s) trace to no registered lever. A hand-authored pose reaches the board without a ledger row whatever tool it bypassed, because this compares the BOARD, not the log.
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpj16ppvqo\wk\seeded.kicad_pcb
+  OK   a missing ledger with MOVED poses is a VIOLATION, not merely unproven -- 4 UNAIDED VIOLATION
+  OK   and it says the board is the witness -- 3 pose(s) differ from the staged board and there is NO ledger at all -- nothing engine-side wrote them. This is the hand-placed case, not an unmeasured one: the board is the witness.
+  OK   it names the refs nothing accounts for -- ['C1', 'C10', 'C11']
+  OK   a staged run with no ledger and NO movement stays UNPROVEN -- 5 UNPROVEN
+  OK   and that branch says nothing was measured, rather than accusing -- no pose-provenance ledger AND no pose differs from the staged board: this run predates the instrument, or nothing wrote a pose. Not a violation -- nothing was measured and nothing moved.
+  OK   an unstaged work dir is UNPROVEN, not a violation -- 5 UNPROVEN
+Modified 0 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp4b0fqk4_\plain.kicad_pcb
+  OK   outside a regime the writer is unchanged and writes no ledger
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp7v02lj6a\wk\seeded.kicad_pcb
+  OK   the CLI exits 0 on a clean chain -- rc=0 
+  OK   the CLI prints a VERDICT and a JSON_SUMMARY -- se(s) trace to place_seed.py, and each is where its lever put it
+JSON_SUMMARY: {"claimed": 3, "ledger_rows": 1, "levers": ["place_seed.py"], "moved": 3, "unverifiable_claims": [], "verdict": "CLEAN"}
+
+  OK   a real CLI runs INSIDE an armed regime without raising -- rc=0 s_before": 0, "pad_edge_shortfall_after": 0, "pad_edge_shortfall_before": 0, "pad_edge_unmeasured_after": 0, "pad_edge_unmeasured_before": 0, "pad_intersection_pairs": 0, "pad_overlap_pairs": 0, "pad_shortfall": 0.0, "pad_shortfall_after": 0.0, "pad_shortfall_before": 0.0, "parts_moved": 40}
+EXIT=0
+
+  OK   and the run audits CLEAN, with the lever named -- 0 CLEAN ['place_optimize.py']
+  OK   every moved pose is claimed -- not a subset -- moved 40 claimed 40
+  OK   the ledger records the CALLER as the CLI, not <unknown> -- ['place_optimize.py:285 in main']
+  OK   an undeclared write is refused BEFORE the file is written -- the board must not exist -- refusing means not writing
+Modified 65 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk\board.kicad_pcb
+  OK   stage_unaided ARMS the regime -- the manifest exists -- C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk
+  OK   and regime_for finds it from a board in the work dir -- C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk
+  OK   the manifest names the STAGED board, not the source -- C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk\board.kicad_pcb
+  OK   its hash is the hash of the file ON DISK -- 51ab0476310ab6a2
+  OK   a stager is not a whitelist: stage_unaided is IN LEVER_REGISTRY, so a RESTAGE is not refused by the guard the stager itself installed -- ('place_seed.py', 'place_optimize.py', 'place_reconstruct.py', 'place_portfolio.py', 'place_route_loop.py', 'place_fanout_clearance.py', 'converge.py', 'place_pose.py', 'route.py', 'perturb.py', 'stage_blind.py', 'stage_unaided.py')
+  OK   an undeclared pose write into a stage_unaided work dir RAISES -- publication refused before writing: no registered lever in LEVER_REGISTRY for armed destination C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\
+  OK   ...and nothing landed -- refusing means not writing -- C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk\hand.kicad_pcb
+  OK   the 'not staged for an unaided run' verdict is GONE -- 5 no delivered board in the work dir (staging artifacts are not one)
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk\delivered.kicad_pcb
+  OK   the ledger the STAGER armed is what a lever then writes into -- C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk
+  OK   a lever run in a stage_unaided work dir audits CLEAN -- 0 CLEAN all 3 moved pose(s) trace to place_optimize.py, and each is where its lever put it
+  OK   and it really moved something, so CLEAN is not vacuous -- moved 3 claimed 3
+Modified 65 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk\board.kicad_pcb
+  OK   a RESTAGE into an armed dir is permitted, not refused -- 2 rows, was 1
+  OK   prior_stagings counts the STAGINGS that predate the restage, never the restage's own -- 0 vs 0 before
+  OK   ...while prior_ledger_rows counts every row, engine writes included -- rows 1 stagings 0 (before: 1)
+  OK   and the restage records itself under its own lever -- ['place_optimize.py', 'stage_unaided.py']
+Modified 65 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp58rir9lp\wk\board.kicad_pcb
+  OK   a stage inside another lever's scope is attributed to the CALLER -- ['place_route_loop.py']
+  OK   a staging row carries no argv, no parent hash and no poses -- ['board_sha256', 'caller', 'declared', 'lever', 'path', 'redacted', 'schema', 't']
+  OK   ...and an ENGINE row still carries them, so redaction is scoped -- [['applied_by', 'board_sha256', 'caller', 'candidate_sha256', 'decision_source', 'declared', 'final_snapshot', 'lever', 'lever_argv', 'locks_written', 'parent_sha256', 'path', 'poses_written', 'provenance_scope', 'refs_moved', 'refs_written', 'schema', 'sides_written', 't']]
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpvkfc278o\wk\seeded.kicad_pcb
+  OK   the engine run itself is CLEAN -- all 3 moved pose(s) trace to place_optimize.py, and each is where its lever put it
+  OK   ...and the ref the hand edit will target IS claimed by it -- C1
+  OK   a hand edit of a CLAIMED ref is a violation, not CLEAN -- UNAIDED VIOLATION -- a ref-keyed claim is inheritable, so every part the engine legitimately moved becomes launderable
+  OK   and it is named as DRIFTED, not as unclaimed -- drifted=['C1'] unclaimed=[]
+  OK   the reason says the ref is claimed but the POSE is not -- 1 pose(s) are NOT where the lever that claims them put them (C1). The ref is claimed, the POSE is not: something moved it after the engine wrote it. A claim keyed on the ref alone would have graded this CLEAN, which is how a hand edit of a part the engine legitimately touched becomes invisible.
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpoy5gd9qu\wk\seeded.kicad_pcb
+  OK   the ledger row records WHERE each ref was put -- poses_written is what makes the claim pose-keyed rather than ref-keyed
+  OK   a delivery nobody touched afterwards is still CLEAN
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpsa9z_nbs\wk\kept.kicad_pcb
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpsa9z_nbs\wk\cand2.kicad_pcb
+  OK   a lever that wrote two candidates does not convict the kept one -- CLEAN drifted=[] -- the pose claim was read off a row that wrote a DIFFERENT board
+  OK   ...and the refs are still CLAIMED, not merely unchecked -- 3 []
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp2mr58g89\wk\a.kicad_pcb
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp2mr58g89\wk\b.kicad_pcb
+  OK   either candidate audits clean against its own row -- a=CLEAN b=CLEAN
+  OK   but a hand edit of a claimed ref is still a violation -- UNAIDED VIOLATION drifted=['C1']
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpx0qvbbt9\wk\seeded.kicad_pcb
+  OK   a copied board the ledger names nowhere is CLEAN when honest -- CLEAN all 3 moved pose(s) trace to place_optimize.py, and each is where its lever put it
+  OK   and a HAND EDIT to that same copied board is still caught -- UNAIDED VIOLATION 1 pose(s) are NOT where the lever that claims them put them (C1). The ref is claimed, the POSE is not: something moved it after the engine wrote it. A claim keyed on the ref alone would have graded this CLEAN, which is how a hand edit of a part the engine legitimately touched becomes invisible. -- a board the ledger does not name must not turn the pose check off
+  OK   route.py is a registered lever -- ('place_seed.py', 'place_optimize.py', 'place_reconstruct.py', 'place_portfolio.py', 'place_route_loop.py', 'place_fanout_clearance.py', 'converge.py', 'place_pose.py', 'route.py', 'perturb.py', 'stage_blind.py', 'stage_unaided.py')
+  OK   route.py still calls the pose funnel (or the entry is pointless)
+  OK   route.py DECLARES its lever when it actually runs -- active_lever()={'lever': 'route.py', 'lever_argv': ['C:\\Users\\rob\\Documents\\prive\\git\\KRT-960\\py_router\\route.py', '--help'], 'decision_source': 'unspecified'} -- route.py swallows the declaration failure, so nothing but a runtime check can see this
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpxwfax32o\wk\board.kicad_pcb
+  OK   the router's cap move SUCCEEDS inside an armed regime -- the move is skipped inside the fence and performed outside it, so the rig would be measuring a different router
+  OK   every registered lever with a __main__ actually declares one -- [] -- these raise UnaidedViolation under an armed regime, refusing the engine
+  OK   and the registry is not empty (else the check is vacuous) -- 12
+  OK   a tool that does NOT write poses is named, not silently registered -- beautify_labels writes silkscreen through write_label_output, not the pose funnel -- registering it would imply coverage that does not exist
+  OK   every registered lever actually STARTS (--help exits 0) --   -- a lever that cannot start cannot author poses, and the source-text check above cannot see this
+  OK   every registered lever RESOLVES to a file -- [] -- an entry that resolves to nothing makes both the static and the runtime check above vacuous for it
+  OK   no CLI directory uses a name it never imported (ruff F821) --   (0 total) -- this is the place_fanout_clearance / fix_mixed_net_refs bug class; each one is a tool that dies on every invocation
+
+65 passed, 0 failed
+EXIT=0
+
+STDERR:

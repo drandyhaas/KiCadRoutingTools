@@ -1,0 +1,39 @@
+PASS GridRouteConfig value parity (docs/configuration.md)
+PASS GridRouteConfig field parity (all documented)
+PASS docs/python-api.md block 0
+PASS docs/python-api.md block 1
+PASS docs/api-kicad-parser.md block 0
+PASS docs/api-kicad-parser.md block 5
+PASS docs/api-kicad-parser.md block 7
+PASS docs/api-kicad-parser.md block 9
+PASS docs/api-kicad-parser.md block 11
+PASS docs/api-kicad-writer.md block 3
+PASS docs/api-kicad-writer.md block 6
+PASS docs/api-pcb-modification.md block 3
+PASS docs/api-pcb-modification.md block 7
+PASS docs/api-pcb-modification.md block 9
+PASS docs/api-routing-config.md block 0
+PASS docs/api-routing-config.md block 1
+PASS docs/api-routing-config.md block 9
+PASS docs/api-routing-config.md block 10
+PASS docs/api-routing-config.md block 18
+PASS docs/api-net-analysis.md block 2
+PASS docs/api-net-analysis.md block 4
+PASS docs/api-net-analysis.md block 6
+PASS docs/api-net-analysis.md block 8
+PASS docs/api-net-analysis.md block 12
+PASS docs/api-net-analysis.md block 15
+PASS docs/api-net-analysis.md block 20
+PASS docs/api-net-analysis.md block 22
+PASS docs/api-net-analysis.md block 31
+PASS docs/api-impedance.md block 1
+PASS docs/api-impedance.md block 3
+PASS docs/api-impedance.md block 5
+PASS docs/api-impedance.md block 11
+PASS docs/api-impedance.md block 13
+PASS docs/api-impedance.md block 14
+
+32 run, 78 skipped (signature listings/fragments), 0 failed
+
+STDERR:
+Could not find platform independent libraries <prefix>
