@@ -3410,6 +3410,7 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
     findings, unmeasured = [], []
     measured = 0
     minimum = None
+    minimum_by_edge = {}
     for ref, fp in sorted(pcb_data.footprints.items()):
         for index, pad in enumerate(fp.pads):
             if _pad_has_no_copper(pad):
@@ -3465,6 +3466,9 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
                 x1, y1 = pad.global_x+ex, pad.global_y+ey
             if reasons:
                 unmeasured.append(dict(identity, reason='; '.join(reasons)))
+            for side, value in (('west', x0-bounds[0]), ('east', bounds[2]-x1),
+                                ('north', y0-bounds[1]), ('south', bounds[3]-y1)):
+                minimum_by_edge[side] = min(minimum_by_edge.get(side, value), value)
             gap, edge = min((x0-bounds[0], 'left'), (bounds[2]-x1, 'right'),
                             (y0-bounds[1], 'bottom'), (bounds[3]-y1, 'top'))
             measured += 1
@@ -3475,6 +3479,7 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
                                      shortfall_mm=amount, edge=edge))
     return {'required_mm': required, 'tolerance_mm': EPS, 'units': 'mm',
             'minimum_gap_mm': minimum, 'measured_pads': measured,
+            'minimum_gap_by_edge_mm': minimum_by_edge,
             'complete': rectangular and not unmeasured and not rules_unmeasured,
             'rules_unmeasured': rules_unmeasured,
             'unmeasured': unmeasured, 'findings': findings,
