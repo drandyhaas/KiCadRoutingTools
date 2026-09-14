@@ -327,6 +327,11 @@ Examples:
               "'the off-board amount strictly improved', which this does not "
               "gate", file=sys.stderr)
 
+    from placement.connector_publication import run_checked
+    return run_checked(args, lambda trial: _execute(trial, p))
+
+
+def _execute(args, p):
     try:
         from redo_record import record_invocation
         record_invocation()

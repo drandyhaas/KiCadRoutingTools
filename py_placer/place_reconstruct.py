@@ -146,6 +146,11 @@ Examples:
         except Exception:
             pass
 
+    from placement.connector_publication import run_checked
+    return run_checked(args, lambda trial: _execute(trial, p, stages, report))
+
+
+def _execute(args, p, stages, report):
     import pose_score
     from kicad_parser import parse_kicad_pcb
     from placement import floorplan, reconstruct, seeder
@@ -691,7 +696,7 @@ Examples:
     if final['oob_pad_count']:
         print("  (off-board residue that no cap could repair: if it is a "
               "by-design overhang -- a card edge, a switch actuator -- "
-              "declare it in an intent's edge_connectors; it is then exempt)")
+              "body bands do not exempt pad copper containment)")
     report.setdefault('complete', True)
     report.setdefault('status', 'ok')
     print('JSON_SUMMARY: ' + json.dumps(report, sort_keys=True, default=str),
