@@ -68,7 +68,11 @@ def run_checked(args, execute):
         summary = capture.summary
         if args.dry_run or not os.path.isfile(trial.output_file):
             if summary:
-                summary.update(output=None, published=False)
+                summary.update(output=None, published=False, engineering_clean=False,
+                               status='dry_run' if args.dry_run else 'refused',
+                               complete=False, connector_requirements={
+                                   'accepted': None, 'complete': False,
+                                   'reason': 'no written final candidate to measure'})
                 print('JSON_SUMMARY: ' + json.dumps(summary, sort_keys=True, default=str))
             return rc
         pcb = parse_kicad_pcb(trial.output_file)

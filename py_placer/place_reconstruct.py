@@ -59,8 +59,8 @@ Examples:
     p.add_argument("input_file")
     p.add_argument("output_file")
     p.add_argument("--intent", default=None, metavar="JSON",
-                   help="Optional floorplan intent (edge connectors exempt "
-                        "from off-board repair; zones constrain re-seating)")
+                   help="Optional floorplan intent (declared body allowances and zones; "
+                        "copper containment remains required)")
     p.add_argument("--stages",
                    default="classify,fit,vector,assign,exchange,reseat,"
                            "legalize",
