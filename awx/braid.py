@@ -77,6 +77,9 @@ import prices as _pr  # ONE source for the swimmer price
 
 TRACK = ts.TRACK         # ONE source: topo_strings
 CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
+SPEC_CLEARANCE = 0.1     # the spec itself: what the fanout lays at, what grade_k
+                         # grades at, and what the output PROJECT records (CLEAR
+                         # is the router's private margin over it, not a rule)
 VIA_SIZE = 0.25
 VIA_DRILL = 0.15
 
@@ -8346,6 +8349,25 @@ def write_out(a, ctx, corridors, names, log):
     pro = os.path.splitext(a.board)[0] + '.kicad_pro'
     if os.path.exists(pro):
         shutil.copy(pro, a.out + '.kicad_pro')
+    # STAMP THE ROUTED FLOOR into the output project (2026-09-13), the way
+    # every production CLI does: the copy above carried the bench's project
+    # down every chain step with its Default class clearance at 0.0 (KiCad's
+    # "not configured", inherited from the human original), which route.py
+    # pins up to the fab floor and the GUI replaces with its own control
+    # default -- a 99-via board opened in the plugin routed at 0.25 on
+    # copper laid at 0.1. Lower-only, so a project already at the floor is
+    # untouched; the copper is unaffected either way (the braid routes from
+    # ctx.cfg, never from the project).
+    if os.environ.get('AWX_STAMP_PRO', '1') != '0':   # 0 = the flag-off parity control
+        try:
+            from fix_kicad_drc_settings import fix_project_for_output
+            fix_project_for_output(out_board, a.board,
+                                   clearance=min(SPEC_CLEARANCE, ctx.cfg.clearance),
+                                   track_width=ctx.cfg.track_width,
+                                   via_diameter=VIA_SIZE, via_drill=VIA_DRILL,
+                                   verbose=False)
+        except Exception as e:  # a project problem must not lose the board
+            log(f'  project floor NOT stamped: {e}')
     nv = sum(len(v) for v in out_vias.values())
     nseg = sum(len(emit[nm]) for nm in names)
     # A VIA-LESS LAYER CHANGE IS A BROKEN NET, and it ships silently: the
