@@ -1347,8 +1347,8 @@ def main():
                   f" (swap cap stays {swap_cap:.1f}mm).")
             max_disp *= 1.5
 
-    shutil.copy(cur_file, args.output_file)
-    copy_siblings(cur_file, args.output_file)          # #441, as at round 0
+    from placement.publication import publish_board
+    publish_board(cur_file, args.output_file, input_file=args.input_file)
     if args.ratsnest_screen > 0:
         print(f"Ratsnest screen: {screened} round(s) skipped the routing run"
               f" at {args.ratsnest_screen:g}% regression.")

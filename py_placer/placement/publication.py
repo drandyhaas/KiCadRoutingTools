@@ -64,7 +64,7 @@ changing the board/requirements while the caller computed its candidate.
             if not lever or lever['lever'] not in pv.LEVER_REGISTRY:
                 raise pv.UnaidedViolation(
                     'publication refused before writing: no registered lever '
-                    'for armed destination %s; declared=%r; caller=%s' % (
+                    'in LEVER_REGISTRY for armed destination %s; declared=%r; caller=%s' % (
                         output, (lever or {}).get('lever'), pv._caller()))
         for lock in lock_paths:
             try:
