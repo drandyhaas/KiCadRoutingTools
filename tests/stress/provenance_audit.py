@@ -326,6 +326,11 @@ def _audit(workdir, delivered=None):
                 or (want[3] is not None and got[3] != want[3])
                 or (want[4] is not None and got[4] != want[4])):
             drifted.append(ref)
+        elif ((want[3] is None and got[3] != _sp[ref][3])
+              or (want[4] is None and got[4] != _sp[ref][4])):
+            # Legacy rows did not record these fields. A changed state with
+            # no corresponding claim is unmeasured, never certified CLEAN.
+            unverifiable.append(ref)
 
     unclaimed = sorted(r for r in moved if r not in claimed)
     drifted = sorted(drifted)
@@ -366,7 +371,7 @@ def _audit(workdir, delivered=None):
     # different file.
     _unv = (f" ({len(unverifiable)} claim(s) matched by ref only: the "
             f"claiming row wrote a different file, or predates "
-            f"`poses_written`)" if unverifiable else '')
+            f"pose/side/lock state coverage)" if unverifiable else '')
     doc.update(verdict='CLEAN', reason=(
         f"all {len(moved)} moved pose(s) trace to "
         f"{', '.join(doc['levers']) or 'no lever (nothing moved)'}"

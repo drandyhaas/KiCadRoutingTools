@@ -181,6 +181,21 @@ class Publication(unittest.TestCase):
         self.assertEqual(provenance_audit.audit(str(self.work), str(self.board))[0], 0)
         self.assertEqual(parse_kicad_pcb(str(self.board)).footprints['R1'].x, 136.4)
 
+    def test_legacy_row_cannot_certify_an_unrecorded_lock_change(self):
+        self.publish(self.candidate())
+        ledger = self.work / pv.LEDGER_NAME
+        row = pv.read_ledger(str(self.work))[0]
+        row.pop('locks_written')
+        row.pop('final_snapshot')
+        ledger.write_text(json.dumps(row) + '\n', encoding='utf-8')
+        # Old rows remain usable for coordinates and unchanged lock state.
+        self.assertEqual(provenance_audit.audit(str(self.work), str(self.out))[0], 0)
+        from placement.pose_ops import apply_locks
+        apply_locks(str(self.out), ['R1'], [])
+        code, doc = provenance_audit.audit(str(self.work), str(self.out))
+        self.assertEqual(code, 5)
+        self.assertEqual(doc['unverifiable_claims'], ['R1'])
+
 
 if __name__ == '__main__':
     unittest.main()
