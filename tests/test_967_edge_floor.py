@@ -380,7 +380,10 @@ class EdgeFloor(unittest.TestCase):
                 self.assertTrue(backup.is_file())
                 real_replace(backup, dst_brief)
             self.assertEqual((digest(out), digest(dst_brief)), identities)
-        self.assertFalse(list(self.work.glob('.krt-backup-*')))
+        # Failed recovery now retains the transaction journal and all backups,
+        # including evidence for paths that were already restored (#960).
+        self.assertTrue(list(self.work.glob('.krt-backup-*')))
+        self.assertTrue(Path(str(out) + '.krt-publish-lock/journal.json').is_file())
 
 
 if __name__ == '__main__':

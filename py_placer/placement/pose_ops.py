@@ -39,7 +39,6 @@ from __future__ import annotations
 import os
 import math
 import shutil
-import stat
 import tempfile
 from typing import Dict, List, Optional, Sequence
 
@@ -592,6 +591,8 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
     if not dry_run and not out_path:
         raise PoseRefusal("a write needs an output path; pass one, or "
                           "--dry-run to grade without writing", code=2)
+    from placement.publication import input_identity
+    source_identity = input_identity(board_path)
     requested = {'clearance': clearance, 'board_edge_clearance': board_edge_clearance}
     clearance, board_edge_clearance, track_width, knobs = resolve_knobs(
         board_path, clearance, board_edge_clearance, track_width)
@@ -952,111 +953,32 @@ def apply_poses(board_path: str, out_path: Optional[str], ops: Sequence[Dict],
                 summary['output'] = None
                 raise PoseRefusal(reason, summary=summary, unlock_failed=still)
 
-        _promote(cand, out_path, summary)
+        _promote(cand, out_path, summary, input_file=board_path,
+                 expected_input=source_identity)
         return summary
     finally:
         stage.cleanup()
 
 
-def _promote(staged: str, out_path: str, summary: Optional[Dict] = None) -> None:
-    """Move a finished staged board and its siblings onto the output path.
-
-    Stage all files and back up prior destinations before replacing anything.
-    Roll back completed replacements on failure. If restoration itself fails,
-    report the affected paths and retain backups instead of claiming atomicity.
-    Destination-only requirements cannot join a board graded without them.
-    """
-    from copy_board import SIBLING_EXTS
-    src_base = os.path.splitext(staged)[0]
-    dst_base = os.path.splitext(out_path)[0]
-    pairs = [(staged, out_path)]
-    extra_requirements = [dst_base + ext for ext in SIBLING_EXTS
-                          if ext != '.kicad_prl' and os.path.exists(dst_base + ext)
-                          and not os.path.isfile(src_base + ext)]
-    if extra_requirements:
-        doc = dict(summary or {})
-        reason = (
-            'output has requirement siblings absent from the graded input: %s. '
-            'Use a fresh output path or reconcile these declarations with the input.'
-            % ', '.join(extra_requirements))
-        doc.update(output=None, refused='; '.join(x for x in (doc.get('refused'), reason) if x))
-        raise PoseRefusal(doc['refused'], code=2, summary=doc)
-    for ext in SIBLING_EXTS:
-        if os.path.isfile(src_base + ext):
-            pairs.append((src_base + ext, dst_base + ext))
-    staged_tmps = []
-    backups = {}
-    replaced = []
-    recovery_paths = []
+def _promote(staged: str, out_path: str, summary: Optional[Dict] = None, *,
+             input_file: Optional[str] = None, expected_input=None) -> None:
+    """Publish the accepted final candidate through the shared transaction."""
+    from placement.publication import publish_board, PublicationError
     try:
-        for _src, dst in pairs:
-            if os.path.lexists(dst) and (not os.path.isfile(dst) or os.path.islink(dst)):
-                raise OSError('destination is not a regular file: %s' % dst)
-        for src, dst in pairs:
-            tmp = dst + '.krt-tmp'
-            shutil.copyfile(src, tmp)
-            staged_tmps.append((tmp, dst))
-        for _src, dst in pairs:
-            backups[dst] = None
-            if os.path.exists(dst):
-                fd, backup = tempfile.mkstemp(prefix='.krt-backup-', dir=os.path.dirname(
-                    os.path.abspath(dst)))
-                os.close(fd)
-                backups[dst] = backup
-                shutil.copy2(dst, backup)
-        # NOT `pop()` before the replace: a failing `os.replace` would then
-        # have already removed its own tmp from the cleanup list, and the file
-        # it could not move was left beside the output. Remove only on
-        # success, so `finally` still owns everything that did not land.
-        for entry in list(reversed(staged_tmps)):
-            os.replace(entry[0], entry[1])
-            replaced.append(entry[1])
-            staged_tmps.remove(entry)
-    except OSError as exc:
-        rollback_errors = []
-        for dst in reversed(replaced):
-            try:
-                backup = backups[dst]
-                if backup is None:
-                    os.remove(dst)
-                else:
-                    os.replace(backup, dst)
-                    backups[dst] = None
-            except OSError as restore_error:
-                rollback_errors.append({'path': dst, 'error': str(restore_error),
-                                        'backup': backups[dst]})
-                if backups[dst]:
-                    recovery_paths.append(backups[dst])
-        reason = 'cannot write %s: %s. ' % (out_path, exc)
-        if rollback_errors:
-            reason += ('Output partially changed; restoration failed for %s. '
-                       'Retained backup paths are listed in rollback_errors.'
-                       % ', '.join(row['path'] for row in rollback_errors))
-        else:
-            reason += 'Nothing was written: previous output files were preserved or restored.'
+        row = publish_board(staged, out_path, input_file=input_file,
+                            expected_input=expected_input)
+        if summary is not None:
+            summary['provenance'] = {
+                'scope': 'registered execution' if row else 'ordinary model-assisted placement',
+                'applied_by': (row or {}).get('applied_by', 'place_pose.py'),
+                'decision_source': (row or {}).get('decision_source', 'caller'),
+                'board_sha256': (row or {}).get('candidate_sha256'),
+                'engineering_validity': 'reported separately in legal and no_worse'}
+    except PublicationError as exc:
         doc = dict(summary or {})
-        # The grade this run already did is kept, and any finding it was
-        # forced past is kept WITH the write error rather than replaced by it:
-        # a summary that reports only the last thing to go wrong is how a
-        # waived finding disappears.
-        doc['refused'] = '; '.join(x for x in (doc.get('refused'), reason) if x)
-        doc['output'] = None
-        doc['output_state'] = 'partial' if rollback_errors else 'unchanged'
-        doc['rollback_errors'] = rollback_errors
-        raise PoseRefusal(reason, code=2, summary=doc)
-    finally:
-        for backup in backups.values():
-            if backup and backup not in recovery_paths:
-                try:
-                    os.chmod(backup, os.stat(backup).st_mode | stat.S_IWUSR)
-                    os.remove(backup)
-                except OSError:
-                    pass
-        for tmp, _dst in staged_tmps:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        doc.update(exc.details, output=None)
+        doc['refused'] = '; '.join(x for x in (doc.get('refused'), str(exc)) if x)
+        raise PoseRefusal(str(exc), code=2, summary=doc) from exc
 
 
 def _refusal_reason(bad, strict, before, after, summary) -> str:

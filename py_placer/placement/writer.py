@@ -868,6 +868,8 @@ def write_placed_output(input_file: str, output_file: str,
     Returns:
         True if output was written successfully
     """
+    from placement.publication import input_identity
+    source_identity = input_identity(input_file, siblings=False)
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -1193,14 +1195,16 @@ def write_placed_output(input_file: str, output_file: str,
                 f"owns. Nothing was written. This is a bug in whatever "
                 f"produced the placement list (#829).")
 
-    from placement import provenance
-    provenance.record_write(input_file, output_file, placements,
-                            pending=True)
-
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(content)
-
-    provenance.commit_write(output_file)
+    # The same final publication boundary serves direct writers and the
+    # pose setter. A private candidate cannot claim an armed destination.
+    import tempfile
+    from placement.publication import publish_board
+    with tempfile.TemporaryDirectory(prefix='placement_writer_') as stage:
+        candidate = os.path.join(stage, 'candidate.kicad_pcb')
+        with open(candidate, 'w', encoding='utf-8') as f:
+            f.write(content)
+        publish_board(candidate, output_file, input_file=input_file,
+                      siblings=False, expected_input=source_identity)
 
     print(f"Modified {modified_count} footprint positions")
     _report_unapplied(placement_by_ref, matched, unapplied_blocks,
