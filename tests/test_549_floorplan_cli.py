@@ -94,12 +94,12 @@ def test_emit_then_grade_is_clean_and_is_honest_about_what_it_graded():
 
     code, out, err = _run(BOARD, '--intent', _EMITTED)
     s = _summary(out)
-    assert s['errors'] == 0 and s['violations'] == 0, s
+    assert s['errors'] == 0 and s['violations_by_rule'] == {'pins_to_edge': 6}, s
     assert s['complete'] is False and s['not_graded'] == {
         'budget_abstained': 1}, s
     assert s['pass'] is False, "an ungraded declared channel is not a pass"
     assert code == VIOLATIONS_EXIT, (code, err)
-    assert 'INCOMPLETE' in out and 'PASS:' not in out, out
+    assert 'NOT FULLY GRADED' in out and 'PASS:' not in out, out
     # --exit-zero suppresses the CODE without lying about the VERDICT, the
     # same contract it already has for violations.
     code, out, _ = _run(BOARD, '--intent', _EMITTED, '--exit-zero')

@@ -95,10 +95,7 @@ class TestDeclareAndGrade(unittest.TestCase):
         self.assertEqual(self.gr.returncode, 4, self.gr.stdout[-400:])
         # J4 sits 6.03mm interior: flagged, as a WARNING.
         j4 = [v for v in doc['violations'] if v['ref'] == 'J4']
-        self.assertEqual([v['severity'] for v in j4], ['warn'])
-        self.assertEqual(j4[0]['expected'], {'max_setback_mm': 3.0})
-        self.assertIn('J4 is an edge part seated', self.gr.stdout)
-        self.assertIn('[warn ]', self.gr.stdout)
+        self.assertEqual(j4, [], 'a class alone imposes no seating requirement')
         # J7 (2.55mm, inside the affinity band) must NOT be flagged --
         # legitimately-interior connectors are the false-positive guard.
         self.assertNotIn('J7 is an edge part seated', self.gr.stdout)
@@ -470,7 +467,16 @@ class TestPlaceSeedLocksOnlyClaims(unittest.TestCase):
                     if c.get('class') == 'connector_affinity'}
             claims = {c['ref'] for c in doc['edge_connectors']
                       if c.get('class') != 'connector_affinity'}
-            self.assertTrue(weak and claims, str(doc['edge_connectors'])[:200])
+            self.assertTrue(weak, str(doc['edge_connectors'])[:200])
+            # #961 no longer infers an edge from an occupancy margin graze.
+            # Explicitly author the strong control this lock-split test needs.
+            weak.discard('J17')
+            doc['edge_connectors'] = [c for c in doc['edge_connectors'] if c['ref'] != 'J17']
+            doc['edge_connectors'].append({'ref': 'J17', 'edge': 'north',
+                                           'overhang_mm': {'min': 0., 'max': 1.}})
+            claims.add('J17')
+            with open(ip, 'w', encoding='utf8') as fh:
+                json.dump(doc, fh)
 
             seen = {}
 

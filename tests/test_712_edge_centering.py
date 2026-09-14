@@ -65,6 +65,7 @@ restore inside one timestamp tick left every later import reading the mutant.
 It clears `__pycache__` around every row and restores byte-exactly.
 """
 import copy
+import json
 import os
 import sys
 
@@ -100,8 +101,24 @@ def _emit(board):
     if board not in _cache:
         path = os.path.join(KF, board + '.kicad_pcb')
         pcb = parse_kicad_pcb(path)
-        _cache[board] = (pcb, path,
-                         fp.emit_intent(pcb, path, declare_classes=True))
+        doc = fp.emit_intent(pcb, path, declare_classes=True)
+        # These are the historical DECLARED edges under test. #961 no longer
+        # infers an edge from a pad/courtyard margin graze. Keep the independent
+        # span/position requirements explicit while testing along-edge grading.
+        with open(os.path.join(KF, '..', 'tests', 'fixtures',
+                               '961-inherited-edge-intents.json'), encoding='utf8') as f:
+            inherited = json.load(f)['edges'][board]
+        for ref, edge in inherited.items():
+            row = next((c for c in doc['edge_connectors'] if c['ref'] == ref), None)
+            if row is None:
+                row = {'ref': ref}
+                doc['edge_connectors'].append(row)
+            if edge is None:
+                row.pop('edge', None)
+            else:
+                row['edge'] = edge
+        _cache[board] = (pcb, path, doc)
+
     return _cache[board]
 
 
@@ -138,7 +155,7 @@ def test_the_offset_is_measured_with_nothing_declared():
     claim was made about it.
     """
     r = _grade('tigard')
-    rows = {e['ref']: e for e in r.edge_seating}
+    rows = {e['ref']: e for e in r.edge_seating if 'along_edge_offset_mm' in e}
     assert set(rows) == {'J1', 'J5', 'J7'}, sorted(rows)
     for (board, ref), (edge, span, off, pct) in MEASURED.items():
         if board != 'tigard':
@@ -167,10 +184,10 @@ def test_a_human_board_is_not_failed_by_accident():
     # that nothing DECLARED went ungraded, and tigard's emitted intent
     # withholds `overlap_area`. The claim here is about the centring conjunct
     # not manufacturing a violation, which is the error list.
-    assert not r.errors, [v.message for v in r.errors]
-    worst = max(abs(e['along_edge_offset_pct']) for e in r.edge_seating)
+    assert not [v for v in r.errors if 'along_edge' in str(v.measured)], r.errors
+    worst = max(abs(e['along_edge_offset_pct']) for e in r.edge_seating if 'along_edge_offset_pct' in e)
     assert worst > 25.0, worst   # anti-vacuity: it really is far off centre
-    print(f"  PASS: worst offset {worst:.1f}% and the board still passes -- "
+    print(f"  PASS: worst offset {worst:.1f}% and no centering clause fails -- "
           f"no default threshold exists")
 
 

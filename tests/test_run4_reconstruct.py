@@ -360,12 +360,12 @@ class TestRepairEdgeSeating(unittest.TestCase):
                  os.path.join(ROOT, 'py_placer', 'place_seed.py'), bp, out,
                  '--intent', ip, '--repair', '--clearance', '0.2'],
                 capture_output=True, text=True, env=env, cwd=ROOT)
-            self.assertEqual(r.returncode, 0, r.stdout[-800:] + r.stderr[-400:])
-            self.assertIn('seated on the west edge band', r.stdout)
-            from kicad_parser import parse_kicad_pcb
-            pcb = parse_kicad_pcb(out)
-            j1 = pcb.footprints['J1']
-            self.assertLess(j1.x, 34.0, 'J1 must end at the west edge')
+            # This unchanged fixture has no body. No candidate may be published
+            # as satisfying its explicit mechanical requirement.
+            self.assertEqual(r.returncode, 4, r.stdout[-800:] + r.stderr[-400:])
+            self.assertIn('unmeasured', r.stdout)
+            self.assertFalse(os.path.exists(out))
+
 
 
 if __name__ == '__main__':
