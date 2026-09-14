@@ -49,7 +49,8 @@ SEEDER = os.path.join(ROOT, 'py_placer', 'placement', 'seeder.py')
 PROV = os.path.join(ROOT, 'py_placer', 'placement', 'provenance.py')
 PARITY = os.path.join(TESTS, 'gui_parity', 'test_manifest_plan_parity.py')
 
-TARGETS = {'o': OPS, 'c': CLI, 's': SEEDER, 'p': PROV, 'g': PARITY}
+PUBLICATION = os.path.join(ROOT, 'py_placer', 'placement', 'publication.py')
+TARGETS = {'o': OPS, 'c': CLI, 's': SEEDER, 'p': PROV, 'g': PARITY, 'u': PUBLICATION}
 
 T_POSE = os.path.join(TESTS, 'test_892_place_pose.py')
 T_REG = os.path.join(TESTS, 'test_892_registries.py')
@@ -163,12 +164,10 @@ ROWS = [
      "    missing = []",
      (T_POSE,), 'KILLED'),
 
-    ('a-failed-promote-is-not-atomic-again', 'o',
-     "        for src, dst in pairs:\n"
-     "            tmp = dst + '.krt-tmp'",
-     "        for src, dst in pairs:\n"
-     "            tmp = dst",
-     (T_POSE,), 'KILLED'),
+    ('a-failed-promote-is-not-atomic-again', 'u',
+     "        for dst in reversed(attempted):",
+     "        for dst in ():",
+     (os.path.join(TESTS, 'test_960_pose_publication.py'),), 'KILLED'),
 
     ('a-forced-run-is-not-disclosed', 'o',
      "            summary['forced'] = True\n\n        if dry_run:",
