@@ -10,7 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 for folder in ('py_router', 'py_placer'):
     sys.path.insert(0, str(ROOT / folder))
-import pcbnew
+try:
+    import pcbnew
+except ImportError:
+    print('SKIP: native KiCad pcbnew is required for written-board verification')
+    raise SystemExit(77)
 from placement import provenance
 from copy_board import copy_board
 

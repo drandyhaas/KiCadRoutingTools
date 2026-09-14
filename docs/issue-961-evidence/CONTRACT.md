@@ -62,3 +62,11 @@ Fetched upstream main: 5a7fbcb6ee4deebd1d9ec1d5bd094d8681f502f3.
 All are ancestors of the integration base; #970 already includes #968.
 The separate integration merge had no conflicts. Original worktrees and fixtures
 were preserved. This new main-based PR includes inherited parent commits.
+
+Intent-driven place_seed/place_reconstruct now stage outside the destination
+regime and check declared connector requirements against the final written
+candidate before inherited transactional publication. Rejected or unmeasured
+connector candidates preserve destinations and add no success ledger. Dry or
+unwritten candidates are explicitly unevaluated. Accepted nonconnector-dirty
+exploration retains its inherited exit policy and reports engineering_clean false.
+Partial and committed recovery errors keep their inherited output-state details.

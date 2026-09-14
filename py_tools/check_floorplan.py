@@ -71,20 +71,12 @@ def build_parser():
     p.add_argument('--intent', metavar='PATH',
                    help='the floorplan intent JSON to grade against')
     p.add_argument('--emit-intent', metavar='PATH',
-                   help='write a starter intent READ OFF this board and exit. '
-                        'It grades clean by construction -- a baseline to '
-                        'tighten, with the real block names filled in')
+                   help='write observed starter declarations for review and exit; '
+                        'independent copper and geometry requirements can still fail')
     p.add_argument('--declare-classes', action='store_true',
-                   help='with --emit-intent: ALSO declare edge-class parts '
-                        '(part_class KB, run-4 A) that are not currently '
-                        'overhanging -- a USB receptacle parked interior gets '
-                        'an edge_connectors entry with a class-default band '
-                        'and NO edge (reconstruct derives it). DELIBERATELY '
-                        'breaks grades-clean-by-construction on a damaged '
-                        'board: an implausibly-posed receptacle then FAILS '
-                        'the proximity rule, which is the detection working. '
-                        'Default off to preserve the observation-only round '
-                        'trip')
+                   help='with --emit-intent: also label connector-family parts; '
+                        'class-only entries impose no edge, seating or maximum '
+                        'overhang requirement. Author mechanical limits explicitly')
     p.add_argument('--declare-decaps', action='store_true',
                    help='with --emit-intent: ALSO derive decaps.'
                         'max_distance_mm from the board\'s own measured '
