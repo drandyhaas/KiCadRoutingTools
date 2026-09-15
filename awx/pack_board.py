@@ -33,13 +33,13 @@ def main():
     ap.add_argument('--out', default=None, help='output stem (default: <board stem>_packed)')
     ap.add_argument('--sidecar', default=None, help='the pack sidecar (default: <board stem>.pack.json)')
     a = ap.parse_args()
-    # THE DESIGN RULES, from the board being packed (rules.py). pack.py reads
-    # braid's constants through the MODULE (br.CLEAR, br.TRACK, br.VIA_SIZE)
-    # at call time, so installing them here is all it takes.
-    _r = _rules.install_for(a.board)
+    # THE DESIGN CONSTANTS (rules.py). pack.py reads braid's constants
+    # through the MODULE (br.CLEAR, br.TRACK, br.VIA_SIZE) at call time, so
+    # installing them here is all it takes.
+    _r = _rules.install_defaults()
     print(f'rules: clearance {br.SPEC_CLEARANCE} (hug {br.CLEAR}), '
           f'track {br.TRACK}, via {br.VIA_SIZE}/{br.VIA_DRILL}'
-          f'  [{_r.sources.get("clearance")}]')
+          f'  [{_r.source}]')
     stem = os.path.splitext(a.board)[0]
     out = a.out or stem + '_packed'
     side_path = a.sidecar or stem + '.pack.json'

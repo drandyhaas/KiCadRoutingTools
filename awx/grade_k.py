@@ -39,14 +39,13 @@ for line in (r.stdout + r.stderr).splitlines():
     m2 = re.match(r'\s+(\S+) \(\d+ pads?\)\s*$', line)
     if m2 and m2.group(1).split('/')[-1] in nets:
         opens.append(m2.group(1).split('/')[-1])
-# GRADE AT THE CLEARANCE THE BOARD WAS ROUTED TO, not at a literal 0.1
-# (CLAUDE.md, "Testing & Verification"). rules.py resolves it from the
-# board's OWN project -- which every stage of the chain stamps with the
-# floor it laid at -- so a board routed at a wider class is graded there.
-# It is printed on the GRADE line: a grade whose clearance is invisible is
-# a number nobody can check.
+# GRADE AT THE CHAIN'S OWN SPEC CLEARANCE, from the one place it is defined
+# (rules.py), not at a literal 0.1 repeated here. It is printed on the GRADE
+# line: a grade whose clearance is invisible is a number nobody can check.
+# `active()` is DEFAULT in a fresh process and becomes the supplied geometry
+# if a future caller installs one in-process.
 import rules as _rules  # noqa: E402
-clr = _rules.rules_of(board).clearance
+clr = _rules.active().clearance
 r = subprocess.run([PY, os.path.join(HERE, '..', 'py_router',
                                      'check_drc.py'), board,
                     '--clearance', repr(clr), '--clearance-margin', '0.1',

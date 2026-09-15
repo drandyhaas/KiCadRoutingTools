@@ -1052,13 +1052,11 @@ def main():
         out_tag = os.path.join('tmp', out_tag)
     base = OPTS.get('board', os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb'))
     dest = OPTS.get('dest', 'DU1')
-    # THE DESIGN RULES, from the board this stage runs on (rules.py): every
-    # geometry constant here and in the modules above is a 0.1 mm-process
-    # DEFAULT until this call replaces it with what the board asks for.
-    _r = _rules.install_for(base)
+    # THE DESIGN CONSTANTS (rules.py) -- inert today, the seam tomorrow.
+    _r = _rules.install_defaults()
     print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
           f'track {te.TRACK}, via {te.VIA_SIZE}/{te.VIA_DRILL}'
-          f'  [{_r.sources.get("clearance")}]')
+          f'  [{_r.source}]')
     ROUNDS = int(OPTS.get('rounds', 4))
     WORST = int(OPTS.get('worst', 3))
     PROBES = int(OPTS.get('probes', 1))

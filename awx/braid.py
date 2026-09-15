@@ -77,9 +77,9 @@ import prices as _pr  # ONE source for the swimmer price
 
 import rules as _rules  # noqa: E402  ONE source for every design rule
 
-# The DEFAULTS. main() resolves these from its own board and installs them
-# (rules.install_for); without an install they are the literals they have
-# always been -- see rules.py, "USING IT".
+# ONE SOURCE: rules.py. main() installs them (rules.install_defaults);
+# without an install they are the literals they have always been -- see
+# rules.py, "USING IT".
 TRACK = ts.TRACK         # ONE source: topo_strings
 CLEAR = _rules.DEFAULT.hug
                          # 0.1 spec + 5um so hugs don't sit exactly at 0.1
@@ -7506,19 +7506,17 @@ def main():
             print(f'[{_time.time() - _t0:6.1f}s rss<={peak:5.0f}MB{tm}] {msg}', flush=True)
         else:
             print(msg)
-    # THE DESIGN RULES, from the board this stage is running on (rules.py):
-    # every constant above is a DEFAULT for a 0.1 mm process until this call
-    # replaces it with what the board actually asks for. One resolve per
-    # stage-process; the chain runs each stage as its own process.
-    _r = _rules.install_for(a.board)
-    # printed from THIS MODULE'S OWN constants, not from the Rules object:
-    # a wiring fix can be inert, and this one was -- install could not see
-    # the module because a stage runs as '__main__', so the first version
-    # printed a resolved 0.15 while routing at the 0.105 default. The line
-    # now says what the router will actually use.
+    # THE DESIGN CONSTANTS (rules.py), installed once per stage-process --
+    # inert today (it installs what the constants above already hold) and
+    # the SEAM for when the main router supplies the geometry instead.
+    _r = _rules.install_defaults()
+    # printed from THIS MODULE'S OWN constants, never from the Rules object:
+    # a wiring fix can be inert, and an early version of this one was --
+    # install could not see the module because a stage runs as '__main__',
+    # so it printed numbers the router was not using.
     log(f'rules: clearance {SPEC_CLEARANCE} (hug {CLEAR}), track {TRACK}, '
         f'via {VIA_SIZE}/{VIA_DRILL}, via_need {VIA_NEED:.4f}  '
-        f'[{_r.sources.get("clearance")}]')
+        f'[{_r.source}]')
     ctx, groups = setup(a.board, names, a.dest, log)
     corridors = []
     for ci, members in enumerate(groups):

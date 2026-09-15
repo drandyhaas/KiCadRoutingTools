@@ -2783,17 +2783,15 @@ def main():
     base = next((a.split('=', 1)[1] for a in sys.argv
                  if a.startswith('--board=')),
                 os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb'))
-    # THE DESIGN RULES, from the board this stage is running on (rules.py).
-    # Every geometry constant in this file and in the modules it imports is
-    # a DEFAULT for a 0.1 mm process until this call replaces it with what
-    # the board asks for.
-    _r = _rules.install_for(base)
+    # THE DESIGN CONSTANTS (rules.py), installed once per stage-process --
+    # inert today, and the seam for a supplied geometry (see rules.py).
+    _r = _rules.install_defaults()
     # printed from the MODULES THIS STAGE READS, never from the Rules object
-    # (see braid.main: a print of the resolved value cannot tell you the
-    # install reached anything).
+    # (see braid.main: a print of the Rules cannot tell you the install
+    # reached anything).
     print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
           f'track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
-          f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.sources.get("clearance")}]')
+          f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.source}]')
     names = coherent_nets(K, base)
     print('planning (source realized every round)...')
     work = out_path[:-len('.kicad_pcb')] if out_path.endswith('.kicad_pcb') else out_path

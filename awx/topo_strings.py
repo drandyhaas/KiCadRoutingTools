@@ -25,10 +25,9 @@ if HERE not in sys.path:
                                      # shadow a py_router module
 import rules as _rules  # noqa: E402  ONE source for every design rule
 
-# The DEFAULTS -- the chain's 0.1 mm-process preferences, which is what
-# these were as literals. A stage resolves them from its own board with
-# rules.install_for(board); a module imported without an install keeps
-# exactly these values (see rules.py, "USING IT").
+# ONE SOURCE: rules.py. A stage installs them (rules.install_defaults);
+# a module imported without an install keeps exactly these values
+# (see rules.py, "USING IT").
 TRACK = _rules.DEFAULT.track
 SPEC_CLEAR = _rules.DEFAULT.clearance
                      # the spec clearance. NOT braid.CLEAR, which is
