@@ -193,8 +193,22 @@ ROWS = [
      (T891, T895), KILLED),
 
     # ---- #961: the overhang band's currency ---------------------------------
-    # Each row puts back one piece of the pre-#961 reading, or deletes one of
-    # the conjuncts the body path needed to keep what the old sum caught.
+    # Rows that put back a piece of the pre-#961 reading (the occupancy
+    # number where a body is measured, the declared edge alone instead of the
+    # sum), plus one per branch the change added: the setback gate it left on
+    # the old reading, the seeder's second rung, the emitter widening, the
+    # per-part copper evidence, side and layer-token selection, the source
+    # memo and the text block.
+    ('layer-token-must-be-quoted', 'cg',
+     "        lm = re.search(r'\\(layer\\s+\"?([FB]\\.(?:Fab|SilkS))\"?\\)', item)",
+     "        lm = re.search(r'\\(layer\\s+\"([FB]\\.(?:Fab|SilkS))\"\\)', item)",
+     (T961,), KILLED),
+    ('format-text-evidence-deleted', 'fp',
+     "    if r.edge_connector_evidence:\n"
+     "        # #961: the number each band was graded on and its CURRENCY, printed",
+     "    if False:\n"
+     "        # #961: the number each band was graded on and its CURRENCY, printed",
+     (T961,), KILLED),
     ('band-reads-the-occupancy', 'fp',
      "        band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),\n"
      "                                                  amount)",
@@ -244,6 +258,61 @@ ROWS = [
     ('copper-gap-board-wide', 'fp',
      "    gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)",
      "    gap = copper.get('minimum_gap_mm')",
+     (T961,), KILLED),
+    # Round 2: the three seeder call sites that hand the band to
+    # `_edge_correct`, and the second rung's own arithmetic. Each survived the
+    # round-2 review's mutations with every test green.
+    ('seat-ladder-drops-the-band', 'sd',
+     "                x, y, converged = _edge_correct(state, ref, edge, x, y,\n"
+     "                                                overhang, band=(lo, hi_eff))",
+     "                x, y, converged = _edge_correct(state, ref, edge, x, y,\n"
+     "                                                overhang, band=None)",
+     (T961,), KILLED),
+    ('stage-one-slide-drops-the-band', 'sd',
+     "                _x, _y, _conv = _edge_correct(\n"
+     "                    state, ref, edge, _x, _y, overhang,\n"
+     "                    band=(lo, float(hi) if hi is not None\n"
+     "                          else max(2.0 * overhang, lo + 1.0)))",
+     "                _x, _y, _conv = _edge_correct(\n"
+     "                    state, ref, edge, _x, _y, overhang, band=None)",
+     (T961,), KILLED),
+    ('stage-one-final-drops-the-band', 'sd',
+     "            x, y, converged = _edge_correct(\n"
+     "                state, ref, edge, x, y, overhang,\n"
+     "                band=(lo, float(hi) if hi is not None\n"
+     "                      else max(2.0 * overhang, lo + 1.0)))",
+     "            x, y, converged = _edge_correct(\n"
+     "                state, ref, edge, x, y, overhang, band=None)",
+     (T961,), KILLED),
+    ('rung-north-sign-flipped', 'sd',
+     "    if edge == 'north':\n        y -= err",
+     "    if edge == 'north':\n        y += err",
+     (T961,), KILLED),
+    ('rung-lo-dropped', 'sd',
+     "            or (lo - 0.02) <= row['body_outside_mm'] <= (hi + 0.02)):",
+     "            or row['body_outside_mm'] <= (hi + 0.02)):",
+     (T961,), KILLED),
+    ('rung-always-converged', 'sd',
+     "                  and abs(target - row['body_outside_mm']) < 0.02)",
+     "                  or True)",
+     (T961,), KILLED),
+    # Round 2: a band on the body must still see copper off the outline.
+    ('copper-off-outline-licensed', 'fp',
+     "        if copper_out > legality.EPS:\n            yield Violation(",
+     "        if False:\n            yield Violation(",
+     (T961,), KILLED),
+    ('exempt-ignores-copper', 'fp',
+     "                copper_ok = (not _body.get('body_measured')\n"
+     "                             or _copper_outside_mm(self, ref) <= legality.EPS)",
+     "                copper_ok = True",
+     (T961,), KILLED),
+    ('castellated-copper-counted', 'fp',
+     "                and getattr(pads[index], 'castellated', False)):",
+     "                and False):",
+     (T961,), KILLED),
+    ('marker-accepted-as-body', 'cg',
+     "        if not self._encloses_own_pads(ref, fp, points):",
+     "        if False:",
      (T961,), KILLED),
     ('bside-reads-front', 'cg',
      "        points, layer, reason = self.source.envelope(ref, footprint_side(fp))",

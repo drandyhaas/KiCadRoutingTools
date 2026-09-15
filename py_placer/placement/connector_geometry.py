@@ -229,6 +229,36 @@ class ConnectorGeometry:
         self.bounds = getattr(pcb_data.board_info, 'board_bounds', None)
         self.source = _source(path, self.bounds)
         self.boundary_reason = self.source.boundary_reason
+        self._encloses = {}
+
+    def _encloses_own_pads(self, ref, fp, points):
+        """Does the envelope enclose the centroid of the part's own pads?
+
+        A closed convex drawing is not necessarily a body: a Fab layer that
+        carries only a pin-1 triangle is closed and convex, and reading it as
+        the body graded a part 1.25 mm over its edge as flush (round-2
+        review). Measured over the 22 tracked boards: 1079 envelopes are
+        measurable, 1078 of them on parts with pads, and every one of those
+        encloses its pads' centroid -- so this refuses markers without
+        refusing a body on the corpus. A padless part is not checked.
+        Pose-independent (local frame), so it is decided once per part."""
+        hit = self._encloses.get(ref)
+        if hit is None:
+            pads = ([p for p in (fp.pads or ())
+                     if getattr(p, 'pad_type', '') != 'np_thru_hole']
+                    or list(fp.pads or ()))
+            if not pads:
+                hit = True
+            else:
+                dx = sum(p.global_x for p in pads) / len(pads) - fp.x
+                dy = sum(p.global_y for p in pads) / len(pads) - fp.y
+                rot = math.radians(fp.rotation or 0.0)
+                c, s = math.cos(rot), math.sin(rot)
+                local = (c * dx - s * dy, s * dx + c * dy)
+                hit = all(_cross(a, b, local) >= -EPS
+                          for a, b in zip(points, points[1:] + points[:1]))
+            self._encloses[ref] = hit
+        return hit
 
     def rect(self, ref, pose=None):
         """`(board_rect, layer, reason)` of the drawn envelope at `pose`
@@ -240,6 +270,10 @@ class ConnectorGeometry:
         points, layer, reason = self.source.envelope(ref, footprint_side(fp))
         if points is None:
             return None, layer, reason
+        if not self._encloses_own_pads(ref, fp, points):
+            return None, layer, ('the drawn envelope does not enclose the '
+                                 'centroid of its own pads: a marker, not a '
+                                 'body outline')
         x, y, rot = pose if pose is not None else (fp.x, fp.y,
                                                     fp.rotation or 0.0)
         c, s = math.cos(math.radians(rot)), math.sin(math.radians(rot))

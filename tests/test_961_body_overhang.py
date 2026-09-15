@@ -326,12 +326,203 @@ class Coverage(_Boards):
         for a, b in zip(rect, (4.0, 9.0, 6.0, 11.0)):
             self.assertAlmostEqual(a, b, places=6)
 
+    def test_a_marker_is_not_a_body(self):
+        """A closed convex pin-1 triangle is not the part's outline."""
+        pads = ('(pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))\n'
+                '    (pad "2" smd rect (at 4 0) (size .5 .5) (layers "F.Cu"))')
+        path = self.synthetic(
+            'marker.kicad_pcb',
+            '(fp_poly (pts (xy -.6 -.6) (xy 0 -.6) (xy -.6 0)) (layer "F.Fab"))',
+            at='1.25 10 0', pads=pads)
+        pcb = parse_kicad_pcb(str(path))
+        row = ConnectorGeometry(pcb, str(path)).measure('J1', 'west')
+        self.assertFalse(row['body_measured'])
+        self.assertIn('marker', row['body_unmeasured_reason'])
+        # The same triangle drawn around both pads is a body.
+        path = self.synthetic(
+            'marker_ok.kicad_pcb',
+            '(fp_poly (pts (xy -1 -1) (xy 6 -1) (xy -1 6)) (layer "F.Fab"))',
+            at='1.25 10 0', pads=pads)
+        pcb = parse_kicad_pcb(str(path))
+        self.assertTrue(ConnectorGeometry(pcb, str(path)).measure(
+            'J1', 'west')['body_measured'])
+
     def test_unquoted_layer_token(self):
         path = self.synthetic('unquoted.kicad_pcb',
                               '(fp_rect (start -1 -1) (end 1 1) (layer F.Fab))')
         pcb = parse_kicad_pcb(str(path))
         self.assertTrue(ConnectorGeometry(pcb, str(path)).measure(
             'J1', 'west')['body_measured'])
+
+
+class Round2(_Boards):
+    """The round-2 review's regression, and branches nothing pinned."""
+
+    def _grade_j1(self, path, band, budget=None):
+        extra = {'_intent': {'legality_budget': budget}} if budget else {}
+        return floorplan.grade(
+            _intent(ref='J1', edge='west', overhang_mm=band, **extra),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+
+    def test_pad_copper_off_the_outline_is_never_licensed(self):
+        """Body flush with the edge, one pad 1.0 mm past it. The body band
+        passes; the copper must still fail the rule AND stay counted."""
+        body = '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))'
+        pads = ('(pad "1" smd rect (at -1.75 0) (size .5 .5) (layers "F.Cu"))\n'
+                '    (pad "2" smd rect (at .5 0) (size .5 .5) (layers "F.Cu"))')
+        path = self.synthetic('copper_off.kicad_pcb', body, at='1 10 0',
+                              pads=pads)
+        r = self._grade_j1(path, {'min': 0.0, 'max': 0.5}, {'oob_count': 0})
+        self.assertEqual(_evidence(r, 'J1')['overhang_basis'], 'body:F.Fab')
+        self.assertFalse(_overhang_violations(r, 'J1'))
+        hits = [v for v in r.violations
+                if v.ref == 'J1' and 'pad copper leaves' in v.message]
+        self.assertEqual(len(hits), 1)
+        self.assertAlmostEqual(hits[0].measured['outside_mm'], 1.0, places=4)
+        self.assertEqual(r.legality.get('oob_count_exempt'), 0)
+        self.assertFalse(r.passed)
+        # A CASTELLATED pad straddles the outline by design.
+        pads = ('(pad "1" thru_hole circle (at -1.75 0) (size .5 .5) '
+                '(drill .3) (layers "*.Cu") (property pad_prop_castellated))\n'
+                '    (pad "2" smd rect (at .5 0) (size .5 .5) (layers "F.Cu"))')
+        path = self.synthetic('castellated.kicad_pcb', body, at='1 10 0',
+                              pads=pads)
+        r = self._grade_j1(path, {'min': 0.0, 'max': 0.5}, {'oob_count': 0})
+        self.assertFalse([v for v in r.violations
+                          if v.ref == 'J1' and 'pad copper leaves' in v.message])
+        self.assertEqual(r.legality.get('oob_count_exempt'), 1)
+
+    def test_exemption_needs_the_census_to_have_counted_the_part(self):
+        path = self.usb1_at(-0.10)
+        r = floorplan.grade(
+            _intent(ref='USB1', edge='west', overhang_mm={'min': 0.0, 'max': 1.0},
+                    _intent={'legality_budget': {'oob_count': 99}}),
+            parse_kicad_pcb(str(path)), str(path),
+            clearance=.25, board_edge_clearance=.55)
+        # The body is 0.10 over and inside the band, but the pad box is
+        # 1.5 mm inboard, so the census never counted USB1: nothing to exempt.
+        self.assertAlmostEqual(_evidence(r)['overhang_mm'], 0.10, places=4)
+        self.assertEqual(r.legality.get('oob_count_exempt'), 0)
+
+    def test_unusable_fab_does_not_fall_back_to_silk(self):
+        path = self.synthetic(
+            'fab_open.kicad_pcb',
+            '(fp_line (start -1 -1) (end 1 -1) (layer "F.Fab")) '
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.SilkS"))')
+        row = ConnectorGeometry(parse_kicad_pcb(str(path)), str(path)).measure(
+            'J1', 'west')
+        self.assertFalse(row['body_measured'])
+        self.assertEqual(row['body_layer'], 'F.Fab')
+
+    def test_a_cutout_makes_the_boundary_unmeasured(self):
+        path = self.root / 'cutout.kicad_pcb'
+        path.write_text(
+            '(kicad_pcb (version 20241229) (generator "t961")\n'
+            '  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))\n'
+            '  (gr_circle (center 10 15) (end 11 15) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "F.Cu") (at 5 10 0)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))\n'
+            '    (pad "1" smd rect (at 0 0) (size .5 .5) (layers "F.Cu"))))\n',
+            encoding='utf-8')
+        row = ConnectorGeometry(parse_kicad_pcb(str(path)), str(path)).measure(
+            'J1', 'west')
+        self.assertFalse(row['body_measured'])
+        self.assertIn('boundary', row['body_unmeasured_reason'])
+
+    def test_a_text_box_is_not_body_geometry(self):
+        path = self.synthetic(
+            'textbox.kicad_pcb',
+            '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab")) '
+            '(fp_text_box "VAL" (start -3 -3) (end 3 3) (layer "F.Fab") '
+            '(effects (font (size 1 1) (thickness .15))))')
+        row = ConnectorGeometry(parse_kicad_pcb(str(path)), str(path)).measure(
+            'J1', 'west')
+        self.assertTrue(row['body_measured'])
+        self.assertAlmostEqual(row['body_setback_mm'], 4.0, places=6)
+
+    def test_emitter_widens_on_the_summed_body(self):
+        """West overhang 0.2 and north 0.3 (sum 0.5) under an occupancy
+        reading of 0.30: the declared edge alone would not widen."""
+        path = self.synthetic(
+            'widen_sum.kicad_pcb',
+            '(fp_rect (start -1.2 -.8) (end 1 1.6) (layer "F.Fab"))',
+            at='1.0 0.5 0',
+            pads='(pad "1" smd rect (at -.5 1.2) (size .5 .5) (layers "F.Cu"))')
+        pcb = parse_kicad_pcb(str(path))
+        doc = floorplan.emit_intent(pcb, str(path))
+        j1 = [e for e in doc['edge_connectors'] if e['ref'] == 'J1']
+        self.assertEqual(len(j1), 1, doc['edge_connectors'])
+        self.assertEqual(j1[0].get('edge'), 'west', j1[0])
+        self.assertAlmostEqual(j1[0]['overhang_mm']['max'], 1.0, places=3)
+        self.assertIn("drawn body's", j1[0].get('note', ''))
+
+    def test_second_rung_moves_the_body_onto_target_on_every_edge(self):
+        from placement.connector_geometry import geometry_for
+        path = self.synthetic('rung.kicad_pcb',
+                              '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))',
+                              at='10 10 0')
+        pcb = parse_kicad_pcb(str(path))
+        st = pose_score.make_state(pcb, str(path), clearance=.25,
+                                   board_edge_clearance=.55)
+        geo = geometry_for(st, st.pcb_data, st.pcb_file)
+        rot = st.parts['J1'].rot
+        band = (0.25, 0.35)
+        for edge, start, want in (
+                ('west', (0.2, 10.0), (0.7, 10.0)),
+                ('east', (19.8, 10.0), (19.3, 10.0)),
+                ('north', (10.0, 0.2), (10.0, 0.7)),
+                ('south', (10.0, 19.8), (10.0, 19.3)),
+                # An INBOARD start is below `lo` and must move out too.
+                ('west', (1.5, 10.0), (0.7, 10.0))):
+            x, y, ok = seeder._body_band_correct(st, 'J1', edge, *start,
+                                                 0.3, band)
+            self.assertTrue(ok, (edge, start))
+            self.assertAlmostEqual(x, want[0], places=6, msg=(edge, start))
+            self.assertAlmostEqual(y, want[1], places=6, msg=(edge, start))
+            self.assertAlmostEqual(geo.measure('J1', edge, (x, y, rot))[
+                'body_outside_mm'], 0.3, places=6)
+        # A corner the rung cannot resolve (0.5 over the north edge already)
+        # is reported as not converged, never claimed.
+        _x, _y, ok = seeder._body_band_correct(st, 'J1', 'west', 0.2, 0.5,
+                                               0.3, band)
+        self.assertFalse(ok)
+
+    def test_seat_edge_ladder_seats_on_the_body_band(self):
+        """A body reaching 3 mm west of its only pad: the occupancy walk
+        puts the pad off the board, so only the body rung can seat it."""
+        from placement.connector_geometry import geometry_for
+        path = self.synthetic('seat.kicad_pcb',
+                              '(fp_rect (start -3 -1) (end 1 1) (layer "F.Fab"))',
+                              at='10 10 0')
+        pcb = parse_kicad_pcb(str(path))
+        st = pose_score.make_state(pcb, str(path), clearance=.25,
+                                   board_edge_clearance=.55)
+        notes = []
+        entry = {'ref': 'J1', 'edge': 'west',
+                 'overhang_mm': {'min': 0.9, 'max': 1.1}}
+        self.assertTrue(seeder._seat_edge(st, 'J1', dict(entry), set(), notes),
+                        notes)
+        p = st.parts['J1']
+        self.assertAlmostEqual(geometry_for(st, st.pcb_data, st.pcb_file).measure(
+            'J1', 'west', (p.x, p.y, p.rot))['body_outside_mm'], 1.0, delta=0.02)
+
+    def test_stage_one_seats_on_the_body_band(self):
+        """esp_prog, USB1 declared west {1.25, 1.35}: stage 1's slide and its
+        final walk both take the body rung. The pose is a change detector,
+        measured at the commit that added it."""
+        import random
+        entry = {'ref': 'USB1', 'edge': 'west',
+                 'overhang_mm': {'min': 1.25, 'max': 1.35}}
+        res = seeder.seed_from_intent(
+            parse_kicad_pcb(str(SOURCE)), str(SOURCE), _intent(**entry),
+            random.Random(0), clearance=.25, board_edge_clearance=.55,
+            seed_refs={'USB1'})
+        usb1 = [q for q in res['placements'] if q['reference'] == 'USB1']
+        self.assertEqual(len(usb1), 1, res.get('notes'))
+        self.assertAlmostEqual(usb1[0]['new_x'], 116.2, places=3)
+        self.assertAlmostEqual(usb1[0]['new_y'], 98.25, places=3)
 
 
 class LegacyFallback(_Boards):
@@ -379,9 +570,12 @@ class Geometry(_Boards):
                 # A rounded KiCad 10 rect: sharp corners would overstate it.
                 ('(fp_rect (start 0 0) (end 4 4) (radius 0.5) (layer "F.Fab"))',
                  False),
-                # An arc inside `pts` bulges past its chord.
-                ('(fp_poly (pts (xy 0 0) (arc (start 4 0) (mid 5 2) (end 4 4)) '
-                 '(xy 0 4)) (layer "F.Fab"))', False),
+                # An arc inside `pts` bulges past its chord. FOUR `xy` points,
+                # so without the arc refusal this would measure as the chord
+                # square (a two-point fixture is unmeasured either way, which
+                # let that refusal be deleted with this test green).
+                ('(fp_poly (pts (xy 0 0) (xy 4 0) (arc (start 4 0) (mid 5 2) '
+                 '(end 4 4)) (xy 4 4) (xy 0 4)) (layer "F.Fab"))', False),
                 ('', False)):
             path = self.synthetic('shape.kicad_pcb', drawing, at='2.5 10 45')
             pcb = parse_kicad_pcb(str(path))

@@ -1696,11 +1696,12 @@ class _Ctx:
         against `legality_budget.oob_count` anyway.
 
         #961: TWO readings, on purpose. "Counted" is still the census number
-        below; "inside the band" is the band's own currency, the same one
-        `rule_edge_connector` grades -- the drawn body where it can be
-        measured, the census number where it cannot. So exempt and violation
-        stay one fact, and the next paragraph's "one number" now holds only
-        for a part whose body cannot be measured.
+        described below; "inside the band" is the band's own currency -- the
+        drawn body where it can be measured (what `rule_edge_connector`
+        grades), else that census number. Where no body is measured the "one
+        number" below holds as it did before, including its old caveat: the
+        census skips the part's own milled rings and the rule does not, so
+        the two differ for a part that owns milled rings.
 
         Measured, run 26: an intent declaring `CON1 east overhang 0..0.5` and
         `legality_budget {oob_count: 0}` (the emitter bakes the pile's own 0)
@@ -1736,7 +1737,12 @@ class _Ctx:
                 # still decides whether the census counted the part at all.
                 band, _basis, _body = _band_amount(self, ref, c.get('edge'),
                                                    amt)
-                if (amt > legality.EPS
+                # The same body path that must still see copper off the
+                # outline (`rule_edge_connector`): a part with pads past the
+                # edge stays counted, whatever its body reads.
+                copper_ok = (not _body.get('body_measured')
+                             or _copper_outside_mm(self, ref) <= legality.EPS)
+                if (amt > legality.EPS and copper_ok
                         and lo - legality.EPS <= band <= hi + legality.EPS):
                     out[ref] = float(band)
             self._oob_exempt = out
@@ -2691,7 +2697,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         lo = float(lim.get('min', 0.0))
         hi = lim.get('max')
         # #961: the band is graded on the DRAWN BODY's overhang past the
-        # declared edge, at zero margin, wherever that body can be measured.
+        # outline -- summed over the sides it crosses, the form of the reading
+        # it replaces -- at zero margin, wherever that body can be measured.
         # `amount` is the occupancy reading at the gate's margin -- `margin -
         # gap` inside the board, `overhang + margin` outside -- and graded
         # alone it let esp_prog's USB1, 0.15 mm INSIDE its edge, read 0.10 and
@@ -2719,6 +2726,26 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                 measured={'overhang_mm': round(band, 4),
                           'overhang_basis': overhang_basis},
                 expected={'min': lo, 'max': float(hi)})
+        # A band licenses the BODY, never copper. The occupancy reading this
+        # replaced carried any pad copper in front of the body (a courtyard,
+        # often the pad box itself); the body reading does not, so on the body
+        # path copper past the outline is named here, or a part with its pads
+        # off the board would grade clean where it used to fail.
+        copper_out = (_copper_outside_mm(ctx, ref)
+                      if body.get('body_measured') else 0.0)
+        if copper_out > legality.EPS:
+            yield Violation(
+                rule='edge_connector', severity=ctx.sev('edge_connector'),
+                ref=ref, message=(f"{ref}'s pad copper leaves the outline by "
+                                  f"{copper_out:.2f}mm; its band is graded on "
+                                  f"the drawn body ({overhang_basis}) and "
+                                  f"licenses no copper"),
+                measured={'pad_copper_outside_mm': round(copper_out, 4),
+                          # `_charge` in the seeder's repair census reads its
+                          # magnitude from `outside_mm`.
+                          'outside_mm': round(copper_out, 4),
+                          'overhang_basis': overhang_basis},
+                expected={'pad_copper_outside_mm': 0.0})
         evidence = _connector_evidence(ctx, c, ref, band, overhang_basis, body,
                                        lo, hi)
         # The SEAT BASIS, decided once for the two conjuncts that ask where
@@ -2851,6 +2878,33 @@ def _band_amount(ctx, ref, edge, legacy_amount):
                        legacy_amount, ctx.gate.margin)
 
 
+def _copper_outside_mm(ctx, ref):
+    """How far a declared connector's pad copper reaches past the outline, at
+    zero margin: the largest `-gap` among its own edge-clearance findings.
+
+    #961's round-2 review: a band graded on the drawn body stops seeing pad
+    copper that sits in front of that body, which the occupancy reading (a
+    courtyard, often the pad box itself) always carried. A band licenses the
+    body, never copper, so the body path must still see it. Castellated pads
+    straddle the outline by design and are skipped. 0.0 when nothing leaves
+    the board; findings from a sampled (non-rectangular) outline carry no gap
+    and are not counted, which is harmless because the body path only runs on
+    rectangular outlines."""
+    fp = ctx.pcb.footprints.get(ref)
+    prefix = ref + '.'
+    worst = 0.0
+    for f in ctx.connector_copper()['findings']:
+        if not str(f['pad_ref']).startswith(prefix) or f.get('gap_mm') is None:
+            continue
+        pads = getattr(fp, 'pads', None) or ()
+        index = f.get('pad_index')
+        if (isinstance(index, int) and index < len(pads)
+                and getattr(pads[index], 'castellated', False)):
+            continue
+        worst = max(worst, -float(f['gap_mm']))
+    return worst
+
+
 def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
     """One `edge_connector_evidence` row (#961): the band's number and
     currency, the body measurements behind it, and the part's pad-copper edge
@@ -2900,6 +2954,9 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
             'minimum_gap_mm': r4(gap),
             'shortfall_mm': round(max((f['shortfall_mm'] for f in findings),
                                       default=0.0), 4),
+            # Past the outline itself, castellated pads excepted: the number
+            # the body path's copper conjunct grades (0.0 = on the board).
+            'outside_mm': round(_copper_outside_mm(ctx, ref), 4),
             'findings': findings, 'unmeasured': unmeasured,
             'rules_unmeasured': copper['rules_unmeasured'],
             'disposition': copper_disposition,
@@ -4829,12 +4886,11 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 # blesses -- a pad-box courtyard 1.6 mm inboard of a flush
                 # body is esp_prog's USB1. Widen to the body in that case
                 # alone, and say so: where the body reads no more than `amt`
-                # the emitted band is unchanged. Measured on the tracked
-                # corpus: the widening never fires and no body-measured
-                # emitted entry crosses a second edge, so an emitted intent
-                # still grades clean there -- a MEASUREMENT, pinned by
-                # tests/test_961_body_overhang.py, not a construction: a body
-                # over two edges would draw the second-edge violation.
+                # the emitted band is unchanged. Either way `max` is at least
+                # the number the rule grades (`body_outside_mm`, or `amt`
+                # itself when no body is measured) plus 0.5, so an edged
+                # entry still grades its band clean by construction. Measured
+                # on the 22 tracked boards: the widening never fires.
                 if body_geometry is None:
                     from .connector_geometry import ConnectorGeometry
                     body_geometry = ConnectorGeometry(pcb_data, pcb_file)

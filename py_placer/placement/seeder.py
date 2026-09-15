@@ -1323,7 +1323,9 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
     """Walk the pose along the edge normal until the MEASURED overhang hits
     `target`. The analytic pose measures against the bounding box, but the
     grade's rule_edge_connector measures rect_outside_amount against the real
-    Edge.Cuts rings -- on a non-rectangular outline the two differ by the
+    Edge.Cuts rings (since #961 it grades the drawn body instead wherever one
+    can be measured, which `band` and `_body_band_correct` follow) -- on a
+    non-rectangular outline the two differ by the
     local inset, and a seed placed by the bbox grades over its declared band
     (measured on splitflap: 4 connectors 0.1-0.2mm past their max).
 
@@ -1376,8 +1378,15 @@ def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
     inboard of a body flush with the west edge. A pose the walk converged on
     and the body band accepts is returned UNCHANGED, so every seat upstream
     produced that is still legal is bit-identical. Only a pose the band would
-    refuse is moved, analytically, to put the body's signed position on
+    refuse is moved, analytically, to put the body's summed overhang on
     `target`; a body that cannot be measured leaves the walk's pose alone.
+
+    What that does NOT promise: that every seat is the one upstream chose.
+    Where upstream REFUSED the walk's pose and went on to another rung or
+    rotation, this rung can make that pose legal and seat it first --
+    measured by the round-2 review with declared rotations [0, 180]: upstream
+    seated at 180 deg, this seats at 0 deg, and the 180 deg seat is still
+    legal. The author's first rotation winning is the intended direction.
     """
     from .connector_geometry import geometry_for
     part = state.parts[ref]
