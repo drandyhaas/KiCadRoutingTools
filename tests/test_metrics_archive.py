@@ -288,6 +288,28 @@ def t_the_pcm_card_names_the_climbing_release_not_the_biggest_pile():
           M.currently_accumulating({'a': snap(10, 1), 'b': snap(10, 1)}) is None)
 
 
+def t_chart_labels_do_not_scale_with_the_page():
+    """No <text> inside a chart SVG -- axis labels must be HTML.
+
+    The plot is width:100% with preserveAspectRatio="none", which is right for
+    the geometry and fatal for type: it scales the SVG's coordinate system, so
+    embedded <text> grows on a wide window and shrinks to nothing on a narrow
+    one, stretched horizontally either way. Labels therefore live in HTML
+    beside the plot, and strokes carry vector-effect so a 2px line stays 2px.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        flat = _render_into(tmp, {'last_collected': 'x', 'errors': {}})
+    # Non-vacuity: there must BE charts to have got this wrong.
+    check('t_the_page_has_charts', flat.count('<svg') >= 2,
+          f"{flat.count('<svg')} chart(s) rendered")
+    check('t_chart_labels_do_not_scale_with_the_page',
+          '<text' not in flat,
+          'no <text> inside any chart SVG')
+    check('t_axis_labels_are_html', 'class="yl"' in flat and 'class="xaxis"' in flat)
+    check('t_strokes_do_not_stretch', 'non-scaling-stroke' in flat)
+
+
 def t_a_failed_endpoint_is_disclosed_not_hidden():
     with tempfile.TemporaryDirectory() as tmp:
         clean = _render_into(tmp, {'last_collected': 'x', 'errors': {}})
@@ -313,6 +335,7 @@ def main():
     t_the_spread_conserves_every_download()
     t_thinning_never_moves_a_lifetime_total()
     t_the_pcm_card_names_the_climbing_release_not_the_biggest_pile()
+    t_chart_labels_do_not_scale_with_the_page()
     t_a_failed_endpoint_is_disclosed_not_hidden()
     print()
     if FAILS:

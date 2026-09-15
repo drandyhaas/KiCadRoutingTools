@@ -306,7 +306,47 @@ def _esc(s):
             .replace('>', '&gt;').replace('"', '&quot;'))
 
 
-def _line_chart(series, width=880, height=200, pad=32):
+def _axis_frame(svg, top, left_label, right_label, height=200):
+    """Wrap a stretched plot in HTML axis labels.
+
+    THE PROBLEM THIS SOLVES: the plot SVG is `width:100%` with
+    `preserveAspectRatio="none"`, which is right for the GEOMETRY -- the series
+    should fill whatever width the page has -- but it scales the SVG's internal
+    coordinate system, so any <text> inside scales and stretches with it. Axis
+    numbers ended up huge on a wide window and unreadable on a narrow one, in a
+    font nobody chose.
+
+    So no text goes in the SVG at all. The tick values and end dates are HTML,
+    positioned around the plot, and therefore sit at a real CSS font size at
+    every width. Strokes carry `vector-effect="non-scaling-stroke"` for the same
+    reason: a 2px line must stay 2px, not stretch with the viewBox.
+    """
+    ticks = ''.join(
+        f'<span class="yl" style="top:{(1 - frac) * 100:.0f}%">'
+        f'{_fmt_tick(top * frac)}</span>' for frac in (1, 0.5, 0))
+    return (f'<div class="plotbox" style="--ph:{height}px">{ticks}'
+            f'<div class="plot">{svg}</div></div>'
+            f'<div class="xaxis"><span>{_esc(left_label)}</span>'
+            f'<span>{_esc(right_label)}</span></div>')
+
+
+def _fmt_tick(v):
+    """Axis numbers stay short so a narrow gutter never truncates them."""
+    v = float(v)
+    if v >= 1000:
+        return f'{v / 1000:.1f}k'.replace('.0k', 'k')
+    if v >= 10 or v == int(v):
+        return f'{int(round(v))}'
+    return f'{v:.1f}'
+
+
+def _legend(series):
+    return '<div class="legend">' + ' '.join(
+        f'<span class="key"><i style="background:{s["color"]}"></i>'
+        f'{_esc(s["label"])}</span>' for s in series) + '</div>'
+
+
+def _line_chart(series, width=880, height=200):
     """Inline SVG, no dependencies -- the page must render from a file:// URL."""
     days = sorted(set().union(*[set(s['points']) for s in series if s['points']])
                   or {''})
@@ -314,10 +354,11 @@ def _line_chart(series, width=880, height=200, pad=32):
     if not days:
         return '<p class="muted">no data yet</p>'
     top = max([max(s['points'].values() or [0]) for s in series] + [1])
-    w, h = width - 2 * pad, height - 2 * pad
+    pad = 3.0
+    w, h = width, height - 2 * pad
 
     def xy(i, v):
-        x = pad + (w * i / max(1, len(days) - 1))
+        x = w * i / max(1, len(days) - 1)
         y = pad + h - (h * v / top)
         return f'{x:.1f},{y:.1f}'
 
@@ -325,20 +366,15 @@ def _line_chart(series, width=880, height=200, pad=32):
            f'preserveAspectRatio="none" role="img">']
     for frac in (0, 0.5, 1):
         y = pad + h - h * frac
-        out.append(f'<line x1="{pad}" y1="{y:.1f}" x2="{pad + w}" y2="{y:.1f}" '
-                   f'class="grid"/>')
-        out.append(f'<text x="4" y="{y + 4:.1f}" class="tick">{int(top * frac)}</text>')
+        out.append(f'<line x1="0" y1="{y:.1f}" x2="{w}" y2="{y:.1f}" '
+                   f'class="grid" vector-effect="non-scaling-stroke"/>')
     for s in series:
         pts = ' '.join(xy(i, s['points'].get(d, 0)) for i, d in enumerate(days))
         out.append(f'<polyline points="{pts}" fill="none" stroke="{s["color"]}" '
-                   f'stroke-width="2" stroke-linejoin="round"/>')
-    out.append(f'<text x="{pad}" y="{height - 8}" class="tick">{days[0]}</text>')
-    out.append(f'<text x="{pad + w}" y="{height - 8}" class="tick" '
-               f'text-anchor="end">{days[-1]}</text>')
+                   f'stroke-width="2" stroke-linejoin="round" '
+                   f'vector-effect="non-scaling-stroke"/>')
     out.append('</svg>')
-    legend = ' '.join(f'<span class="key"><i style="background:{s["color"]}"></i>'
-                      f'{_esc(s["label"])}</span>' for s in series)
-    return ''.join(out) + f'<div class="legend">{legend}</div>'
+    return _axis_frame(''.join(out), top, days[0], days[-1], height) + _legend(series)
 
 
 def spread_downloads(rows, today=None):
@@ -392,43 +428,33 @@ def spread_downloads(rows, today=None):
     return out
 
 
-def _grouped_bars(rows, series, width=880, height=220, pad=34):
-    """Two bars per category, inline SVG. `rows` = [(label, {key: value})].
-
-    Linear, not log, and deliberately: PCM installs concentrate on whichever
-    release PCM points at, so one bar towering over the rest IS the finding.
-    A log axis would flatten it into a tidy picture that hides the shape of how
-    this project is actually installed.
-    """
+def _grouped_bars(rows, series, width=880, height=220):
+    """Two bars per category. Labels live in HTML -- see `_axis_frame`."""
     if not rows:
         return '<p class="muted">no data yet</p>'
     top = max([v for _, d in rows for v in d.values()] + [1])
-    w, h = width - 2 * pad, height - 2 * pad
+    pad = 3.0
+    w, h = width, height - 2 * pad
     slot = w / max(1, len(rows))
-    bw = min(14.0, max(2.0, slot / (len(series) + 1)))
-    out = [f'<svg viewBox="0 0 {width} {height}" class="chart chart-tall" '
+    bw = max(1.5, slot / (len(series) + 1))
+    out = [f'<svg viewBox="0 0 {width} {height}" class="chart" '
            f'preserveAspectRatio="none" role="img">']
     for frac in (0, 0.5, 1):
         y = pad + h - h * frac
-        out.append(f'<line x1="{pad}" y1="{y:.1f}" x2="{pad + w}" y2="{y:.1f}" class="grid"/>')
-        out.append(f'<text x="2" y="{y + 4:.1f}" class="tick">{int(top * frac):,}</text>')
+        out.append(f'<line x1="0" y1="{y:.1f}" x2="{w}" y2="{y:.1f}" '
+                   f'class="grid" vector-effect="non-scaling-stroke"/>')
     for i, (label, vals) in enumerate(rows):
-        base = pad + i * slot + (slot - bw * len(series)) / 2
+        base = i * slot + (slot - bw * len(series)) / 2
         for j, (key, colour, sname) in enumerate(series):
             v = vals.get(key, 0)
             bh = h * v / top
-            x = base + j * bw
             out.append(
-                f'<rect x="{x:.1f}" y="{pad + h - bh:.1f}" width="{bw - 1:.1f}" '
-                f'height="{max(bh, 0.6):.1f}" fill="{colour}">'
+                f'<rect x="{base + j * bw:.2f}" y="{pad + h - bh:.1f}" '
+                f'width="{bw * 0.9:.2f}" height="{max(bh, 0.6):.1f}" fill="{colour}">'
                 f'<title>{_esc(label)} — {_esc(sname)}: {v:,}</title></rect>')
-    out.append(f'<text x="{pad}" y="{height - 8}" class="tick">{_esc(rows[0][0])}</text>')
-    out.append(f'<text x="{pad + w}" y="{height - 8}" class="tick" '
-               f'text-anchor="end">{_esc(rows[-1][0])}</text>')
     out.append('</svg>')
-    legend = ' '.join(f'<span class="key"><i style="background:{c}"></i>{_esc(n)}</span>'
-                      for _k, c, n in series)
-    return ''.join(out) + f'<div class="legend">{legend}</div>'
+    return (_axis_frame(''.join(out), top, rows[0][0], rows[-1][0], height)
+            + _legend([{'color': c, 'label': n} for _k, c, n in series]))
 
 
 def _bars(rows, unit=''):
@@ -738,8 +764,14 @@ th {{ font-weight:600 }}
 .bars th {{ width:34%; font-weight:400 }}
 .barcell {{ width:50% }}
 .bar {{ display:block; height:9px; border-radius:3px; background:#3b82f6; min-width:2px }}
-.chart {{ width:100%; height:200px; display:block }}
-.chart-tall {{ height:220px }}
+.plotbox {{ position:relative; padding-left:42px }}
+.plotbox .yl {{ position:absolute; left:0; width:36px; text-align:right;
+  font-size:11px; line-height:1; color:var(--muted); transform:translateY(-50%);
+  font-variant-numeric:tabular-nums }}
+.plot {{ height:var(--ph,200px) }}
+.chart {{ width:100%; height:100%; display:block }}
+.xaxis {{ display:flex; justify-content:space-between; padding-left:42px;
+  font-size:11px; color:var(--muted); margin-top:4px }}
 .grid {{ stroke:var(--line) }}
 .tick {{ fill:var(--muted); font-size:10px }}
 .legend {{ font-size:.82rem; color:var(--muted); margin-top:6px }}
