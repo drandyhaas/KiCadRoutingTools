@@ -419,7 +419,7 @@
   },
   "v0.22.0": {
    "assets": {
-    "KiCadRoutingTools-0.22.0.zip": 175,
+    "KiCadRoutingTools-0.22.0.zip": 176,
     "grid_router-linux-x86_64.so": 347,
     "grid_router-macos-arm64.so": 237,
     "grid_router-macos-x86_64.so": 61,
