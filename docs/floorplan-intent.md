@@ -294,6 +294,45 @@ rectangle, yet its east and west ring spans are identical to the bbox on all 13
 of its entries, so abstaining per *board* rather than per *edge* would throw
 away 13 correct measurements.
 
+### The overhang band is graded on the drawn body (#961)
+
+`overhang_mm` used to be graded on `rect_outside_amount(courtyard)`, which is
+a clearance shortfall at the gate's margin (`margin − gap` inside the board,
+`overhang + margin` outside), not an overhang. On esp_prog, USB1 moved 1.45 mm
+west has its drawn body 1.45 mm over the edge. The old reading was 0.10 at
+margin 0.25 and 0.40 at 0.55, so the same board passed `{min 0.05, max 0.20}`
+at one margin and failed it at the other.
+
+The band is now graded on the **drawn body's signed position past the
+declared `edge`, at zero margin**, whenever that body can be measured. That
+means a closed convex Fab outline (else SilkS) and a rectangular Edge.Cuts
+outline. A zero `min` is therefore nonbinding and a positive `min` is a real
+conjunct. A body that also crosses a *second* edge is named when the band has
+a `max`, since a band licenses its own edge only.
+
+When no body can be measured, the band is graded exactly as before, on the
+occupancy reading. Unmeasurable cases include a courtyard-only part, an arc
+in the Fab drawing, a non-rectangular outline, or an entry with no `edge`.
+Nothing is withheld or abstained, and the basis says which reading was used.
+The seat conjunct's "no overhang" gate, the nearest-edge identity, the class
+setback defaults and the `connector_affinity` warning are **unchanged**. The
+seeder's `edge_seat_ok` and `_Ctx.oob_exempt` grade the band in the same
+currency as the rule.
+
+Every declared connector on the board gets a row in `edge_connector_evidence`
+(`--json`), including passing ones. Each row carries:
+- `overhang_mm` and `overhang_basis` (`body:F.Fab` or
+  `legacy_occupancy@margin=<m>`), plus the limit and a disposition;
+- the body's signed position, setback and other-edge overhang, or
+  `body_unmeasured_reason`;
+- `pad_copper_edge`: the part's pad-copper edge clearance from
+  `grade_pad_edge_clearance`, at the floor `grade_pad_legality` resolves. This
+  is the channel `check_drc --check-pad-edge` grades, and it is reported
+  alongside the body because a legal body overhang does not make the copper
+  legal. It is evidence only, never a violation.
+
+The same keys are added to the entry's `edge_seating` row when one exists.
+
 ### `refs` is the primitive, not `group`
 
 Sheet group keys are opaque uuid paths — KiCad's `Sheetname` property is absent
@@ -362,7 +401,7 @@ for it, and the reason is printed:
 | `assembly_side` | a part sits on a face the board's declared assembly policy does not populate. **warn** by default (#837): nothing in the engine can move a part between faces, so an error would be a red mark no run could clear | `legality.assembly_census`, body face — the pad-bearing population, so a zero-pad graphic on the back is not a part |
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way — and since [#797](https://github.com/drandyhaas/KiCadRoutingTools/issues/797) the seat search refuses such a pose too, with the verdict `zone_exclusive_blocks` |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
-| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
+| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | the band: the drawn body's signed position past `edge` (`connector_geometry`, #961), else `BoardOutlineGate.rect_outside_amount`; the seat: `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
 | `decap_ungraded` | a cap in scope lies BEYOND the tether search radius, so `decap_distance` never measured it against the declared limit — a claim about COVERAGE, not compliance. **warn** by default ([#794](https://github.com/drandyhaas/KiCadRoutingTools/issues/794)) | `groups.decap_populations` (`beyond`) |
 | `decap_pin_distance` | a DECLARED supply pin is further than `max_pin_distance_mm` from the nearest decoupling cap on its own rail, pad edge to pad edge ([#705](https://github.com/drandyhaas/KiCadRoutingTools/issues/705)) | `floorplan.supply_pins`, `legality.pad_rect` + `rect_gap` |

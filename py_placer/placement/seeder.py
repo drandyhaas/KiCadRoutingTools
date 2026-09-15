@@ -1319,7 +1319,7 @@ def _edge_pose(part, bounds, edge: str, frac: float, overhang: float
 
 
 def _edge_correct(state, ref: str, edge: str, x: float, y: float,
-                  target: float) -> Tuple[float, float, bool]:
+                  target: float, band=None) -> Tuple[float, float, bool]:
     """Walk the pose along the edge normal until the MEASURED overhang hits
     `target`. The analytic pose measures against the bounding box, but the
     grade's rule_edge_connector measures rect_outside_amount against the real
@@ -1358,7 +1358,49 @@ def _edge_correct(state, ref: str, edge: str, x: float, y: float,
         # that happened to land on its target on the final step is converged.
         amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
         converged = abs(target - amt) < 0.02
+    if band is not None and converged:
+        return _body_band_correct(state, ref, edge, x, y, target, band)
     return x, y, converged
+
+
+def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
+                       target: float, band) -> Tuple[float, float, bool]:
+    """#961: the second rung of `_edge_correct`, taken only when the first
+    rung's pose would be REFUSED by the band `edge_seat_ok` now grades.
+
+    The walk above converges `rect_outside_amount` -- the occupancy reading
+    at the gate's margin -- on `target`. Where the part's drawn body can be
+    measured, the band is graded on the body instead (see
+    `connector_geometry`), and the two disagree by the margin and by any gap
+    between courtyard and body: esp_prog's USB1 has a pad-box courtyard 1.6 mm
+    inboard of a body flush with the west edge. A pose the walk converged on
+    and the body band accepts is returned UNCHANGED, so every seat upstream
+    produced that is still legal is bit-identical. Only a pose the band would
+    refuse is moved, analytically, to put the body's signed position on
+    `target`; a body that cannot be measured leaves the walk's pose alone.
+    """
+    from .connector_geometry import geometry_for
+    part = state.parts[ref]
+    geometry = geometry_for(state, state.pcb_data, state.pcb_file)
+    row = geometry.measure(ref, edge, (x, y, part.rot))
+    lo, hi = band
+    if (not row['body_measured']
+            or (lo - 0.02) <= row['body_overhang_mm'] <= (hi + 0.02)):
+        return x, y, True
+    err = target - row['body_signed_position_mm']
+    if edge == 'north':
+        y -= err
+    elif edge == 'south':
+        y += err
+    elif edge == 'west':
+        x -= err
+    else:
+        x += err
+    row = geometry.measure(ref, edge, (x, y, part.rot))
+    return x, y, (row['body_measured']
+                  and abs(target - row['body_overhang_mm']) < 0.02
+                  and not any(v > 1e-6 for v in
+                              row['other_body_edge_overhang_mm'].values()))
 
 
 def edge_seat_ok(state, part, x: float, y: float, edge: str,
@@ -1405,7 +1447,23 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     """
     r, tht = part.rects(x, y, part.rot)
     amt = state.edge_gate.rect_outside_amount(r)
+    # #961: the band in the currency `rule_edge_connector` now grades it in
+    # -- the drawn body at zero margin where it can be measured, `amt` itself
+    # where it cannot -- so "a seat accepted here is not a violation there"
+    # keeps holding. A body crossing a SECOND edge is never a seat; the
+    # occupancy reading refused it by summing the sides it crossed.
+    from .connector_geometry import band_amount, geometry_for
+    amt, _basis, body = band_amount(
+        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
+        amt, state.edge_gate.margin, pose=(x, y, part.rot))
     if not ((lo - 0.02) <= amt <= (hi + 0.02)):
+        return False
+    crossed = sorted(e for e, v in
+                     (body.get('other_body_edge_overhang_mm') or {}).items()
+                     if v > 1e-6)
+    if crossed:
+        if reasons is not None:
+            reasons.extend(f"drawn body over the {e} edge" for e in crossed)
         return False
     _blockers = state.keepout_blockers(part.ref, (r, tht))
     if _blockers:
@@ -1838,7 +1896,7 @@ def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
                 frac = min(f_hi, max(f_lo, cur + df * step))
                 x, y = _edge_pose(part, state.board, edge, frac, overhang)
                 x, y, converged = _edge_correct(state, ref, edge, x, y,
-                                                overhang)
+                                                overhang, band=(lo, hi_eff))
                 if not converged or not on_board(x, y):
                     continue
                 if conflict_free(x, y, rot):
@@ -2364,8 +2422,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
             for _df in _slide:
                 frac = min(f_hi, max(f_lo, _base_frac + _df * _sstep))
                 _x, _y = _edge_pose(part, bounds, edge, frac, overhang)
-                _x, _y, _conv = _edge_correct(state, ref, edge, _x, _y,
-                                              overhang)
+                _x, _y, _conv = _edge_correct(
+                    state, ref, edge, _x, _y, overhang,
+                    band=(lo, float(hi) if hi is not None
+                          else max(2.0 * overhang, lo + 1.0)))
                 _why = []
                 if _conv and edge_seat_ok(state, part, _x, _y, edge, lo,
                                           float(hi) if hi is not None
@@ -2386,7 +2446,10 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         f"conflict is left for the gate -- narrow the band, "
                         f"or move what it crowds")
             x, y = _edge_pose(part, bounds, edge, frac, overhang)
-            x, y, converged = _edge_correct(state, ref, edge, x, y, overhang)
+            x, y, converged = _edge_correct(
+                state, ref, edge, x, y, overhang,
+                band=(lo, float(hi) if hi is not None
+                      else max(2.0 * overhang, lo + 1.0)))
             if not converged:
                 # The walk diverged (it drives a scalar SUM along one axis, so
                 # an along-edge overshoot never cancels). It used to

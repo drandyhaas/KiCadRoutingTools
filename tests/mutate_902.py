@@ -46,8 +46,11 @@ TARGETS = {
     'db': os.path.join(REPO, 'py_placer', 'placement', 'design_brief.py'),
     'cf': os.path.join(REPO, 'py_tools', 'check_floorplan.py'),
     'bc': os.path.join(REPO, 'py_tools', 'board_context.py'),
+    'sd': os.path.join(REPO, 'py_placer', 'placement', 'seeder.py'),
+    'cg': os.path.join(REPO, 'py_placer', 'placement', 'connector_geometry.py'),
 }
 
+T961 = 'tests/test_961_body_overhang.py'
 T902 = 'tests/test_902_proximity.py'
 T895 = 'tests/test_895_boundary_criteria.py'
 T891 = 'tests/test_891_board_context.py'
@@ -188,6 +191,45 @@ ROWS = [
      "        if worst is None or near > worst:",
      "        if worst is None or near < worst:",
      (T891, T895), KILLED),
+
+    # ---- #961: the overhang band's currency ---------------------------------
+    # Each row puts back one piece of the pre-#961 reading, or deletes one of
+    # the conjuncts the body path needed to keep what the old sum caught.
+    ('band-reads-the-occupancy', 'fp',
+     "        band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),\n"
+     "                                                  amount)",
+     "        band, overhang_basis, body = amount, 'legacy', {}",
+     (T961,), KILLED),
+    ('second-edge-licensed', 'fp',
+     "        if hi is not None:\n            for other, over in crossed:",
+     "        if False:\n            for other, over in crossed:",
+     (T961,), KILLED),
+    # The one gate #961 deliberately leaves on the occupancy reading.
+    ('setback-gate-reads-the-body', 'fp',
+     "        if setback is not None and amount <= legality.EPS:",
+     "        if setback is not None and band <= legality.EPS:",
+     (T961,), KILLED),
+    ('exempt-reads-the-occupancy', 'fp',
+     "                band, _basis, body = _band_amount(self, ref, c.get('edge'), amt)",
+     "                band, _basis, body = amt, 'legacy', {}",
+     (T961,), KILLED),
+    ('seat-band-reads-the-occupancy', 'sd',
+     "    amt, _basis, body = band_amount(\n"
+     "        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,\n"
+     "        amt, state.edge_gate.margin, pose=(x, y, part.rot))",
+     "    body = {}",
+     (T961,), KILLED),
+    ('second-rung-deleted', 'sd',
+     "    if band is not None and converged:\n"
+     "        return _body_band_correct(state, ref, edge, x, y, target, band)",
+     "    if False:\n"
+     "        return _body_band_correct(state, ref, edge, x, y, target, band)",
+     (T961,), KILLED),
+    # A board rewritten in place must not be answered from its old text.
+    ('source-cache-ignores-content', 'cg',
+     "           hashlib.blake2b(raw, digest_size=16).digest(),",
+     "           b'',",
+     (T961,), KILLED),
 ]
 
 

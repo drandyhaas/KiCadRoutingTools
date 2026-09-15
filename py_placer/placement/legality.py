@@ -3410,6 +3410,10 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
     findings, unmeasured = [], []
     measured = 0
     minimum = None
+    # #961: the same minimum per part, so a consumer reporting ONE part's
+    # copper (an edge connector's evidence row) reads it rather than running
+    # this whole function once per part.
+    minimum_by_ref: Dict[str, float] = {}
     for ref, fp in sorted(pcb_data.footprints.items()):
         for index, pad in enumerate(fp.pads):
             if _pad_has_no_copper(pad):
@@ -3469,12 +3473,14 @@ def grade_pad_edge_clearance(pcb_data, required: float, pcb_file=None) -> Dict:
                             (y0-bounds[1], 'bottom'), (bounds[3]-y1, 'top'))
             measured += 1
             minimum = gap if minimum is None else min(minimum, gap)
+            minimum_by_ref[ref] = min(minimum_by_ref.get(ref, gap), gap)
             amount = required - gap
             if amount > EPS:
                 findings.append(dict(identity, required_mm=required, gap_mm=gap,
                                      shortfall_mm=amount, edge=edge))
     return {'required_mm': required, 'tolerance_mm': EPS, 'units': 'mm',
             'minimum_gap_mm': minimum, 'measured_pads': measured,
+            'minimum_gap_by_ref_mm': minimum_by_ref,
             'complete': rectangular and not unmeasured and not rules_unmeasured,
             'rules_unmeasured': rules_unmeasured,
             'unmeasured': unmeasured, 'findings': findings,
