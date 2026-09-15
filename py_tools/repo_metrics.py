@@ -564,6 +564,35 @@ def _release_rollup(releases):
     return rows, plat_tot, pcm_tot
 
 
+def currently_accumulating(releases):
+    """Which release is gaining PCM installs RIGHT NOW -> (tag, gain, since).
+
+    "The release with the most installs" is a proxy for "the release PCM serves"
+    and it goes stale in a known way: when PCM is repointed, the new release
+    starts at zero while the old one keeps the larger lifetime total for months.
+    A reader would keep being told about a release nobody is installing any more.
+
+    The delta between the two most recent snapshots measures it directly --
+    whichever release is still climbing is the one being served. That needs two
+    snapshots on different DAYS (same-day runs share a key and overwrite), so it
+    returns None until the archive has them, and the caller falls back to the
+    lifetime maximum rather than inventing an answer.
+    """
+    stamps = sorted(releases)
+    if len(stamps) < 2:
+        return None
+    prev, cur = releases[stamps[-2]], releases[stamps[-1]]
+
+    def pcm_of(snap, tag):
+        return sum(v for k, v in (snap.get(tag, {}).get('assets') or {}).items()
+                   if _PCM_RE.match(k))
+    gains = {tag: pcm_of(cur, tag) - pcm_of(prev, tag) for tag in cur}
+    tag, gain = max(gains.items(), key=lambda kv: kv[1], default=(None, 0))
+    if not tag or gain <= 0:
+        return None
+    return tag, gain, stamps[-2]
+
+
 def _weekly_deltas(releases):
     """Per-snapshot NEW downloads: cumulative counters differenced in time."""
     stamps = sorted(releases)
@@ -597,9 +626,14 @@ def render(slug):
         return sum(d.get(x, {}).get(key, 0) for x in days)
 
     pcm_head = max(pcm_tot.items(), key=lambda kv: kv[1]) if pcm_tot else ('-', 0)
+    # Prefer the MEASURED answer -- the release still gaining installs is the
+    # one PCM is serving -- and fall back to the lifetime maximum, labelled as
+    # such, while the archive has fewer than two days of snapshots.
+    acc = currently_accumulating(releases)
+    pcm_hint = (f'now serving {acc[0]} (+{acc[1]:,} since {acc[2]})' if acc
+                else f'largest single release: {pcm_head[0]} ({pcm_head[1]:,})')
     cards = [
-        ('PCM installs', f'{sum(pcm_tot.values()):,}',
-         f'all releases; {pcm_head[1]:,} on {pcm_head[0]}'),
+        ('PCM installs', f'{sum(pcm_tot.values()):,}', pcm_hint),
         ('Router binaries', f'{sum(plat_tot.values()):,}',
          'prebuilt .so/.pyd, all releases'),
         ('Clones / 14d', f'{_sum(clones, last14, "count"):,}',

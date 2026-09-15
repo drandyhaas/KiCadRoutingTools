@@ -260,6 +260,34 @@ def t_thinning_never_moves_a_lifetime_total():
           f"{len(recent)} of the last 31 days kept")
 
 
+def t_the_pcm_card_names_the_climbing_release_not_the_biggest_pile():
+    """When PCM is repointed, the headline must follow it, not the old total.
+
+    This is the staleness the lifetime maximum cannot avoid: a repointed PCM
+    leaves the OLD release holding the larger total for months while the NEW one
+    is what people are actually installing.
+    """
+    def snap(old, new):
+        return {'v0.20.4': {'published_at': '2026-08-14T00:00:00Z',
+                            'assets': {'KiCadRoutingTools-0.20.4.zip': old}},
+                'v0.23.0': {'published_at': '2026-09-20T00:00:00Z',
+                            'assets': {'KiCadRoutingTools-0.23.0.zip': new}}}
+    rel = {'2026-09-15': snap(4170, 10), '2026-09-16': snap(4172, 310)}
+    acc = M.currently_accumulating(rel)
+    _rows, _plat, pcm = M._release_rollup(rel)
+    biggest = max(pcm.items(), key=lambda kv: kv[1])[0]
+    check('t_the_pcm_card_names_the_climbing_release_not_the_biggest_pile',
+          acc and acc[0] == 'v0.23.0' and acc[1] == 300 and biggest == 'v0.20.4',
+          f"climbing {acc[0]} (+{acc[1]}) while the biggest pile is still {biggest}")
+    # With one snapshot there is no delta, so it must answer "I don't know"
+    # rather than guessing -- the caller falls back to the labelled maximum.
+    check('t_one_snapshot_yields_no_claim',
+          M.currently_accumulating({'2026-09-15': snap(4170, 10)}) is None)
+    # A repoint that has not happened yet (nothing gained) is also no claim.
+    check('t_no_movement_yields_no_claim',
+          M.currently_accumulating({'a': snap(10, 1), 'b': snap(10, 1)}) is None)
+
+
 def t_a_failed_endpoint_is_disclosed_not_hidden():
     with tempfile.TemporaryDirectory() as tmp:
         clean = _render_into(tmp, {'last_collected': 'x', 'errors': {}})
@@ -284,6 +312,7 @@ def main():
     t_a_short_read_cannot_shrink_the_lifetime_total()
     t_the_spread_conserves_every_download()
     t_thinning_never_moves_a_lifetime_total()
+    t_the_pcm_card_names_the_climbing_release_not_the_biggest_pile()
     t_a_failed_endpoint_is_disclosed_not_hidden()
     print()
     if FAILS:
