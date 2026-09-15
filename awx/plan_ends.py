@@ -126,7 +126,7 @@ def _plan_pages(dst_choice, launch, dst_box, cache, tooth_layer, buses):
 
 
 def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
-                    changes=None, cross=None, swim_changes=None):
+                    changes=None, cross=None, swim_changes=None, swim_mode=None):
     """Per-net vias implied by a page assignment ({net: layer | None}):
     tooth vias + the lane's layer CHANGES + berth vias. `changes` is the
     braid planner's count over the lane's whole profile (tooth, page,
@@ -136,13 +136,17 @@ def vias_from_pages(dst_choice, tooth_layer, tooth_vias, pages, leg_layer=None,
     sees. Without `changes` the profile is tooth -> page -> (leg) ->
     berth: tooth/page mismatch + the arrival -- straight into the berth:
     page/berth mismatch; through a side-exit leg on `leg_layer`: page/leg
-    + leg/berth mismatch. A swimmer: tooth vias + SWIM_VIAS + berth vias."""
+    + leg/berth mismatch. A swimmer: tooth vias + SWIM_VIAS + berth vias.
+    `swim_mode`: None = the SWIM_CHANGES env rule; 'changes' = the
+    swimmer's `swim_changes` where the planner gave one; 'flat' = the
+    flat SWIM_VIAS (fanout_from_plan.PLAN_JUDGE picks it)."""
     pred = {}
+    use_ch = SWIM_CHANGES if swim_mode is None else (swim_mode == 'changes')
     for n, m in dst_choice.items():
         pg = pages.get(n)
         tv = tooth_vias.get(n, 0) + (cross or {}).get(n, 0)
         if pg is None:
-            sw = (swim_changes or {}).get(n) if SWIM_CHANGES else None
+            sw = (swim_changes or {}).get(n) if use_ch else None
             pred[n] = tv + (sw if sw is not None else SWIM_VIAS) + m.vias
             continue
         ch = (changes or {}).get(n)

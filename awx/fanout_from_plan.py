@@ -60,6 +60,28 @@ if PLAN_PAGES:
     # (Raising SEL_XING for the seed select as well was measured worse on the
     # ladder, 2026-09-14: K35 65 -> 76, K41 87 -> 89 with 2 open.)
 DST_CLIMB = int(os.environ.get('DST_CLIMB', '0'))
+# PLAN_JUDGE (2026-09-15, THE PLAN item 1): what a candidate plan is JUDGED
+# on. '' (default, byte-identical): the old planner on judge_by_braid's
+# ride-priced cost, pages-first on (the braid's residue, the CP-SAT's own
+# via count). 'count': the braid's PLAN-IMPLIED COUNT is the cost --
+# the ends as they stand (the teeth as laid, the berths as chosen) + every
+# page lane's `changes` + every swimmer's `swim_changes` + cross-corridor
+# vias, NO ride -- what plan_vias.py / judge_gate.py compute, the one
+# number that predicted the routed board (K41 DET 40/80/160/320: 84 / 94
+# / 90 / 96 -> routed 79 / 102+1o / 98 / 92 where the residue + model
+# judge approved every worse plan); the pages-first key becomes (count,
+# residue). 'flat': the same with a flat prices.SWIM per swimmer.
+# PLAN_JUDGE_MARGIN: the count's noise (+-5 measured); a count difference
+# within it is a tie the residue decides (the completion guard).
+PLAN_JUDGE = os.environ.get('PLAN_JUDGE', '')
+PLAN_JUDGE_MARGIN = float(os.environ.get('PLAN_JUDGE_MARGIN', '0') or 0)
+PLAN_JUDGE_RIDE = int(os.environ.get('PLAN_JUDGE_RIDE', '1') or 0)
+# PLAN_JUDGE_LEN: the length ESTIMATOR the judge prices at VIA_MM -- 'lane' (the
+# braid's planned polylines + berth runs; default) or 'ride' (the around-box
+# ride from launch to berth exit, ride_mm: the jcr arm, 3x over on the K35 batch)
+PLAN_JUDGE_LEN = os.environ.get('PLAN_JUDGE_LEN', 'ride')
+if PLAN_JUDGE not in ('', 'count', 'flat'):
+    raise SystemExit(f'PLAN_JUDGE={PLAN_JUDGE!r}: expected count | flat | unset')
 
 # SPLIT_BLOCKS=1 (2026-09-10): a destination array whose ball grid has a
 # depopulated BAND (a DDR3/DDR4 FBGA: two blocks of three ball columns
@@ -152,6 +174,28 @@ FORCE_DST = _load_force('PLAN_FORCE_DST')
 FORCE_SRC = _load_force('PLAN_FORCE_SRC')
 
 
+def dedupe_climbs(moves):
+    """One CLIMBED candidate per (kind, face, layer, exit row) -- the cheapest
+    by (vias, run length) -- the plain candidates untouched, in the menu's
+    own order (the CP-SAT model is built in it). enumerate_moves emits a
+    climb per (start site, gap side, half-pitch step), so one exit row
+    arrives four to six ways that differ only in the run's first bend;
+    measured at K28 with DST_CLIMB=2: 2812 berth candidates and 718k
+    pairwise exclusions, the solve stopping worse than without climbs and
+    routing 42 against 34; deduped 1361. Inert when no move climbs."""
+    best = {}
+    for m in moves:
+        if not getattr(m, 'climb', 0):
+            continue
+        ax = 0 if m.direction in ('up', 'down') else 1
+        k = (m.kind, m.direction, m.layer, round(m.exit_pt[ax], 2))
+        c = (m.vias, sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b, L in m.legs))
+        if k not in best or c < best[k][0]:
+            best[k] = (c, m)
+    keep = {id(v[1]) for v in best.values()}
+    return [m for m in moves if not getattr(m, 'climb', 0) or id(m) in keep]
+
+
 def plan_state(pcb, names, banned=frozenset()):
     """Everything the plan reads off ONE board: the menus of legal escapes
     at both ends, the launch points (the source teeth AS THEY ARE on this
@@ -204,7 +248,7 @@ def plan_state(pcb, names, banned=frozenset()):
         pad = min(fp.pads, key=lambda p: (p.global_x - bx) ** 2
                   + (p.global_y - by) ** 2)
         dst_pad[nm] = pad
-        moves = menu(pad, em.grid_of(fp), nid, walk=DST_WALK, climb=DST_CLIMB)
+        moves = dedupe_climbs(menu(pad, em.grid_of(fp), nid, walk=DST_WALK, climb=DST_CLIMB))
         if ends[nm][2] == dref and len(dblocks) > 1:
             # the BLOCK's moves too: its band faces are moves the whole
             # array does not have; its outer faces are the array's own
@@ -231,7 +275,7 @@ def plan_state(pcb, names, banned=frozenset()):
         p = src_pad[nm]
         if p is None or p.component_ref != sref:
             continue
-        smenu[nm] = [m for m in menu(p, sgrid, byname[nm][0], own_only=True, climb=SRC_CLIMB)
+        smenu[nm] = [m for m in dedupe_climbs(menu(p, sgrid, byname[nm][0], own_only=True, climb=SRC_CLIMB))
                      if (nm, sr.move_sig(m)) not in banned]
     tooth0 = {}
     tooth_vias = {}
@@ -509,9 +553,33 @@ def judge_by_braid(st, choice, board, achieved=None, bp=None):
     xv = {nm: bp[nm].get('cross_vias', 0) for nm in choice}
     swc = {nm: bp[nm].get('swim_changes') for nm in choice}
     pred = pe.vias_from_pages(choice, st['tooth0'], st['tooth_vias'], pages, legs,
-                              changes=chg, cross=xv, swim_changes=swc)
+                              changes=chg, cross=xv, swim_changes=swc,
+                              swim_mode={'count': 'changes', 'flat': 'flat'}.get(PLAN_JUDGE))
     ride = pe.sm.ride_mm(choice, st['launch'], st['dboxes'],
                          st['sgrid'].bbox) / pe.sm.VIA_MM
+    if PLAN_JUDGE and PLAN_JUDGE_RIDE and PLAN_JUDGE_LEN == 'lane':
+        # the LENGTH the braid itself planned: each lane's polyline (launch
+        # to stub end, as the plan phase drew it) plus the berth's own run,
+        # at VIA_MM; the around-box ride only for a net the plan phase gave
+        # no lane. Measured on the K35 batch the ride-judge reverted: the
+        # ride model said +60 mm, the copper +19 mm (jcr vs jc), and the
+        # batch was worth 5.4 vias net under the rule.
+        length = 0.0
+        for nm, m in choice.items():
+            pts = bp.get(nm, {}).get('lane')
+            if pts:
+                length += sum(math.hypot(q[0] - p[0], q[1] - p[1]) for p, q in zip(pts, pts[1:]))
+            else:
+                length += pe.sm.ride_mm({nm: m}, st['launch'], st['dboxes'], st['sgrid'].bbox)
+            length += pe.sm._length(m)
+        ride = length / pe.sm.VIA_MM
+    if PLAN_JUDGE:
+        # THE PLAN item 1: the braid's plan-implied COUNT is the cost -- plus
+        # the ride round both arrays at VIA_MM (Andy, 2026-09-15: length at
+        # 7.5 mm per via EVERYWHERE), the one term that sees a far-face tooth
+        # (K35 SDQ13: 13 mm out and 13 mm back for a ball on U1's east
+        # column). PLAN_JUDGE_RIDE=0 = the count alone (the jc arm).
+        return sum(pred.values()) + (ride if PLAN_JUDGE_RIDE else 0.0), pred, bp, plan
     if SF_ESC_W == 1.0:
         return sum(pred.values()) + ride, pred, bp, plan
     # split pred back into its two halves. Per net vias_from_pages emits
@@ -522,6 +590,43 @@ def judge_by_braid(st, choice, board, achieved=None, bp=None):
            + sum(m.vias for m in choice.values()))
     cor = sum(pred.values()) - esc
     return cor + SF_ESC_W * (esc + ride), pred, bp, plan
+
+
+def pf_key(choice, bp, cost, model_vias=None):
+    """The KEY a realize-and-confirm site compares plans on: (residue,
+    cost) as recorded -- under PLAN_PAGES the cost is the CP-SAT's own
+    via count `model_vias` where the caller has one -- or, under
+    PLAN_JUDGE, (the braid's count, residue): the count decides, the
+    residue is the tie-break and the completion guard."""
+    resid = sum(1 for nm in choice if bp.get(nm, {}).get('page') is None)
+    if PLAN_JUDGE:
+        return (cost, resid)
+    return (resid, model_vias if model_vias is not None else cost)
+
+
+def pf_better(new, best, strict=False):
+    """Is key `new` better than `best`? Lexicographic, except that under
+    PLAN_JUDGE_MARGIN a count difference within the margin is a tie the
+    residue decides (the count's own precision is +-5, measured).
+    `strict`: the margin is ignored -- the batch BISECT compares nested
+    subsets against a moving incumbent, where a margin ratchets (the s10
+    judge review, finding 7)."""
+    if strict or not PLAN_JUDGE or PLAN_JUDGE_MARGIN <= 0:
+        return new < best
+    dc = new[0] - best[0]
+    if dc < -PLAN_JUDGE_MARGIN:
+        return True
+    if dc > PLAN_JUDGE_MARGIN:
+        return False
+    return new[1] < best[1] or (new[1] == best[1] and dc < 0)
+
+
+def pf_fmt(k0, k1):
+    """`judged residue A -> B, cost X -> Y` (the recorded line), or under
+    PLAN_JUDGE `judged count X -> Y, residue A -> B`."""
+    if PLAN_JUDGE:
+        return f'judged count {k0[0]:.0f} -> {k1[0]:.0f}, residue {k0[1]} -> {k1[1]}'
+    return f'judged residue {k0[0]} -> {k1[0]}, cost {k0[1]:.2f} -> {k1[1]:.2f}'
 
 
 # DST_SEARCH=1 (2026-09-10): after the greedy selection, a LOCAL SEARCH over
@@ -610,6 +715,27 @@ DST_RESIDUE_POOL = os.environ.get('DST_RESIDUE_POOL', 'displaced')
 DST_RESIDUE_SRC = int(os.environ.get('DST_RESIDUE_SRC', '0'))
 SRC_RESIDUE_CANDS = int(os.environ.get('SRC_RESIDUE_CANDS', '8'))
 SRC_RESIDUE_ROUNDS = int(os.environ.get('SRC_RESIDUE_ROUNDS', '8'))   # one tooth realized -> re-chosen, at most this often a round
+# PLAN_BATCH=1 (2026-09-14, session 8; README "the batch loop"): the source
+# moves a plan asks for are realized as ONE batch first, as before, and then
+# (1) a move the engine did not lay AS ASKED -- a refusal, or a miss laid
+#     somewhere else -- is dropped and the rest re-realized from the SAME
+#     board, so the board that is judged carries exactly the moves asked and
+#     nothing the engine invented (pg2 K41/K51: SA11 and SA12 asked as
+#     dog-bones on B, laid as surface stubs on F at other gaps, and the
+#     board KEPT with them; the re-plan then swam SA11);
+# (2) a batch judged not better is BISECTED by the planner's value per move
+#     (pages_first's `value`: the cost the move saves its net plus the
+#     inversions its standing key would have) -- halves, each tried on top
+#     of what is kept, 2-3 engine calls at ~0.5 s -- instead of banning
+#     every move in it (arc9: 12 moves lost to one refusal);
+# (3) only a move the engine refused as asked is banned: a move laid exactly
+#     that did not help stays in the menu;
+# (4) a DRC rejection names its nets (check_drc's pairs) and only the asked
+#     nets it names are refused, the rest re-realized.
+# Asked / landed / refused / reverted are counted per run and printed.
+# 0 = the loop as it was, byte-identical.
+PLAN_BATCH = int(os.environ.get('PLAN_BATCH', '0'))
+PLAN_BATCH_DEPTH = int(os.environ.get('PLAN_BATCH_DEPTH', '0'))   # bisect levels on a not-better batch: 0 = none (measured 2026-09-14: halves kept a K35 part the plan judge liked, residue 2 -> 1, and the braid opened SDQ13, 60 / 1 open against 65 / 0), 1 = halves, 2 = quarters
 # DST_RESIDUE_WORKERS (2026-09-11): one net's candidate moves are judged in
 # parallel worker processes -- the trials of a net are independent (the
 # greedy accepts one per net, in order, as before), a trial is ~3.3 s of
@@ -2192,6 +2318,210 @@ def residue_choice(st, choice, board, log=print, sweeps=4, src_out=None):
     return choice
 
 
+def _pair_nets(lines, names):
+    """The run nets a check_drc pair line names (`/DDR3 16x1/SA5 <-> /DDR3
+    16x1/SCS1`): a net's short name as the last path component of either
+    side."""
+    import re
+    hit = set()
+    for ln in lines:
+        if '<->' not in ln:
+            continue
+        for side in ln.split('<->'):
+            side = side.strip()
+            for nm in names:
+                if re.search(r'(?:^|/)' + re.escape(nm) + r'(?=$|[\s):,])', side):
+                    hit.add(nm)
+    return hit
+
+
+def _realize_exact(board, asked, st, names, free, out_stem, realized, banned, value, tally, log=print):
+    """PLAN_BATCH: realize `asked` ({net: Move}) on `board` so that the
+    written board carries EXACTLY the moves asked. A move the engine refused
+    or laid otherwise is refused (banned) and the others re-realized from
+    `board`; a DRC rejection refuses the asked nets its pairs name. Returns
+    (new_board or None, laid {net: Move}, refused [net])."""
+    asked = dict(asked)
+    refused = []
+    attempt = 0
+    while asked:
+        out = f'{out_stem}{"" if attempt == 0 else f"_t{attempt}"}.kicad_pcb'
+        res = sr.realize(board, asked, st['src_pad'], st['byname'], st['sref'], out,
+                         guard_names=names, free=free, strict=bool(SRC_REFAN_STRICT))
+        realized.append(res)
+        tally['calls'] += 1
+        attempt += 1
+        drop = [nm for nm in asked if not res['audit'][nm]['exact']]
+        why = 'not laid as asked'
+        if res['rejected']:
+            named = sorted(_pair_nets(res.get('pairs', []), list(asked)))
+            drop = sorted(set(drop) | set(named))
+            if not drop:
+                # no asked net is named: the pair is between copper nobody
+                # asked to move; refuse the least valued move rather than loop
+                drop = [min(asked, key=lambda n: (value.get(n, 0.0), n))]
+            why = f'REJECTED ({res["rejected"]}; named {named or "none of the asked"})'
+        if not drop:
+            return out, asked, refused
+        for nm in drop:
+            banned.add((nm, sr.move_sig(asked[nm])))
+            refused.append(nm)
+            del asked[nm]
+        tally['refused'] += len(drop)
+        log(f'    batch: {len(drop)} move(s) {why} -> refused (banned): {drop}'
+            + (f'; re-realizing the other {len(asked)} from {os.path.basename(board)}' if asked else ''))
+    return None, {}, refused
+
+
+def _chunks(order, depth):
+    """`order` split into 2**depth runs of near-equal size, empties dropped."""
+    n = max(1, 2 ** max(0, depth))
+    k = -(-len(order) // n)
+    return [order[i:i + k] for i in range(0, len(order), k)] if order else []
+
+
+def batch_rounds(board, st, dst_choice, un, best_key, src_out, names, work, r,
+                 banned, realized, tally, log=print):
+    """PLAN_BATCH: the realize-and-judge rounds of one plan round (the
+    SRC_RESIDUE_ROUNDS loop) with the batch laid exactly, bisected when it
+    does not help, and only refused moves banned. Returns the updated
+    (board, st, dst_choice, un, best_key, src_out)."""
+    import pages_first
+
+    def _judge(nb, st_from, dst_from, moved):
+        st2 = plan_state(parse_kicad_pcb(nb), names, banned)
+        src2 = {}
+        keep_sig = {nm: sr.move_sig(m) for nm, m in dst_from.items()
+                    if nm not in moved and nm in st2['dmenu']
+                    and any(sr.move_sig(mm) == sr.move_sig(m) for mm in st2['dmenu'][nm])}
+        ch2, un2 = dest_choice(st2, nb, src_out=src2, fixed=keep_sig)
+        if not ch2:
+            return None
+        f2, _p2, bp2, _pl2 = judge_by_braid(st2, ch2, nb)
+        mv2 = None
+        if PLAN_PAGES and not PLAN_JUDGE:
+            mv2 = getattr(pages_first.choose, 'last', {}).get('vias', f2)
+        key2 = pf_key(ch2, bp2, f2, mv2)
+        return key2, st2, ch2, un2, src2
+
+    _fmt = pf_fmt
+
+    for _k in range(SRC_RESIDUE_ROUNDS):
+        value = dict(getattr(pages_first.choose, 'last', {}).get('value', {})) if PLAN_PAGES else {}
+        _free = []
+        if SRC_REFAN_JOINT:
+            _pcb_now = parse_kicad_pcb(board)
+            _pin = set()
+            for _nm, _mv in src_out.items():
+                _mov, _pinned = sr.blockers_of(_pcb_now, _mv, st['byname'][_nm][0], st['byname'],
+                                               set(names) - set(src_out))
+                _free += [b for b in _mov if b not in _free]
+                _pin |= set(_pinned)
+            if len(_free) > SRC_REFAN_MAX:
+                log(f'    joint re-fan: {len(_free)} blocker(s), capping at '
+                    f'{SRC_REFAN_MAX}: {_free[SRC_REFAN_MAX:]} left in place')
+                _free = _free[:SRC_REFAN_MAX]
+            log(f'    joint re-fan: blockers of {sorted(src_out)} = {_free or "none"}'
+                + (f'; PINNED (outside the run, immovable): {sorted(_pin)}' if _pin else ''))
+        stem = f'{work}_srcres{r}_{_k}'
+        tally['asked'] += len(src_out)
+        # FIRST TRY: the whole batch, as before. A board laid with misses is
+        # still a candidate -- the engine's fallback for a miss can serve the
+        # plan (pg2 K41: SA12 asked dog-bone/B on the right face, laid as a
+        # surface stub on F there; without it the judged residue was 8, with
+        # it 6, and the exact-only board routed 91 against 79) -- so it is
+        # JUDGED beside the exact board rather than thrown out or kept blind.
+        raw = f'{stem}.kicad_pcb'
+        res = sr.realize(board, src_out, st['src_pad'], st['byname'], st['sref'], raw,
+                         guard_names=names, free=_free, strict=bool(SRC_REFAN_STRICT))
+        realized.append(res)
+        tally['calls'] += 1
+        misses = [nm for nm in src_out if not res['audit'][nm]['exact']]
+        for nm in misses:
+            banned.add((nm, sr.move_sig(src_out[nm])))
+        tally['refused'] += len(misses)
+        cands = []                      # (label, board, laid exactly, moved)
+        if not res['rejected']:
+            if misses:
+                cands.append(('as laid', raw, {n: m for n, m in src_out.items() if n not in misses}, set(src_out)))
+            else:
+                cands.append(('exact', raw, dict(src_out), set(src_out)))
+        else:
+            log(f'    batch: the whole batch REJECTED ({res["rejected"]}; named '
+                f'{sorted(_pair_nets(res.get("pairs", []), list(src_out))) or "none of the asked"})')
+        if misses or res['rejected']:
+            rest = {n: m for n, m in src_out.items() if n not in misses}
+            if res['rejected']:
+                named = _pair_nets(res.get('pairs', []), list(rest))
+                for nm in sorted(named):
+                    banned.add((nm, sr.move_sig(rest[nm])))
+                    tally['refused'] += 1
+                    del rest[nm]
+                misses = misses + sorted(named)
+            if rest:
+                nb, laid, ref2 = _realize_exact(board, rest, st, names, _free, f'{stem}_x',
+                                                realized, banned, value, tally, log)
+                misses = misses + ref2
+                if nb is not None:
+                    cands.append(('exact', nb, laid, set(laid)))
+        head = (f'  round {r}: source move(s) asked: {sorted(src_out)}'
+                + (f'; refused as asked (banned): {sorted(misses)}' if misses else ''))
+        if not cands:
+            log(head + '; nothing laid -- the board stands')
+            break
+        judged = []
+        for label, nb, laid, moved in cands:
+            j = _judge(nb, st, dst_choice, moved)
+            if j is not None:
+                judged.append((j[0], label, nb, laid, j))
+        if not judged:
+            log(head + '; no destination choice on the new board(s) -- reverted')
+            break
+        judged.sort(key=lambda t: (t[0], t[1]))
+        key2, label, nb, laid, (_, st2, ch2, un2, src2) = judged[0]
+        others = ', '.join(f'{lb} {_fmt(best_key, k)[len("judged "):]}' for k, lb, *_ in judged[1:])
+        if pf_better(key2, best_key):
+            log(head + f'; {label} ({sorted(laid)}): {_fmt(best_key, key2)}: KEPT'
+                + (f'  [{others}]' if others else ''))
+            tally['landed'] += len(laid)
+            board, st, dst_choice, un, best_key, src_out = nb, st2, ch2, un2, key2, src2
+        else:
+            order = sorted(laid, key=lambda n: (-value.get(n, 0.0), n))
+            parts = _chunks(order, PLAN_BATCH_DEPTH)
+            if len(parts) < 2:
+                log(head + f'; {label} ({sorted(laid)}): {_fmt(best_key, key2)}: not better -- reverted (nothing banned)'
+                    + (f'  [{others}]' if others else ''))
+                tally['reverted'] += len(laid)
+                break
+            log(head + f'; {label} ({sorted(laid)}): {_fmt(best_key, key2)}: not better as a whole'
+                + (f' [{others}]' if others else '') + f' -- bisecting into {len(parts)} by the planner\'s value '
+                + ', '.join(f'{n} {value.get(n, 0.0):+.1f}' for n in order))
+            kept = False
+            for pi, part in enumerate(parts):
+                sub = {n: laid[n] for n in part}
+                nb_p, laid_p, ref_p = _realize_exact(board, sub, st, names, _free, f'{stem}_p{pi}',
+                                                     realized, banned, value, tally, log)
+                if nb_p is None:
+                    continue
+                jp = _judge(nb_p, st, dst_choice, laid_p)
+                if jp is None:
+                    continue
+                kp, stp, chp, unp, srcp = jp
+                if pf_better(kp, best_key, strict=True):
+                    log(f'    batch part {pi + 1}/{len(parts)} {sorted(laid_p)}: {_fmt(best_key, kp)}: KEPT')
+                    tally['landed'] += len(laid_p)
+                    board, st, dst_choice, un, best_key, src_out = nb_p, stp, chp, unp, kp, srcp
+                    kept = True
+                else:
+                    log(f'    batch part {pi + 1}/{len(parts)} {sorted(laid_p)}: {_fmt(best_key, kp)}: not better -- reverted (nothing banned)')
+                    tally['reverted'] += len(laid_p)
+            if not kept:
+                break
+        if not src_out:
+            break
+    return board, st, dst_choice, un, best_key, src_out
+
+
 def plan(base, names, work):
     """The plan as ONE consistent loop. Each round: choose the destination
     escapes against the source teeth AS THEY ARE on the current board;
@@ -2209,6 +2539,7 @@ def plan(base, names, work):
     realized = []
     banned = set()          # (net, move signature) the fanout refused
     new_bans = 0
+    tally = {'asked': 0, 'landed': 0, 'refused': 0, 'reverted': 0, 'calls': 0}   # PLAN_BATCH's count
     for r in range(ROUNDS + 1):
         st = plan_state(parse_kicad_pcb(board), names, banned)
         if prev_launch is not None and st['launch'] == prev_launch and not new_bans:
@@ -2228,8 +2559,7 @@ def plan(base, names, work):
             # so the engine still has the last word on whether it can be
             # laid as asked.
             _f0, _p0, _bp0, _pl0 = judge_by_braid(st, dst_choice, board)
-            _key0 = (sum(1 for nm in dst_choice
-                         if _bp0.get(nm, {}).get('page') is None), _f0)
+            _key0 = pf_key(dst_choice, _bp0, _f0)
             _res0 = [nm for nm in dst_choice
                      if _bp0.get(nm, {}).get('page') is None]
             _pick = src_replan_pick(st, dst_choice, board, _res0, _key0,
@@ -2246,16 +2576,22 @@ def plan(base, names, work):
             # cost 141 -> 147). A rejected round's moves are banned.
             def _key(ch):
                 f_, _p, bp_, _pl = judge_by_braid(st, ch, board)
-                if PLAN_PAGES:
+                mv = None
+                if PLAN_PAGES and not PLAN_JUDGE:
                     # the planner's objective: the braid's residue (exact
                     # pages), then the pages-first model's vias of the plan
                     # just chosen -- not the old judge's ride-priced cost,
                     # which reverted a batch of teeth this plan needed
+                    # (PLAN_JUDGE: the braid's count, pf_key)
                     import pages_first
-                    f_ = getattr(pages_first.choose, 'last', {}).get('vias', f_)
-                return (sum(1 for nm in ch if bp_.get(nm, {}).get('page') is None), f_)
+                    mv = getattr(pages_first.choose, 'last', {}).get('vias', f_)
+                return pf_key(ch, bp_, f_, mv)
             best_key = _key(dst_choice)
-            for _k in range(SRC_RESIDUE_ROUNDS):
+            if PLAN_BATCH:
+                board, st, dst_choice, un, best_key, src_out = batch_rounds(
+                    board, st, dst_choice, un, best_key, src_out, names, work, r,
+                    banned, realized, tally, log=print)
+            for _k in range(0 if PLAN_BATCH else SRC_RESIDUE_ROUNDS):
                 new_board = f'{work}_srcres{r}_{_k}.kicad_pcb'
                 _free = []
                 if SRC_REFAN_JOINT:
@@ -2308,12 +2644,13 @@ def plan(base, names, work):
                 if not ch2:
                     print(line + '; no destination choice on the new board -- reverted'); break
                 f2, _p2, bp2, _pl2 = judge_by_braid(st2, ch2, new_board)
-                if PLAN_PAGES:
+                mv2 = None
+                if PLAN_PAGES and not PLAN_JUDGE:
                     import pages_first
-                    f2 = getattr(pages_first.choose, 'last', {}).get('vias', f2)
-                key2 = (sum(1 for nm in ch2 if bp2.get(nm, {}).get('page') is None), f2)
-                if key2 < best_key:
-                    print(line + f'; judged residue {best_key[0]} -> {key2[0]}, cost {best_key[1]:.2f} -> {f2:.2f}: KEPT')
+                    mv2 = getattr(pages_first.choose, 'last', {}).get('vias', f2)
+                key2 = pf_key(ch2, bp2, f2, mv2)
+                if pf_better(key2, best_key):
+                    print(line + f'; {pf_fmt(best_key, key2)}: KEPT')
                     board, st, dst_choice, un, best_key, src_out = new_board, st2, ch2, un2, key2, src2
                     if SRC_REPLAN and not src_out:
                         _res = [nm for nm in dst_choice
@@ -2323,7 +2660,7 @@ def plan(base, names, work):
                         if _pk:
                             src_out[_pk[1]] = _pk[2]
                 else:
-                    print(line + f'; judged residue {best_key[0]} -> {key2[0]}, cost {best_key[1]:.2f} -> {f2:.2f}: '
+                    print(line + f'; {pf_fmt(best_key, key2)}: '
                           f'not better -- reverted, moves banned')
                     for nm in src_out:
                         banned.add((nm, sr.move_sig(src_out[nm])))
@@ -2385,6 +2722,9 @@ def plan(base, names, work):
         board = new_board
     f, board, choice, st, r = best
     print(f'  kept round {r}: floor {f:.2f} on {os.path.basename(board)}')
+    if PLAN_BATCH:
+        print(f'  source moves: asked {tally["asked"]}, landed {tally["landed"]}, refused as asked '
+              f'{tally["refused"]}, laid but reverted {tally["reverted"]}; {tally["calls"]} engine call(s)')
     return choice, st['dst_pad'], st['dref'], st['byname'], board, realized, banned
 
 
@@ -2423,7 +2763,8 @@ def explain_plan(choice, st, names, out_path=None, board=None, achieved=None):
                   + (f'  cross-corridor dives {bp[nm]["cross_vias"] // 2}'
                      if bp[nm].get('cross_vias') else ''))
     print(f'  plan model total predicted vias: {sum(pred.values())} over {len(pred)} nets '
-          f'(braid-judged cost {cost:.2f} incl. ride)')
+          + (f'(PLAN_JUDGE={PLAN_JUDGE}: the braid\'s count {cost:.0f})' if PLAN_JUDGE else
+             f'(braid-judged cost {cost:.2f} incl. ride)'))
     if out_path:
         side = os.path.splitext(out_path)[0] + '.plan.json'
         if PLAN_PAGES:

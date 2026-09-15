@@ -349,6 +349,11 @@ def around_box_path(a: Pt, b: Pt, box, pad: float = 0.3):
 # open unit question is that plan_floor counts CROSSINGS (a dive is
 # ~2 vias), so the honest rate for the floor+ride sum may be 2x.
 VIA_MM = 7.5
+# PLAN_RATE=1 (2026-09-15, Andy: "length should be priced at 7.5 mm per via
+# equivalent everywhere"): the greedy seed's ranking prices its channel and
+# reach at VIA_MM too (via_weight per VIA_MM mm) instead of the greedy's own
+# 2 / 1 per mm. pages_first and the judge read the same variable.
+SEL_RATE = int(os.environ.get('PLAN_RATE', '0') or 0)
 # SEL_SITE_ANY (2026-09-14): `_site_in_lane` tests ANY via, not only a
 # dog-bone's -- a via-in-pad's barrel stands on the ball's row line, where
 # another net's run along that line on the back layer passes (K41 pages-first
@@ -1294,7 +1299,10 @@ def _select(menu: Dict[str, List[Move]],
             if bi is not None:
                 leg = band_leg((lx, ly), m.exit_pt, geo.bands[bi])
                 chan += math.hypot(leg[2][0] - leg[1][0], leg[2][1] - leg[1][1])
-        c_ = via_weight * m.vias + channel_weight * chan + reach
+        if SEL_RATE:
+            c_ = via_weight * (m.vias + (chan + reach) / VIA_MM)
+        else:
+            c_ = via_weight * m.vias + channel_weight * chan + reach
         # ...and the room the BARREL takes (SEL_CONTEND). The run above is
         # charged for the channel it occupies; the via was free wherever it
         # sat, so a dog-bone deep in the ball field -- whose site 6 other
