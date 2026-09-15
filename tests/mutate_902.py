@@ -198,11 +198,15 @@ ROWS = [
     ('band-reads-the-occupancy', 'fp',
      "        band, overhang_basis, body = _band_amount(ctx, ref, c.get('edge'),\n"
      "                                                  amount)",
-     "        band, overhang_basis, body = amount, 'legacy', {}",
+     # `body_measured: False`, not `{}`: an empty dict made the row KILL by a
+     # KeyError in the evidence builder before any currency assertion ran.
+     "        band, overhang_basis, body = amount, 'legacy', {'body_measured': False}",
      (T961,), KILLED),
-    ('second-edge-licensed', 'fp',
-     "        if hi is not None:\n            for other, over in crossed:",
-     "        if False:\n            for other, over in crossed:",
+    # The graded number is summed over every side, as the occupancy reading
+    # was; reading the declared edge alone lets a corner overhang escape.
+    ('band-drops-the-other-sides', 'cg',
+     "        return row['body_outside_mm'], 'body:' + row['body_layer'], row",
+     "        return row['body_overhang_mm'], 'body:' + row['body_layer'], row",
      (T961,), KILLED),
     # The one gate #961 deliberately leaves on the occupancy reading.
     ('setback-gate-reads-the-body', 'fp',
@@ -210,20 +214,40 @@ ROWS = [
      "        if setback is not None and band <= legality.EPS:",
      (T961,), KILLED),
     ('exempt-reads-the-occupancy', 'fp',
-     "                band, _basis, body = _band_amount(self, ref, c.get('edge'), amt)",
-     "                band, _basis, body = amt, 'legacy', {}",
+     "                band, _basis, _body = _band_amount(self, ref, c.get('edge'),\n"
+     "                                                   amt)",
+     "                band, _basis, _body = amt, 'legacy', {}",
      (T961,), KILLED),
     ('seat-band-reads-the-occupancy', 'sd',
-     "    amt, _basis, body = band_amount(\n"
+     "    amt, _basis, _body = band_amount(\n"
      "        geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,\n"
      "        amt, state.edge_gate.margin, pose=(x, y, part.rot))",
-     "    body = {}",
+     "    _body = {}",
      (T961,), KILLED),
     ('second-rung-deleted', 'sd',
      "    if band is not None and converged:\n"
      "        return _body_band_correct(state, ref, edge, x, y, target, band)",
      "    if False:\n"
      "        return _body_band_correct(state, ref, edge, x, y, target, band)",
+     (T961,), KILLED),
+    ('emitter-widening-deleted', 'fp',
+     "                if (body['body_measured']\n"
+     "                        and body['body_outside_mm'] > amt + legality.EPS):",
+     "                if (False\n"
+     "                        and body['body_outside_mm'] > amt + legality.EPS):",
+     (T961,), KILLED),
+    ('copper-findings-unsliced', 'fp',
+     "    findings = [f for f in copper['findings']\n"
+     "                if str(f['pad_ref']).startswith(prefix)]",
+     "    findings = list(copper['findings'])",
+     (T961,), KILLED),
+    ('copper-gap-board-wide', 'fp',
+     "    gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)",
+     "    gap = copper.get('minimum_gap_mm')",
+     (T961,), KILLED),
+    ('bside-reads-front', 'cg',
+     "        points, layer, reason = self.source.envelope(ref, footprint_side(fp))",
+     "        points, layer, reason = self.source.envelope(ref, 'F')",
      (T961,), KILLED),
     # A board rewritten in place must not be answered from its old text.
     ('source-cache-ignores-content', 'cg',

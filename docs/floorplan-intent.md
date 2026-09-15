@@ -303,12 +303,14 @@ west has its drawn body 1.45 mm over the edge. The old reading was 0.10 at
 margin 0.25 and 0.40 at 0.55, so the same board passed `{min 0.05, max 0.20}`
 at one margin and failed it at the other.
 
-The band is now graded on the **drawn body's signed position past the
-declared `edge`, at zero margin**, whenever that body can be measured. That
-means a closed convex Fab outline (else SilkS) and a rectangular Edge.Cuts
-outline. A zero `min` is therefore nonbinding and a positive `min` is a real
-conjunct. A body that also crosses a *second* edge is named when the band has
-a `max`, since a band licenses its own edge only.
+The band is now graded on the **drawn body's overhang past the outline, at
+zero margin**, whenever that body can be measured. That means a declared
+`edge`, a closed convex Fab outline (SilkS when the part draws nothing on
+Fab) and a rectangular Edge.Cuts outline. A zero `min` is therefore
+nonbinding and a positive `min` is a real conjunct. Like the occupancy reading
+it replaces, the graded number is summed over every side the body crosses, so
+a corner part counts both sides. For a body that crosses only its declared
+edge, it is exactly that edge's overhang.
 
 When no body can be measured, the band is graded exactly as before, on the
 occupancy reading. Unmeasurable cases include a courtyard-only part, an arc
@@ -321,8 +323,9 @@ currency as the rule.
 
 Every declared connector on the board gets a row in `edge_connector_evidence`
 (`--json`), including passing ones. Each row carries:
-- `overhang_mm` and `overhang_basis` (`body:F.Fab` or
-  `legacy_occupancy@margin=<m>`), plus the limit and a disposition;
+- `overhang_mm` and `overhang_basis` (`body:<layer>`, e.g. `body:F.Fab`,
+  `body:B.Fab`, `body:F.SilkS`, or `legacy_occupancy@margin=<m>`), plus the
+  limit and a disposition;
 - the body's signed position, setback and other-edge overhang, or
   `body_unmeasured_reason`;
 - `pad_copper_edge`: the part's pad-copper edge clearance from
@@ -401,7 +404,7 @@ for it, and the reason is printed:
 | `assembly_side` | a part sits on a face the board's declared assembly policy does not populate. **warn** by default (#837): nothing in the engine can move a part between faces, so an error would be a red mark no run could clear | `legality.assembly_census`, body face — the pad-bearing population, so a zero-pad graphic on the back is not a part |
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way — and since [#797](https://github.com/drandyhaas/KiCadRoutingTools/issues/797) the seat search refuses such a pose too, with the verdict `zone_exclusive_blocks` |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
-| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | the band: the drawn body's signed position past `edge` (`connector_geometry`, #961), else `BoardOutlineGate.rect_outside_amount`; the seat: `edge_clearance` |
+| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | the band: the drawn body's overhang past `edge`, `max(0, signed position)` (`connector_geometry`, #961), else `BoardOutlineGate.rect_outside_amount`; the seat: `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
 | `decap_ungraded` | a cap in scope lies BEYOND the tether search radius, so `decap_distance` never measured it against the declared limit — a claim about COVERAGE, not compliance. **warn** by default ([#794](https://github.com/drandyhaas/KiCadRoutingTools/issues/794)) | `groups.decap_populations` (`beyond`) |
 | `decap_pin_distance` | a DECLARED supply pin is further than `max_pin_distance_mm` from the nearest decoupling cap on its own rail, pad edge to pad edge ([#705](https://github.com/drandyhaas/KiCadRoutingTools/issues/705)) | `floorplan.supply_pins`, `legality.pad_rect` + `rect_gap` |

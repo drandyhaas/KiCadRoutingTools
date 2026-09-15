@@ -15,11 +15,16 @@ signed position is positive outside the board, `overhang = max(0, signed)` and
 simulation, and it takes no margin at all.
 
 WHAT COUNTS AS A BODY. A closed convex polygonal envelope on the footprint's
-own Fab layer, else its own SilkS layer. Internal markings are allowed, but
-every side of the convex hull must actually be drawn. Open outlines, concave
-envelopes, arcs, circles and curves are UNMEASURED, as is a part that draws
-no body. Text, pads and courtyards are never body geometry. Vertices are
-transformed before taking extrema, so any rotation is exact.
+own Fab layer -- or its own SilkS layer when it draws nothing on Fab; an
+unusable Fab drawing does NOT fall back to SilkS -- drawn with `fp_line`, sharp-cornered
+`fp_rect` and straight-sided `fp_poly`. Internal markings drawn with those
+primitives are allowed, but every side of the convex hull must actually be
+drawn. ANY other primitive on that layer makes the whole body UNMEASURED --
+`fp_arc`, `fp_circle` (a pin-1 dot included), `fp_curve`, a rounded
+`fp_rect`, an `fp_poly` carrying an arc -- as do open outlines, concave
+envelopes and a part that draws no body. Text, pads and courtyards are never
+body geometry. Vertices are transformed before taking extrema, so any
+rotation of the supported primitives is exact.
 
 WHAT COUNTS AS A BOUNDARY. A rectangular Edge.Cuts outline with no other cuts.
 Anything else is unmeasured rather than approximated by the bounding box.
@@ -130,10 +135,20 @@ def _parse_body(block, side):
             if kind == 'line':
                 segments.append((_point(item, 'start'), _point(item, 'end')))
             elif kind == 'rect':
+                rm = re.search(r'\(radius\s+([-+\d.eE]+)\)', item)
+                if rm and float(rm.group(1)) > EPS:
+                    # KiCad 10 rounded rectangle: its sharp corners would
+                    # overstate the extent at any non-orthogonal rotation.
+                    raise ValueError('rounded fp_rect corners are not measured')
                 a, b = _point(item, 'start'), _point(item, 'end')
                 pts = [a, (b[0], a[1]), b, (a[0], b[1])]
                 segments.extend(zip(pts, pts[1:] + pts[:1]))
             elif kind == 'poly':
+                if re.search(r'\(arc\b', item):
+                    # An arc inside `pts` bulges past its chord; the chord
+                    # polygon would understate the body.
+                    raise ValueError('fp_poly with an arc segment is not '
+                                     'measured')
                 pts = [_point(x.group(), 'xy') for x in re.finditer(
                     r'\(xy\s+[-+\d.eE]+\s+[-+\d.eE]+\)', item)]
                 segments.extend(zip(pts, pts[1:] + pts[:1]))
@@ -251,15 +266,19 @@ class ConnectorGeometry:
         outside = dict(zip(EDGES, (b[0] - rect[0], rect[2] - b[2],
                                    b[1] - rect[1], rect[3] - b[3])))
         signed = outside[edge]
+        others = {e: max(0.0, v) for e, v in outside.items() if e != edge}
         row.update(body_measured=True,
                    body_overhang_mm=max(0.0, signed),
                    body_setback_mm=max(0.0, -signed),
                    body_signed_position_mm=signed,
                    body_bounds_mm=list(rect),
-                   # A band licenses its OWN edge only, never a second one.
-                   other_body_edge_overhang_mm={
-                       e: max(0.0, v) for e, v in outside.items()
-                       if e != edge})
+                   other_body_edge_overhang_mm=others,
+                   # The body's overhang SUMMED over every side -- the form
+                   # of the occupancy reading it replaces, at zero margin, so
+                   # a corner part counts both sides against its band exactly
+                   # as it did before #961. Equal to `body_overhang_mm`
+                   # whenever the body crosses no second edge.
+                   body_outside_mm=max(0.0, signed) + sum(others.values()))
         return row
 
 
@@ -277,12 +296,13 @@ def band_amount(geometry, ref, edge, legacy_amount, margin, pose=None):
     """`(amount, basis, row)`: the number a declared `overhang_mm` band is
     graded on, and the currency it is in.
 
-    Drawn body measurable -> the body's overhang past `edge`, at zero margin.
-    Otherwise -> `legacy_amount`, exactly as the caller computed it, so every
-    call site keeps its own pre-#961 reading (and its own rings and
-    tolerance) wherever the body cannot be read."""
+    Drawn body measurable -> the body's overhang past the outline at zero
+    margin, summed over the sides it crosses (`body_outside_mm`, the same
+    form as the occupancy reading). Otherwise -> `legacy_amount`, exactly as
+    the caller computed it, so every call site keeps its own pre-#961 reading
+    (and its own rings and tolerance) wherever the body cannot be read."""
     row = geometry.measure(ref, edge, pose)
     if row['body_measured']:
-        return row['body_overhang_mm'], 'body:' + row['body_layer'], row
+        return row['body_outside_mm'], 'body:' + row['body_layer'], row
     return (float(legacy_amount),
             f'legacy_occupancy@margin={float(margin):g}', row)

@@ -205,24 +205,31 @@ class BodyCurrency(_Boards):
 
 
 class Conjuncts(_Boards):
-    def test_a_band_licenses_its_own_edge_only(self):
+    def test_a_corner_body_counts_every_side(self):
         """The occupancy reading summed every side it crossed, so a corner
-        overhang counted against the band; on the body path a second edge is
-        named instead -- when the band has a maximum, as the sum needed."""
+        overhang counted against the band. The body reading keeps that form:
+        the graded number is the sum, and nothing else is added."""
         path = self.synthetic('corner.kicad_pcb',
                               '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab"))',
                               at='0.5 0.5 0')
+        pcb = parse_kicad_pcb(str(path))
 
-        def crossing(band):
-            r = floorplan.grade(_intent(ref='J1', edge='west', overhang_mm=band),
-                                parse_kicad_pcb(str(path)), str(path),
-                                clearance=.25, board_edge_clearance=.55)
-            return [v for v in r.violations
-                    if v.ref == 'J1' and 'also overhangs the north' in v.message]
-        hits = crossing({'min': 0.0, 'max': 2.0})
-        self.assertEqual(len(hits), 1)
-        self.assertAlmostEqual(hits[0].measured['overhang_mm'], 0.5, places=4)
-        self.assertFalse(crossing({'min': 0.0}))
+        def grade(band, budget=None):
+            extra = {'_intent': {'legality_budget': budget}} if budget else {}
+            return floorplan.grade(
+                _intent(ref='J1', edge='west', overhang_mm=band, **extra),
+                pcb, str(path), clearance=.25, board_edge_clearance=.55)
+        wide = grade({'min': 0.0, 'max': 2.0}, {'oob_count': 0})
+        ev = _evidence(wide, 'J1')
+        self.assertAlmostEqual(ev['body_overhang_mm'], 0.5, places=4)
+        self.assertAlmostEqual(ev['overhang_mm'], 1.0, places=4)
+        self.assertEqual(ev['overhang_disposition'], 'pass')
+        self.assertFalse(_overhang_violations(wide, 'J1'))
+        self.assertEqual(wide.legality.get('oob_count_exempt'), 1)
+        tight = _overhang_violations(grade({'min': 0.0, 'max': 0.8}), 'J1')
+        self.assertEqual(len(tight), 1)
+        self.assertIn('past the declared maximum', tight[0].message)
+        self.assertAlmostEqual(tight[0].measured['overhang_mm'], 1.0, places=4)
 
     def test_setback_gate_keeps_the_occupancy_reading(self):
         """Run 4 A's seat conjunct opens only when the part does not overhang,
@@ -243,6 +250,88 @@ class Conjuncts(_Boards):
                                places=4)
         self.assertFalse([v for v in r.violations
                           if v.ref == 'J1' and 'seated' in v.message])
+
+
+class Coverage(_Boards):
+    """Branches a verifier's extra mutations showed nothing else pinned."""
+
+    def test_emitter_widens_a_band_only_to_cover_the_body(self):
+        # Pad copper 0.25 mm inside the west edge (an occupancy reading of
+        # 0.30 at the 0.55 margin) under a Fab body 1.5 mm over it. (esp_prog's
+        # translated USB1 cannot serve: the translation makes it a SUSPECT
+        # pad-legality entry, which is emitted with no edge at all.)
+        path = self.synthetic('widen.kicad_pcb',
+                              '(fp_rect (start -2 -1) (end 1 1) (layer "F.Fab"))',
+                              at='0.5 10 0')
+        pcb = parse_kicad_pcb(str(path))
+        doc = floorplan.emit_intent(pcb, str(path))
+        j1 = [e for e in doc['edge_connectors'] if e['ref'] == 'J1']
+        self.assertEqual(len(j1), 1, doc['edge_connectors'])
+        self.assertEqual(j1[0].get('edge'), 'west', j1[0])
+        self.assertAlmostEqual(j1[0]['overhang_mm']['max'], 2.0, places=3)
+        self.assertIn("drawn body's", j1[0].get('note', ''))
+        # ... and the emitted intent still grades the band clean.
+        r = floorplan.grade(floorplan.intent_from_dict(doc), pcb, str(path))
+        self.assertEqual(_evidence(r, 'J1')['overhang_basis'], 'body:F.Fab')
+        self.assertFalse(_overhang_violations(r, 'J1'), [
+            v.message for v in _overhang_violations(r, 'J1')])
+
+    def test_copper_evidence_is_per_part(self):
+        from placement.legality import grade_pad_edge_clearance
+        from copy import copy
+        path = self.usb1_at(-1.45)
+        pcb = parse_kicad_pcb(str(path))
+        other = next(ref for ref in sorted(pcb.footprints)
+                     if ref not in ('USB1',) and pcb.footprints[ref].pads
+                     and not ref.startswith(('Ref', 'REF', '#')))
+        intent = floorplan.intent_from_dict({
+            'schema': floorplan.SCHEMA_VERSION, 'kind': floorplan.KIND,
+            'units': 'mm', 'edge_connectors': [
+                {'ref': 'USB1', 'edge': 'west',
+                 'overhang_mm': {'min': 0.0, 'max': 2.0}},
+                {'ref': other, 'edge': 'east',
+                 'overhang_mm': {'min': 0.0, 'max': 99.0}}]})
+        r = floorplan.grade(intent, pcb, str(path), clearance=.25,
+                            board_edge_clearance=.25)
+        mine = _evidence(r, other)['pad_copper_edge']
+        usb1 = _evidence(r, 'USB1')['pad_copper_edge']
+        self.assertTrue(usb1['findings'])
+        self.assertTrue(all(f['pad_ref'].startswith(other + '.')
+                            for f in mine['findings'] + mine['unmeasured']))
+        alone = copy(pcb)
+        alone.footprints = {other: pcb.footprints[other]}
+        direct = grade_pad_edge_clearance(alone, .25, str(path))
+        self.assertAlmostEqual(mine['minimum_gap_mm'],
+                               round(direct['minimum_gap_mm'], 4), places=4)
+        self.assertNotAlmostEqual(mine['minimum_gap_mm'],
+                                  usb1['minimum_gap_mm'], places=3)
+        text = floorplan.format_text(r)
+        self.assertIn('edge connector overhang', text)
+        self.assertIn('USB1 west: overhang 1.4500mm [body:F.Fab]', text)
+
+    def test_back_side_body_is_read_from_its_own_layer(self):
+        path = self.root / 'bside.kicad_pcb'
+        path.write_text(
+            '(kicad_pcb (version 20241229) (generator "t961")\n'
+            '  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))\n'
+            '  (footprint "t" (layer "B.Cu") (at 5 10 0)\n'
+            '    (property "Reference" "J1")\n'
+            '    (fp_rect (start -1 -1) (end 1 1) (layer "B.Fab"))\n'
+            '    (fp_rect (start -3 -3) (end 3 3) (layer "F.Fab"))\n'
+            '    (pad "1" smd rect (at 0 0) (size .5 .5) (layers "B.Cu"))))\n',
+            encoding='utf-8')
+        pcb = parse_kicad_pcb(str(path))
+        rect, layer, _ = ConnectorGeometry(pcb, str(path)).rect('J1')
+        self.assertEqual(layer, 'B.Fab')
+        for a, b in zip(rect, (4.0, 9.0, 6.0, 11.0)):
+            self.assertAlmostEqual(a, b, places=6)
+
+    def test_unquoted_layer_token(self):
+        path = self.synthetic('unquoted.kicad_pcb',
+                              '(fp_rect (start -1 -1) (end 1 1) (layer F.Fab))')
+        pcb = parse_kicad_pcb(str(path))
+        self.assertTrue(ConnectorGeometry(pcb, str(path)).measure(
+            'J1', 'west')['body_measured'])
 
 
 class LegacyFallback(_Boards):
@@ -287,6 +376,12 @@ class Geometry(_Boards):
                  True),
                 ('(fp_line (start 0 0) (end 4 0) (layer "F.Fab"))', False),
                 ('(fp_circle (center 0 0) (end 1 0) (layer "F.Fab"))', False),
+                # A rounded KiCad 10 rect: sharp corners would overstate it.
+                ('(fp_rect (start 0 0) (end 4 4) (radius 0.5) (layer "F.Fab"))',
+                 False),
+                # An arc inside `pts` bulges past its chord.
+                ('(fp_poly (pts (xy 0 0) (arc (start 4 0) (mid 5 2) (end 4 4)) '
+                 '(xy 0 4)) (layer "F.Fab"))', False),
                 ('', False)):
             path = self.synthetic('shape.kicad_pcb', drawing, at='2.5 10 45')
             pcb = parse_kicad_pcb(str(path))

@@ -1689,11 +1689,18 @@ class _Ctx:
         self._connector_copper = None
 
     def oob_exempt(self) -> Dict[str, float]:
-        """`{ref: overhang_mm}` for every declared edge connector whose
-        courtyard leaves the outline by an amount INSIDE its own
-        `overhang_mm` band -- the parts `rule_edge_connector` has always said
-        are correct off the board, and that `rule_legality` used to count
+        """`{ref: overhang_mm}` for every declared edge connector the census
+        counts as leaving the outline and whose overhang lies INSIDE its own
+        `overhang_mm` band -- the parts `rule_edge_connector` says are
+        correct off the board, and that `rule_legality` used to count
         against `legality_budget.oob_count` anyway.
+
+        #961: TWO readings, on purpose. "Counted" is still the census number
+        below; "inside the band" is the band's own currency, the same one
+        `rule_edge_connector` grades -- the drawn body where it can be
+        measured, the census number where it cannot. So exempt and violation
+        stay one fact, and the next paragraph's "one number" now holds only
+        for a part whose body cannot be measured.
 
         Measured, run 26: an intent declaring `CON1 east overhang 0..0.5` and
         `legality_budget {oob_count: 0}` (the emitter bakes the pile's own 0)
@@ -1727,11 +1734,9 @@ class _Ctx:
                 # one `rule_edge_connector` grades -- the drawn body where it
                 # can be measured, this very reading where it cannot. `amt`
                 # still decides whether the census counted the part at all.
-                band, _basis, body = _band_amount(self, ref, c.get('edge'), amt)
-                crossed = any(v > legality.EPS for v in
-                              (body.get('other_body_edge_overhang_mm')
-                               or {}).values())
-                if (amt > legality.EPS and not crossed
+                band, _basis, _body = _band_amount(self, ref, c.get('edge'),
+                                                   amt)
+                if (amt > legality.EPS
                         and lo - legality.EPS <= band <= hi + legality.EPS):
                     out[ref] = float(band)
             self._oob_exempt = out
@@ -2714,28 +2719,8 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
                 measured={'overhang_mm': round(band, 4),
                           'overhang_basis': overhang_basis},
                 expected={'min': lo, 'max': float(hi)})
-        # A band licenses its OWN edge. The occupancy reading sums every side
-        # it crosses, so a corner overhang used to count against the band; a
-        # body measured against one edge would lose that, so a body crossing
-        # a second edge is named here -- only when the band has a maximum,
-        # which is the only case the sum could ever have exceeded.
-        crossed = sorted((e, v) for e, v in
-                         (body.get('other_body_edge_overhang_mm')
-                          or {}).items() if v > legality.EPS)
-        if hi is not None:
-            for other, over in crossed:
-                yield Violation(
-                    rule='edge_connector', severity=ctx.sev('edge_connector'),
-                    ref=ref, message=(f"{ref}'s drawn body also overhangs the "
-                                      f"{other} edge by {over:.2f}mm; its band "
-                                      f"licenses the {c.get('edge')} edge only "
-                                      f"({overhang_basis})"),
-                    measured={'overhang_mm': round(over, 4),
-                              'overhang_basis': overhang_basis,
-                              'edge': other},
-                    expected={'edge': c.get('edge'), 'max': float(hi)})
         evidence = _connector_evidence(ctx, c, ref, band, overhang_basis, body,
-                                       lo, hi, bool(hi is not None and crossed))
+                                       lo, hi)
         # The SEAT BASIS, decided once for the two conjuncts that ask where
         # the part's MATING FACE is (nearest edge, seat). A receptacle's
         # pads sit well inboard of its opening by construction: a micro-USB
@@ -2743,9 +2728,9 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # `edge_receptacle` (or a brief row carrying `mount_mode:
         # edge_mount`) both conjuncts are therefore measured on the DRAWN
         # body when the library drew one; everything else keeps the
-        # courtyard, and the OVERHANG conjunct above stays on the courtyard
-        # too (its edge-margin graze would read a flush body as a 0.55 mm
-        # overhang -- a different currency, not changed here).
+        # courtyard. (The OVERHANG conjunct above no longer does: since #961
+        # it reads the drawn body wherever one can be measured, because the
+        # edge-margin graze read a flush body as a 0.55 mm overhang.)
         basis = 'courtyard'
         seat_rect = part.rect
         ctxd = c.get('context') or {}
@@ -2866,7 +2851,7 @@ def _band_amount(ctx, ref, edge, legacy_amount):
                        legacy_amount, ctx.gate.margin)
 
 
-def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi, crossed):
+def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi):
     """One `edge_connector_evidence` row (#961): the band's number and
     currency, the body measurements behind it, and the part's pad-copper edge
     clearance from `_Ctx.connector_copper` -- units, limits and a disposition
@@ -2890,7 +2875,7 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi, crossed):
     else:
         copper_disposition = 'pass'
     over = (band < lo - legality.EPS
-            or (hi is not None and band > float(hi) + legality.EPS) or crossed)
+            or (hi is not None and band > float(hi) + legality.EPS))
     others = body.get('other_body_edge_overhang_mm')
     return {
         'ref': ref, 'edge': c.get('edge'), 'units': 'mm',
@@ -2902,6 +2887,8 @@ def _connector_evidence(ctx, c, ref, band, basis, body, lo, hi, crossed):
         'effective_margin_mm': ctx.gate.margin,
         'body_measured': body['body_measured'],
         'body_layer': body.get('body_layer'),
+        # The declared edge alone, beside the summed number the band read.
+        'body_overhang_mm': r4(body.get('body_overhang_mm')),
         'body_signed_position_mm': r4(body.get('body_signed_position_mm')),
         'body_setback_mm': r4(body.get('body_setback_mm')),
         'other_body_edge_overhang_mm': (
@@ -4842,20 +4829,23 @@ def emit_intent(pcb_data, pcb_file: str, *,
                 # blesses -- a pad-box courtyard 1.6 mm inboard of a flush
                 # body is esp_prog's USB1. Widen to the body in that case
                 # alone, and say so: where the body reads no more than `amt`
-                # (every body-measured part on the tracked corpus) the
-                # emitted band is unchanged, and an emitted intent still
-                # grades clean by construction.
+                # the emitted band is unchanged. Measured on the tracked
+                # corpus: the widening never fires and no body-measured
+                # emitted entry crosses a second edge, so an emitted intent
+                # still grades clean there -- a MEASUREMENT, pinned by
+                # tests/test_961_body_overhang.py, not a construction: a body
+                # over two edges would draw the second-edge violation.
                 if body_geometry is None:
                     from .connector_geometry import ConnectorGeometry
                     body_geometry = ConnectorGeometry(pcb_data, pcb_file)
                 body = body_geometry.measure(ref, entry['edge'])
                 if (body['body_measured']
-                        and body['body_overhang_mm'] > amt + legality.EPS):
+                        and body['body_outside_mm'] > amt + legality.EPS):
                     entry['overhang_mm']['max'] = round(
-                        body['body_overhang_mm'] + 0.5, 3)
+                        body['body_outside_mm'] + 0.5, 3)
                     entry['note'] = (
                         f"band max from the drawn body's "
-                        f"{body['body_overhang_mm']:.3f}mm overhang "
+                        f"{body['body_outside_mm']:.3f}mm overhang "
                         f"({body['body_layer']}), wider than the occupancy "
                         f"reading {amt:.3f}mm it would otherwise use")
             if declare_classes and pc is not None \

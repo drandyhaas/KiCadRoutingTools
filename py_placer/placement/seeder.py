@@ -1385,7 +1385,7 @@ def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
     row = geometry.measure(ref, edge, (x, y, part.rot))
     lo, hi = band
     if (not row['body_measured']
-            or (lo - 0.02) <= row['body_overhang_mm'] <= (hi + 0.02)):
+            or (lo - 0.02) <= row['body_outside_mm'] <= (hi + 0.02)):
         return x, y, True
     err = target - row['body_signed_position_mm']
     if edge == 'north':
@@ -1398,9 +1398,7 @@ def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
         x += err
     row = geometry.measure(ref, edge, (x, y, part.rot))
     return x, y, (row['body_measured']
-                  and abs(target - row['body_overhang_mm']) < 0.02
-                  and not any(v > 1e-6 for v in
-                              row['other_body_edge_overhang_mm'].values()))
+                  and abs(target - row['body_outside_mm']) < 0.02)
 
 
 def edge_seat_ok(state, part, x: float, y: float, edge: str,
@@ -1449,21 +1447,14 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     amt = state.edge_gate.rect_outside_amount(r)
     # #961: the band in the currency `rule_edge_connector` now grades it in
     # -- the drawn body at zero margin where it can be measured, `amt` itself
-    # where it cannot -- so "a seat accepted here is not a violation there"
-    # keeps holding. A body crossing a SECOND edge is never a seat; the
-    # occupancy reading refused it by summing the sides it crossed.
+    # where it cannot -- so this predicate and the rule read one number, as
+    # they did before (agreeing up to this check's own +/-0.02 tolerance,
+    # which the rule does not share, exactly as upstream).
     from .connector_geometry import band_amount, geometry_for
-    amt, _basis, body = band_amount(
+    amt, _basis, _body = band_amount(
         geometry_for(state, state.pcb_data, state.pcb_file), part.ref, edge,
         amt, state.edge_gate.margin, pose=(x, y, part.rot))
     if not ((lo - 0.02) <= amt <= (hi + 0.02)):
-        return False
-    crossed = sorted(e for e, v in
-                     (body.get('other_body_edge_overhang_mm') or {}).items()
-                     if v > 1e-6)
-    if crossed:
-        if reasons is not None:
-            reasons.extend(f"drawn body over the {e} edge" for e in crossed)
         return False
     _blockers = state.keepout_blockers(part.ref, (r, tht))
     if _blockers:
