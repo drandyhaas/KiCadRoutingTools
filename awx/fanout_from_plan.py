@@ -39,6 +39,7 @@ import plan_ends as pe  # noqa: E402
 import schedule as sch  # noqa: E402  -- lis_keep, for plan_lis
 import source_realize as sr  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
+import rules as _rules  # noqa: E402  ONE source for every design rule
 
 # SRC_CLIMB=k (2026-09-10): the SOURCE menu also offers CLIMBS -- a dog-bone
 # or via-in-pad whose run first travels up to k pitches along a gap under
@@ -131,7 +132,8 @@ def copy_pro(src_board, dst_board):
         return
     try:
         from fix_kicad_drc_settings import fix_project_for_output
-        fix_project_for_output(dst_board, src_board, clearance=te.SPEC_CLEARANCE, track_width=0.1,
+        fix_project_for_output(dst_board, src_board, clearance=te.SPEC_CLEARANCE,
+                               track_width=sr.FAN_TRACK,
                                via_diameter=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                                verbose=False)
     except Exception as e:
@@ -2781,6 +2783,17 @@ def main():
     base = next((a.split('=', 1)[1] for a in sys.argv
                  if a.startswith('--board=')),
                 os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb'))
+    # THE DESIGN RULES, from the board this stage is running on (rules.py).
+    # Every geometry constant in this file and in the modules it imports is
+    # a DEFAULT for a 0.1 mm process until this call replaces it with what
+    # the board asks for.
+    _r = _rules.install_for(base)
+    # printed from the MODULES THIS STAGE READS, never from the Rules object
+    # (see braid.main: a print of the resolved value cannot tell you the
+    # install reached anything).
+    print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
+          f'track {te.TRACK}, fanout {sr.FAN_TRACK}/{sr.FAN_CLEAR}, '
+          f'via {te.VIA_SIZE}/{te.VIA_DRILL}  [{_r.sources.get("clearance")}]')
     names = coherent_nets(K, base)
     print('planning (source realized every round)...')
     work = out_path[:-len('.kicad_pcb')] if out_path.endswith('.kicad_pcb') else out_path
@@ -3222,7 +3235,7 @@ def fanout_blocks(pcb, dref, blocks, targets, dst_pad, hints, src_file, out_path
         print(f'  whole array: {len(rest_nets)} net(s) {rest_nets}')
         t, va, vr, f = generate_bga_fanout(
             cur.footprints[dref], cur, net_filter=rest_nets, layers=list(LAYERS),
-            track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
+            track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
             exit_margin=0.5, escape_method='underpad', plane_drop='off',
             escape_dir_hints={q: h for q, h in hints.items() if q not in band_pos})
         all_t += t
@@ -3247,7 +3260,7 @@ def fanout_blocks(pcb, dref, blocks, targets, dst_pad, hints, src_file, out_path
         try:
             t, va, vr, f = generate_bga_fanout(
                 cur.footprints[dref], cur, net_filter=nets, layers=list(LAYERS),
-                track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE,
+                track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE,
                 via_drill=te.VIA_DRILL, exit_margin=BAND_EXIT,
                 escape_method='underpad', plane_drop='off',
                 escape_dir_hints={q: h for q, h in hints.items() if q in mine})
@@ -3351,7 +3364,7 @@ def fanout_once(out_path, names, choice, dst_pad, dref, byname, board,
     else:
         tracks, vias_add, vias_rm, failed = generate_bga_fanout(
             pcb.footprints[dref], pcb, net_filter=targets, layers=list(LAYERS),
-            track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
+            track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
             exit_margin=0.5, escape_method='underpad', plane_drop='off',
             escape_dir_hints=hints)
     if tracks:

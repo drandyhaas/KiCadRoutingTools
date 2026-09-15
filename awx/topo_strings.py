@@ -20,13 +20,23 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'py_router'))
+if HERE not in sys.path:
+    sys.path.append(HERE)            # append, never insert: awx must not
+                                     # shadow a py_router module
+import rules as _rules  # noqa: E402  ONE source for every design rule
 
-TRACK = 0.127
-SPEC_CLEAR = 0.1     # the spec clearance. NOT braid.CLEAR, which is
+# The DEFAULTS -- the chain's 0.1 mm-process preferences, which is what
+# these were as literals. A stage resolves them from its own board with
+# rules.install_for(board); a module imported without an install keeps
+# exactly these values (see rules.py, "USING IT").
+TRACK = _rules.DEFAULT.track
+SPEC_CLEAR = _rules.DEFAULT.clearance
+                     # the spec clearance. NOT braid.CLEAR, which is
                      # 0.105 -- the spec plus 5um so a hug does not sit
                      # exactly on it. Two different quantities: do not
                      # import one where the other is meant.
-MARGIN_OUT = SPEC_CLEAR + TRACK / 2      # routing margin outside the field
+MARGIN_OUT = _rules.DEFAULT.margin_out   # routing margin outside the field
+                                         # (= SPEC_CLEAR + TRACK / 2)
 MARGIN_IN = 0.06                     # bare-copper margin inside the field
 FREEZE = 0.35                        # no pushes this close to an endpoint
 STEP = 0.12                          # densify step (mm)

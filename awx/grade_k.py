@@ -10,6 +10,9 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.append(HERE)      # append, never insert: awx must not shadow
+                               # a py_router module
 PY = sys.executable
 board = sys.argv[1]
 nets = sys.argv[2].split(',')
@@ -36,9 +39,17 @@ for line in (r.stdout + r.stderr).splitlines():
     m2 = re.match(r'\s+(\S+) \(\d+ pads?\)\s*$', line)
     if m2 and m2.group(1).split('/')[-1] in nets:
         opens.append(m2.group(1).split('/')[-1])
+# GRADE AT THE CLEARANCE THE BOARD WAS ROUTED TO, not at a literal 0.1
+# (CLAUDE.md, "Testing & Verification"). rules.py resolves it from the
+# board's OWN project -- which every stage of the chain stamps with the
+# floor it laid at -- so a board routed at a wider class is graded there.
+# It is printed on the GRADE line: a grade whose clearance is invisible is
+# a number nobody can check.
+import rules as _rules  # noqa: E402
+clr = _rules.rules_of(board).clearance
 r = subprocess.run([PY, os.path.join(HERE, '..', 'py_router',
                                      'check_drc.py'), board,
-                    '--clearance', '0.1', '--clearance-margin', '0.1',
+                    '--clearance', repr(clr), '--clearance-margin', '0.1',
                     # or k-net-drc counts only what check_drc PRINTED: it
                     # truncates each category at 20, so measured 146 and
                     # 7947 true violations both reported ~45-78 -- the
@@ -73,7 +84,7 @@ if m is None:
     print(f'GRADE {os.path.basename(board)} BROKEN: via census failed:\n'
           + (r.stdout + r.stderr).strip()[-300:])
     sys.exit(2)
-print(f'GRADE {os.path.basename(board)} K={len(nets)} '
+print(f'GRADE {os.path.basename(board)} K={len(nets)} clr={clr} '
       f'open={len(opens)} drc={ndrc} vias={m.group(1) if m else "?"} '
       f'segs={m.group(2) if m else "?"} k-net-drc={ndrc_k}'
       + (f'  open: {",".join(sorted(opens))}' if opens else ''))
