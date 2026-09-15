@@ -4958,3 +4958,546 @@ that locates K51's gap: 100 / 1245 mm against 115 / 1389 with one open.
    the above: on a clear channel the chain is at the optimum at every K;
    a part in the corridor is where it pays 8-26 vias on a 0-via optimum
    and leaves the band -- exactly the C5 class. Run it before a ladder.
+
+## Session 12 (2026-09-15, 14:00-): the island-price ladder read; the end-of-face climb; the rate in the walk
+
+### Item 1: the island-price ladder (`tmp/s11/ladder_ip.out`), read
+
+Vias / rule (vias + mm/7.5); jcl = the count+lane judge, the reference.
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| jcl | 34 / 121.5 | 60 / 181.4 | 80 / 231.0 | 115 / 300.2 |
+| `ip3` (island 3/part) | = jcl | = jcl | = jcl | **129 + SA11 open** / 311.1 |
+| `ip3sw4` (+ swimmer 4) | 36 / 122.3 | 58 / 175.0 | 80 / 232.3 | 119 + SBA2 open / 296.8 |
+| `sw4j` (swimmer 4 alone) | 36 / 122.3 | 54 / 168.5 | 86 / 237.9 | 119 + SBA2 open / 296.8 |
+| forced probe `fl` (four DQ nets head-on) | -- | 68 / 185.7 | -- | 100 + SCAS open / 265.9 |
+
+**No arm reaches the head-on plan.** What each says:
+
+1. **`ip3` K51 keeps all four DQ nets on DU1's south face.** Final berths
+   SDQ0 down/F, SDQ1 down/B, SDQ2 down/F, SDQ7 down/B, SDQ15 down/F
+   (jcl: F / F / B / B / B; the probe: every one left/B). The price is
+   LEARNED per chosen berth signature from the verified plan, so each
+   re-solve steps a flagged lane to its sibling south berth (the other
+   layer, a neighbouring slot), which crosses C5 as well and is priced on
+   the next iteration -- a walk over the south face that never reaches
+   the west face, because a head-on B berth costs a model swimmer at 100
+   and the whole south face at 3/part is cheaper than one. At K51 the
+   chain took the priced plan at stage 1 (count 308 against 329) and the
+   later stages then solved at 344-381 where jcl's ran 301-311; the
+   final floors were **314.27 (ip3) against 315.50 (jcl)** -- the judge
+   could not separate them, and the copper is 129 + 1 open against 115.
+   The K51 judge's precision is not +-5.
+2. **`sw4j`: the swimmer at 4 is what removes the west-face stubs, and
+   the board is not better for it.** The model buys 18 swimmers (obj
+   1330.7; jcl 9 at 3983.7), moves SDQ0 up/F and SDQ2/SDQ15 left/F (on
+   F, where the probe's head-on berths are on B), keeps SDQ1/SDQ7 south;
+   the braid's count is 354 against 329 at the same stage (the stage's
+   first solve is the reference, so it ships); routed 119 + SBA2 open.
+   Its K51 plan has ONE west-face tooth (SCAS; jcl SCAS SDQ11 SDQ13).
+3. **`ip3sw4` = `sw4j` byte-identical at K28 and K51** (36; 119 + SBA2,
+   1333.4 mm, 104 rip trials): with the swimmer at 4 the island price
+   fires on SDQ1 / SDQ14 / SZQ and every re-solve is judged worse (373 /
+   370 against 354; 343 against 341), so nothing lands. K35 58 against
+   54 and K41 80 against 86 are the price landing on a near-tie.
+4. **So the swimmer price still decides.** At 100 the model keeps the DQ
+   group south to save two model swimmers; at 4 it moves two of them
+   west but onto F with 18 swimmers, which routes 119, not 100. And
+   "the model prefers head-on" is NOT established: the first solve is a
+   20 s FEASIBLE point (jcl obj 3983.7, bound 1533.9; the forced probe
+   4060.9, bound 1567.2) -- the solver stops where det 40 leaves it, on
+   both. The probe's plan (all four left/B; 7 model swimmers at the end
+   against jcl's 11) is not reachable through prices on this solve.
+
+**Settled: `PLAN_PAGES_ISLAND` as built.** A price learned per chosen
+berth cannot say "this face", and the K51 judge cannot tell 115 from
+129. To become a mechanism it would need every candidate priced by its
+own chord up front (the chord test is cheap) AND a swimmer price the
+copper agrees with -- and `sw4j` says the second alone routes worse.
+
+**For item 3, the human's census on the same nets** (`bundles51.txt`):
+the human launches ten K51 nets -- SA0 SA1 SA11 SA12 SA14 SA15 SA2 SA4
+SA8 SBA1, balls in U1 rows N-W, columns 17-21 -- from U1's NORTH face on
+B (20-27 mm of B copper, 2 vias each). Our K51 swimmers are that set
+less SA0/SA4/SA8, plus SDQ12 SDQ9 SCKE0 SCKE1 SA6 SDQ7 SRST SCS0 SDQ4
+SDQ5 SA10. The bench's east face carries this run's stubs in rows F-Y
+(31 of the 48) and **rows A-E are free**: Andy's proposal -- not a north
+stub, "a stub exiting at a row above the other stubs on the East" -- has
+five free rows to land in. That move IS the climb class
+(`escape_moves.enumerate_moves climb=`, the s7 measurement above):
+what is new is offering ONLY the climb to the free end of the face, a
+handful of candidates per net instead of the six-to-eight-fold menu
+that made the CP-SAT stop worse at K41/K51.
+
+### Items 2 and 3 built: the end-of-face climb, the rate in the walk; and a menu pre-filter (Andy)
+
+**The probe that reframes item 2** (`src_prices.py`, scratchpad): every
+source candidate of K51's west-face nets priced in BOTH unit systems with
+its frame key. SDQ11: `left/B` (the west tooth) greedy 29.6 / rate 11.3,
+key -29; `up/B` (the north face at the corner column) greedy 14.0 / rate
+5.2, key -8; `right/B` 3.6 / 3.1, key 0. The north exit has the SAME
+order effect as the west tooth (both key before every east-face launch)
+and is cheaper under either price, yet the model took the west face for
+both SDQ11 and SDQ13 -- because the north exit is ONE point, (126.69,
+57.11), for every east-column ball, so at most one net can have it.
+**The far-face tooth is chosen by exclusion, not by price**; the rate's
+wrap changes no order among these candidates (west/east 4.1x greedy,
+3.5x rate). The launch face has five free rows (A-E) north of the bundle
+(rows F-Y) and one south (AA): Andy's climb has room, and it is what the
+model is reaching for when it takes the west face.
+
+**Built (all opt-in, flag-off byte-identical: `ctl12` K28 = `ctl11` on
+both boards):**
+- `SRC_CLIMB_END=n` (fanout_from_plan `end_climbs`; escape_moves
+  `enumerate_moves(dirs=)`): the launch face = the source face nearest
+  the most launch points; the span = what the run's teeth occupy along
+  it; climbs enumerated on that face alone with `climb` = the row count,
+  kept when the exit lies beyond the span by half a pitch or more, the n
+  nearest rows per (layer, end), the cheaper start per row, tagged
+  `Move.end_climb`. K51: +? per net (K28: +48 over 28 nets; K35: +54).
+- `SRC_CLIMB_END_WALK=1` (pages_first): the end climbs enter ONLY the
+  walk's proposal solves (`_solve(end_climbs=)`), never the reference.
+- `PLAN_PAGES_WALK_RATE=1`: the walk's proposals in the rate's units
+  (`_solve(rate=1)`), the reference in the run's.
+- `PLAN_PAGES_MENU=k` / `PLAN_PAGES_MENU_TOP=K`: the solve's menus
+  pre-filtered -- per net at most k per (face, layer, climbed) class by
+  the objective's own price, then K overall; the seed's choice, fixed /
+  held / trust-reference moves, the standing tooth and the end climbs
+  always kept. Menu census at K51 (`menu_census.py`): 838 berths = ~17
+  per net over 8 classes, the B dog-bone classes 3-5 deep, the F classes
+  2; 225 tooth moves.
+
+**K28 smokes.** `ce2` (end climbs in EVERY solve): 40 vias against 34 --
+the first solve's menu 186 -> 234 tooth candidates, its feasible point
+obj 727.2 -> 737.0, the braid's count 123 -> 133, six teeth moved (two
+end climbs: SCKE0 to the south end, SDQ13 to row E), and the stage-1
+plan ships unjudged. The s7 climb finding again, at a quarter of the
+menu growth: **the big solve does not converge (11% gap at K28, 61% at
+K51) and any extra candidate moves its stopping point.** `cew` (in the
+walk only): 34 = the walk arm; the walk proposed SCAS's end climb and
+berth changes ten times, the judge rejected all (count 128-145 against
+122.5) -- K28 has no swimmer to fix. `wr` (rate in the walk): 32, but
+its REFERENCE solve read obj 729.7 where five other runs of the same
+model read 727.2, and a re-run under the flag read 727.2 -- **the CP-SAT's
+feasible point is load-dependent once in ~6 runs** (this machine was
+running the synthetic harness beside it). Rule: **an arm's first-solve
+objective is a determinism CANARY** -- K28 727.2 / 644.5, K35 1028.2 /
+935.3, K41 2308.9 / 1163.6, K51 3983.7 / 1533.9 -- and a rung whose
+canary differs is re-run, not read.
+
+**The synthetic harness as the gate** (`tmp/s12/synth_base_{b1,b3}`,
+jcl configuration; arms `jw` / `cew` / `wr` queued behind it in
+`synth_arms.sh`, compared by `synth_cmp.py BATCH ARM..`).
+
+**`cew` (end climbs in the walk's proposals) on the bench: K35 54 / K41
+74 = the walk arm to the segment (no end climb taken; the accepted steps
+are jwfb's), K51 118 + SCS0 open (jwfb 125, jcl 115; canary 3983.7
+matched). The K51 walk took four steps (jwfb one), moving SDQ11 / SDQ12
+/ SA14 / SDQ13 / SDQM0 teeth and berths, and the shipped plan has the
+same two launches beyond the F-Y span as jwfb (SCKE0, SCS1: plain south
+teeth) and the same west-face teeth (SCAS, SDQ11) -- no end climb
+survived. `end_probe.py` (scratchpad) on the K51 bench: the end climbs
+EXIST and are conflict-free against every standing tooth, strict or lax
+-- SDQ11 `right/B` at row E, climb 4, greedy 10.1 (its west tooth 29.6,
+the same order effect: key -2.5 against the bundle's first launch
+-2.16); SDQ13 climb 6, 12.7; SA15 climb 10, 23.1 -- but SBA1, SRST,
+SA12, SDQ4/5, SA10, SDQ1 have NONE (their column gaps on B are walled
+by the standing B teeth's via-in-pad barrels: SA15's at R17 seals the
+gap SBA1 at T18 would climb), and with n=2 rows per end only two nets
+can take the north end: the walk gave a row to one and the rest went
+back west. Next: SRC_CLIMB_END=5 (every free row A-E) at K51, and the
+walk log now says WHERE a moved end went (`SDQ11:s>rB*`, `*` = end
+climb, `^` = climb).
+
+**The menu pre-filter at K28 (fanout only):** top 8 by price: berths
+501 -> 230, exclusions 14975 -> 1584, the solve OPTIMAL in 7.9 s -- at
+obj 1014.3 with a model swimmer, against the full menu's FEASIBLE 727.2
+with none: **price alone cuts the candidates the planar plan needs**,
+and the two-stage hint from it gives the full solve 730.2 (worse than
+the greedy hint's 727.2). Class cap 2: 501 -> 365, exclusions 7069,
+FEASIBLE 730.2 bound 656.0 -- neither proves. The bound barely moves
+with the menu (644 -> 656), so the 11% gap at K28 is the encoding's,
+not the menu's; what a small menu buys is a PROVEN solve, and a proven
+solve is what makes price changes measurable (jpR at K35: OPTIMAL in
+18 s and the best complete K35 under the rule).
+
+**The harness on the walk (`synth_cmp.py b1 base jw`; base = the jcl
+configuration, jw = jwfb's walk):** routed 343 -> 298 over the 23 cases,
+in band 533/560 -> 481/534, opens 0 -> 2. Every gain is a crossing-heavy
+case -- `reversed_k28` 83 -> 54, `reversed_k8` 8 -> 6,
+`interleave_k15_dst180` 22 -> 16 -- and the loss is `reversed_k15`: 26 /
+0 open -> 18 / 2 open (SYN09, SYN11 refused at last call). Its log says
+why: the walk accepted NOTHING in any stage (0 steps, 4-8 solves each),
+so the plan that shipped is the RAW first solve (the braid swims 9 on
+it, count 70) -- where the recorded loop would have gone on to re-key
+it (its iteration 1 had 3 model swimmers and the board routed 26 / 0).
+**Under `PLAN_PAGES_WALK` the damped loop does not run at all**
+(`choose` returns `_walk`'s answer), so a walk that finds no step ships
+a worse plan than the loop it replaced. The fix is a reference the loop
+has already improved: `PLAN_PAGES_WALK_FROM=damped` (built next).
+
+**Five end rows at K51 (`cew5x`, fanout only, walk from the solve):**
+the walk's step 2 reads `moved 3 [SDQ13:s, SDQ11:s, SA15:s>rB*]` --
+SA15 (ball R17, berth on DU1's north face: a swimmer by construction)
+TOOK an end climb to U1's east face's north end on B, while SDQ11 and
+SDQ13 went back to their standing east stubs; count 325 -> 307,
+accepted. The mechanism fires once the end has room for more than two
+nets. The braid still lists SA15 among its 13 swimmers on that plan: an
+outermost LAUNCH needs an outermost TARGET as well, and its north-face
+berth sits mid-order -- the berth is the model's to move, the judge
+counted the plan better anyway. The chain result (`cew5` K51) is
+queued.
+
+**`PLAN_PAGES_WALK_FROM=damped`** (built, K28 smoke: "reference = the
+damped loop's plan", the walk runs after the loop and ships the loop's
+plan when it accepts nothing). Queues reprioritized (`bench_queue1b.sh`:
+cew5 51, jwd 51/35/41, cew5d 51/35/41, cel5 51, mf2 51, mt8s 51, jpRm2
+51, cewr5 51, jw12 51, ctl12b 28; `synth_arms2.sh`: jwd, cew5d, cew5 on
+b1+b3 after the running jw b3). `wr` (rate in the walk): K35 54 = jwfb,
+the same accepted step under either unit system -- the rate does not
+change what the walk proposes there.
+
+**The two feasible points of the K28 model, and what they route.** The
+full-menu solve at DET 40 returns obj 727.2 (bound 644.5) in most runs
+and **729.7** in some (`wr` K28's reference; the menu portfolio's second
+solve in `mfp_chk`); the four CP-SAT workers share solutions on the wall
+clock, so the point they stop at is load-dependent. The two plans are
+NOT equivalent: the 729.7 plan is judged 118.6 against 122.5 and ROUTES
+32 against 34 -- the plan the model calls worse by 2.5 units is the
+better copper by two vias. The objective's blindness, seen at the
+smallest scale: which feasible point the solver hands back is worth as
+much as the menu it searched. Hence `PLAN_PAGES_SEEDS=n` (built next):
+the first solve n times under different CP-SAT random seeds, each plan
+verified, the judge keeps the best -- diversity the judge can use, as
+`PLAN_PAGES_PORTFOLIO` does across objectives and
+`PLAN_PAGES_MENU_PORTFOLIO` across menus (K28: the judge took the full
+plan over the class-cap-2 plan, 118.6 against 122.9).
+
+**`PLAN_PAGES_SEEDS=3` at K28 (fanout only):** seed 0 and seed 1 both
+stop at 727.2 (the same plan, key 122.5), seed 2 at 733.2 with a model
+swimmer (key 123.2, the braid swims 1); the judge keeps seed 0. The seed
+changes the search, not always the point; the 729.7 plan that routes 32
+was not among these three. Built; the arm `sd3` (K51 / K35 / K41) is
+queued behind the mechanisms.
+
+**Item 2, settled: `wr` (the rate's source wrap inside the walk's
+proposals) = K35 54 / K41 74 / K51 125 (0 open, rule 306.6) -- jwfb's
+54 / 74 / 125 to within 5 mm at K51 (canaries matched at every K).** At
+K35 and K41 the walk accepts the SAME step under either unit system; at
+K51 its one accepted step differs by one net (SA14's tooth in place of
+SA11's) and the copper lands on the walk's own 125. The probe said why
+before the ladder did: the west-face tooth is chosen by exclusion, not
+by price, so pricing its wrap changes nothing the model was weighing.
+Note also that the walk arms carry NO open net at K51 and only SDQ11 on
+the west face (its step 1 returns SDQ13's tooth east in every arm): the
+opens of the s11 fix arms were the braid-side arms on the recorded d40
+plan, not a property of the west-face stub.
+
+**The harness on the obstacle ladder (`b3 base jw`):** identical to the
+segment except `interleave_k15_obs6x18` 32 -> 30. The walk is a
+plan-side mechanism; the obstacle cases are braid-side (every one
+leaves the band), and the harness separates the two as designed.
+
+**Why one end climb does not pay (the `cew5x` plan, read):** SA15
+launches at row D (y 59.70) and berths at x 142.73 on DU1's north face
+-- the 9th of 13 north berths from the west; SBA1 (143.13) and SA12
+(143.93), east of it on the same page B, launch from rows T and R,
+south of SA15's new row, so SA15's lane still crosses theirs and the
+braid (and the model) still count it a swimmer. An outermost LAUNCH
+pays only with an outermost TARGET, or when its page-mates east of it
+climb too, in berth order -- the human's answer, ten nets launched
+north on B in the order of their north-face berths. That is a GROUP
+move: k end climbs assigned to the k outermost berths of one face and
+page, verified as ONE proposal; the walk's r=3 cannot compose it and
+the count judge rejects each member alone. And the group's climbs do
+not all exist on today's menu: SBA1 and SA12 have no end climb because
+the standing B teeth's barrels (SA15's own at R17) wall their column
+gaps -- the menu would have to be built with the group's own old teeth
+removed, and the realize lay the group after stripping them.
+
+### The first K51 below the reference: `cew5` = 109 vias, 0 open, 0 DRC (rule 284.7)
+
+`cew5` = jwfb's walk (from the solve, SOLVES 16, RMAX 5) + `SRC_CLIMB_END=5
+SRC_CLIMB_END_WALK=1` -- the five free rows of U1's east face offered as
+end climbs in the walk's proposals only. K51: **109 / 0 open / 1317.7 mm,
+rule 284.7** against jcl 115 (300.2), jwfb 125 (306.0), the forced probe
+100 + 1 open (265.9), the human 81 (250.5). Canary 3983.7 matched; the
+chain's walk steps are the probe's to the digit (step 1 SDQ12/SA14 teeth,
+step 2 `SDQ13:s, SDQ11:s, SA15:s>rB*`: SA15 climbs to row D, SDQ11 and
+SDQ13 return east; count 329 -> 325 -> 307). In band first pass 37/48,
+kept 39/48 (jcl 33/48), last calls 9 (14), rip trials 5 (9). With two rows
+(`cew`) the same walk gave 118 + 1 open: the end needs room for the
+group. Its other rungs (K28/K35/K41) are queued first; edict 3 decides.
+
+**Look at the renders** (`cew5_k51.png` against `jcl_k51.png`, scratchpad
+8b767581; the K51 nets bright, x 112-147): jcl's two west-face through-run
+stubs are the long B tracks crossing U1's whole field at rows J and L to
+the west face and round -- the 26 mm wrap. In `cew5` they are gone: SDQ11
+and SDQ13 launch east again, one B climb runs north along the east
+columns to row D, and the north arc into DU1 carries more of the bundle.
+The launch region is visibly less tangled; the destination side is much
+the same. **`jwd` (walk from the damped loop's plan) K51 = 124 / 0 open
+(309.7)**: at K51 the damped loop does not improve the first solve (its
+plan is the reference's, count 329), so the walk starts where jwfb's
+did and lands beside it (125).
+
+**The group climb (`PLAN_PAGES_GROUP=5`, K51 fanout smoke) and what walls
+it.** The census per destination face and page, berths outermost first
+with each net's climb count: up/F `SA6:0 SA0:11 SA10:0 SCS0:0 SZQ:11
+SDQM1:11 SDQ13:11`; up/B `SA12:0 SBA1:0 SA15:9 SCKE0:0 SCKE1:0 SDQ5:0
+SDQ11:9`; down/B `SA8:2 SA2:2 SCS1:2 ...`. Proposals: up/F outermost 4
+(SA0 SZQ SDQM1 SDQ13) count 342 rejected, 3 -> 367 rejected, **2 (SA0,
+SZQ) -> 328.5 against 328.8 ACCEPTED** (a hair); up/B (SA15, SDQ11) 353
+rejected; down/B (SA8, SA2) 329 rejected. So the group mechanism runs
+and the judge takes only a marginal pair, because the group it can form
+is not the human's: SBA1 and SA12 (up/B, balls T18 / R18) have NO climb
+even with their page-group's teeth removed. `gap_blockers.py`
+(scratchpad) says what walls their two column gaps between the ball and
+the north edge: **the run's OWN standing teeth of other groups** -- SA0's
+and SRST's F `up` stubs (11 and 7 segments along the gap), SA14's and
+SA15's B teeth and via barrels; excluding EVERY K net gives each of them
+54 climbs. The human's north bundle is ten nets re-fanned TOGETHER
+(rows N-W, columns 17-21); ours can only be laid the same way -- a JOINT
+re-fan of the east block (`source_realize.realize(free=...)` strips and
+re-lays a set jointly with the engine) with the climbs enumerated against
+the block stripped. That is the next build of item 3: the group =
+every net whose standing tooth crosses the launch face between the
+group's rows and the end, freed together; the plan carries the climbs,
+the engine re-lays the rest around them, the judge decides.
+
+**The group climb with the whole run stripped from the enumeration
+(`group_end_climbs` excludes every net of the run; the joint realize
+frees a laid climb's blockers itself, `blockers_of`, capped at
+`SRC_REFAN_MAX` 6):** the census fills in -- up/F every member 11
+climbs, up/B every member 9 -- and the judge takes TWO groups at stage 1:
+up/F outermost 5 (SA6 SA0 SA10 SCS0 SZQ) count 329 -> 301, swimmers 11
+-> 8; up/B outermost 5 (SA12 SBA1 SA15 SCKE0 SCKE1) 301 -> **291**,
+swimmers 7. That is the lowest K51 count any plan has been judged at
+(cew5's shipped plan 307, the human-count territory). Two defects in
+the same run: both groups were handed the same rows 57.43-58.73 (the
+assignment was per group; now unique across groups and the standing
+launches), and the joint re-fan laid 17 (10 climbs + 7 freed blockers)
+with 9 of 17 in the asked gap -- SA0 and SA10 as asked, SBA1 one row
+off, SA15 / SCS0 / SA6 degraded 8-11 mm along the face by
+`_follow_plan`, SZQ sent to another face, SCKE1 refused -- and the
+audit then crashed on the refused net's bare ball (`order_agreement`,
+guarded now). The engine cannot lay ten B climbs through five column
+gaps; the human's ten north launches use row gaps as well. The round
+loop judges the REALIZED plan, so a degraded group is reverted, not
+shipped -- the question the chain will answer is how many of the group
+survive the lay.
+
+**`PLAN_PAGES_WALK_FALLBACK=1` (K28 smoke):** stage 1 the walk's plan
+(key 118.6) over the loop's (122.5); stage 2 a tie, the loop's. Arms
+`jwf` / `cew5f` queued on the bench and the harness.
+
+### `jwd` K41 = 71 vias, 0 open (rule 224.3): the best clean K41 this chain has produced
+
+`jwd` = the walk FROM THE DAMPED LOOP'S PLAN (`PLAN_PAGES_WALK_FROM=damped`,
+jwfb's budgets): K35 54 / 172.5, **K41 71 / 224.3** (jwfb 74 / 228.2, jcl
+80 / 231.0, the human 70 / 220.6), K51 124 / 309.7 (jwfb 125). Canary
+2308.9 matched. Its K41 walk step: `SDQ15:s>lB, SA11:s, SCS1:s` from the
+loop's plan (count 239 -> 232) -- SDQ15's tooth sent to the WEST face,
+and the copper is the better for it: a far-face tooth is not a defect
+in itself, the K35/K51 through-runs were. In band first pass 31/41,
+last calls 6, rip trials 2 (jwfb 33/41, 7, 9). Not better than jwfb at
+K51 and equal at K35; the walk from the loop's plan and from the free
+solve are two neighbourhoods, and neither contains the other's wins.
+
+**The group climb, realized (`grp_chk` K51, rows unique):** stage 1
+takes up/F outermost 5 (count 329 -> 301) and rejects every up/B group
+at the inner rows 59.06-60.03 (325 / 324 / 330); the joint re-fan lays
+14 asked, 8 of 14 in the asked gap, and the REALIZED plan is judged 317
+-> 320: **reverted, the seven degraded moves banned** (SA12 SA11 SA6 SA0
+SA10 SCS0 SZQ). The later stages accept groups again (298 / 295, 310 /
+305) and the destination passes end at 311 -- the chain (`grp`) is
+queued. The wall is the engine: `_follow_plan` degrades a climb it
+cannot lay verbatim instead of refusing it, so a group arrives
+half-laid and the round judge throws the whole round away. A group
+needs an all-or-nothing lay (or the climbs the engine can actually lay,
+enumerated against what it will strip).
+
+## Handoff: the next session (written 2026-09-15, ~15:30, end of session 12; supersedes the session-11 handoff)
+
+**Tree.** `bus622-take5` @ a472bd26 + this session's edits (a WIP commit
+at the end of the session if the flag-off identity check passes; see
+the tree's log): `escape_moves.py` (`enumerate_moves(dirs=)`,
+`Move.end_climb`), `fanout_from_plan.py` (`SRC_CLIMB_END`, `end_climbs`,
+`group_end_climbs`), `pages_first.py` (`SRC_CLIMB_END_WALK` 1|2,
+`PLAN_PAGES_WALK_RATE`, `PLAN_PAGES_WALK_FROM=damped`,
+`PLAN_PAGES_WALK_FALLBACK`, `PLAN_PAGES_MENU` / `_TOP` / `_STAGE` /
+`_PORTFOLIO`, `PLAN_PAGES_SEEDS`, `PLAN_PAGES_GROUP`, the walk log's
+`n:s>rB*` tags), `source_realize.py` (`order_agreement` guarded against a
+bare ball). Every flag is off by default. Flag-off identity: `ctl12` K28
+= `ctl11` on both boards (before the later edits), and `ctl12c` -- the
+fanout stage on the FINAL code, run until its canary read 727.2 -- is
+copper-identical to `ctl12`'s fanout board (540 items); the braid was
+not edited this session. The canary rule below is how to read any
+control run under load (the first `ctl12c` try read 729.7 and differed).
+
+**The two results of the day (vias / rule; human K35 58 / 186.1, K41 70
+/ 220.6, K51 81 / 250.5):**
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| jcl (reference) | 34 / 121.5 | 60 / 181.4 | 80 / 231.0 | 115 / 300.2 |
+| jwfb (walk from the solve) | 34 | 54 / 172.5 | 74 / 228.2 | 125 / 306.0 |
+| **cew5** = jwfb + `SRC_CLIMB_END=5 SRC_CLIMB_END_WALK=1` | 34 / 121.5 | 54 / 172.5 | 74 / 228.2 | **109 / 284.7, 0 open** |
+| **jwd** = `PLAN_PAGES_WALK_FROM=damped` | -- | 54 / 172.5 | **71 / 224.3** | 124 / 309.7 |
+| wr = jwfb + `PLAN_PAGES_WALK_RATE=1` | 32 (canary off) | 54 | 74 | 125 / 306.6 |
+| cew (two end rows) | 34 | 54 | 74 | 118 + 1 open |
+| ip3 / ip3sw4 / sw4j (s11's island ladder) | 34 / 36 / 36 | 60 / 58 / 54 | 80 / 80 / 86 | 129+1o / 119+1o / 119+1o |
+| grp (`PLAN_PAGES_GROUP=5`, the group climb, no walk) | -- | -- | -- | 119 + SCS1 open / 295.9 (12 groups judged in, the engine's degraded lays reverted them; canary matched) |
+
+**cew5 = 34 / 54 / 74 / 109 (every canary matched): not worse than jwfb
+on any rung and better at K51; against jcl better at K35, K41 and K51
+and equal at K28.** jwd is not worse than jwfb on any rung and better at
+K41. Neither is a default by this session (edict 3 is Andy's call, and
+the walk's K41 time -- 149 s against 83 -- was the s10 caveat); both
+are the first arms since jcl that beat every clean board they touch.
+
+**The queue, complete (16:48; vias / rule, K51 opens named; every
+first-solve canary matched except where the menu was trimmed by design):**
+
+| arm | K35 | K41 | K51 |
+|---|---|---|---|
+| jcl | 60 / 181.4 | 80 / 231.0 | 115 / 300.2 |
+| jwfb = jw12 (re-run on this tree) | 54 / 172.5 | 74 / 228.2 | 125 / 306.0 |
+| cew5 (walk from the solve + 5 end rows) | 54 | 74 | **109 / 284.7** |
+| jwd (walk from the damped plan) | 54 | **71 / 224.3** | 124 / 309.7 |
+| jwf (walk + damped fallback) | 54 | 71 | 124 |
+| **cew5d = cew5f (both mechanisms; damped or fallback + 5 rows)** | 54 / 172.5 | **71 / 224.3** | **109 / 284.7** (K28 34 / 121.5, canary matched; a first try at 729.7 read 32) |
+| sd3 (three CP-SAT seeds, judge picks) | 60 | 80 | 113 + SA4 open / 285.5 |
+| mf2 = mfp (class cap 2, alone / portfolio) | 60 | 80 | **102 + SA4 open / 266.6** |
+| mtp (top 8 + portfolio), cel5 (end climbs in the re-solves) | -- | -- | 115 (= jcl: nothing landed) |
+| grp = grpw (the group climb) | -- | -- | 119 + SCS1 open / 295.9 |
+| jpRm2 (the rate + class cap 2) | -- | -- | 133 + 4 open |
+| ctl12b (flag-off, the final code) | K28 34, copper IDENTICAL to ctl11 | | |
+
+Readings. **`cew5d` = 54 / 71 / 109 is jwd's K41 and cew5's K51 in one
+arm, equal to jwfb at K35** -- the first arm to beat jwfb on two rungs
+with none worse: **cew5d = 34 / 54 / 71 / 109** (jwf K28 34 as well). The fallback (`jwf`) equals jwd on the bench and on the
+harness: the count judge takes the loop's plan over the walk's wherever
+they differ, including `reversed_k28` where the walk's plan routes 54
+against 83 -- the judge cannot see that win, so the fallback recovers
+jwd's completeness and none of jw's gains. **The class-cap-2 menu at K51
+routes 102, the fewest vias of any arm, with SA4 open** (mf2 = mfp: the
+portfolio took the trimmed plan, its solve obj 3973 against the full
+menu's 3984; at K35 the trimmed solve PROVED, obj 1067, and the judge
+took the full plan). So a pre-filtered menu does reach a different and
+cheaper region at K51; what it lacks is completion, which the count
+judge does not price. The seed portfolio moved K51 by a hair in the
+judge's units (328.25 against 328.81, seed 2's obj 3639) and routed 113
++ 1 open. The rate with the cap still displaces (133 + 4 open, obj 3015
+FEASIBLE): trimming did not make K51 prove.
+
+**The harness (b1, 23 cases; routed / open):** base 343 / 0, jw 298 / 2,
+jwd 341 / 0, jwf 341 / 0, cew5 301 / 2, cew5d = cew5f 339 / 0. On b3
+every plan arm is 258 / 19 against 260 / 19: braid-side, as designed.
+The one thing on the harness the count judge gets wrong is the same
+case every time -- `reversed_k28`, where the walk's plan (54) is judged
+worse than the loop's (83).
+
+**Settled this session (do not re-run):** the island price
+(`PLAN_PAGES_ISLAND`, s11's build) -- learned per chosen berth, it walks
+the DQ group over the south face and never reaches the west face; the
+rate's source wrap in the walk (`wr`) -- the far-face tooth is chosen by
+exclusion, not price, and the walk proposes the same steps under either
+unit system; the end climbs in EVERY solve (`ce2`, K28 40 against 34:
+the big solve's feasible point moves with any extra candidate); price-
+only menu trimming (`PLAN_PAGES_MENU_TOP=8` alone: proves in 8 s at obj
+1014 with a swimmer, against the full menu's 727 with none); the
+two-stage hint from a trimmed solve (730.2 against 727.2).
+
+**Rules learned:** (1) **the CP-SAT's feasible point is load-dependent**
+(the K28 model returns 727.2 or 729.7 under load; the 729.7 plan routes
+32 against 34) -- read every arm's first-solve objective as a CANARY
+(K28 727.2 / 644.5, K35 1028.2 / 935.3, K41 2308.9 / 1163.6, K51 3983.7
+/ 1533.9) and re-run a rung whose canary differs; a flag-off identity
+check under load must match the canary before its copper is compared.
+(2) Under `PLAN_PAGES_WALK` the damped loop does not run; a walk that
+accepts nothing ships the raw first solve (the harness's reversed_k15
+opened two nets that way). (3) One end climb never pays: an outermost
+launch needs an outermost target or its page-mates climbing with it, in
+berth order (the human's ten-net north bundle).
+
+**The queue still running when this was written** (one chain at a time,
+`tmp/s12/bench_queue1c.sh` -> `bench_queue1c.out`): cew5 K41 / K28,
+grp 51 (the group climb), cew5f and jwf 51/35/41 (the walk with the
+damped-loop fallback, with and without the five rows), cew5d 51/35/41,
+sd3 51/35/41 (three CP-SAT seeds, the judge picks), mfp 51/35/41 and
+mtp 51 (menu portfolios), cel5 51, grpw 51, mf2 51, jpRm2 51 (the rate
+with a class-capped menu: does K51 PROVE?), jw12 51, ctl12b 28 (the
+flag-off control at the queue's end, compared with ctl11 by
+`copper_eq.py`). The harness arms (`synth_arms2.sh` -> jwd, cew5d, cew5;
+`synth_arms3.sh` -> jwf, cew5f; compare with `python3 tmp/s12/synth_cmp.py
+b1 base jw jwd ...`): so far jw 298 routed / 2 open, jwd 341 / 0 against
+the base 343 / 0 on b1; b3 is braid-side and no plan arm moves it.
+
+### The group climb: how to make it lay (Andy, end of session 12: "can that be made to work well? even better than 109/0?")
+
+The plan side is done -- the judge takes the group at K51 count 291
+against 307 for the plan that routed 109, and the count has been worth
+about a via a point in this range, so a group laid AS PLANNED should
+land near 95-100. The wall is the lay alone, three mechanical pieces:
+
+1. **Lanes.** `enumerate_moves` runs a climb along a column-gap midline
+   only: five gaps for columns 17-21, and at 0.65 mm pitch with 0.25 mm
+   barrels a gap carries about one track (0.40 mm free, a track needs
+   0.33), so ten climbs cannot fit and `_follow_plan` degrades half of
+   them. The human's ten north launches also run on B OVER via-free
+   ball positions (a ball without a via is empty space on B). Add the
+   COLUMN LINE as a run lane for a via-in-pad start wherever the column
+   has no barrel between the ball and the exit row -- one more `gaps`
+   entry (g = 0) in the climb block -- and the east block has ~10 lanes.
+2. **A consistent assignment inside the group**, not just distinct rows:
+   distinct lanes; no run through another member's barrel; and NESTED
+   exits, because a member's eastward exit leg crosses every lane east
+   of it still running at that row, so the westernmost lane must exit
+   northernmost. A small matching (<= 10 members, a handful of
+   candidates each; brute force or a 1-second CP-SAT). It also says the
+   group's TRUE size, which may be six or seven, not ten.
+3. **All or nothing.** With a consistent assignment the verbatim legs do
+   not collide, so the engine lays them exactly; any member it still
+   degrades fails the WHOLE group before the braid runs (audit the
+   `gap ok` column of the source audit), instead of a half-laid group the
+   round judge throws away. `SRC_REFAN_MAX` (6 freed blockers) may need
+   raising for a group this size.
+
+Caveats: the K51 judge is the weakest rung (291 is a target, not a
+promise), and the human's 81 also rests on the destination side, which
+the group leaves at the model's outermost berths as they stand -- expect
+the group to close about half the remaining gap. About a session; gate it
+on the harness's `reversed` cases before the bench, and add a planted
+"north bundle" pattern there (k launches that must leave the far end of
+the face) so it has a known answer.
+
+**Next, in order:**
+1. Read the queue (`tmp/s12/bench_queue1c.out`): the fallback arms jwf /
+   cew5f (the harness says the walk's opens come from shipping the raw
+   solve; the fallback should give jw's wins with jwd's completeness),
+   cew5d (jwd's K41 71 and cew5's K51 109 are different mechanisms on
+   different rungs; if it is not worse on any rung it is the first
+   default candidate since jcl), then sd3 / mfp / mtp / jpRm2 for the
+   pre-filter question -- does any trimmed menu PROVE at K51 under the
+   rate, and does the judge ever prefer its plan? `ctl12b` at the end is
+   the flag-off control. Re-run alone any rung whose canary is off.
+2. The group climb's three pieces above.
+3. **The same move at the destination.** The group takes the outermost k
+   berths as they stand; let the composite also RE-BERTH its members to
+   the outermost slots of the face in launch order (the matched group,
+   both ends). The forced probe's 100 at K51 was exactly this for the
+   DQ group on the west face -- a proposal the judge could take, where
+   the island price could not express it.
+4. **A walk budget per stage.** The walk spends its 16 solves at stage 1
+   and every later stage (the destination passes) gets none; give each
+   stage its own budget and see whether the destination passes move.
+5. **A braid-tier judge for near-ties.** At K51 the count cannot separate
+   115 from 129 (floors 314 / 315). For the final pick among the top two
+   or three plans of a stage, route corridor 0's first pass in band (no
+   last call, no rips; ~1 min at K51) and let THAT decide -- expensive,
+   so only where the count is within its noise.
+6. The D1 island stack at C5 (the DQ group's south-face bends) is still
+   there in the 109 board; item 3's re-berth is the plan-side answer to
+   it, the braid-side arms are settled.
