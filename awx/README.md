@@ -4153,3 +4153,233 @@ Do not: another per-swimmer via model; optimising the swimmer count;
 geometric hints to a solver. Do: one chain at a time, renders for every
 arm, the routed ladder as the judge, nothing landed unless better at
 every K within about two minutes a K.
+
+## Session 11 (2026-09-15, 09:30-): K51 at the TRACK level -- every first-pass refusal is a launch-side wall
+
+Andy's asks: understand what goes wrong at K51 at the track level (not the
+via ladder); then "reduce strongly the last-call routing and rip-ups,
+getting all routes in-band"; consider `VIA_MM` above 7.5 with the away
+gate; spawn Opus agents on the handoff's items 3-6 (done, in their own
+worktrees off the local WIP commit `6998d959`, which carries the s8-s10
+tree so the agents see the real code -- NOT for merge, never pushed).
+
+**Instruments (all in `tmp/s11/` and the session scratchpad):**
+`braid_ab.sh TAG K` runs the BRAID ALONE on the recorded `tmp/s9/d40_fo_kK`
+fanout boards (flag-off base = IDENTICAL copper to `d40_k35/41/51`, so a
+braid change is A/B'd with the plan held fixed); `ledger.py LOG..` prints
+per corridor the FIRST-ATTEMPT in-band lanes, the kept attempt's, and the
+tail work (last calls, x4 rescues, rip trials) -- the in-band count is the
+headline Andy asked for, the via count follows it; `rule.py K BOARD..`
+grades vias + mm/7.5. In the scratchpad: `plan_geom.py` (the braid's plan
+phase dumped: every lane's (s,o) polyline, page, req, bwin; then the
+SAME-PAGE PITCH CHECK, every pair of page lanes planned closer than
+TRACK+CLEAR perpendicular), `src_face.py` (source exit face / destination
+entry face per net, human vs ours), `wall_*.txt` (wall_probe censuses of
+all 12 K51 refusals). **`wall_probe --png` draws the F layer only**
+(`if png and L == 0`): a B-tooth lane's picture is the wrong layer; read
+its text census. Legend: red blocked F cell, black free, green reached
+from the tooth (yellow circle) on F, white real F copper, light blue the
+virtual centrelines of lanes not yet laid, yellow cross-corridor reserves.
+
+### What the base K51 board is, at the track level
+
+`d40_k51` (115 vias): the first pass routes **33 of 45** corridor lanes;
+12 are refused; the tail closes them -- 11 last calls, 9 rip trials, rip
+victims re-laid at up to 8 vias (`SRAS 2 -> 8`, `SDQ4 0 -> 4`, `SCS0 2 ->
+4 -> 8`, econ re-lay recovering some). Regions: human 17 / 7 / 57 vias at
+source / corridor / destination, ours 21 / 23 / 71. The walk's K51
+(`jwfb`, 125) has the same shape: 33/46 first pass, 13 last calls, 7 rip
+trials, `SDQ1 0 -> 8` as a rip victim, `SDQ11` a 10-via west-face stub --
+which is why the plan-implied count (blind to the tail by construction)
+judged it better (302 vs 328) and the copper said worse (125 vs 115).
+**The count judge becomes honest exactly when everything routes in band.**
+
+### The census: all 12 refusals are LAUNCH-side, in the fan-in
+
+`wall_probe` at each lane's first call (attempt 0's world):
+
+| lane | class | tooth | pocket cells | farthest s (of ~21-30) | walled by |
+|---|---|---|---|---|---|
+| SDQ0 | page F | F | 1727 | 14.0 | band + virtual SDQ2 F + pad C5.2 |
+| SDQ2 | page F | F | 950 | 12.3 | virtual SDQ0 F + virtual SDQ1 F |
+| SDQ1 | page F | F | 1633 | 13.5 | virtual SDQ2 F + band + virtual SDQ7 F |
+| SDQ7 | page F | F | 481 | 11.9 | real SDQ3 F + virtual SDQ5 F |
+| SA2 | page B, joiner | B | 217 | 8.6 | virtual SA6 B (SA6's join leg) |
+| SBA1 | swimmer | B | 2554 | 11.9 | real SDQ4 B + real SA1 B, 0.05 mm apart |
+| SA6 | swimmer, joiner | F | 1762 | 11.7 | real SA5 F + virtual SA2 F |
+| SRST | swimmer | F | 535 | 12.1 | real SDQM1 F + real SA0 F |
+| SCKE0 | swimmer | F | 6373 | 14.8 | real SA10 F + real SA5 F |
+| SCS0 | swimmer | F | 994 | 12.2 | real SA4 F + real SA10 F |
+| SCKE1 | swimmer | F | 6003 | 14.8 | real SA10 F + real SA5 F |
+| SA12 | swimmer | F | 3427 | 12.6 | virtual SDQ1 F + virtual via hop SCS0 |
+
+Every pocket from the tooth dies between s 8.6 and 14.8 -- the comb sits
+at s ~10.3, the schedule region is s0 11.92 .. s1 16.22 -- and every
+pocket from the STUB is open. The destination is not where K51 fails;
+the fan-in from the comb into the ribbon is. Three mechanisms:
+
+**D1 -- the island stack (the page lanes, every K >= 35).** `deflect_islands`
+bends the DQ lanes round the bench capacitor C5 (a part sitting in the
+corridor at s 14-15) to its south edge and stacks them outward at
+`min(MINP, original)` = 0.38 -- TIGHTER than the 0.5-0.66 the slope-scaled
+`pair_floor` had given their launch and target slots -- with a run-in whose
+slope is the line's own (1.44) PLUS one: 2.4. Perpendicular room between
+two lines 0.38 apart at slope 2.4 is 0.38 / sqrt(1 + 2.4^2) = **0.14 mm**,
+below TRACK + CLEAR = 0.232. The virtual copper of the not-yet-laid
+page-mates then enforces an infeasible promise, and the lanes are refused
+in the order they are laid. `plan_geom.py`'s same-page pitch check over the
+WHOLE plan finds only these pairs -- K35: SDQ0/SDQM0, SDQ0/SDQ2, SDQ2/SDQ7,
+SA4/SDQ7 (0.07-0.18 mm); K41: SDQ0/SDQ2, SDQ0/SDQ14, SDQ2/SDQ7, SA3/SDQ7;
+K51: SDQ1/SDQ7 (0.03), SDQ1/SDQ2, SDQ0/SDQ2 (0.14) -- and they are the
+refused DQ lanes at every K (K35 attempt 0: SDQM0 SDQ0 SDQ2 SDQ7; K41:
+SDQ0 SDQ2 SDQ7 ...; K51: SDQ0 SDQ2 SDQ1 SDQ7). They route at the last call
+at 0-1 vias each; the damage is the copper laid meanwhile. The code's own
+comment on `lay_lanes` knew the class: "the same slots all starting at s0
+lay 0.19 mm apart across a 1.5 slope".
+
+**D2 -- a join leg stamped on both layers (SA2).** `virtual_of` stamps a
+joiner's leg on every layer `allowed` -- both, for a swimmer. SA6's leg
+(swimmer, F tooth, s 8.72) starts at o 3.67 on the south face line, which
+is SA2's tooth line (B tooth, s 8.38, jog to its leg at 9.08): the B stamp
+of SA6's F leg seals SA2's B jog. The head rule for a head-on tooth already
+says a tooth's piece is a promise on the tooth's layer only.
+
+**D3 -- swimmers laid last, no room at the comb.** The swimmers (12 at K51)
+route after every page lane, against real copper. SBA1 (B tooth) sits
+between SDQ4 (B page) and SA1 (an earlier swimmer, laid free) with 0.05 mm
+between them just past the end of its stamped head piece; SCKE0/SCKE1/SCS0
+(F teeth in the south rows, berths on DU1's north face) reach s 12-14.8 on
+F and are walled by SA10/SA5/SA4's F lanes -- and the 0.325-pitch comb has
+no via room to dive earlier. These are the lanes that pay 4-6 vias each and
+whose rips re-lay victims at 8. Their fix is the PLAN (a south-row tooth
+given a north berth is a swimmer by construction; the human launches these
+nets from U1's north on B) -- not a braid rule.
+
+### Two opt-in braid fixes, measured braid-only on the fixed d40 plans
+
+`BRAID_DEFLECT_SEC` (deflect_islands): level 1 = every consecutive pair on
+the island's side stacked at MINP x sec(bend slope), run-ins stretched to
+the region's start; 2 = only the lanes the island displaces and their
+pushed neighbours; 3 = the EXACT perpendicular distance between the two
+lanes' bent paths, pushed by bisection; 4 = level 3 plus the s-STAGGER of a
+bus bend: a bent lane's run-in starts as early as its own polyline allows
+(tooth or leg end + 0.3) so its slope stays at or under 1, the outer lanes
+turning first; `BRAID_DEFLECT_Q` the perpendicular room (default TRACK +
+CLEAR + 0.01). `BRAID_JOIN_LEG_TOOTH=1` (virtual_of): a join leg is a
+promise on the tooth's layer (and the page's, if different). Flag-off is
+byte-identical (base = d40 copper at every K).
+
+### The arms, braid only on the fixed d40 plans (first-pass in-band lanes of corridor 0 / vias / open)
+
+| arm | K35 | K41 | K51 | verdict |
+|---|---|---|---|---|
+| base (= d40) | 28/32, 65, 0 | 28/40, 79, 0 | 33/45, 115, 0 | |
+| `DEFLECT_SEC=1` sec pitch, every pair | 31/32, 60, SDQ13 open | 18/40, 76 | 26/45, 106, 2 open | cascade: every pair on the side is held to the rule; K41 SCAS pushed to +59 mm |
+| `=2` displaced pairs only | **32/32, 65, 0** | 18/40, 76 | 26/45, 116, 2 open | K35 fully in band; the cascade still runs once it starts, and with the slope-scaled slots (below) it drove a lane off the board and crashed the router (a 490 TiB window) |
+| `=3` exact distance, bends from the region start | 32/32, 65 | 16/40, 78 | -- | unsatisfiable: two bends from lines a pitch apart at the same s cannot clear past ~45 degrees whatever the push; bisection runs to its cap |
+| `=4` early-start bends (bus-bend stagger) | 28/32, 62, SDQ13 open | 29/40, 77 | 22/45, 109, **7 open** | the early bend cuts across the head-on neighbours' fan-in pieces, which the stack-pair check never sees |
+| `=4`, room 0.33 | 22/32, 68 | 30/40, 80 | 21/45, 107, 2 open | wider room = wider stack = the joiners refused |
+| `=5` full-geometry check | 24/32, 66, SDQ13 open | 28/40, 82 | 24/45, 106, 2 open | inner-to-outer placement lets an early bend run over a later member's fixed tooth exit; where the paper check passes at 0.27 the router still finds a 1-4 cell thread |
+| `SLOPE_FROM_MID` slots by the bent slope | 29/32, 64, SDQ13 open | crash | -- | the second pass widens the launch by 1.7 mm and the geometry explodes like the arc line's |
+| `JOIN_LEG_TOOTH` | 27/32, 65, SDQ13 open | 28/40, 79 | 33/45, 121, SDQ11 open | frees SA2's class, exposes SA8's (B joiners lose the B room the both-layer stamps kept) |
+
+Under the rule (vias + mm/7.5) the base is 193.4 / 233.0 / 300.2 and no
+arm beats it on every rung. **Verdict (edict 3): none is a default.** What
+they establish: the DQ group's in-band path does not exist in this plan's
+frame. Its lanes must shift 5-6 mm across the ribbon inside ~3 mm of s to
+reach the south exit block past C5, from teeth 0.325 mm apart; the launch
+comb spreads them to 0.5-0.6 by s0 (pair_floor at the chord's slope), the
+island then demands slope 2.2 and pitch 0.65, and widening the stack
+pushes the 15 south joiners, which at LPITCH 0.35 and slope 0.67 have no
+room to bend at all. Every arm moves the refusal to a neighbour. The opens
+in every arm are the west-face through-run stub corridors (SDQ11, SDQ13),
+one-lane corridors routed after corridor 0 on 1.5 mm end reserves -- a plan
+defect, the rate's source wrap is what removes them.
+
+**The synthetic harness (agent, its README section) says the same from the
+other side:** on a clear channel the chain routes every K8/K15/K28 case at
+its known optimum, DRC-clean; a part in the corridor is where it falls
+apart -- on a sorted bus whose optimum is 0 vias it pays 8-26 as the
+blocker grows, at 2.1x detour, strands 4 of 15 nets where the counting
+bound says 16 fit, and every obstacle case leaves the band (171/580 lanes
+in band against 285/310 clear).
+
+### Plan side: a pitch-infeasible lane as a swimmer (`PLAN_PAGES_PITCH=1`)
+
+`braid.pitch_violations(bp)` -- the same-page pitch check over the plan
+phase's exported geometry (`plan_braid` now carries each lane's `mid`,
+`req`, `bwin`, `s0`, `s1`) -- and `pages_first.verify` marks every lane of
+a violating pair page None, so the damped loop re-solves it with that
+berth barred, the key counts it and the judge prices it as a swimmer.
+`PLAN_PAGES_PITCH_Q` the room (default TRACK + CLEAR + 0.05; 0.232 = the
+paper bound). On the recorded plans it flags exactly the refused DQ group
+(K51: SDQ0 SDQ1 SDQ2 SDQ7 at 0.232) plus launch fan-in pairs at 0.282.
+Flag-off K28 is byte-identical to the s10 control (both boards), under
+concurrent load. **Inert at every K, at both bounds** (0.282 and 0.232:
+65 / 79 / 115, the base's boards segment for segment): the loop bars the
+DQ berths, every re-solve lands on a plan the braid's planner swims 19
+lanes on (the whole south joiner bundle), the key keeps iteration 0. The
+DQ menus DO carry head-on `left` berths (a 4-6 mm surface stub on F to the
+west face, or a B dog-bone), so the alternative exists; the forced probe
+below asks what the braid makes of it.
+
+### The two threads finished (Andy: "make sure no improvements are possible there")
+
+**Level 6** = level 5 with the later group members' FIXED tooth-side pieces
+in every check and a second sweep against the paths as finally bent.
+**Join-leg level 2** = the other layer's stamp kept but clipped where it
+covers another not-yet-landed net's head piece on that layer (the first
+cut was inert: `virtual_of` never sees the lane being routed, which is
+exactly the head to protect; the probe showed SA2's pocket 217 -> 15530
+cells once that was fixed). **`BRAID_VIRT_SLACK`** (connect.py) widens
+every virtual stamp: a virtual line keeps a neighbour's centreline a track
+plus a clearance away and the lane it stands for then needs exactly that
+from the neighbour -- zero slack, no cell on an unlucky grid (K35 SDQ0
+between SDQM0's real copper and SDQ2's line, 0.000 mm free even where the
+paper check passed at 0.27).
+
+| arm | K35 | K41 | K51 |
+|---|---|---|---|
+| base | 28/32, 65, 193.4 | 28/40, 79, 233.0 | 33/45, 115, 300.2 |
+| level 6, room 0.27 | 30/32, 65, 194.6 | 28/40, 79 | 32/45, 116, 2 open |
+| level 6, room 0.30 | 30/32, 65 | 30/40, **75**, 229.5 | 32/45, 128, 3 open |
+| join-leg level 2 | = base | = base | 33/45, 121, SDQ11 open: SA2 routes in band, SA10 refused instead |
+| slack 0.10 | 27/32, 62, 191.6 | 30/40, 77, 229.5 | **13/45**, 106, 2 open |
+| level 6 + slack 0.10 | 27/32, **61**, **189.0** | 31/40, **75**, **226.3** | **12/45**, 109, 2 open |
+
+(in-band first pass / vias / rule; the human is 186.1 / 220.6 / 250.5.)
+The join-leg thread is closed: freeing SA2's tooth moves the refusal to
+SA10 and the tail is worse -- the first-pass count at K51 is a capacity of
+the corridor, not of any one tooth. Level 6 with the slack is the best
+clean K35 and K41 the braid alone has produced (61 / 75, under the rule
+189.0 / 226.3 against 193.4 / 233.0), the gain coming from the TAIL
+(cheaper last calls once the neighbours hug less) rather than from the
+first pass -- and at K51 the same slack closes most bands at the packing
+the ribbon has there and the first pass collapses to 12-13 of 45. The
+one-cell slack (0.05) is the last candidate; if K51 rejects it too, the
+braid side is exhausted on this plan and the plan (the DQ berths, the
+forced probe's 100 at K51) is where the K51 gap is.
+
+**Closed (2026-09-15, afternoon).** The slack sweep with level 6 at K35 /
+K41: 0.05 -> 65 / **74** (rule 194.8 / **223.5**, the human 220.6), 0.15 ->
+68 / 72 with the first pass down to 27 of 40, 0.20 -> 3 and 12 nets open.
+And K51, run alone because two K51 braids exhaust this 8 GB machine
+beside PyCharm: level 6 + 0.05 -> **29/45 first pass, 134 vias, 2 open**;
+0.05 alone -> 32/45, 119, SA12 open. Every braid-side arm of the day that
+helps K35 or K41 hurts K51 on this plan, and the join-leg clip moves the
+refusal from SA2 to SA10. The braid side is exhausted on the recorded
+plans: at K51 the ribbon is packed to the pitch, so any extra room a lane
+is given is a band a neighbour loses, and the DQ group's south-face
+berths cannot be made feasible by geometry. The forced probe (the four
+DQ nets held to head-on west-face berths, everything else free) is the
+measurement that says where the K51 gap is: 100 vias / 1245 mm (rule
+265.9 against 300.2) with one net open, the DQ lanes in band, and the
+refusals moved to the south joiners. The model's own candidate prices
+already prefer those head-on berths (SDQ0 16.6 against 23.9 in its units);
+it chose the south face because the head-on plan carries two more model
+swimmers at 100 vias each, a price no length saving can offset -- and the
+copper says those swimmers cost ~3 vias apiece. The next build is
+plan-side and general: a berth is priced by the corridor part its ribbon
+lane must cross on its page, and a swimmer at what the copper pays for
+one, so that the model stops buying a 6 mm shift through an island to
+save a swimmer it could afford.

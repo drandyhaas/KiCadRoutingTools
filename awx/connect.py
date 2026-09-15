@@ -103,6 +103,7 @@ def _band_cell_strips(coord: GridCoord, window: PCBData, band,
 
 
 VIRTUAL_NET = 10 ** 7      # foreign net id for virtual copper (no such net)
+VIRT_SLACK = float(os.environ.get('BRAID_VIRT_SLACK', '0') or 0)   # extra width of a virtual stamp (mm); 0 = as ever
 
 
 def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
@@ -170,7 +171,13 @@ def connect(pcb: PCBData, net_id: int, a: Point, a_layer: str,
     if not window.board_info.board_bounds:
         return None
     if virtual:
-        w = cfg.track_width
+        # BRAID_VIRT_SLACK (2026-09-15): a virtual line keeps a neighbour's
+        # centreline exactly a track plus a clearance away, and the lane
+        # the line stands for then needs exactly that from the neighbour
+        # -- zero slack, no cell on an unlucky grid (K35 SDQ0 between
+        # SDQM0's real copper and SDQ2's line: 0.000 mm free). The stamp
+        # is widened by this much, so the lane inherits half of it a side.
+        w = cfg.track_width + VIRT_SLACK
         window.segments = list(window.segments) + [
             Segment(p[0], p[1], q[0], q[1], w, layer, VIRTUAL_NET)
             for (p, q, layer) in virtual if layer in layer_map]
