@@ -2716,3 +2716,1440 @@ that run shared the machine with a memory write on a box with 55 MB
 free. Rule: one divergent chain run is not evidence of a code change --
 re-run it alone before bisecting. The committed tree's ladder was
 re-verified afterwards (`tmp/s7/verify.log`, the base10_* boards).
+
+## Source and destination climbs in the pages-first plan (2026-09-14, 21:55-22:30): measured, not landed
+
+Andy: "try the src and dst climbs as part of the plan and fanouts". The
+climb class (`escape_moves.enumerate_moves climb=`: a dog-bone or
+via-in-pad whose run climbs along a gap on the other layer and leaves
+the face at a chosen row -- the human's riders, the rank freedom the
+pages-first write-up names) reaches the plan through `SRC_CLIMB` /
+`DST_CLIMB`, and the engine LAYS a chosen climb on the move's own legs
+(`underpad.exact_lane`): source audits 9/9 at K35, 12/12 at K41, 16/16 at
+K51, and the K41 board carries four real climbs (SA1 SDQ13 SCKE0 SCS1,
+B, 1-1.5 pitches; `tmp/s8/climb_census.py`). PLAN_PAGES=1 throughout,
+vias / open, all 0 DRC, base = pg2:
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| base | 34 | 65 | 79 | 115 |
+| `SRC_CLIMB=2` | 32 | 60 | 90 | 132 |
+| `SRC_CLIMB=2` + `dedupe_climbs` | -- | 56 | 83 | 112 / 2 open |
+| `SRC_CLIMB=2` + `PLAN_PAGES_CLIMB_LATE=1` | 34 | 62 | 83 | 143 / 3 open |
+| `DST_CLIMB=2` raw / deduped | 42 / 34 | | | |
+| both, raw | 36 | | | |
+| `SRC_CLIMB=4` | 38 | | | |
+| `SRC_CLIMB=2` deduped, `PLAN_PAGES_SWIM=4` / `=10` | | | 90 / 1 open, 83 | |
+
+What each row taught. Raw: the menu grows six to eight times (K41 tooth
+candidates 244 -> 1677, K51 838 -> 1874, K28 berths 501 -> 2812), the
+pairwise strict conflict test with it (exclusions K41 31k -> 203k, K51
+41k -> 252k, K28 destination 718k), and the CP-SAT at DET 40 stops at a
+worse FEASIBLE point (K51 obj 5215 / 13 model swimmers against 3984 / 9;
+K28 both 3687 / 10); the braid routes that. `dedupe_climbs` (one climbed
+candidate per kind, face, layer and exit row -- the menu emits each row
+four to six ways differing only in the run's first bend; plain
+candidates untouched, flag-off byte-identical) halves the menu and
+recovers K28's destination arm and part of K41, not K51. The swimmer
+price is not the lever: at 4 the model keeps 11 swimmers and ships an
+open net; at 10 it behaves as at 100. `PLAN_PAGES_CLIMB_LATE=1` (the
+plain menu at iteration 0 = the base solve exactly at K28/K41; climbs
+only in the re-solve that frees the swimmers, every other net held) is
+the smallest model of all and still loses at K41 (the re-solve gave SA11
+a climbed tooth the engine did not lay as asked and the batch loop kept
+the board) and at K51 (143 / 3 open). Every form helps where there is
+slack (K28/K35) and hurts where the board is over capacity (K41/K51) --
+the pattern seed's shape again. Not a default; nothing landed. The two
+pieces stay in the tree uncommitted, inert with the flags off
+(`base11` / `base12` copper-identical to pg2), for a decision.
+
+## Session 8 (2026-09-14, 22:40-): item 3, the batch realize-and-reject loop
+
+Andy's order for the session: item 3 of the handoff list, then item 2
+again (the climbs may work once 3 is in), then 4, 5, 6.
+
+**What the loop cost, measured (K41, one run):** `sr.realize` 0.4-0.6 s,
+the first pages-first `choose` 23 s (the CP-SAT at DET 40), a re-plan
+`choose` 1.4-1.6 s (the held menu collapses to ~170 candidates and
+solves OPTIMAL in a second), `judge_by_braid` 0.1 s, `plan_state` 0.5 s.
+A realize-and-judge probe is ~3 s: the loop is not where the time goes.
+
+**What the base loop actually did on pg2 (its own logs):** K28 asked one
+move, kept. K35 asked 11 (all exact, kept, residue 9 -> 2), then 5 (SA11
+asked dog-bone/right/B, laid surface/right/F; one move "= original"),
+judged not better, all five banned. K41 asked 9 -- SA11 and SA12 asked as
+dog-bones on B, laid as surface stubs on F at other gaps, level 2/3 of
+the engine's degrade ladder, "exact move infeasible even alone" -- KEPT
+with them (residue 11 -> 6); then SBA1 + SDQ12 kept (6 -> 5); then SDQ12
+alone, laid "= original", not better, banned. K51 the same 9 with the same
+two misses, kept (16 -> 10); then SCKE0 + SDQ12, SDQ12 refused outright,
+SCKE0 "= original", not better, both banned. So: **every K >= 35 asks at
+least one move that is not a move** (the tooth as it stands, re-asked),
+and the two K41/K51 misses are the SAME two asks each time.
+
+**Built: `PLAN_BATCH=1`** (`fanout_from_plan.batch_rounds` +
+`_realize_exact`; flag-off byte-identical, K28 copper verified against
+base10). The batch stays the first try. Then (1) a move the engine did not
+lay as asked is banned and the OTHERS are re-realized from the same
+board, so an EXACT board exists beside the as-laid one; (2) both are
+judged and the better kept -- the as-laid board is a candidate, not the
+default and not discarded; (3) a batch judged not better is bisected by
+the planner's value per move (`pages_first._solve` now reports `value`:
+the model cost the move saves its net plus the inversions its standing
+key would have, each priced as a swimmer), halves tried on top of what
+is kept, nothing banned for merely not helping; (4) a DRC rejection
+refuses only the asked nets its pairs name (`source_realize.realize` now
+returns `pairs`). Asked / landed / refused / reverted / engine calls are
+printed per run.
+
+| arm | K28 | K35 | K41 | K51 | note |
+|---|---|---|---|---|---|
+| base (pg2, re-run tonight as `ctl`) | 34 | 65 | 79 | 115 | K41 ctl copper-identical |
+| exact-only (b1: misses dropped, never judged) | | | 91 | | the misses were serving the plan |
+| `PLAN_BATCH=1`, halves (b2) | 34 | 60 / **SDQ13 open** | 79 | 115 | K28/41/51 copper-identical to base |
+| `PLAN_BATCH=1`, no bisect (the default now) | = base | = base | = base | = base | by construction on this menu |
+
+The exact-only row is the lesson: at K41 the engine's fallbacks for SA11
+and SA12 (surface stubs on F, on the RIGHT face the plan wanted) judged
+residue 6 against 8 without them, and the exact board routed 91. A miss
+is a partial success -- the face is what the plan mostly needed -- and the
+judge, not the audit, has to decide. With both boards judged the chain is
+the base chain at K28/K41/K51 (it takes the same as-laid boards) and
+differs only where the bisect kept a half: K35's second batch (SA1, SDQM0)
+judged residue 2 -> 1 at the same model vias, and the routed board then
+OPENED SDQ13 with 60 vias -- the two-net side corridor (SDQ13, SDQ8,
+"cannot be reached by the spine") lost its B path once the main
+corridor's lanes re-ordered; the render shows the main corridor's B
+lanes detouring round the top of DU1 in a wider bundle. The same lesson
+as SF_ACCEPT_MARGIN: a judge right 51-64% of the time, accepting a
+residue drop of one, is a random walk. `PLAN_BATCH_DEPTH` defaults to 0.
+
+**Two model defects found on the way, both measured, neither a default.**
+The source menu re-emits the tooth as it stands (same kind, face, layer,
+exit within 0.02 mm: K35 16, K41 20, K51 22 of ~200 candidates), and the
+model keys the two DIFFERENTLY -- the standing tooth by the corridor's
+RELAXED `launch_o` (Ly after `_relax_pitch`), the candidate by its raw
+spine offset (`_alt_src_slot`, head-on -> o_t): 20 of 20 differ at K41,
+by up to 0.67 mm (SA6 4.31 vs 4.98) -- so it can "fix" an inversion by
+re-laying a tooth identically, which is the "= original" ask above.
+`PLAN_PAGES_NOOP=1` (`same_tooth`: such a candidate leaves the menu) and a
+raw-key arm (the standing head-on teeth keyed at `c.st`, the candidates'
+scale) were run on the PLAN_BATCH loop:
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| `PLAN_PAGES_NOOP=1` (n1) | 34 | 61 | 77 | 141 |
+| raw keys (r1) | 36 | 65 | 86 | 151 / 8 open |
+| both (nr1) | 41 | 61 | 93 | 173 / 2 open |
+
+NOOP: a smaller model (K41 224 tooth candidates, 31076 exclusions) and a
+different feasible stop -- K51's first solve has obj 3976.8 against the
+base's 3983.7 with its pages FLIPPED (F 19 / B 29 against F 31 / B 17),
+and the chain routes 141. Raw keys are simply wrong: the braid orders the
+standing teeth by the relaxed offsets, so keying them raw disagrees with
+the order the braid will use; it is the CANDIDATE key that sits on the
+wrong scale, and the fix would relax a candidate's offset into the
+standing sequence (not built; the raw-key code is removed, the finding
+kept as a comment at `PAGES_NOOP`). Same shape as every menu change this
+week: a different model, a different feasible stop, the chain routes it.
+
+**Trap:** an in-process `import fanout_from_plan; plan(...)` takes a
+different greedy seed than `python3 fanout_from_plan.py` under the chain
+(K41: 6 vs 2 nets the seed left unplaced, first obj 1777 vs 2309), with
+the chain's own BLAS pinning exported. The chain reproduces pg2 exactly
+(`ctl` K41 79 / 1787). Measure with `chain_k.sh` only; the timing numbers
+above are from the in-process run and are the only thing taken from it.
+
+### Item 2 again: the climbs on the fixed loop (23:32-23:45)
+
+`SRC_CLIMB=2` (the deduped menu, always on since s7) with `PLAN_BATCH=1`,
+no bisect (c1) and halves (c2): **34 / 56 / 83 / 112 + 2 open (SCKE1
+SCS1)** -- both arms identical, and identical to session 7's deduped row.
+The loop is inert here too: on the climb arm the engine refuses a move in
+most batches (K41: SA11 four times under four signatures, SA9, SA3, SDQ6;
+23 asked, 16 landed, 5 refused, 8 engine calls) and the as-laid board
+judges the same as the exact one every time, so the same boards are
+kept; no batch was judged not better with two or more laid moves, so the
+bisect never ran. Session 7's "the K41 loss was a refused climb kept" was
+the CLIMB_LATE arm, not this one. What is left of item 2 is the model
+size: the first solve carries 1100 tooth candidates and 93100 exclusions
+at K41 (1226 / 116809 at K51) and stops FEASIBLE at obj 1230 against a
+bound of 959.
+
+**The resource form of the conflict test (`PLAN_PAGES_CELLS=1`, 23:50-00:05).**
+Every candidate occupies tol-sized point cells on its layer along its
+lane stretches (two across-cells, so lanes within tol share), its via's
+reach square on both layers, and its exit cell; one `AddAtMostOne` per
+occupied cell replaces the pairwise `AddBoolOr`s. Probed against the
+pairwise test at K41 with `SRC_CLIMB=2`: MISSED 0 (every pairwise
+conflict is implied) and 21% (berths) / 36% (teeth) EXTRA implied pairs
+-- the slop of two-across cells and square reaches. K41 plain menu:
+31102 exclusions -> 9931 at-most-ones over 80001 memberships; the CP-SAT
+then stops at obj 3002.8 against the pairwise 2308.9 at the same DET 40.
+
+| arm (PLAN_BATCH=1) | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| base | 34 | 65 | 79 | 115 |
+| `SRC_CLIMB=2` (c1 = c2) | 34 | 56 | 83 | 112 / 2 open |
+| `PLAN_PAGES_CELLS=1`, plain menu (cp) | 34 | 63 | 102 / 2 open | 97 / 2 open |
+| `PLAN_PAGES_CELLS=1` + `SRC_CLIMB=2` (cc) | 39 | 56 | 78 | 116 / 2 open |
+
+The over-exclusion costs the plain menu K41 outright; with the climbs the
+smaller model finds the best K41 yet (78, one under pg2) and loses K28
+and K51. An EXACT linear form exists (an interval-clique cover per lane:
+the intervals containing each start point, exact along the lane; sites
+as reach intervals; crossings as point intervals) and was not built --
+every arm this session that changed the model's shape re-rolled the
+feasible stop, and there is no reason to expect the exact form to roll
+differently. **Item 2 closes as measured: the climbs are laid exactly,
+chosen by the plan, and not a default in any form** (raw, deduped, late,
+on the fixed loop, on the resource form). The code stays flag-off.
+
+### Item 4: the berth kind priced (00:10-00:35)
+
+`PLAN_PAGES_KIND_VIP` (extra cost of a via-in-pad candidate in via
+units, both ends) and `PLAN_PAGES_MISMATCH` (the end/page mismatch as a
+multiple of a via, so a dog-bone on the right page beats a bare stub plus
+a corridor dive at equal via count). PLAN_BATCH=1 throughout:
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| base | 34 | 65 | 79 | 115 |
+| `KIND_VIP=1` (v1) | 35 | 64 | 91 | 133 |
+| `MISMATCH=1.5` (m1) | 34 | 65 | 89 | 132 / 3 open |
+| both (vm) | 35 | 63 | 89 | 110 / 6 open |
+
+Not a default in any form. The copper says why the via-in-pad price
+misfires: v1's boards carry two to three times the segments (K28 2029
+against 783 at 35 vias) -- the dog-bones the price buys sit a pitch
+further along the face than the via-in-pad they replace and the lanes
+lengthen round them; the human's dog-bones are chosen WITH the corridor
+order, not by a kind weight. Both knobs stay, off.
+
+### Item 6: `BRAID_LAY_ORDER=xing` on the pg2 boards (00:35-00:41)
+
+Most-constrained-first lane order in the braid, on the committed planner
+(PLAN_BATCH=1, plain menu): **36 / 65 + SDQ13 open / 79 / 114 + SDQ5
+open** against 34 / 65 / 79 / 115. TODO 10 closes: the order that won on
+the old planner's boards (K51 112 -> 99) loses on these.
+
+### Item 5: a per-face-strip capacity term (00:20-01:00)
+
+`PLAN_PAGES_STRIP` (`pages_first.face_strips` / `strip_of`): for every
+destination face but the one facing the source, the strip beside it is
+measured PER LAYER -- the room from the ball-centre line to the nearest
+foreign pad copper on that layer across the face's extent (any
+through-hole pad, an SMD pad on the layer), or the board edge -- and
+priced by `band_capacity`'s rule (one stub-tip margin, one clearance
+gap, the comb pitch). A berth on a side face loads its own strip; a
+far-face berth loads the side strip of its half; a near-face berth none.
+The load per strip per PAGE (an AND of the berth and the page literal)
+over the capacity costs the knob's value per lane, in via units.
+
+DU1 on this bench, per the geometry: `up` F 3 lanes (2.2 mm) / **B 0
+(0.3 mm)** -- the back-side passives sit on the north face; `down` F 3
+(2.0 mm) / **B 28 (11.0 mm)**; `right` 16 / 16 (6.5 mm). That is the
+human's south-on-B route read off the copper: the north strip has no
+room on B and the south has all of it.
+
+| arm (PLAN_BATCH=1) | K28 | K35 | K41 | K51 | K51 strip loads (F/B over cap) |
+|---|---|---|---|---|---|
+| base | 34 | 65 | 79 | 115 | (unpriced) |
+| `STRIP=3` (s3) | 36 | 72 | 98 / 3 open | 118 / 1 open | down 9/3, 19/28; up 6/3, 5/0 |
+| `STRIP=100` (s100) | 36 | 77 | 86 | 135 | down 3/3, 26/28; up 7/3, 4/0 |
+
+At 100 the model does move the lanes south on B as the human does (down
+B 26 of 28) and still leaves 4 on the north's B and 7 on its F, because
+those balls have no other face in their menu; the braid then pays 135
+vias for the south-on-B bundle it was handed -- a bundle whose lanes all
+have to reach the corridor mouth on the west, which the model does not
+price. Not a default. The measure itself (the per-layer room beside each
+face) is worth keeping as an instrument: it names the human's choice
+from the geometry alone.
+
+## Session 9 (2026-09-15, 00:40-): item 1, the mid-corridor page change, measured before it is built
+
+Andy's ask: explain item 1 of the session-7 list and think about what would
+work best there. Measured first, on FIXED ends, so the idea is graded on
+its own capacity before any model change re-rolls the CP-SAT's feasible
+stop (the session-8 root finding).
+
+**The idea.** Today a lane holds ONE page through the corridor -- in the
+plan (`pages_first`: a page bool per net, no inversion inside a page) and
+in the braid (`Schedule` / `exact_pages`: the page lane runs on its layer
+over the whole region, and pays each end that is not on it with a via AT
+that end: the birth via at the launch slot, the landing via at the target).
+The chain runs no `BRAID_ONE_DIVE` (default 0, not set by `chain_k.sh`:
+no `one dive:` line in any pg2 log), so both halves of the chain are the
+same two-page model. The human's 'Cd' lane ("why not two vias") is F from
+the tooth, ONE dive mid-corridor, B to a dog-bone: the same two vias, the
+change where the crossings say. Item 1 = a page per HALF per lane in the
+plan: an inverted pair crosses in the first half iff |dL| < |dT| (linear
+on the keys once the sign bools exist), so the pair constraint becomes
+"not the same page in the half where they cross"; F-then-B is free for an
+F-tooth/B-berth lane and one via otherwise.
+
+**The probe: `xchange_probe.py BOARD K [--cap 2] [--one-corridor] [--drop]`.**
+The braid's plan phase on the board (the sidecar read as the braid reads
+it; `--one-corridor` drops a grouping sidecar so the human's ends are one
+corridor like ours), each corridor's `launch_o` / `target_o` and end
+layers, and on the SAME crossings (two ribbon lines inverted between
+launch and target cross at f = dL / (dL - dT)) four layer models under the
+human's two-via cap (end vias T + D plus corridor changes), CP-SAT, every
+solve OPTIMAL in under a second: `pages` = one layer through the region
+(today), `half` = one layer before f = 0.5 and one after (item 1 as
+written), `quarter`, `free` = any step function along the lane's crossing
+sequence (session 3's `one_change.py`). Minimises 1000 x residue + vias.
+
+| board | pages | half | quarter | free | the braid's schedule |
+|---|---|---|---|---|---|
+| pg2 K28 (27 lanes, 23 crossings) | 0 | 0 | 0 | 0 | 0 |
+| pg2 K35 (32, 78) | 3 | 3 | 3 | 3 | 2 |
+| pg2 K41 (40, 131) | 5 | 5 | 4 | 3 (SDQ9 SA8 SA1) | 5 |
+| pg2 K51 (45, 224) | 11 | 10 | 10 | 8 | 12 |
+| human ends K41 (`hbn_k41`, one corridor; 41, 85) | 6 | 6 | 6 | 4 | 10 |
+| human ends K51 (`hbn_k51`, SZQ dropped; 47, 101) | 6 | 6 | 6 | 4 | 11 |
+
+Residue (lanes that fit no profile at two vias), vias as the model counts
+them (K41: pages 36, free 40 -- a freed lane pays its changes).
+
+**What it says.** (1) The MIDPOINT model is inert: 0 / 0 / 1 / 0 lanes on
+our boards, 0 on the human's ends. Where a lane's change must sit is
+between two specific crossings of ITS sequence, and a fixed split lands
+there by luck (12 of K41's 131 crossings lie within 5% of the midpoint,
+which a real build would also need a dead band for). (2) A FREE change
+point buys 2-3 lanes per board and still leaves 3 / 8 / 4 / 4. (3) The
+leftover is PARITY, not room: cap 3 gives the identical residue (a B/B
+lane cannot change at all, an F/B lane exactly once), and only cap 4 --
+two mid changes for any lane -- clears it, at 68 / 118 model vias against
+40 / 52. (4) The one-page residue is pure topology: identical at cap 2, 3
+and 4 (the Greene 2-chain bound). (5) On the human's ends the free model
+still needs 4 swimmers where the human routes every net at two vias; what
+the one-corridor order model cannot see is the arc structure (67 of 101
+crossings phantom, "the six pages"), not the change point.
+
+**What the vias say (routed pg2 boards, vias per net):** K41 swimmers
+SDQ12 2, SDQ9 2, SA8 4, SA1 2, SA11 2 -- 12 for 5, four of them at the
+human's two -- and the nine lanes refused in band 24 (SCKE1 8). The four
+nets above two are SCKE1 8 (north-strip room), SBA1 5 (a west tooth in its
+own corridor), SA8 4 (a north far-face berth for a south joiner; residue
+under EVERY model above) and SA2 4 (exit legs): none is a layer-profile
+problem. K51: the 12 swimmers cost 42 (SA12 6, SCS0 6, five at 4), 15 nets
+sit at 4-6. So item 1's ceiling at K41 is about two vias on fixed ends.
+
+**Why the free version does not go into the CP-SAT cheaply.** The lane's
+layer along its crossing SEQUENCE needs the crossings' order along s, and
+the crossing fraction is a ratio of the four end keys, so ordering two
+crossings of one lane is a product of decision variables per pair of pairs
+(K41: ~40 lanes x ~10 crossings each). A seed-fixed order is exact only
+with the other lanes held, which is the damped loop's regime already.
+
+**The braid half, end to end.** The via POSITION is the braid schedule's
+business, and the braid already has the mid-corridor scheduler item 1
+describes: `BRAID_ONE_DIVE` (level 1 = a changer changes once at the s
+the crossings say, stayers stay; level 2 = rides allowed; level 5 = the
+whole-lane profile MILP), never run on the pages-first stack until now
+(`tmp/s9/onedive.sh`, `PLAN_PAGES=1` + the level; the judge and the
+braid both take it):
+
+| K | pg2 (pages) | level 1 | level 2 | level 5 | human |
+|---|---|---|---|---|---|
+| 28 | 34 | 40 | 40 | 39 (2 min) | 46 |
+| 35 | 65 | 69 | 64 | 64 | 58 |
+| 41 | 79 | 112 | 110 | not run | 70 |
+| 51 | 115 | 153 + SA10 open | 130 | not run | 81 |
+
+All 0 DRC. Level 1's mechanism at K41 (its log): rides forbidden, so 22
+stayer-stayer same-layer crossings become 9-10 residue against the
+two-page schedule's 5, the plan's verify loop degrades on that verdict
+(10 braid swimmers), 53 in-band refusals, 112 vias. Level 2 admits rides
+and still pages F 15 / B 18 / swimmers 8 at K41 with 23 of 41 routed in
+band. Level 5 was stopped after K35 (39 / 64, over the time budget at
+K28 and losing there). **Verdict on item 1 (edict 3): nothing here is a
+default, and the plan half is not worth building** -- the midpoint model
+is inert on fixed ends, the free model's ceiling is 2-3 lanes a board, and
+the braid's realisation of the same idea loses at every rung.
+
+### Does the pages-first solve run long enough, and does a better plan route better? (session 9, 01:30-)
+
+Andy's second ask. Three instruments, in the order they cost: (1) every
+arm's fanout log already records its FIRST solve (`pages-first: N nets,
+... FEASIBLE obj X bound Y in Z s`) and the chain log its grade, so the
+whole session-8 ladder is a free dataset; (2) `PLAN_PAGES_DUMP=<dir>` (new,
+inert unless set) writes every instance the chain solves, as built and
+hinted, and `solve_curve.py INSTANCE.pb --det 640` re-solves it under the
+chain's own parameters with a long budget, printing every improvement as
+(deterministic time, objective, bound, swimmers, and the objective split
+into swimmer / via / channel / reach / mismatch terms) -- the curve the
+chain's DET-40 stop sits on, on the CHAIN'S instance (an in-process
+`plan()` takes a different greedy seed); (3) a DET ladder on the chain
+(80 / 160 / 320 against pg2's 40 and pg1's 20), queued as `tmp/s9/det.sh`.
+
+**(1) What the logs already say.** The first solve at K28 and above is
+NEVER proven; every later solve of a chain (the swimmers re-solved with
+the rest held, the destination re-plans with the laid berths fixed) is a
+small instance that proves OPTIMAL in 0.3-3 s. The gap grows with K and is
+the swimmer price (300 a net): the bound is about the non-swimmer part.
+
+| K | first solve (pg2) | bound | gap | wall |
+|---|---|---|---|---|
+| 15 | 296.4 | 279.8 | 6% | 16 s |
+| 28 | 727.2 | 644.5 | 11% | 20 s |
+| 35 | 1028.2 | 935.3 | 9% | 23 s |
+| 41 | 2308.9 (4 swimmers) | 1163.6 | 50% | 23 s |
+| 51 | 3983.7 (9 swimmers) | 1533.9 | 61% | 20 s |
+
+**Objective against the routed board, arms on the SAME objective** (same
+prices and menus; only the budget, the hint, the seed or the loop differ):
+
+| K41 arm | first obj (swimmers) | last obj (swimmers) | routed |
+|---|---|---|---|
+| desc (swimmer descent) | 1761.0 (2) | 1996.8 (3) | 93 |
+| pg5 (xing seed) | 1777.4 (2) | 2009.6 (3) | 85 |
+| pg2 (DET 40 + hint) | 2308.9 (4) | 2261.9 (4) | **79** |
+| pg3 (DET 40, no hint) | 2350.8 (4) | 2278.9 (4) | 81 |
+| pg1 (DET 20) | 2963.7 (6) | 3167.9 (7) | 87 |
+| aw0 (menu filtered) | 2024.7 (3) | 3171.0 (7) | **72** |
+
+The two plans the solver found with 2 swimmers routed WORSE (93, 85) than
+the 4-swimmer plan (79), and the arm with the worst final objective (aw0,
+3171) routed best (72). Spearman over the five same-menu arms is -0.3.
+K51 says the same: pg2 3983.7 -> 115, pg5 3728.1 -> 116 + 3 open, n1
+3976.8 -> 141, nr1 3692.5 -> 173 + 2 open, r1 3663.8 -> 151 + 8 open. The
+one axis on which a lower objective DID route better is the budget alone
+at K41 (pg1 -> pg3 -> pg2: 2964 / 2351 / 2309 -> 87 / 81 / 79), which is
+what the DET ladder tests further.
+
+**What the objective is made of** (read off the logs: obj = 300 per
+swimmer + 3 per model via + the channel-length and reach terms):
+
+| K (pg2) | obj | swimmers | model vias x 3 | channel + reach | share |
+|---|---|---|---|---|---|
+| 28 | 727 | 0 | 84 | 643 | 88% |
+| 35 | 1028 | 0 | 138 | 890 | 87% |
+| 41 | 2309 | 1200 | 138 | 971 | 42% |
+| 51 | 3984 | 2700 | 183 | 1101 | 28% |
+
+The greedy's "tie-break" units (VIA_W 3, CHAN_W 2 per mm, reach 1 per mm)
+are not a tie-break in a global objective: at K28 and K35 the solver
+spends its whole budget on lane length, and everywhere one via trades for
+1.5 mm of channel. The routed judge is vias. That is the arithmetic behind
+the table above: a lower objective is mostly shorter lanes, and the vias
+follow the keys' validity, not the objective.
+
+**(3) The DET ladder on the chain** (`PLAN_PAGES_DET`, everything else
+pg2; first-solve objective / swimmers, then the routed board):
+
+| K | DET 20 (pg1) | DET 40 (pg2) | DET 80 | DET 160 | DET 320 |
+|---|---|---|---|---|---|
+| 28 | 731.1 -> 34 | 727.2 -> 34 | 727.2 (same stop, 38 s) -> 34 | 727.2 (75 s) -> 34 | 727.2 -> 34 |
+| 35 | 1028.3 -> 65 | 1028.2 -> 65 | 1028.2 **OPTIMAL** (34 s) -> 65 | 1028.2 -> 65 | 1028.2 -> 65 |
+| 41 | 2963.7 (6 sw) -> 87 | 2308.9 (4) -> 79 | **2022.6 (3) -> 102 + SDQ11 open** | **1761.0 (2, the optimum) -> 98** | 1759.5 (2) -> 92 |
+| 51 | 4819.7 (12) -> 125 | 3983.7 (9) -> 115 | 3344.5 (7) -> 120 | 3329.0 (7) -> 117 | 3329.0 (7, the same stop) -> 117 |
+
+K35 is settled: DET 80 proves the DET-40 plan optimal, so 65 is the
+model's optimum routed. K41 is the answer to the third question: the
+longer solve found a plan better by EVERY plan-side measure -- objective
+2308.9 -> 2022.6, model swimmers 4 -> 3, the braid's own judge 5 -> 3
+swimmers on the final plan -- and the chain routed it at 102 vias with a
+net open, against 79 clean. The braid refused 16 lanes in band (pg2: 9)
+and the last call paid for them: per net, 12 worse and 6 better, the
+worst on the teeth the better plan MOVED (SCKE0 2 -> 11, SDQ0 2 -> 6,
+SCS0 0 -> 4; 6 teeth moved against pg2's 9, a different six). The plan's
+judge cannot see band room and refusals, and the improved objective is
+spent on ends the braid cannot lay. DET 160 reaches the model's optimum
+itself (1761.0, 2 swimmers SA4 / SRST -- the plan the curve's DET-406
+best is) in 89 s, moving 10 teeth; the braid's planner swims 4 on it
+(the keys are built on the seed and hold only near it: session 3's
+`PLAN_PAGES_LEX` finding again), 44 in-band refusals, 98 vias clean. Three
+points on one axis: DET 40 / 80 / 160 -> 79 / 102 + 1 open / 98 (DET
+320: 92).
+
+**The judge that would have said no.** Session 3's `plan_vias.py` (the
+braid's plan phase on the fanout board: end vias on that board + the
+plan-implied changes of every lane + cross-corridor vias), on the four
+K41 plans:
+
+| plan | planner objective | planner's judge (braid swimmers) | braid's plan count | routed |
+|---|---|---|---|---|
+| DET 40 (pg2) | 2308.9 | 5 | 28 + 54 + 2 = **84** | 79 |
+| DET 80 | 2022.6 | 4 | 33 + 59 + 2 = 94 | 102 + 1 open |
+| DET 160 | 1761.0 | 4 | 33 + 55 + 2 = 90 | 98 |
+| DET 320 | see table | 4 | 32 + 62 + 2 = 96 | 92 |
+
+The planner's own judge (residue with exact pages + the planner's vias)
+approved every better-objective plan; the braid's count rejected all
+three, and predicts the routed board within 4-8. The plan's objective
+and its judge do not see what the braid's count sees: the lane CHANGES
+(exit legs, crossed lanes, the schedule's dives) and the end vias as
+laid, not as priced.
+
+**(2) The curves, on the chain's own instances** (`modal_curve.py`: the
+d40 control's first solve of each K re-solved on Modal at DET 640, 4
+workers interleaved). **K28 and K35 are PROVEN**: the DET-40 plan is the
+optimum -- K28 727.2 found at DET 10.5, proven at DET 592 (651 s); K35
+1028.2 found at DET 11.6, proven at DET 76 (57 s). K41 is not:
+
+| K41, deterministic time | 10 | 20 | 40 | 80 | 160 | 320 | 640 |
+|---|---|---|---|---|---|---|---|
+| objective | 3620 | 3204 | 2053 | 2049 | 1916 | 1831 | 1760 |
+| swimmers | 8 | 7 | 3 | 3 | 2 | 2 | 2 |
+| bound | 1141 | 1141 | 1164 | 1164 | 1440 | 1440 | 1476 |
+
+111 improvements; the best, 1759.5 with 2 swimmers (SA4, SRST) at DET
+406, is 16% above the bound and is the 2-swimmer plan the capped solves
+of session 3 found (obj 1761) -- 0 and 1 swimmers are infeasible there,
+so this is about the optimum. Its split: swim 600, reach 691, channel
+294, vias 102, mismatch 72. And K51 (103 improvements in 354 s):
+
+
+| deterministic time | 10 | 20 | 40 | 80 | 160 | 320 | 640 |
+|---|---|---|---|---|---|---|---|
+| objective | 6128 | 5471 | 4317 | 3991 | 3677 | 3626 | 3335 |
+| swimmers | 16 | 14 | 10 | 9 | 8 | 8 | 7 |
+| bound | 1261 | 1261 | 1558 | 1558 | 1558 | 1558 | 1558 |
+
+So the K41 solve needs DET ~400 to reach its optimum and the K51 solve
+is nowhere near converged: still improving at DET 432,
+the bound frozen at 1558 from DET 40 on (the gap is the swimmer terms, 7
+x 300 = 2100 of the final 3335; the rest is reach 779, channel 291, vias
+96, mismatch 69 -- reach, the around-the-box distance, is the largest
+non-swimmer term). And deterministic time is NOT the same on two
+machines: the cloud's DET-40 stop is 4317 / 10 swimmers where the local
+chain's is 3983.7 / 9, and the local DET-80 chain (3344.5) reached what
+the cloud took DET 430 to find -- modal_solve.py's bistability finding
+again, so the curve says how far from converged the solve is, and the
+chain's own log says where it stopped.
+
+**The swimmer CERTIFICATE (`solve_curve.py --min-swim`: the same
+instance, the objective replaced by the swimmer count alone).** K41: the
+fewest swimmers the menus admit is **2, PROVEN at DET 30** (30 s). K51:
+**4, PROVEN at DET 209** (224 s) -- where the full-objective solve had 10
+swimmers at DET 40, 9 at 80 and still 7 at DET 640. So the term that
+owns the bound gap can be certified cheaply on its own, and at K51 the
+chain's plan sits five swimmers above the floor at DET 40 and three at
+DET 640: the objective's big-M swimmer terms are what the solver cannot
+search, not the instance's size. (`--swim-cap K` is phase B: the rest of
+the objective with the count pinned.) **K41 at cap 2:** the optimum
+1759.5 is found at **DET 22** (uncapped: DET 406, 18x later) and holds
+unchanged to DET 640 (26 improvements, the last at 22.3), bound 1475 --
+so the rest of the objective plateaus at once but does not prove: the 16%
+residual gap is the pair / key constraints' relaxation. Practical
+convergence test, then: the certificate for the swimmers plus a PLATEAU
+for the rest (no improvement over ten times the time-to-last-improvement);
+a proof of the rest needs smaller instances (the trust region) or a
+tighter formulation.
+
+**The exchange rate is wrong in this objective (Andy, 02:05: "one via is
+supposed to be 7.5 mm of length").** The repo's ONE rate is
+`select_moves.VIA_MM = 7.5` -- the router's 75 grid units -- and
+`plan_ends`' judge, the realize loop's judged objective and the braid all
+convert at it, as ride DIFFERENCES from a reference. The pages-first
+CP-SAT never adopted it: it kept `sched_first`'s greedy ranking weights
+(a via 3, a mm of channel 2, a mm of reach 1) as its objective and prices
+ABSOLUTE lane length, so a via trades for 1.5 mm of channel or 3 mm of
+reach inside the solve, five and two-and-a-half times cheaper than in the
+judge, and the length terms are 87% of the objective at K28 / K35. Fix,
+flag-gated: `PLAN_PAGES_RATE=1` prices every length term at VIA_W /
+VIA_MM per mm (via units); ladder `rt1` queued behind `ub1`
+(`tmp/s9/rate.sh`). Note the optimum itself changes under the rate, so
+K35's proven optimum is expected to move too. **`rt1` K28: 42** (pg2 34).
+The re-priced plan is via-cheaper on paper -- model vias 28 -> 18, 19 nets
+at zero -- and moves SIX teeth where pg2 moved one; the braid refuses in
+band (15 refusal events, 22 of 25 routed at attempt 0) and the last call
+pays. The DET-80 mechanism again: the objective's units were wrong, but
+fixing them lets the solve move more ends than the seed's keys can vouch
+for, which is the structural defect the trust-region walk addresses and
+no re-pricing can. `rt1` K35 65 (a different plan, same count), **K41
+100**: the re-priced solve stops at 1116.7 (19% gap) with 2 model
+swimmers and TEN teeth moved, the braid's planner swims 4 on it, 21 of
+38 lanes route in band (94 refusal events) and the last call pays.
+**K51 133 + SA12, SDQ13 open.** `rt1` = 42 / 65 / 100 / 133+2o against
+34 / 65 / 79 / 115: the rate is right and the ladder is wrong, for the
+reason above -- not a default, and not a re-run.
+
+**The damped re-solve is dead half the time.** "Free the swimmers, each
+barred from its berth, hold the rest" returns INFEASIBLE in 132 of 251
+K41 re-solves across the session's logs (17 of 174 at K35, 80 of 365 at
+K51; pg2 K41: both of them), and the loop then keeps the first solve's
+plan. Diagnostic added (log only): on INFEASIBLE the solve names every
+freed net whose EVERY candidate is excluded by a held one-move berth --
+the hypothesis, since pages and swim literals are free for every net and
+cannot make it infeasible. **Confirmed by the d40 control** (copper-
+identical to pg2, 34 / 65 / 79 / 115): K41's two dead re-solves are
+`SA1 17/17, SA15 17/17, SA8 14/14` and then `SA11 19/19` -- every
+candidate of the barred swimmer excluded by a held berth -- and K51's is
+`SA1 17/17, SA6 15/15, SCS0 18/18`. **The fix, `PLAN_PAGES_UNBLOCK=1`**
+(off = byte-identical): for a boxed-in swimmer the held berths that box
+in its least-held candidate are un-held (full menu restored; a berth the
+realize loop FIXED because it is laid is never touched), so the small
+proven re-solve can move them. Ladder `ub1` (`tmp/s9/unblock.sh`): K28 34,
+K35 65, **K41 79** -- the unblock fired (SA1 and SA15 boxed in by SA0's
+held berth, SA8 by SA11's; two freed) and the re-solve was STILL
+infeasible with "0 freed nets with every candidate excluded": no single
+hold boxes a freed net any more, but the freed nets' remaining candidates
+exclude one another (or a source pair, a learned pair), and the HARD bar
+on each swimmer's old berth leaves no joint assignment. So
+`PLAN_PAGES_UNBLOCK=2` makes the bar SOFT: the old berth stays in the
+menu at one swimmer's price, the re-solve is always feasible (the
+verified plan is a solution) and moves what can move; ladder `ub2`
+queued behind `rt1`. `ub1` K51: 115 (the unblock freed SA12 / SA8 / SBA2's
+berths for SA1 / SA6 / SCS0; the same board as pg2). **`ub2` (the soft
+bar): K28 34, K35 65, K41 82** -- the re-solve now runs (K41: a plan the
+braid swims 5 on instead of 6 at iteration 1, kept), the later realize
+rounds drift with it (6, then 8 -> 5 swimmers where pg2 held 5), and the
+board is 3 vias worse. A live loop is not a better loop when its judge is
+residue + planner vias (the finding above); the fix is correct and its
+value waits on the judge switch. `ub2` K51: 115 (no re-solve found a
+plan the braid swims fewer on, 11-13 against 12; the pg2 board). `ub2` =
+34 / 65 / 82 / 115: not a default.
+## Session 10 (2026-09-15, 02:40-): THE PLAN, items 1-3 built; item 1 gated and laddered
+
+Andy's ask: start THE PLAN. Order of evidence: the judge switch first (item
+1), gated OFFLINE on every recorded run before its ladder; then the
+certificate (item 2) and the trust-region walk (item 3), built flag-off
+and queued behind the judge ladder. Standing rule re-stated by Andy
+mid-session: **keep the router GENERAL -- nothing tuned to this board or
+its chips.** Every judge below is a quantity read off the plan's own
+geometry (the braid's plan-implied count, its residue); the price and
+margin arms in the second wave are diagnostics for choosing a RULE, not
+constants to ship.
+
+### Item 1: `PLAN_JUDGE` -- the braid's plan-implied count as the judge
+
+**Built** (`fanout_from_plan.py`, `pages_first.py`, `plan_ends.py`; default
+byte-identical, `ctl` K28 copper IDENTICAL to s9's `d40` on both the fanout
+board and the routed board):
+
+- `PLAN_JUDGE=count`: `judge_by_braid` returns the COUNT -- the ends as
+  they stand (the teeth as laid, the berths as chosen) + every page lane's
+  `changes` + every swimmer's `swim_changes` + `cross_vias` -- and NO ride
+  term. `PLAN_JUDGE=flat`: the same with a flat `prices.SWIM` per swimmer
+  (`SWIM_VIAS` re-prices the judge alone; `SWIM_PRICE` would re-price the
+  braid too). `plan_ends.vias_from_pages(swim_mode=)` carries the choice.
+- ONE key / compare / print for every realize-and-confirm site: `pf_key`
+  ((residue, cost) as recorded, with the CP-SAT's own vias as the cost
+  under PLAN_PAGES; (count, residue) under PLAN_JUDGE), `pf_better`
+  (lexicographic; `PLAN_JUDGE_MARGIN=m` makes a count difference within m
+  a tie the residue decides), `pf_fmt`. Sites: the source realize loop,
+  `batch_rounds` (whole batch and its bisected parts), `src_replan_pick`'s
+  reference key, and `pages_first.choose`'s re-key loop (`verify` now
+  returns `(swim, bp, cost)`).
+- **Old planner (the feedback rule):** its judge is `judge_by_braid`'s
+  ride-priced cost with flat swimmers -- the ride term is the defect
+  session 4's pred_vs_routed named (it reverted a needed batch of teeth),
+  and `PLAN_JUDGE` applies to it as the same opt-in; unmeasured there.
+
+**The offline gate, `judge_gate.py`** (new tool): every recorded
+`<tag>_fo_kK` + `<tag>_kK` pair under `tmp`, `tmp/s7-s9` -- 246 boards --
+gets `plan_braid` on its fanout board (what `judge_by_braid` calls), and
+each candidate judge is held against the routed board (vias on the run's
+nets; open nets). Rows cache in `tmp/s10/judge_gate.tsv`; `--swim-flat`
+sweeps the flat price on the cache. Per K: Spearman rho on clean boards /
+pairwise concordance / false-accept rate over pairs with |d routed| >= 5:
+
+| judge | K28 (76) | K35 (51) | K41 (63) | K51 (56) |
+|---|---|---|---|---|
+| resid = the current key[0] | .59 / .66 / .05 | .15 / .55 / .31 | .23 / .56 / .34 | -.17 / .42 / .48 |
+| model vias = the current key[1] | .13 / .50 / .42 | .09 / .53 / .30 | .23 / .56 / .37 | .39 / .55 / .35 |
+| c_sw (ends + changes + swim_changes + cross) | **.62 / .75 / .16** | .26 / .65 / .31 | .51 / .74 / .24 | .22 / .56 / .39 |
+| c_flat (flat 2 per swimmer) | .20 / .61 / .20 | **.67 / .81 / .15** | **.68 / .77 / .21** | **.48 / .63 / .26** |
+| c_flat at 3 / 4 | .57 / .63 | .54 / .48 | .67 / .68 | .59 / .47 |
+
+The current judge (residue first, then the model's vias) is near-random
+at K35 and above. On the recorded corpus the flat count is the best single
+judge and the swim_changes count second; the two disagree on swimmer-heavy
+plans (sw4 K41, 11 swimmers: c_sw 108 for a routed 90 + 1 open, c_flat
+76), where c_sw over-predicts but ORDERS right and c_flat under-predicts.
+The DET quartet: both counts put d40 first -- the decision that matters;
+neither orders the three worse plans among themselves (the +-5 precision).
+
+**The ladder** (`PLAN_PAGES=1` + the arm; base 34 / 65 / 79 / 115):
+
+| arm | K28 | K35 | K41 | K51 | note |
+|---|---|---|---|---|---|
+| jf: `PLAN_JUDGE=flat` (2) | 38 | 68 | 79 | 119 + SCS1 open | = session 4's jb, board for board |
+| **jc: `PLAN_JUDGE=count`** | **34** | **60** | **79** | **115** | better at K35, tied elsewhere, 0 open, 0 DRC |
+| jf3 / jf4: flat 3 / 4 | 34 / -- | -- | -- | -- | running |
+| jm5: flat 2, margin 5 | -- | -- | -- | -- | queued |
+
+**Why the gate and the ladder disagree on the flat count.** The loop
+compares NEAR-IDENTICAL plans, and its decisive comparisons are between a
+plan with MANY swimmers and its realized batch with few: at K35 the plan
+on the original teeth has 9 swimmers and scored 57 at flat 2, the batch
+that took the residue to 2 scored 64 -- the batch the copper wanted (65
+routed with it; jf reverted it and routed 68). At flat 2 a nine-swimmer
+plan is cheap on paper; `swim_changes` prices those nine at 4-6 each
+(jc: 70 -> 66, kept). The gate, which compares whole different plans,
+cannot see this: its swimmer-heavy boards ROUTED at ~3 a swimmer, because
+the braid's last call pays them one at a time. So the count's swimmer
+term must be the one that penalises a residue the braid has not yet
+paid for, and swim_changes is that today.
+
+**Where jc's K35 gain came from** (the logs, `jc_fo_k35.log` vs
+`d40_fo_k35.log`): every decision at K28 / K41 / K51 is IDENTICAL to the
+control's (the residue direction and the count direction agreed on every
+batch -- hence the ties), and the one difference is K35's second batch:
+four teeth realized (SA1 SDQ15 SDQ8 SDQM0; SA11 refused), residue 2 -> 2,
+which the old judge called a tie and reverted (cost 38 -> 38) and the
+count accepted (66 -> 58): routed 65 -> 60. Render (`tmp/s10/r_jc_k35.png`
+vs `r_d40_k35.png`): the same corridor and bundles; the control keeps two
+long B stubs running deep into U1's array where jc keeps one.
+
+**Second wave** (flat 3 / flat 4 / margin 5): jf3 = jf4 = **34 / 60 / 79 /
+108 + 2 open** -- the two open nets at K51 are SDQ11 and SDQ13, the
+west-face through-run stubs below; jm5 K28 34, K35 68 (its K41 / K51 rungs
+ran across a default change and are discarded). Flat 3-4 buys jc's K28 /
+K35 and loses K51's completion: not a default.
+
+**The session's ladder, consolidated (vias / open; base 34 / 65 / 79 /
+115; human 46 / 58 / 70 / 81):**
+
+| arm | judge | length in the judge | solve units | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|---|---|---|
+| jf | flat 2 | none | greedy | 38 | 68 | 79 | 119 + 1 |
+| **jc** | **swim_changes** | none | greedy | 34 | **60** | 79 | 115 |
+| jf3 / jf4 | flat 3 / 4 | none | greedy | 34 | 60 | 79 | 108 + 2 |
+| jm5 | flat 2, margin 5 | none | greedy | 34 | 68 | (discarded) | (discarded) |
+| jcr (= jcs0, an identical configuration) | swim_changes | ride | greedy | 34 | 68 | 80 | 119 + 1 |
+| **jcl** | **swim_changes** | **lane** | greedy | 34 | **60** | 80 (231.0 < jc's 233.0 by the rule) | 115 |
+| jfl / jfl3 | flat 2 / 3 | lane | greedy | 34 | 68 | 80 | 124 + 1 |
+| jcR / jclR | swim_changes | ride / lane | RATE everywhere | 28 | 60 | 94 | 172 + 4 |
+| jpR | swim_changes | ride | rate in the CP-SAT only | 30 | **58** | 91 + 2 | 118 + 3 |
+| jplR | swim_changes | lane | rate in the CP-SAT only | 30 | 61 | 91 + 2 | 118 + 1 |
+
+Read: (1) the swimmer term must be `swim_changes` -- every flat price
+reverts the K35 batch the copper wanted and opens K51, with or without a
+length term; (2) the braid's planned LANE length is the length estimator
+(jcl's K41 call was right by the rule, jcr's ride call was not); (3) the
+rate in the solve wins K28 / K35 and loses K41 / K51 by displacement --
+its place is behind the judge (the portfolio, jpf queued), not in front
+of it.
+
+### The west-face through-run stubs (Andy's question on the K35 renders)
+
+The long B.Cu lines running from the corridor deep into U1 are SOURCE
+FANOUT STUBS the planner asked for: teeth relocated to U1's WEST face --
+the face away from DU1 -- laid across the whole ball array, which the
+braid then rides back east. Per K on the fanout boards: K35 d40 SA15
+SDQ13 SDQ8 (jc: SA15 SDQ13), K41 SBA1, K51 SDQ11 SDQ13; aw0 (the away
+filter) none at any K. SDQ13 sits at L21, U1's EAST-most column; SA15 and
+SDQ8 1-3 mm from the east edge; each pays 11-13 mm out and the same
+back. The CP-SAT prices a tooth at 3 a via + 2 a mm, so a 13 mm through-
+run is ~29 against 300 for a swimmer, and a far-face launch sits at the
+end of the launch order and crosses nothing: the solve buys a crossing-
+free order with a 26 mm detour. Neither judge saw it: the count charges
+the tooth one via and no length, and the one term that did -- the ride --
+was dropped in session 4 because it fought a batch the copper wanted.
+
+**Andy's rule (03:10): length is priced at 7.5 mm per via equivalent
+EVERYWHERE.** Built as `PLAN_RATE=1` (one variable, three sites) plus the
+judge's ride:
+- the judge: `PLAN_JUDGE=count` now ADDS `ride_mm / VIA_MM` (source box
+  included: `_st_with_src` moves the launch, so a west tooth's wrap is
+  seen); `PLAN_JUDGE_RIDE=0` is the count alone (= the jc arm);
+- the CP-SAT (`PLAN_PAGES_RATE`, implied by `PLAN_RATE`): every length at
+  VIA_W / VIA_MM per mm, AND a tooth candidate's wrap round the SOURCE
+  box to the destination's side (`around_box(exit, dref, sbox) -
+  straight`, the term ride_mm has and the solve never did); the
+  cheapest-berth keying of an unplaced net in the same units;
+- the greedy seed (`select_moves.SEL_RATE`): `via_weight * (vias + (chan
+  + reach) / VIA_MM)` in place of 3 / 2 / 1.
+Arms (`tmp/s10/rate.sh`): jcr = count + ride; jcR = count + ride +
+`PLAN_RATE=1`. **jcr: 34 / 68 / 80 / (lost)** -- the ride in the judge reverts
+the K35 batch again (judged 144 -> 148: count 70 -> 66, ride 74 -> 82).
+TRAP: macOS's filesystem is case-insensitive, so the `jcR` arm wrote over
+`jcr`'s boards and log (`jcr_k41` = 80 was read before the overwrite,
+`jcr_k51` never was); never give two arms tags that differ by case only.
+**The copper says the batch was right under the rule**: with it (jc)
+60 vias / 911 mm, without it (jcr = jf's board) 68 / 892 mm -- 8 vias for
+19 mm, +5.4 via-equivalents net -- and the base 65 / 963. The ride MODEL
+put the batch at +60 mm (3x the copper) and the count at -4 vias (half
+the copper): both estimates erred the same way. The judge's length
+estimator is therefore `PLAN_JUDGE_LEN=lane` (the braid's own planned
+polylines + berth runs, at VIA_MM; `ride` = the around-box ride, jcr's
+arm; `judge_gate2` measures rho(lane_mm, routed_mm)); arms jcl / jclR
+queued behind the probes (`tmp/s10/lane.sh`). **jcl (count + the braid's
+lane length) = 34 / 60 / 80 / 115.** Under the rule its K41 board is the
+BETTER one: 80 vias / 1132 mm = 231.0 against jc's 79 / 1155 = 233.0; the
+one decision that differed (the SBA1 + SDQ12 batch) it priced +1 and
+reverted, the copper says +2. The braid's planned length is the first
+length estimator whose calls the copper confirms (K35 accepted, K41
+reverted, both right by the rule). `rule_table.py` grades every arm's
+boards under the rule.
+**jcR (everything at the rate): K28 28** (base 34, human 46; the best
+K28 this chain has produced) at 699 mm against the base's 34 / 656 mm --
+a TIE under the rule (121.2 vs 121.5) -- **K35 60** (jc's count); render
+`tmp/s10/r_jcR_k28.png`: the same corridor, more lanes on F, one wider
+loop over DU1's top, no exiled stubs. **K41 94, K51 172 + 4 open** (SA1
+SDQ3 SDQ4 SDQ7): jcR = 28 / 60 / 94 / 172+4o. The rule applied to the ONE
+BIG SOLVE re-rolls its DET-40 stop far from the seed (K41: 11 teeth moved,
+59% gap; K51 the same) -- the DET-80 / rt1 displacement mechanism, which
+the rule cannot cure and the walk exists to. The rate is right; the
+solver that spends it must stay near the seed.
+`PLAN_RATE` reaches the greedy select the OLD planner uses too (the
+feedback rule): offered there as the same opt-in, unmeasured.
+
+**Generality debt found by the objective review (edict 1), recorded, not
+fixed:** the braid's and the planner's design rules are LITERALS for a
+0.1 mm process -- `topo_strings.TRACK = 0.127`, `braid.CLEAR = 0.105` /
+`SPEC_CLEARANCE = 0.1` / `VIA_SIZE = 0.25` / `VIA_DRILL = 0.15`,
+`select_moves.BAND_TIP = 0.9` / `BAND_LPITCH = 0.35` -- while the braid
+reads only `min_hole_to_hole` and the edge clearance off the board
+(`board_constraint`), and `chain_k.sh` grades at `--clearance 0.1`. A
+board at a 0.15 clearance would be planned and routed at 0.105. The
+general form is one `rules_of(board)` (netclass + `.kicad_dru` +
+`routing_defaults`) feeding all of them, and D1's strip capacity must
+read it before it becomes a constraint. One session; not this one.
+
+**`judge_gate2` (the gate re-graded with the braid's planned lane length
+and the routed length; Andy's rule `vias + mm / 7.5` as the TARGET;
+deduped, same-family rows: 30 / 27 / 35 / 33 boards).** Spearman rho
+against the rule / pairwise concordance:
+
+| judge | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| resid (the current key) | .18 / .44 | -.28 / .46 | -.16 / .42 | -.18 / .44 |
+| c_sw = count with swim_changes (jc) | .31 / .71 | .07 / .61 | .12 / .58 | -.02 / .52 |
+| c_flat (flat 2) | .32 / .69 | .54 / .77 | .33 / .63 | .59 / .65 |
+| c_cap3 (min(swim_changes, 3)) | .31 / .71 | .30 / .73 | .25 / .63 | .34 / .61 |
+| c_sw + lane / 7.5 | .70 / .84 | .17 / .53 | .38 / .66 | .29 / .63 |
+| **c_flat + lane / 7.5** | **.88 / .87** | .54 / .62 | **.68 / .74** | **.82 / .78** |
+
+The lane estimate: rho(lane_mm, routed_mm) .80 / .64 / .59 / .36, mean
+lane / routed 0.82-0.88 (the tooth and berth runs and the smoother's
+detours are the shortfall). On whole plans, under the rule, the flat
+count plus the braid's planned length is the judge; swim_changes plus
+length is worse at every K (the 2-3x over-prediction now has a partner
+it inflates). The loop's decisive comparisons are residue-heavy (the
+K35 batch), where flat 2 lost on the ladder -- so `jfl` (flat 2 + lane)
+and `jfl3` (flat 3 + lane) are queued behind `jcl` / `jclR` / `jpR` /
+`jplR` (`tmp/s10/flat_lane.sh`); the ladder decides.
+
+### The three Opus reviews of THE PLAN (2026-09-15, 03:00) and what changed
+
+Judge review: the offline gate compares whole plans while the loop
+compares near-identical ones, so it mis-ranked flat over swim_changes at
+K35 (build a DECISION-level gate from the recorded `judged ... KEPT /
+reverted` lines); the gate's rows are duplicate-weighted (246 rows, 155
+distinct plans) and mix arms whose braid differed; residue does NOT
+predict open nets (rho .43 / -.22 / .15 / .12), so it is no completion
+guard; price a swimmer by MERGED DIVE INTERVALS at 2 x VIA_MM, not a
+constant; the margin rule ratchets under a moving incumbent -- margin 0
+in the bisect; the count without the ride is blind to length (finding 8,
+which Andy's rule settles). Solve review: the walk's proposal generator
+ranks by an objective anti-correlated with the braid's count -- run a
+20-neighbour correlation probe before laddering it, and put the via-unit
+objective on the walk first; the r schedule was inverted and cleared
+valid cuts; the budget was per call, not per run; the certificate on the
+trusted model is a neighbourhood minimum, and a cap at the floor steers
+into the plans that routed worst; the first acceptance could be
+unverified; measure key validity (pairs off) per step. Objective review:
+"length as a difference from the seed" is inert inside the solve (a
+per-net constant); `PAGES_SWIM = 100` bypasses `prices.py`; D1's capacity
+rests on five hard-coded design rules; cut D7; K51 cannot reach the human
+on one corridor + two pages, and the general arc key is the corner
+sequence of `around_box_path`; build a negative control (the walk must
+reject the DET-160 and rt1 plans).
+
+**Applied:** the walk rewritten (`_walk`): the reference is the seed
+completed by a radius-0 solve (objective + model swimmers read off it,
+verified), the cuts stay until the reference moves, r resets on
+acceptance / shrinks on an unproven solve / grows on a proven exhaustion
+or TRIES rejections, the swimmer cap is the REFERENCE's model count
+(monotone), one solve budget per run (`_WALK_BUDGET`), trust-region holes
+logged, `pairs off` per step, and `PLAN_PAGES_WALK_PROBE=N` (acceptance
+off, N proposals, Spearman(d obj, d count) printed -- the gate for the
+walk). The certificate caps only when PROVEN and only on an untrusted
+solve. Not applied yet: the merged-interval swimmer price, D1's rules from the
+board, the negative control. The gate's dedupe / family columns and the
+per-swimmer clamp ARE in `judge_gate.py` now (`--dedupe`, `--main-only`,
+`c_cap3`), with the braid's planned lane length and the routed length per
+row (`judge_gate2.tsv`). **The decision-level gate is sized, not built:**
+the recorded fanout logs hold 486 `judged ... KEPT / reverted` decisions
+(K28 86, K35 111, K41 150, K51 136; 329 kept, 157 reverted) with the
+after-board on disk beside each; scoring a judge on them means routing
+BOTH branches through the braid, ~1.5 min a replay at K41, so a 40-
+decision sample is ~2 h of one machine -- a Modal job (`modal_k.py`), not
+a laptop one.
+
+**The walk's first K41 probe did not probe (03:35): the greedy seed is
+not in the model.** At radius 0 the seed violates **26** of the model's
+own exclusions (`_conflicts(strict=1)`; **83** under `PLAN_RATE=1`,
+whose seed differs), and no model-feasible plan exists within r=3 of it,
+so the walk shipped the seed (15 swimmers, count 241 -- the recorded
+loop's free first solve never has to be near the seed, which is how this
+went unseen; at K8 it was 5 pairs, and that seed routes clean at the
+human's count). Two readings, both live: the strict cells forbid pairs
+the engine lays (K8 says so), and the greedy's own collision test
+(`SEL_SITE_ANY`) misses pairs the model sees. Built: a PROXIMITY solve
+(`_solve(trust=(ref, src, None))`: minimise the ends moved off the
+reference, the cost as a tie-break) whose answer is the walk's
+reference when the seed is infeasible; its Hamming distance is the
+measured gap between the two legalities. Probes re-queued
+(`tmp/s10/queue2.sh`: probe2_r0 / r1 after jcl, then jclR, jpR, jplR,
+jfl, jfl3). **Then the cause was read off `select_moves._conflict`'s own
+docstring:** `strict` adds ONE thing -- lane keys matched within a 0.16
+mm tolerance instead of exactly -- and the docstring says it is the
+SOURCE refinement's form, that "the DESTINATION choice is not strict:
+the fanout takes only the plan's DIRECTION from it, never its move
+geometry", and that applying it there once took a K19 plan from floor 12
+to 20 and left 5 lanes open. The any-via site-in-lane rule (session 3's
+nine DRC shorts) and the shared-exit rule are NOT gated by strict. The
+pages-first model applies strict to its destination candidates
+(`PLAN_PAGES_STRICT=1`, undocumented in this README until now), so its
+legality is the one the docstring warns against, and the K8 seed's 5 /
+K41's 26 "violations" are tolerance-band lane matches the engine lays
+without a DRC mark (K8: routed at 10). Queued (`tmp/s10/queue3.sh`): the
+K41 probe under `PLAN_PAGES_STRICT=0` and the ladder arm jcs0.
+**CORRECTION (04:30): the strict reading was wrong.** The probe under
+`PLAN_PAGES_STRICT=0` is byte-identical to the strict one (31102
+exclusions both ways; on the base board's K41 menu `_conflicts` gives
+29833 strict AND non-strict), because the destination menu's lanes lie
+on EXACT gap lines and the tolerance band matches nothing extra. The
+seed's 26 violations are conflicts under the greedy's own non-strict
+test: `_select` places a net at its least-conflicting candidate rather
+than leaving it unplaced (`select_moves.py:1402`, "N conflict(s)"), and
+the fanout ENGINE then negotiates the berths (K8: the five conflicting
+pairs laid clean by negotiation, not verbatim). So the gap is between a
+seed that tolerates conflicts and a model that forbids them -- the
+model cannot know what the engine will negotiate -- and no exclusion
+knob closes it. jcs0 = jc, a free determinism check.
+
+**The K41 probes with the proximity reference (03:55): THE WALK IS
+PARKED.** Reference = the model-feasible plan nearest the seed: **11 ends
+moved** at the greedy's units (model swims 16, the braid swims 16, count
+261 -- the shipped pg2 plan's count is 84), **17 ends** under the rate
+(count 284). Twenty proposals at r=3 from each: Spearman(d obj, d count)
+= **-0.18** (RATE=0) and **-0.09** (RATE=1); d count -13..+7 and
+-61..+7 (from a reference that bad, most moves help; the model's
+ranking of them is noise). The solve review's stop condition ("if it is
+<= 0 under both, do not build the walk yet") is met: the CP-SAT's
+objective does not rank proposals the braid's way even three moves from
+a reference, and the seed's neighbourhood in this model is not a good
+region -- the greedy's planarity and legality and the model's disagree
+at the seed itself (16 model swimmers on a plan the greedy built as
+crossing-free). What produced the good K41 boards this month was the
+MENU and the JUDGE, not search: the away filter (aw0 72), the leg term
+(lg1 75), today's batch acceptances (K35 60). So: the walk code stays
+(flag-off; `_walk`, the proximity solve and the probe are instruments),
+and the effort goes to the judge (jfl / jfl3 pending), the rate in the
+solve with the source wrap as the PRICED form of the away filter (jpR /
+jplR pending), the legality gap (probe3 / jcs0 pending), and the away
+filter under the new judge (jal, queued -- VOID: `PLAN_PAGES_SRC_AWAY`
+and `BRAID_RIP_PROBE_ALL` no longer exist in this tree, they went with
+the reverted arcs-era code like `PLAN_PAGES_JUDGE` and `_LEX`; jal's
+copper is jcl's, IDENTICAL at K41. The priced form of the filter -- the
+source wrap in the rate objective -- rides in the portfolio's rate
+proposal instead).
+
+**jpR (the rate in the CP-SAT only, the seed at the greedy's units,
+count + ride judge): 30 / 58 / 91 + 2 open (SA15 SA9) / ...** -- K35 58
+is the human's count and the best clean K35 this chain has produced, and
+K41 breaks again: the displacement is in the SOLVE (vias five times
+dearer relative to length, the DET-40 stop trades ends for length far
+from the seed), not in the seed. jclR = jcR at every rung (28 / 60 / 94 /
+172+4o): the judge cannot undo a first solve's displacement after the
+fact. So the rate needs a solver that stays near a good plan: the walk
+as a REFINEMENT of the big solve's plan (`PLAN_PAGES_WALK_FROM=solve`:
+the free first solve is the reference, verified, re-keyed there, every
+step judged) -- built; its K41 probe (probe4) is queued after the final
+gate, since the earlier probes measured proposals around a BAD
+reference (the plan nearest the seed, 16 swimmers) and cannot say
+whether the model ranks moves usefully near a good one.
+
+**The judge orders the FINAL plans right at every K, so a PORTFOLIO is
+the principled use of the rate in the solve.** `judge_gate` on the s10
+arms' shipped fanout boards (count + lane length at 7.5 per via):
+
+| K | greedy-unit plan (d40 / jc) | the rate's plan (jpR) | the copper, under the rule |
+|---|---|---|---|
+| 28 | 108.6 | 109.3 | 121.5 vs 125.1: greedy |
+| 35 | 164.3 (jc) / 174.1 (d40) | **161.5** | 181.4 / 193.4 vs **174.1**: rate |
+| 41 | **217.5** | 245.5 | 233.0 vs 236.6 + 2 open: greedy |
+| 51 | **291.9** | 300.3 | 300.2 vs 296.5 + 3 open: greedy (complete) |
+
+Four for four, the open boards ranked last by the count's swimmer term.
+Built: `PLAN_PAGES_PORTFOLIO=1` -- the first solve of a plan runs under
+both objectives (one extra DET-40 solve) and the judge picks the plan the
+loop continues from; the objectives are proposal generators, the braid's
+count decides. On today's boards that would have shipped 34 / 58 / 79 /
+115 with no rung worse than the base. Arm jpf queued (`tmp/s10/queue6.sh`,
+after the refinement probe).
+
+**probe4 (04:50): the walk as a REFINEMENT of the big solve's plan.**
+Reference = the free first solve (pg2's plan: 9 teeth to move, model
+swims 4, the braid swims 6, count 239 with the lane length). Eleven
+proposals at r=3 before the region is exhausted (the cap at 4 model
+swimmers and the moved-set cuts bar the rest): d count -7, -3, -2, 0,
++1, +2, +5, +17, +27, +28 -- three the judge would ACCEPT (232, 236,
+237 against 239), each ~2 s. Spearman(d obj, d count) -0.12, but the
+model's own d obj is +-1..7 on a 2309 objective: it sees ties, the judge
+sees a 35-unit spread. So the objective cannot RANK proposals, and does
+not need to: the walk is a verified enumeration near a good plan, and
+the judge disposes -- THE PLAN's B with the reference moved from the
+seed (a bad region in this model) to the big solve's plan. Tooth moves
+invalidate the keys most (pairs off 34 / 780 on a three-teeth
+proposal, 2 / 820 on a berths-only one). Arm jwf queued (`queue7.sh`,
+after the portfolio arm); the budget is the question (40 solves at ~2 s
+on top of a 90 s K41 chain). **jwf: K28 34, K35 54, K41 74, K51 125** (complete; K51 +10) -- the best clean K35 and K41 this chain has produced (base 65 /
+79, human 58 / 70; K35's step took three teeth for a 0.35 count gain
+with the braid's swimmers 1 -> 4, which I doubted and the copper
+vindicated; K41's step moved SDQ15 / SA11 / SCS1's teeth, count 239 ->
+232). **Time: K28 86 s, K35 127 s, K41 218 s** against 35 / 61 / 83 --
+over the 2-minute edict at K41: 23 solves in the first call, most at
+radii 4-9 AFTER the one accepted step (the region grows to RMAX before
+the walk gives up). Arms queued: jwfm (`PLAN_JUDGE_MARGIN=3`: a count
+difference within the noise is decided by the residue) and jwfb
+(`_SOLVES=16 _RMAX=5`, the budgeted form).
+
+### Item 5's gate, D4 the pinch census: built, first reading weak
+
+`pinch_gate.py` (new): per LANE of every recorded run, the plan phase's
+polyline and page give four censuses -- `end_pinch` (foreign fanout
+copper within VIA_NEED of the lane's two ends), `run_static` (foreign
+same-layer fanout segments within PROX_TRACK of the run), `run_lanes`
+(OTHER planned lanes on the same page within PROX_TRACK: the virtual-
+copper pinch the refusal lines name) and `xings` (same-page crossings) --
+against the labels the braid's own log gives (refused at attempt 0;
+routed only at the last call, with its vias) and the routed vias per
+net; AUC per label and Spearman per K, cached in `tmp/s10/pinch_gate.tsv`.
+Smoke on the 26 K28 runs of `tmp/s9` (723 page lanes, 59 refused at
+attempt 0, 53 last-call): AUC(refused at 0) end_pinch .57, run_static
+.54, run_lanes .57, xings .54, the three summed .58 -- and the lane's own
+LENGTH .67. A pinch read off the plan barely beats chance at K28; the
+full run over every K and root follows the ladder. Nothing prices a
+pinch until it clears the bar (the review: well above 0.5 on a held-out
+K, and above room_probe's recorded null). **The full run (every root and
+K: 9577 page lanes, 1999 refused at attempt 0, 1743 last-call) says it
+does not clear it:** AUC(refused at 0) end_pinch .55 / .57 / .52 / .45,
+run_static .52 / .60 / .55 / .61, run_lanes .52 / .50 / .51 / .51, xings
+.49 / **.37** / .44 / .46, the sum .53 / .46 / .47 / .47 at K28 / 35 / 41
+/ 51; over all 9577 the best single census is run_static at .58 and the
+crossing count is BELOW chance. rho against the routed vias per net:
+run_static .22, lane length .22, the rest ~0. **D4 is closed, negative:**
+a pinch census read off the plan phase's polylines does not predict what
+the braid refuses; the refusal is decided by what the OTHER lanes lay
+(the virtual-copper net) in an order the census cannot see. The static
+walls (run_static) carry the only signal, and it is weak. No pricing.
+
+**The rule table (`rule_table.py`, vias + mm / 7.5, every s10 arm; the
+best COMPLETE board per K in bold):**
+
+| K | base (d40) | best complete | arm | note |
+|---|---|---|---|---|
+| 28 | 34 v / 656 mm = 121.5 | **28 v / 689 mm = 119.9** | jclR | jcR 121.2, base 121.5, jc / jcl 121.5: within 1.6 |
+| 35 | 65 / 963 = 193.4 | **58 / 871 = 174.1** | jpR | jc / jcl / jal 181.4 |
+| 41 | 79 / 1155 = 233.0 | **80 / 1132 = 231.0** | jcl / jal | jpR 236.6 + 2 open |
+| 51 | 115 / 1389 = 300.2 | **115 / 1389 = 300.2** | base / jc / jcl | jcs0 295.9 + 1 open, jf3 282.2 + 2 open |
+
+### Item 2: the certificate, `PLAN_PAGES_CERT` (built, queued)
+
+`_solve`: phase A on `m.clone()` with the objective replaced by the
+swimmer count, under `PLAN_PAGES_CERT_DET` (30) of deterministic time; the
+main solve is capped at what phase A found -- PROVEN or "UNCERTIFIED (best
+found, bound b)", said in the log; `=2` also hands phase A's whole plan to
+the main solve as its hint. In the walk phase A runs ONCE per `choose`
+(`cert_cap`), not per proposal (the K8 smoke test re-ran it 18 times).
+
+### Item 3: the trust-region walk, `PLAN_PAGES_WALK=r` (built, queued)
+
+`_walk` replaces `choose`'s one-big-solve + damped re-solve: from the
+greedy seed, keyed exactly there and VERIFIED by the braid (its count and
+residue are the reference key), the CP-SAT proposes the objective-best
+plan that moves at most r ends (`trust`: a berth off its reference berth, a
+tooth off its reference tooth; a net the seed left unplaced is free); the
+braid's plan phase verifies it; accepted iff `pf_better`, then re-keyed
+there; rejected -> a no-good on its SET OF MOVED ENDS (not the exact
+candidates: the K8 smoke test re-proposed the same three ends at a
+neighbouring gap three times) and the next-best, up to
+`PLAN_PAGES_WALK_TRIES` (3); no accepted proposal at r -> r + 1, bound
+`PLAN_PAGES_WALK_RMAX` (8); a proposal that is the reference itself and
+OPTIMAL jumps r to the bound (one solve says whether anything in the model
+beats it); a solve that does not prove shrinks r; an INFEASIBLE solve under
+the cap relaxes the cap by one (the certificate is proven INSIDE the trust
+region, so it can sit behind the barred proposals). Budgets:
+`PLAN_PAGES_WALK_DET` (10) per solve, `_STEPS` (20) accepted,
+`_SOLVES` (40) in all -- deterministic time and counts only.
+
+**K8 smoke (`tmp/s10/smoke2_fo_k8.log`, walk 3 + count judge + cert +
+rate):** every proposal cut the objective (51.7 -> 38.5 with 7 moves) and
+raised the braid's count (10 -> 14-18) and residue (1 -> 2-3), so the walk
+accepted nothing and shipped the seed (K8 = 10, human parity). Two facts to
+carry: the model's proposals are still LENGTH-driven even in via units
+(the seven moves are worth ~4 vias of length to the model and cost 4-8
+real ones), and the model says 0 swimmers on plans the braid swims 3 on,
+three moves from the seed -- the keys' validity radius is small. Ladder
+arms jw / jwr / jwcr (walk; + rate; + cert) queued in `tmp/s10/walk.sh`.
+
+## THE PLAN: planning that routes better (written 2026-09-15, end of session 9; Andy's ask)
+
+Goal: a plan (ends + pages) whose optimum the braid routes at the human's
+count with 0 open, K41 and K51 within ~2 min, deterministic, and graded by
+a judge that predicts the routed board. Every item below rests on a
+measurement in this README; the build order is the order of evidence.
+
+### Diagnosis, in one table
+
+| defect | evidence | consequence |
+|---|---|---|
+| the objective is not the routed cost | a via = 1.5 mm of channel (VIA_MM is 7.5); absolute length 87% of it at K28/K35; swimmers at 300 own the bound gap | its optimum routes worse: DET 40/80/160/320 -> 79 / 102+1o / 98 / 92 |
+| the keys are exact only near the seed | insertion-slot keys with set-dependent parts (ext, relaxed pitch, head-on class); 10-12 teeth moved -> the braid swims 4-6 where the model says 2 | any solve that moves far from the seed ships a void promise |
+| the judge approves what the braid rejects | residue + planner vias: 5 -> 4 -> 4 -> 4 swimmers; the braid's plan count 84 -> 94 / 90 / 96; routed 79 -> 102 / 98 / 92 | the loop cannot tell a better plan from a worse one |
+| band room is absent | refusals 9 -> 16 -> 44 events, blockers = the virtual-copper net (dynamic); SCKE1's north strip (static) | the last call pays 24-40 vias a board |
+| the re-solve was dead | INFEASIBLE 132/251 at K41: swimmers boxed in by held berths, then a joint residue | the first solve's lottery stop ships unimproved |
+
+### A. The judge: the braid's plan-implied count (first, gates everything)
+
+`judge_by_braid` under `PLAN_PAGES` returns the count `plan_vias.py`
+computes: end vias AS LAID on the fanout board + every page lane's
+plan-implied `changes` + every swimmer's `swim_changes` + `cross_vias`
+(which carries `band_over` at the swimmer price). Residue is a tie-break
+and a completion guard, never the key. Precision is +-5 (DET 320 vs 160
+mis-ordered by 4), so a step is accepted only when the count drops by more
+than the noise or the residue drops. Gate: the four K41 DET plans and the
+session-8 arms re-graded offline must order as the routed boards did.
+Cost: ~30 lines; half a session with its ladder.
+
+### B. The solve: a certified swimmer floor, then a proven trust-region walk
+
+1. **Phase A, the certificate.** `min swimmers` alone, proven (K41 2 in
+   30 s, K51 4 in 224 s; `solve_curve.py --min-swim`). Budget it; if it
+   does not prove, keep the best found as an UNCERTIFIED cap and say so.
+2. **Phase B, the walk.** From the greedy seed, keyed exactly there:
+   solve with at most r moved ends (a berth or a tooth changed), swimmers
+   <= the cap, objective in via units (C); the neighbourhood is small, so
+   it proves in seconds (the capped K41 solve reached its optimum at DET
+   22 and held). Verify with the braid's plan phase (A); accept iff the
+   count drops; otherwise a no-good cut and the next-best, up to m tries;
+   re-key at the accepted plan; repeat. r starts at 3; a step that does
+   not prove in DET 10 shrinks r; no improving step at r grows it (bound
+   8) or widens to the swimmers' crossers; stop at no improvement or the
+   time budget. Twenty steps of (keying 0.4 s + solve + plan phase 0.4 s)
+   fit two minutes at K41.
+3. **Converged means:** the count is certified (or the cap is uncertified
+   and said so), every inner solve proved, and no r-step improves the
+   braid's count. **Not converged means:** the walk stopped on time; ship
+   the best VERIFIED plan (every accepted step is near its seed, so its
+   keys hold) and log the count's improvement rate over the last steps.
+   Never ship a lottery stop far from the seed (what DET 80 / 160 / rt1 did).
+4. The existing loop's pieces are reused: `PLAN_PAGES_LEX` (phase A),
+   the damped re-solve with the soft bar (`UNBLOCK=2`, now live), the
+   hold / avoid / fixed plumbing, `_solve.value`.
+Cost: ~150 lines in `choose` / `_solve`; one session with its ladder.
+
+### C. The objective, in the braid's units
+
+- Vias at VIA_W; every length at 1 / VIA_MM per mm (`PLAN_PAGES_RATE`,
+  now `PLAN_RATE`). [s10 review: "as a difference from the seed" was
+  inert inside the solve -- a per-net constant -- and is dropped; the
+  RATE is the whole of this bullet, and Andy made it the rule
+  everywhere.]
+- Swimmers at a via price (~3, the routed mean) -- the certificate cap
+  handles the count, so the price no longer has to be a wall.
+- The exit-leg term (`PLAN_PAGES_LEG`, the corrected crossed-lane rule):
+  the changes the braid's count charges and this objective did not.
+- The berth KIND (`PLAN_PAGES_KIND_VIP`): the human's 36 dog-bones of 47
+  ends -- harmful under the lottery, re-graded on the walk.
+Rule: one term per ladder, on the walk, so an effect is the term's and
+not the feasible stop's.
+
+### D. Band room: the detection methods, from cheapest to dearest
+
+| method | what it sees | where it lives | cost | status |
+|---|---|---|---|---|
+| D1 strip capacity per face per page (`face_strips`: strip height to foreign copper / comb pitch) | the static room a side or far face has (SCKE1's north strip) | a HARD constraint in the CP-SAT | free | built as a price (item 5), losing under the lottery; re-grade as a constraint on the walk |
+| D2 exit-leg crossings (the leg term) | a leg crossing N lanes' bands -> a B leg or N dives | the CP-SAT objective | free | built (lg3) |
+| D3 the braid's plan phase on the candidate plan | `band_over`, cross-corridor vias, the planned polylines -- the dynamic part | the judge (A), once per step | 0.4 s | exists (`plan_braid`) |
+| D4 the pinch census on planned lanes | at each lane's via sites (launch slot, landing slot) the neighbours within VIA_NEED on both layers; along its run the same-layer neighbours within PROX_TRACK (level 4's proximity sampling) | a per-lane refusal predictor read off D3's polylines; a price on the predicted refusals | ~0.1 s | to build; GATE: it must correlate with the recorded refusal lists (pg2 9, det80 16, det160 44 events) above the |r| = 0.2 rule before it prices anything |
+| D5 the wall census (`wall_probe.py`, 0906) | track-level walls at the destination | a diagnostic when D4 and the braid disagree | seconds | exists |
+| D6 router probes (`replan.py`, the route as the judge) | the truth, one lane at a time | the final plan's refused lanes only, <= 2 rounds | 5-20 s a lane | exists; produced the best boards (K41 76 / 82) |
+| D7 refusal feedback | the braid stage's refusals as no-goods for one re-plan round | the walk's outer loop | one extra fanout + braid | to build; bounded by the time budget |
+
+The refusal lines at K41 name the virtual-copper net as the blocker, so
+D3 + D4 carry most of the room question; D1 carries the strip cases.
+
+### E. Keys: keep the surrogate honest
+
+- Re-key every accepted step (B does this by construction).
+- Log the model-vs-braid pair agreement after each step (the `src_diag`
+  instrument: K41 launch pairs off 1/706 at the seed); off-pairs above a
+  threshold shrink r.
+- Later, not first: the set-dependent parts of the keys (`ext`, the
+  relaxed pitch, the relative head-on class) as conservative bounds or
+  explicit variables.
+
+### F. The gates (edicts 2-4)
+
+Ladder K28 / K35 / K41 / K51 against 34 / 65 / 79 / 115 with times and
+renders; commit nothing unless better at every K within ~2 min; log per
+run the certificate, the inner statuses, the braid's count per step and
+the refusal predictors, so a regression is attributable to a step, not a
+lottery; one chain at a time; corpus A/B on Modal before any default.
+
+### Build order
+
+| # | build | gate | size |
+|---|---|---|---|
+| 1 | judge = the braid's count (A) | orders the four DET plans and the s8 arms as routed; ladder | 1/2 session |
+| 2 | certificate + cap in `_solve` (B1) | K41 optimum found in-chain at DET ~22; ladder | 1/2 session |
+| 3 | the trust-region walk (B2-B4) | deterministic, <= 2 min K41, ladder >= pg2 at every K | 1 session |
+| 4 | objective in via units, one term per ladder (C) | each term's own ladder on the walk | 1 session |
+| 5 | strip capacity as a constraint (D1) + the pinch census (D4) with its correlation gate | predictor |r| > 0.2 against recorded refusals, then its ladder | 1 session |
+| 6 | refusal feedback round (D7) | ladder, within budget | 1/2 session |
+| 7 | re-grade on the stable base: berth kind, climbs (item 2), NOOP, strip price | ladders | as time permits |
+
+Where the vias are expected to come from: K41's four bad nets map to
+D1 (SCKE1's strip), the walk + leg term (SBA1's west tooth), the count
+(SA8's wrong-side berth, 25 crossings) and D2 (SA2's exit legs); K51's
+fifteen nets at 4-6 vias are seven swimmers (certificate 4) and the
+refused lanes (D1 / D4).
+
+## Handoff: the next session (written 2026-09-15, ~04:40, end of session 10; supersedes the session-9 handoff below)
+
+**Tree.** `bus622-take5` @ 693b8922 + everything s8 / s9 left uncommitted +
+session 10's, all flag-off and byte-identical off (`ctl` K28 copper
+IDENTICAL to s9's d40 on the fanout and the routed board). New flags:
+`PLAN_JUDGE` (count | flat) + `PLAN_JUDGE_RIDE` + `PLAN_JUDGE_LEN`
+(ride | lane) + `PLAN_JUDGE_MARGIN` (fanout_from_plan); `PLAN_RATE`
+(select_moves SEL_RATE + pages_first PAGES_RATE with the source wrap);
+`PLAN_PAGES_CERT` (+`_DET`), `PLAN_PAGES_WALK` (+`_RMAX/_TRIES/_STEPS/
+_SOLVES/_DET/_PROBE/_FROM`), `PLAN_PAGES_PORTFOLIO` (pages_first); the
+proximity solve (`_solve(trust=(ref, src, None))`). New tools:
+`judge_gate.py` (+`--dedupe --main-only`, `tmp/s10/judge_gate2.tsv`),
+`pinch_gate.py` (`tmp/s10/pinch_gate.tsv`), `rule_table.py`. Arms and
+logs under `tmp/s10/`, queue scripts `tmp/s10/*.sh`. Nothing committed,
+nothing pushed. Two traps this session: **macOS paths are case-
+insensitive (arm tags `jcr` / `jcR` collided)**, and **a default flipped
+while an arm runs contaminates its later rungs** (jm5; new behaviour is
+opt-in only, defaults change between arms).
+
+**Andy's rules this session:** keep the router GENERAL (no board
+constants); **length is priced at 7.5 mm per via equivalent EVERYWHERE**
+(`PLAN_RATE`, the judge's length term); a synthetic harness with known
+answers "at some point" (memory `project-synthetic-bus-harness`).
+
+**Baseline unchanged:** `PLAN_PAGES=1 bash chain_k.sh TAG K` -> 34 / 65 /
+79 / 115, 0 open, 0 DRC; human 46 / 58 / 70 / 81.
+
+**The one arm better on a rung and worse on none: `PLAN_JUDGE=count
+PLAN_JUDGE_LEN=lane` (jcl) = 34 / 60 / 80 / 115**, and its K41 board is
+the better one under the rule (231.0 vs 233.0). The count with
+`swim_changes` (jc, no length) = 34 / 60 / 79 / 115. Every flat swimmer
+price loses K35 and opens K51, with or without a length term. The rate
+in the solve wins K28 / K35 and loses K41 / K51 by displacement (jpR 30 /
+58 / 91+2o / 118+3o; jcR 28 / 60 / 94 / 172+4o); the portfolio (both
+objectives, the judge picks) = 34 / 62 / 80 / 115, complete, not better
+than jcl. The walk from the seed is parked (the seed is not in the
+model: 26 conflicts at K41, the nearest feasible plan 11 ends off with
+16 swimmers); the walk FROM THE BIG SOLVE'S PLAN (probe4) finds
+accepted proposals at ~2 s each; **its arm jwf = 34 / 54 / 74 / 125**,
+complete -- the best clean K35 and K41 this chain has produced (human 58
+/ 70) and K51 ten worse, at K28 86 s / K35 127 s / K41 218 s against 35
+/ 61 / 83 (over the 2-minute edict at K41: the region keeps growing to
+RMAX after the accepted step). **jwfm (`PLAN_JUDGE_MARGIN=3`, the residue decides a count
+tie within 3) = 34 / 64 / 74 / 119 + SCKE1 open**: the margin rejects the
+K35 step that made 54 and opens K51 -- the residue is not a completion
+guard (the judge review's finding, now measured on the walk); margin 0
+stands. **jwfb (`_SOLVES=16 _RMAX=5`, the budgeted form) = 34 / 54 / 74 /
+125, the SAME boards as jwf** at K28 69 s / K35 86 s / K41 149 s / K51
+157 s (jwf 86 / 127 / 218; base 35 / 61 / 83 / 126): the accepted step
+comes early, the rest of the budget was the region growing after it.
+Under the rule: K35 **172.5** (base 193.4, jpR 174.1, jcl 181.4), K41
+**228.2** (base 233.0, jcl 231.0), K51 306.0 (base 300.2), K28 121.5 (=
+base). Not a default by edict 3 (K51 worse, K41 over time by 30 s); the
+first search mechanism to beat every clean board at K35 and K41.
+**Nothing is a default** (edict 3: jcl is better at K35 only); the
+judge switch is the change with the evidence behind it.
+
+**Settled this session (do not re-run):** the current judge (residue,
+model vias) is near-random at K35+ (gate); flat swimmer prices; the ride
+as the judge's length (3x over on the K35 batch); the rate in the ONE
+BIG SOLVE (displacement); `PLAN_PAGES_STRICT` (inert on the destination
+menu); the away filter and rip probe flags (gone from the tree); D4 the
+pinch census (AUC .45-.61 over 9577 lanes: closed negative); the
+certificate as a cap (a neighbourhood minimum; and fewer swimmers route
+worse here).
+
+**Next, in order:** (1) the walk from the solve at K51: why its accepted
+steps route worse there (render `tmp/s10/jwfb_k51` against `d40_k51`;
+the count's K51 precision is the weakest, gate2 rho .36 on the lane
+length) and the K41 time (the first call's solves after the accepted
+step); (2) the rate's source wrap -- the priced away filter -- inside the
+walk's proposals, since the west-face stubs survive every judge-only
+arm; (3) the decision-level gate on Modal (486 recorded decisions, both
+branches routed) -- the gate that would have separated jf from jc before
+a ladder; (4) the merged-dive-interval swimmer price (one currency with
+`changes`); (5) the design rules from the board (`rules_of(board)`)
+before D1; (6) the synthetic harness. Related memory: `issue-622-judge-switch-0915-s10`.
+
+## Handoff: the next session (written 2026-09-15, ~02:30, end of session 9; supersedes the session-8 handoff below)
+
+**Tree.** `bus622-take5` @ 693b8922 + everything session 8 left uncommitted
+(`tmp/session8_0915_batch_loop.patch`) + session 9's, all flag-off and
+byte-identical off (the d40 control with only the dump flag graded
+34 / 65 / 79 / 115): `PLAN_PAGES_DUMP` (instance writer),
+`PLAN_PAGES_UNBLOCK` 1 / 2, `PLAN_PAGES_RATE`, the infeasible-re-solve
+diagnostic; new files `xchange_probe.py`, `solve_curve.py`,
+`modal_curve.py`; ladder scripts `tmp/s9/{onedive,det,unblock,rate,unblock2}.sh`;
+instances under `tmp/s9/dump/k*/` with their Modal curves. Nothing
+committed, nothing pushed. Git works again (Xcode licence accepted).
+
+**Baseline unchanged:** `PLAN_PAGES=1 bash chain_k.sh TAG K` -> 34 / 65 /
+79 / 115, 0 open, 0 DRC; human 46 / 58 / 70 / 81.
+
+**Settled this session (do not re-run):**
+
+| question | answer | evidence |
+|---|---|---|
+| item 1 (mid-corridor page change) | CLOSED both halves | midpoint inert on fixed ends (5->5, 11->10, human 6->6); free change 2-3 lanes, parity-limited; braid's ONE_DIVE 1/2/5 loses every rung |
+| do the plan solves converge? | K28/K35 yes (proven); K41 needs DET ~400, K51 not by DET 640 | curves on the chain's own instances |
+| does more time improve the plan? | yes: K41 2309 -> 1760, K51 3984 -> 3335 | DET ladder + curves |
+| does a better plan route better? | **NO**: K41 DET 40/80/160/320 -> 79 / 102+1o / 98 / 92; K51 115 / 120 / 117 / 117 | the DET ladder |
+| why | the braid's plan-implied COUNT rejects every plan the planner's judge accepted (84 vs 94/90/96) and predicts routed within 4-8 | `plan_vias.py` on the four K41 fanouts |
+| what owns the bound gap | the swimmer terms; the count is certifiable apart (K41 2 in 30 s, K51 4 in 224 s) | `--min-swim` |
+| with the count pinned | the rest plateaus at once (K41 optimum at DET 22 vs 406) but does not prove (16%) | `--swim-cap 2` |
+| the objective's units | a via = 1.5 mm of channel inside the solve where the repo's rate is 7.5 (VIA_MM); length = 87% of the objective at K28/K35. Re-priced (`rt1`): 42 / 65 / 100 / 133+2o -- right units, more teeth moved, worse route | Andy caught it; `PLAN_PAGES_RATE` |
+| the damped re-solve | INFEASIBLE 132/251 at K41: swimmers boxed in by held berths, and a joint residue beyond that | diagnostic; `UNBLOCK=1` inert (79/115), `=2` running |
+
+**The design on the table (README "Does the pages-first solve run long
+enough"):** the CP-SAT proposes within a trust region (few moves per
+proven solve, re-keyed each step), the braid's plan-implied count
+disposes; the swimmer certificate as phase A; the objective in via units
+at VIA_MM with length as a tie-break; strip capacity as a constraint;
+band room read from the braid's plan phase per step. Build order: judge
+switch (`judge_by_braid` under the flag: the braid's count, not residue +
+planner vias), then the walk, then the objective terms one at a time.
+
+**Every ladder of the session, against the base 34 / 65 / 79 / 115:**
+
+| arm | K28 | K35 | K41 | K51 |
+|---|---|---|---|---|
+| one-dive level 1 / 2 / 5 | 40 / 40 / 39 | 69 / 64 / 64 | 112 / 110 / -- | 153+1o / 130 / -- |
+| DET 80 / 160 / 320 | 34 / 34 / 34 | 65 / 65 / 65 | 102+1o / 98 / 92 | 120 / 117 / 117 |
+| unblock 1 / 2 (soft bar) | 34 / 34 | 65 / 65 | 79 / 82 | 115 / 115 |
+| rate (via = 7.5 mm) | 42 | 65 | 100 | 133+2o |
+
+Nothing is a default. Every arm that changed the PLAN more than pg2's
+lucky stop did routed worse, whatever made it change, and the one judge
+that predicted the outcome is the braid's plan count.
+
+## Handoff: the next session (written 2026-09-15, 01:05, end of session 8)
+
+**Tree.** `bus622-take5` @ 693b8922 + UNCOMMITTED, all flag-off and
+copper-identical to base10 with the flags off (K28/K41 verified at the
+end of the session, `tmp/s9/off2_*`): session 7's `dedupe_climbs` /
+`PLAN_PAGES_CLIMB_LATE`; session 8's `PLAN_BATCH` (+ `_DEPTH`),
+`PLAN_PAGES_NOOP`, `PLAN_PAGES_CELLS`, `PLAN_PAGES_KIND_VIP`,
+`PLAN_PAGES_MISMATCH`, `PLAN_PAGES_STRIP`; `pages_first._solve` reports
+`value` per source move and `source_realize.realize` returns `pairs`
+(both inert). The whole diff is saved as
+`tmp/session8_0915_batch_loop.patch` (1095 lines; the four files are also
+snapshotted in `tmp/session8_0915/`). Note: `/usr/bin/git` stopped
+working at 01:10 -- `xcode-select -p` is Xcode.app and its licence is
+unaccepted (`sudo xcodebuild -license accept` in a real terminal, or
+`sudo xcode-select -s /Library/Developer/CommandLineTools`); meanwhile
+`/Library/Developer/CommandLineTools/usr/bin/git` works directly.
+Commit or drop -- Andy's call;
+nothing here is better than the base at every K.
+
+**Baseline unchanged:** `PLAN_PAGES=1 bash chain_k.sh TAG K` -> 34 / 65 /
+79 / 115, 0 open, 0 DRC (`ctl` K41 79 / 1787 copper-identical to pg2);
+human 46 / 58 / 70 / 81.
+
+**The six ideas of the session-7 list, all measured, none landed:**
+
+| # | idea | best arm | verdict |
+|---|---|---|---|
+| 3 | the batch loop | judged-both, no bisect = base copper | correct, inert; the bisect opens K35 |
+| 2 | climbs on the fixed loop | 34 / 56 / 83 / 112 + 2 open | loop inert on it; cells form 39 / 56 / 78 / 116 + 2 open |
+| 4 | berth kind price | 34 / 65 / 89 / 132 + 3 open | worse at K41/K51 every arm |
+| 5 | strip capacity | 36 / 77 / 86 / 135 | moves lanes south on B like the human, braid pays |
+| 6 | lay order xing | 36 / 65 + 1 open / 79 / 114 + 1 open | closes TODO 10 |
+| 1 | mid-corridor page change | not built | the one idea left untested |
+
+**What the session actually established.** (a) The chain is
+deterministic and the CP-SAT's FEASIBLE stop at DET 40 is the whole
+story: every change to the model's SHAPE this session -- a candidate
+dropped (NOOP), a key rescaled, an encoding swapped (cells), a price
+added (kind, strip) -- re-rolled that stop, and the chain routed the new
+stop, up or down by 10-30 vias with no relation to the change's merit
+(K51 NOOP: obj 3976.8 against 3983.7, pages F 19 / B 29 against 31 / 17,
+routed 141 against 115). A ladder is one sample per arm of a lottery,
+and 2-of-4 wins are its noise. Until the solve is proven or a
+warm-start makes it stable, no model term can be graded on this chain.
+(b) The loop's misses are the judge's better boards, not accidents; the
+audit's "exact" is not the criterion, the judge is. (c) The source menu
+re-emits the standing tooth under a different key (relaxed vs raw) --
+the candidate keys are on the wrong scale; the fix (relax a candidate
+into the standing sequence) is not built. (d) The per-layer room beside
+each destination face reads the human's south-on-B choice off the
+geometry (north B 0.3 mm, south B 11 mm).
+
+**Suggested next:** stabilise the solve before any more terms -- prove
+it (K28 stops at 727.2 / bound lower; try a warm start from the previous
+K's plan, or fix the pages by a first solve and solve the berths as a
+second, smaller instance), then re-run NOOP / STRIP / cells on a stable
+solve. Item 1 (the mid-corridor page change) is the only untested idea
+and needs the braid's `changes` realised per half; build it only on a
+stable solve.
+
+**Traps:** in-process `plan()` takes a different greedy seed than the
+chain (measure with `chain_k.sh`); the K28 first solve has two feasible
+stops (32 / 34) under load; one chain at a time; `tmp/s9/*.sh` are the
+session's ladder scripts (each waits for the previous `.done`).
+
+## Handoff: the next session (written 2026-09-14, 22:35, end of session 7; SUPERSEDED by the session-8 handoff above)
+
+**Tree.** `bus622-take5` @ 693b8922 (this README's sessions 3-7 record)
++ three UNCOMMITTED pieces, inert with their flags off (controls
+`base11` / `base12` copper-identical to pg2): `fanout_from_plan.dedupe_climbs`,
+`pages_first.PAGES_CLIMB_LATE`, the climb section above. Commit or drop
+-- Andy's call. Sessions 3-7 code (the arc line) is archived in
+`tmp/session6_0914_slant.patch` and `tmp/session7_0914_arcs.patch`.
+
+**Baseline, re-verified alone tonight:** `PLAN_PAGES=1 bash chain_k.sh TAG K`
+-> 34 / 65 / 79 / 115 (K28..K51), 0 open, 0 DRC, 32 / 56 / 79 / 121 s;
+human 46 / 58 / 70 / 81. One divergent run is not evidence: K28's first
+solve has a second feasible stop at 32 vias under load.
+
+**Settled tonight.** Arcs: abandoned (the braid routes the human's ends
+at the human's 80 when given them; no plan-chosen arc beat one corridor
+on the chain). Climbs: laid exactly, chosen by the plan, and jagged in
+every form (help K28/K35, hurt K41/K51; table above). The swimmer price
+is not a lever. Model SIZE is the recurring limiter: a bigger or
+different menu moves the CP-SAT's feasible stop and the chain routes it.
+
+**Six ideas for two-page capacity at K51, ranked, each with its fact:**
+
+1. **One mid-corridor page change per lane at a chosen half.** The human
+   routes the nets that must swim under our keys at 2 vias as 'F tooth,
+   one dive mid-corridor, B to a dog-bone' ("why not two vias"): a lane
+   whose ends differ in layer changes once anyway, and the human puts the
+   change where the crossings say. Split the corridor at its midpoint, a
+   page per half per lane; an inverted pair crosses in the first half
+   iff its launch gap is smaller than its target gap (linear on the keys),
+   so the pair rule is "not the same page in the half where they cross".
+   The braid already realizes scheduled changes; the plan side is new.
+2. **Climbs**: measured (above). Left: an at-most-one-per-cell resource
+   form of the conflict test (the pairwise one is quadratic in
+   candidates), and item 3 (the K41 loss was a refused climb kept).
+3. **Fix the batch realize-and-reject loop** (`plan()`): all moves in one
+   engine call, judged as a whole, every move banned on rejection. Keep
+   the batch as the first try; on rejection bisect by the planner's value
+   per move (2-4 engine calls); ban only a move refused as asked; count
+   asked vs landed per K.
+4. **Price the berth kind**: 36 of the human's 47 DU1 ends are dog-bones,
+   none via-in-pad; ours 16 via-in-pad + 14 bare stubs, which pushes the
+   layer changes into the corridor. One kind weight in the menu cost.
+5. **A per-face-strip capacity term**: K51's SCKE1 failure was 11 'up'
+   berths + 4 far-face lanes in the north strip; 170 of the plan's 224
+   crossings involve those 11 berths. A strip holds width/pitch lanes
+   (`select_moves.band_capacity` is the model for split blocks).
+6. **`BRAID_LAY_ORDER=xing` as a slack-gated arm** (TODO 10): K51 112->99 /
+   K41 91->97 on the old planner's boards; unmeasured on pg2.
+
+Do not: another per-swimmer via model; optimising the swimmer count;
+geometric hints to a solver. Do: one chain at a time, renders for every
+arm, the routed ladder as the judge, nothing landed unless better at
+every K within about two minutes a K.

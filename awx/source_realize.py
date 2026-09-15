@@ -447,4 +447,4 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
             log('      ' + ln)
     return {'board': out_path, 'audit': audit_d, 'ok': ok, 'restored': restored,
             'achieved': achieved, 'original': original, 'rejected': rejected,
-            'counts': counts, 'free': list(free)}
+            'counts': counts, 'free': list(free), 'pairs': pairs}
