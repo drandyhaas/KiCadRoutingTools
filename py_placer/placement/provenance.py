@@ -197,10 +197,11 @@ def discard_write(output_file: str) -> Optional[Dict]:
     """Drop the row `record_write(pending=True)` started for a write that never landed.
 
     The cancel half of the pending/commit split (#960). A promote that fails
-    after recording must not leave its row behind: a later write to the same
-    path from OUTSIDE any regime returns from `record_write` without replacing
-    it, and that write's `commit_write` would then append the stale claim --
-    stamped with the new file's hash -- to the old work dir's ledger.
+    after recording must not leave its row in `_PENDING`. While the regime
+    stands the leak is inert -- the next record for that path replaces it --
+    but a write to the path once the manifest is gone returns from
+    `record_write` without replacing it, and its `commit_write` would append
+    the stale claim, stamped with that file's hash, to the old ledger.
     """
     return _PENDING.pop(os.path.abspath(output_file), None)
 
