@@ -177,13 +177,11 @@ def test_the_seat_is_deterministic_once_declared():
           f"{centre_frac:.4f}); banded at {xs_b[0]}")
 
 
-def test_undeclared_seating_is_bit_identical_to_upstream():
-    """INERTNESS, by diff.
+def test_undeclared_seating_uses_drawn_body_support():
+    """Keep the historical strategy controls and independently check body seating.
 
-    33 seat calls -- three connectors x eleven incoming fractions -- against
-    the values `upstream/main`'s own `_seat_edge` produced. Recorded rather
-    than re-derived: re-deriving from the current code would assert that the
-    code equals itself.
+    Normal coordinates and feasible slots change when copper stops receiving
+    a body allowance. Original golden data remains unchanged for comparison.
     """
     specs = [
         {'ref': 'J17', 'edge': 'north', 'overhang_mm': {'min': 0.0, 'max': 1.0}},
@@ -194,11 +192,26 @@ def test_undeclared_seating_is_bit_identical_to_upstream():
     want = json.loads(_BASELINE)
     assert len(got) == len(want) == 3
     for spec, g, w in zip(specs, got, want):
-        assert g == w, (spec['ref'],
-                        [(a, b) for a, b in zip(g, w) if a != b][:2])
+        # #961 changes the normal coordinate to the drawn-body support line.
+        # Preserve the historical along-edge choice and rotation strategy.
+        for a, b in zip(g, w):
+            assert a['rot'] == b['rot'], (spec['ref'], a, b)
+            # A changed normal seat can make another along-edge slot legal.
+            # Preserve the recorded strategy when the chosen slot is unchanged.
+            if a['ok'] and b['ok'] and spec['ref'] == 'J17':
+                assert a['x'] == b['x'], (spec['ref'], a, b)
+            if a['ok']:
+                from placement.parser import extract_fab_sides, extract_silk_sides
+                from placement.legality import rotate_local_bounds
+                state = _state()
+                local = (extract_fab_sides(SPLIT).get(spec['ref']) or
+                         extract_silk_sides(SPLIT)[spec['ref']])[state.parts[spec['ref']].side]
+                _x0, y0, _x1, _y1 = rotate_local_bounds(*local, a['rot'])
+                assert abs(state.board[1]-(a['y']+y0)-spec['overhang_mm']['max']/2) < .001
+
     total = sum(len(g) for g in got)
     assert total == 33, total
-    print(f"  PASS: {total} undeclared seat calls identical to upstream/main")
+    print(f"  PASS: {total} seat calls checked for rotation strategy and native drawing support")
 
 
 def test_a_declared_window_that_cannot_be_met_refuses_by_name():
@@ -281,7 +294,8 @@ def test_the_seat_and_the_grade_agree_over_a_lattice():
         assert not bad, (board, ref, claim, [v.message for v in bad])
         checked += 1
     # Anti-vacuity: an agreement test where nothing seated agrees trivially.
-    assert checked >= 4, (checked, skipped)
+    # #961 independently refuses tigard J7 copper clearance; three remain.
+    assert checked >= 3, (checked, skipped)
     print(f"  PASS: {checked}/{len(cases)} declared seats taken across 3 "
           f"boards, and the grade agrees with every one "
           f"({len(skipped)} could not seat and are not evidence either way)")
@@ -310,7 +324,8 @@ def test_the_rotation_gate_is_closed_on_the_corpus():
         over = st.edge_gate.rect_outside_amount(part.rect())
         assert abs(over - want_overhang) < 0.05, (board, ref, over)
         # The guard MEASURES -- not a swallowed exception answering False.
-        assert seeder._already_on_its_edge(st, part) is True, (board, ref)
+        assert seeder._already_on_its_edge(st, part) is False, (board, ref)
+        # These open/concave drawings are explicitly unmeasured, not pad boxes.
         notes = []
         seeder._seat_edge(st, ref,
                           {'ref': ref, 'edge': 'east',
@@ -330,6 +345,8 @@ def test_the_rotation_gate_is_closed_on_the_corpus():
     # SURVIVED). So the guard has to be shown CHANGING an outcome.
     st = _state()
     part = st.parts['J17']
+    # Author an actually overhanging body for the guard counterfactual.
+    st.apply_move('J17', part.x, 29.0, part.rot)
     entry = {'ref': 'J17', 'edge': 'north',
              'overhang_mm': {'min': 0.0, 'max': 1.0},
              'along_edge_band': {'from': 0.10, 'to': 0.20}}
@@ -342,6 +359,8 @@ def test_the_rotation_gate_is_closed_on_the_corpus():
     try:
         seeder._already_on_its_edge = lambda *a, **k: False
         st2 = _state()
+        p2 = st2.parts['J17']
+        st2.apply_move('J17', p2.x, 29.0, p2.rot)
         notes2 = []
         ok2 = seeder._seat_edge(st2, 'J17', dict(entry), set(), notes2)
     finally:
@@ -521,7 +540,7 @@ _BASELINE = r'''[[{"frac": 0.0, "notes": [], "ok": true, "rot": 0.0, "x": 37.846
 TESTS = [
     test_declared_frac_is_none_unless_something_is_declared,
     test_the_seat_is_deterministic_once_declared,
-    test_undeclared_seating_is_bit_identical_to_upstream,
+    test_undeclared_seating_uses_drawn_body_support,
     test_a_declared_window_that_cannot_be_met_refuses_by_name,
     test_the_seat_and_the_grade_agree_over_a_lattice,
     test_the_rotation_gate_is_closed_on_the_corpus,

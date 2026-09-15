@@ -1,0 +1,19 @@
+fab_flush native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+silk_pads_extend native: 0 old body: (-1.25, 8.0, 4.0, 12.0) silk
+missing native: None old body: (1.75, 9.75, 2.25, 10.25) pad_bbox
+open_fab_line native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+triangle_45 native: 0 old body: (-0.3284271247461903, 7.17157287525381, 5.32842712474619, 12.82842712474619) fab
+fab_back_37 native: 0.300901 old body: (-0.3009010663986822, 7.199098933601318, 5.300901066398682, 12.800901066398682) fab
+fab_front_37 native: 0.300901 old body: (-0.3009010663986822, 7.199098933601318, 5.300901066398682, 12.800901066398682) fab
+concave_notch native: 0 old body: (6.0, 8.0, 10.0, 12.0) fab
+cutout native: 0 old body: (5.0, 8.0, 9.0, 12.0) fab
+opposite_face_only native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+concave_body native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+circle_body native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+disconnected_bodies native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+slanted_boundary native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+open_cut native: 0 old body: (0.0, 8.0, 4.0, 12.0) fab
+corner_two_edges native: 0.1 old body: (-0.10000000000000009, -0.10000000000000009, 3.9, 3.9) fab
+fab_rect_37 native: 0.300901 old body: (-0.3009010663986822, 7.199098933601318, 5.300901066398682, 12.800901066398682) fab
+fab_poly_45 native: 0 old body: (-0.3284271247461903, 7.17157287525381, 5.32842712474619, 12.82842712474619) fab
+Independent native/grade assertions passed: 738

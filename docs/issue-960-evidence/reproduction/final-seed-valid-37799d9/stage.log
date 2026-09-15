@@ -1,0 +1,13 @@
+Modified 21 footprint positions
+Successfully wrote C:\Users\rob\Documents\prive\git\KRT-960-reproduction\reviewer_evidence\final-seed-valid-37799d9\work\board.kicad_pcb
+Staged C:\Users\rob\Documents\prive\git\KRT-960-reproduction\reviewer_evidence\final-seed-valid-37799d9\work\board.kicad_pcb
+  3 ref(s) declared mechanical and carried at their source pose; everything else at the board centre, rotation 0
+    Ref*: fiducial (confidence medium): its position is a mechanical fact a real new board would already know
+    Ref*~2: fiducial (confidence medium): its position is a mechanical fact a real new board would already know
+    USB1: edge_receptacle (confidence medium): its position is a mechanical fact a real new board would already know
+  truth in C:\Users\rob\Documents\prive\git\KRT-960-reproduction\reviewer_evidence\final-seed-valid-37799d9\truth (a sibling; nothing in the work dir names the source)
+  regime armed: C:\Users\rob\Documents\prive\git\KRT-960-reproduction\reviewer_evidence\final-seed-valid-37799d9\work\.unaided-manifest.json -- an undeclared pose write in this dir now RAISES, and every declared one is recorded in C:\Users\rob\Documents\prive\git\KRT-960-reproduction\reviewer_evidence\final-seed-valid-37799d9\work\.pose-provenance.jsonl
+JSON_SUMMARY: {"board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-37799d9\\work\\board.kicad_pcb", "exempt": 3, "mechanical": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-37799d9\\work\\mechanical.json", "regime": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-seed-valid-37799d9\\work\\.unaided-manifest.json"}
+
+STDERR:
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

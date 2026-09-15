@@ -1,0 +1,18 @@
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+the seat gate refuses a buried pose -- and ONLY it does
+  PASS  the pose IS a containment by the engine s own term
+  PASS  candidate_valid refuses it
+  PASS  ...and with the term disabled it is ACCEPTED, so the term is what rejected it
+it does not over-refuse: a KISS is not a containment
+  PASS  a 0.25-frac overlap is not charged
+  PASS  ...while the threshold step itself is
+the exemption reaches the SEAT path too
+  PASS  D3 buried in U5 is charged
+  PASS  ...but TP1 at the SAME point is not (marker_class)
+a healthy board is undisturbed
+  PASS  a part at its own shipped pose is not contained
+  PASS  ...and its own pose is still a valid candidate
+
+OK
+
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

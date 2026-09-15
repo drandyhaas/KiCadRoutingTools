@@ -1,4 +1,11 @@
-"""Was every pose in this board produced by a registered engine lever?
+"""Was every changed pose applied through a registered placement lever?
+
+Execution provenance does not identify who selected the coordinates. In
+particular, place_pose applies caller decisions (often a model's) and is not
+evidence of optimizer authorship. `decision_source` is a separate declaration,
+not an inference from the application tool. No provenance verdict certifies
+engineering validity. Outside an armed benchmark regime, other adapters and
+model-authored arrangements remain ordinary supported work.
 
 `fence_audit` asks a different question, correctly, and answers it every time:
 *does any file in this work dir carry the control's poses?* That is the BLIND
@@ -31,6 +38,7 @@ worse than one that states its own limit.
 from __future__ import annotations
 
 import contextlib
+from contextvars import ContextVar
 import hashlib
 import inspect
 import json
@@ -98,7 +106,7 @@ NOT_POSE_WRITERS = ('beautify_labels.py',)
 #: name -- so the restage counter is unaffected.
 FENCE_SENSITIVE_LEVERS = ('stage_blind.py', 'stage_unaided.py', 'perturb.py')
 
-_active: List[Dict] = []
+_active = ContextVar('placement_levers', default=())
 
 
 class UnaidedViolation(RuntimeError):
@@ -106,22 +114,24 @@ class UnaidedViolation(RuntimeError):
 
 
 @contextlib.contextmanager
-def declare_lever(file: str, argv: Optional[Sequence[str]] = None):
+def declare_lever(file: str, argv: Optional[Sequence[str]] = None, *,
+                  decision_source: str = 'unspecified'):
     """Declare that the poses written inside this block come from `file`.
 
     Called explicitly by each CLI. The innermost declaration wins, so a tool
     that shells out to another still attributes to the one doing the writing.
     """
-    _active.append({'lever': os.path.basename(file),
-                    'lever_argv': list(argv) if argv else None})
+    token = _active.set(_active.get() + ({'lever': os.path.basename(file),
+                    'lever_argv': list(argv) if argv else None,
+                    'decision_source': decision_source},))
     try:
         yield
     finally:
-        _active.pop()
+        _active.reset(token)
 
 
 def active_lever() -> Optional[Dict]:
-    return dict(_active[-1]) if _active else None
+    return dict(_active.get()[-1]) if _active.get() else None
 
 
 def _caller() -> str:
@@ -152,15 +162,14 @@ def _caller() -> str:
 
 def regime_for(path: str) -> Optional[str]:
     """The work dir governing `path`, or None. Walks up for the manifest."""
-    d = os.path.dirname(os.path.abspath(path)) or os.getcwd()
-    seen = 0
-    while d and seen < 24:
+    d = os.path.dirname(os.path.realpath(path)) or os.getcwd()
+    while d:
         if os.path.isfile(os.path.join(d, REGIME_NAME)):
             return d
         parent = os.path.dirname(d)
         if parent == d:
             break
-        d, seen = parent, seen + 1
+        d = parent
     return None
 
 
@@ -175,21 +184,60 @@ def sha256_file(path: str) -> str:
 _PENDING: Dict[str, Dict] = {}
 
 
+def _key(path):
+    return os.path.normcase(os.path.realpath(path))
+
+
+def cancel_write(output_file: str) -> Optional[Dict]:
+    """Discard an uncommitted record. Never removes a successful ledger row."""
+    return _PENDING.pop(_key(output_file), None)
+
+
 def commit_write(output_file: str) -> Optional[Dict]:
     """Finish the row `record_write(pending=True)` started, now the file exists.
 
     Split in two so the REFUSAL can happen before the write. The gate used to
     run after it, which made refusing decorative -- the poses were already on
     disk and the exception only described a file it had helped produce.
+
+    Low-level API: callers must hold the publication lock and provide recovery
+    for both board and ledger. Production writers use publication.publish_board.
+    A missing output or failed ledger replacement retains the pending record
+    until cancellation; no successful row is appended for a missing file.
     """
-    row = _PENDING.pop(os.path.abspath(output_file), None)
+    row = _PENDING.get(_key(output_file))
     if row is None:
         return None
-    root = row.pop('_root')
+    if not os.path.isfile(output_file):
+        raise OSError('cannot commit provenance: output board does not exist')
+    root = row['_root']
+    row = {k: v for k, v in row.items() if not k.startswith('_')}
     row['board_sha256'] = (sha256_file(output_file)
                            if os.path.isfile(output_file) else None)
-    with open(os.path.join(root, LEDGER_NAME), 'a', encoding='utf-8') as f:
-        f.write(json.dumps(row, sort_keys=True) + '\n')
+    expected = row.get('candidate_sha256')
+    if expected and row['board_sha256'] != expected:
+        raise OSError('published board differs from accepted provenance candidate')
+    # The publication transaction holds the regime lock and retains the old
+    # ledger for rollback. Replace a complete file: a failed append must not
+    # leave a syntactically valid successful row about a rolled-back board.
+    import tempfile
+    ledger = os.path.join(root, LEDGER_NAME)
+    prior = b''
+    if os.path.exists(ledger):
+        with open(ledger, 'rb') as f:
+            prior = f.read()
+    fd, tmp = tempfile.mkstemp(prefix='.pose-ledger-', dir=root)
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(prior + (b'\n' if prior and not prior.endswith(b'\n') else b'')
+                    + (json.dumps(row, sort_keys=True) + '\n').encode('utf-8'))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, ledger)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    cancel_write(output_file)
     return row
 
 
@@ -214,7 +262,7 @@ def _side_changed(fp, placement) -> bool:
 
 def record_write(input_file: str, output_file: str,
                  placements: Sequence[Dict],
-                 pending: bool = False) -> Optional[Dict]:
+                 pending: bool = False, *, candidate_file: Optional[str] = None) -> Optional[Dict]:
     """Append one row for a pose write. Returns it, or None outside a regime.
 
     Raises `UnaidedViolation` when a regime is in force and no lever is
@@ -238,6 +286,8 @@ def record_write(input_file: str, output_file: str,
             f"LEVER_REGISTRY, so it cannot author poses under the unaided "
             f"regime at {root}. Register it deliberately or run outside the "
             f"regime.")
+    if pending and _key(output_file) in _PENDING:
+        raise RuntimeError('a provenance record is already pending for ' + output_file)
 
     # refs_moved is SEPARATE from refs_written on purpose. `perturb.
     # _all_at_current` hands the writer EVERY part so that six-decimal `(at)`
@@ -314,6 +364,29 @@ def record_write(input_file: str, output_file: str,
            'poses_written': _written,
            'sides_written': _sides,
            'refs_moved': sorted(r for r in moved if r)}
+    row.update(applied_by=lever['lever'],
+               decision_source=lever.get('decision_source', 'unspecified'),
+               provenance_scope='registered execution; coordinate selection is separately declared')
+    if candidate_file is not None:
+        # Read the accepted bytes after ALL pose/side/lock stamping. Requested
+        # placements and rejected search trials are not publication evidence.
+        from kicad_parser import parse_kicad_pcb
+        from placement.legality import footprint_side
+        from placement.parser import extract_locked_refs
+        final = parse_kicad_pcb(candidate_file).footprints
+        old = parse_kicad_pcb(input_file).footprints
+        locks = extract_locked_refs(candidate_file)
+        old_locks = extract_locked_refs(input_file)
+        row.update(final_snapshot=True, candidate_sha256=sha256_file(candidate_file),
+                   refs_written=sorted(final),
+                   poses_written={r: [f.x, f.y, (f.rotation or 0.0) % 360.0]
+                                  for r, f in final.items()},
+                   sides_written={r: footprint_side(f) for r, f in final.items()},
+                   locks_written={r: r in locks for r in final})
+        row['refs_moved'] = sorted(r for r, f in final.items() if r not in old or
+            abs(f.x - old[r].x) > 1e-6 or abs(f.y - old[r].y) > 1e-6 or
+            abs(((f.rotation or 0.0) - (old[r].rotation or 0.0) + 180) % 360 - 180) > 1e-6 or
+            footprint_side(f) != footprint_side(old[r]) or (r in locks) != (r in old_locks))
     if lever['lever'] in FENCE_SENSITIVE_LEVERS:
         # A STAGING row states that a staging happened and nothing else. Its
         # argv names the source board and the truth dir, its `refs_moved` is
@@ -333,7 +406,7 @@ def record_write(input_file: str, output_file: str,
                            '-- this ledger is inside the fence'}
     if pending:
         row['_root'] = root
-        _PENDING[os.path.abspath(output_file)] = row
+        _PENDING[_key(output_file)] = row
         return row
     row['board_sha256'] = (sha256_file(output_file)
                            if os.path.isfile(output_file) else None)

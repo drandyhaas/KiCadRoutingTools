@@ -1,0 +1,11 @@
+  PASS: a locked receptacle off its seat does not fail the gate
+  PASS: ...its errors are counted apart, as pinned
+  PASS: ...and NAMED on the console, with the rule
+  PASS: (locked yes) in the file pins on its own
+  PASS: an error on a part the seed placed still fails the gate
+  PASS: ...with the pinned errors still counted beside it
+  PASS: an unlocked receptacle is seated by the seed and pins nothing
+
+ALL PASS
+
+STDERR:

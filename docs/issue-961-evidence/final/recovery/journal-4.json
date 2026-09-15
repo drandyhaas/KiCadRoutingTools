@@ -1,0 +1,10 @@
+{
+  "output": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup\\out.kicad_pcb",
+  "phase": "committed",
+  "backups": {
+    "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup\\out.kicad_pcb": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup\\.krt-backup-fe5blbq2",
+    "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup\\out.kicad_pro": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup\\.krt-backup-0o_2fm7l",
+    "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\recovery-20260914-121049\\place_reconstruct-committed-cleanup\\.pose-provenance.jsonl": null
+  },
+  "cleanup_error": "reviewer injected postcommit journal cleanup denial"
+}

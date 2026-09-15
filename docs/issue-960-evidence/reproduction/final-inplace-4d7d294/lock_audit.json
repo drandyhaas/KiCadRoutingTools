@@ -1,0 +1,25 @@
+{
+ "added_refs": [],
+ "callers": [
+  "place_pose.py:372 in main"
+ ],
+ "claimed": 1,
+ "decision_sources": [
+  "caller"
+ ],
+ "delivered": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-inplace-4d7d294\\work\\board.kicad_pcb",
+ "drifted_refs": [],
+ "ledger_rows": 1,
+ "levers": [
+  "place_pose.py"
+ ],
+ "moved": 1,
+ "provenance_scope": "registered execution; not optimizer or engineering certification",
+ "reason": "all 1 moved pose(s) trace to place_pose.py, and each is where its lever put it",
+ "staged": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-inplace-4d7d294\\work\\.pose-baseline-eec95fe7cd57478f88fdb85d85c87b90.kicad_pcb",
+ "unclaimed_refs": [],
+ "undeclared_refs": {},
+ "unverifiable_claims": [],
+ "verdict": "CLEAN",
+ "workdir": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\final-inplace-4d7d294\\work"
+}

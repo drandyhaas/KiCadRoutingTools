@@ -130,8 +130,8 @@ x_bad, y_bad = seeder._edge_pose(st.parts['J2'], st.board, 'south', 0.90, 0.0)
 _x, _y, converged = seeder._edge_correct(st, 'J2', 'south', x_bad, y_bad, 0.0)
 check("a diverging overhang walk reports converged=False",
       converged is False, f"landed at ({_x:.3f}, {_y:.3f})")
-check("and it really did march off the board (the case is not hypothetical)",
-      _y < st.board[1] or _y > st.board[3],
+check("body correction refuses tangential overshoot without marching off the opposite edge",
+      st.board[1] <= _y <= st.board[3],
       f"y={_y:.3f} vs board y {st.board[1]:.2f}..{st.board[3]:.2f}")
 
 # a centred start converges
@@ -148,7 +148,8 @@ piled = pile(st)
 entry = {'edge': 'south', 'overhang_mm': {'min': 0.0, 'max': 1.0}}
 notes = []
 ok = seeder._seat_edge(st, 'J2', entry, set(), notes, exclude=piled)
-check("it seats against a pile", ok, str(notes[-2:]))
+check("the unchanged body band cannot waive actual pad edge clearance",
+      not ok and any("pad copper edge clearance" in n for n in notes), str(notes[-2:]))
 check("and the seat is ON the board -- the whole point",
       pads_on_board(st, 'J2'),
       f"pose ({st.parts['J2'].x:.3f}, {st.parts['J2'].y:.3f}), "
@@ -207,8 +208,8 @@ ok5 = seeder._seat_edge(st5, 'J2',
                         {'edge': 'south', 'overhang_mm': {'min': 0.0,
                                                           'max': 1.0}},
                         set(), [], exclude=piled5)
-check("a sane band still seats (the bound is not a blanket refusal)",
-      ok5 and pads_on_board(st5, 'J2'),
+check("a body-only band with insufficient copper clearance refuses",
+      not ok5 and pads_on_board(st5, 'J2'),
       f"ok={ok5} pose ({st5.parts['J2'].x:.3f}, {st5.parts['J2'].y:.3f})")
 
 # WITHOUT the exclude set the pile is a full obstacle set -- that is defect A.

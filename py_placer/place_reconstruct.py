@@ -32,25 +32,10 @@ import math
 import os
 import sys
 
-# Sibling files a staged board carries with it (the .kicad_pro is the DRC floor
-# a later step reads; #441).
-from copy_board import SIBLING_EXTS as _SIBLING_EXTS  # ONE list (#711)
-
-
-def _promote_staged(staged: str, final: str) -> None:
-    """Move a completed staged board (and its siblings) onto the output path.
-
-    One rename per file, after every stage that can still move copper or parts
-    has finished -- so a killed run leaves the staging files behind rather than
-    a half-finished board at the name the caller will hand to the next step.
-    """
-    staged_base = os.path.splitext(staged)[0]
-    final_base = os.path.splitext(final)[0]
-    os.replace(staged, final)
-    for ext in _SIBLING_EXTS:
-        src = staged_base + ext
-        if os.path.isfile(src):
-            os.replace(src, final_base + ext)
+def _promote_staged(staged: str, final: str, *, input_file=None) -> None:
+    """Publish finished reconstruction and requirements through the pose boundary."""
+    from placement.publication import publish_board
+    publish_board(staged, final, input_file=input_file)
 
 
 #: The stage names that actually gate code. `classify` runs unconditionally
@@ -74,8 +59,8 @@ Examples:
     p.add_argument("input_file")
     p.add_argument("output_file")
     p.add_argument("--intent", default=None, metavar="JSON",
-                   help="Optional floorplan intent (edge connectors exempt "
-                        "from off-board repair; zones constrain re-seating)")
+                   help="Optional floorplan intent (declared body allowances and zones; "
+                        "copper containment remains required)")
     p.add_argument("--stages",
                    default="classify,fit,vector,assign,exchange,reseat,"
                            "legalize",
@@ -161,6 +146,11 @@ Examples:
         except Exception:
             pass
 
+    from placement.connector_publication import run_checked
+    return run_checked(args, lambda trial: _execute(trial, p, stages, report))
+
+
+def _execute(args, p, stages, report):
     import pose_score
     from kicad_parser import parse_kicad_pcb
     from placement import floorplan, reconstruct, seeder
@@ -548,9 +538,7 @@ Examples:
                   + ", ".join(f"{r} ({m:g})" for r, m in
                               sorted(rep['edge_bands_dropped'].items())))
         if rep['moves']:
-            tmp = board_path + '.reseat'
-            write_placed_output(board_path, tmp, rep['moves'])
-            os.replace(tmp, board_path)
+            write_placed_output(board_path, board_path, rep['moves'])
         print(f"  reseat ({rep['scope_source']}): {len(rep['scope'])} in "
               f"scope, {len(rep['reseated'])} re-seated, "
               f"{len(rep['unseated'])} unseated, {len(rep['refused'])} "
@@ -596,9 +584,7 @@ Examples:
         for n in rep['notes']:
             print(f"  NOTE: {n}")
         if rep['moves']:
-            tmp = board_path + '.legalize'
-            write_placed_output(board_path, tmp, rep['moves'])
-            os.replace(tmp, board_path)
+            write_placed_output(board_path, board_path, rep['moves'])
         print(f"  legalize: {len(rep['repaired'])} repaired, "
               f"{len(rep['unrepairable'])} unrepairable")
         return rep
@@ -658,7 +644,7 @@ Examples:
         report['legalize'] = {'repaired': rep['repaired'],
                               'unrepairable': rep['unrepairable']}
 
-    _promote_staged(staged, args.output_file)
+    _promote_staged(staged, args.output_file, input_file=args.input_file)
 
     out_pcb = parse_kicad_pcb(args.output_file)
     final = grade_pad_legality(out_pcb, args.clearance,
@@ -710,7 +696,7 @@ Examples:
     if final['oob_pad_count']:
         print("  (off-board residue that no cap could repair: if it is a "
               "by-design overhang -- a card edge, a switch actuator -- "
-              "declare it in an intent's edge_connectors; it is then exempt)")
+              "body bands do not exempt pad copper containment)")
     report.setdefault('complete', True)
     report.setdefault('status', 'ok')
     print('JSON_SUMMARY: ' + json.dumps(report, sort_keys=True, default=str),

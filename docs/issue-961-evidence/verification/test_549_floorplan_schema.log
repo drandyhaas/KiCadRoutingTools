@@ -1,0 +1,56 @@
+--- test_a_wellformed_intent_loads
+  PASS: 2 blocks, envelope (0.0, 0.0, 100.0, 80.0), no self-contradiction
+--- test_rects_are_normalised_not_trusted
+  PASS: [100,80,0,0] normalised to (0,0,100,80)
+--- test_the_wrong_file_is_refused_by_kind
+  PASS: a round sidecar cannot masquerade as an intent
+--- test_schema_version_is_enforced
+  PASS: only schema 1 loads
+--- test_unknown_keys_are_refused_not_ignored
+  PASS: unknown top-level and per-block keys both refused
+--- test_the_key_sets_are_exactly_what_is_documented
+  PASS: 16 key sets pinned exactly; 94 names all documented, 9 of them against their table row
+--- test_an_intent_using_every_known_key_loads
+  PASS: an intent using all 77 known keys loads
+--- test_min_reader_refuses_a_build_that_would_ignore_the_claim
+  PASS: reader 5 loads min_reader<=5, refuses 6 before reading further
+--- test_a_non_string_key_is_an_intent_error_not_a_TypeError
+  PASS: a non-string key refuses as an IntentError, not TypeError
+--- test_unknown_nested_keys_are_refused_not_ignored
+  PASS: 12 nested typos refused, each naming the key that was meant
+--- test_a_nested_object_must_be_an_object
+  PASS: 7 objects + 4 list entries + context.budget_withheld all refuse a list/scalar instead of crashing later
+--- test_context_is_deliberately_open
+  PASS: context accepts arbitrary keys; budget_withheld still read
+--- test_an_entry_carries_its_own_context_slot
+  PASS: 4 entry kinds carry a free-form context; a non-object is refused by path
+--- test_severity_keys_are_checked_against_the_rule_names
+  PASS: 22 settable rule names accepted, a typo refused (RULES has 14)
+--- test_every_violation_rule_name_is_settable
+  PASS: all 22 violation rule names are settable
+--- test_a_block_needs_refs_or_group
+  PASS: refs or group required; either alone suffices
+--- test_refs_as_a_bare_string_is_refused
+  PASS: refs must be a list, not a string
+--- test_enumerations_are_checked
+  PASS: side / edge / units / severity enumerations enforced
+--- test_malformed_rects_are_refused
+  PASS: 5 malformed rect shapes refused (incl. bool-as-number)
+--- test_duplicate_block_names_are_refused
+  PASS: a duplicate block name cannot silently shadow the first
+--- test_keepout_needs_a_shape
+  PASS: rect and circle keepouts load; sides default to both faces
+--- test_zone_outside_the_envelope_is_a_self_contradiction
+  PASS: zone 'oops' [90.00, 70.00, 140.00, 120.00] is not inside the envelope [0.00, 0.00, 100.00, 80.00]
+--- test_two_zones_fighting_over_one_rectangle
+  PASS: zones 'a' and 'b' overlap by 300.00mm2 on the same side; no placement can satisfy both
+--- test_zones_on_opposite_sides_may_share_a_rectangle
+  PASS: same rect on F and B is legal
+--- test_severity_override_reaches_the_violation
+  PASS: per-rule severity downgrades one rule and no other
+--- test_violation_order_is_a_property_of_the_finding
+  PASS: 2 findings totally ordered by (rule, ref, block)
+--- test_load_intent_reports_the_path_and_the_parse_error
+  PASS: truncated and missing files both name the path
+ALL PASS
+

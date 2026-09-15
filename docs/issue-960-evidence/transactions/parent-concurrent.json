@@ -1,0 +1,14 @@
+{
+  "A": {
+    "success": true,
+    "observed_R1": [
+      137.4,
+      98.8,
+      270.0
+    ]
+  },
+  "B": {
+    "success": false,
+    "error": "cannot write C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\concurrent\\out.kicad_pcb: [WinError 2] Het systeem kan het opgegeven bestand niet vinden: 'C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-transactions\\\\reviewer-runtime\\\\concurrent\\\\out.kicad_pcb.krt-tmp' -> 'C:\\\\Users\\\\rob\\\\Documents\\\\prive\\\\git\\\\KRT-960-transactions\\\\reviewer-runtime\\\\concurrent\\\\out.kicad_pcb'. Nothing was written: previous output files were preserved or restored."
+  }
+}

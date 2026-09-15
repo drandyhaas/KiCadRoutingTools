@@ -1,0 +1,64 @@
+{
+  "before": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+  "after": "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1",
+  "changed": [
+    "py_placer/place_reconstruct.py",
+    "py_placer/place_seed.py",
+    "py_placer/placement/connector_publication.py"
+  ],
+  "unchanged_blob_or_tree_identities": {
+    "py_placer/placement/floorplan.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "006269af3d5733a6c152585c1e3c0cb067c18145",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "006269af3d5733a6c152585c1e3c0cb067c18145"
+    },
+    "py_placer/placement/connector_geometry.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "d67f440f75831a9667db8b3bdbb1454ec3eb0235",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "d67f440f75831a9667db8b3bdbb1454ec3eb0235"
+    },
+    "py_placer/placement/legality.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "038056a6d7cf431b6e381d271259cc63535fd4ca",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "038056a6d7cf431b6e381d271259cc63535fd4ca"
+    },
+    "py_placer/placement/quench.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "b05fe013bde1b47cbcd625f04181ba85cbbb86c7",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "b05fe013bde1b47cbcd625f04181ba85cbbb86c7"
+    },
+    "py_placer/placement/seeder.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "3682f685435dab3681974d366585dcc76413d70c",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "3682f685435dab3681974d366585dcc76413d70c"
+    },
+    "py_placer/placement/reconstruct.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "2e7b49f72e5e869e00d95eaaa6976aec6109383a",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "2e7b49f72e5e869e00d95eaaa6976aec6109383a"
+    },
+    "py_placer/placement/writer.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "556bfaa194dcdb92ad701bfbcb60401e2fcb95a8",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "556bfaa194dcdb92ad701bfbcb60401e2fcb95a8"
+    },
+    "py_placer/placement/publication.py": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "ad6ee655f903760c99638f50d0df8f70d2b9ff89",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "ad6ee655f903760c99638f50d0df8f70d2b9ff89"
+    },
+    "py_router": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "c1f94185bbe16eced655a6bb047768549031fdb0",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "c1f94185bbe16eced655a6bb047768549031fdb0"
+    },
+    "py_tools": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "c4589f06d71246ed9f043f9b43d15ed9b87fea01",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "c4589f06d71246ed9f043f9b43d15ed9b87fea01"
+    },
+    "kicad_routing_plugin": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "d7e66ed873d39e4882f16a40e727d442b192d080",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "d7e66ed873d39e4882f16a40e727d442b192d080"
+    },
+    "tests": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "27eec4f5a24136703f6a689b2b628a8b94af3f74",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "27eec4f5a24136703f6a689b2b628a8b94af3f74"
+    },
+    "kicad_files": {
+      "bc8071b9ab586dd78629cdf511e4d527b4af33a1": "4434f5bd38b8211c7e486110255e9f8e0934553b",
+      "52db3fb0fa6f3ba94f029c1f2b4de76f9c2d34c1": "4434f5bd38b8211c7e486110255e9f8e0934553b"
+    }
+  },
+  "all_identical": true
+}

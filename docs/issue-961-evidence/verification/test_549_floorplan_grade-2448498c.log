@@ -1,0 +1,191 @@
+--- test_an_emitted_intent_grades_clean_on_every_tracked_board
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 8 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AE1, J1, J3, SW1, SW2, SW3, SW4, U1
+  WARNING [quench]: 8 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AE1, J1, J3, SW1, SW2, SW3, SW4, U1
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+Copper-to-hole clearance 0.25mm (from the board's own min_hole_clearance, above the 0.2mm fab floor)
+  PASS: 7 boards emit -> grade; independent edge/copper findings retained
+--- test_what_emit_writes_is_what_the_loader_accepts
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 8 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AE1, J1, J3, SW1, SW2, SW3, SW4, U1
+  WARNING [quench]: 8 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AE1, J1, J3, SW1, SW2, SW3, SW4, U1
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+Modified 2 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpalko6pop\damaged.kicad_pcb
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  PASS: 15 emissions carry only accepted keys; 15 emitter-source keys all known (seen live: class, note, observed_overhang_mm, overhang_capped, source)
+--- test_the_round_trip_is_not_vacuous
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: 7 rules ran, 10 blocks, 222 parts covered
+--- test_a_part_pushed_out_of_its_zone_is_caught_with_the_distance
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: 7 part(s) caught, worst 3.73mm east
+--- test_an_unresolved_block_is_an_error_not_a_silent_pass
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: block 'typo' matched no footprint on this board (refs ['ZZ99*']). A block that resolves 
+--- test_a_group_name_resolves_in_both_its_raw_and_short_form
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: sheet:58d51cad and its raw uuid both resolve to 83 refs
+--- test_a_side_violation_names_the_part
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: 5 back-side parts flagged against a side:F block
+--- test_a_keepout_catches_a_through_hole_part_from_the_other_side
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: AUDIO1 on F caught by an opposite-face keep-out (occupies both)
+--- test_a_keepout_allow_list_clears_its_own_part
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: AE1 caught, then cleared by allow
+--- test_decap_distance_agrees_with_the_grouper_exactly
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: 39 cap distances identical to decap_tethers
+--- test_decap_exempt_and_limit_both_bite
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: limit 1.20mm flags 26/53; exempting C10 drops exactly one
+--- test_must_lock_reports_a_part_the_file_does_not_pin
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: unlocked part and unmatched pattern both reported
+--- test_legality_numbers_are_the_optimizers_own
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: ['hole_shortfall', 'hpwl', 'locked_contact_pairs', 'oob_amount', 'oob_area', 'oob_count', 'overlap_area', 'pad_conflict_pairs', 'pad_intersection_pairs', 'pad_overlap_pairs', 'pad_shortfall'] identical to QuenchState.legality_metrics
+--- test_oob_area_is_refused_as_a_budget_because_it_is_cutout_blind
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: oob_area refused with the cutout reason; unknown key refused
+--- test_a_legality_budget_bites_when_exceeded
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: overlap bites either way; oob_count 2 exempt when declared, 2 counted when not
+--- test_declared_edge_connectors_within_band_are_not_oob
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: only measured finite body bands exempt occupancy; unlicensed parts remain
+--- test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_connectors
+  WARNING [quench]: 5 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, J1, U2, U9
+  WARNING [quench]: 5 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, J1, U2, U9
+  PASS: one WARN naming U2 (3 pads, north); J1 excluded; skipped without edge_connectors
+--- test_the_envelope_rule_refuses_to_licence_a_resize
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: line is fixed: correct the intent, do not resize the board
+--- test_emit_never_claims_a_zone_it_cannot_defend
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: 4 disjoint zones of 10 blocks, all inside the envelope; 6 say why they have none
+--- test_emit_records_the_overhanging_parts_as_edge_connectors
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: 2 overhanging parts recorded, none flagged
+--- test_an_edge_connector_outside_its_declared_overhang_is_caught
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: US1 body overhang 0.4950mm outside declared limit {'min': 0.0, 'max': 0.0} (F.Fab; n
+--- test_a_round_board_now_parses_its_outline
+  PASS: a round outline tessellates and grades (was #550-refused)
+--- test_a_board_with_no_outline_at_all_is_refused_not_graded
+  PASS: refused -- the board has no Edge.Cuts outline
+--- test_a_plain_rectangular_board_is_trustworthy_with_no_rings
+  PASS: 5 rectangular board(s) trusted with 0 rings
+--- test_the_summary_says_how_many_rules_RAN
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: rules_run=7 rules_skipped=7 blocks=10
+--- test_state_signals_reach_the_summary
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: dup=0.0 spread=0.929 outside=0.0265
+ALL PASS
+
+WARNING: 4 footprint block(s) share 2 reference(s) -- TP4 x2, TP5 x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 86 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 4 footprint block(s) share 2 reference(s) -- TP4 x2, TP5 x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 86 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 7 footprint block(s) share 1 reference(s) -- REF** x7. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 272 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 7 footprint block(s) share 1 reference(s) -- REF** x7. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 272 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 4 footprint block(s) share 2 reference(s) -- TP4 x2, TP5 x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 86 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 7 footprint block(s) share 1 reference(s) -- REF** x7. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 272 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 4 footprint block(s) share 2 reference(s) -- TP4 x2, TP5 x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 86 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 7 footprint block(s) share 1 reference(s) -- REF** x7. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 272 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

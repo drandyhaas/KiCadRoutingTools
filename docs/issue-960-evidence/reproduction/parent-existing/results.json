@@ -1,0 +1,26 @@
+{
+  "after": {
+    ".unaided-manifest.json": "f1d35941965e991d335ddbe2c6d55ce2baa782fe69cfdb66f56bf90a12a411e3",
+    "board.kicad_pcb": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+    "delivered.design-brief.json": "8dbeba4bee3a5e0adab4b9485446ca1b12e8565fb95c010edbeb267d7278559c",
+    "delivered.kicad_dru": "7d26c90af126d96870bb398b1ebb9b4794a676f3d12924c3dccdce8b3135b116",
+    "delivered.kicad_pcb": "3ed5a9a2b280cd5f38d93e34c8d0677bb8deffa7c36d79b343f9b432ca5b2c24",
+    "delivered.kicad_pro": "aeb9199af76678d117101b3993e1f33b0a8fe85c4d596ab5d85791a47935720c",
+    "mechanical.json": "c917a7c927d86b9ea144badedd306069186f8a6bf53cb924b56682050499c945"
+  },
+  "before": {
+    ".unaided-manifest.json": "f1d35941965e991d335ddbe2c6d55ce2baa782fe69cfdb66f56bf90a12a411e3",
+    "board.kicad_pcb": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+    "delivered.design-brief.json": "f8d024f6c5097bc318d3ebd8d657115d290c2db41dfd890edb1fcc10f8fa16ff",
+    "delivered.kicad_dru": "7d26c90af126d96870bb398b1ebb9b4794a676f3d12924c3dccdce8b3135b116",
+    "delivered.kicad_pcb": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+    "delivered.kicad_pro": "aeb9199af76678d117101b3993e1f33b0a8fe85c4d596ab5d85791a47935720c",
+    "mechanical.json": "c917a7c927d86b9ea144badedd306069186f8a6bf53cb924b56682050499c945"
+  },
+  "exception": null,
+  "ledger": [],
+  "reason": null,
+  "revision": "cbc819b6b862f6ec14ecb30b8659819e800fce76",
+  "stage_command": "\"C:\\Program Files\\KiCad\\10.0\\bin\\python.exe\" -X utf8 tests/stress/stage_unaided.py C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\kicad_files\\esp_prog.kicad_pcb C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent-existing\\work C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-reproduction\\reviewer_evidence\\parent-existing\\truth",
+  "unchanged": false
+}

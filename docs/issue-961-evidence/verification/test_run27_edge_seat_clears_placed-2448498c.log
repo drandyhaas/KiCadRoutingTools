@@ -1,0 +1,29 @@
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: FIX1, J1, U2
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: FIX1, J1, U2
+  PASS: the fixture is a trap: the band midpoint shorts the locked part
+  PASS: ...and FIX1 is locked in the file, so the seeder treats it as placed
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: FIX1, J1, U2
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\t_esc_s3n1lt26\out.kicad_pcb
+  PASS: J1 is seated with no pad or hole conflict
+  PASS: ...on its declared south edge
+  PASS: ...inside the declared band 0.1-0.9 of a 30mm edge
+  PASS: ...and it MOVED off the midpoint to get there
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: FIX1, J1, U2
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\t_esc_s3n1lt26\free_out.kicad_pcb
+  PASS: with nothing locked, J1 still takes the declared midpoint
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: FIX1, J1, U2
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\t_esc_s3n1lt26\wide_out.kicad_pcb
+  PASS: with no clear seat, J1 still gets its declared south edge
+  PASS: ...and the blocker is NAMED on the record
+  PASS: ...and the conflict is real, for the gate to refuse
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: FIX1, J1, U2
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\t_esc_s3n1lt26\bare_out.kicad_pcb
+  PASS: an undeclared position still slides clear of the locked part
+  PASS: ...on its declared south edge, off the midpoint
+
+ALL PASS
+

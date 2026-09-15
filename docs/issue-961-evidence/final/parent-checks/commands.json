@@ -1,0 +1,148 @@
+{
+  "revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+  "python": "3.11.5 (main, Jan 23 2026, 07:39:48) [MSC v.1944 64 bit (AMD64)]",
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_960_pose_publication.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_960_pose_publication.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_967_edge_floor.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_967_edge_floor.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_967_pad_geometry_coverage.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_967_pad_geometry_coverage.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_966_unset_clearance.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_966_unset_clearance.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_768_cap_ceiling_real_dialog.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_768_cap_ceiling_real_dialog.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_manifest_plan_parity.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_manifest_plan_parity.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/gui_parity/test_cli_postpass_coverage.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\test_cli_postpass_coverage.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "docs/issue-960-evidence/final-verifier/verify.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify.log",
+      "behavior_passed": 96,
+      "behavior_failed": 0
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "docs/issue-960-evidence/final-verifier/alternate.py"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\alternate.log",
+      "behavior_passed": 28,
+      "behavior_failed": 0
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "docs/evidence/issue966/verify_reader_matrix.py",
+        ".",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\run-20260914-121053\\reader-2",
+        "flat_hierarchy"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify_reader_matrix-flat_hierarchy.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "docs/evidence/issue966/verify_reader_matrix.py",
+        ".",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\run-20260914-121053\\reader-4",
+        "glasgow_revC"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify_reader_matrix-glasgow_revC.log"
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "docs/evidence/issue966/verify_cap_boundary.py",
+        ".",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\run-20260914-121053\\cap"
+      ],
+      "exit": 0,
+      "log": "docs\\issue-961-evidence\\final\\run-20260914-121053\\verify_cap_boundary.log"
+    }
+  ],
+  "source_identities": {
+    "kicad_files\\esp_prog.kicad_pcb": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e",
+    "kicad_files\\flat_hierarchy.kicad_pcb": "f756cec11151f79a9c8fe7123089130ad166f5abfd6d5f4d59aaf828b08eb05a",
+    "kicad_files\\flat_hierarchy.kicad_prl": "139647be537bf5ac9bb9eb1adca9ca105551b891049f1aa22e19c4e8e1d25d0b",
+    "kicad_files\\flat_hierarchy.kicad_pro": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+    "kicad_files\\glasgow_revC.kicad_pcb": "95c3653b65af3d149b518f6cfa01240da32b1c6ca7237d085ab808952ce52587",
+    "kicad_files\\glasgow_revC.kicad_pro": "f556f66d7175abe78f6ebe14f47d67240fd3477e3acc4485b1249e7b917bdb75"
+  },
+  "all_source_identities_preserved": true,
+  "passed": true
+}

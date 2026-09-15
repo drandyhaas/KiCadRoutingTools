@@ -1,0 +1,381 @@
+{
+  "cases": {
+    "zero": {
+      "source_board_sha256": "f756cec11151f79a9c8fe7123089130ad166f5abfd6d5f4d59aaf828b08eb05a",
+      "source_project_sha256": "9b7172785c408a93bf6fd0669e57468ce662839ba1f9b7401548387e93283c3b",
+      "footprint_count": 64,
+      "pad_count": 247,
+      "outline_count": 5,
+      "source_copper_count": 0,
+      "runs": {
+        "baseline-cli": {
+          "router_reported_min_clearance_used_mm": 0.1,
+          "board_sha256": "dc67554da09c519758f77dcc6b3c21b1fb9c572906692bb01f66833189c38418",
+          "project_sha256": "0e9f9623cd13e13e209af385b7cacacd60e03f7c9c1c5f1c8913c0f6644c7140",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "hole_clearance": 3,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        },
+        "baseline-gui": {
+          "router_reported_min_clearance_used_mm": 0.25,
+          "board_sha256": "cebe8cb4d1f94ecf9654a46698c529d39e6f8072caf60927836c49eeff2ea335",
+          "project_sha256": "9b7172785c408a93bf6fd0669e57468ce662839ba1f9b7401548387e93283c3b",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        },
+        "candidate-cli": {
+          "router_reported_min_clearance_used_mm": 0.1,
+          "board_sha256": "9abd25989c818f6339cd0139725ed7b2ea3d5a70b48109bd67de33573ec31944",
+          "project_sha256": "0e9f9623cd13e13e209af385b7cacacd60e03f7c9c1c5f1c8913c0f6644c7140",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "hole_clearance": 3,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        },
+        "candidate-gui": {
+          "router_reported_min_clearance_used_mm": 0.1,
+          "board_sha256": "db228298018e9752581355762a38124ff41e88661ac266c7b2cdbaede329b2d8",
+          "project_sha256": "9b7172785c408a93bf6fd0669e57468ce662839ba1f9b7401548387e93283c3b",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        }
+      }
+    },
+    "positive": {
+      "source_board_sha256": "f756cec11151f79a9c8fe7123089130ad166f5abfd6d5f4d59aaf828b08eb05a",
+      "source_project_sha256": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+      "footprint_count": 64,
+      "pad_count": 247,
+      "outline_count": 5,
+      "source_copper_count": 0,
+      "runs": {
+        "baseline-cli": {
+          "router_reported_min_clearance_used_mm": 0.2,
+          "board_sha256": "cc519f45b81b1f5d3b7dfbe90034aaab5b47dd9ba6f7955073b989e3dcdbfdb2",
+          "project_sha256": "76f13f1dc47fee4da463c1f4afa8e0aa4d19848cc6d3a10bad8e1086bc46d702",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "hole_clearance": 3,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        },
+        "baseline-gui": {
+          "router_reported_min_clearance_used_mm": 0.2,
+          "board_sha256": "c6d43284aa197032fcd08ff64c2f43f6e3d8b5cc538c31c0a2e874e6e55fc9c6",
+          "project_sha256": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        },
+        "candidate-cli": {
+          "router_reported_min_clearance_used_mm": 0.2,
+          "board_sha256": "f8bd553097c37bf13c743bcf7ecccc9d05780ee5b086296ed50337679482f0c7",
+          "project_sha256": "76f13f1dc47fee4da463c1f4afa8e0aa4d19848cc6d3a10bad8e1086bc46d702",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "hole_clearance": 3,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        },
+        "candidate-gui": {
+          "router_reported_min_clearance_used_mm": 0.2,
+          "board_sha256": "45ae46f07f1c3f7e2acb5bf7e3f08e9ec69cd1004846940e84de545c9a5ddb51",
+          "project_sha256": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+          "copper_net_layer_start_end_width_nm": [
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                78400000,
+                75200000
+              ],
+              [
+                81900000,
+                71700000
+              ],
+              200000
+            ],
+            [
+              "Net-(D1-A)",
+              0,
+              [
+                81900000,
+                71700000
+              ],
+              [
+                81900000,
+                63000000
+              ],
+              200000
+            ]
+          ],
+          "mechanics_exactly_preserved": true,
+          "net_settings_exactly_preserved": true,
+          "native_drc_types": {
+            "clearance": 1,
+            "silk_edge_clearance": 2,
+            "lib_footprint_issues": 64,
+            "silk_overlap": 1
+          },
+          "native_unconnected_count": 86,
+          "native_target_unconnected_count": 0
+        }
+      }
+    }
+  },
+  "notes": [
+    "min_clearance_used is the router-reported used rule; it is not a geometric nearest-copper distance.",
+    "Raw default0 is pinned to physical0.1; raw default0.2 is retained. No clearance override or ceiling supplied.",
+    "The public sparse board reproduces divergent rule resolution; both baseline routes succeed with identical copper.",
+    "DDR3 boxed-in/ripup and hypothetical routing quality gains are not reproduced by these cases."
+  ],
+  "baseline_revision": "5a7fbcb6ee4deebd1d9ec1d5bd094d8681f502f3",
+  "candidate_revision": "e5681428d43a17f663df257b9a94c55c544e786c",
+  "kicad": "10.0.0"
+}

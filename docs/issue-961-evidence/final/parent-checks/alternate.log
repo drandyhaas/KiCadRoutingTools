@@ -1,0 +1,100 @@
+PASS seed wrote final output
+PASS seed final ledger identity
+PASS seed native pose locks sides reconcile
+PASS seed audit CLEAN
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'baseline.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+PASS reconstruct wrote final output
+PASS reconstruct final ledger identity
+PASS reconstruct native pose locks sides reconcile
+PASS reconstruct audit CLEAN
+PASS reconstruct requirements .kicad_dru
+PASS reconstruct requirements .design-brief.json
+PASS reconstruct baseline preserved
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'baseline.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+PASS seed-repair wrote final output
+PASS seed-repair final ledger identity
+PASS seed-repair native pose locks sides reconcile
+PASS seed-repair audit CLEAN
+PASS seed-repair requirements .kicad_dru
+PASS seed-repair requirements .design-brief.json
+PASS seed-repair baseline preserved
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'baseline.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+PASS route-loop wrote final output
+PASS route-loop final ledger identity
+PASS route-loop native pose locks sides reconcile
+PASS route-loop audit CLEAN
+PASS route-loop baseline preserved
+WARNING: 'esp_prog.kicad_pcb' has no sibling .kicad_pro; copied the board only. The DRC floor is undefined for 'input.kicad_pcb' and later steps will fall back to the stock netclass (#441).
+PASS ordinary model-assisted CLI accepted
+PASS ordinary model rotation exact
+PASS ordinary no benchmark ledger fabricated
+PASS ordinary benchmark claim UNPROVEN
+PASS source unchanged
+C:\Users\rob\Documents\prive\git\KRT-961-review-final\review_final\alternate-20260914-121253 28 0
+
+STDERR
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'
+Adding duplicate image handler for 'PNG file'
+Adding duplicate image handler for 'JPEG file'
+Adding duplicate image handler for 'TIFF file'
+Adding duplicate image handler for 'GIF file'
+Adding duplicate image handler for 'PNM file'
+Adding duplicate image handler for 'PCX file'
+Adding duplicate image handler for 'IFF file'
+Adding duplicate image handler for 'Windows icon file'
+Adding duplicate image handler for 'Windows cursor file'
+Adding duplicate image handler for 'Windows animated cursor file'
+Adding duplicate image handler for 'TGA file'
+Adding duplicate image handler for 'XPM file'
+Adding duplicate image handler for 'WebP file'

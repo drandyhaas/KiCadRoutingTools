@@ -1,0 +1,47 @@
+--- test_wk_dependent_tests_are_declared
+  PASS: 19 wk/-dependent test file(s) declared
+  NOTE: 19 of them are INERT on this machine (the wk/ board is absent) -- they report PASS while covering nothing:
+          test_788_marginal_literals.py
+          test_887_run24_regression.py
+          test_outline_prefilter.py
+          test_part_class.py
+          test_place_reconstruct.py
+          test_placement_pad_legality.py
+          test_run20_run_watch.py
+          test_run4_custom_pad_circle.py
+          test_run4_reconstruct.py
+          test_run5_emit_guard.py
+          test_run5_exchange.py
+          test_run6_backlog.py
+          test_run6_body_overlap.py
+          test_run6_check_assembly.py
+          test_run7_vectors.py
+          test_run8_airwire_refuted.py
+          test_run8_oob_outline.py
+          test_run8_rigid_consistency.py
+          test_run8_starved_face_gate.py
+--- test_no_test_spawns_a_script_that_moved
+  PASS: no test spawns a root-level script the reorg moved (6 declared exemption)
+--- test_the_scanners_still_match_something
+  PASS: scanners see 834 file(s), 419 argv list(s), 4071 literal join(s)
+--- test_no_module_scope_posix_only_import
+  PASS: no module-scope POSIX-only import, over 1066 file(s)
+--- test_no_test_is_defined_after_its_own_runner
+  PASS: no test defined after its own runner, over 650 test file(s)
+--- test_every_test_is_registered_in_its_files_own_list
+  PASS: every registry-style test file lists all its tests
+--- test_every_committed_baseline_is_declared
+  PASS: 21 committed baseline(s) declared -- 14 read by a named gate, 7 ungated with a stated reason
+--- test_every_mutation_anchor_matches_exactly_once
+  PASS: 1108 mutation anchor(s) across 50 batteries each match their target exactly once
+--- test_every_test_in_this_file_is_registered
+  PASS: all 9 test(s) here are registered in TESTS
+ALL PASS
+
+<unknown>:28: SyntaxWarning: invalid escape sequence '\s'
+<unknown>:28: SyntaxWarning: invalid escape sequence '\s'
+<unknown>:28: SyntaxWarning: invalid escape sequence '\s'
+<unknown>:28: SyntaxWarning: invalid escape sequence '\s'
+<unknown>:28: SyntaxWarning: invalid escape sequence '\s'
+<unknown>:28: SyntaxWarning: invalid escape sequence '\s'
+<unknown>:28: SyntaxWarning: invalid escape sequence '\s'

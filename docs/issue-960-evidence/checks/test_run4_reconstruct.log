@@ -1,0 +1,18 @@
+
+STDERR:
+sssssssssC:\Users\rob\Documents\prive\git\KRT-960\tests\test_run4_reconstruct.py:355: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmp7e4sjrxb\\b.kicad_pcb' mode='w' encoding='utf-8'>
+  open(bp, 'w', encoding='utf-8').write(board)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+C:\Users\rob\Documents\prive\git\KRT-960\tests\test_run4_reconstruct.py:356: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmp7e4sjrxb\\i.json' mode='w' encoding='utf-8'>
+  open(ip, 'w', encoding='utf-8').write(intent)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+C:\Program Files\KiCad\10.0\bin\Lib\site-packages\pcbnew.py:63: DeprecationWarning: The SWIG-based Python interface to the PCB editor is deprecated and will be removed in a future version of KiCad.  Please plan to move to the new IPC API and/or make use of the kicad-cli tool for your KiCad automation needs.
+  warnings.warn("The SWIG-based Python interface to the PCB editor is deprecated and will be removed "
+.
+----------------------------------------------------------------------
+Ran 10 tests in 1.402s
+
+OK (skipped=9)

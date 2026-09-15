@@ -1,0 +1,54 @@
+{
+  "revision": "4d7d2947d4af3d91c66f5680a535e06e75f7d841",
+  "shape": "legacy row modeled by dropping unavailable lock/snapshot fields and retaining only moved R1 pose; then native KiCad toggles only lock",
+  "legacy_row": {
+    "board_sha256": "3ed5a9a2b280cd5f38d93e34c8d0677bb8deffa7c36d79b343f9b432ca5b2c24",
+    "caller": "place_pose.py:372 in main",
+    "declared": true,
+    "lever": "place_pose.py",
+    "lever_argv": [
+      "py_placer/place_pose.py",
+      "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\candidate5-legacy\\work\\board.kicad_pcb",
+      "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\candidate5-legacy\\work\\out.kicad_pcb",
+      "set",
+      "R1",
+      "136.4",
+      "98.8",
+      "--rot",
+      "270"
+    ],
+    "parent_sha256": "e9ec45eae4ea7f332825522d195fc05960a8e257b56a6101e5ea56e715528034",
+    "path": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\candidate5-legacy\\work\\out.kicad_pcb",
+    "poses_written": {
+      "R1": [
+        136.4,
+        98.8,
+        270.0
+      ]
+    },
+    "provenance_scope": "registered execution; coordinate selection is separately declared",
+    "refs_moved": [
+      "R1"
+    ],
+    "refs_written": [
+      "R1"
+    ],
+    "schema": 1,
+    "sides_written": {},
+    "t": 1789376835.0682175
+  },
+  "audit": {
+    "command": "tests/stress/provenance_audit.py --workdir C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\candidate5-legacy\\work --delivered C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\candidate5-legacy\\work\\out.kicad_pcb",
+    "code": 5,
+    "stdout": "VERDICT: UNPROVEN\n  all 1 moved pose(s) trace to place_pose.py, and each is where its lever put it (1 claim(s) matched by ref only: the claiming row wrote a different file, or predates pose/side/lock state coverage); final poses cannot all be reconciled\nJSON_SUMMARY: {\"claimed\": 1, \"ledger_rows\": 1, \"levers\": [\"place_pose.py\"], \"moved\": 1, \"unverifiable_claims\": [\"R1\"], \"verdict\": \"UNPROVEN\"}\n",
+    "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+  },
+  "side_audit": {
+    "command": "tests/stress/provenance_audit.py --workdir C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\candidate5-legacy\\work --delivered C:\\Users\\rob\\Documents\\prive\\git\\KRT-960-transactions\\reviewer-runtime\\candidate5-legacy\\work\\out.kicad_pcb",
+    "code": 5,
+    "stdout": "VERDICT: UNPROVEN\n  all 1 moved pose(s) trace to place_pose.py, and each is where its lever put it (1 claim(s) matched by ref only: the claiming row wrote a different file, or predates pose/side/lock state coverage); final poses cannot all be reconciled\nJSON_SUMMARY: {\"claimed\": 1, \"ledger_rows\": 1, \"levers\": [\"place_pose.py\"], \"moved\": 1, \"unverifiable_claims\": [\"R1\"], \"verdict\": \"UNPROVEN\"}\n",
+    "stderr": "WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\nWARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.\n"
+  },
+  "native_side_after": "B.Cu",
+  "native_rotation_after": -90.0
+}

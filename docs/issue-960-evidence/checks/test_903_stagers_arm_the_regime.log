@@ -1,0 +1,52 @@
+  OK   stage_unaided.py writes the regime manifest -- C:\Users\rob\AppData\Local\Temp\t903_95dcl0wp\wk\.unaided-manifest.json
+  OK   the manifest names the STAGED board, not the source -- C:\Users\rob\AppData\Local\Temp\t903_95dcl0wp\wk\board.kicad_pcb
+  OK   and its hash is the hash of the board ON DISK -- 51ab0476310ab6a2
+  OK   the source board is named NOWHERE in the manifest -- splitflap_driver: {"kind": "unaided-regime", "lever_registry": ["place_seed.py", "place_optimize.py", "place_reconstruct.py", "p
+  OK   the "not staged for an unaided run" verdict is GONE --   no delivered board in the work dir (staging artifacts are not one)
+  OK   a restage is permitted and writes exactly one row -- 1
+  OK   ...under its own lever -- stage_unaided.py
+  OK   a staging row carries no argv, no parent hash and no poses -- ['board_sha256', 'caller', 'declared', 'lever', 'path', 'redacted', 'schema', 't']
+  OK   ...and says so, rather than looking like a row that never had them -- staging row: argv, parent hash and poses withheld -- this ledger is inside the fence
+  OK   the ledger names neither the source board nor the truth dir -- {"board_sha256": "51ab0476310ab6a2b5decd19530e2d27a4fbfafe6f84f589f11e69b05e4fea59", "caller": "stage_unaided.py:294 in stage", "declared": true, "lever": "stag
+  OK   prior_stagings counts rows that PREDATE the restage, not its own -- 0
+  OK   ...and rises by one on the next restage -- 1
+  OK   an ENGINE write does not inflate prior_stagings -- 2
+  OK   ...while prior_ledger_rows does count it, which is the laundering number -- rows 3 stagings 2
+  OK   an undeclared hand pose write is REFUSED in a staged work dir
+  OK   ...and nothing landed -- refusing means not writing -- C:\Users\rob\AppData\Local\Temp\t903_95dcl0wp\wk\hand.kicad_pcb
+  OK   a registered lever in a staged work dir audits CLEAN -- VERDICT: CLEAN
+  all 3 moved pose(s) trace to place_optimize.py, stage_unaided.py, and each is where its lever put it
+JS
+  OK   ...over poses that really moved, so CLEAN is not vacuous -- moved 3 claimed 3
+  OK   a drifted delivered board is an UNAIDED VIOLATION
+  OK   a nested stage says its write went to the OUTER ledger --  this work dir is nested inside an armed regime at C:\Users\rob\AppData\Local\Temp\t903_95dcl0wp\wk; the staging write was recorded in ITS ledger, not this one
+
+  OK   ...and a nested stage underneath it does NOT launder it to CLEAN -- VERDICT: UNAIDED VIOLATION
+  3 pose(s) are NOT where the lever that claims them put them (C1, C10, C11). The ref is claimed, the POSE is not: something moved it
+  OK   a manifest whose hash no longer matches the board is UNPROVEN
+  OK   fence_audit --mode create is CLEAN on an armed work dir
+  OK   the fence OPENS the manifest and makes it no row -- ['board.kicad_pcb', 'placed.kicad_pcb', 'inner/board.kicad_pcb']
+  OK   ...over a scan that saw more than one file, so it is not vacuous -- ['board.kicad_pcb', 'placed.kicad_pcb', 'inner/board.kicad_pcb']
+  OK   fence_audit --mode audit is CLEAN too
+  OK   stage_blind.py staged the fixture -- te in this dir now RAISES
+parts 65 | nets 83 | copper layers 2 (F.Cu, B.Cu) | bbox 198.1 x 30.5
+segments 0 | vias 0
+damage applied; kind/dose/seed/block written to the truth dir and disclosed nowhere
+
+  OK   stage_blind arms the regime too -- C:\Users\rob\AppData\Local\Temp\t903_95dcl0wp\wkb\.unaided-manifest.json
+  OK   its manifest carries EXACTLY the schema keys, no draw extras -- ['kind', 'lever_registry', 'schema', 'staged_board', 'staged_sha256']
+  OK   no perturbation kind appears in it -- []
+  OK   ...while the truth dir does carry the draw, so the check is real -- scatter
+  OK   run_watch counts every recorded re-stage in the ledger, and only those -- 3 vs 3 staging rows
+  OK   a nested dir's staging row is present but NOT counted here -- 1 nested row(s)
+  OK   the CMD: matcher names BOTH stagers -- one of the two stagers is not matched
+  OK   ...and nothing else -- a non-staging command matched
+  OK   a non-UTF-8 ledger neither kills the reader nor truncates it -- counted 2, expected 2
+  OK   ...which redaction did NOT break -- it reads `lever`, which survives -- ['board_sha256', 'caller', 'declared', 'lever', 'path', 'redacted', 'schema', 't']
+  OK   ...and the matcher names BOTH stagers and nothing else -- 2
+  OK   ...and a ledger of non-staging levers counts zero -- 0
+
+39 passed, 0 failed
+903 coverage: 39 rows (unaided, blind, refusal, restage, nesting, stale-manifest, fence)
+
+STDERR:

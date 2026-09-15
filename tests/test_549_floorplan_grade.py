@@ -88,11 +88,15 @@ def test_an_emitted_intent_grades_clean_on_every_tracked_board():
         # boards legitimately abstain on `overlap_area` (the emitter refuses to
         # derive a budget that would bless existing courtyard overlaps). So
         # assert the two halves separately rather than loosening either.
-        assert not r.errors, (name, [v.message for v in r.errors[:4]])
-        assert r.passed == r.complete, (name, r.not_graded)
+        # #961: emitted physical bands cannot bless independent copper defects
+        # or unsupported body geometry. Other emitted declarations still round-trip.
+        assert all(v.rule == 'edge_connector' for v in r.errors), (name, r.errors)
+        assert r.passed == (r.complete and not r.errors), (name, r.not_graded)
+        for row in r.edge_seating:
+            assert row.get('measurements'), row
         checked += 1
     assert checked >= 5, f"only {checked} boards round-tripped"
-    print(f"  PASS: {checked} boards emit -> grade with zero errors")
+    print(f"  PASS: {checked} boards emit -> grade; independent edge/copper findings retained")
 
 
 def _stray_keys(doc):
@@ -505,18 +509,18 @@ def test_a_legality_budget_bites_when_exceeded():
     hits = {v.expected and next(iter(v.expected)): v
             for v in r.violations if v.rule == 'legality'}
     assert 'overlap_area' in hits, "a zero overlap budget caught nothing on ulx3s"
-    assert 'oob_count' not in hits, \
-        f"declared edge connectors still counted: {hits['oob_count'].message}"
-    assert r.legality['oob_count_exempt'] == n_conn, r.legality
-    assert r.legality['oob_count'] == n_conn, \
-        "the raw oob_count must stay the optimizer's own number"
+    exempt = r.legality['oob_count_exempt']
+    assert 0 < exempt <= n_conn, r.legality
+    assert 'oob_count' in hits, 'unsupported/unlicensed occupancy was silently exempted'
+    assert hits['oob_count'].measured['oob_count'] == r.legality['oob_count']-exempt
+
     # (b) undeclared: the same parts are off the board and nothing vouches for
     #     them, so a zero budget must catch every one.
     raw['edge_connectors'] = []
     r2 = _graded(raw)
     oob = [v for v in r2.violations if v.rule == 'legality'
            and 'oob_count' in v.expected]
-    assert len(oob) == 1 and oob[0].measured['oob_count'] == n_conn, \
+    assert len(oob) == 1 and oob[0].measured['oob_count'] == r.legality['oob_count'], \
         [v.message for v in oob]
     assert r2.legality['oob_count_exempt'] == 0
     print(f"  PASS: overlap bites either way; oob_count {n_conn} exempt when "
@@ -531,27 +535,24 @@ def test_declared_edge_connectors_within_band_are_not_oob():
     raw = _emit()
     raw['legality_budget'] = {'oob_count': 0}
     conns = raw['edge_connectors']
-    assert not [v for v in _graded(raw).violations if v.rule == 'legality'], \
-        "a zero oob budget fired on parts the intent declares off the board"
-    # Tighten one band to nothing: that part is outside it now.
+    initial = _graded(raw)
+    raw_count = initial.legality['oob_count']
+    exempt = initial.legality['oob_count_exempt']
+    assert exempt > 0 and raw_count > exempt
     ref = conns[0]['ref']
-    conns[0]['overhang_mm'] = {'min': 0.0, 'max': 0.0}
-    r = _graded(raw)
-    leg = [v for v in r.violations if v.rule == 'legality']
-    edge = [v for v in r.violations if v.rule == 'edge_connector' and v.ref == ref]
-    assert len(leg) == 1 and leg[0].measured['oob_count'] == 1, \
-        [v.message for v in leg]
-    assert ref not in leg[0].measured['exempt'], leg[0].measured
-    assert edge, f"{ref} outside its band was not named by edge_connector"
-    assert r.legality['oob_count_exempt'] == len(conns) - 1
-    # No max at all: an unbounded band vouches for nothing.
-    conns[0]['overhang_mm'] = {'min': 0.0}
-    r = _graded(raw)
-    leg = [v for v in r.violations if v.rule == 'legality']
-    assert len(leg) == 1 and leg[0].measured['oob_count'] == 1, \
-        [v.message for v in leg]
-    print(f"  PASS: {len(conns)} declared parts exempt; one pushed outside its "
-          f"band (and one with no max) is counted and named")
+    assert initial.edge_seating[0]['body_overhang_mm'] > 0
+    for band in ({'min': 0., 'max': 0.}, {'min': 0.}):
+        conns[0]['overhang_mm'] = band
+        r = _graded(raw)
+        leg = [v for v in r.violations if v.rule == 'legality']
+        assert len(leg) == 1 and leg[0].measured['oob_count'] == raw_count-exempt+1
+        assert ref not in leg[0].measured.get('exempt', []), leg[0].measured
+        assert r.legality['oob_count_exempt'] == exempt-1
+        if 'max' in band:
+            assert any(v.rule == 'edge_connector' and v.ref == ref for v in r.errors)
+            row = next(e for e in r.edge_seating if e['ref'] == ref)
+            assert row['measurements']['body_overhang']['disposition'] == 'fail'
+    print('  PASS: only measured finite body bands exempt occupancy; unlicensed parts remain')
 
 
 def test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_connectors():
@@ -575,7 +576,8 @@ def test_pins_to_edge_warns_on_a_row_at_the_edge_and_is_skipped_without_edge_con
         assert [v.ref for v in hits] == ['U2'], [v.message for v in hits]
         assert hits[0].severity == 'warn' and hits[0].measured['pads_to_edge'] == 3
         assert hits[0].measured['faces'] == ['north'], hits[0].measured
-        assert r.passed, "a WARN must not fail the grade"
+        assert all(v.rule == "edge_connector" for v in r.errors), r.errors
+        assert not r.complete, "this synthetic connector has no drawn body"
         assert 'pins_to_edge' in r.rules_run
         raw['edge_connectors'] = []
         r2 = _graded(raw, path=board)
@@ -721,7 +723,8 @@ def test_the_summary_says_how_many_rules_RAN():
     """Anti-vacuity, for machines: `0 violations` and `0 rules ran` must not
     look the same."""
     s = summary(_graded(_emit()))
-    assert s['rules_run'] >= 4 and s['violations'] == 0
+    assert s['rules_run'] >= 4 and s['violations'] == 6
+    assert s['violations_by_rule'] == {'pins_to_edge': 6}
     assert s['rules_skipped'] >= 1
     assert s['parts_total'] > 0 and s['blocks_resolved'] == s['blocks']
     for k in ('overlap_area', 'oob_count', 'state_unplaced', 'cutouts'):

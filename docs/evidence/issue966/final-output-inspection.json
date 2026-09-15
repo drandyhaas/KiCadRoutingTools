@@ -1,0 +1,268 @@
+{
+  "revision": "e5681428d43a17f663df257b9a94c55c544e786c",
+  "kicad": "10.0.0",
+  "boards": {
+    "zero": {
+      "input": {
+        "board_sha256": "f756cec11151f79a9c8fe7123089130ad166f5abfd6d5f4d59aaf828b08eb05a",
+        "project_sha256": "9b7172785c408a93bf6fd0669e57468ce662839ba1f9b7401548387e93283c3b",
+        "copper": [],
+        "mechanics_unchanged": true,
+        "default_clearance": 0.0,
+        "wide_preserved": true,
+        "project_changes": [],
+        "native_drc_types": {
+          "clearance": 1,
+          "silk_edge_clearance": 2,
+          "lib_footprint_issues": 64
+        },
+        "native_unconnected_count": 87,
+        "native_target_unconnected_count": 1
+      },
+      "cli": {
+        "board_sha256": "ede10b90b84c6cd00f48645cdc9dff834325d7b9a69e9cddc1693c317932b7d9",
+        "project_sha256": "0e9f9623cd13e13e209af385b7cacacd60e03f7c9c1c5f1c8913c0f6644c7140",
+        "copper": [
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              78400000,
+              75200000
+            ],
+            [
+              81900000,
+              71700000
+            ],
+            200000
+          ],
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              81900000,
+              71700000
+            ],
+            [
+              81900000,
+              63000000
+            ],
+            200000
+          ]
+        ],
+        "mechanics_unchanged": true,
+        "default_clearance": 0.0,
+        "wide_preserved": true,
+        "project_changes": [
+          {
+            "key": "/board/design_settings/rules/min_hole_clearance",
+            "before": 0.25,
+            "after": 0.1
+          },
+          {
+            "key": "/board/design_settings/rules/min_via_drill",
+            "before": "<absent>",
+            "after": 0.4
+          },
+          {
+            "key": "/kicad_routing_tools",
+            "before": "<absent>",
+            "after": {
+              "fab_floor_origin": {
+                "min_hole_clearance": 0.1,
+                "min_through_hole_diameter": 0.3,
+                "min_track_width": 0.2,
+                "min_via_annular_width": 0.1,
+                "min_via_diameter": 0.5
+              }
+            }
+          }
+        ],
+        "native_drc_types": {
+          "clearance": 1,
+          "silk_edge_clearance": 2,
+          "lib_footprint_issues": 64,
+          "silk_overlap": 1
+        },
+        "native_unconnected_count": 86,
+        "native_target_unconnected_count": 0
+      },
+      "gui": {
+        "board_sha256": "f6ad99d5e2de2caac52dc3ecea3ef1ab0c65fd0aff9ef8da6d7ccb2931eae4a1",
+        "project_sha256": "9b7172785c408a93bf6fd0669e57468ce662839ba1f9b7401548387e93283c3b",
+        "copper": [
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              78400000,
+              75200000
+            ],
+            [
+              81900000,
+              71700000
+            ],
+            200000
+          ],
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              81900000,
+              71700000
+            ],
+            [
+              81900000,
+              63000000
+            ],
+            200000
+          ]
+        ],
+        "mechanics_unchanged": true,
+        "default_clearance": 0.0,
+        "wide_preserved": true,
+        "project_changes": [],
+        "native_drc_types": {
+          "clearance": 1,
+          "silk_edge_clearance": 2,
+          "lib_footprint_issues": 64,
+          "silk_overlap": 1
+        },
+        "native_unconnected_count": 86,
+        "native_target_unconnected_count": 0
+      },
+      "copper_equal": true
+    },
+    "positive": {
+      "input": {
+        "board_sha256": "f756cec11151f79a9c8fe7123089130ad166f5abfd6d5f4d59aaf828b08eb05a",
+        "project_sha256": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+        "copper": [],
+        "mechanics_unchanged": true,
+        "default_clearance": 0.2,
+        "wide_preserved": true,
+        "project_changes": [],
+        "native_drc_types": {
+          "clearance": 1,
+          "silk_edge_clearance": 2,
+          "lib_footprint_issues": 64
+        },
+        "native_unconnected_count": 87,
+        "native_target_unconnected_count": 1
+      },
+      "cli": {
+        "board_sha256": "848c8e0b3e512010c9062b655f4510f3c1e04023e4c535d6a372b1c64105a035",
+        "project_sha256": "76f13f1dc47fee4da463c1f4afa8e0aa4d19848cc6d3a10bad8e1086bc46d702",
+        "copper": [
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              78400000,
+              75200000
+            ],
+            [
+              81900000,
+              71700000
+            ],
+            200000
+          ],
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              81900000,
+              71700000
+            ],
+            [
+              81900000,
+              63000000
+            ],
+            200000
+          ]
+        ],
+        "mechanics_unchanged": true,
+        "default_clearance": 0.2,
+        "wide_preserved": true,
+        "project_changes": [
+          {
+            "key": "/board/design_settings/rules/min_hole_clearance",
+            "before": 0.25,
+            "after": 0.2
+          },
+          {
+            "key": "/board/design_settings/rules/min_via_drill",
+            "before": "<absent>",
+            "after": 0.4
+          },
+          {
+            "key": "/kicad_routing_tools",
+            "before": "<absent>",
+            "after": {
+              "fab_floor_origin": {
+                "min_hole_clearance": 0.2,
+                "min_through_hole_diameter": 0.3,
+                "min_track_width": 0.2,
+                "min_via_annular_width": 0.1,
+                "min_via_diameter": 0.5
+              }
+            }
+          }
+        ],
+        "native_drc_types": {
+          "clearance": 1,
+          "silk_edge_clearance": 2,
+          "lib_footprint_issues": 64,
+          "silk_overlap": 1
+        },
+        "native_unconnected_count": 86,
+        "native_target_unconnected_count": 0
+      },
+      "gui": {
+        "board_sha256": "c221fdf1919949c4742bcec47499ea047ca7a5ed379986295a8200cc975a5053",
+        "project_sha256": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+        "copper": [
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              78400000,
+              75200000
+            ],
+            [
+              81900000,
+              71700000
+            ],
+            200000
+          ],
+          [
+            "Net-(D1-A)",
+            0,
+            [
+              81900000,
+              71700000
+            ],
+            [
+              81900000,
+              63000000
+            ],
+            200000
+          ]
+        ],
+        "mechanics_unchanged": true,
+        "default_clearance": 0.2,
+        "wide_preserved": true,
+        "project_changes": [],
+        "native_drc_types": {
+          "clearance": 1,
+          "silk_edge_clearance": 2,
+          "lib_footprint_issues": 64,
+          "silk_overlap": 1
+        },
+        "native_unconnected_count": 86,
+        "native_target_unconnected_count": 0
+      },
+      "copper_equal": true
+    }
+  }
+}

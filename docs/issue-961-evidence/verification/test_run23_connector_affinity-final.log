@@ -1,0 +1,67 @@
+Modified 65 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmpbtjsnqxb\pile.kicad_pcb
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+legality at clearance 0.25 (fixed default), edge 0.55 (fixed default)
+Loading C:\Users\rob\AppData\Local\Temp\tmpbtjsnqxb\pile.kicad_pcb...
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+Seeded 65 part(s); 0 unseated; 0 to lock
+Modified 65 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\place_seed_final_rityqjni\candidate.kicad_pcb
+Stamped (locked yes) on 0 part(s)
+intent: 0 zoned block(s) over 0 part(s), 0 keep-out(s), 1 locked ref(s); blocks resolved from kicad,sheet
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp3fc5_fxw\damaged.kicad_pcb
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  Repair census: 0 conflict pair(s), all listed
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  Repair census: 0 conflict pair(s), all listed
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+C:\Program Files\KiCad\10.0\bin\Lib\site-packages\pcbnew.py:63: DeprecationWarning: The SWIG-based Python interface to the PCB editor is deprecated and will be removed in a future version of KiCad.  Please plan to move to the new IPC API and/or make use of the kicad-cli tool for your KiCad automation needs.
+  warnings.warn("The SWIG-based Python interface to the PCB editor is deprecated and will be removed "
+.C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:72: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmp7ybdmyxt\\intent.json' mode='r' encoding='utf-8'>
+  doc = json.load(open(self.intent, encoding='utf-8'))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:111: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmpyrhlqx0l\\g.json' mode='r' encoding='utf-8'>
+  doc = json.load(open(g, encoding='utf-8'))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:84: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmp7ybdmyxt\\grade.json' mode='r' encoding='utf-8'>
+  doc = json.load(open(self.grade, encoding='utf-8'))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:137: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmppuglqi79\\intent.json' mode='r' encoding='utf-8'>
+  cls.doc = json.load(open(cls.path, encoding='utf-8'))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:230: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\Documents\\prive\\git\\KRT-961\\py_placer/place_seed.py' mode='r' encoding='utf-8'>
+  src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:230: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\Documents\\prive\\git\\KRT-961\\py_placer/place_reconstruct.py' mode='r' encoding='utf-8'>
+  src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:230: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\Documents\\prive\\git\\KRT-961\\py_placer/placement/reconstruct.py' mode='r' encoding='utf-8'>
+  src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:230: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\Documents\\prive\\git\\KRT-961\\py_placer/placement/seeder.py' mode='r' encoding='utf-8'>
+  src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+...C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:230: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\Documents\\prive\\git\\KRT-961\\py_placer/placement/seeder.py' mode='r' encoding='utf-8'>
+  src = open(os.path.join(ROOT, rel), encoding='utf-8').read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..C:\Users\rob\Documents\prive\git\KRT-961\tests\test_run23_connector_affinity.py:465: ResourceWarning: unclosed file <_io.TextIOWrapper name='C:\\Users\\rob\\AppData\\Local\\Temp\\tmpbtjsnqxb\\i.json' mode='r' encoding='utf-8'>
+  doc = json.load(open(ip, encoding='utf-8'))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.....
+----------------------------------------------------------------------
+Ran 16 tests in 102.852s
+
+OK

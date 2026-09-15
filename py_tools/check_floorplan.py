@@ -71,20 +71,12 @@ def build_parser():
     p.add_argument('--intent', metavar='PATH',
                    help='the floorplan intent JSON to grade against')
     p.add_argument('--emit-intent', metavar='PATH',
-                   help='write a starter intent READ OFF this board and exit. '
-                        'It grades clean by construction -- a baseline to '
-                        'tighten, with the real block names filled in')
+                   help='write observed starter declarations for review and exit; '
+                        'independent copper and geometry requirements can still fail')
     p.add_argument('--declare-classes', action='store_true',
-                   help='with --emit-intent: ALSO declare edge-class parts '
-                        '(part_class KB, run-4 A) that are not currently '
-                        'overhanging -- a USB receptacle parked interior gets '
-                        'an edge_connectors entry with a class-default band '
-                        'and NO edge (reconstruct derives it). DELIBERATELY '
-                        'breaks grades-clean-by-construction on a damaged '
-                        'board: an implausibly-posed receptacle then FAILS '
-                        'the proximity rule, which is the detection working. '
-                        'Default off to preserve the observation-only round '
-                        'trip')
+                   help='with --emit-intent: also label connector-family parts; '
+                        'class-only entries impose no edge, seating or maximum '
+                        'overhang requirement. Author mechanical limits explicitly')
     p.add_argument('--declare-decaps', action='store_true',
                    help='with --emit-intent: ALSO derive decaps.'
                         'max_distance_mm from the board\'s own measured '
@@ -235,7 +227,11 @@ def main(argv=None):
     elif not args.quiet and not getattr(args, 'no_brief', False):
         # A SILENT absence is the failure this channel exists to fix, so the
         # not-found branch says what is filling the gap instead.
-        print(_db.format_absent_note(args.board))
+        if args.intent:
+            print('design brief: none; grading the supplied intent as written. '
+                  'Each entry retains its declared or inferred source.')
+        else:
+            print(_db.format_absent_note(args.board))
 
     _require_brief_failed = False
     if args.emit_intent:
@@ -352,6 +348,13 @@ def main(argv=None):
               "clean report would mean 'stopped checking'.", file=sys.stderr)
         return UNPLACED_EXIT
 
+    for row in result.edge_seating:
+        for key in ('pad_copper_edge_gap', 'copper_edge_shortfall'):
+            if key in row.get('measurements', {}):
+                row['measurements'][key]['requirement_source'] = knobs['board_edge_clearance']
+        row.setdefault('clearance_parameters', {}).update(
+            requested_copper_clearance_mm=args.clearance,
+            requested_board_edge_clearance_mm=args.board_edge_clearance)
     if not args.quiet:
         print(format_text(result))
 
@@ -426,8 +429,8 @@ def main(argv=None):
     if args.require_brief and not brief_fragment:
         print(f"  FAIL: --require-brief, but " + _brief_absence_reason(
             args, brief)
-              + ". Every `edge` in this intent is then an INFERENCE from a "
-                "part's current pose, not a declaration.", file=sys.stderr)
+              + ". The supplied intent is graded as written; the required "
+                "brief is absent.", file=sys.stderr)
         if not args.exit_zero:
             return VIOLATIONS_EXIT
     # #902. The CLAUSE gate, beside the RULE gate. They are different claims:

@@ -1,0 +1,314 @@
+{
+ "blocks": {},
+ "board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\candidate-bc8071\\minus210\\esp_prog.kicad_pcb",
+ "brief_coverage": {
+  "abstained": 0,
+  "brief": null,
+  "carried": 0,
+  "clauses": [],
+  "complete": true,
+  "drifted": 0,
+  "graded": 0,
+  "not_claimed": 0,
+  "schema": 1,
+  "uncovered": 0
+ },
+ "budget_abstained": {},
+ "complete": true,
+ "decap_pin_evidence": {},
+ "edge_seating": [
+  {
+   "along_edge_fraction": 0.6207,
+   "along_edge_offset_mm": 1.75,
+   "along_edge_offset_pct": 12.07,
+   "basis": "bbox",
+   "body_bounds_mm": [
+    111.9,
+    96.3,
+    119.02000000000001,
+    103.7
+   ],
+   "body_measured": true,
+   "body_overhang_basis": "F.Fab",
+   "body_overhang_mm": 2.0999999999999943,
+   "body_requirement_declared": true,
+   "body_setback_mm": 0.0,
+   "body_signed_position_mm": 2.0999999999999943,
+   "boundary_basis": "rectangular Edge.Cuts centreline",
+   "clearance_parameters": {
+    "board_edge_clearance_mm": 0.0,
+    "copper_clearance_mm": 0.25,
+    "effective_occupancy_margin_mm": 0.25,
+    "physical_body_margin_mm": 0.0,
+    "requested_board_edge_clearance_mm": 0.0,
+    "requested_copper_clearance_mm": 0.25
+   },
+   "copper_edge_complete": true,
+   "copper_edge_findings": [
+    {
+     "edge": "left",
+     "gap_mm": -0.5,
+     "pad_index": 6,
+     "pad_loc": [
+      114.0,
+      101.5
+     ],
+     "pad_ref": "USB1.0",
+     "required_mm": 0.0,
+     "shortfall_mm": 0.5
+    },
+    {
+     "edge": "left",
+     "gap_mm": -0.5,
+     "pad_index": 7,
+     "pad_loc": [
+      114.0,
+      98.5
+     ],
+     "pad_ref": "USB1.0",
+     "required_mm": 0.0,
+     "shortfall_mm": 0.5
+    }
+   ],
+   "copper_edge_shortfall_mm": 0.5,
+   "copper_edge_unmeasured": [],
+   "copper_rules_unmeasured": [],
+   "declared": false,
+   "edge": "west",
+   "mating_face_basis": "drawn envelope support line toward declared edge",
+   "measurements": {
+    "body_overhang": {
+     "declared_limit": {
+      "max": 1.5,
+      "min": 1.4
+     },
+     "disposition": "fail",
+     "geometry_basis": "F.Fab",
+     "requirement_source": "intent.edge_connectors",
+     "units": "mm",
+     "value": 2.0999999999999943
+    },
+    "body_setback": {
+     "declared_limit": {
+      "max": 0.0
+     },
+     "disposition": "pass",
+     "geometry_basis": "F.Fab",
+     "requirement_source": "intent.edge_connectors",
+     "units": "mm",
+     "value": 0.0
+    },
+    "copper_edge_shortfall": {
+     "declared_limit": {
+      "max": 0.0
+     },
+     "disposition": "fail",
+     "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+     "requirement_source": {
+      "source": "cli",
+      "value": 0.0
+     },
+     "units": "mm",
+     "value": 0.5
+    },
+    "pad_copper_edge_gap": {
+     "declared_limit": {
+      "min": 0.0
+     },
+     "disposition": "fail",
+     "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+     "requirement_source": {
+      "source": "cli",
+      "value": 0.0
+     },
+     "units": "mm",
+     "value": -0.5
+    }
+   },
+   "other_body_edge_overhang_mm": {
+    "east": 0.0,
+    "north": 0.0,
+    "south": 0.0
+   },
+   "overhang_basis": "F.Fab",
+   "overhang_mm": 2.0999999999999943,
+   "pad_copper_declared_edge_gap_mm": -0.5,
+   "pad_copper_edge_gap_mm": -0.5,
+   "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+   "ref": "USB1",
+   "required_copper_edge_gap_mm": 0.0,
+   "span_mm": 14.5,
+   "units": "mm"
+  }
+ ],
+ "health": {},
+ "intent": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\candidate-bc8071\\legal_body.intent.json",
+ "legality": {
+  "hole_shortfall": 0.0,
+  "hpwl": 262.3809,
+  "locked_contact_pairs": 0,
+  "oob_amount": 0.75,
+  "oob_area": 6.3,
+  "oob_count": 1,
+  "overlap_area": 1.14,
+  "pad_conflict_pairs": 2,
+  "pad_intersection_pairs": 1,
+  "pad_overlap_pairs": 1,
+  "pad_shortfall": 4.4585
+ },
+ "n_footprints": 21,
+ "not_graded": {},
+ "outline": {
+  "bounds": [
+   114.0,
+   91.0,
+   145.75,
+   105.5
+  ],
+  "cutouts": 0,
+  "edge_contours": 0,
+  "edge_segments": 4,
+  "outlines": 0,
+  "problems": [],
+  "simple_rectangle": true,
+  "trustworthy": true
+ },
+ "pass": false,
+ "rules_run": [
+  "edge_connector",
+  "pins_to_edge"
+ ],
+ "rules_skipped": {
+  "assembly_side": "the intent declares no assembly.sides",
+  "decap_distance": "the intent declares no decaps.max_distance_mm",
+  "decap_pin_distance": "the intent declares no decaps.max_pin_distance_mm",
+  "decap_ungraded": "the intent declares no decaps.max_distance_mm",
+  "envelope": "the intent declares no envelope.rect",
+  "keepout": "the intent declares no keepouts",
+  "legality": "the intent declares no legality_budget",
+  "must_lock": "the intent declares no must_lock patterns",
+  "proximity": "the intent declares no proximity claims",
+  "zone_containment": "no block declares a zone",
+  "zone_exclusive": "no block is marked exclusive",
+  "zone_side": "no block declares a side"
+ },
+ "schema": 1,
+ "state": {
+  "distinct_positions": 18,
+  "duplicate_fraction": 0.0,
+  "has_copper": false,
+  "n_footprints": 18,
+  "outside_fraction": 0.0556,
+  "partially_unplaced": false,
+  "segments": 0,
+  "spread_ratio": 0.8608,
+  "stacked_refs": [],
+  "stacked_suspect_refs": [],
+  "unplaced": false,
+  "vias": 0
+ },
+ "violations": [
+  {
+   "expected": {
+    "max": 1.5,
+    "min": 1.4
+   },
+   "measured": {
+    "basis": "F.Fab",
+    "body_overhang_mm": 2.0999999999999943,
+    "overhang_mm": 2.0999999999999943
+   },
+   "message": "USB1 body overhang 2.1000mm outside declared limit {'min': 1.4, 'max': 1.5} (F.Fab; west edge)",
+   "ref": "USB1",
+   "rule": "edge_connector",
+   "severity": "error"
+  },
+  {
+   "expected": {
+    "required_copper_edge_gap_mm": 0.0
+   },
+   "measured": {
+    "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+    "complete": true,
+    "copper_edge_shortfall_mm": 0.5,
+    "pad_copper_edge_gap_mm": -0.5
+   },
+   "message": "USB1 pad copper edge clearance fail: 2 pad violation(s), required 0mm",
+   "ref": "USB1",
+   "rule": "edge_connector",
+   "severity": "error"
+  },
+  {
+   "expected": {
+    "pads_to_edge": 0
+   },
+   "measured": {
+    "edge_mm": 2.0,
+    "faces": [
+     "north"
+    ],
+    "gap_mm": 2.0,
+    "pads": 7,
+    "pads_to_edge": 7
+   },
+   "message": "CON2: 7 of 7 connected pads sit on a row facing the north edge (2.00mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+   "ref": "CON2",
+   "rule": "pins_to_edge",
+   "severity": "warn"
+  },
+  {
+   "expected": {
+    "pads_to_edge": 0
+   },
+   "measured": {
+    "edge_mm": 2.0,
+    "faces": [
+     "south"
+    ],
+    "gap_mm": 1.4475,
+    "pads": 3,
+    "pads_to_edge": 1
+   },
+   "message": "Q2: 1 of 3 connected pads sit on a row facing the south edge (1.45mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+   "ref": "Q2",
+   "rule": "pins_to_edge",
+   "severity": "warn"
+  },
+  {
+   "expected": {
+    "pads_to_edge": 0
+   },
+   "measured": {
+    "edge_mm": 2.0,
+    "faces": [
+     "south"
+    ],
+    "gap_mm": 1.8805,
+    "pads": 17,
+    "pads_to_edge": 8
+   },
+   "message": "U1: 8 of 17 connected pads sit on a row facing the south edge (1.88mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+   "ref": "U1",
+   "rule": "pins_to_edge",
+   "severity": "warn"
+  },
+  {
+   "expected": {
+    "pads_to_edge": 0
+   },
+   "measured": {
+    "edge_mm": 2.0,
+    "faces": [
+     "south"
+    ],
+    "gap_mm": 1.4,
+    "pads": 4,
+    "pads_to_edge": 2
+   },
+   "message": "Y1: 2 of 4 connected pads sit on a row facing the south edge (1.40mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+   "ref": "Y1",
+   "rule": "pins_to_edge",
+   "severity": "warn"
+  }
+ ]
+}

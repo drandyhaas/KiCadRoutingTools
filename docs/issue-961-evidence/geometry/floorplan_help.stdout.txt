@@ -1,0 +1,133 @@
+CMD: python.exe -X utf8 C:\Users\rob\Documents\prive\git\KRT-961-review-geometry\py_tools\check_floorplan.py --help
+ENV KNOBS: none
+usage: check_floorplan.py [-h] [--intent PATH] [--emit-intent PATH]
+                          [--declare-classes] [--declare-decaps]
+                          [--brief JSON] [--no-brief] [--require-brief]
+                          [--require-brief-coverage] [--json PATH]
+                          [--group-by SOURCES] [--clearance MM]
+                          [--board-edge-clearance MM] [--health]
+                          [--require-rules N] [--exit-zero] [-q]
+                          [--allow-unplaced] [--allow-routed]
+                          board
+
+Grade a board against a declared floorplan intent
+
+positional arguments:
+  board                 the .kicad_pcb to grade
+
+options:
+  -h, --help            show this help message and exit
+  --intent PATH         the floorplan intent JSON to grade against
+  --emit-intent PATH    write observed starter declarations for review and
+                        exit; independent copper and geometry requirements can
+                        still fail
+  --declare-classes     with --emit-intent: also label connector-family parts;
+                        class-only entries impose no edge, seating or maximum
+                        overhang requirement. Author mechanical limits
+                        explicitly
+  --declare-decaps      with --emit-intent: ALSO derive decaps.max_distance_mm
+                        from the board's own measured tethers (#704), so
+                        rule_decap_distance can fire on an auto intent at all.
+                        The limit is ceil(max) over
+                        placement.groups.decap_tethers, so it grades CLEAN by
+                        construction, and it is WITHHELD into
+                        context.budget_withheld when the number would be
+                        dishonest: no tethers, fewer than 3, or more than a
+                        quarter of the rail-sharing caps already beyond the
+                        search radius. SEPARATE from --declare-classes on
+                        purpose -- this key is not a part CLASS, and declaring
+                        it CHANGES PLACEMENT: place_seed reads it and moves
+                        the caps that elect a tether out of zone packing into
+                        its per-supply-pin stage (ulx3s: 60 of 70, the other
+                        10 having no rail-carrying chip to be seated at). It
+                        also arms decap_ungraded, which reports at WARN the
+                        caps beyond the search radius that the limit was never
+                        derived from. The tether census is written to
+                        context.decap_census either way
+  --brief JSON          Design brief JSON: what the board file cannot know --
+                        which connectors are user-facing, which edge each
+                        belongs on and where along it, what the enclosure
+                        forbids. Auto-discovered as the sibling
+                        <board>.design-brief.json when this is omitted; pass a
+                        path to override. A DECLARED claim outranks the edge
+                        this toolchain would otherwise infer from the part's
+                        current pose (#711)
+  --no-brief            Do not read the sibling design brief, even if one
+                        exists. The OFF arm: without it there is no way to
+                        measure what declaring changed
+  --require-brief       exit 4 when no design brief was found, or when the one
+                        found declares nothing gradable. The parallel of
+                        --require-rules one level up: a grade with no declared
+                        intent behind it is graded against INFERENCE, and a
+                        caller that means "check this against what was
+                        declared" needs to be able to say so (#711)
+  --require-brief-coverage
+                        exit 4 unless every clause the design brief DECLARED
+                        reached a verdict. --require-rules counts RULES, and
+                        that is exactly the gap: one run graded six rules,
+                        passed, and measured not one clause its brief
+                        declared, because the count was satisfied by rules
+                        nobody had declared anything for. This counts CLAUSES.
+                        A clause the author wrote "unknown", and one this
+                        toolchain carries by design, never block (#902)
+  --json PATH           write the full findings (every measurement) as JSON
+  --group-by SOURCES    how blocks are derived when an intent block names a
+                        `group`: comma list of kicad,sheet,netprefix,decap;
+                        'auto' = kicad,sheet (default); 'none' to disable.
+                        Deriving is read-only here, which is why this defaults
+                        ON unlike on the placement CLIs
+  --clearance MM        clearance the legality model grades at (default: the
+                        board's own Default netclass, else 0.25). Grading a
+                        fixed constant tighter than the board's floor
+                        manufactures phantom violations
+  --board-edge-clearance MM
+                        board-edge clearance for the outline gate (default:
+                        the board's own min_copper_edge_clearance, else 0.55)
+  --health              also report the routability signals from the intent's
+                        `health` block: how far each block sits from the parts
+                        it connects to, and what crosses each declared bus
+                        corridor. Advisory -- these say the floorplan will
+                        fight the router, not that it breaks the intent
+  --require-rules N     fail unless at least N rules actually RAN. Default 0
+                        (off), which keeps the long-standing contract that a
+                        vacuous intent exits 0 -- but that contract is how an
+                        intent running ZERO rules constrained two placement
+                        laps with nothing, twice, and every consumer stayed
+                        silent. A caller that means "grade this" should pass
+                        --require-rules 1.
+  --exit-zero           report violations but exit 0 anyway
+  -q, --quiet           suppress the text report; keep JSON_SUMMARY
+  --allow-unplaced      Run even when the board does not look placed (parts
+                        stacked at one coordinate). Off by default: this
+                        toolchain REFINES a placement, so on a pile every
+                        candidate pose is illegal and the run prints '0 parts
+                        moved' plus a legality block that looks like a result
+  --allow-routed        Run even when the board already carries copper. Off by
+                        default: placement moves FOOTPRINTS and not tracks, so
+                        every segment would be left behind detached from its
+                        pad
+
+Grade a board against a declared floorplan intent (#549).
+
+Placement is judged here by `crossings` and `hpwl`, and those are indifferent
+between a sensible layout and a scattered one with the same wirelength. Nothing
+declares where parts BELONG, so nothing can check whether they went there, and a
+render only moves the judgement from a number to a vibe.
+
+This makes the intent falsifiable. Write what the floorplan is meant to be, and
+this measures the board against it and exits non-zero with the number that broke.
+
+    # start from what the board already is, then edit it
+    python3 check_floorplan.py board.kicad_pcb --emit-intent floorplan.json
+
+    # grade
+    python3 check_floorplan.py board.kicad_pcb --intent floorplan.json
+    python3 check_floorplan.py board.kicad_pcb --intent floorplan.json --json out.json
+
+THE BOARD OUTLINE IS NOT EDITABLE BY THIS TOOLCHAIN. `envelope` is READ from the
+board; a part outside it is a finding about the PART. Board size, cutouts and
+slots are mechanical decisions -- enclosure fit, panel rails, connector
+apertures -- that belong to the user. The honest response to a board that is
+genuinely too small is to say so with the measured number and stop, never to
+resize it. Nothing here writes Edge.Cuts.
+EXIT=0

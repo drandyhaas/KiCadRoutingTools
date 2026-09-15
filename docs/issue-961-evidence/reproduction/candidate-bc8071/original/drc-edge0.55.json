@@ -1,0 +1,19 @@
+{
+ "accepted": 0,
+ "board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\candidate-bc8071\\original\\esp_prog.kicad_pcb",
+ "by_type": {},
+ "contacts_by_type": {},
+ "graded_at": {
+  "board_declares_no_floor": true,
+  "board_edge_clearance": 0.55,
+  "clearance": 0.2,
+  "clearance_margin": 0.0,
+  "hole_to_hole_clearance": 0.2,
+  "per_net_clearances": false,
+  "size_checks": true
+ },
+ "items": [],
+ "schema": 1,
+ "tool": "check_drc.py",
+ "violations": 0
+}

@@ -1,0 +1,110 @@
+[
+  {
+    "command": [
+      "git",
+      "fetch",
+      "origin",
+      "refs/heads/fix/960-pose-provenance:refs/remotes/origin/fix/960-pose-provenance",
+      "refs/heads/fix/967-resolved-edge-clearance:refs/remotes/origin/fix/967-resolved-edge-clearance",
+      "refs/heads/fix/966-unset-clearance:refs/remotes/origin/fix/966-unset-clearance"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "fetch",
+      "upstream",
+      "main"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": "From https://github.com/drandyhaas/KiCadRoutingTools\n * branch              main       -> FETCH_HEAD\n"
+  },
+  {
+    "command": [
+      "git",
+      "merge-base",
+      "--is-ancestor",
+      "bae72deee7ef90a5e27618c23424c27293c88b72",
+      "3f343981ae3fdbc82a60c0d41d693a03ccca98de"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "merge-base",
+      "--is-ancestor",
+      "cbc819b6b862f6ec14ecb30b8659819e800fce76",
+      "3f343981ae3fdbc82a60c0d41d693a03ccca98de"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "merge-base",
+      "--is-ancestor",
+      "acbcfa898f011f976632625194410d5fae8cccd5",
+      "3f343981ae3fdbc82a60c0d41d693a03ccca98de"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "merge-base",
+      "--is-ancestor",
+      "5a7fbcb6ee4deebd1d9ec1d5bd094d8681f502f3",
+      "3f343981ae3fdbc82a60c0d41d693a03ccca98de"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "show",
+      "--format=fuller",
+      "--stat",
+      "3f343981ae3fdbc82a60c0d41d693a03ccca98de"
+    ],
+    "exit": 0,
+    "stdout": "commit 3f343981ae3fdbc82a60c0d41d693a03ccca98de\nMerge: bae72dee acbcfa89\nAuthor:     Rob Boerman <robboerman@live.nl>\nAuthorDate: Mon Sep 14 11:33:42 2026 +0200\nCommit:     Rob Boerman <robboerman@live.nl>\nCommitDate: Mon Sep 14 11:33:42 2026 +0200\n\n    Integrate published placement and routing clearance parents for #961\n\n docs/evidence/issue966/FINAL-VERIFICATION.md       | 144 +++++\n docs/evidence/issue966/README.md                   | 233 +++++++\n docs/evidence/issue966/REPRODUCTION.md             |  52 ++\n docs/evidence/issue966/cap-boundary.json           |  10 +\n docs/evidence/issue966/compare_966.py              |  57 ++\n .../evidence/issue966/final-output-inspection.json | 268 ++++++++\n docs/evidence/issue966/full-chain-inspection.json  |  42 ++\n docs/evidence/issue966/inspect_outputs.py          |  68 ++\n docs/evidence/issue966/matrix-2layer.json          | 690 +++++++++++++++++++++\n docs/evidence/issue966/matrix-4layer.json          | 690 +++++++++++++++++++++\n docs/evidence/issue966/reproduce_966.py            | 105 ++++\n .../evidence/issue966/reproduction-comparison.json | 381 ++++++++++++\n docs/evidence/issue966/verify_cap_boundary.py      |  62 ++\n docs/evidence/issue966/verify_full_chain.py        |  44 ++\n docs/evidence/issue966/verify_output_boards.py     |  49 ++\n docs/evidence/issue966/verify_reader_matrix.py     |  96 +++\n kicad_routing_plugin/fanout_gui.py                 |  10 +-\n kicad_routing_plugin/swig_gui.py                   |  22 +-\n .../gui_parity/test_768_cap_ceiling_real_dialog.py |  57 +-\n tests/gui_parity/test_966_unset_clearance.py       | 123 ++++\n 20 files changed, 3188 insertions(+), 15 deletions(-)\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "rev-parse",
+      "upstream/main"
+    ],
+    "exit": 0,
+    "stdout": "5a7fbcb6ee4deebd1d9ec1d5bd094d8681f502f3\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--exit-code",
+      "3f343981ae3fdbc82a60c0d41d693a03ccca98de",
+      "HEAD",
+      "--",
+      "kicad_files"
+    ],
+    "exit": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+]

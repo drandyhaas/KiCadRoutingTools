@@ -243,10 +243,39 @@ verdicts rather than one — `assembly_side` violations, and
 `options.grow_board`'s utilisation, which credits the back face's area to every
 board and had no way to be told the board is built on one side.
 
+### Drawn-body overhang, mating-edge setback and copper clearance
+
+The declared compass edge selects the body envelope's support line. Signed
+position is positive outside the boundary: overhang is `max(0, position)` and
+setback is `max(0, -position)`, in mm, independent of clearance knobs. A zero
+minimum overhang does not require seating; a positive minimum rejects a fully
+inboard body. Only explicit setback intent constrains its distance inboard.
+
+Own-face F.Fab/B.Fab is preferred, with supported F.SilkS/B.SilkS fallback.
+Closed convex line/rectangle/polygon envelopes and arbitrary saved rotations
+are supported. Open, curved, disconnected or concave bodies and nonrectangular,
+concave, open or cutout boundaries are explicitly unmeasured with a reason;
+a pad box is never called a body. Required unmeasured geometry prevents a
+complete passing certificate. The drawing is a mechanical proxy, not a 3-D
+mating cavity. See the [full geometry contract](issue-961-evidence/CONTRACT.md).
+
+Every `edge_seating` row carries the actual clause value (`overhang_mm` equals
+`body_overhang_mm`), setback and independent copper gap/shortfall, with mm units,
+bases, declared limits, sources and dispositions on passes as well as failures.
+The minimum copper gap covers all edges; the declared-edge projection is named
+separately. Legal body overhang and failing copper clearance can coexist.
+
+Intent-driven seed and reconstruct stage candidates before publication and check
+declared connector requirements on the written final board. Rejected or
+unmeasured candidates do not replace the destination or receive a success ledger
+row. Dry candidates explicitly remain unevaluated. Accepted improving-pile work
+can still be published as exploratory with `engineering_clean: false`;
+provenance CLEAN does not certify engineering cleanliness.
+
 ### WHERE ALONG the edge: `center_on_edge` and `along_edge_band`
 
-`edge_connector` grades the overhang band, the nearest-edge identity and a
-setback. All three are satisfied *anywhere along* the edge — so a receptacle
+`edge_connector` grades declared body overhang and explicit setback relative
+to the declared mating edge. These normal distances are unchanged *anywhere along* the edge — so a receptacle
 well off the centre of its edge grades exactly as well as a centred one. On a
 stick-shaped board where the PCB is the plug body, that is the difference
 between a product and something a human rejects on sight. Measured on this
@@ -362,7 +391,7 @@ for it, and the reason is printed:
 | `assembly_side` | a part sits on a face the board's declared assembly policy does not populate. **warn** by default (#837): nothing in the engine can move a part between faces, so an error would be a red mark no run could clear | `legality.assembly_census`, body face — the pad-bearing population, so a zero-pad graphic on the back is not a part |
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area`, **courtyard only** — a through-hole stranger's leads may cross a reserved zone, unlike a keep-out's. **Enforced since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702)**, same way — and since [#797](https://github.com/drandyhaas/KiCadRoutingTools/issues/797) the seat search refuses such a pose too, with the verdict `zone_exclusive_blocks` |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect. **Enforced, not only graded, since [#701](https://github.com/drandyhaas/KiCadRoutingTools/issues/701)** — the seat search refuses such a pose through the same `keepout_hit` this rule calls — and since [#702](https://github.com/drandyhaas/KiCadRoutingTools/issues/702) the quench refuses such a MOVE through it too |
-| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
+| `edge_connector` | declared drawn-body overhang/setback or along-edge position fails; copper containment/clearance fails independently; required unsupported geometry is unmeasured | own-face Fab/Silk convex drawn envelope at zero margin against declared rectangular boundary; copper uses the resolved pad-edge gate |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_populations` (`near`) |
 | `decap_ungraded` | a cap in scope lies BEYOND the tether search radius, so `decap_distance` never measured it against the declared limit — a claim about COVERAGE, not compliance. **warn** by default ([#794](https://github.com/drandyhaas/KiCadRoutingTools/issues/794)) | `groups.decap_populations` (`beyond`) |
 | `decap_pin_distance` | a DECLARED supply pin is further than `max_pin_distance_mm` from the nearest decoupling cap on its own rail, pad edge to pad edge ([#705](https://github.com/drandyhaas/KiCadRoutingTools/issues/705)) | `floorplan.supply_pins`, `legality.pad_rect` + `rect_gap` |
@@ -780,9 +809,9 @@ other nowhere. A blocker list is only an action list if the names are real.
 
 ## What `--emit-intent` does and does not claim
 
-It writes an intent that **grades clean by construction** — a baseline to
-tighten, and the round trip is what proves the rules are wired to real geometry
-rather than silently skipping.
+It writes observed starter declarations for review. Independent copper failures
+and unsupported required geometry can make the emitted intent fail or remain
+incomplete. Emission is not an engineering-clean certificate.
 
 It claims a `zone` only where it can defend one. A schematic sheet is a
 *functional* grouping, not a spatial one: its members scatter across the board,
@@ -795,28 +824,18 @@ carry membership and say why they have no zone.
 This is the same spatial incoherence that makes sheet blocks useless for
 *movement* — see `placement/README.md`.
 
-Parts already overhanging the outline are recorded as `edge_connectors` by
-observation, which is what stops `oob_count` reporting a card edge or USB shell
-as a defect forever.
+Observed connector bands use the same zero-margin body measurement as grading
+and `oob_exempt()`. An edge is inferred only when the supported body/boundary
+geometry identifies one uniquely. An occupancy margin graze does not establish
+body overhang. Exemption affects the footprint occupancy count only; declared
+body allowance never waives copper containment or clearance.
 
-With `--declare-classes`, connector-family parts that claim no edge (headers,
-JST, terminal blocks; `part_class` calls them `connector_affinity`) are also
-recorded, with `"class": "connector_affinity"` and **no `edge`** (naming one
-would be an invention). The grade then flags such a part seated more than
-3 mm from every edge at `warn` only, because legitimately interior connectors
-exist; write `max_setback_mm` or `edge` on the entry to make it a real claim
-at the configured severity.
-
-These entries are **declarations, not seat claims**, and the placement engines
-do not act on them. `edge_connectors` therefore holds two populations, and
-`Intent.edge_claims()` is the split: it drops `connector_affinity` and is what
-`place_seed` (which LOCKS edge refs for its polish quench), `place_reconstruct`
-(banded off-outline allowance, exchange-stage exclusion) and
-`reconstruct.classify` (the anchor tier) read. The `edge_connector` **rule**
-reads the whole key, because flagging an interior pose is the entry's only
-purpose. Writing `max_setback_mm` or `edge` on an entry changes its class-based
-severity, not its membership -- to hand a part the edge-part treatment in the
-engines, declare it with an edge class.
+With `--declare-classes`, connector families are labelled without inventing an
+edge, maximum overhang or seating distance. A class-only `{min: 0}` band is
+nonbinding. Write an explicit `edge`, `overhang_mm` band and/or
+`max_setback_mm` for the actual mechanical requirement. Generic
+`connector_affinity` entries remain excluded from engine anchor/locking treatment
+by `Intent.edge_claims()`, while the grader reports every entry.
 
 The `overlap_area` budget is **withheld** when the emitting board carries a
 blocking body pair, or an unwaived courtyard interpenetration past the

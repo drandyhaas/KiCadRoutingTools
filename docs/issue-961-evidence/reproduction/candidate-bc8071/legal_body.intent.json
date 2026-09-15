@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "kind": "floorplan-intent",
+  "units": "mm",
+  "edge_connectors": [
+    {
+      "ref": "USB1",
+      "edge": "west",
+      "class": "edge_receptacle",
+      "overhang_mm": {
+        "min": 1.4,
+        "max": 1.5
+      },
+      "max_setback_mm": 0.0
+    }
+  ]
+}

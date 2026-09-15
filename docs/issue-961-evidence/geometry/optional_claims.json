@@ -1,0 +1,269 @@
+[
+  {
+    "label": "nonbinding_class",
+    "passed": true,
+    "complete": true,
+    "not_graded": {},
+    "edge_seating": [
+      {
+        "body_overhang_mm": null,
+        "body_setback_mm": null,
+        "body_signed_position_mm": null,
+        "body_overhang_basis": null,
+        "overhang_mm": null,
+        "overhang_basis": null,
+        "units": "mm",
+        "boundary_basis": "rectangular Edge.Cuts centreline",
+        "mating_face_basis": "drawn envelope support line toward declared edge",
+        "body_measured": false,
+        "body_unmeasured_reason": "no body drawing on the footprint face",
+        "ref": "J1",
+        "edge": null,
+        "declared": false,
+        "body_requirement_declared": true,
+        "measurements": {
+          "body_overhang": {
+            "value": null,
+            "units": "mm",
+            "geometry_basis": null,
+            "declared_limit": {
+              "min": 0
+            },
+            "requirement_source": "auto-class",
+            "disposition": "unmeasured",
+            "reason": "no body drawing on the footprint face"
+          },
+          "body_setback": {
+            "value": null,
+            "units": "mm",
+            "geometry_basis": null,
+            "declared_limit": null,
+            "requirement_source": "auto-class",
+            "disposition": "unmeasured",
+            "reason": "no body drawing on the footprint face"
+          },
+          "pad_copper_edge_gap": {
+            "value": 2.75,
+            "units": "mm",
+            "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "declared_limit": {
+              "min": 0.55
+            },
+            "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+            "disposition": "pass"
+          },
+          "copper_edge_shortfall": {
+            "value": 0.0,
+            "units": "mm",
+            "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "declared_limit": {
+              "max": 0.0
+            },
+            "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+            "disposition": "pass"
+          }
+        },
+        "pad_copper_edge_gap_mm": 2.75,
+        "required_copper_edge_gap_mm": 0.55,
+        "pad_copper_declared_edge_gap_mm": null,
+        "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+        "copper_edge_shortfall_mm": 0.0,
+        "copper_edge_complete": true,
+        "copper_edge_findings": [],
+        "copper_edge_unmeasured": [],
+        "copper_rules_unmeasured": [],
+        "clearance_parameters": {
+          "copper_clearance_mm": 0.25,
+          "board_edge_clearance_mm": 0.55,
+          "effective_occupancy_margin_mm": 0.55,
+          "physical_body_margin_mm": 0.0
+        }
+      }
+    ],
+    "violations": []
+  },
+  {
+    "label": "edge_only_missing",
+    "passed": false,
+    "complete": false,
+    "not_graded": {
+      "budget_abstained": 1
+    },
+    "edge_seating": [
+      {
+        "ref": "J1",
+        "edge": "west",
+        "declared": false,
+        "basis": "bbox",
+        "span_mm": 20.0,
+        "along_edge_offset_mm": 0.0,
+        "along_edge_offset_pct": 0.0,
+        "along_edge_fraction": 0.5,
+        "body_overhang_mm": null,
+        "body_setback_mm": null,
+        "body_signed_position_mm": null,
+        "body_overhang_basis": null,
+        "overhang_mm": null,
+        "overhang_basis": null,
+        "units": "mm",
+        "boundary_basis": "rectangular Edge.Cuts centreline",
+        "mating_face_basis": "drawn envelope support line toward declared edge",
+        "body_measured": false,
+        "body_unmeasured_reason": "no body drawing on the footprint face",
+        "body_requirement_declared": true,
+        "measurements": {
+          "body_overhang": {
+            "value": null,
+            "units": "mm",
+            "geometry_basis": null,
+            "declared_limit": null,
+            "requirement_source": "intent.edge_connectors",
+            "disposition": "unmeasured",
+            "reason": "no body drawing on the footprint face"
+          },
+          "body_setback": {
+            "value": null,
+            "units": "mm",
+            "geometry_basis": null,
+            "declared_limit": null,
+            "requirement_source": "intent.edge_connectors",
+            "disposition": "unmeasured",
+            "reason": "no body drawing on the footprint face"
+          },
+          "pad_copper_edge_gap": {
+            "value": 2.75,
+            "units": "mm",
+            "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "declared_limit": {
+              "min": 0.55
+            },
+            "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+            "disposition": "pass"
+          },
+          "copper_edge_shortfall": {
+            "value": 0.0,
+            "units": "mm",
+            "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "declared_limit": {
+              "max": 0.0
+            },
+            "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+            "disposition": "pass"
+          }
+        },
+        "pad_copper_edge_gap_mm": 2.75,
+        "required_copper_edge_gap_mm": 0.55,
+        "pad_copper_declared_edge_gap_mm": 2.75,
+        "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+        "copper_edge_shortfall_mm": 0.0,
+        "copper_edge_complete": true,
+        "copper_edge_findings": [],
+        "copper_edge_unmeasured": [],
+        "copper_rules_unmeasured": [],
+        "clearance_parameters": {
+          "copper_clearance_mm": 0.25,
+          "board_edge_clearance_mm": 0.55,
+          "effective_occupancy_margin_mm": 0.55,
+          "physical_body_margin_mm": 0.0
+        }
+      }
+    ],
+    "violations": [
+      "J1 declared mating edge unmeasured: no body drawing on the footprint face"
+    ]
+  },
+  {
+    "label": "along_only",
+    "passed": true,
+    "complete": true,
+    "not_graded": {},
+    "edge_seating": [
+      {
+        "ref": "J1",
+        "edge": "west",
+        "declared": true,
+        "basis": "bbox",
+        "span_mm": 20.0,
+        "along_edge_offset_mm": 0.0,
+        "along_edge_offset_pct": 0.0,
+        "along_edge_fraction": 0.5,
+        "body_overhang_mm": 0.0,
+        "body_setback_mm": 1.0,
+        "body_signed_position_mm": -1.0,
+        "body_overhang_basis": "F.Fab",
+        "overhang_mm": 0.0,
+        "overhang_basis": "F.Fab",
+        "units": "mm",
+        "boundary_basis": "rectangular Edge.Cuts centreline",
+        "mating_face_basis": "drawn envelope support line toward declared edge",
+        "body_measured": true,
+        "body_bounds_mm": [
+          1.0,
+          8.0,
+          5.0,
+          12.0
+        ],
+        "other_body_edge_overhang_mm": {
+          "east": 0.0,
+          "north": 0.0,
+          "south": 0.0
+        },
+        "body_requirement_declared": true,
+        "measurements": {
+          "body_overhang": {
+            "value": 0.0,
+            "units": "mm",
+            "geometry_basis": "F.Fab",
+            "declared_limit": null,
+            "requirement_source": "intent.edge_connectors",
+            "disposition": "not_declared"
+          },
+          "body_setback": {
+            "value": 1.0,
+            "units": "mm",
+            "geometry_basis": "F.Fab",
+            "declared_limit": null,
+            "requirement_source": "intent.edge_connectors",
+            "disposition": "not_declared"
+          },
+          "pad_copper_edge_gap": {
+            "value": 2.75,
+            "units": "mm",
+            "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "declared_limit": {
+              "min": 0.55
+            },
+            "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+            "disposition": "pass"
+          },
+          "copper_edge_shortfall": {
+            "value": 0.0,
+            "units": "mm",
+            "geometry_basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check",
+            "declared_limit": {
+              "max": 0.0
+            },
+            "requirement_source": "resolved placement board_edge_clearance (independent of body intent)",
+            "disposition": "pass"
+          }
+        },
+        "pad_copper_edge_gap_mm": 2.75,
+        "required_copper_edge_gap_mm": 0.55,
+        "pad_copper_declared_edge_gap_mm": 2.75,
+        "pad_copper_edge_gap_scope": "minimum over all board edges and copper pads",
+        "copper_edge_shortfall_mm": 0.0,
+        "copper_edge_complete": true,
+        "copper_edge_findings": [],
+        "copper_edge_unmeasured": [],
+        "copper_rules_unmeasured": [],
+        "clearance_parameters": {
+          "copper_clearance_mm": 0.25,
+          "board_edge_clearance_mm": 0.55,
+          "effective_occupancy_margin_mm": 0.55,
+          "physical_body_margin_mm": 0.0
+        }
+      }
+    ],
+    "violations": []
+  }
+]

@@ -1,0 +1,135 @@
+{
+  "revision": "2448498c762e0c5a5807ff02554cf4faa72a536d",
+  "tests": [
+    {
+      "test": "test_961_connector_geometry.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_961_connector_geometry.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_961_connector_geometry.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_961_connector_publication.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_961_connector_publication.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_961_connector_publication.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_549_floorplan_cli.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_549_floorplan_cli.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_549_floorplan_cli.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_549_floorplan_grade.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_549_floorplan_grade.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_549_floorplan_grade.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_712_edge_centering.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_712_edge_centering.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_712_edge_centering.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_run23_connector_affinity.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_run23_connector_affinity.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_run23_connector_affinity.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_run26_edge_seat_body_basis.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_run26_edge_seat_body_basis.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_run26_edge_seat_body_basis.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_run27_edge_seat_clears_placed.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_run27_edge_seat_clears_placed.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_run27_edge_seat_clears_placed.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_run4_reconstruct.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_run4_reconstruct.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_run4_reconstruct.py.log",
+      "traceback": false
+    },
+    {
+      "test": "test_place_edge_containment.py",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_place_edge_containment.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "test_place_edge_containment.py.log",
+      "traceback": false
+    }
+  ]
+}

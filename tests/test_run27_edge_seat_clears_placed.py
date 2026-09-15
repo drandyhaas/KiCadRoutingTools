@@ -86,10 +86,16 @@ INTENT = {
 }
 
 
-def _board(tmp, name, locked=True, fix_w='2.2'):
+def _board(tmp, name, locked=True, fix_w='2.2', body=True):
     p = os.path.join(tmp, name)
     with open(p, 'w', encoding='utf-8') as fh:
-        fh.write(BOARD % (' (locked yes)' if locked else '', fix_w))
+        text = BOARD % (' (locked yes)' if locked else '', fix_w)
+        if body:
+            # Supported additional control; keep the original body-less BOARD.
+            text = text.replace('(property "Reference" "J1" (at 0 0 0))',
+                '(property "Reference" "J1" (at 0 0 0))'
+                '(fp_rect (start -3.4 -2) (end 3.4 2) (layer "F.Fab"))')
+        fh.write(text)
     return p
 
 
@@ -119,6 +125,10 @@ def main():
             fails.append(name)
 
     with tempfile.TemporaryDirectory(prefix='t_esc_') as tmp:
+        missing = _board(tmp, 'missing.kicad_pcb', body=False)
+        missing_grade = fp.grade(fp.intent_from_dict(INTENT), parse_kicad_pcb(missing), missing)
+        assert not missing_grade.complete and not missing_grade.passed
+        assert missing_grade.edge_seating[0]['body_overhang_mm'] is None
         # --- 0: ANTI-VACUITY. The band's midpoint, where the seat used to go,
         #        really does land on the locked part.
         path = _board(tmp, 'b.kicad_pcb')

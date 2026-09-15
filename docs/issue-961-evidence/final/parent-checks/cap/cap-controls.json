@@ -1,0 +1,40 @@
+[
+  {
+    "declared": 0,
+    "params": {
+      "clearance": 0.3
+    },
+    "expected": 0.3,
+    "routing_clearance": 0.3,
+    "returned": "Decoupling caps optimized: 0 moved",
+    "log": "  cap pair clearance: 0.3mm (cli)\n  board-edge margin for caps: 0.55mm (fixed default)\nBGAs: (none)  fanout vias: 0  movable near-BGA caps: 0\nNo vias on the board - run this AFTER bga_fanout.py.\n"
+  },
+  {
+    "declared": 0,
+    "params": {
+      "clearance": 0.05
+    },
+    "expected": 0.1,
+    "routing_clearance": 0.1,
+    "returned": "Decoupling caps optimized: 0 moved",
+    "log": "  cap pair clearance: 0.1mm (cli)\n  board-edge margin for caps: 0.55mm (fixed default)\nBGAs: (none)  fanout vias: 0  movable near-BGA caps: 0\nNo vias on the board - run this AFTER bga_fanout.py.\n"
+  },
+  {
+    "declared": 0,
+    "params": {
+      "clearance_ceiling": 0.3
+    },
+    "expected": 0.1,
+    "routing_clearance": 0.1,
+    "returned": "Decoupling caps optimized: 0 moved",
+    "log": "  cap pair clearance: 0.1mm (cli)\n  board-edge margin for caps: 0.55mm (fixed default)\nBGAs: (none)  fanout vias: 0  movable near-BGA caps: 0\nNo vias on the board - run this AFTER bga_fanout.py.\n"
+  },
+  {
+    "declared": 0.2,
+    "params": {},
+    "expected": 0.2,
+    "routing_clearance": 0.2,
+    "returned": "Decoupling caps optimized: 0 moved",
+    "log": "  cap pair clearance: 0.2mm (board netclass)\n  board-edge margin for caps: 0.55mm (fixed default)\nBGAs: (none)  fanout vias: 0  movable near-BGA caps: 0\nNo vias on the board - run this AFTER bga_fanout.py.\n"
+  }
+]

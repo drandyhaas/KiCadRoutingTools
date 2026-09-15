@@ -1,0 +1,10 @@
+{
+  "revision": "e5681428d43a17f663df257b9a94c55c544e786c",
+  "routed_clearance": 0.1,
+  "cli_omitted_cap_clearance": [
+    0.25,
+    "fixed default"
+  ],
+  "returned": "Decoupling caps optimized: 0 moved",
+  "engine_log": "  cap pair clearance: 0.25mm (fixed default)\n  board-edge margin for caps: 0.55mm (fixed default)\nCopper-to-hole clearance 0.25mm (from the board's own min_hole_clearance, above the 0.2mm fab floor)\nBGAs: (none)  fanout vias: 0  movable near-BGA caps: 0\nNo vias on the board - run this AFTER bga_fanout.py.\n"
+}

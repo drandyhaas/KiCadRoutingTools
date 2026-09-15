@@ -1,0 +1,37 @@
+--- test_the_offset_is_measured_with_nothing_declared
+  PASS: 3 offsets measured with no declaration: J1 +16.1%, J5 -25.4%, J7 -28.7%
+--- test_a_human_board_is_not_failed_by_accident
+  PASS: worst offset 28.7% and no centering clause fails -- no default threshold exists
+--- test_a_declared_tolerance_passes_and_fails_on_the_same_part
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: tol 0.5 clean, tol 0.01 fires -- J1 sits 0.02mm (0.0% of the 50.80mm west edge) south of that edge's cent...
+--- test_a_declared_band_contains_and_excludes
+  PASS: band 20-30% clean, 50-60% fires at fraction 0.246
+--- test_the_ring_basis_is_load_bearing
+  PASS: BUS1 reads +0.000mm on the ring (span 81.28mm); the same part measured against the 115.57mm bbox side would read -5.715mm
+--- test_a_non_rectangular_board_still_measures_where_it_can
+  WARNING [quench]: 8 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AE1, J1, J3, SW1, SW2, SW3, SW4, U1
+  WARNING [quench]: 8 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AE1, J1, J3, SW1, SW2, SW3, SW4, U1
+  PASS: 13 entries measured on a 21-segment, 2-cutout board, all on the ring basis
+--- test_the_abstain_names_its_reason_and_is_not_a_pass
+  PASS: split run, absent run and no-ring-no-rectangle all abstain with a stated reason; a simple rectangle uses the bbox
+--- test_a_claim_with_no_edge_abstains_rather_than_inferring_one
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+  PASS: abstained -- the entry declares no `edge`, so there is no span to take a fraction a...
+--- test_the_emitter_never_writes_either_field
+  PASS: 40 emitted connector(s) across 5 boards, none carrying either field
+--- test_the_loader_refuses_every_malformed_along_edge_claim
+  PASS: 12 malformed along-edge claims refused by reason; both forms load alone; READER_VERSION 5
+--- test_rules_run_bookkeeping_is_untouched
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  WARNING [quench]: 9 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: AUDIO1, GPDI1, SD1, U1, U2, U3, U4, U5, U9
+  PASS: rules_run identical (7), summary carries edge_seating_rows=13
+ALL PASS
+
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 4 footprint block(s) share 2 reference(s) -- TP4 x2, TP5 x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 86 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

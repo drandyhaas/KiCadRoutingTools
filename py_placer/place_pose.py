@@ -512,6 +512,6 @@ if __name__ == "__main__":
     # placement.provenance.LEVER_REGISTRY: an armed unaided regime accepts
     # this tool and still refuses the hand script it replaces.
     from placement.provenance import declare_lever
-    with declare_lever('place_pose.py', sys.argv):
+    with declare_lever('place_pose.py', sys.argv, decision_source='caller'):
         import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
         sys.exit(main())

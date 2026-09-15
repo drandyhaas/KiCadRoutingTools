@@ -1,0 +1,8 @@
+VERDICT: UNAIDED VIOLATION
+  1 pose(s) differ from the staged board and there is NO ledger at all -- nothing engine-side wrote them. This is the hand-placed case, not an unmeasured one: the board is the witness.
+  unclaimed: R1
+JSON_SUMMARY: {"claimed": 0, "ledger_rows": 0, "levers": [], "moved": 1, "unverifiable_claims": null, "verdict": "UNAIDED VIOLATION"}
+
+STDERR:
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

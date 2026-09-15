@@ -1,0 +1,20 @@
+{
+ "kind": "unaided-regime",
+ "lever_registry": [
+  "place_seed.py",
+  "place_optimize.py",
+  "place_reconstruct.py",
+  "place_portfolio.py",
+  "place_route_loop.py",
+  "place_fanout_clearance.py",
+  "converge.py",
+  "place_pose.py",
+  "route.py",
+  "perturb.py",
+  "stage_blind.py",
+  "stage_unaided.py"
+ ],
+ "schema": 1,
+ "staged_board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-final\\docs\\issue-961-evidence\\final\\publication-20260914-121713\\baseline.kicad_pcb",
+ "staged_sha256": "165302e6a4f7aacdd64b3174df27ed8ddb19fd5f1f7effadd8d92205e25a120e"
+}

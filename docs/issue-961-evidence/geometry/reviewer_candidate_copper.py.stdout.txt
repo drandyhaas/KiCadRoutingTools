@@ -1,0 +1,1 @@
+Native-written candidate copper controls passed: 216 max gap discrepancy mm 7.238261763298226e-07

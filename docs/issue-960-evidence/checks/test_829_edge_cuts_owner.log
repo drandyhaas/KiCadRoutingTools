@@ -1,0 +1,115 @@
+--- test_the_parser_separates_the_fact_from_the_decision
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   U_STRUCT: parsed
+  ok   U_STRUCT: owns_edge_cuts=True
+  ok   U_STRUCT: owns_board_outline=True
+  ok   U_CARRY: parsed
+  ok   U_CARRY: owns_edge_cuts=True
+  ok   U_CARRY: owns_board_outline=False
+  ok   U_PLAIN: parsed
+  ok   U_PLAIN: owns_edge_cuts=False
+  ok   U_PLAIN: owns_board_outline=False
+  ok   U_NOPAD: parsed
+  ok   U_NOPAD: owns_edge_cuts=True
+  ok   U_NOPAD: owns_board_outline=True
+--- test_a_carried_relief_is_not_a_board_outline
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   a window under the part's own body is owned but NOT structural
+--- test_the_movable_set_refuses_the_owner_and_says_why
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   U_STRUCT is not free
+  ok   U_CARRY IS still free
+  ok   U_PLAIN IS still free
+  ok   the refusal names the ref
+  ok   the refusal gives a reason, not just a flag
+  ok   only the outline owner is refused
+--- test_the_quench_locks_the_owner_and_discloses_it
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  Locked because they draw the board outline (#829): U_STRUCT -- moving one would resize the board. Edit the part and the outline together in KiCad if it really must move.
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: U_CARRY, U_PLAIN, U_STRUCT
+  ok   U_STRUCT is a part (an obstacle), not dropped
+  ok   U_STRUCT is locked
+  ok   U_CARRY is NOT locked
+  ok   the lock is disclosed by ref
+--- test_the_writer_refuses_rather_than_skipping
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   moving the outline owner RAISES
+  ok   and writes no output file
+  ok   and it is the PER-REF backstop that refused, naming the ref
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\fix829_8whdnqiw\w2.kicad_pcb
+  ok   moving a carried relief still succeeds
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   and the board does NOT resize
+--- test_the_outline_tripwire_fires_when_every_per_ref_gate_is_bypassed
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   the tripwire catches an outline change the gates missed
+  ok   and NOTHING was written
+  ok   and it says the outline changed, not just 'refused'
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\fix829_zvd6qe4w\bypass_carry.kicad_pcb
+  ok   a carried relief still writes with the gate bypassed
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   and it really did move
+--- test_the_classifier_on_the_boards_a_review_broke_it_with
+WARNING: reclassified 2 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   panelised (open path inside the panel frame): {'J1': True, 'LED1': False}
+  ok   rectangle spelled with 4 segments: {'JF': True}
+  ok   rectangle spelled with 8 segments: {'JF': True}
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   round window on a round board: {'U_R': False}
+--- test_both_arms_of_the_containment_ladder_are_exercised
+  ok   the RING arm is reached by at least one fixture
+  ok   the BOUNDS arm is reached by at least one fixture
+--- test_the_owner_map_is_keyed_like_the_footprints_dict
+  ok   both blocks are kept under distinct keys
+  ok   exactly one of them owns Edge.Cuts
+  ok   and it is the block that draws it, not the one that shares its name
+  ok   the twin that draws nothing is untouched
+--- test_every_refusal_names_its_own_source
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  Locked because they draw the board outline (#829): U_STRUCT -- moving one would resize the board. Edit the part and the outline together in KiCad if it really must move.
+  WARNING [quench]: 3 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: U_CARRY, U_PLAIN, U_STRUCT
+  ok   U_STRUCT is refused
+  ok   the refusal mentions the outline
+  ok   and does NOT claim a (locked yes) stamp the file does not carry
+--- test_a_zero_move_write_is_not_a_move
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\fix829_kijqu7qm\nomove.kicad_pcb
+  ok   handing EVERY part its current pose is not a move
+  ok   and the control board is written
+--- test_the_tripwire_works_on_an_in_place_write
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   the tripwire fires on an IN-PLACE write
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   and the board on disk is unchanged
+--- test_a_pure_rotation_is_covered_too
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   rotating the owner alone moves the outline (the hazard is real)
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   and the rotated owner is still classified structural
+--- test_a_board_with_no_owners_is_untouched
+  ok   no footprint reports owning Edge.Cuts
+  ok   no footprint reports owning the outline
+--- test_no_tracked_board_carries_footprint_edge_cuts
+  ok   0 of 30 tracked boards carry footprint Edge.Cuts
+  ok   the corpus was actually scanned (not an empty list)
+--- test_place_optimize_leaves_the_outline_alone
+  ok   place_optimize succeeded
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   board_bounds unchanged
+  ok   board_outlines unchanged
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+WARNING: reclassified 1 Edge.Cuts contour(s) mis-read as board cutout(s) -- each encloses pads, so it is an inner outline / keep-out, not a hole (as a cutout it would have marked the enclosed pads off-board). Kept as a milled edge for clearance.
+  ok   the outline owner did not move
+  ok   the run disclosed the lock
+
+ALL PASS
+
+STDERR:
+WARNING: 2 footprint block(s) share 1 reference(s) -- JF x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 2 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

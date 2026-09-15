@@ -1,0 +1,56 @@
+Modified 4 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\cap_chain.kicad_pcb
+Modified 21 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\esp_prog.kicad_pcb
+  Moved 19 text element(s) from copper layers to silkscreen
+Modified 64 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\flat_hierarchy.kicad_pcb
+Modified 272 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\glasgow_revC.kicad_pcb
+Modified 8 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\haasoscope_pro_max_test.kicad_pcb
+  Moved 6 text element(s) from copper layers to silkscreen
+Modified 25 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\interf_u_unrouted.kicad_pcb
+Modified 25 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\interf_u_unrouted_placed.kicad_pcb
+  Moved 2 text element(s) from copper layers to silkscreen
+Modified 160 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\kit-dev-coldfire-xilinx_5213.kicad_pcb
+Modified 13 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\lvds_converter_dualclk.kicad_pcb
+Modified 13 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\lvds_converter_dualclk_gnd.kicad_pcb
+Modified 167 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\orangecrab_ext_pll.kicad_pcb
+Modified 2 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\qfn_csi_underpad_diff.kicad_pcb
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\qfn_diffpair_escape.kicad_pcb
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\qfn_interior_pads.kicad_pcb
+Modified 1 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\qfn_underpad_coupling.kicad_pcb
+Modified 8 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\routed_output.kicad_pcb
+Modified 61 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\rp2350_fpga_eensy_prePlane.kicad_pcb
+  Moved 8 text element(s) from copper layers to silkscreen
+Modified 25 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\sonde_u.kicad_pcb
+Modified 65 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\splitflap_driver.kicad_pcb
+Modified 92 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\tigard.kicad_pcb
+Modified 235 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\ulx3s.kicad_pcb
+Modified 86 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714identokdydqm6\watchy.kicad_pcb
+PASS: identity write byte-identical on 22 tracked boards, 1349 footprints
+
+STDERR:
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 7 footprint block(s) share 1 reference(s) -- REF** x7. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 272 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 3 footprint block(s) share 1 reference(s) -- G*** x3. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 167 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 2 footprint block(s) share 1 reference(s) -- EMARD x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 235 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.
+WARNING: 4 footprint block(s) share 2 reference(s) -- TP4 x2, TP5 x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 86 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

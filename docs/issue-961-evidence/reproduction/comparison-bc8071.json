@@ -1,0 +1,2944 @@
+{
+  "before_revision": "3f343981ae3fdbc82a60c0d41d693a03ccca98de",
+  "after_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+  "seating_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+  "passed": 734,
+  "checks": [
+    {
+      "name": "same source and requirement siblings",
+      "pass": true
+    },
+    {
+      "name": "positive.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "zero.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "legal_body.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "supplementary inboard board identity",
+      "pass": true
+    },
+    {
+      "name": "supplementary legal body board identity",
+      "pass": true
+    },
+    {
+      "name": "legal-overhang130.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "positive_no_seating.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "seat_020.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "seat_110.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "zero_class_no_seating.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "zero_no_class.intent.json declaration bytes preserved",
+      "pass": true
+    },
+    {
+      "name": "original same written fixture bytes",
+      "pass": true
+    },
+    {
+      "name": "original native readback unchanged",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/0/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/1/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/2/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/3/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/4/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/5/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/6/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/7/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/8/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/9/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/10/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/11/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/12/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/13/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "original/14/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "original actual DRC unchanged",
+      "pass": true
+    },
+    {
+      "name": "minus145 same written fixture bytes",
+      "pass": true
+    },
+    {
+      "name": "minus145 native readback unchanged",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/0/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/1/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/2/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/3/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/4/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/5/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/6/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/7/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/8/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/9/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/10/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/11/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/12/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/13/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus145/14/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus145 actual DRC unchanged",
+      "pass": true
+    },
+    {
+      "name": "minus210 same written fixture bytes",
+      "pass": true
+    },
+    {
+      "name": "minus210 native readback unchanged",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/0/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/1/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/2/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/3/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/4/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/5/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/6/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/7/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/8/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/9/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/10/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/11/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/12/positive exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/13/zero exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body physical body amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body same verdict amount",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body actual Fab basis",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body body setback zero",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body signed position",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body minimum native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body declared-edge native copper gap",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body independent required edge floor",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body/body_overhang full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body/body_setback full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body/pad_copper_edge_gap full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body/copper_edge_shortfall full measurement contract",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body margin-independent mechanical disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body independent copper disposition",
+      "pass": true
+    },
+    {
+      "name": "minus210/14/legal_body exact copper shortfall",
+      "pass": true
+    },
+    {
+      "name": "minus210 actual DRC unchanged",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_no_class/0.25 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_no_class/0.25 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_no_class/0.25 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_no_class/0.55 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_no_class/0.55 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_no_class/0.55 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_class_no_seating/0.25 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_class_no_seating/0.25 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_class_no_seating/0.25 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_class_no_seating/0.55 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_class_no_seating/0.55 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/zero_class_no_seating/0.55 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/positive_no_seating/0.25 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/positive_no_seating/0.25 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/positive_no_seating/0.25 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/positive_no_seating/0.55 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/positive_no_seating/0.55 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/positive_no_seating/0.55 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_020/0.25 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_020/0.25 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_020/0.25 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_020/0.55 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_020/0.55 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_020/0.55 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_110/0.25 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_110/0.25 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_110/0.25 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_110/0.55 native zero overhang",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_110/0.55 native 1mm setback",
+      "pass": true
+    },
+    {
+      "name": "inboard/seat_110/0.55 correct independent declared verdict",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.25 declared body permitted",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.25 independent actual copper check",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.25 all collateral disclosed",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.25 correct floorplan verdict",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.55 declared body permitted",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.55 independent actual copper check",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.55 all collateral disclosed",
+      "pass": true
+    },
+    {
+      "name": "legal130/0.55 correct floorplan verdict",
+      "pass": true
+    }
+  ]
+}

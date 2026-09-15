@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\baseline-preserved\\minus210\\esp_prog.kicad_pcb",
+  "intent": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\baseline-preserved\\positive.intent.json",
+  "pass": false,
+  "complete": true,
+  "not_graded": {},
+  "violations": [
+    {
+      "rule": "edge_connector",
+      "severity": "error",
+      "message": "USB1 overhangs the outline by 0.75mm, past the declared maximum 0.20mm",
+      "ref": "USB1",
+      "measured": {
+        "overhang_mm": 0.75
+      },
+      "expected": {
+        "min": 0.05,
+        "max": 0.2
+      }
+    },
+    {
+      "rule": "pins_to_edge",
+      "severity": "warn",
+      "message": "CON2: 7 of 7 connected pads sit on a row facing the north edge (2.00mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+      "ref": "CON2",
+      "measured": {
+        "pads_to_edge": 7,
+        "pads": 7,
+        "faces": [
+          "north"
+        ],
+        "gap_mm": 2.0,
+        "edge_mm": 2.0
+      },
+      "expected": {
+        "pads_to_edge": 0
+      }
+    },
+    {
+      "rule": "pins_to_edge",
+      "severity": "warn",
+      "message": "Q2: 1 of 3 connected pads sit on a row facing the south edge (1.45mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+      "ref": "Q2",
+      "measured": {
+        "pads_to_edge": 1,
+        "pads": 3,
+        "faces": [
+          "south"
+        ],
+        "gap_mm": 1.4475,
+        "edge_mm": 2.0
+      },
+      "expected": {
+        "pads_to_edge": 0
+      }
+    },
+    {
+      "rule": "pins_to_edge",
+      "severity": "warn",
+      "message": "U1: 8 of 17 connected pads sit on a row facing the south edge (1.88mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+      "ref": "U1",
+      "measured": {
+        "pads_to_edge": 8,
+        "pads": 17,
+        "faces": [
+          "south"
+        ],
+        "gap_mm": 1.8805,
+        "edge_mm": 2.0
+      },
+      "expected": {
+        "pads_to_edge": 0
+      }
+    },
+    {
+      "rule": "pins_to_edge",
+      "severity": "warn",
+      "message": "Y1: 2 of 4 connected pads sit on a row facing the south edge (1.40mm) with no partner beyond -- their nets can only leave along the edge strip or under the part",
+      "ref": "Y1",
+      "measured": {
+        "pads_to_edge": 2,
+        "pads": 4,
+        "faces": [
+          "south"
+        ],
+        "gap_mm": 1.4,
+        "edge_mm": 2.0
+      },
+      "expected": {
+        "pads_to_edge": 0
+      }
+    }
+  ],
+  "blocks": {},
+  "legality": {
+    "overlap_area": 1.14,
+    "oob_count": 1,
+    "oob_amount": 0.75,
+    "oob_area": 6.3,
+    "hpwl": 262.3809,
+    "pad_conflict_pairs": 2,
+    "pad_shortfall": 4.4585,
+    "pad_overlap_pairs": 1,
+    "pad_intersection_pairs": 1,
+    "locked_contact_pairs": 0,
+    "hole_shortfall": 0.0
+  },
+  "outline": {
+    "bounds": [
+      114.0,
+      91.0,
+      145.75,
+      105.5
+    ],
+    "outlines": 0,
+    "cutouts": 0,
+    "edge_contours": 0,
+    "edge_segments": 4,
+    "simple_rectangle": true,
+    "problems": [],
+    "trustworthy": true
+  },
+  "state": {
+    "unplaced": false,
+    "partially_unplaced": false,
+    "has_copper": false,
+    "n_footprints": 18,
+    "distinct_positions": 18,
+    "duplicate_fraction": 0.0,
+    "spread_ratio": 0.8608,
+    "outside_fraction": 0.0556,
+    "stacked_refs": [],
+    "stacked_suspect_refs": [],
+    "segments": 0,
+    "vias": 0
+  },
+  "health": {},
+  "rules_run": [
+    "edge_connector",
+    "pins_to_edge"
+  ],
+  "rules_skipped": {
+    "envelope": "the intent declares no envelope.rect",
+    "zone_containment": "no block declares a zone",
+    "zone_side": "no block declares a side",
+    "assembly_side": "the intent declares no assembly.sides",
+    "zone_exclusive": "no block is marked exclusive",
+    "keepout": "the intent declares no keepouts",
+    "decap_distance": "the intent declares no decaps.max_distance_mm",
+    "decap_ungraded": "the intent declares no decaps.max_distance_mm",
+    "decap_pin_distance": "the intent declares no decaps.max_pin_distance_mm",
+    "proximity": "the intent declares no proximity claims",
+    "must_lock": "the intent declares no must_lock patterns",
+    "legality": "the intent declares no legality_budget"
+  },
+  "budget_abstained": {},
+  "edge_seating": [
+    {
+      "ref": "USB1",
+      "edge": "west",
+      "declared": false,
+      "basis": "bbox",
+      "span_mm": 14.5,
+      "along_edge_offset_mm": 1.75,
+      "along_edge_offset_pct": 12.07,
+      "along_edge_fraction": 0.6207
+    }
+  ],
+  "decap_pin_evidence": {},
+  "n_footprints": 21
+}

@@ -327,6 +327,11 @@ Examples:
               "'the off-board amount strictly improved', which this does not "
               "gate", file=sys.stderr)
 
+    from placement.connector_publication import run_checked
+    return run_checked(args, lambda trial: _execute(trial, p))
+
+
+def _execute(args, p):
     try:
         from redo_record import record_invocation
         record_invocation()
@@ -737,10 +742,14 @@ Examples:
         for _r in sorted(_rot_unseated):
             print(f"    {_r}: declared {_rot_unseated[_r]}")
 
-    write_placed_output(args.input_file, args.output_file,
-                        result['placements'])
-    n_locked = seeder.stamp_locked(args.output_file, result['lock_refs'])
-    copy_siblings(args.input_file, args.output_file)
+    import tempfile
+    from placement.publication import publish_board
+    with tempfile.TemporaryDirectory(prefix='place_seed_final_') as stage:
+        candidate = os.path.join(stage, 'candidate.kicad_pcb')
+        write_placed_output(args.input_file, candidate, result['placements'])
+        n_locked = seeder.stamp_locked(candidate, result['lock_refs'])
+        copy_siblings(args.input_file, candidate)
+        publish_board(candidate, args.output_file, input_file=args.input_file)
     print(f"Stamped (locked yes) on {n_locked} part(s)")
 
     ratsnest = {}
@@ -774,9 +783,7 @@ Examples:
             corridor_specs=list((intent.health or {}).get('bus_corridors')
                                 or ()) or None)
         if placements:
-            tmp = args.output_file + '.polish'
-            write_placed_output(args.output_file, tmp, placements)
-            os.replace(tmp, args.output_file)
+            write_placed_output(args.output_file, args.output_file, placements)
 
     # ---- self-check: the seed must grade clean against its own intent ------
     def _grade():
@@ -895,9 +902,7 @@ Examples:
                           f"{', '.join(f['reference'] for f in fixes)} out of "
                           f"a declared {' / '.join(_rules)}; re-seated "
                           f"against the polished board")
-                    tmp = args.output_file + '.reseat'
-                    write_placed_output(args.output_file, tmp, fixes)
-                    os.replace(tmp, args.output_file)
+                    write_placed_output(args.output_file, args.output_file, fixes)
                     graded = _grade()
     except floorplan.UntrustworthyOutline as exc:
         print(f"place_seed: outline cannot be trusted for grading: {exc}",

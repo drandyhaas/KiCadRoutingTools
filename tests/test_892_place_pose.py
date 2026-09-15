@@ -801,25 +801,10 @@ with tempfile.TemporaryDirectory() as d:
     pro = os.path.join(d, 'out.kicad_pro')
     with open(pro, 'w', encoding='utf-8') as f:
         f.write('OLD-PRO\n')
-    # THE STAGING NAME IS WHAT GETS BLOCKED, with a directory standing on it.
-    # `_promote` copies each file to `<dst>.krt-tmp` before it `os.replace`s
-    # anything, so a directory at that name fails the very first copy --
-    # IsADirectoryError on POSIX, PermissionError on Windows, both OSError,
-    # both at the staging step, before a single destination is touched. That
-    # is the point: the mechanism is the SAME on both platforms.
-    #
-    # It used to write-protect the destination DIRECTORY (`chmod 0500`), which
-    # is a POSIX statement: on Windows `os.chmod` can only toggle a file's
-    # read-only attribute and is a NO-OP on directories, so the promote
-    # succeeded there and the three refusal checks below asserted the inverse
-    # of what happened -- 3 of the 6 rows of #928, on a suite with no platform
-    # gate. Before that it protected the destination `.kicad_pro`, which
-    # stopped the pre-atomic implementation (a `copyfile` straight onto a
-    # mode-0444 file) and stops nothing now, because `rename(2)` overwrites a
-    # read-only destination. The read-only SIBLING is the block below, which
-    # measures the other half -- what happens when a REPLACE, not a copy, is
-    # the step that cannot proceed.
-    blocker = out + '.krt-tmp'
+    # Hold the publication exclusion marker. Unique staging names (#960)
+    # intentionally ignore stale .krt-tmp files; concurrency/recovery must
+    # instead refuse at the actual publication boundary on both platforms.
+    blocker = out + '.krt-publish-lock'
     os.mkdir(blocker)
     r = run([POSE, src, out, 'rotate', 'R1', '90'])
     wrote = open(out, encoding='utf-8').read()
@@ -829,10 +814,9 @@ with tempfile.TemporaryDirectory() as d:
           wrote == 'OLD-OUTPUT\n', wrote[:40])
     check("and the summary says nothing was written",
           summary(r)['output'] is None
-          and 'Nothing was written' in (summary(r).get('refused') or ''),
+          and 'publication busy or recovery required' in (summary(r).get('refused') or ''),
           str(summary(r).get('refused'))[:120])
-    # `isfile`, because the blocker this case planted is itself named
-    # `.krt-tmp` and is ours, not debris the promote left.
+    check("the existing exclusion marker is preserved", os.path.isdir(blocker))
     check("no .krt-tmp file is left behind",
           not [f for f in os.listdir(d)
                if f.endswith('.krt-tmp') and os.path.isfile(os.path.join(d, f))],

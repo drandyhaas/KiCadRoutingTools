@@ -1,0 +1,5 @@
+  cap pair clearance: 0.25mm (fixed default)
+  board-edge margin for caps: 0.55mm (fixed default)
+Copper-to-hole clearance 0.25mm (from the board's own min_hole_clearance, above the 0.2mm fab floor)
+BGAs: (none)  fanout vias: 0  movable near-BGA caps: 0
+No vias on the board - run this AFTER bga_fanout.py.

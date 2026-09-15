@@ -1,0 +1,154 @@
+{
+  "revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+  "measurement_behavior_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+  "publication_behavior_revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+  "test_reference": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+  "cli_help_behavior_reference": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+  "changed_from_publication_behavior": [
+    "docs/floorplan-intent.md",
+    "docs/issue-961-evidence/CONTRACT.md",
+    "py_tools/check_floorplan.py",
+    "tests/fixtures/961-inherited-edge-intents.json",
+    "tests/test_549_floorplan_cli.py",
+    "tests/test_549_floorplan_grade.py",
+    "tests/test_706_seat_edge_target.py",
+    "tests/test_712_edge_centering.py",
+    "tests/test_961_connector_publication.py",
+    "tests/test_place_edge_containment.py",
+    "tests/test_run23_connector_affinity.py",
+    "tests/test_run26_edge_seat_body_basis.py",
+    "tests/test_run27_edge_seat_clears_placed.py",
+    "tests/test_run4_reconstruct.py"
+  ],
+  "all_identical": true,
+  "identities": [
+    {
+      "path": "py_placer/placement/floorplan.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "006269af3d5733a6c152585c1e3c0cb067c18145",
+      "final_blob_or_tree": "006269af3d5733a6c152585c1e3c0cb067c18145",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/connector_geometry.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "d67f440f75831a9667db8b3bdbb1454ec3eb0235",
+      "final_blob_or_tree": "d67f440f75831a9667db8b3bdbb1454ec3eb0235",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/legality.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "038056a6d7cf431b6e381d271259cc63535fd4ca",
+      "final_blob_or_tree": "038056a6d7cf431b6e381d271259cc63535fd4ca",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/quench.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "b05fe013bde1b47cbcd625f04181ba85cbbb86c7",
+      "final_blob_or_tree": "b05fe013bde1b47cbcd625f04181ba85cbbb86c7",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/seeder.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "3682f685435dab3681974d366585dcc76413d70c",
+      "final_blob_or_tree": "3682f685435dab3681974d366585dcc76413d70c",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/reconstruct.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "2e7b49f72e5e869e00d95eaaa6976aec6109383a",
+      "final_blob_or_tree": "2e7b49f72e5e869e00d95eaaa6976aec6109383a",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/writer.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "556bfaa194dcdb92ad701bfbcb60401e2fcb95a8",
+      "final_blob_or_tree": "556bfaa194dcdb92ad701bfbcb60401e2fcb95a8",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/publication.py",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "ad6ee655f903760c99638f50d0df8f70d2b9ff89",
+      "final_blob_or_tree": "ad6ee655f903760c99638f50d0df8f70d2b9ff89",
+      "identical": true
+    },
+    {
+      "path": "py_router",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "c1f94185bbe16eced655a6bb047768549031fdb0",
+      "final_blob_or_tree": "c1f94185bbe16eced655a6bb047768549031fdb0",
+      "identical": true
+    },
+    {
+      "path": "kicad_routing_plugin",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "d7e66ed873d39e4882f16a40e727d442b192d080",
+      "final_blob_or_tree": "d7e66ed873d39e4882f16a40e727d442b192d080",
+      "identical": true
+    },
+    {
+      "path": "kicad_files",
+      "tested_revision": "bc8071b9ab586dd78629cdf511e4d527b4af33a1",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "4434f5bd38b8211c7e486110255e9f8e0934553b",
+      "final_blob_or_tree": "4434f5bd38b8211c7e486110255e9f8e0934553b",
+      "identical": true
+    },
+    {
+      "path": "py_placer/place_seed.py",
+      "tested_revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "407e1e3930831c3fb582da9386f893d0a99199e9",
+      "final_blob_or_tree": "407e1e3930831c3fb582da9386f893d0a99199e9",
+      "identical": true
+    },
+    {
+      "path": "py_placer/place_reconstruct.py",
+      "tested_revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "18d7bcba2c3a051bdfdaedfa19a9c4380a08d076",
+      "final_blob_or_tree": "18d7bcba2c3a051bdfdaedfa19a9c4380a08d076",
+      "identical": true
+    },
+    {
+      "path": "py_placer/placement/connector_publication.py",
+      "tested_revision": "e182bbfe4c3ec19ad65999de9ff023dc84035128",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "c576540b6b22ef4f1659dcc310b0c753d0ef6d41",
+      "final_blob_or_tree": "c576540b6b22ef4f1659dcc310b0c753d0ef6d41",
+      "identical": true
+    },
+    {
+      "path": "py_tools",
+      "tested_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "0d610643524f5237be64e5969efbae7d0b4c9a9e",
+      "final_blob_or_tree": "0d610643524f5237be64e5969efbae7d0b4c9a9e",
+      "identical": true
+    },
+    {
+      "path": "tests",
+      "tested_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "final_revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+      "tested_blob_or_tree": "803fabce03ab98cc054137b88e772ef64d547879",
+      "final_blob_or_tree": "803fabce03ab98cc054137b88e772ef64d547879",
+      "identical": true
+    }
+  ]
+}

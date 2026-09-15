@@ -1,0 +1,58 @@
+Modified 65 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp6e63e0x4\pile.kicad_pcb
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  OK   seed run exits 0 -- gument_mm": 0.55, "basis": "analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check", "complete": true, "findings": [], "measured_pads": 295, "minimum_gap_mm": 6.770000000000003, "required_mm": 0.55, "rules_unmeasured": [], "source": "caller argument", "tolerance_mm": 1e-06, "units": "mm", "unmeasured": []}, "placed": 65, "rotation_unseated": {}, "unseated": 0, "unseated_refs": []}
+EXIT=0
+
+  OK   all parts placed -- 65/65
+  OK   no unseated parts
+  OK   grade has zero errors
+  OK   re-run exits 0
+  OK   same seed is byte-identical across hash seeds
+  OK   --seed 3 exits 0/4 -- rc=0
+  OK   --seed 3 differs
+  OK   placed board refused with exit 3 -- rc=3
+  OK   refusal names place_portfolio as the explore path
+  OK   seeded board assesses as PLACED
+  OK   sibling run exits 0
+  OK   seed output carries the .kicad_pro sibling
+  OK   seed output carries the .kicad_dru sibling
+
+--reseat
+  OK   healthy board: bare --reseat exits 0 -- rc=0 ": [], "reseat": true, "reseat_max_move_mm": 0.0, "reseat_min_gain": 0.0, "reseated": 0, "reseated_refs": [], "scope": [], "scope_selector": null, "scope_source": "auto:damage_witnesses", "status": "ok", "unseated": [], "witnesses_after": 0, "witnesses_after_refs": [], "witnesses_before": 0}
+EXIT=0
+
+  OK   healthy board: auto scope is empty -- []
+  OK   healthy board: no witnesses before OR after
+Modified 3 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\tmp6e63e0x4\dmg.kicad_pcb
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  OK   damage_witnesses names exactly the parts pushed off -- ['C1', 'C10', 'C11'] vs ['C1', 'C10', 'C11']
+  WARNING [quench]: 2 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: H6, H7
+  OK   a 25mm+ overhang is emitted WITHOUT an edge (treated as damage) -- [('C1', 5.0, None), ('C10', 5.0, None), ('C11', 5.0, None)]
+  OK   ...and its band is CAPPED, not the observed displacement -- [('C1', 5.0, None), ('C10', 5.0, None), ('C11', 5.0, None)]
+  OK   ...and the entry says so in machine-readable form
+  OK   the uncapped band would have been >= the displacement -- cap must be far below the ~25-35mm observed overhang
+  OK   --reseat on the damaged board exits 0 -- rc=0 rance_mm": 1e-06, "units": "mm", "unmeasured": []}, "refused": [], "reseat": true, "reseat_max_move_mm": 133.617, "reseat_min_gain": 0.0, "reseated": 3, "reseated_refs": ["C1", "C10", "C11"], "scope": ["C1", "C10", "C11"], "scope_selector": null, "scope_source": "auto:damage_witnesses", "status": "ok", "unseated": [], "witnesses_after": 0, "witnesses_after_refs": [], "witnesses_before": 3}
+EXIT=0
+
+  OK   --reseat auto scope is exactly the witnesses -- ['C1', 'C10', 'C11']
+  OK   --reseat scope_source names the census
+  OK   witnesses_after is 0 -- THE number that predicts routability -- 3 -> 0
+  OK   every scope part was seated -- {'accept_basis': {'eviction_licence': None, 'fired': 'oob', 'hpwl_after': 2507.882, 'hpwl_before': 2670.465, 'hpwl_delta': -162.583, 'intent_licence': None, 'min_gain': 0.0, 'min_gain_applies_to': 'scope_hpwl', 'min_gain_units': 'mm', 'policy': 'auto:oob-strict', 'safety': None, 'scope_source': 'auto:damage_witnesses', 'terms': [{'after': 0.882, 'before': 93.957, 'first': True, 'gain': 93.075, 'min_gain_applies': False, 'term': 'oob', 'units': 'mm', 'would_fire': True}], 'witness_ok': True, 'witnesses_after': 0, 'witnesses_before': 3}, 'accepted': True, 'complete': True, 'dry_run': False, 'edge_bands_dropped': {'C1': 5.0, 'C10': 5.0, 'C11': 5.0}, 'evicted': [], 'evictions': 0, 'evictions_reverted': 0, 'gate_after': [0, 0, 0.0, 0.882, 0, 2507.882, 0.0], 'gate_before': [0, 0, 0.0, 93.957, 0, 2670.465, 0.0], 'grade_errors': 0, 'grade_errors_pinned': 0, 'hole_conflicts_after': 0, 'no_pose_blockers': {}, 'no_pose_census': {}, 'no_pose_verdict': {}, 'oob_pad_count_after': 0, 'output': 'C:\\Users\\rob\\AppData\\Local\\Temp\\tmp6e63e0x4\\r.kicad_pcb', 'pad_clearance_required': [], 'pad_conflicts_after': 0, 'pad_edge_after': {'argument_mm': 0.55, 'basis': 'analytic pad copper extrema (custom pads: parsed polygons) vs rectangular Edge.Cuts centreline; other outlines sampled, not certified; no body/track/via/fill check', 'complete': True, 'findings': [{'edge': 'bottom', 'gap_mm': 0.45200000000000173, 'pad_index': 0, 'pad_loc': [28.702, 28.702], 'pad_ref': 'H1.1', 'required_mm': 0.55, 'shortfall_mm': 0.09799999999999831}, {'edge': 'bottom', 'gap_mm': 0.45200000000000173, 'pad_index': 0, 'pad_loc': [220.218, 28.702], 'pad_ref': 'H2.1', 'required_mm': 0.55, 'shortfall_mm': 0.09799999999999831}, {'edge': 'top', 'gap_mm': 0.4519999999999982, 'pad_index': 0, 'pad_loc': [28.702, 52.578], 'pad_ref': 'H3.1', 'required_mm': 0.55, 'shortfall_mm': 0.09800000000000186}, {'edge': 'top', 'gap_mm': 0.4519999999999982, 'pad_index': 0, 'pad_loc': [220.218, 52.578], 'pad_ref': 'H4.1', 'required_mm': 0.55, 'shortfall_mm': 0.09800000000000186}, {'edge': 'top', 'gap_mm': 0.4519999999999982, 'pad_index': 0, 'pad_loc': [124.46, 52.578], 'pad_ref': 'H5.1', 'required_mm': 0.55, 'shortfall_mm': 0.09800000000000186}], 'measured_pads': 295, 'minimum_gap_mm': 0.4519999999999982, 'required_mm': 0.55, 'rules_unmeasured': [], 'source': 'caller argument', 'tolerance_mm': 1e-06, 'units': 'mm', 'unmeasured': []}, 'refused': [], 'reseat': True, 'reseat_max_move_mm': 133.617, 'reseat_min_gain': 0.0, 'reseated': 3, 'reseated_refs': ['C1', 'C10', 'C11'], 'scope': ['C1', 'C10', 'C11'], 'scope_selector': None, 'scope_source': 'auto:damage_witnesses', 'status': 'ok', 'unseated': [], 'witnesses_after': 0, 'witnesses_after_refs': [], 'witnesses_before': 3}
+  OK   the gate ACCEPTED
+  OK   oob strictly improved -- 93.957 -> 0.882
+  OK   nothing ABOVE oob in the gate tuple worsened -- [0, 0, 0.0] -> [0, 0, 0.0]
+  OK   no scope ref kept an edge declaration
+  OK   damaged board HAS nets with an off-board pad -- ['+12V', '+3V3', 'GND']
+  OK   after --reseat NO net has an off-board pad -- []
+  OK   placement-blocked nets do not survive the pass -- before [] after []
+  OK   --reseat is byte-identical across hash seeds
+  OK   an unmatched ref is named in the notes -- , "reseat": true, "reseat_max_move_mm": 0.0, "reseat_min_gain": 0.0, "reseated": 0, "reseated_refs": [], "scope": [], "scope_selector": null, "scope_source": "explicit", "status": "ok", "unseated": [], "witnesses_after": 3, "witnesses_after_refs": ["C1", "C10", "C11"], "witnesses_before": 3}
+EXIT=0
+
+  OK   --reseat with --force is a usage error -- rc=2
+
+37/37 checks passed
+
+STDERR:

@@ -73,27 +73,17 @@ def _bbox_outside(ext, b) -> float:
 
 
 def pad_oob_amount(state, edge_bands=None) -> float:
-    """Summed pad/hole-extent off-board amount over all parts (zero margin).
+    """Summed pad/hole-extent boundary amount, independent of body bands.
 
-    Run-4 F2: a ref declared in ``edge_bands`` ({ref: band_max_mm}, from the
-    intent's edge_connectors) charges only the EXCESS past its band -- its
-    declared overhang is by design, and without the allowance the gate tuple
-    itself would revert a correct edge-homecoming (the move RAISES board-wide
-    oob exactly by the legitimate overhang).
-
-    Run-7 finding: this used to measure against the board's BOUNDING RECTANGLE
-    while every other instrument used the real Edge.Cuts outline. On a
-    non-rectangular board the two disagree completely -- a candidate that swept
-    nine parts into a notch measured `oob 0.0` here and 14.29mm everywhere
-    else, so the gate accepted an evacuation it was built to reject. The
-    legality context already owns the outline-aware measurement (rings,
-    cutouts, notches); use it, and keep the bbox form only as the fallback for
-    a state that has no context.
+    ``edge_bands`` remains an accepted compatibility argument. Since #961 it
+    cannot discount copper containment: a physical body may overhang while
+    its copper must still satisfy its own requirement. This is a search
+    aggregate, never labelled a physical body distance.
     """
     oob = 0.0
     if state.legality_ctx is None:
         return oob
-    bands = edge_bands or {}
+    # #961: body bands never waive pad copper containment.
     ctx = state.legality_ctx
     outline_aware = getattr(ctx, 'gate', None) is not None
     for ref, pp in ctx.parts.items():
@@ -107,7 +97,7 @@ def pad_oob_amount(state, edge_bands=None) -> float:
             if ext is None:
                 continue
             amt = _bbox_outside(ext, state.board)
-        oob += max(0.0, amt - bands.get(ref, 0.0))
+        oob += max(0.0, amt)
     return oob
 
 
@@ -1113,7 +1103,7 @@ def _exchange_solve(state, v, exclude, edge_bands):
     except ImportError:
         return None
     vx, vy = v
-    bands = edge_bands or {}
+    # #961: body bands never waive pad copper containment.
     excl = exclude or set()
     ctx = state.legality_ctx
     m = state.clearance + 0.1
@@ -1140,7 +1130,7 @@ def _exchange_solve(state, v, exclude, edge_bands):
             ext = (pp.extent(p.x + k * vx, p.y + k * vy, p.rot)
                    if pp is not None else None)
             if ext is None or (_bbox_outside(ext, state.board)
-                               <= bands.get(r, 0.0) + 1e-6):
+                               <= 1e-6):
                 ss.append(k)
         opts[r] = ss
 
@@ -1557,16 +1547,13 @@ def build_candidates(state, tiers: Tiers,
     (kept only when the pad extent stays on-board), and any pattern-proposed
     slots. Locked parts get only stay.
 
-    Run-4 F2: the anti-evacuation cull compares each candidate's off-board
-    amount against the part's CURRENT pose -- and a DISPLACED edge part sits
-    interior (cur_oob = 0), so its true home, which overhangs BY DESIGN, was
-    culled unconditionally (run 3's J1 was never offered its edge slot).
-    Refs declared in ``edge_bands`` ({ref: band_max_mm}) may overhang up to
-    their band; 'stay' stays index 0 -- a declaration never forces a move.
+    The anti-evacuation cull compares copper/hole extent to the current pose.
+    Body bands do not waive it. 'Stay' stays index 0; a declaration never
+    forces a move, and inherited defects remain available to no-worse search.
     """
     out: Dict[str, List[Tuple[float, float]]] = {}
     pattern: Dict[str, Set[Tuple[float, float]]] = {}
-    bands = edge_bands or {}
+    # #961: body bands never waive pad copper containment.
     for ref in sorted(state.parts):
         p = state.parts[ref]
         cands = [(p.x, p.y)]
@@ -1593,8 +1580,8 @@ def build_candidates(state, tiers: Tiers,
                     # Never offer a candidate whose pad copper leaves the
                     # board MORE than the part already does (S1: the
                     # conflict gate must not be satisfiable by evacuation)
-                    # -- except up to a declared edge band (run-4 F2).
-                    allow = max(cur_oob, bands.get(ref, 0.0))
+                    # Body overhang cannot license additional off-board copper.
+                    allow = cur_oob
                     if _bbox_outside(ext, state.board) > allow + 1e-6:
                         continue
             kept.append((x, y))

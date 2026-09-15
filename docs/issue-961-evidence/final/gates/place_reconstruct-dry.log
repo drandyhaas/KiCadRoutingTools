@@ -1,0 +1,13 @@
+CMD: python.exe -X utf8 C:\Users\rob\Documents\prive\git\KRT-961-review-final\py_placer\place_reconstruct.py C:\Users\rob\Documents\prive\git\KRT-961-review-final\docs\issue-961-evidence\final\gate-20260914-121034\place_reconstruct-dry\board.kicad_pcb C:\Users\rob\Documents\prive\git\KRT-961-review-final\docs\issue-961-evidence\final\gate-20260914-121034\place_reconstruct-dry\out.kicad_pcb --intent C:\Users\rob\Documents\prive\git\KRT-961-review-final\docs\issue-961-evidence\final\gate-20260914-121034\place_reconstruct-dry\intent.json --clearance .2 --board-edge-clearance .25 --stages classify --dry-run
+ENV KNOBS: none
+legality at clearance 0.2 (cli), edge 0.25 (cli)
+Loading C:\Users\rob\Documents\prive\git\KRT-961-review-final\docs\issue-961-evidence\final\gate-20260914-121034\place_reconstruct-dry\board.kicad_pcb...
+  WARNING [quench]: 18 footprint(s) have no courtyard (F/B.CrtYd) and fall back to their pad bounding box, which carries no courtyard margin: C1, C2, C3, C4, CON1, CON2, Q1, Q2, R1, R2, R3, R4, ...
+Tiers: 0 locked, 2 zero-net (frame), 5 anchors (extent >= 3.8mm), 11 smalls
+Declared edge parts (band max mm): USB1 (0.65)
+Gate before: locked_contacts=0 pad_pairs=1 hole=0 oob=0 stacks=0 hpwl=253.981 overlap=1.14
+JSON_SUMMARY: {"assign_moved": [], "assign_pruned": [], "complete": false, "connector_requirements": {"accepted": null, "complete": false, "reason": "no written final candidate to measure"}, "dry_run": true, "edge_bands": {"USB1": 0.65}, "engineering_clean": false, "gate_after_assign": [0, 1, 0.0, 0.0, 0, 253.981, 1.14], "gate_before": [0, 1, 0.0, 0.0, 0, 253.981, 1.14], "output": null, "published": false, "stages_requested": ["classify"], "status": "dry_run", "tiers": {"anchor_extent_mm": 3.8, "anchors": ["CON1", "CON2", "U1", "U2", "USB1"], "edge": ["USB1"], "locked": [], "smalls": ["C1", "C2", "C3", "C4", "Q1", "Q2", "R1", "R2", "R3", "R4", "Y1"], "zero_net": ["Ref*", "Ref*~2"]}, "would_move": []}
+EXIT=0
+
+STDERR
+WARNING: 2 footprint block(s) share 1 reference(s) -- Ref* x2. Every block is kept; the later ones are keyed ~2, ~3 ... in file order, so this board parses as 21 parts. Legal in KiCad (a paired testpoint, a net tie), but rename them if they are meant to be distinct parts.

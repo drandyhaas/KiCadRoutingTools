@@ -1320,45 +1320,31 @@ def _edge_pose(part, bounds, edge: str, frac: float, overhang: float
 
 def _edge_correct(state, ref: str, edge: str, x: float, y: float,
                   target: float) -> Tuple[float, float, bool]:
-    """Walk the pose along the edge normal until the MEASURED overhang hits
-    `target`. The analytic pose measures against the bounding box, but the
-    grade's rule_edge_connector measures rect_outside_amount against the real
-    Edge.Cuts rings -- on a non-rectangular outline the two differ by the
-    local inset, and a seed placed by the bbox grades over its declared band
-    (measured on splitflap: 4 connectors 0.1-0.2mm past their max).
+    """Correct a first guess to the declared drawn-body support position.
 
-    Returns (x, y, converged). **The third element is not decoration.** This
-    walk moves along ONE axis while `rect_outside_amount` is a SUM over all
-    four sides (`legality.EdgeGate.rect_outside_amount`), so any along-edge
-    overshoot is a
-    constant term the walk cannot cancel -- it subtracts it again every
-    iteration and marches the part inland past the far edge. Measured on a
-    41.16mm connector on a 50.8mm edge: frac 0.70 -> y 88.767 (off the
-    opposite side), frac 0.90 -> y -2.443. It used to return that pose
-    indistinguishably from a converged one, and the caller seated it.
+    A zero target is flush for this optional seeding strategy; it does not
+    turn a zero-minimum grading band into a mandatory seating requirement.
+    Unsupported body/boundary geometry returns non-convergence.
     """
-    part = state.parts[ref]
-    converged = False
-    for _ in range(4):
-        amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
-        err = target - amt
-        if abs(err) < 0.02:
-            converged = True
-            break
-        if edge == 'north':
-            y -= err
-        elif edge == 'south':
-            y += err
-        elif edge == 'west':
-            x -= err
-        else:
-            x += err
+    from .connector_geometry import state_measure
+    row = state_measure(state, ref, edge, x, y)
+    if not row['body_measured']:
+        return x, y, False
+    # Signed support position makes an inboard starting pose correctable too.
+    err = target - row['body_signed_position_mm']
+    if edge == 'north':
+        y -= err
+    elif edge == 'south':
+        y += err
+    elif edge == 'west':
+        x -= err
     else:
-        # Ran out of iterations. One last measurement decides it -- a walk
-        # that happened to land on its target on the final step is converged.
-        amt = state.edge_gate.rect_outside_amount(part.rect(x, y, part.rot))
-        converged = abs(target - amt) < 0.02
-    return x, y, converged
+        x += err
+    row = state_measure(state, ref, edge, x, y)
+    return x, y, (row['body_measured'] and
+                  abs(target-row['body_overhang_mm']) <= 1e-6 and
+                  not any(v > 1e-6 for v in row['other_body_edge_overhang_mm'].values()))
+
 
 
 def edge_seat_ok(state, part, x: float, y: float, edge: str,
@@ -1404,8 +1390,13 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
     reader to look at an outline that is not the problem.
     """
     r, tht = part.rects(x, y, part.rot)
-    amt = state.edge_gate.rect_outside_amount(r)
-    if not ((lo - 0.02) <= amt <= (hi + 0.02)):
+    from .connector_geometry import state_measure
+    row = state_measure(state, part.ref, edge, x, y)
+    amt = row['body_overhang_mm']
+    if (amt is None or not ((lo - 1e-6) <= amt <= (hi + 1e-6))
+            or any(v > 1e-6 for v in row.get('other_body_edge_overhang_mm', {}).values())):
+        if reasons is not None:
+            reasons.append(row.get('body_unmeasured_reason') or 'drawn body outside declared edge band')
         return False
     _blockers = state.keepout_blockers(part.ref, (r, tht))
     if _blockers:
@@ -1429,12 +1420,12 @@ def edge_seat_ok(state, part, x: float, y: float, edge: str,
         if reasons is not None:
             reasons.extend(f"exclusive zone of block {n!r}" for n in _zblockers)
         return False
-    gate = state.edge_gate
-    for px, py, _sz in part.pad_globals(x, y, part.rot):
-        # A zero-size rect at the pad centre: "is this point on the board",
-        # asked through the gate so cutouts and milled rings count.
-        if gate.rect_outside_amount((px, py, px, py)) > 1e-9:
-            return False
+    from .connector_geometry import candidate_copper
+    copper = candidate_copper(state, part.ref, x, y)
+    if not copper['complete'] or copper['findings']:
+        if reasons is not None:
+            reasons.append('pad copper edge clearance fails or is unmeasured')
+        return False
     return True
 
 
@@ -1643,7 +1634,12 @@ def _already_on_its_edge(state, part) -> bool:
     once. A measurement that cannot be taken must raise, not return the
     permissive answer.
     """
-    return state.edge_gate.rect_outside_amount(part.rect()) > _ON_EDGE_EPS_MM
+    from .connector_geometry import state_measure
+    for edge in ('west', 'east', 'north', 'south'):
+        row = state_measure(state, part.ref, edge)
+        if row['body_measured'] and row['body_overhang_mm'] > _ON_EDGE_EPS_MM:
+            return True
+    return False
 
 
 def _seat_edge(state, ref: str, entry: Dict, must_lock: Set[str],
@@ -3361,13 +3357,6 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     notes: List[str] = []
     must_lock = {r for pat in intent.must_lock
                  for r in fnmatch.filter(refs_all, pat)} if intent else set()
-    # {ref: declared band max mm}. The off-board census below charges only the
-    # EXCESS past the band, not nothing at all -- see the note there.
-    edge_band: Dict[str, float] = {}
-    if intent:
-        for _c in intent.edge_claims():   # seat claims only; see edge_claims
-            edge_band[_c['ref']] = float(
-                (_c.get('overhang_mm') or {}).get('max') or 0.0)
 
     ref_zone: Dict[str, object] = {}
     if intent:
@@ -3592,17 +3581,7 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         if ext is None:
             continue
         amt = zero_gate.rect_outside_amount(ext)
-        band = edge_band.get(ref)
-        if band is not None:
-            excess = amt - band
-            if excess > 1e-6:
-                notes.append(
-                    f"{ref}: overhangs {amt:.3f}mm against a declared band of "
-                    f"{band:.3f}mm -- the {excess:.3f}mm EXCESS is charged "
-                    f"(a declared band exempts the overhang it declares, not "
-                    f"any overhang)")
-                _charge(ref, excess)
-            continue
+        # #961: body allowances never discount copper/hole extent.
         if amt > 1e-6:
             _charge(ref, amt)
 

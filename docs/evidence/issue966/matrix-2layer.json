@@ -1,0 +1,690 @@
+{
+  "revision": "e5681428d43a17f663df257b9a94c55c544e786c",
+  "production_swig_gui_sha256": "bd55302fed397a059f0852912d584cd725b009f67e70962caffd683099235b1f",
+  "source_board": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-966-verifier\\kicad_files\\flat_hierarchy.kicad_pcb",
+  "source_sha256": "f756cec11151f79a9c8fe7123089130ad166f5abfd6d5f4d59aaf828b08eb05a",
+  "source_project_sha256": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+  "source_siblings": {
+    ".kicad_pro": "c994fc09d25007823fefba8c2362b4c93f057d7ffd88b8d2c134e6b7cbb574e0",
+    ".kicad_prl": "139647be537bf5ac9bb9eb1adca9ca105551b891049f1aa22e19c4e8e1d25d0b",
+    ".kicad_dru": null,
+    ".design-brief.json": null
+  },
+  "kicad": "10.0.0",
+  "rows": [
+    {
+      "case": "standard/declared=0.0/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.0/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.0/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.0/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.0/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.0/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.099999/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.099999/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.099999/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.099999/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.099999/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.099999/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.1/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.1/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.1/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.1/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.1/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.1/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.100001/unchecked-typed=0.25",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.100001/unchecked-typed=0.73",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.100001/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.100001/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.100001/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.100001/ceiling=0.3",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.2/unchecked-typed=0.25",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.2/unchecked-typed=0.73",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.2/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.2/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.2/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.2/ceiling=0.3",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.4/unchecked-typed=0.25",
+      "expected": 0.4,
+      "actual": 0.4,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.4/unchecked-typed=0.73",
+      "expected": 0.4,
+      "actual": 0.4,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.4/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.4/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.4/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "standard/declared=0.4/ceiling=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.0/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.0/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.0/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.0/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.0/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.0/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.099999/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.099999/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.099999/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.099999/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.099999/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.099999/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.1/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.1/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.1/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.1/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.1/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.1/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.100001/unchecked-typed=0.25",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.100001/unchecked-typed=0.73",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.100001/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.100001/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.100001/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.100001/ceiling=0.3",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.2/unchecked-typed=0.25",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.2/unchecked-typed=0.73",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.2/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.2/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.2/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.2/ceiling=0.3",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.4/unchecked-typed=0.25",
+      "expected": 0.4,
+      "actual": 0.4,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.4/unchecked-typed=0.73",
+      "expected": 0.4,
+      "actual": 0.4,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.4/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.4/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.4/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "advanced/declared=0.4/ceiling=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.0/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.0/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.0/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.0/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.0/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.0/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.099999/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.099999/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.099999/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.099999/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.099999/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.099999/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.1/unchecked-typed=0.25",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.1/unchecked-typed=0.73",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.1/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.1/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.1/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.1/ceiling=0.3",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.100001/unchecked-typed=0.25",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.100001/unchecked-typed=0.73",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.100001/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.100001/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.100001/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.100001/ceiling=0.3",
+      "expected": 0.100001,
+      "actual": 0.100001,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.2/unchecked-typed=0.25",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.2/unchecked-typed=0.73",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.2/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.2/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.2/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.2/ceiling=0.3",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.4/unchecked-typed=0.25",
+      "expected": 0.4,
+      "actual": 0.4,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.4/unchecked-typed=0.73",
+      "expected": 0.4,
+      "actual": 0.4,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.4/explicit=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.4/ceiling=0.09",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.4/explicit=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "auto/declared=0.4/ceiling=0.3",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "custom physical clearance=0.083, declared zero",
+      "expected": 0.083,
+      "actual": 0.083,
+      "pass": true
+    },
+    {
+      "case": "custom hole floor0.10 declared0 keeps CLI fallback0.2",
+      "expected": 0.2,
+      "actual": 0.2,
+      "pass": true
+    },
+    {
+      "case": "plan explicit clearance",
+      "expected": 0.3,
+      "actual": 0.3,
+      "pass": true
+    },
+    {
+      "case": "plan reset then omitted clearance",
+      "expected": 0.1,
+      "actual": 0.1,
+      "pass": true
+    }
+  ],
+  "passed": 112,
+  "failed": 0
+}

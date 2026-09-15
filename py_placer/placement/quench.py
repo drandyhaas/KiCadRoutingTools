@@ -797,6 +797,8 @@ class QuenchState:
         # usable ring at all -- in which case behaviour is unchanged.
         self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
         self.clearance = clearance
+        # Physical connector measurements never consume the occupancy margin.
+        self.board_edge_clearance = board_edge_clearance
         self.crossing_penalty = crossing_penalty
         self.length_weight = length_weight
         self.net_weights = net_weights or {}

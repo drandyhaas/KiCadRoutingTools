@@ -1,0 +1,77 @@
+{
+  "revision": "9e65e44b0cb1bc7ab2b8656a48f4848ddbc38100",
+  "production_AST_identical_except_help_strings": true,
+  "actual_grade_JSON_unchanged": true,
+  "no_native_is_skip_not_pass": true,
+  "runs": [
+    {
+      "name": "native-publication",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_961_connector_publication.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "native-publication.log"
+    },
+    {
+      "name": "system-pcbnew-probe",
+      "argv": [
+        "C:\\Users\\rob\\AppData\\Local\\Microsoft\\WindowsApps\\python3.EXE",
+        "-c",
+        "import importlib.util,sys; print(sys.version); assert importlib.util.find_spec(\"pcbnew\") is None"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "system-pcbnew-probe.log"
+    },
+    {
+      "name": "no-native-publication",
+      "argv": [
+        "C:\\Users\\rob\\AppData\\Local\\Microsoft\\WindowsApps\\python3.EXE",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\tests\\test_961_connector_publication.py"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 77,
+      "log": "no-native-publication.log"
+    },
+    {
+      "name": "floorplan-help",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\py_tools\\check_floorplan.py",
+        "--help"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "floorplan-help.log"
+    },
+    {
+      "name": "floorplan-existing-control",
+      "argv": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\py_tools\\check_floorplan.py",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\candidate-bc8071\\original\\esp_prog.kicad_pcb",
+        "--intent",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\candidate-bc8071\\zero.intent.json",
+        "--clearance",
+        ".25",
+        "--board-edge-clearance",
+        ".25",
+        "--json",
+        "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro\\docs\\issue-961-evidence\\reproduction\\help-portability-9e65\\grade.json"
+      ],
+      "cwd": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-961-review-repro",
+      "exit": 0,
+      "log": "floorplan-existing-control.log"
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "revision": "2448498c762e0c5a5807ff02554cf4faa72a536d",
+  "results": [
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_549_floorplan_grade.py"
+      ],
+      "exit": 0,
+      "log": "test_549_floorplan_grade-2448498c.log"
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_549_floorplan_cli.py"
+      ],
+      "exit": 0,
+      "log": "test_549_floorplan_cli-2448498c.log"
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_961_connector_geometry.py"
+      ],
+      "exit": 0,
+      "log": "test_961_connector_geometry-2448498c.log"
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_961_connector_publication.py"
+      ],
+      "exit": 0,
+      "log": "test_961_connector_publication-2448498c.log"
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_run26_edge_seat_body_basis.py"
+      ],
+      "exit": 0,
+      "log": "test_run26_edge_seat_body_basis-2448498c.log"
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_run27_edge_seat_clears_placed.py"
+      ],
+      "exit": 0,
+      "log": "test_run27_edge_seat_clears_placed-2448498c.log"
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_place_edge_containment.py"
+      ],
+      "exit": 0,
+      "log": "test_place_edge_containment-2448498c.log"
+    },
+    {
+      "command": [
+        "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe",
+        "-X",
+        "utf8",
+        "tests/test_run4_reconstruct.py"
+      ],
+      "exit": 0,
+      "log": "test_run4_reconstruct-2448498c.log"
+    }
+  ]
+}

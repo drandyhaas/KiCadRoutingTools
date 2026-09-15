@@ -61,7 +61,9 @@ def poses(path):
     from kicad_parser import parse_kicad_pcb
     from placement.legality import footprint_side
     pcb = parse_kicad_pcb(path)
-    return {r: (f.x, f.y, f.rotation or 0.0, footprint_side(f))
+    from placement.parser import extract_locked_refs
+    locked = extract_locked_refs(path)
+    return {r: (f.x, f.y, f.rotation or 0.0, footprint_side(f), r in locked)
             for r, f in pcb.footprints.items()}
 
 
@@ -88,12 +90,27 @@ def moved_refs(a, b):
         # The side term is an OR, not a tolerance: a flip in place moves
         # nothing else, so without it the part reads as untouched (#714).
         if (abs(pa[0] - pb[0]) > POSE_TOL_MM or abs(pa[1] - pb[1]) > POSE_TOL_MM
-                or drot > POSE_TOL_DEG or pa[3] != pb[3]):
+                or drot > POSE_TOL_DEG or pa[3] != pb[3]
+                or (len(pa) > 4 and len(pb) > 4 and pa[4] != pb[4])):
             out.append(ref)
     return out
 
 
 def audit(workdir, delivered=None):
+    """Serialize the read with cooperating publishers, including final readback."""
+    lock = os.path.join(workdir, '.pose-publication-lock')
+    try:
+        os.mkdir(lock)
+    except FileExistsError:
+        return UNPROVEN, {'verdict': 'UNPROVEN', 'recovery_journal': lock,
+                          'reason': 'publication in progress or recovery required: ' + lock}
+    try:
+        return _audit(workdir, delivered)
+    finally:
+        os.rmdir(lock)
+
+
+def _audit(workdir, delivered=None):
     from placement import provenance as PV
     manifest = os.path.join(workdir, PV.REGIME_NAME)
     if not os.path.isfile(manifest):
@@ -267,11 +284,18 @@ def audit(workdir, delivered=None):
         for ref in row.get('refs_moved') or ():
             if ok:
                 claimed[ref] = lever or row.get('caller', '<unknown>')
-                if _wrote_this and ref in _poses:
-                    claim_pose[ref] = tuple(_poses[ref]) + (_sides.get(ref),)
             else:
                 undeclared.setdefault(ref, lever or row.get(
                     'caller', '<unknown>'))
+        # A final snapshot also carries unchanged, inherited poses. Those
+        # supply the final pose for an earlier claim, without claiming that
+        # this application tool selected every coordinate on the board.
+        if ok and _wrote_this:
+            for ref in (row.get('refs_written') if row.get('final_snapshot')
+                        else row.get('refs_moved')) or ():
+                if ref in _poses:
+                    claim_pose[ref] = tuple(_poses[ref]) + (
+                        _sides.get(ref), (row.get('locks_written') or {}).get(ref))
 
     # A claim is only good for the pose it claimed. Two kinds of ref have no
     # pose to compare and both stay ref-keyed rather than being failed for it:
@@ -299,8 +323,14 @@ def audit(workdir, delivered=None):
                 or abs(got[1] - want[1]) > _TOL_MM
                 or abs(((got[2] or 0.0) - want[2] + 180.0) % 360.0 - 180.0)
                 > _TOL_DEG
-                or (want[3] is not None and got[3] != want[3])):
+                or (want[3] is not None and got[3] != want[3])
+                or (want[4] is not None and got[4] != want[4])):
             drifted.append(ref)
+        elif ((want[3] is None and got[3] != _sp[ref][3])
+              or (want[4] is None and got[4] != _sp[ref][4])):
+            # Legacy rows did not record these fields. A changed state with
+            # no corresponding claim is unmeasured, never certified CLEAN.
+            unverifiable.append(ref)
 
     unclaimed = sorted(r for r in moved if r not in claimed)
     drifted = sorted(drifted)
@@ -315,6 +345,8 @@ def audit(workdir, delivered=None):
            'unverifiable_claims': unverifiable[:40],
            'undeclared_refs': {r: undeclared[r] for r in bad[:40]},
            'levers': sorted({r.get('lever') for r in rows if r.get('lever')}),
+           'provenance_scope': 'registered execution; not optimizer or engineering certification',
+           'decision_sources': sorted({r.get('decision_source', 'unspecified') for r in rows}),
            'callers': sorted({r.get('caller') for r in rows
                               if r.get('caller')})[:10]}
     if unclaimed:
@@ -339,11 +371,14 @@ def audit(workdir, delivered=None):
     # different file.
     _unv = (f" ({len(unverifiable)} claim(s) matched by ref only: the "
             f"claiming row wrote a different file, or predates "
-            f"`poses_written`)" if unverifiable else '')
+            f"pose/side/lock state coverage)" if unverifiable else '')
     doc.update(verdict='CLEAN', reason=(
         f"all {len(moved)} moved pose(s) trace to "
         f"{', '.join(doc['levers']) or 'no lever (nothing moved)'}"
         f", and each is where its lever put it{_unv}"))
+    if unverifiable:
+        doc.update(verdict='UNPROVEN', reason=doc['reason'] + '; final poses cannot all be reconciled')
+        return UNPROVEN, doc
     return CLEAN, doc
 
 

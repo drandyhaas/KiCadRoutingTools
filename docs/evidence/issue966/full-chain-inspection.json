@@ -1,0 +1,42 @@
+{
+  "kicad": "10.0.0",
+  "paths": "C:\\Users\\rob\\Documents\\prive\\git\\KRT-966\\wk\\issue966\\engine-parity",
+  "assertions": {
+    "footprints_preserved": true,
+    "outline_preserved": true,
+    "tracks_equal_exact_native_iu": true,
+    "vias_equal_exact_native_iu": true,
+    "native_pad_edge_errors_same_uuids": true
+  },
+  "drc": {
+    "input": {
+      "counts": {
+        "copper_edge_clearance": 5,
+        "lib_footprint_mismatch": 35,
+        "lib_footprint_issues": 23,
+        "silk_overlap": 14
+      },
+      "unconnected": 201
+    },
+    "cli": {
+      "counts": {
+        "copper_edge_clearance": 5,
+        "lib_footprint_mismatch": 35,
+        "lib_footprint_issues": 23,
+        "silk_overlap": 14
+      },
+      "unconnected": 0
+    },
+    "gui": {
+      "counts": {
+        "copper_edge_clearance": 5,
+        "lib_footprint_mismatch": 35,
+        "lib_footprint_issues": 23,
+        "silk_overlap": 14
+      },
+      "unconnected": 0
+    }
+  },
+  "tracks_count": 1078,
+  "vias_count": 128
+}

@@ -1,0 +1,13 @@
+Modified 89 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714perturb565zfd5q\_truth\control.kicad_pcb
+CONTROL (GROUND TRUTH) -> C:\Users\rob\AppData\Local\Temp\krt714perturb565zfd5q\_truth\control.kicad_pcb
+Modified 89 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714perturb565zfd5q\flipped.kicad_pcb
+Modified 89 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714perturb565zfd5q\_truth2\control.kicad_pcb
+CONTROL (GROUND TRUTH) -> C:\Users\rob\AppData\Local\Temp\krt714perturb565zfd5q\_truth2\control.kicad_pcb
+Modified 89 footprint positions
+Successfully wrote C:\Users\rob\AppData\Local\Temp\krt714perturb565zfd5q\other.kicad_pcb
+PASS: layer_flip flipped exactly its 33 members, left 59 alone, the control is unmoved, and no dose-gated consumer draws it
+
+STDERR:
