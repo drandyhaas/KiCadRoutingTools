@@ -17,10 +17,11 @@ Refusals are asserted with `run_utils.check(..., refuse=..., code=N)` rather
 than on the exit code alone, so an ImportError or an argparse accident is
 reported as a BROKEN TEST instead of as a guard that held.
 
-WHAT THE BATTERY MEASURED (`python3 -X utf8 tests/mutate_892.py`, 27 rows over
+WHAT THE BATTERY MEASURED (`python3 -X utf8 tests/mutate_892.py`, 32 rows over
 `placement/pose_ops.py`, `place_pose.py`, `placement/seeder.py`,
 `placement/provenance.py` and the manifest parity gate), run in a clean
-worktree at the commit that carries this docstring:
+worktree at the commit that carries these rows (#960 added the five
+`promote` / `ledger` rows):
 
     face-cycle-reversed                                  KILLED
     the-face-row-is-keyed-by-pad-number-again            KILLED
@@ -40,6 +41,11 @@ worktree at the commit that carries this docstring:
     lock-and-unlock-of-one-ref-is-allowed-again          KILLED
     an-unknown-lock-ref-is-accepted-again                KILLED
     a-failed-promote-is-not-atomic-again                 KILLED
+    the-promote-records-nothing-again                    KILLED
+    the-promote-records-the-staged-path-again            KILLED
+    the-promote-row-is-computed-after-the-write-again    KILLED
+    a-failed-promote-leaks-its-pending-row-again         KILLED
+    a-ledger-failure-ships-the-board-anyway              KILLED
     a-forced-run-is-not-disclosed                        KILLED
     only-the-first-op-is-written                         KILLED
     the-copper-gate-stops-refusing                       KILLED
@@ -50,7 +56,7 @@ worktree at the commit that carries this docstring:
     place_pose-leaves-the-lever-registry                 KILLED
     the-parity-gate-goes-back-to-a-hand-picked-list      KILLED
 
-    27 rows: 27 killed, 0 survived, 0 broken, 0 disagreeing with expectation
+    32 rows: 32 killed, 0 survived, 0 broken, 0 disagreeing with expectation
 
 Four earlier rounds are the reason several arms here look pedantic:
 
