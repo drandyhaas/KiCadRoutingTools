@@ -193,6 +193,18 @@ def commit_write(output_file: str) -> Optional[Dict]:
     return row
 
 
+def discard_write(output_file: str) -> Optional[Dict]:
+    """Drop the row `record_write(pending=True)` started for a write that never landed.
+
+    The cancel half of the pending/commit split (#960). A promote that fails
+    after recording must not leave its row behind: a later write to the same
+    path from OUTSIDE any regime returns from `record_write` without replacing
+    it, and that write's `commit_write` would then append the stale claim --
+    stamped with the new file's hash -- to the old work dir's ledger.
+    """
+    return _PENDING.pop(os.path.abspath(output_file), None)
+
+
 def _side_changed(fp, placement) -> bool:
     """Did this placement ask to put `fp` on the other face (#714)?
 
@@ -220,6 +232,12 @@ def record_write(input_file: str, output_file: str,
     Raises `UnaidedViolation` when a regime is in force and no lever is
     declared. With `pending=True` the row is held until `commit_write`, so a
     refusal can precede the write rather than follow it.
+
+    `output_file` must be the path the board is DELIVERED to. The regime is
+    found by walking up from it, so a caller that writes a candidate outside
+    the work dir and then copies it in must record at that copy, against the
+    real destination: recording only the staged write finds no regime,
+    returns None and refuses nothing (#960; see `pose_ops._promote`).
     """
     root = regime_for(output_file)
     lever = active_lever()
