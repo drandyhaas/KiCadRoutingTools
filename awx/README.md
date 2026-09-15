@@ -4868,3 +4868,93 @@ is the one live thread left in it: the swimmer's cost is a property of the
 REALIZED board, so the only estimator that has ever worked is the braid
 itself (`replan.py`) -- the merge relaxes the plan's ORDER model, and the
 plan's order is not what was wrong.
+
+### The plan-side fix (Andy: "price a berth by the corridor part its ribbon lane must cross on its page, and a swimmer at what the copper pays")
+
+**`PLAN_PAGES_ISLAND=v`** (pages_first, vias per part). The braid's plan
+phase now exports, for every page lane, the corridor parts its REGION
+CHORD (launch slot at s0 to target slot at s1) crosses on its own page
+(`plan_braid` key `islands`, from `static_islands`; the run's own arrays
+excluded). In `choose`, when a verified plan carries such lanes, each of
+their berth candidates is priced at v per part crossed (the price
+accumulates across iterations) and the model is solved again with
+EVERYTHING free -- the damped loop's held re-solve moved the violators
+onto berths the held plan could not accommodate (19 swimmers, K35),
+while the forced probe with everything free found the head-on plan the
+model's own prices already prefer (SDQ0: 16.6 head-on against 23.9 south
+in its units; it took the south face for two fewer model swimmers at
+PAGES_SWIM = 100 vias each). The judge (`pf_key`, here the braid's count
+plus its planned lane length at VIA_MM) keeps the better plan. On the
+recorded plans the chord test flags exactly the C5 group (K35 SDQ15 SDQ14
+SDQ0 SDQM0 SDQ2; K41 the same less SDQM0; K51 SDQ15 SDQ0 SDQ2 SDQ1) --
+the lanes refused in band at every K. **`PLAN_PAGES_SWIM=4`** is the
+swimmer at what the copper pays (mean 3.2 measured over 98 swimmers).
+Arms, all under `PLAN_JUDGE=count PLAN_JUDGE_LEN=lane` (jcl = 34 / 60 /
+80 / 115): `ip3` (island 3), `ip3sw4` (+ swimmer 4), `sw4j` (swimmer 4
+alone, for attribution); one chain at a time on this machine.
+
+Ladder so far (vias / rule; jcl = 34 121.5 / 60 181.4 / 80 231.0 / 115
+300.2): **ip3 = 34 121.5 / 60 181.4 / 80 231.0 / (K51 pending)** -- the
+price fires (K35: five berths priced, K41: four) and the free re-solve's
+plans are judged no better, so the shipped boards are jcl's to the
+segment at K28-K41. `ip3sw4` and `sw4j` run after it; the ladder script
+is `tmp/s11/ladder_ip.sh`, its output `tmp/s11/ladder_ip.out`.
+
+## Handoff: the next session (written 2026-09-15, ~13:45, end of session 11; supersedes the session-10 handoff)
+
+**Tree.** `bus622-take5` @ `1cdceecc` + uncommitted `braid.py` /
+`pages_first.py` / `README.md` (the island price and this text). The
+branch now carries, as local commits never pushed: `6998d959` (the
+s8-s10 flag-off code, a WIP so agent worktrees could branch from the
+real tree), `10c6e4d6` (session 11's braid-side arms: `BRAID_DEFLECT_SEC`
+1-6, `BRAID_JOIN_LEG_TOOTH` 1-2, `BRAID_VIRT_SLACK`, `PLAN_PAGES_PITCH`),
+the synthetic harness merge (`awx/synth_bus.py`, `synth_ladder.py`,
+`awx/img/synth_*`), the constants module merge (`awx/rules.py`,
+`tests/test_622_rules_of.py`, every stage installs from it; K15/K28
+copper-identical), and the merged-interval write-up (README only, NULL).
+Every flag is off by default and the flag-off chain is byte-identical:
+`PLAN_PAGES=1 bash chain_k.sh TAG 28` reproduces `tmp/s10/ctl_k28` on the
+fanout AND the routed board (checked after every merge). The agent
+worktrees and branches are deleted; nothing of theirs is lost. **Andy
+stopped the decision-level gate as useless** (its code is gone with its
+branch) and **reduced `rules_of(board)` to one constants module** -- the
+board-derived resolution already exists in py_router, the main router
+will SUPPLY these constants later (`Rules.from_router_config`).
+
+**Instruments (all under `tmp/s11/`):** `braid_ab.sh TAG K` (braid only,
+on the recorded `tmp/s9/d40_fo_kK` plans; base = d40 copper), `ledger.py`
+(per-corridor first-attempt in-band lanes, tail work, opens -- the
+headline for "all lanes in band"), `rule.py K BOARD..` (vias + mm/7.5),
+`ladder_ip.sh` (sequential chain ladders). Scratchpad f987c8cb:
+`plan_geom.py`, `src_face.py`, `pitch_check.py`, the wall censuses.
+**`wall_probe --png` draws F only.** **This machine has 8 GB and PyCharm
+holds 1.7: run ONE K51 braid at a time** (parallel ones are killed, and
+the pages-first CP-SAT is reproducible only on an idle machine).
+
+**Settled this session (do not re-run):** every braid-side arm on the
+recorded plans -- island-bend levels 1-6 (the cascade, the unsatisfiable
+same-s bend, the early bend over the neighbours' fixed tooth pieces, the
+thread the grid cannot follow), the join-leg stamp (moves the refusal
+SA2 -> SA10), the virtual-stamp slack (K35 61 / K41 74 at best, K51's
+first pass collapses to 12-13 of 45 at 0.10 and 29 at 0.05); the
+plan-side pitch-as-swimmer hook (inert at every K, both bounds: the held
+re-solve). The forced probe (four DQ nets head-on) is the measurement
+that locates K51's gap: 100 / 1245 mm against 115 / 1389 with one open.
+
+**Next, in order:**
+1. Read `tmp/s11/ladder_ip.out`: `ip3` K51, `ip3sw4`, `sw4j`. The
+   question is whether the free re-solve under the island price finds
+   the head-on plan the forced probe found (100 at K51) -- at K35/K41 it
+   did not beat jcl's plan under the judge. If not: look at what the
+   priced re-solve chose (`pages-first: iteration N` lines in
+   `tmp/s11/ip3_fo_k51.log`) and whether the swimmer price (100 vias)
+   is still what decides; `sw4j` is the attribution arm.
+2. The west-face through-run stubs (SDQ11/SDQ13): every fix arm's opens.
+   The rate's source wrap inside the walk's proposals (s10 item 2).
+3. The swimmers (D3): south-row teeth given north berths are swimmers
+   by construction; the human launches those nets from U1's north on
+   B. A source-side move class, not a braid rule.
+4. The synthetic harness (`awx/synth_ladder.py`) as the gate for any of
+   the above: on a clear channel the chain is at the optimum at every K;
+   a part in the corridor is where it pays 8-26 vias on a 0-via optimum
+   and leaves the band -- exactly the C5 class. Run it before a ladder.
