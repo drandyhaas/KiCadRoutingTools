@@ -1382,11 +1382,11 @@ def _body_band_correct(state, ref: str, edge: str, x: float, y: float,
     `target`; a body that cannot be measured leaves the walk's pose alone.
 
     What that does NOT promise: that every seat is the one upstream chose.
-    Where upstream REFUSED the walk's pose and went on to another rung or
-    rotation, this rung can make that pose legal and seat it first --
-    measured by the round-2 review with declared rotations [0, 180]: upstream
-    seated at 180 deg, this seats at 0 deg, and the 180 deg seat is still
-    legal. The author's first rotation winning is the intended direction.
+    Where the walk's pose was REFUSED, this rung can make it legal, so a
+    ladder that used to fall through to a later rung, rotation or stage can
+    now seat at the earlier one. `test_seat_edge_ladder_seats_on_the_body
+    _band` is that case at its simplest: a body reaching 3 mm west of its
+    only pad seats at x 2.0 here and nowhere at all without this rung.
     """
     from .connector_geometry import geometry_for
     part = state.parts[ref]

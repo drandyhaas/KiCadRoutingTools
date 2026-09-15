@@ -259,6 +259,29 @@ ROWS = [
      "    gap = (copper.get('minimum_gap_by_ref_mm') or {}).get(ref)",
      "    gap = copper.get('minimum_gap_mm')",
      (T961,), KILLED),
+    # Round 3: five branches round 2 covered with a test but no row.
+    ('fab-falls-back-to-silk', 'cg',
+     "    layer = next((side + suffix for suffix in ('.Fab', '.SilkS')",
+     "    layer = next((side + suffix for suffix in ('.SilkS', '.Fab')",
+     (T961,), KILLED),
+    ('any-outline-is-rectangular', 'cg',
+     "            rectangular = bool(bounds) and _segments_cover_rectangle(",
+     "            rectangular = bool(bounds) or _segments_cover_rectangle(",
+     (T961,), KILLED),
+    ('text-box-is-body-geometry', 'cg',
+     "        if kind in ('text', 'text_box'):",
+     "        if kind in ('text',):",
+     (T961,), KILLED),
+    ('exempt-count-gate-reads-the-band', 'fp',
+     "                if (amt > legality.EPS and copper_ok",
+     "                if (band > legality.EPS and copper_ok",
+     (T961,), KILLED),
+    ('emitter-widens-on-the-declared-edge', 'fp',
+     "                if (body['body_measured']\n"
+     "                        and body['body_outside_mm'] > amt + legality.EPS):",
+     "                if (body['body_measured']\n"
+     "                        and body['body_overhang_mm'] > amt + legality.EPS):",
+     (T961,), KILLED),
     # Round 2: the three seeder call sites that hand the band to
     # `_edge_correct`, and the second rung's own arithmetic. Each survived the
     # round-2 review's mutations with every test green.

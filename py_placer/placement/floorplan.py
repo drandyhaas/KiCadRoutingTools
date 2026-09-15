@@ -1753,8 +1753,10 @@ class _Ctx:
         graded once per grade by `legality.grade_pad_edge_clearance` at the
         floor `grade_pad_legality` resolves -- the channel `check_drc
         --check-pad-edge` grades, reported beside the body overhang so the
-        two can be read side by side. Evidence only: no violation, no
-        abstention. Memoised; only the declared parts' pads are walked."""
+        two can be read side by side. The CLEARANCE it measures is evidence
+        only -- no violation, no abstention -- but `_copper_outside_mm` reads
+        the same findings for copper past the OUTLINE, which the rule does
+        grade on the body path. Memoised; only declared parts' pads walked."""
         if self._connector_copper is None:
             from copy import copy
             from list_nets import board_floor_knobs
