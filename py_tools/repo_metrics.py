@@ -285,6 +285,57 @@ def _line_chart(series, width=880, height=200, pad=32):
     return ''.join(out) + f'<div class="legend">{legend}</div>'
 
 
+def spread_downloads(rows, today=None):
+    """Per-release lifetime totals -> an estimated downloads-per-day timeline.
+
+    WHY NOT BARS. A release's counter is cumulative and never stops rising, and
+    PCM piles every install onto whichever release it points at -- so a bar
+    chart shows three towers and thirty-six stubs. That is true but unreadable,
+    and it says nothing about WHEN any of it happened.
+
+    Each release's total is spread evenly across its lifetime (publish date to
+    today) and the per-day contributions are summed, which turns the towers
+    into overlapping plateaus: a release that gathered 4,000 installs over a
+    month reads as ~130/day for that month, directly comparable to one that
+    gathered 200 over the same span.
+
+    TWO BIASES, BOTH DISCLOSED ON THE PAGE RATHER THAN HIDDEN:
+
+    1. Even spread is wrong in a known direction -- downloads arrive fastest
+       just after a release and taper -- so the start of each plateau is
+       understated and the tail overstated.
+    2. The TOTAL slopes upward as an artifact: every release ever published
+       keeps contributing to every later day, so the sum grows with the size of
+       the catalogue even if interest is flat. The shape of the plateaus is
+       meaningful; the trend of their sum is not.
+
+    Both are TEMPORARY. Once two snapshots exist, differencing them gives the
+    real per-period rate with no assumption at all, which is what
+    `_weekly_deltas` already does for the table.
+    """
+    from datetime import date as _date, timedelta
+    if today is None:
+        today = _date(*map(int, _today().split('-')))
+    out = {}
+    for r in rows:
+        pub = (r.get('published') or '')[:10]
+        if not pub:
+            continue
+        try:
+            start = _date(*map(int, pub.split('-')))
+        except Exception:
+            continue
+        days = max(1, (today - start).days + 1)
+        pcm = r['pcm'] / days
+        binr = sum(r['binaries'].values()) / days
+        for i in range(days):
+            key = (start + timedelta(days=i)).isoformat()
+            cell = out.setdefault(key, {'pcm': 0.0, 'bin': 0.0})
+            cell['pcm'] += pcm
+            cell['bin'] += binr
+    return out
+
+
 def _grouped_bars(rows, series, width=880, height=220, pad=34):
     """Two bars per category, inline SVG. `rows` = [(label, {key: value})].
 
@@ -528,11 +579,13 @@ def render(slug):
                     f'than a quiet week:<ul>{items}</ul>'
                     f'The traffic endpoints need a token with push access.</div>')
 
-    dl_rows = [(r['tag'], {'pcm': r['pcm'], 'bin': sum(r['binaries'].values())})
-               for r in sorted(rows, key=lambda r: r['published'])
-               if r['pcm'] or r['binaries']]
-    dl_chart = _grouped_bars(dl_rows, [('pcm', '#3b82f6', 'PCM zip'),
-                                       ('bin', '#f97316', 'router binaries')])
+    spread = spread_downloads(rows)
+    dl_chart = _line_chart([
+        {'label': 'PCM zip installs/day', 'color': '#3b82f6',
+         'points': {d: v['pcm'] for d, v in spread.items()}},
+        {'label': 'router binaries/day', 'color': '#f97316',
+         'points': {d: v['bin'] for d, v in spread.items()}},
+    ], height=220)
 
     wk = weekly_rollup(traffic)
     _wk_rows = []
@@ -628,14 +681,22 @@ rebuilt weekly from GitHub's API</p>
 
 <h2>Downloads by release</h2>
 {dl_chart}
-<p class="note">Every release, oldest to newest, with its lifetime download
-counts. The two series are <strong>never added together</strong>: the PCM zip is
-what KiCad's Plugin and Content Manager fetches on install or update, and it
-piles onto whichever release PCM currently points at — which is why a handful of
-releases tower over the rest and most show almost none. That shape is the
-finding, so the axis is linear; a log scale would tidy it away. The
-<code>grid_router-*</code> binaries are fetched by <code>build_router.py</code>
-and track from-source installs instead, including this project's own CI.</p>
+<p class="note"><strong>Estimated rate, not a measurement — yet.</strong> A
+release's counter is cumulative and never stops rising, and PCM piles every
+install onto whichever release it points at, so the raw numbers are three
+towers and thirty-six stubs. Here each release's lifetime total is spread
+evenly across the days since it was published and the contributions are summed,
+which makes a release that gathered 4,000 installs over a month read as ~130/day
+rather than one spike. <strong>Even spread is an assumption, and it is wrong in
+a known direction:</strong> downloads arrive fastest just after a release and
+taper, so the start of each plateau is understated and the tail overstated. It
+is temporary — once two weekly snapshots exist, differencing them gives the
+real per-period rate with no assumption at all. <strong>The upward slope is
+partly an artifact of the method</strong> for the same reason: every release
+ever published keeps contributing to every later day, so the total rises as the
+catalogue grows even if interest is flat. Read the SHAPE of the plateaus, not
+the trend. Exact per-release totals are in the table below; the two series are
+still never added together.</p>
 
 <h2>Daily views and clones</h2>
 {chart}

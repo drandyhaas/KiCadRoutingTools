@@ -210,6 +210,30 @@ def t_a_short_read_cannot_shrink_the_lifetime_total():
           f"4100 (risen) + 2500 (kept) = {sum(pcm.values())}")
 
 
+def t_the_spread_conserves_every_download():
+    """Spreading may reshape the timeline but must not invent or lose totals."""
+    from datetime import date
+    rows = [{'tag': 'a', 'published': '2026-09-01', 'pcm': 100,
+             'binaries': {'grid_router-linux-x86_64.so': 30}},
+            {'tag': 'b', 'published': '2026-09-15', 'pcm': 7, 'binaries': {}}]
+    sp = M.spread_downloads(rows, today=date(2026, 9, 15))
+    tp = sum(v['pcm'] for v in sp.values())
+    tb = sum(v['bin'] for v in sp.values())
+    check('t_the_spread_conserves_every_download',
+          abs(tp - 107) < 1e-6 and abs(tb - 30) < 1e-6,
+          f"pcm {tp:.4f} == 107, bin {tb:.4f} == 30")
+    # The older release spans 15 days, the same-day one exactly 1 -- so the
+    # spread is a RATE, and a fresh release is not smeared into the past.
+    check('t_a_release_never_predates_itself',
+          min(sp) == '2026-09-01' and sp['2026-09-01']['pcm'] < sp['2026-09-15']['pcm'],
+          f"starts {min(sp)}, and the day b lands is higher")
+    # A release with no publish date cannot be placed in time and is dropped
+    # rather than silently dated today.
+    sp2 = M.spread_downloads([{'tag': 'x', 'published': '', 'pcm': 999,
+                               'binaries': {}}], today=date(2026, 9, 15))
+    check('t_an_undated_release_is_dropped_not_guessed', sp2 == {}, f"{sp2}")
+
+
 def t_a_failed_endpoint_is_disclosed_not_hidden():
     with tempfile.TemporaryDirectory() as tmp:
         clean = _render_into(tmp, {'last_collected': 'x', 'errors': {}})
@@ -232,6 +256,7 @@ def main():
     t_clone_character_is_a_ratio_not_a_headcount()
     t_weekly_rollup_withholds_a_stub_comparison()
     t_a_short_read_cannot_shrink_the_lifetime_total()
+    t_the_spread_conserves_every_download()
     t_a_failed_endpoint_is_disclosed_not_hidden()
     print()
     if FAILS:
