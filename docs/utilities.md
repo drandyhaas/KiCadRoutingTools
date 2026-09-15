@@ -1856,7 +1856,7 @@ KiCad) still grades it correctly. Exit 0 when filled with classes intact,
 Snapshots this repository's own GitHub reach — release asset downloads, daily
 views and clones, referrers and popular paths — into `metrics/data/`, and
 renders `docs/site/` for GitHub Pages — a landing page at the root and the
-metrics page at `/metrics`. Run weekly by
+metrics page at `/metrics`. Run daily — and on every published release — by
 `.github/workflows/metrics.yml`.
 
 **Why it must be committed and run on a schedule:** GitHub's traffic API is a
@@ -1866,10 +1866,13 @@ under `metrics/data/` is the project's only history of its own reach. Release
 counters do not expire, but they are **cumulative**, so "how many downloads
 last week" exists only as the difference between two snapshots.
 
-Each traffic call returns 14 daily buckets, so weekly collection observes every
-day with a week of margin; merging is by date keeping the **max**, which makes
-overlapping runs idempotent and lets a part-elapsed day be corrected by the
-next run instead of being frozen low.
+Each traffic call returns 14 daily buckets, so any cadence under a fortnight
+observes every day — the margin is the point: weekly left one run of slack,
+daily leaves thirteen. Merging is by date keeping the **max**, which makes the
+heavy overlap between daily runs idempotent and lets a part-elapsed day be
+corrected by the next run instead of being frozen low. Snapshot stores are
+thinned to one per ISO week after 30 days, which cannot move a lifetime total
+(counters only rise, so the last snapshot of a week holds its maximum).
 
 **Two populations, never summed.** The PCM zip is what KiCad's Plugin and
 Content Manager fetches on install/update, and it accumulates on whichever

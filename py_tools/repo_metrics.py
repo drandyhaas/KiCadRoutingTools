@@ -9,11 +9,20 @@ they are CUMULATIVE totals with no per-period breakdown, so the only way to
 learn "how many downloads last week" is to diff two snapshots -- which again
 requires keeping them.
 
-Weekly is sufficient, and that is a property of the API rather than a guess:
-each traffic call returns FOURTEEN daily buckets, so consecutive runs up to 14
-days apart still observe every day. Merging is by date, keeping the max, so the
-overlap between runs is idempotent and a partially-elapsed day is corrected by
-the next run rather than frozen at its partial value.
+Collection runs DAILY (and on every release). Any cadence under a fortnight
+observes every day -- each traffic call returns FOURTEEN daily buckets -- but
+the margin is what matters: weekly left one run of slack, so a single failure
+was already a deadline, while daily leaves thirteen. Merging is by date keeping
+the max, so the heavy overlap between daily runs is idempotent and a
+partially-elapsed day is corrected by the next run rather than frozen at its
+partial value.
+
+Daily rewrites cost archive size, so snapshot-keyed stores are THINNED: every
+snapshot for 30 days, then one per ISO week. Counters only rise, so the last
+snapshot of a week carries that week's maximum and `_release_rollup` takes the
+max across survivors -- no lifetime total can change, only the resolution of
+the old delta column. Measured: a year of daily snapshots thins 365 -> 80 with
+identical totals.
 
 TWO POPULATIONS, NEVER SUMMED. The PCM zip (KiCad's Plugin and Content Manager
 fetches it on install/update) and the prebuilt `grid_router-*` binaries
@@ -160,6 +169,47 @@ def _save(name, obj):
         f.write('\n')
 
 
+def thin_snapshots(store, keep_days=30, today=None):
+    """Keep every snapshot from the last `keep_days`, then one per ISO week.
+
+    Daily collection rewrites a full ~12 KB release snapshot every day, which
+    is ~4 MB a year and rising as the release list grows. Old snapshots are
+    almost all redundant: a download counter only ever goes up, so the LAST
+    snapshot of a week carries that week's maximum for every asset, and
+    `_release_rollup` takes the max across whatever survives. Thinning
+    therefore cannot change any lifetime total -- only the resolution of the
+    per-snapshot delta column, which nobody reads at day granularity a year
+    back.
+
+    The newest snapshot is always kept, whatever else happens, because it is
+    the one the page renders from.
+    """
+    from datetime import date as _date
+    if today is None:
+        today = _date(*map(int, _today().split('-')))
+    stamps = sorted(store)
+    if not stamps:
+        return 0
+    keep = {stamps[-1]}
+    weekly = {}
+    for s in stamps:
+        try:
+            d = _date(*map(int, s.split('-')))
+        except Exception:
+            keep.add(s)          # unparseable: never silently discard it
+            continue
+        if (today - d).days <= keep_days:
+            keep.add(s)
+        else:
+            y, w, _ = d.isocalendar()
+            weekly[(y, w)] = s   # last one wins, i.e. that week's maximum
+    keep |= set(weekly.values())
+    dropped = [s for s in stamps if s not in keep]
+    for s in dropped:
+        del store[s]
+    return len(dropped)
+
+
 def _merge_daily(store, key, rows):
     """Merge `rows` into store[key] by date, keeping the MAX per date.
 
@@ -209,8 +259,11 @@ def collect(slug, token=''):
             continue
         store = _load(fname, {})
         store[stamp] = payload
+        n = thin_snapshots(store)
         _save(fname, store)
         collected.append(ep)
+        if n:
+            print(f'  {fname}: thinned {n} old snapshot(s) to weekly')
         print(f'  {ep}: {len(payload)} row(s) snapshotted')
 
     payload, err = _api(slug, 'releases', token, paginate=True)
@@ -226,8 +279,11 @@ def collect(slug, token=''):
                            for a in rel.get('assets') or []},
             }
         store[stamp] = snap
+        n = thin_snapshots(store)
         _save('releases.json', store)
         collected.append('releases')
+        if n:
+            print(f'  releases.json: thinned {n} old snapshot(s) to weekly')
         print(f'  releases: {len(snap)} release(s) snapshotted')
 
     meta = _load('meta.json', {})

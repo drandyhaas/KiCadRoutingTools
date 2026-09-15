@@ -3,12 +3,18 @@ name: Weekly reach metrics
 # Snapshots GitHub's reach data into metrics/data (committed, so it becomes a
 # permanent archive) and republishes the docs/site/ pages (landing + /metrics) to GitHub Pages.
 #
-# WHY WEEKLY IS ENOUGH, AND WHY IT CANNOT BE MONTHLY: the traffic API is a
-# ROLLING 14-DAY WINDOW that GitHub does not backfill. Each call returns 14
-# daily buckets, so runs up to 14 days apart still observe every day -- but a
-# gap longer than that loses those days for everyone, permanently. Weekly
-# leaves exactly one run of margin, which is why a failed run is worth looking
-# at rather than waiting out.
+# WHY DAILY: the traffic API is a ROLLING 14-DAY WINDOW that GitHub does not
+# backfill. Each call returns 14 daily buckets, so any cadence under a fortnight
+# observes every day -- but a gap longer than that loses those days for everyone,
+# permanently. Weekly left exactly one run of margin, so a single failure was
+# already a deadline; daily leaves thirteen, which turns a failed run from an
+# emergency into a non-event. The extra cost is one ~60s job per day.
+#
+# The `release` trigger is the half that actually answers "monitor new releases
+# faster": a release published at 09:00 appears on the page within a minute
+# instead of waiting for the next cron. Its download counts start near zero by
+# definition -- what it updates immediately is that the release EXISTS, and the
+# version on the landing page.
 #
 # TOKEN: the traffic endpoints require PUSH access, which the default
 # GITHUB_TOKEN may not satisfy. Set a repository secret METRICS_TOKEN (a
@@ -21,7 +27,9 @@ name: Weekly reach metrics
 
 on:
   schedule:
-    - cron: '17 6 * * 1'   # Mondays 06:17 UTC
+    - cron: '17 6 * * *'   # every day, 06:17 UTC
+  release:
+    types: [published]     # a new release shows up immediately, not tomorrow
   workflow_dispatch:
 
 permissions:

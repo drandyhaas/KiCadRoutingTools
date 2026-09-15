@@ -234,6 +234,32 @@ def t_the_spread_conserves_every_download():
     check('t_an_undated_release_is_dropped_not_guessed', sp2 == {}, f"{sp2}")
 
 
+def t_thinning_never_moves_a_lifetime_total():
+    """Daily snapshots thin to weekly after 30 days, losing no download."""
+    from datetime import date, timedelta
+    today = date(2026, 12, 31)
+    store = {}
+    for i in range(365):
+        d = today - timedelta(days=364 - i)
+        store[d.isoformat()] = {'v1': {'published_at': '2026-01-01T00:00:00Z',
+                                       'assets': {'KiCadRoutingTools-1.zip': 100 + i}}}
+    before, lifetime_before = len(store), M._release_rollup(store)[2]
+    dropped = M.thin_snapshots(store, today=today)
+    after, lifetime_after = len(store), M._release_rollup(store)[2]
+    check('t_thinning_never_moves_a_lifetime_total',
+          lifetime_before == lifetime_after,
+          f"{before} -> {after} snapshots, total {lifetime_after} unchanged")
+    check('t_thinning_actually_thins', dropped > 200 and after < before // 3,
+          f"dropped {dropped}, kept {after}")
+    check('t_thinning_keeps_the_newest', today.isoformat() in store,
+          'the snapshot the page renders from survives')
+    # Recent days keep FULL resolution -- thinning must not blunt the window
+    # anyone actually reads.
+    recent = [s for s in store if (today - date(*map(int, s.split('-')))).days <= 30]
+    check('t_the_last_30_days_keep_daily_resolution', len(recent) == 31,
+          f"{len(recent)} of the last 31 days kept")
+
+
 def t_a_failed_endpoint_is_disclosed_not_hidden():
     with tempfile.TemporaryDirectory() as tmp:
         clean = _render_into(tmp, {'last_collected': 'x', 'errors': {}})
@@ -257,6 +283,7 @@ def main():
     t_weekly_rollup_withholds_a_stub_comparison()
     t_a_short_read_cannot_shrink_the_lifetime_total()
     t_the_spread_conserves_every_download()
+    t_thinning_never_moves_a_lifetime_total()
     t_a_failed_endpoint_is_disclosed_not_hidden()
     print()
     if FAILS:
