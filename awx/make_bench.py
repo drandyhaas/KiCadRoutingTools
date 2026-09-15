@@ -106,12 +106,22 @@ def pair_nets(pcb, src, dst):
                   and {p.component_ref for p in n.pads} == {src, dst})
 
 
-def fanout_source(board, out, src, names):
-    """fanout_from_plan.fanout_once's engine call, on the SOURCE array."""
+def fanout_source(board, out, src, names, layers=None):
+    """fanout_from_plan.fanout_once's engine call, on the SOURCE array.
+
+    `layers` (the `--fanout-layers` flag; default `fp.LAYERS` = F + B) is the
+    escape layer set. Restricting it to ONE layer is what the synthetic
+    harness (`synth_bus.py`) wants and nothing else does: with two layers the
+    engine's post-resolution `rebalance_layers` spreads the escapes evenly
+    over both -- measured, 4 of 8 straight-out EDGE escapes were pushed onto
+    B, each paying a via in pad -- which is right for a real part and fatal
+    for a generated case whose known answer assumes both ends of a lane are
+    on F. Default unchanged."""
     pcb = parse_kicad_pcb(board)
     pcb._fanout_all_foreign_immovable = True
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
-        pcb.footprints[src], pcb, net_filter=names, layers=list(fp.LAYERS),
+        pcb.footprints[src], pcb, net_filter=names,
+        layers=list(layers) if layers else list(fp.LAYERS),
         track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE,
         via_drill=te.VIA_DRILL, exit_margin=0.5, escape_method='auto',
         plane_drop='off')
@@ -244,6 +254,11 @@ def main(argv=None):
     ap.add_argument('--src-side', choices=('F', 'B'))
     ap.add_argument('--dst-side', choices=('F', 'B'))
     ap.add_argument('--rotate', type=float)
+    ap.add_argument('--fanout-layers',
+                    help='comma-separated escape layers for the SOURCE fanout '
+                         '(default F.Cu,B.Cu). A single layer keeps every tooth '
+                         'there and suppresses the engine even-layer rebalance; '
+                         'see fanout_source')
     a = ap.parse_args(argv)
     board, src, dst, out = a.board, a.src, a.dst, a.out
     src_side, dst_side, rotate = a.src_side, a.dst_side, a.rotate
@@ -282,8 +297,9 @@ def main(argv=None):
     print(f'{os.path.basename(base)}: copper layers {pcb.board_info.copper_layers}, '
           f'{len(pcb.footprints)} parts; {src} on {side_of(pcb.footprints[src])}, '
           f'{dst} on {side_of(pcb.footprints[dst])}')
+    fan_layers = a.fanout_layers.split(',') if a.fanout_layers else None
     with contextlib.redirect_stdout(sys.stderr):
-        n_t, n_v, failed = fanout_source(base, out, src, names)
+        n_t, n_v, failed = fanout_source(base, out, src, names, fan_layers)
     print(f'{src} fanned out: {n_t} tracks, {n_v} vias'
           + (f', refused {failed}' if failed else ''))
     with contextlib.redirect_stdout(sys.stderr):
