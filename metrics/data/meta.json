@@ -1,10 +1,5 @@
 {
- "errors": {
-  "traffic/clones": "HTTP 403; gh: gh: Resource not accessible by integration (HTTP 403)",
-  "traffic/popular/paths": "HTTP 403; gh: gh: Resource not accessible by integration (HTTP 403)",
-  "traffic/popular/referrers": "HTTP 403; gh: gh: Resource not accessible by integration (HTTP 403)",
-  "traffic/views": "HTTP 403; gh: gh: Resource not accessible by integration (HTTP 403)"
- },
- "last_collected": "2026-09-15T15:44:31+00:00",
+ "errors": {},
+ "last_collected": "2026-09-15T15:52:11+00:00",
  "repo": "drandyhaas/KiCadRoutingTools"
 }
