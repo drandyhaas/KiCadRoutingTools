@@ -591,6 +591,122 @@ with tempfile.TemporaryDirectory() as d:
     check("an undeclared write is still refused", raised is not None,
           (raised or "NO UnaidedViolation was raised")[:120])
 
+    # #960. Exit 0 and a file at OUT were all the checks above asked for, and
+    # both held while the ledger stayed EMPTY: the candidate is staged in a
+    # temp dir, so the writer's regime lookup found nothing, and the copy into
+    # this dir was never recorded. The row, and the audit that reads it, are
+    # what "accepted under an armed regime" has to mean.
+    sys.path.insert(0, os.path.join(REPO, 'tests', 'stress'))
+    import provenance_audit                                       # noqa: E402
+
+    def _same(p, q):
+        return os.path.normcase(os.path.abspath(p or '')) == \
+            os.path.normcase(os.path.abspath(q))
+
+    rows = provenance.read_ledger(d)
+    check("the place_pose write left exactly one ledger row, and it is place_pose's",
+          len(rows) == 1 and rows[0].get('lever') == 'place_pose.py',
+          json.dumps(rows)[:300])
+    row = rows[-1] if rows else {}
+    check("the row names the DELIVERED board, not the staged candidate",
+          _same(row.get('path'), out), str(row.get('path')))
+    check("the row claims the part that moved",
+          'R1' in (row.get('refs_moved') or ()), str(row.get('refs_moved')))
+    check("and hashes the file that landed",
+          os.path.isfile(out)
+          and row.get('board_sha256') == provenance.sha256_file(out),
+          str(row.get('board_sha256'))[:16])
+    code, doc = provenance_audit.audit(d, out)
+    check("provenance_audit grades the delivered board CLEAN",
+          code == provenance_audit.CLEAN,
+          '%s: %s' % (doc.get('verdict'), doc.get('reason')))
+    code, doc = provenance_audit.audit(d)
+    check("and finds that board on its own when no --delivered is given",
+          code == provenance_audit.CLEAN and _same(doc.get('delivered'), out),
+          '%s: %s' % (doc.get('verdict'), doc.get('delivered')))
+
+    # IN PLACE, OUT onto itself. `record_write` diffs the placements against
+    # its input, and here the input is the output: a row computed after the
+    # replace would read the new pose as the incumbent and claim nothing.
+    # --force because the pose is chosen to DIFFER from the staged baseline
+    # (so the audit has a move to reconcile), not to be legal.
+    r = run([POSE, out, out, 'rotate', 'R1', '0', '--force'])
+    rows = provenance.read_ledger(d)
+    landed = parse_kicad_pcb(out).footprints['R1'].rotation % 360
+    check("an in-place place_pose write lands", abs(landed) < 1e-6,
+          'R1 at %s; %s' % (landed, (r.stdout + r.stderr)[-300:]))
+    check("and records its own row, claiming the part it moved",
+          len(rows) == 2 and rows[-1].get('lever') == 'place_pose.py'
+          and _same(rows[-1].get('path'), out)
+          and 'R1' in (rows[-1].get('refs_moved') or ()),
+          json.dumps(rows[-1:])[:300])
+    code, doc = provenance_audit.audit(d, out)
+    check("and the audit still grades it CLEAN, R1 where the row put it",
+          code == provenance_audit.CLEAN,
+          '%s: %s' % (doc.get('verdict'), doc.get('reason')))
+
+# ---------------------------------------------------------------------------
+print("a candidate staged OUTSIDE the regime is refused at the promote (#960)")
+with tempfile.TemporaryDirectory() as d, \
+        tempfile.TemporaryDirectory() as elsewhere:
+    from unittest import mock
+    from placement import provenance
+    b = os.path.join(d, 'b.kicad_pcb')
+    shutil.copyfile(BOARD, b)
+    provenance.start_regime(d, b)
+    moves = [{'reference': 'R1', 'new_x': 130.0, 'new_y': 98.0,
+              'new_rotation': 0}]
+    # Outside any regime the writer records nothing and refuses nothing --
+    # that is correct for a candidate. The promote is where it lands.
+    cand = os.path.join(elsewhere, 'candidate.kicad_pcb')
+    write_placed_output(b, cand, moves)
+    out = os.path.join(d, 'promoted.kicad_pcb')
+    shutil.copyfile(b, out)
+    before = open(out, 'rb').read()
+
+    def _promote_it():
+        try:
+            pose_ops._promote(cand, out, input_file=b, placements=moves)
+        except Exception as exc:                          # noqa: BLE001
+            return exc
+        return None
+
+    raised = _promote_it()
+    # The TYPE, not "something raised": a TypeError from a signature that does
+    # not take these arguments would otherwise read as a gate that held.
+    check("an undeclared promote into an armed dir raises UnaidedViolation",
+          isinstance(raised, provenance.UnaidedViolation), repr(raised)[:160])
+    check("and the destination is byte-identical",
+          open(out, 'rb').read() == before)
+    check("and no ledger row was written", provenance.read_ledger(d) == [])
+    check("and no pending row is left behind for a later write to commit",
+          os.path.abspath(out) not in provenance._PENDING,
+          str(list(provenance._PENDING))[:160])
+
+    # DECLARED, and the replace fails. The row is recorded before the copy, so
+    # it must be dropped with the write: left pending, a later write to this
+    # path from outside any regime would commit it into THIS ledger, stamped
+    # with that other file's hash.
+    _real_replace = os.replace
+
+    def _fail_on_out(src, dst, *a, **k):
+        if os.path.normcase(os.path.abspath(dst)) == \
+                os.path.normcase(os.path.abspath(out)):
+            raise OSError('injected: the output cannot be replaced')
+        return _real_replace(src, dst, *a, **k)
+
+    with provenance.declare_lever('place_pose.py'):
+        with mock.patch('os.replace', side_effect=_fail_on_out):
+            raised = _promote_it()
+    check("a declared promote whose replace fails is refused",
+          isinstance(raised, pose_ops.PoseRefusal), repr(raised)[:160])
+    check("and drops the row it had started",
+          os.path.abspath(out) not in provenance._PENDING
+          and provenance.read_ledger(d) == [],
+          str(list(provenance._PENDING))[:160])
+    check("and leaves the destination as it was",
+          open(out, 'rb').read() == before)
+
 # ---------------------------------------------------------------------------
 print("the OFF-BOARD magnitude is an arm, not just the count")
 with tempfile.TemporaryDirectory() as d:
