@@ -111,6 +111,7 @@ import plan_ends as pe  # noqa: E402
 import braid as te  # noqa: E402
 import escape_moves as em  # noqa: E402
 from coherent_nets import coherent_nets  # noqa: E402
+import rules as _rules  # noqa: E402  ONE source for every design rule
 
 from escape_moves import LAYERS  # noqa: E402,F401  -- ONE source
 
@@ -702,7 +703,7 @@ def engine_lays(B, nm, move, end, others=None):
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             tracks, vias_add, vias_rm, failed = generate_bga_fanout(
                 pcb.footprints[ref], pcb, net_filter=list(group), layers=list(LAYERS),
-                track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
+                track_width=sr.FAN_TRACK, clearance=sr.FAN_CLEAR, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
                 exit_margin=0.5, escape_method='underpad', plane_drop='off',
                 escape_dir_hints=hints)
     finally:
@@ -1051,6 +1052,11 @@ def main():
         out_tag = os.path.join('tmp', out_tag)
     base = OPTS.get('board', os.path.join(HERE, 'fb_t2q_fresh.kicad_pcb'))
     dest = OPTS.get('dest', 'DU1')
+    # THE DESIGN CONSTANTS (rules.py) -- inert today, the seam tomorrow.
+    _r = _rules.install_defaults()
+    print(f'rules: clearance {te.SPEC_CLEARANCE} (hug {te.CLEAR}), '
+          f'track {te.TRACK}, via {te.VIA_SIZE}/{te.VIA_DRILL}'
+          f'  [{_r.source}]')
     ROUNDS = int(OPTS.get('rounds', 4))
     WORST = int(OPTS.get('worst', 3))
     PROBES = int(OPTS.get('probes', 1))

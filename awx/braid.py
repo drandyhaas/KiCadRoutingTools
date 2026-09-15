@@ -75,21 +75,30 @@ from select_moves import pair_chirality  # noqa: E402
 from bga_fanout.flip_frame import to_front_frame, other_layer, mirror_axis  # noqa: E402
 import prices as _pr  # ONE source for the swimmer price
 
+import rules as _rules  # noqa: E402  ONE source for every design rule
+
+# ONE SOURCE: rules.py. main() installs them (rules.install_defaults);
+# without an install they are the literals they have always been -- see
+# rules.py, "USING IT".
 TRACK = ts.TRACK         # ONE source: topo_strings
-CLEAR = 0.105            # 0.1 spec + 5um so hugs don't sit exactly at 0.1
-SPEC_CLEARANCE = 0.1     # the spec itself: what the fanout lays at, what grade_k
+CLEAR = _rules.DEFAULT.hug
+                         # 0.1 spec + 5um so hugs don't sit exactly at 0.1
+SPEC_CLEARANCE = _rules.DEFAULT.clearance
+                         # the spec itself: what the fanout lays at, what grade_k
                          # grades at, and what the output PROJECT records (CLEAR
                          # is the router's private margin over it, not a rule)
-VIA_SIZE = 0.25
-VIA_DRILL = 0.15
+VIA_SIZE = _rules.DEFAULT.via_size
+VIA_DRILL = _rules.DEFAULT.via_drill
 
-MINP = 0.38                    # lane pitch floor at the exits
-LPITCH = 0.35                  # pitch of a side-join / side-exit block
+MINP = _rules.DEFAULT.exit_pitch   # lane pitch floor at the exits
+LPITCH = _rules.DEFAULT.lane_pitch # pitch of a side-join / side-exit block
 BLOCK_GAP = 0.45               # a block starts this far beyond what it clears
-BAND_GAP = TRACK + CLEAR + 0.07  # a band comb starts this far inside a stub-tip
+BAND_GAP = _rules.DEFAULT.band_gap  # a band comb starts this far inside a stub-tip
                                # line: a lane passing a stub's END at the
                                # legal minimum plus a hair
-HALF_SEP = (TRACK + 0.1) / 2   # two lanes at their band edges clear
+                               # (= TRACK + CLEAR + 0.07)
+HALF_SEP = _rules.DEFAULT.half_sep  # two lanes at their band edges clear
+                               # (= (TRACK + SPEC_CLEARANCE) / 2)
 LEG_W = 0.5                    # half-width in s of a join / exit leg's band
 ISLAND_VETO = 100              # an islanded layer is priced out of a leg's
                                # economics (see place_and_decide)
@@ -1097,10 +1106,12 @@ def cross_reserve(ctx, nm):
 END_KEEP = TRACK + CLEAR + 0.05    # a virtual stamp keeps this off a free end
 
 
-def clip_round_lines(pieces, lines, keep_r=END_KEEP):
+def clip_round_lines(pieces, lines, keep_r=None):
     """`pieces` [(p, q, layer)] with every stretch within keep_r of any of
     the segments `lines` [(a, b)] cut out (a point piece a == b is a bare
     end). Sampled along the piece at 0.05 mm: exact enough for a stamp."""
+    if keep_r is None:
+        keep_r = END_KEEP
     out = []
     for (p, q, lay) in pieces:
         L = math.hypot(q[0] - p[0], q[1] - p[1])
@@ -1138,7 +1149,7 @@ def clip_round_lines(pieces, lines, keep_r=END_KEEP):
     return out
 
 
-def clip_round_ends(pieces, ends, keep_r=END_KEEP):
+def clip_round_ends(pieces, ends, keep_r=None):
     """`pieces` [(p, q, layer)] with the stretch within keep_r of any
     of `ends` cut out. A virtual stamp must not cover another net's
     FREE END: the lane it predicts will dodge that copper when it is
@@ -1147,7 +1158,14 @@ def clip_round_ends(pieces, ends, keep_r=END_KEEP):
     SA5's tooth, a one-cell pocket). Applied to the corridor's OWN
     lanes' stamps it freed K35's SA5/SA6 (exit legs of one stub row
     each landing a foot 0.05 mm from the next stub end) but cost K41
-    three more open nets (2026-09-06), so it stays a reservation rule."""
+    three more open nets (2026-09-06), so it stays a reservation rule.
+
+    keep_r defaults to END_KEEP READ AT CALL TIME, not captured in the
+    signature: a default argument is bound at def time, which rules.install
+    (a module attribute write) cannot reach -- so on a board with a wider
+    clearance this one site would have kept the bench's 0.282."""
+    if keep_r is None:
+        keep_r = END_KEEP
     clipped = []
     for (p, q, lay) in pieces:
         bx0, bx1 = min(p[0], q[0]) - keep_r, max(p[0], q[0]) + keep_r
@@ -7914,6 +7932,17 @@ def main():
             print(f'[{_time.time() - _t0:6.1f}s rss<={peak:5.0f}MB{tm}] {msg}', flush=True)
         else:
             print(msg)
+    # THE DESIGN CONSTANTS (rules.py), installed once per stage-process --
+    # inert today (it installs what the constants above already hold) and
+    # the SEAM for when the main router supplies the geometry instead.
+    _r = _rules.install_defaults()
+    # printed from THIS MODULE'S OWN constants, never from the Rules object:
+    # a wiring fix can be inert, and an early version of this one was --
+    # install could not see the module because a stage runs as '__main__',
+    # so it printed numbers the router was not using.
+    log(f'rules: clearance {SPEC_CLEARANCE} (hug {CLEAR}), track {TRACK}, '
+        f'via {VIA_SIZE}/{VIA_DRILL}, via_need {VIA_NEED:.4f}  '
+        f'[{_r.source}]')
     ctx, groups = setup(a.board, names, a.dest, log)
     corridors = []
     for ci, members in enumerate(groups):

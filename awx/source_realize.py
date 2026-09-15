@@ -48,8 +48,11 @@ def move_sig(m):
 
 # The engine lays at these (realize's own generate_bga_fanout call); the
 # blocker census must use the SAME numbers or it names the wrong nets.
-FAN_TRACK = 0.1
-FAN_CLEAR = 0.1
+# Defaults from rules.py, resolved per board by the stage that installs
+# (see rules.py, "USING IT"); the engine call below reads them at call time.
+import rules as _rules            # noqa: E402  ONE source for every design rule
+FAN_TRACK = _rules.DEFAULT.fan_track
+FAN_CLEAR = _rules.DEFAULT.fan_clear
 
 
 def _seg_point_dist(px, py, ax, ay, bx, by):
@@ -382,7 +385,8 @@ def realize(board, src_choice, src_pad, byname, sref, out_path, log=print,
     # already-fanned array needs.
     tracks, vias_add, vias_rm, failed = generate_bga_fanout(
         pcb.footprints[sref], pcb, net_filter=names, layers=list(LAYERS),
-        track_width=0.1, clearance=0.1, via_size=te.VIA_SIZE, via_drill=te.VIA_DRILL,
+        track_width=FAN_TRACK, clearance=FAN_CLEAR, via_size=te.VIA_SIZE,
+        via_drill=te.VIA_DRILL,
         exit_margin=0.5, escape_method='underpad', plane_drop='off',
         escape_dir_hints=hints)
     got = {t['net_id'] for t in tracks}

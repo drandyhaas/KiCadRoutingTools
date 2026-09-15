@@ -38,6 +38,14 @@ mkdir -p tmp
 case "$TAG" in */*) ;; *) TAG="tmp/$TAG";; esac
 BASE=${BASE:-fb_t2q_fresh.kicad_pcb}
 DEST=${DEST:-DU1}
+# THE DESIGN CONSTANTS, from the one place they are defined (rules.py) --
+# this used to be a literal 0.1 repeated here and in grade_k.py. Printed,
+# because a grade whose clearance is invisible is a number nobody can check.
+RULES_OUT=$(python3 rules.py)
+CLR=$(printf '%s\n' "$RULES_OUT" | awk '$1=="clearance"{print $2; exit}')
+CLR=${CLR:-0.1}
+printf '=== %s\n' "$RULES_OUT"
+echo "=== grading at clearance $CLR"
 for K in "$@"; do
   echo "=== K$K  $(date +%H:%M:%S)"
   # fresh outputs per run: a reused tag would re-read its own previous
@@ -69,7 +77,7 @@ for K in "$@"; do
   echo "  fanout stage done $(date +%H:%M:%S)"
   echo -n "  fanout board: "
   python3 ../py_router/check_drc.py "${TAG}_fo_k${K}.kicad_pcb" \
-    --clearance 0.1 --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"
+    --clearance "$CLR" --clearance-margin 0.1 2>&1 | grep -E "FOUND|NO DRC"
   python3 -u braid.py --board "${TAG}_fo_k${K}.kicad_pcb" \
     --dest "$DEST" --nets "$NETS" --out "${TAG}_k${K}" \
     > "${TAG}_k${K}.log" 2>&1

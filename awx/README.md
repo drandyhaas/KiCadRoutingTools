@@ -272,6 +272,11 @@ octilinear, so a non-orthogonal pose is outside both models today
 
 ## One source for every routing number
 
+**Superseded in part 2026-09-15: every quantity below is now DEFINED in
+one place, `awx/rules.py`, and installed into these names by each stage.
+See "`rules.py` -- one place for the topo chain's design constants" at
+the end of this file for the table and the formulas.**
+
 Audited 2026-09-12, after a swimmer was found priced five different ways
 and `collapse_dives` was found re-laying at the wrong track AND the wrong
 via size. Every routing quantity now has exactly one home:
@@ -3501,6 +3506,10 @@ board at a 0.15 clearance would be planned and routed at 0.105. The
 general form is one `rules_of(board)` (netclass + `.kicad_dru` +
 `routing_defaults`) feeding all of them, and D1's strip capacity must
 read it before it becomes a constraint. One session; not this one.
+**[2026-09-15: the LITERALS are now in one place (`awx/rules.py`); the
+board-derived resolution was declined -- py_router owns that and will
+SUPPLY the geometry. See "`rules.py` -- one place for the topo chain's
+design constants" at the end of this file, including what it did NOT fix.]**
 
 **`judge_gate2` (the gate re-graded with the braid's planned lane length
 and the routed length; Andy's rule `vias + mm / 7.5` as the TARGET;
@@ -4604,3 +4613,118 @@ build-failure row carried only a tag.
 4. A `--pattern shuffle --inversions N` sweep at fixed K would give a
    dose-response of gap against crossing count, which none of these batches
    has (the patterns are corners, not a curve).
+## `rules.py` -- one place for the topo chain's design constants (agent, 2026-09-15)
+
+Half of the generality debt recorded above is paid, and the other half was
+DECLINED on purpose. `awx/rules.py` is now the single definition of the
+chain's design constants; every module's constant defaults to it and every
+stage installs from it.
+
+**Andy's decision, and the reason.** The first version of this module
+RESOLVED the numbers from the board -- the sibling `.kicad_pro` Default net
+class, `.kicad_dru` layer rules, `list_nets.board_constraint`, the
+`fab_tiers` floor. That was removed. **py_router already does that
+resolution**, properly and in one place, and the topo chain is not a second
+front for it: two resolvers reading one board are two chances to disagree
+about what it asks for. The topo chain will be DRIVEN by the main router, and
+when it is, the geometry will be SUPPLIED. So this module holds the chain's
+own constants and offers exactly one seam for that handover --
+`Rules.from_router_config(cfg)` -- which is unused by the chain today and
+covered by a unit test only.
+
+| quantity | the one source | value | formula |
+|---|---|---|---|
+| spec clearance | `rules.SPEC_CLEARANCE` -> `topo_strings.SPEC_CLEAR`, `braid.SPEC_CLEARANCE` | 0.1 | the chain's spec: what the fanout lays at, what `chain_k.sh` / `grade_k.py` grade at, what the output project records |
+| braid hug clearance | `Rules.hug` -> `braid.CLEAR` | 0.105 | **= clearance + 5 um** -- the spec plus a hair, so a hug does not sit exactly on it |
+| braid lane track | `rules.TRACK` -> `topo_strings.TRACK` | 0.127 | the lane track (5 mil) |
+| fanout track / clearance | `Rules.fan_track` / `.fan_clear` -> `source_realize.FAN_TRACK` / `FAN_CLEAR` | 0.1 / 0.1 | the production engine's stub width; clearance **= the spec**. The board carries TWO track widths on purpose |
+| via size / drill | `rules.VIA_SIZE` / `VIA_DRILL` -> `braid.VIA_SIZE` / `VIA_DRILL` | 0.25 / 0.15 | |
+| lane slice | `Rules.lane_slice` -> `select_moves.NEST_IN`, `cut_ledger.NEED` | 0.232 | **= track + hug** -- two parallel tracks of width w at clearance c sit at pitch w + c |
+| lane pitch / exit pitch | `Rules.lane_pitch` / `.exit_pitch` -> `braid.LPITCH` / `MINP`, `select_moves.BAND_LPITCH` | 0.35 / 0.38 | **= max(the chain's pitch, one lane's slice)** -- the floor binds above clearance 0.218 |
+| band tip | `Rules.band_tip` -> `select_moves.BAND_TIP` | 0.9 | **= array pitch / 2 + the engine's exit margin** (DU1's 0.8 + 0.5). A DEAD default -- see below |
+| `BAND_GAP`, `HALF_SEP`, `VIA_NEED`, `END_KEEP`, `MARGIN_OUT` | `Rules` properties | | braid's / topo_strings' own expressions, re-evaluated on install so the formula has one home |
+| hole-to-hole / edge | `Rules.hole_to_hole` / `.edge_clearance` | None | the braid reads these two off the board itself and applies them tighten-only; that is left exactly where it was |
+
+**How it is wired.** Each stage is its own process, so each entry point calls
+`rules.install_defaults()` once: `braid.main`, `fanout_from_plan.main`,
+`make_bench.main`, `pack_board.main`, `replan.main`, `cut_ledger.main`,
+`collapse_dives` (after its argparse). `install` writes the values into the
+module constants the chain already reads and re-evaluates the ones derived
+from them. **The literals stay as each module's DEFAULT**, so a module
+imported without an install behaves exactly as before -- the chain is
+byte-identical BY CONSTRUCTION, not by measurement. Constants were chosen
+over functions because the consumers read them as module ATTRIBUTES at call
+time (`te.VIA_SIZE`, `br.CLEAR`) in ~30 places, so one install reaches all of
+them and no hot loop grows a call. `chain_k.sh` and `grade_k.py` grade at the
+module's clearance and PRINT it (`GRADE ... clr=0.1`), instead of each
+carrying its own literal 0.1.
+
+`install_defaults()` is inert today -- it installs what the modules already
+hold -- and that is the point: it is the seam. When the main router drives
+the chain, that call becomes `install(Rules.from_router_config(cfg))` and the
+whole chain moves onto the router's geometry at once.
+
+**`from_router_config` does not invent what a router config cannot say.** It
+takes `clearance` / `track_width` / `via_size` / `via_drill` (plus
+`hole_to_hole_clearance` / `board_edge_clearance` when present) and derives
+the chain's quantities by the formulas above. Two things it refuses to guess:
+the **two track widths** (a config has ONE `track_width`, so the supplied
+width becomes both unless the caller passes `fan_track` -- the split is a
+chain decision and stays an explicit argument rather than a silent ratio),
+and **band_tip**, which is array geometry, not routing geometry. A config
+carrying neither clearance nor track_width raises rather than falling back to
+the chain defaults: a mis-wired handover must not look like a working one.
+
+**Float bits are part of the contract.** `0.1 + 0.005` is one ULP ABOVE the
+double `0.105`, and `0.127 + 0.105` one ULP BELOW `0.232`. A 1-ULP clearance
+moves a grid cell, moves a lane, changes the via count. So every DERIVED
+quantity is rounded to 6 decimals (the writeback's own normalization) and
+lands exactly on the literal it replaced, while the expressions the modules
+already spelled are re-evaluated in their original order and not rounded.
+`tests/test_622_rules_of.py` compares with `.hex()`, not `approx`.
+
+**The gate: flag-off byte-identity.** `PLAN_PAGES=1 bash chain_k.sh T 15 28`
+before and after: K15 and K28, fanout board AND routed board, **IDENTICAL
+copper** on `copper_same.py` and on `cmp_copper.py` (counters, so a
+duplicated segment cannot hide), and the stamped `.kicad_pro` byte-identical.
+Ladder unchanged: K15 16 vias, K28 34 vias, 0 open, 0 DRC.
+
+**A bug this work introduced, and what caught it.** The first `install`
+resolved its targets with `sys.modules.get(name)`. A stage runs as
+`python3 braid.py`, so the router's own module is named `__main__` and
+`sys.modules['braid']` does not exist: the install wrote NOTHING into the
+router, silently, while the stage printed the numbers it was not using -- the
+"a wiring fix can be INERT" trap exactly. `install` now also matches a module
+running as `__main__` by its `__file__`, every stage prints **its own
+constants** rather than the `Rules` object, and the test runs a stand-in
+stage as a real subprocess. A second, quieter one: `braid.clip_round_ends`
+captured `END_KEEP` as a DEFAULT ARGUMENT, bound at def time where a module
+attribute write cannot reach it; it now reads it in the body, and the test
+AST-scans every awx file for that shape.
+
+**Found and NOT fixed (recorded, as the audit above records its own):**
+
+- **`select_moves.BAND_TIP` is a DEAD default.** Its only readers
+  (`band_leg`, `band_capacity`) are on the `SPLIT_BLOCKS=1` path, and that
+  path's caller (`fanout_from_plan.plan_state`) already overwrites it with a
+  different formula -- `max(pitch_x, pitch_y) / 2 + 0.05`, half a pitch plus
+  one occupancy cell, because the under-pad engine ends its stubs at the
+  boundary cell and not at `exit_margin` (measured 0.425 at 0.8 mm pitch).
+  The 0.9 is reproduced exactly by the formula in its own comment, and is not
+  what runs.
+- **`select_moves.BAND_BLOCK_GAP = 0.30` calls itself "the braid's
+  BAND_GAP", which is `TRACK + CLEAR + 0.07` = 0.302.** A stale hand-copy.
+  Making it follow the formula changes the chain's output, so it is named
+  here instead of changed.
+- **The 0.025 routing grid in `braid.setup` is still a literal**, justified
+  in its own comment by a rule computation ("the legal minimum, track +
+  clearance = 0.227, plus 23 um") that is not true at another geometry -- so
+  a supplied geometry would not move it.
+- **Per-NET-CLASS clearance.** The braid prices ONE scalar for the whole bus,
+  and whatever the main router supplies will be one number too, so a board
+  whose bus class differs from its Default class needs a decision that does
+  not exist yet on either side.
+- (Observed while the resolver still read the board, and still true:
+  `list_nets.board_constraint` cannot see `min_via_drill` -- it is not in
+  `_CONSTRAINT_FIELDS` -- although this repo's own writeback writes that key
+  and the bench carries it. That is py_router's to fix if it matters.)
