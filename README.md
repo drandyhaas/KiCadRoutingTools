@@ -6,6 +6,8 @@
 
 A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiCad 9 and KiCad 10**. Available as both a **KiCad Plugin** with full GUI and a **Command-Line Interface** for scripting and automation.
 
+📊 **[Project metrics](https://drandyhaas.github.io/KiCadRoutingTools/metrics/)** — installs, downloads and traffic, updated daily.
+
 <p align="center">
   <img src="docs/routed_all.png" alt="Routed PCB example" width="600">
   <img src="docs/routed_kit.png" alt="Routed PCB example 2" width="600">
@@ -21,6 +23,7 @@ A fast Rust-accelerated A* autorouter for KiCad PCB files. Compatible with **KiC
 - [Project Structure](#project-structure) & [Module Overview](#module-overview)
 - [Performance](#performance)
 - [Command Reference](#command-reference) — options per tool (full list: `--help` / [configuration.md](docs/configuration.md))
+- [Project metrics](https://drandyhaas.github.io/KiCadRoutingTools/metrics/) — installs, downloads and traffic
 - [Requirements](#requirements) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
 
 ## Features
