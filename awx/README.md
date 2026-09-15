@@ -1190,6 +1190,487 @@ via-in-pad tooth (1) + dive (1) + dog-bone (1) + a weave or a leg crossing
 is 4 -- the model prices the first three and not the fourth. That leg
 crossing term is the next lever.
 
+### 2026-09-14 (session 3): why not two vias, and the exit-leg term
+
+Andy's two asks: build the leg-crossing term, and understand why not every
+net at K41 fits on two pages at two vias when the human's do. Bench pg2
+(the committed defaults): K41 79 / 0 open, human 70.
+
+**The gap is four nets.** Per net against the human (`struct_table.py`,
+`net_vias.py`, scratchpad e78852db): ours 79 = 8 nets at 0, 29 at 2, and
+SCKE1 8 / SBA1 5 / SA8 4 / SA2 4 (+13 against the human's 2 each); five
+DQ nets at 2 where the human is at 0 (+10); seven nets at 0 where the
+human pays 2 (-14). Fix the four at 2 and K41 is 66. What each one is:
+SA2 is a page-B joiner crossed by the B exit legs of eight outer joiners
+that exit earlier, so it dives under them and returns (+2, priced 0);
+SCKE1's 'up' via-in-pad berth sits in the north strip between DU1 and the
+passives, which carries 11 'up' berths and 4 far-face lanes -- refused in
+band, the last call laid a 4-via staircase through the top block (the
+human goes round the SOUTH, dives at (138.1, 71.8), rides B north under
+the whole array and dog-bones just north of J9: the face with ROOM);
+SBA1's tooth was bought on U1's WEST face (against the flow, 11 mm under
+U1 at 3 + 2 x 11 = 25 against a 300 swimmer), which the braid cannot join
+to the corridor -- its own 34 mm spine, refused every attempt; SA8 is a
+south-side joiner given a north-side far-face berth (its ball is in the
+north half) and swims the whole bundle.
+
+**Model 46, braid plan 82, copper 79 (`plan_vias.py`).** The pages-first
+objective counts the end vias (28) and the end-page mismatches (18). The
+braid's own planner on the same plan implies 54 lane changes. The 36 the
+model never saw: the JOINERS' exit legs (the joined block keeps the
+source's join order, last joiner innermost, so a joiner's leg crosses
+every port and every inner joiner exiting later; `place_and_decide` flips
+such a leg to B and pays a corner + a tip: SA5 SBA0 SDQ6 SODT0 SRAS SWE at
+2 each, +12, all priced 0 as F/F/F), the page-B lanes those B legs cross
+(SA2, SCS1, +4), and the swimmers' changes (+22, of which the router paid
+9). The human's joiners cost 2 as well ('DD' / 'dD': F corridor, dive at
+or under DU1, B ride, surface, F in), so the joiners are at parity; the
+mispricing hurts by making the model F-HUNGRY for them (0 on F, 1-2 on B,
+when both are 2) and blind to what their legs cross.
+
+**The human is not a two-page router.** `two_chain.py` on the human's
+ends (hbn_k41) needs 6 swimmers under our keys (the braid 10: SDQM1 SDQ9
+SA1 SDQ11 SDQ12 SDQ14 SDQ0 SA4 SCKE1 SCKE0), and the human routes all ten
+at 2 vias: 'Cd' -- F tooth, ONE dive mid-corridor, B to a dog-bone. A
+two-page lane pays its mismatch at an end; the human puts the change
+where the crossings say. Under-array copper is not the difference (B
+under DU1 81 mm on both boards); the perimeter is (human B 185 / F 97 mm,
+ours 108 / 143).
+
+**Proven: our menus need two swimmers.** `PLAN_PAGES_MAX_SWIM=k` (a probe
+knob) on the bench's instance (728 berth + 244 tooth candidates, 820
+pairs): 0 swimmers INFEASIBLE in 5 s, 1 in 8 s, 2 FEASIBLE. On the chain's
+own seed the uncapped DET-40 solve stops at 4 swimmers / obj 2309 while
+the same model capped at 2 finds obj 1761 -- a search failure, not a
+capacity. `PLAN_PAGES_LEX=1` (phase A minimises the swimmer count alone,
+proves 2 OPTIMAL in 10 s, caps the main solve and hints it) finds a
+2-swimmer plan the braid then swims 6 on: 12 teeth moved, and the keys
+built on the seed no longer hold. Off.
+
+**The exit-leg term, `PLAN_PAGES_LEG=1`.** A leg-layer bool per net (the
+page for a head-on berth), corner + tip in place of the berth mismatch,
+and per same-corridor pair with a shared side the crossing reified from
+the keys (same side, |T| inner, exit s earlier by 0.05 mm) -- only a net
+with a joiner tooth on offer owns a crossing leg -- with a crossed lane's
+dive charged once however many legs cross it. Two things the build
+taught: the term in ONE phase stops at 7 swimmers / obj 3318 where the
+leg-free solve has 2 / 1777 (every leg-free answer is feasible under the
+term at about 1830: the bigger model searches worse), and the leg
+constraints built up front degrade the leg-free phase on their own (obj
+2662 for 1777), so phase 1 is the pristine model and the leg variables
+are added to it afterwards, phase 1's answer the hint
+(`PLAN_PAGES_LEG_DET`). `PLAN_PAGES_SRC_AWAY=0` drops tooth candidates
+pointing against the spine's launch direction (SBA1's west tooth).
+
+Ladder (vias / open, PLAN_PAGES=1 + the arm; pg2 = the defaults; lg1 =
+the term with the first crossed-lane rule, lg3 / lg4 = the corrected one):
+
+| K | pg2 | lg1: LEG=1 (old rule) | lg3: LEG=1 | aw0: SRC_AWAY=0 | lg4: LEG=1 + SRC_AWAY=0 | human |
+|---|---|---|---|---|---|---|
+| 15 | 16 | 16 | 16 | 16 | 16 | 22 |
+| 28 | 34 | 40 | 34 | 35 | 34 | 46 |
+| 35 | 65 | 62 | 62 | 62 | **60** | 58 |
+| 41 | 79 | 75 | 79 (copper = pg2) | **72** | **72** | 70 |
+| 51 | 115 | 120 + SDQ11 open | 117 + SDQ11 open | 113 + SA10 open | 96 + 4 open | 85 |
+
+K41 wall (fanout + braid): pg2 92 s, lg1 147 s, lg3 126 s, aw0 73 s, lg4
+114 s.
+
+lg1's K41 75 was the best clean K41 this chain had produced (the four bad
+nets went 8/5/4/4 -> 3/2/2/2; SA15 6, SDQ9 4, SA1 4 appeared), K35 -3,
+but K28 +6 and K51 +5 with an open net. **K28's mechanism:**
+same pages, same joiners, the same 24 plan-implied changes -- but the
+model, indifferent at 2 between an F berth with a B leg and a B berth,
+took B berths for five joiners; the braid then put their legs on F (its
+own tie: corner 1 against tip 1) over 7-10 F lanes whose berths are B,
+which the term priced at 0 (the change "taken early") and which then
+needed their OWN F legs: up again and down again. The braid's plan
+predicted both boards exactly (ends 10 + 24 = 34; 16 + 24 = 40). The
+corrected rule: a crossed lane pays two unless it leaves its page at its
+own leg (z >= hit_page and not corner), and a lane hit by legs of both
+layers pays two whatever it does. **The braid's plan-implied count (ends
++ changes) predicts the routed board within 3 at every K seen; the
+pages-first objective does not.**
+
+**Verdict (edict 3): nothing here is a default.** The corrected term
+(lg3) repairs K28 and buys K35 -3, leaves K41's copper identical to pg2,
+and costs an open net at K51 with 30 s more solve time. The away filter
+(aw0) is the largest single effect -- K41 72 (histogram 0:10 2:26 4:5)
+and K35 -3 in 73 s -- and with the term (lg4) K35 60 / K41 72, the best
+clean K35 and K41 this chain has produced; but every arm that helps at
+K41 ships an open net at K51 (four in lg4), where the plan is over the
+two-page capacity and completion is the knife edge. `PLAN_PAGES=1` alone
+is still pg2's stack, byte-identical (checked at K28 / K41 after the
+edits). The open items, in order: the K51 completion under the away
+filter; the model's disagreement with the braid (the braid's plan count
+is the judge to trust); the solver's swimmer search (2 is feasible where
+it settles for 4).
+
+### 2026-09-14 (session 4): K51 completion, the braid's count as the judge, the swimmer descent
+
+Andy's order for the day: K51 completion under the away filter; judging
+plans by the braid's plan-implied count instead of the model's; the
+swimmer search that settles for 4 where 2 exists. Bench pg2 (the
+committed defaults): 16 / 34 / 65 / 79 / 115; re-verified IDENTICAL
+copper at K28 (fanout board and routed board) after every edit below.
+
+**K51 under the away filter completes -- a braid fix, `BRAID_RIP_PROBE_ALL=1`.**
+aw0 refused SA10 (a swimmer with 17 page crossings) at the last call
+with "no path even with every lane priced -- walled by static copper".
+It was not: its tooth exit sat in a wedge between SA4's and SCKE1's F
+diagonals, with SODT0 and SA2 on B right under it. `rip_for`'s min-cut
+probe priced only the lanes on the refused search's FRONTIER (SA4 SCKE1
+SRST SCS1), and the frontier is one lane deep by construction -- the
+boundary of the reachable pocket -- so the probe could cross the first
+wall and no other: crossing SA4 needed B, B was hard copper to it, no
+path. With every lane of the run priced the cut set reads [SA4 SA1 SA2
+...], the trial [SA4, SA1, SA2] routes SA10 at 2 and re-lays the three
+victims at +2 each: **K51 121 / 0 open / 0 DRC** (aw0 113 + SA10 open,
+pg2 115 complete). The knob acts only where the false verdict occurred
+-- aw0 K51 and lg3 K51, once each; never at K15-K41 on any arm, and not
+on the old planner's bs1 K51 (its SBA2 refusal is a cut set no trial
+can re-lay) -- so everything else is byte-identical with it. Default 0.
+
+**The judge: what predicts the routed board (`pred_vs_routed.py`,
+scratchpad e90127ce, 19 fanout/routed pairs).** Per class, the braid's
+plan-implied vias (the fanout board's ends + `plan_braid`'s per-lane
+count) against the routed vias:
+
+| board | page lanes: ends + `changes` -> routed | swimmers: ends + `swim_changes` -> routed | swimmers: ends + FLAT 2 -> routed |
+|---|---|---|---|
+| pg2 K28 | 40 -> 34 | -- | -- |
+| pg2 K35 | 56 -> 59 | 8 -> 6 | 6 -> 6 |
+| pg2 K41 | 54 -> 67 | 28 -> 12 | 13 -> 12 |
+| pg2 K51 | 61 -> 73 | 74 -> 42 | 33 -> 42 |
+| aw0 K41 | 46 -> 48 | 58 -> 24 | 25 -> 24 |
+| aw0 K51 | 67 -> 81 | 98 -> 32 | 29 -> 32 |
+| bs1 K41 | 50 -> 53 | 108 -> 38 | 36 -> 38 |
+| bs1 K51 | 47 -> 49 | 144 -> 63 | 51 -> 63 |
+
+So the count that tracks the copper is `plan_ends.vias_from_pages` as
+`judge_by_braid` already sums it -- ends, each page lane's profile
+changes, a FLAT `SWIM_VIAS` per swimmer -- WITHOUT the ride term (the
+ride is what reverted a needed batch of teeth and why the model's count
+replaced it). `swim_changes` over-predicts a swimmer 2-3x (the router
+finds a smarter line than the hold-then-run), and the pages-first
+model's count sees no exit legs (K41 pg2: model 46, braid 67, routed
+79). Page lanes under-predict at K41+ by 12-14 -- the jammed strips
+(SCKE1 8, SBA1 5) that the plan phase does not model.
+`PLAN_PAGES_JUDGE=braid`: `pages_first.verify` returns the count
+(`braid_count`), `choose`'s key becomes (count, braid swimmers), and
+both realize-confirm sites in `fanout_from_plan` (`_pf_key`) become
+(sum of `pred`, residue). `PLAN_PAGES_JUDGE=resbraid`: the residue
+first, the count where it ties (only the model's vias replaced).
+Default `model` = pg2.
+
+**The swimmer descent, `PLAN_PAGES_DESCENT=1`: built, and it loses on
+the merits.** After phase 1 the model is re-solved on a `clone()` with
+the swimmer count capped one below the answer's and the answer as the
+hint (a constraint cannot be taken back out of a CpModel; assumptions
+work too), per level under `PLAN_PAGES_DESCENT_DET`, until INFEASIBLE
+(a proof) or UNKNOWN. On the K41 chain's own instance (`desc_probe.py`):
+
+| solve | model swimmers | model vias | teeth moved | braid swims | braid-implied vias |
+|---|---|---|---|---|---|
+| plain (pg2) | 4 (obj 2309) | 46 | 9 | 6 | **72** |
+| descent, DET 20 | 2 (obj 1905) | 80 | 22 | 5 | 97 |
+| descent, DET 40 | 2 (obj 1761) | 56 | 10 | 4 | 83 |
+
+<= 1 swimmer is proven INFEASIBLE in 8 s at both budgets. The 2-swimmer
+plans the descent finds are the ones the standalone probes called
+"better" (obj 1761 against 2309), and under the braid's count they are
+worse by 11 and 25: the objective's 300 per swimmer buys fewer swimmers
+with more moved teeth and more end vias, which is what the copper pays
+for. So "settles for 4 where 2 exists" was a search failure only in the
+model's own objective; the search was never the lever.
+
+**Ladder of the arms above (vias / open):** jb (`PLAN_PAGES_JUDGE=braid`)
+16 / 38 / 68 / 79 / 119 + SCS1 open; jba (jb + `SRC_AWAY=0` +
+`RIP_PROBE_ALL`) 16 / 38 / 62 / 72 / 134 + 3 open; desc
+(`PLAN_PAGES_DESCENT=1`, DET 40) K41 93; sw4 (`PLAN_PAGES_SWIM=4`) K28 36,
+K35 **54** (stopped there; the best K35 this chain has produced, human
+58 -- unmeasured at K41/K51). pg2 16 / 34 / 65 / 79 / 115. The count-first
+judge tolerates swimmers at the flat 2 and K51 then ships 1-3 open;
+resbraid (residue first) was queued and not run. Andy stopped the arms:
+"everything you're doing seems like a failure at K51 -- diagnose".
+
+### The K51 diagnosis (2026-09-14): the human routes BUNDLES, we route lanes
+
+Andy's reading of the renders, which the census confirms: **the human
+keeps tracks on the same page in bundles, over length.** `bundles.py`
+(scratchpad e90127ce) classes each K51 net by the ARC it takes round
+DU1 (copper above DU1's box = north, below = south, neither = mid) and
+the layer it runs on outside both arrays:
+
+| arc / layer | human: nets (vias) | ours pg2: nets (vias) |
+|---|---|---|
+| mid F | 4 (0) | 7 (2) |
+| mid F+B | 6 (12) | 8 (**36**: SA12 6, SDQ13 6, SDQ4 6, SDQ11/12/15/9 at 4) |
+| north B | **10 (20)** | 4 (10) |
+| north F / F+B | 2 (2) / 1 (2) | 0 / 3 (8) |
+| south B | 3 (6) | 1 (2) |
+| south F | 8 (12) | 6 (8) |
+| south F+B | 13 (26) | 18 (48) |
+| total | 47 (80) | 47 (114) |
+
+The human's north bundle is ten address nets on B END TO END (F 0-2 mm
+each, two dog-bones): SA0 SA1 SA11 SA12 SA14 SA15 SA2 SA4 SA8 SBA1 --
+every one a ball in DU1's EAST columns (M..T), reached by riding B round
+the north of DU1 and down into the east end of the array, where B is
+free under the balls. The south bundle is the bottom block's east end
+and the gap-S row: eight nets pure F, thirteen F with a short B tail at
+DU1 (the 'dD' diver), three B. The middle is the west columns (A..H),
+straight in. Bundles are chosen by DESTINATION GEOMETRY (which block,
+how deep from the west face), each bundle is planar and one layer, and
+bundles never cross because they are spatially apart. Length is not a
+cost: the south bundle is a 25-30 mm detour for 17 mm pads.
+
+Ours: one corridor, 47 lanes, two LAYER pages plus 11-12 swimmers. Per
+arc against the human: the middle 15 nets / 38 vias against 10 / 12 (the
+corridor's sorting and the swimmers' dives land there -- corridor vias 23
+against 7), the north 7 / 18 against 13 / 24, the south 25 / 58 against
+24 / 44 with 18 mixed-layer lanes. Ten nets are in the WRONG bundle:
+SA2 SA4 SA8 SA12 (human north-B; ours south or mid at 2-6), SRST (human
+south-B; ours north), SDQ13 (human mid-F at 0; ours mid at 6), SDQ4 SDQ5
+(human south; ours mid). And the source is the other half: the human
+peels the north bundle out of U1's NORTH face on B (7 N-B exits; ours N 2,
+E 29, S 16), so ours must cross the whole bundle inside the corridor to
+reach a north berth -- **170 of the plan's 224 crossings involve one of
+the 11 'up' berths** (down-up 66, left-up 54, up-up 27, right-up 23);
+the human's ends have 101 crossings in all. Via classes: human 0
+via-in-pad / 34 dog-bones / 47 free; ours 27 / 25 / 7 weave pairs.
+Region: human src 17 / corr 7 / dst 57; ours 21 / 23 / 71.
+
+What K51 is, then: K41 fits in two layer pages of one corridor with
+4-6 swimmers; the seven nets K51 adds (SA10 SA14 SDQ1 SDQ3 SDQ4 SDQ5 SZQ:
+deep U1 balls, DU1 columns E-H and L/T) push it over that capacity, and
+the human's answer is not a better two-page schedule but MORE PAGES:
+(north, B), (south, F), (mid, F), (mid, B) -- pages by (arc, layer),
+with the arc decided by where the ball sits in DU1 and the north
+bundle launched from U1's north face. Nothing in the chain chooses an
+arc: the berth chooser prices faces by vias/channel/reach, the braid
+forms ONE corridor and pages it by layer, and the source menu has no
+north-face exit. Every arm of this session (judge, descent, swimmer
+price, rip probe) worked inside that structure.
+
+**Andy's direction after the diagnosis:** finish the cheap-swimmer arm
+(sw4 final: 36 / 54 / 86 / 119 + SBA2 open -- K35 only, not a default),
+and look into MORE PAGES like the human: north / south / middle for
+both F and B, six pages, each guided towards its own region.
+
+### The six pages: what the probes say (2026-09-14, afternoon)
+
+**Phantom crossings.** `phantom_xing.py` (scratchpad e90127ce) runs the
+braid's plan phase on a board and classes every launch/target crossing
+by the two nets' (arc, layer) as routed on a reference board. On the
+HUMAN'S ENDS (hbn_k51, the clipped bench; SZQ dropped) our one-corridor
+order model counts 101 crossings: **67 are phantom** (59 between lanes
+on different arcs, 8 between different layers -- pairs that never meet)
+and 34 real, 20 of them inside the middle bundle. On our pg2 plan: 224
+counted, 147 phantom, 77 real. So the order model that drives every
+schedule and every judge is counting crossings between lanes that go
+round opposite sides of DU1.
+
+**Arcs as corridors: the plan can now name them.** `braid.setup` takes
+`plan['corridors']` (a list of net lists) as the grouping when a sidecar
+carries it, and accepts a grouping-only sidecar (no ends). The human's
+three K51 bundles written beside hbn_k51 (`tmp/hbn_k51.plan.json`,
+north 13 / mid 10 / south 24):
+
+| ends | corridors | schedule | plan swimmers | routed | open |
+|---|---|---|---|---|---|
+| human | 1 (as clustered) | greedy pages (hb1) | 11 | 93 | 2 (SCS0 SCS1) |
+| human | 3 arcs | greedy pages (hb3) | 3+4+3 = 10 | 96 | 3 |
+| human | 3 arcs | exact pages (hb4) | 2+2+1 = 5 (= MIN) | 101 | **8** (the whole middle) |
+| human | 3 arcs | one-dive 1 (hb5) | -- | 111 | 12 |
+| human | 3 arcs | one-dive 2 (hb6) | -- | 112 | 14 |
+| human | 3 arcs | one-dive 3 (hb8) | -- | 105 | 9 |
+| human | 3 arcs | one-dive 5 (hb7) | -- | 100 | 4 |
+| human | 1 | exact pages (hb10) | 11 | 95 | 2 |
+| human | 1 | one-dive 5 (hb9) | -- | 100 | 3 |
+| human, real board | -- | -- | -- | **81** | 0 |
+
+Two-chain capacity of the human's ends (`two_chain.py`): one corridor
+101 crossings / MIN 6 swimmers; three arcs 17 + 20 + 14 = 51 crossings /
+MIN 2 + 1 + 2 = 5. **One-change residue (`one_change.py`): one corridor 4;
+three arcs 0 + 0 + 0, model 88 (ends 43 + changes 45) against the
+human's 81.** So the STRUCTURE that reproduces the human is exactly
+"arcs + one change per lane": the arc removes the phantom crossings,
+the free change point resolves the real ones (the human's mid-bundle
+lanes cross each other with one dive each, F before it and B after --
+a two-page lane cannot, its change is pinned to an end).
+
+**Why the braid cannot route it yet.** hb4's render: the three
+corridors all get STRAIGHT two-vertex spines between the arrays (north
+15.3 mm, mid 5.5 mm, south 16.6 mm). The north spine runs under the
+passives along DU1's top row -- the 2.2 mm strip -- not above them
+where the human's north bundle rides, and all three share the launch
+region, so the bundles overlap and the middle corridor's lanes (planned
+after the north one, whose lanes are its reservations) are refused six
+at a time. `build_spine` draws a straight line whenever the launch and
+arrival flows are within 30 degrees, and the destination array is its
+own corridor's end (`own`), never an obstacle: nothing pushes an arc's
+spine round the array. The general rule the human's board suggests: an
+arc corridor's spine must wrap the destination's box inflated by the
+corridor's half-width H (LPITCH x (n-1)/2 + LPITCH: 2.45 mm for 13
+lanes, wider than the 2.2 mm strip, so it goes ABOVE the passives; a
+thinner bundle would use the strip), with the parts inside that margin
+solid to it; the middle corridor planned first, the arcs relaxed round
+its tube. The source half is the other missing piece: the human peels
+the north bundle out of U1's north face on B (7 of its 10), and our
+source menu offers an 'up' move to 2 of those 10 (SA0 and SA4 have
+EMPTY menus: boxed in by the bench's teeth).
+
+**The build, in order (none of it written):**
+1. region-guided spines for arc corridors (the rule above), middle
+   first; measure on the human's ends with the arc sidecar until hb3/hb4
+   route at ~88 with 0 open -- that is the gate for the braid half;
+2. one-change scheduling per corridor (`BRAID_ONE_DIVE` exists at levels
+   1-5; on the arcs it shipped 4-14 open, so it must be re-measured once
+   the spines are right);
+3. the planner: an arc per net (corridor membership) -- keys from
+   `braid_slots` on a 3-corridor seed, pairs only within a corridor (the
+   model's existing rule, which is what deletes the phantoms), the arc
+   decided by the berth's side; the source menu extended with the N/S
+   face B exit for a deep ball (a dog-bone into the gap, a B run along
+   the column out the face) so a north-arc lane launches outermost-up
+   instead of crossing the bundle.
+
+### The wrap spine (2026-09-14, later): built, and what it exposed
+
+`Corridor._arc_spine` (braid.py): an arc corridor (the plan's
+`arcs` list beside `corridors`, 'N' / 'S') gets a WRAP SPINE instead of
+`spine_of`: the destination's pad box inflated by H + a ball's radius +
+clearance + a track's half-width + 0.2, merged with every part OUTSIDE
+the array's own box on the arc's side whose pads reach into the inflated
+box (re-inflated after each merge, until nothing touches), then the
+polyline teeth-centroid -> out along the launch flow -> the box's near
+corner on the arc side -> along it -> round the far corner and down the
+far side to where the last stub projects, plus 0.5 mm. Axis-aligned, no
+relaxation. On the human's K51 ends: N spine along y 52.7 (13 parts
+merged, above both passive rows), S spine along y 74.3 (C5 C12 C6 C10
+merged), each up the east side to x 148-153. The render has the human's
+shape. Two lessons on the way: (1) a decoupling cap BETWEEN the balls
+must not widen the wrap (merge only parts outside the array's box), and
+(2) an arc's members must be the nets whose STUBS are on that arc's
+faces -- classing by the copper's y-extent put the west-column SDQ nets
+that merely dip under DU1's south-west corner into the south corridor
+(24 lanes, 8.7 mm wide, 20 legs through the caps). With a west-column
+net in the north corridor s1 < s0 and `route_lane` asked numpy for
+3.5 PiB: a guard is owed there.
+
+| grouping (human ends, SZQ dropped; SCS0/SCS1 are a BENCH DEFECT -- two unconnected pieces, no via -- open in every run, so real opens = open - 2) | schedule | swimmers | vias | open |
+|---|---|---|---|---|
+| v3: mid 19 / N 10 (the human's north-B) / S 18 (bottom block + gap-S east end + SCKE) | greedy (ha3) | 6 + 1 + 7 | 115 | 4 |
+| v3 | exact pages (ha4) | | 109 | 4 (SA15 SCKE1) |
+| v3 | one-dive 5 (ha5), + exact (ha6) | | 116 | 5 (SA11 SA12 SA15) |
+| one corridor, greedy (hb1) | | 11 | 93 | 2 (= 0 real) |
+| human | | | 81 | 0 |
+
+**Why the arc still loses under the two-page schedule: the order keys.**
+The south corridor alone, in the wrap frame (`two_chain` v3: 66
+crossings, MIN 6 swimmers; one-change residue 4). Launch: the human's
+deep balls (SODT1 V11, SODT0 W11, SA13 V12, SRAS V13, SWE W13) escape
+STRAIGHT SOUTH through the array on F and leave the clip box at its
+south edge at x 120-123, so they are the OUTERMOST lanes of the
+eastbound band; the shallow east-face teeth (SA3 SCKE1 SCS1 at x 127.7)
+the innermost. Target: the braid's exit comb puts the first exiter
+innermost, and the human's first exits (J1 SODT1, K1 SODT0, J3 SRAS at
+x 140-142) are exactly the outermost lanes -- the comb's order is the
+reverse of the band's. The human resolves it without any reordering:
+**the south bundle is ONE layer (F) end to end in launch order, and
+every lane leaves it by a leg on the OTHER layer (the dive) at its own
+stub** -- a B leg under an all-F band crosses anything, so the exit
+order needs no comb and the schedule has nothing to resolve; 2 vias per
+net = the corner where the leg dives + the berth's own via. The north
+bundle is the mirror: an all-B band whose legs enter the array on B
+(same layer), so there the comb applies -- first exiter innermost -- and
+the human orders the launch to match by running the B lanes up U1's
+east side under the F teeth in the order the comb wants (a B end makes
+the rank free; residue 1 under our keys). The braid has the leg
+economics already (`place_and_decide`: a band lane's leg on its own page
+crosses nothing by the nested comb; other legs on the side's majority
+berth layer, crossings priced along s) but no mode that says "band =
+one layer, target offsets = launch offsets, legs on the other layer".
+
+**The arc-corridor mode to build (not written):** per arc corridor a
+band layer (from the plan: N = B, S = F on this pair; in general the
+layer whose escapes are cheaper at that arc's faces), every lane paged
+on it, no morph (target_o = launch_o for side exits, the comb only for
+same-layer legs), side-exit legs on the other layer at the stub's own
+s, far-face lanes carried round the corner by the wrap spine. Cost per
+lane = tooth/band mismatch + corner + tip. Gate: the v3 grouping on the
+human's ends at ~88 / 0 real open.
+
+**Choosing the arc paths as part of the plan (design).** An arc is a
+homotopy class round the destination: which side, and which channel on
+that side -- between the array and the parts attached to it, or outside
+them. The wrap rule decides the channel from the bundle's WIDTH (13
+lanes need 4.9 mm + margins, the strip under the passives has 2.2, so
+the box swallows them; a 5-lane bundle would ride the strip): capacity
+is the criterion, so the plan's choice is the MEMBERSHIP of each arc
+(which nets, hence the width) and the band layer, and the channel
+follows. The plan can price an arc candidate by: the wrap path's length
+(the human ignores it, so a low weight), its narrowest gap against the
+bundle's width (infeasible when narrower), the end costs of its members
+(tooth/band and tip mismatches, 1 via each), and -- for a same-layer
+comb (the N case) -- the inversions between the launch order and the
+comb order, which are the only crossings that survive in this model.
+The pages-first CP-SAT already has the pieces: an arc index per net as
+a variable, `braid_slots` keys built per arc (a 3-corridor seed), pair
+constraints only within an arc, and the source menu extended with the
+N/S-face and edge-hugging B exits that let a north-arc lane launch in
+comb order.
+
+**The bench defect, and the fix (Andy: "fix the bench by moving the
+line").** `human_bench.py` clips the human's copper at each array's pad
+box + 1.0 mm. The human dives to B exactly on U1's edge line for the
+lanes that turn along the edge (SCS0 0.01 mm outside the line, SA4 0.16,
+SCS1 0.21), and dog-bones 1.0-1.5 mm outside DU1 on every side (SA13
+0.05 out, SA14 0.24, SDQ5 0.29 at 1.0), so ANY single margin cuts through
+some via: no line to move to. The fix is a via-aware clip
+(`human_bench2.py`, scratchpad e90127ce): per net and box, the box steps
+out to swallow a via of that net lying within 0.5 mm outside the line
+(+0.1), so a dive on the line keeps its run. New benches
+`tmp/hbn2_k51` / `tmp/hbn2_k41` (54 vias kept against 44); the old
+`hbn_*` stay for the numbers above. Why only SCS0/SCS1 were open: SA4's
+via was cut the same way, but the endpoint finder took its F piece as
+the tooth, while for SCS0/SCS1 it took the orphan B piece whose free end
+points out of the box.
+
+**Three benches, three answers (10:10-10:25).** The via-aware bench
+(`hbn2`, edge vias kept) turned out harder for the braid, not easier:
+the human's dog-bones sit 1.0-1.5 mm outside DU1 on every side and on
+U1's edge line, and kept as static copper they crowd the launch and
+arrival zones (SA4's via 0.8 mm from SDQ7's tooth; SDQ7 refused with its
+start cell boxed by virtual copper). It also exposed a second defect of
+the old bench: the human's board carries 68 `(arc ...)` copper items
+that `human_bench.py` never stripped, so orphan arcs survived every clip
+as obstacles (and the braid's writer re-emitted their expansions beside
+them -- the "same-net soft joint" DRC pairs). The clean bench is
+`human_bench3.py` -> `tmp/hbn3_k51` / `hbn3_k41`: the plain 1.0 clip,
+arcs stripped, and every piece not connected to its own pad dropped
+(SCS0/SCS1 get a clean F tooth like SA4; SDQ4 lost 21 orphan pieces
+inside the DU1 box). Invariant asserted: every K net is exactly two
+copper components. The same runs on all three:
+
+| bench | 1 corridor, greedy | 3 arcs, greedy | 3 arcs, exact |
+|---|---|---|---|
+| old `hbn` (orphan arcs + stubs; opens minus SCS0/SCS1) | 93 / 0 | 115 / 2 | 109 / 2 |
+| `hbn2` (arcs stripped, edge vias kept) | 87 / 7 refused + SCS1 | 111 / 1 (SA8) | 125 / 1 (SA8) |
+| **`hbn3` (clean)** | **106 / 0** | 122 / 4 (south arc) | 80 / 11 (south arc collapsed) |
+| human | 81 / 0 | | |
+
+So the bench moves the one-corridor answer by 19 vias and the arc
+answer by up to 42; every number above is only comparable within its
+row, and `hbn3` is the one to use from here. On it the single corridor
+is 106 / 0 against the human's 81, and the two-page schedule on the
+three arcs loses (the south arc's comb order, as diagnosed) -- the
+arc-corridor MODE is still the build. One reading survives all three
+benches: with the human's edge vias in place (`hbn2`) the arcs COMPLETE
+where the single corridor refuses seven, which is the region separation
+doing what it should even before the mode exists.
+
 ## Settled -- do not re-run these
 
 | arm | verdict |
@@ -1761,3 +2242,477 @@ state kept only if the count of balls landed as asked rises), and what
 is still short degrades along the least damaging dimension: nearest free
 gaps first, then the other layer/kind, then any face. Every ball's
 outcome is reported per dimension in `pcb_data._fanout_plan_report`.
+
+### The arc-corridor MODE (2026-09-14, session 5): built, and what each arm taught
+
+Andy: "the arc-corridor mode in the braid (band layer per arc, target
+offsets equal launch offsets when legs are on the other layer, comb only
+for same-layer legs), gated on the human's ends routing at about 88 with
+0 open; then the plan chooses arc membership and band layer, the channel
+following from the width."
+
+**The mode (braid.py, gated by `plan['bands']` beside `plan['corridors']`
+/ `plan['arcs']`: `'F.Cu'` / `'B.Cu'` / null per corridor; `Corridor.band`,
+`Corridor.arc_inner`, `Corridor.LP` / `.BG`).** An arc corridor with a
+band is one bundle on one layer end to end: every stub a side exit reached
+by a leg at its own s (no head-on exits, no far-face legs -- the wrap
+carries the bundle round the corner), the exit block in LAUNCH order
+(`offsets`: no morph, so nothing crosses inside the band), one page for
+every lane (`_make_sched`: the two-page pager's answer overwritten, no
+swimmers), the page held to the lane's own leg (`lay_lanes`), the leg's
+layer by `place_and_decide`'s economics with the tie to the OTHER layer
+(a leg there crosses the whole band for its corner via -- the human's
+south bundle; the band's own layer wins only where the stub is on it and
+nothing still present lies between slot and stub -- the north comb).
+"Comb only for same-layer legs" turned out to need no comb at all:
+re-ranking a lane inside the band is a swimmer at 2 vias, the same price
+as the other-layer leg, and the other-layer leg needs no weave; the
+nesting is the LAUNCH order's business, which the join comb along the
+face gives for free (below) and the plan will choose.
+
+Nothing in that design routed. Every arm below is a defect the design did
+not contain, found by a probe, fixed in general terms; the flag-off chain
+stays byte-identical (K28 fanout board and routed board IDENTICAL to pg2
+after every edit). Bench `tmp/hbn3_k51` (human ends, SZQ dropped, v3
+grouping mid 19 / N 10 / S 18), `tmp/arc_arm.sh TAG`; probes in
+`tmp/arcprobe/` (`mask_probe`, `hop_probe`, `flood_probe --route-before`
+= a two-layer flood of a lane's tube minus every obstacle the router
+sees, which is the instrument that found most of these; `plan_dump`,
+`inmask`, `zoom.py` renders copper + the Eco plan lines, `vs_human.py`
+per-net vias against the human's board):
+
+| arm | what changed | vias / open | s |
+|---|---|---|---|
+| hb1c | one corridor, two pages (the base on this bench) | 106 / 0 | |
+| am1 | the mode as designed | 131 / 3 | 118 |
+| am4 | the stub's spine frame by the ARRAY's box (`_arc_project`: a wrap spine passes a stub on two sides; the nearest leg was the east one for DU1's north-line stubs, and every leg ran along the north line at one s) | 141 / 3 | 132 |
+| am5 | the legs' and jogs' mask rectangles in their own segment's frame (the lower half of each north leg projected to the east frame and fell outside the mask: 8/8 neighbours blocked by nothing) | 141 / 3 | |
+| am6 | the launch leg ALONG the teeth's line toward the arc (out along the mean escape the ten teeth spread along it, every one head-on over the next one's stub); a tooth with any tooth downstream joins; join legs stamped on the tooth's layer only | 110 / 4 | 100 |
+| am8 | the wrap merges only parts with copper on the BAND's layer (the F-only passives north of DU1 had pushed the B band 8 mm out, past the board edge -- eight of ten lanes planned off the board) | 112 / 3 | 128 |
+| am9-11 | `Spine.lane_xy` fold clamp (a vertex inside a corner's inner fold rendered 0.8-3 mm behind its mitre); the band mask as an XY TUBE round the lane's own mitred polyline (`_band_xy`, `lane_sxy`: the (s, o) mask interpolated the offset through the corner and lay on the NEIGHBOURS' true paths; the extreme lanes' open side was unbounded and SA8 searched DU1's ball field); pitch 0.42; innermost first | 119 / 2 | 139 |
+| am12-13 | band corridors first + ribbon start pushed past the combs: the middle corridor's channel is 4 mm and it collapsed (15/19 -> 2/19, 9 open) | 91 / 9 | 90 |
+| **am14** | plan order; an unrouted band corridor's LAUNCH COMB reserved whole for the corridors before it (`cross_reserve`); the ribbon push only where 2 mm of region remain; the launch leg CENTRED on its block (`BG` + `LP`(n-1)/2 off the teeth: through the teeth the inner lanes launched 4 mm inside the spine and cut the corner's margin through C9); pitch 0.40, gap the legal minimum, axis snapped to the source array's own axes | **93 / 1** (SBA2) | 79 |
+| am15 | + the econ re-lay honours reservations (`BRAID_ECON_RESERVE`): north 20 = the human's, middle 24 -> 38 | 115 / 7 | 89 |
+| am16 | + arc lanes routed HOP BY HOP through their polyline corners (`BRAID_ARC_HOPS`: the two-layer flood proved the south tubes connected while one search died at 72-120k iterations) | 115 / 1 | 57 |
+| am17 | hops without the econ reservation: south 42 -> 39 and 10/18 in band, north 27 -> 33 (SBA1 10, a hop's end pinned where the lane wanted to dodge), and 5 whole-board DRC -- the south band's outer lanes and a via 0.06-0.10 mm over the board-edge clearance. Hops off by default. | 96 / 1 + 5 DRC | 62 |
+| am18 | the wrap side clamped to the board edge less the band's half-width (the south side 74.75 -> 74.58); hops off | 91 / 2 (SBA2 SODT1) | 97 |
+| human | | 81 / 0 | |
+
+am14 per arc against the human: middle **24 = 24**, north 27 / 20, south
+42 / 36 (the bench keeps 40 of the human's 80). In band: middle 13/19,
+north 4/10, south 9/18 -- the rest at last call, 2-8 vias each. am18 is
+the tree as left (the edge clamp is a DRC class, kept): 91 / 2, the same
+in-band counts, SODT1 lost on the knife edge the clamp's 0.17 mm moved.
+**The gate (~88 / 0 real open) is not met**; the base on this bench is
+106 / 0 and the mode is 91-93 / 1-2 in 80-100 s.
+
+**What the probes say the rest is.** (1) U1's south-east corner: the
+north corridor's SA8 stands on the SOUTH face and its join leg must cross
+the east-face line between the south corridor's SA3 / SCS1 / SCS0 teeth
+0.3-0.5 mm apart; the north lanes born on the southern teeth (SA0 SA2 SA4
+SA1 SBA1) are walled at their join legs by the middle corridor's B copper
+-- its econ re-lay ignored the comb reservation (SDQ12 / SDQ14 3 -> 1 via
+straight through the slots), and with the reservation honoured the
+middle pays 14. The human's comb SLANTS north-east from the southern
+teeth and its middle dives sit just east of it at x 129.4-131.7; ours is
+vertical along the face, so the two want the same channel. (2) The
+south corridor's long lanes die at the search budget in one search
+(hops fix that: 4-9/18 -> 11/18) and SA5 / SBA2 end INSIDE DU1's box
+(the bench's clip), reached only through the ball rows. (3) A last-call
+lane is 2-8 vias where the in-band lane would be 2.
+
+**Next**, in order: the launch comb slanted toward the wrap (the human's:
+NNE from the southern teeth, which also frees the channel's east half
+for the middle bundle's dives); a corner tooth (SA8) joining OUTSIDE the
+other corridor's teeth; then the plan (arc membership + band layer as
+CP-SAT variables, keys per arc, the source berths chosen so the comb
+nests), and the mid corridor as a band with dives at DU1.
+
+### The slanted comb (2026-09-14, session 6): the human's count on the human's ends
+
+Andy: "Next, in order: the slanted comb, corner teeth joining outside
+the other corridor's teeth, then the plan choosing arc membership and
+band layer." And, mid-session: keep the router GENERAL.
+
+**What the bench really is.** `human_bench3.py` clips the human's
+copper at U1's box + 1 mm (x 127.69 on the east, y 71.43 on the south),
+so eight of the north corridor's ten teeth are the ENDS OF THE HUMAN'S
+OWN 45-DEGREE RUNS, pointing north-east at x 127.69, y 59.3-67.6; the
+south teeth point south-east along y 71.43. Measured segment by segment
+(`tmp/arcprobe/comb_geom.py`): the human's north lane is a short east
+leg, a 45-degree jog, a NORTH run beside the face for the three southern
+teeth (SA0 4.4 mm at x 127.85, SA2 4.7 at 128.25, SA4 4.8 at 128.6 -- a
+pitch apart), then 4-6.7 mm at 45 degrees into the band at y 57-59.6.
+The session-5 comb ran the launch leg ALONG the teeth's line: the block
+a gap beyond the teeth (x 127.7-131.2), every tooth a joiner with a leg
+across to it, and the whole block parallel to the face -- through the
+channel's east half where the human's middle bundle dives (x 129.4-131.7,
+y 61.7-66.3).
+
+**The mode (`BRAID_ARC_SLANT`, default 1 in the arc mode, band
+corridors only).** `_arc_spine`: the launch leg runs from the teeth's
+centroid toward the wrap's near corner along the nearest OCTILINEAR
+direction (north-east for the north arc, south-east for the south),
+straight to the wrap's side. `classify`: every band tooth is head-on in
+that frame. `offsets`: the slots are the compact block in the teeth's
+PERPENDICULAR order, its outer edge (the side away from the destination)
+at the outermost tooth, every other tooth pulled toward it by a 45-degree
+run in the frame -- north on the board for a north-east leg -- after a
+JOG along the spine that staggers pulls sharing a line a pitch apart
+(teeth on one face line all pull on one line otherwise); a shift under
+half a pitch is the router's wiggle, not a run, and a pull is staggered
+only past an earlier pull whose offset range comes within a pitch of
+its own (the first rule, rank order with every line staggered, jogged
+SA8 5 mm and chained the south's 0.1-0.7 mm pushes to 5 mm). Outward
+pulls are laid outer slot first, inward pushes inner slot first: the
+order in each family that lets no pull cross a lane already at its
+slot. The fan-in vertices (jog end, pull end) are in the lane's own
+polyline, so the band tube and the reservation follow them; `s0` is the
+longest fan-in's end. The flag-off chain touches none of this (`slant`
+is set only by `_arc_spine`).
+
+**Then two reservations the slant exposed** (both by
+`flood_probe --route-before`, the two-layer flood of a lane's tube minus
+every obstacle):
+
+- The middle corridor's ECON RE-LAY had put SDQ0, SDQ5 and SDQ7 through
+  the pulled lanes' tubes (SA2's pocket ended at y 65.2 on SDQ0, SA4's
+  at x 128.0 on SDQ7) -- the known shared defect (`BRAID_ECON_RESERVE`,
+  measured a LOSS under the vertical comb: the middle paid 14). Under
+  the slant it costs the middle 2.
+- The band was reserved only to `s0 + 0.3`, which with the vertical
+  comb lay past the channel and with the slant lies mid-channel: the
+  middle's swimmer SDQ9 dove ON SA0's line 0.02 mm past the stamp's end
+  and ran across SA2's and SA4's. A band corridor is one layer with
+  exact slots end to end, so `cross_reserve` now stamps a band corridor
+  WHOLE for the corridors routed before it: every lane's line on the
+  band's layer from the tooth to its exit leg, the leg on the layer the
+  economics chose, the tail on the stub's (`BRAID_ARC_RESERVE_BAND`,
+  default 1). The two-page corridors keep ENDS ONLY, where whole lines
+  were measured to starve the earlier corridor.
+
+| arm | env | vias / open | in band M / N / S | s |
+|---|---|---|---|---|
+| am18 / sl0 | ARC_SLANT=0 (session 5 as left; reproduced) | 91 / 2 | 15 / 4 / 9 | 93 |
+| sl1 | slant | 93 / 1 (SBA2) | 15 / 6 / 9 | 50 |
+| sl2 | + ECON_RESERVE | 98 / 0 | 15 / 6 / 9 | 37 |
+| sl3 | + ARC_HOPS | 98 / 0 | 15 / 6 / 9 | 50 |
+| **sl4** | **+ RESERVE_BAND (the defaults now, with ECON_RESERVE=1)** | **80 / 0** | **14 / 9 / 11** | **35** |
+| human | | 81 / 0 (80 on the K nets) | | |
+| base | one corridor, two pages, this bench | 106 / 0 | | |
+
+sl4 per arc against the human: middle 26 / 24, north **20 / 20**, south
+34 / 36 (SCS0 and SCS1 route with no via where the human spends two;
+SCAS 4). Every north lane is 2 vias; the renders
+(`tmp/arcprobe/zs4_launchN.png`, `zs4_S.png`, `zs4_Nend.png`) show the
+human's shape: the six northern teeth run north-east directly, SA0 /
+SA2 / SA4 go north beside the face a pitch apart before turning, the
+band runs east under the parts north of DU1 and drops into the
+north-east stubs; the south teeth run south-east nested and turn north
+into DU1's south face. Hops (sl3) change nothing under the slant: the
+pulled lanes were not dying of budget but walled. The gate (~88 / 0)
+is passed; the run is 35 s.
+
+**The flag-off chain is byte-identical, with a caveat worth its own line.**
+`PLAN_PAGES=1 bash chain_k.sh sl_chk3 28` reproduces `tmp/pg2_{fo_,}k28`
+segment for segment and via for via (the session-5 reference `am_chk`
+is the same copper). The FIRST attempt did not: run beside another
+chain (sl4b), the pages-first planner's first CP-SAT solve -- the same
+model, 501 + 186 candidates, 14975 exclusions -- stopped at a different
+FEASIBLE solution (obj 729.7 / 22.0 s against 727.2 / 20.3 s), moved
+SA1 as well as SCAS, and the chain shipped 32 vias against 34. So
+`max_deterministic_time` with 4 workers is reproducible on an idle
+machine and NOT under concurrent load (the comment in `chain_k.sh`
+claims more than that); an identity check runs ALONE. The default
+environment (no PLAN_PAGES) lands at the base's own 36.
+
+**The corner tooth (the second item), built.** `offsets` tests every
+band tooth's planned fan-in -- the jog on the tooth's layer, the pull on
+the band's -- against the corridor's other copper (the members' teeth
+and stubs are hard walls) and the static copper the router sees
+(`_fanin_walled`, 0.05 mm samples). A walled tooth takes the OUTERMOST
+slot, one pitch beyond the outermost free tooth (the human's SA8 rides
+0.37 mm outside SA14), its fan-in is the router's: `route_lane` routes
+it as a band-free first hop from the tooth to the lane's hold point at
+the region's start, in a window round the hop's own ends twice the
+band's half-width wide (room to skirt the band, none to circle the
+array -- the whole lane's window let a hop circle DU1 in 707k
+iterations), and `cross_reserve` promises nothing there. On the bench
+it finds SA8 (north; its pull ran through SA0 / SBA1 / SA12's kept B
+copper under the array) and SRST (south; its jog on B would lie 0.13 mm
+from SCAS's kept B run).
+
+| arm | | vias / open | in band M / N / S | s |
+|---|---|---|---|---|
+| sl5 | + corner teeth, whole-lane free-hop window | 80 / 0 | 14 / 10 / 13 | 31 |
+| **sl6** | **+ the hop's own window (the defaults now)** | **80 / 0** | **14 / 10 / 13** | **30** |
+
+SA8 routes in band: a 12 mm free hop to the hold point (28k
+iterations), then the band, 46.8 mm and 2 vias -- the human's shape --
+and the ECON RE-LAY then replaces it with the 35 mm route round DU1's
+SOUTH at the same 2 vias (its rule: fewer vias, else shorter), through
+the channel the south corridor's exit legs cross. The count is the
+human's either way; the shape is a policy question for the re-lay (a
+wrap's outermost lane is long by design). SRST is detected but its free
+hop fails: its hold point sits on the south band's OUTER edge on F,
+where every neighbouring lane's line is already reserved, so its via
+cannot land -- the human keeps SRST (and SA7, SCAS) on B for the whole
+band, a per-lane layer the arc mode does not have; last call, 2 vias,
+the human's count. The middle pays 2 more (SDQ7 0 -> 2) with the north
+block shifted a pitch outward for SA8's slot.
+
+**What is NOT done, and what the renders say is left.** (1) The econ
+re-lay's length economy on a wrap's outermost lane (SA8 above), and a
+per-lane band layer for a corner tooth on the other layer (SRST). (2) The south
+band: its wrap merges C10 (east of DU1) and stands its far side at
+x 153.15, past the board's edge at 152.4 (the edge clamp guards the wrap
+side only), and 7 of 18 lanes still land at last call; the human turns
+every south lane north into DU1's south face at x 137.5-140.3 and
+reaches the three east-end stubs from below at x 143.5. (3) The middle
+bundle at 26 against 24: SDQ3 costs 2 where the human has 0. (4) The
+plan: arc membership, band layer and the launch order are still the
+sidecar's (`tmp/hbn3_k51.plan.json`); with the comb slanted, the plan's
+lever is exactly the teeth's perpendicular order, which the source
+berths set.
+
+### The plan choosing the arcs (the third item): the fresh chain says what it needs
+
+`BRAID_ARCS=1` (default 0) is the first, geometric form of "the plan
+chooses arc membership and band layer": with no corridors named by the
+plan, `braid.setup` splits a geometric corridor whose members share one
+destination array by where each stub escapes it along the flow from the
+source -- toward the source: the middle; sideways: the arc on that
+side; the far face: the arc on the side of the stub's row -- an arc of
+fewer than three nets folding back into the middle, the band layer the
+majority of the arc's nets' two end layers. It runs in the judge and
+the braid stage alike, so the pages-first iterations plan against it.
+Nothing board-specific: the flow direction, the box, the escapes.
+
+Measured on the fresh chain (`PLAN_PAGES=1 BRAID_ARCS=1
+BRAID_ECON_RESERVE=1 bash chain_k.sh arc1 K`):
+
+| K | pg2 (one corridor, two pages) | arcs |
+|---|---|---|
+| 28 | 34 / 0 | 50 / 1 (SDQM0): middle 8, N 10 on F, S 10 on F |
+| 51 | 115 / 1 | 96 / **19 open** (arc4, with the s0 guard; 10 min braid): middle 9, N 20 on F, S 18 on F -- the arcs' launch regions clamped to a hair, 12 + 6 corner teeth |
+
+The first K51 runs died before grading (the root cause and the guard are
+below); with the guard the chain completes and the split loses 19 nets.
+Two things the fresh chain shows that the human-ends bench could not:
+
+1. **The arcs are a CHOICE, not a rule.** At K28 one corridor of two
+   pages is under capacity and the split costs 16 vias and an open net;
+   at K51 it is the human's structure. The choice has to be judged --
+   the braid's own count on both plans, as `plan_search` judges chain
+   candidates -- and the geometric split is the candidate generator,
+   not the decision.
+2. **An arc's SOURCE teeth must be the plan's too.** On the bench the
+   north teeth are the ends of the human's runs, on one line at U1's
+   east face; on the fresh chain the 20 nets the split puts round the
+   north have teeth on every face of U1 (span 9.75 mm across a 7.6 mm
+   block, the launch leg's centroid INSIDE the array, 12 of 20 teeth
+   walled -- all corner teeth), and the south's 18 likewise. The human
+   peels the north bundle out U1's north face on B before it is a
+   bundle. So the arc variable belongs in the pages-first model, where
+   the source moves are chosen: an arc per net, pairs priced only
+   within an arc (67 of 101 counted crossings on the human's ends were
+   between arcs), the source menu offering N/S-face and edge-hugging
+   exits, the arc's band layer a variable the two end layers price --
+   the design already written in the session-4 notes, now with the
+   comb it needs on the braid's side. That is the next build.
+
+The K51 braid's death was chased three ways, two of them traps: the
+chain reported `Killed: 9`; a resident-memory monitor
+(`tmp/arcprobe/memwatch.py`) saw the process die at 817 MB, so not
+memory; a `faulthandler.dump_traceback_later` run died at 3 s -- and
+its crash report names the FAULTHANDLER THREAD itself (`dump_frame` ->
+`PyUnstable_InterpreterFrame_GetLine`, SIGSEGV), so a periodic-dump
+diagnostic is a crash source on this process, not an instrument. Four
+capped braid runs on the same board (arcs off / on, econ reservation
+off, whole-band reservation off; `tmp/arcprobe/braid_try.py`) all ran
+75 s past the death point without dying, so nothing in the new paths
+crashes deterministically; the chain was re-run alone under nohup with
+a monitor (arc2) -- and died the same way, inside a blocking call too
+(arc3), and alone from a wrapper (`braid_try.py`, exit -9 at 8 s
+whatever the output path), so not the tool's parenting either. What
+found it: `ps -o vsz=` every second (the VIRTUAL size jumps by 44 GB
+between t=6 and t=7 s while the resident set climbs to 770 MB -- the
+kernel kills it when the pages are touched), then an in-process
+sampler thread printing the main thread's stack every half second
+(`sys._current_frames()`, no faulthandler): the death is in
+`route_lane -> connect -> build_base_obstacle_map -> segment_blocked_spans
+-> _capsule_mask -> np.meshgrid`, a capsule over a virtual-copper piece
+whose endpoint lies 24 000 km off the board. The piece is an arc lane's
+target: on the arc1 board the north arc's fan-ins end at s 26.4 while
+its first stub projects at s 26.1 -- the teeth span every face of U1,
+so the pulls are 5 mm -- and with s0 > s1 the region's length is the
+1e-6 floor, every slope explodes and `target_o` lands at -1.35e7. The
+session-4 guard clamps s1 against the TEETH's base s0; the slanted
+comb sets s0 later, from the fan-ins, so `offsets` now clamps s0 to
+s1 - 0.2 with a WARNING naming the corridor ("the teeth are not on one
+face"), and the corridor refuses and says so instead of dying. The
+four concurrent survivors were slower (four on eight cores) and had
+not yet touched the pages when capped. The bench arm is unchanged by
+the guard (sl7 copper-identical to sl6). `BRAID_ARCS=0` leaves the chain untouched (the split is gated
+before the corridor log line).
+
+### Handoff: the plan for the next session (written 2026-09-14 evening)
+
+**Where it stands.** Worktree `bus622-take5` @ 2daff560 + sessions 3-6,
+all UNCOMMITTED (`awx/tmp/session6_0914_slant.patch`, 2979 lines; the
+flag-off chain is byte-identical to pg2, verified at K28, run alone).
+The braid side of the arc mode is ready: given ends like the human's
+(bench `tmp/hbn3_k51` + its sidecar) it routes them at the human's
+count, 80 / 0 in 30 s, deterministic. The chain side is not: arcs as a
+geometric rule lose (K28 50 / 1 against 34 / 0, K51 96 / 19 open against
+115 / 1), because the plan chooses berths and source moves for ONE
+two-page corridor and the arc's teeth then span every face of U1. The
+bench measures the braid given the ends; the chain measures the plan;
+never compare the two.
+
+**Goal.** The fresh K51 chain better than 115 / 1 with the arcs chosen
+by the plan, K28 / K35 / K41 no worse than pg2's 34 / 65 / 79, about
+two minutes a K. Nothing lands unless the ladder says so (the edicts).
+
+**Step 0 -- baselines, alone.** `PLAN_PAGES=1 bash chain_k.sh base K`
+for K in 28 35 41 51, ONE AT A TIME on an idle machine (the pages-first
+CP-SAT stops at a different feasible solution under concurrent load);
+compare with `tmp/pg2_{fo_,}kK.kicad_pcb` by segment and via multisets
+(UUIDs differ per run), record the times. K51's identity was not
+re-verified this session, only K28's. Bench sanity:
+`tmp/arc_arm.sh sl8 "BRAID_ECON_RESERVE=1"` must be copper-identical to
+`tmp/sl6_k51`.
+
+**Step 1 -- arc labels on the destination candidates
+(`pages_first._solve`).** Every destination candidate `m` in
+`st['dmenu'][n]` gets `arc(m)` in {M, N, S} by the rule already in
+`braid.arc_split_groups` (flow = destination centre minus source
+centre; an escape toward the source is M; sideways, the arc on that
+side; the far face, the arc on the side of the row), applied PER
+CANDIDATE. Per-net indicators `A[n][a] = sum of xd[n][j] over the
+candidates with arc a` are linear. Then price the pair terms
+(inversions, crossings: the `ltT` / `ltL` / `same` / `cr` bools) only
+within an arc, gated by a `same_arc(a, b)` bool: on the human's ends 67
+of the 101 counted crossings were between arcs
+(`tmp/session4_0914_probes/phantom_xing.py` is the check). An arc net's
+page is its arc's band layer and it never swims. An arc holds at least
+`ARC_MIN` = 3 nets or none (a use bool per arc).
+
+**Step 2 -- the band layer per arc.** One bool per arc, F or B. Costs
+per arc net: a tooth on the other layer is a birth via, a stub on the
+other layer an exit via; the arc mode's exit rule (every exit a leg,
+the leg on the other layer for two vias unless the stub is on the band
+and nothing lies between slot and stub) is priced as the layer
+mismatches first and calibrated against the judge (Step 4).
+
+**Step 3 -- source exits for the arcs (`fanout_from_plan.py`, the
+`smenu` built at lines ~229-234 by `menu(p, sgrid, net, own_only=True,
+climb=SRC_CLIMB)`).** The human peels the north bundle out U1's NORTH
+face on B before it is a bundle. Add tooth candidates on the arc's face
+and edge-hugging exits on the band layer at the near face's end, and
+price a (tooth candidate, arc) pair by its PULL in the arc's launch
+frame: the candidate's perpendicular distance from the arc's outer
+edge line (the octilinear leg toward the wrap corner, as
+`_arc_spine` draws it) -- a per-candidate constant once the arc is
+fixed, so a joint bool per arc-capable candidate carries it. A
+candidate is arc-capable only when that pull fits the launch strip
+(the fan-ins must end before the first stub; the geometric split's
+K51 failure is exactly the fan-ins overrunning the region, and the
+braid now clamps and WARNS "the teeth are not on one face").
+
+**Step 4 -- the judged choice (`fanout_from_plan.judge_by_braid` /
+`explain_plan`).** Solve twice, arcs forbidden (today's model) and arcs
+allowed, judge both by the braid's own plan-only count with the
+corridors / arcs / bands passed in the plan dict (so `braid.setup`
+builds arc corridors for the judge), keep the lower, and write
+`corridors` / `arcs` / `bands` into the `.plan.json` only when the
+arcs won. First calibrate the judge on arc corridors: its predicted
+vias against the routed 80 on the bench and against `tmp/arc4_k51`.
+Gate the whole feature on one env (`PLAN_ARCS=1`), default off.
+
+**Step 5 -- braid-side gaps, each small and independent, each measured
+on the bench (`tmp/arc_arm.sh`) with a render:** (a) the south wrap's
+far side stands at x 153.15, past the board edge at 152.4 -- clamp it
+like the near side and stop merging parts beyond the array's far end
+(C10); (b) the econ re-lay pulls a band's outermost lane out of its
+band (SA8: 46.8 mm in band, re-laid to 35 mm round DU1's south at the
+same 2 vias) -- skip band-corridor lanes in the re-lay, or hold the
+re-laid path inside its corridor's tube; (c) a corner tooth on the
+other layer whose free hop cannot land its via (SRST) keeps its own
+layer through the band, the human's SA7 / SRST / SCAS on B; (d)
+`BRAID_ARC_PITCH` 0.35 (the human's is ~0.30).
+
+**Rules.** Every arm reports vias / open / in-band / seconds and gets a
+render (`tmp/arcprobe/zoom2.py`, `plan_probe.py`); a repeat run before
+a number is believed; commit nothing unless clearly better on K28 /
+K35 / K41 / K51 within the time budget -- the arc mode is plan-gated
+and byte-identical off, so committing it as opt-in is Andy's call, not
+the session's. Keep the router general: geometry, flows, faces, never
+a name or a bench constant.
+
+**Traps recorded this session.** CP-SAT drifts under a concurrent chain;
+`faulthandler.dump_traceback_later` segfaults its own thread on this
+process; py-spy needs root on macOS; macOS has no `timeout` and
+`ulimit -v` fails -- a runaway is found with `ps -o vsz=` per second
+and an in-process sampler thread (`tmp/arcprobe/braid_try.py`,
+`memwatch.py`); s0 > s1 in a band corridor is guarded now.
+
+**Files.** braid.py: `ARC_SLANT`, `ARC_RESERVE_BAND`, `BRAID_ARCS`,
+`ARC_MIN`; `_arc_spine`, `offsets` (the slant block, `_fanin_walled`),
+`route_lane` (the free hop), `cross_reserve`, `arc_split_groups`.
+Probes `tmp/arcprobe/{comb_geom,plan_probe,reserve_probe,zoom2,
+flood_probe,vs_human,braid_try,memwatch}.py`, `tmp/arc_arm.sh`,
+`chain_k.sh`. Boards: `tmp/hbn3_k51` (bench), `tmp/sl6_k51` (best),
+`tmp/arc4_k51` (fresh chain with the split), `tmp/pg2_*` (baseline),
+the human's `~/Downloads/bus/00_human_original.kicad_pcb`.
+
+## REVERTED 2026-09-14 (late evening): the arc line is abandoned
+
+Andy's decision after session 7: "Let's give up on the arc idea. Revert
+it, and whatever else is not working well." The CODE of sessions 3-7
+(the exit-leg term, the swimmer descent, the wrap spine, the arc-corridor
+mode, the slanted comb and corner teeth, and the plan choosing the arcs)
+is reverted to commit 2daff560 -- `braid.py`, `corridor.py`,
+`fanout_from_plan.py`, `pages_first.py` as committed, `arc_plan.py`
+removed. All of it was opt-in and inert when off (the flag-off chain was
+byte-identical to pg2 at every K before and after), so the default path
+is unchanged: PLAN_PAGES=1 gives 16 / 34 / 65 / 79 / 115 (K15..K51),
+the old planner what 901108e5 records. The write-ups above stay as the
+record of what was tried and measured; the code is archived as
+`tmp/session6_0914_slant.patch` (sessions 3-6), `tmp/session7_0914_arcs.patch`
+(sessions 3-7, the plan-chooses-arcs work included) and
+`tmp/s7/arc_plan.py.archived`; the bench `tmp/hbn3_k51` and its
+routed 80/0 (`tmp/sl6_k51`) remain as the measurement that the braid
+CAN route the human's ends at the human's count when given them.
+
+The verdict, in one paragraph: on the human's ends the arc mode routes
+at the human's 80 vias; on the fresh chain no arc plan ever beat one
+corridor of two pages (K51 routed: base 115/0; the arc arms 112/4,
+88/16, 122/6 open). The reasons found in session 7, each measured: the
+plan's choice of arcs is a search problem the CP-SAT does not solve from
+the one-corridor instance in its budget; the launch frame had to be
+tied down (the flow turned 45 degrees, not the teeth's centroid nor the
+wrap corner); an arc must OWN THE OUTERMOST TEETH of its launch face --
+any middle tooth outer to an arc tooth walls its fan-in, and the
+walled corner teeth were the open nets -- which with the teeth as they
+stand admits arcs of three nets, and with climbed teeth (the human's
+riders) blows the pairwise exit-leg pricing up to 281k pairs. What
+would remain: compact order variables for the exit legs, a warm start
+or decomposition for the arc arm, and a judge that prices a swimmer at
+what it routes for (~3.5 at K51, not the flat 2).
+
+**The revert's own trap (21:20-21:45, the same night).** The first K28 run
+of the reverted tree graded 32 vias / 1107 segments and its copper
+differed from pg2 (a different fanout board, one corridor of 28 where
+pg2 has 27 + SA0): it read as "one of the reverted changes was
+load-bearing for the default chain". A per-file bisect (each session-6
+file's diff applied alone) then gave 34 / 783, copper-identical to pg2,
+for pages_first alone, braid alone AND corridor alone -- which no code
+cause can explain -- and a plain re-run of the committed tree is
+identical to pg2 too. The 32 is the pages-first CP-SAT's SECOND feasible
+stop at DET 40 (obj 729.7 against the usual 727.2), the same 32-against-34
+pair "The base re-measured, determinism" records under concurrent load;
+that run shared the machine with a memory write on a box with 55 MB
+free. Rule: one divergent chain run is not evidence of a code change --
+re-run it alone before bisecting. The committed tree's ladder was
+re-verified afterwards (`tmp/s7/verify.log`, the base10_* boards).
