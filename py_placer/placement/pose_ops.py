@@ -1070,8 +1070,8 @@ def _promote(staged: str, out_path: str, summary: Optional[Dict] = None, *,
         doc['rollback_errors'] = rollback_errors
         raise PoseRefusal(reason, code=2, summary=doc)
     finally:
-        # A no-op after a commit. Otherwise the write did not land, and a row
-        # left pending would be committed by the next write to this path.
+        # A no-op after a commit. Otherwise the write did not land, and its row
+        # must not stay pending for some later commit of this path to pick up.
         provenance.discard_write(out_path)
         for backup in backups.values():
             if backup and backup not in recovery_paths:

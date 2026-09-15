@@ -197,6 +197,16 @@ ROWS = [
      "",
      (T_POSE,), 'KILLED'),
 
+    # The commit outside the rollback: a ledger that cannot be appended to
+    # would then ship the board with no row for it.
+    ('a-ledger-failure-ships-the-board-anyway', 'o',
+     "        provenance.commit_write(out_path)\n",
+     "        try:\n"
+     "            provenance.commit_write(out_path)\n"
+     "        except OSError:\n"
+     "            pass\n",
+     (T_POSE,), 'KILLED'),
+
     ('a-forced-run-is-not-disclosed', 'o',
      "            summary['forced'] = True\n\n        if dry_run:",
      "            summary['forced'] = False\n\n        if dry_run:",

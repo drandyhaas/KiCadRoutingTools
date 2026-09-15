@@ -684,9 +684,9 @@ with tempfile.TemporaryDirectory() as d, \
           str(list(provenance._PENDING))[:160])
 
     # DECLARED, and the replace fails. The row is recorded before the copy, so
-    # it must be dropped with the write: left pending, a later write to this
-    # path from outside any regime would commit it into THIS ledger, stamped
-    # with that other file's hash.
+    # it must be dropped with the write. Left pending it is inert only while
+    # this regime stands: a write to this path after the manifest is gone
+    # would commit it into this ledger, stamped with that file's hash.
     _real_replace = os.replace
 
     def _fail_on_out(src, dst, *a, **k):
@@ -706,6 +706,28 @@ with tempfile.TemporaryDirectory() as d, \
           str(list(provenance._PENDING))[:160])
     check("and leaves the destination as it was",
           open(out, 'rb').read() == before)
+
+    # DECLARED, the board replaced, and then the LEDGER cannot be appended to.
+    # The commit sits inside the rollback, so the board must go back: a board
+    # delivered with no row is exactly what #960 shipped.
+    _real_open = open
+
+    def _no_ledger(file, mode='r', *a, **k):
+        if str(file).endswith(provenance.LEDGER_NAME) and 'a' in mode:
+            raise OSError('injected: the ledger cannot be appended to')
+        return _real_open(file, mode, *a, **k)
+
+    with provenance.declare_lever('place_pose.py'):
+        with mock.patch('builtins.open', side_effect=_no_ledger):
+            raised = _promote_it()
+    check("a declared promote whose ledger append fails is refused",
+          isinstance(raised, pose_ops.PoseRefusal), repr(raised)[:160])
+    check("and rolls the destination back rather than shipping it rowless",
+          open(out, 'rb').read() == before)
+    check("and leaves no row and nothing pending",
+          provenance.read_ledger(d) == []
+          and os.path.abspath(out) not in provenance._PENDING,
+          str(list(provenance._PENDING))[:160])
 
 # ---------------------------------------------------------------------------
 print("the OFF-BOARD magnitude is an arm, not just the count")
