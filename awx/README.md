@@ -4728,3 +4728,143 @@ AST-scans every awx file for that shape.
   `list_nets.board_constraint` cannot see `min_via_drill` -- it is not in
   `_CONSTRAINT_FIELDS` -- although this repo's own writeback writes that key
   and the bench carries it. That is py_router's to fix if it matters.)
+
+
+## The merged-dive-interval swimmer price (agent, 2026-09-15)
+
+Session-10 handoff item 4, from the Opus objective review: "price a swimmer
+by MERGED DIVE INTERVALS at 2 x VIA_MM, not a constant" -- one currency with
+a page lane's `changes`. **Built, gated offline, laddered: NULL as a per-lane
+term and WORSE on the ladder than the `swim_changes` it replaces. Not a
+default, and not a candidate.** It joins the four null feature families and
+D4 the pinch census. Flag-off is byte-identical (`ctl0` K28 copper IDENTICAL
+to s10's recorded `ctl` on BOTH the fanout board and the routed board).
+
+**What was built.** `braid.Corridor` now stores the CONSTRAINT SEQUENCE its
+swimmer census already builds -- `swim_seq`, `[(s, layer), ...]`: the tooth
+layer at the region start, one entry per page crossing carrying the layer
+that crossing forces (`_need_at`, the opposite of the partner's layer there),
+the berth layer at the end -- and `plan_braid` emits it beside `swim_changes`.
+`plan_ends.merged_changes(seq, window, link)` prices it;
+`vias_from_pages(swim_mode='merged', swim_seq=...)` and
+`SWIM_MODE=merged` (+ `SWIM_MERGE_W`, `SWIM_MERGE_LINK`) select it.
+
+**The model, and why it is one family with the two prices already laddered.**
+`swim_changes` is the number of adjacent differences in that sequence, which
+is the EXACT minimum for a lane that must be on the named layer AT each point
+IN THAT ORDER -- there is no slack in it to merge. So the relaxation has to be
+of the ORDER, and that is the honest one: `Schedule.inverted` forces the
+swimmer to cross each partner an ODD number of times and nothing forces WHERE;
+the positions in the sequence are read off two straight planned midlines, and
+the router bends. Crossings within a merge window may therefore be taken in
+any order (serve all of one layer's partners, then the other's); crossings
+further apart may not. Constraints are grouped by the window and a group is
+priced as a SET, not a sequence (a one-layer group pins the lane, a two-layer
+group costs one change inside and may be entered on either layer; a DP over
+the groups). So **W = 0 is `swim_changes` exactly and W = infinity is the flat
+price** -- one knob between the two prices the ladder has already measured.
+The window is not a bench number: a dive and its resurface are two via SITES,
+so the default is `2 * select_moves.VIA_NEED_SITE` = 0.72 mm. The review's
+"cannot exceed swim_changes" claim is TRUE and measured: 0 of 1342 rows exceed
+it, at any window, in either linkage mode.
+
+**The offline gate, `swim_gate.py`** (new tool; reuses `judge_gate`'s
+spearman / concordance / variants and its cached board aggregates, so the
+columns are directly comparable -- it reproduces the recorded c_sw / c_flat
+numbers exactly). The same 246 recorded `<tag>_fo_kK` + `<tag>_kK` pairs under
+`tmp`, `tmp/s9`, re-planned with `plan_braid`: **1399 swimmer rows** (57
+dropped as OPEN -- an open net lays no copper), cached in
+`tmp/s10/swim_gate.tsv`. Its per-board `(resid, swim_changes)` agree with
+`judge_gate2.tsv` on every one of the 246.
+
+**PER SWIMMER: null, at every window, in both linkage modes.** Pearson r of
+the merged count against that lane's ACTUAL routed vias (chunk):
+
+| set | n | W=0 | 0.36 | 0.72 | 1 | 1.5 | 2 | 3 | 5 |
+|---|---|---|---|---|---|---|---|---|---|
+| K28 | 77 | -.07 | .03 | .08 | -.10 | .01 | .01 | .14 | -.03 |
+| K35 | 161 | -.21 | -.21 | -.14 | -.25 | -.23 | -.06 | -.11 | -.21 |
+| K41 | 439 | .12 | .12 | .13 | .09 | .08 | .10 | .04 | -.04 |
+| K51 | 665 | -.00 | .01 | .04 | .03 | -.07 | .00 | -.05 | -.06 |
+| **all** | **1342** | **.05** | **.04** | **.07** | **.03** | **-.06** | **-.02** | **-.05** | **-.06** |
+| within-board | 1329 | -.00 | -.00 | .03 | .01 | -.07 | .00 | -.05 | -.11 |
+
+The `within-board` row is the fairest form of the question and the one to
+quote: each board's own mean removed from BOTH sides, so it asks only
+"inside ONE plan, does the price rank its swimmers?" -- **r between -0.15 and
++0.03** over 177 boards (link mode's is -0.15 at W=1). Pooled r never reaches
+0.15. The only cells near the bar are K35's, and they are NEGATIVE. By the
+standing rule (|r| > 0.2 before a per-lane term prices anything) **the merged
+count must not price anything**, exactly as `room_probe`'s three room features
+and the four plan-time features before it.
+
+**WHOLE PLAN: it does beat both incumbents -- and its own control beats it.**
+Per K, rho(clean) / concordance / false-accept, the lane-length form (= jcl's
+judge), `c_m1` = merged at W=1:
+
+| judge | K28 (76) | K35 (51) | K41 (63) | K51 (56) |
+|---|---|---|---|---|
+| c_sw_len (= jcl) | **.75 / .93 / .07** | .07 / .58 / .40 | .56 / .77 / .23 | .16 / .65 / .34 |
+| c_flat_len | .70 / .94 / .06 | .33 / .63 / .35 | .55 / .76 / .24 | .15 / .69 / .29 |
+| c_m1_len | .72 / .94 / .06 | .27 / .64 / .34 | **.70 / .80 / .20** | **.69 / .77 / .21** |
+| ^ flat@3.13_len (CONTROL) | .71 / .95 / .05 | **.38 / .66 / .32** | **.72 / .81 / .19** | .40 / .76 / .23 |
+
+On the criterion as written -- against `c_sw` and `c_flat` -- the merged count
+WINS at K41 and K51 and beats `c_sw` at K35, which is why the ladder below was
+earned and run. But the last row is the control the README's own rule demands,
+and it settles what the win is: **a FLAT price set to that window's own mean
+(3.13) scores the same or better at every K** (K51's apparent merged advantage
+lives in rho(clean), which at K51 rests on only **20 clean boards** of 56; the
+concordance over all 1337 pairs is .77/.21 against .76/.23, a tie). The mean
+merged price is 3.22 at W=1 and 3.69 at W=0.72 against a routed mean of 3.27:
+the merged model's contribution is a well-calibrated LEVEL and nothing else --
+"a better CONSTANT fixes the level and adds no ranking power", re-measured.
+
+**The ladder (`PLAN_PAGES=1 PLAN_JUDGE=count PLAN_JUDGE_LEN=lane
+SWIM_MODE=merged`; base 34 / 65 / 79 / 115, jcl 34 / 60 / 80 / 115, human
+46 / 58 / 70 / 81):**
+
+| arm | K28 | K35 | K41 | K51 | time (whole rung) |
+|---|---|---|---|---|---|
+| mg1: `SWIM_MERGE_W=1` (the gate's best) | 34 | 68 | 80 | 124 + SDQ11 open | 73 / 143 / 108 / 210 s |
+| mg072: `SWIM_MERGE_W=0.72` (the derived default) | 34 | 68 | 80 | 124 + SDQ11 open | 59 / 130 / 114 / 177 s |
+
+**The two windows ship IDENTICAL copper at every K** (`copper_same.py`, all
+four rungs), so the family is flat in W over its whole physical range: the
+merge either happens or it does not. Both lose K35 by 8 against jcl, tie K41,
+and lose K51 by 9 WITH a net open -- and the open net is **SDQ11**, one of the
+two nets every flat price opens at K51 (jf3 / jf4 = 34 / 60 / 79 / 108 + SDQ11
+and SDQ13). The flat-family failure mode, inherited exactly.
+
+**Why, at decision level -- the one line worth keeping.** The K35 rungs differ
+on their FIRST decision, the same batch in both arms:
+
+```
+jcl   : 11 teeth realized; judged count 182 -> 181, residue 9 -> 2: KEPT
+merged: the same 11 teeth;  judged count 178 -> 181, residue 9 -> 2: reverted, banned
+```
+
+The AFTER plan is 181 to both. The merge changes the BEFORE plan -- the
+nine-swimmer one -- from 182 to 178, because merging is precisely what makes a
+nine-swimmer plan cheap on paper. Once that batch is reverted and its moves
+banned, the two further batches `jcl` keeps (181 -> 172) never happen, and
+K35 ships 68 instead of 60. This is the mechanism session 10 already named
+("the count's swimmer term must be the one that penalises a residue the braid
+has not yet paid for, and `swim_changes` is that today") observed directly,
+at the decision the offline gate cannot see. The renders agree
+(`tmp/img/mg1_k35.png` vs `jcl_k35.png`): jcl re-seats those source teeth
+deep into U1's array on B, the merged arm keeps the original teeth and a pile
+of vias at the array edge.
+
+**Note the merged price is worse than BOTH its own endpoints at K35** --
+`swim_changes` (W=0) 60, flat 3 60, merged 68. A per-lane term with null
+resolution that still VARIES per lane does not just fail to help: it adds
+noise to the judge's ordering. That is the general lesson, and it is the
+argument against the next per-swimmer model as much as this one.
+
+**Settled -- do not re-run:** the merged-dive-interval price, at any window
+and either linkage rule, as the judge's swimmer term. What is NOT settled and
+is the one live thread left in it: the swimmer's cost is a property of the
+REALIZED board, so the only estimator that has ever worked is the braid
+itself (`replan.py`) -- the merge relaxes the plan's ORDER model, and the
+plan's order is not what was wrong.
