@@ -74,6 +74,22 @@ class Move:
     end_climb: bool = False         # an END-OF-FACE climb (fanout_from_plan
                                     # SRC_CLIMB_END): leaves beyond the span the
                                     # run's teeth occupy on the launch face
+    group: str = ''                 # this move is one member of a GROUP move
+                                    # (pages_first PLAN_PAGES_GROUP) laid all or
+                                    # nothing: the tag names the group
+    replaces: object = None         # the move this one DISPLACED in the plan
+                                    # (a group member's pre-group source move,
+                                    # pages_first._group_climb). A group is
+                                    # dropped whole, and the net must then fall
+                                    # back to what the plan asked before it --
+                                    # not to its standing tooth.
+    blockers: int = -1              # how many OTHER nets of the run must be
+                                    # stripped for this move to be laid
+                                    # (source_realize.blockers_of); -1 = not
+                                    # measured. A climb that needs six teeth
+                                    # out of the way is not the same move as
+                                    # one that needs none, and the freed teeth
+                                    # are re-laid with no hint at all.
 
     def __repr__(self) -> str:
         s = (f'{self.kind}/{self.direction}/{self.layer[0]} '
@@ -245,7 +261,8 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     via_clear: Callable[[Pt, str], bool] = None,
                     margin: float = 0.0, climb: int = 0,
                     walk: int = 0, walk_off: int = 0,
-                    dirs: Optional[Sequence[str]] = None) -> List[Move]:
+                    dirs: Optional[Sequence[str]] = None,
+                    own_line: bool = False) -> List[Move]:
     """Every escape move this pad has. `clear(p, q, layer)` says whether
     a track from p to q on `layer` is free of foreign copper;
     `via_clear(p, layer)` whether a via barrel fits at p (checked on
@@ -253,7 +270,9 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
     returned, so an empty list means this pad is boxed in. `dirs`
     restricts the CLIMB block to these exit faces (SRC_CLIMB_END asks for
     one face with `climb` = the whole array, where all four would cost
-    the clearance walk four times over); None = every face."""
+    the clearance walk four times over); None = every face. `own_line`
+    adds the pad's OWN column (or row) line to the climb lanes of a
+    via-in-pad start -- see the climb block."""
     net = getattr(pad, 'net_name', '') or ''
     net = net.split('/')[-1]
     px, py = pad.global_x, pad.global_y
@@ -432,14 +451,30 @@ def enumerate_moves(pad, grid: Grid, layers: Sequence[str],
                     # the gaps the run may climb along: a dog-bone's site
                     # is already in one; a via-in-pad steps half a pitch
                     # into the gap on either side first
+                    # THE OWN LINE (own_line, 2026-09-15): a via-in-pad's
+                    # run may also climb along the pad's OWN column (or
+                    # row) line -- straight out of the barrel, over the
+                    # ball positions above it. On the run layer those
+                    # positions are empty unless a ball there has a via of
+                    # its own, which `clear` decides; the gap midlines are
+                    # the only lanes a DOG-BONE has, but a via-in-pad
+                    # starts on the line itself. It matters for a GROUP
+                    # climb (pages_first PLAN_PAGES_GROUP): a 0.65 mm pitch
+                    # gap carries about one 0.33 mm track, so five column
+                    # gaps cannot carry ten climbs and the engine degrades
+                    # half of them -- with the lines there are ten lanes.
+                    # The human's ten north launches use both.
+                    lanes = (0, -1, 1) if own_line else (-1, 1)
                     if kind == 'dogbone':
                         gaps = [(site, [])]
                     elif dx:
-                        gaps = [((px + g * hx, py), [((px, py), (px + g * hx, py), L)])
-                                for g in (-1, 1) if x0 < px + g * hx < x1]
+                        gaps = [((px + g * hx, py),
+                                 [] if not g else [((px, py), (px + g * hx, py), L)])
+                                for g in lanes if not g or x0 < px + g * hx < x1]
                     else:
-                        gaps = [((px, py + g * hy), [((px, py), (px, py + g * hy), L)])
-                                for g in (-1, 1) if y0 < py + g * hy < y1]
+                        gaps = [((px, py + g * hy),
+                                 [] if not g else [((px, py), (px, py + g * hy), L)])
+                                for g in lanes if not g or y0 < py + g * hy < y1]
                     for (gx, gy), legs_in in gaps:
                         if any(not clear(a, b, l) for a, b, l in legs_in):
                             continue

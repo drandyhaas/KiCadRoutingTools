@@ -81,12 +81,13 @@ def case(k, pattern, **kw):
     c = dict(k=k, pattern=pattern, seed=0, blocks=2, inversions=None,
              cols=4, rows=None, depth=1, gap=12.0, dst_rot=0.0, caps=0,
              pad=0.4, pad_inner=None, margin_y=6.0, fanout_layers='F.Cu',
-             obstacle_w=0.0, obstacle_h=0.0, obstacle_x=0.5, obstacle_y=0.0)
+             obstacle_w=0.0, obstacle_h=0.0, obstacle_x=0.5, obstacle_y=0.0,
+             row_offset=0)
     c.update(kw)
     bits = [pattern, f'k{k}']
     for key, dflt in (('seed', 0), ('blocks', 2), ('gap', 12.0), ('depth', 1),
                       ('caps', 0), ('dst_rot', 0.0), ('cols', 4),
-                      ('pad', 0.4), ('margin_y', 6.0)):
+                      ('pad', 0.4), ('margin_y', 6.0), ('row_offset', 0)):
         if c[key] != dflt:
             bits.append(f'{key[:3]}{c[key]:g}' if isinstance(c[key], (int, float))
                         else f'{key[:3]}{c[key]}')
@@ -161,6 +162,44 @@ BATCHES['b3'] = (
     # to be asymmetric -- an equal split is then the wrong answer
     + [case(15, 'interleave', pad_inner=0.6, obstacle_w=2.0, obstacle_h=18.0,
             obstacle_y=4.0)]
+)
+
+
+# b4: the BUNDLE ladder -- the room an END-OF-FACE CLIMB needs, and its
+# negative control. Every case above fills the facing column from the first
+# non-corner row to the last (`rows` is derived as K + 2), so a launch has
+# NOWHERE along the face to move to: the end-of-face climb
+# (fanout_from_plan SRC_CLIMB_END) and the group move built on it
+# (pages_first PLAN_PAGES_GROUP) cannot exist on any b1/b2/b3 case, and the
+# harness is inert for them however they are flagged. `row_offset=3` leaves
+# three free ball rows at EACH end of the facing column and changes nothing
+# else -- the permutation, the crossing graph and all three planted answers
+# are identical -- so each pair below (offset 3 against offset 0) measures
+# exactly what the room buys, on a case whose optimum is known.
+#
+# What the optimum is NOT, and it is worth saying plainly: **a clear
+# two-layer channel cannot make the group move pay.** A crossing costs its
+# lane 2 vias (one at each end, both pads being on F), and a climb that
+# re-orders a launch costs the same 2 -- it dives to the other layer to run
+# along the face and must come back for its F pad. So on these cases the
+# answer with the room is the answer without it, and what the pair grades is
+# that the chain still REACHES the optimum when the extra moves are on the
+# menu -- a change detector for the group machinery, not a claim that it
+# wins here. The climb's value is congestion relief, which is why the
+# obstacle rows are here too: with a blocker mid-channel the excess over the
+# clear-channel optimum is the measure, and re-ordering the fan-in at the
+# face is a thing that can reduce it.
+BATCHES['b4'] = (
+    [case(k, p, row_offset=o, pad_inner=0.6)
+     for k in (15, 28)
+     for p in ('blocks', 'reversed', 'interleave')
+     for o in (3, 0)]
+    # and the congested pair: the same blocker as b3's ladder, where the
+    # excess over the clear-channel optimum is what a re-ordered fan-in can
+    # actually move
+    + [case(15, p, row_offset=o, pad_inner=0.6, obstacle_w=2.0, obstacle_h=18.0)
+       for p in ('blocks', 'interleave')
+       for o in (3, 0)]
 )
 
 
@@ -400,6 +439,8 @@ def gen_and_bench(c, outdir, log=print):
                  '--obstacle-y', str(c['obstacle_y'])]
     if c['rows']:
         argv += ['--rows', str(c['rows'])]
+    if c['row_offset']:
+        argv += ['--row-offset', str(c['row_offset'])]
     if c['inversions'] is not None:
         argv += ['--inversions', str(c['inversions'])]
     r = subprocess.run(argv, capture_output=True, text=True)

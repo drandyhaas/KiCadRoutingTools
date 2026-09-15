@@ -21,7 +21,9 @@ usage: fanout_from_plan.py OUT.kicad_pcb K --board=BASE.kicad_pcb
 """
 import math
 import collections
+import contextlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -279,6 +281,18 @@ def end_climbs(smenu, names, src_pad, sref, sgrid, ends, menu, byname, banned):
             f'span {lo:.2f}..{hi:.2f} ({len(on[face])} teeth): +{added} candidate(s) over {tried} net(s)']
 
 
+def _lane_of(m, ax):
+    """The coordinate of the LANE a climb runs along -- the column line or
+    column-gap midline for a run that climbs in y, the row line or row gap
+    for one that climbs in x. It is the run leg's constant coordinate, read
+    off the move's own legs (the one perpendicular to the face's `ax`)."""
+    pax = 1 - ax
+    for (a, b, _L) in reversed(m.legs or ()):
+        if abs(a[ax] - b[ax]) > 1e-6 and abs(a[pax] - b[pax]) <= 1e-6:
+            return a[pax]                      # the climb leg itself
+    return (m.site or m.exit_pt)[pax]
+
+
 def group_end_climbs(st, group, face, end):
     """The GROUP form of the end-of-face climb (PLAN_PAGES_GROUP): the
     climbs of `group` on `face` toward `end` ('lo' | 'hi'), enumerated with
@@ -286,10 +300,17 @@ def group_end_climbs(st, group, face, end):
     realize strips them together, so one member's barrel must not wall
     another's gap (K51: SA15's via-in-pad at R17 walls SBA1's climb from
     T18) -- against a span that is the OTHER teeth's launches on the face.
+    The climbs are enumerated with `own_line` (escape_moves): a via-in-pad
+    may run out along its own column line as well as the two gap midlines
+    beside it, so the east block offers about ten lanes instead of five --
+    a 0.65 mm gap carries one 0.33 mm track, and five gaps cannot carry ten
+    climbs.
+
     Returns {net: [Move, ...]}: every exit beyond the span, nearest rows
-    first, one per (layer, row), tagged `end_climb`."""
+    first, one per (layer, row, lane), tagged `end_climb`."""
     pcb, sgrid, sref = st['pcb'], st['sgrid'], st['sref']
     byname, src_pad, launch = st['byname'], st['src_pad'], st['launch']
+    banned = st.get('banned') or frozenset()
     x0, y0, x1, y1 = sgrid.bbox
     hx, hy = sgrid.pitch_x / 2.0, sgrid.pitch_y / 2.0
     ax = 1 if face in ('left', 'right') else 0
@@ -312,19 +333,22 @@ def group_end_climbs(st, group, face, end):
     # and the joint realize frees whichever stands in a laid climb's room
     # (source_realize's blocker census) and re-lays it with the engine
     gids = {byname[n][0] for n in launch if n in byname}
+    pool = set(launch) - set(group)         # whose teeth a climb may displace
     nrows = len(sgrid.ys if ax else sgrid.xs)
     out = {}
     for n in group:
         p = src_pad.get(n)
         if p is None or p.component_ref != sref:
             continue
+        if (n, ('end_climb', face)) in banned:
+            continue        # the engine refused this net's climb ON THIS FACE
         nid = byname[n][0]
         maps = {L: te.build_obstacles(pcb, nid, gids | {nid}, L) for L in LAYERS}
         cands = em.enumerate_moves(
             p, sgrid, LAYERS,
             lambda a, b, L: maps[L].seg_clear(a, b),
             lambda a, L: not (maps[L].point_violation(a, pad=(te.VIA_SIZE - te.TRACK) / 2) or [0])[0],
-            climb=nrows, dirs=(face,))
+            climb=nrows, dirs=(face,), own_line=True)
         best = {}
         for m in cands:
             if not getattr(m, 'climb', 0) or m.direction != face:
@@ -332,13 +356,30 @@ def group_end_climbs(st, group, face, end):
             v = m.exit_pt[ax]
             if not ((end == 'lo' and v <= lo - pitch / 2 + 1e-6) or (end == 'hi' and v >= hi + pitch / 2 - 1e-6)):
                 continue
-            k = (m.layer, round(v, 2))
+            if (n, sr.move_sig(m)) in banned:
+                continue        # the engine has already refused this one
+            # keyed by the LANE as well as the exit row: two lanes reaching
+            # one row are different proposals to the assignment below (the
+            # column line and the gap beside it), and keeping only the
+            # cheaper of them is what leaves the group without a lane each
+            k = (m.layer, round(v, 2), round(_lane_of(m, ax), 2))
             c = (m.vias, sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b, _L in m.legs))
             if k not in best or c < best[k][0]:
                 best[k] = (c, m)
         ms = []
-        for (_L, v), (_c, m) in sorted(best.items(), key=lambda kv: (abs(kv[0][1] - edge), kv[1][0])):
+        for _k, (_c, m) in sorted(best.items(), key=lambda kv: (abs(kv[0][1] - edge), kv[1][0])):
             m.end_climb = True
+            # WHAT THE CLIMB COSTS THE REST OF THE RUN. The enumeration above
+            # runs against a map with every net of the run stripped, because
+            # the group is re-fanned jointly -- so a candidate that runs the
+            # whole length of the face reads as free while it in fact needs a
+            # dozen other teeth out of the way, and those are re-laid with no
+            # hint at all. Measured at K51 (`grp13c`): a five-member group
+            # laid EXACTLY, with twelve blockers freed, and the round judge
+            # then read the realized board at 312 against the 296 the plan
+            # was accepted at -- the whole gain, and more, spent on the
+            # scatter. The assignment orders on this.
+            m.blockers = len(sr.blockers_of(pcb, m, nid, byname, pool)[0])
             ms.append(m)
         out[n] = ms
     return out
@@ -460,7 +501,9 @@ def plan_state(pcb, names, banned=frozenset()):
                                sgrid.bbox, dgrid.bbox)
     paths = db.taut_paths(names, ends, lambda nm: obs(byname[nm][0], bundle_layer))
     buses = db.cluster(names, paths)
-    return {'byname': byname, 'dmenu': dmenu, 'smenu': smenu, 'launch': launch,
+    return {'banned': banned,          # the feasibility ledger, for a proposal
+                                       # that enumerates its own moves
+            'byname': byname, 'dmenu': dmenu, 'smenu': smenu, 'launch': launch,
             'tooth0': tooth0, 'tooth_vias': tooth_vias, 'src_pad': src_pad,
             'dst_pad': dst_pad, 'sref': sref, 'dref': dref, 'sgrid': sgrid,
             'bundle_layer': bundle_layer, 'chi': chi,
@@ -1377,6 +1420,20 @@ SRC_REFAN_MAX = int(os.environ.get('SRC_REFAN_MAX', '6'))
 # refused ask is REFUSED (and the net keeps its copper, said so) instead of
 # arriving as a near-miss the audit has to unpick.
 SRC_REFAN_STRICT = int(os.environ.get('SRC_REFAN_STRICT', '0'))
+# PLAN_PAGES_GROUP_FREE=1 (2026-09-15, session 13): when a GROUP climb has been
+# laid, the round's judge re-chooses the destination with NO held berths (see
+# the call site). 0 = the held re-choice, as for any other realized tooth.
+PLAN_PAGES_GROUP_FREE = int(os.environ.get('PLAN_PAGES_GROUP_FREE', '0') or 0)
+# SRC_REFAN_RESEAT=1 (2026-09-15, session 13): after a group climb is laid,
+# ask every displaced blocker back to the tooth it had (_reseat_blockers).
+# OFF, because it has not yet succeeded: measured at K51 it laid 5 of 10 and
+# the call was refused for DRC, and the reason is MUSICAL CHAIRS -- a blocker
+# the engine refuses keeps the copper it had on the input board (realize
+# strips only the nets it laid), and that copper can be standing in the very
+# tooth another blocker was just re-seated into. The pass falls back safely
+# to the group board, so it costs an engine call and nothing else; the fix
+# it needs is to ask only for teeth the group's copper has not taken.
+SRC_REFAN_RESEAT = int(os.environ.get('SRC_REFAN_RESEAT', '0') or 0)
 # DST_CONTEND (2026-09-11): the via-site CONTENTION term, in the JOINT
 # SOLVE's own currency. A barrel does not just cost a via, it takes an
 # inter-ball site, and under a ball field those sites are the scarcest room
@@ -2525,6 +2582,244 @@ def _realize_exact(board, asked, st, names, free, out_stem, realized, banned, va
     return None, {}, refused
 
 
+def _group_pullin(src_out, misses):
+    """PLAN_PAGES_GROUP is laid ALL OR NOTHING. A group climb is a JOINT
+    change of launch order -- the outermost berths leaving by the outermost
+    rows of the face, in berth order -- so a member the engine could not lay
+    as asked leaves its page-mates crossing it exactly as before: the
+    members that DID lay buy nothing and cost a via each (K51 `grp`: 14 of
+    the 17 asked laid, 8 in the asked gap, and the realized plan judged 317
+    against the 301 the group was accepted at). Returns the OTHER members of
+    every group that has a missed member -- the nets to drop with it. They
+    are not banned: their own moves are feasible, and the next round may
+    form the group again without the one the engine refused."""
+    def _g(nm):
+        return getattr(src_out[nm], 'group', '') or ''
+    bad = {_g(nm) for nm in misses if _g(nm)}
+    if not bad:
+        return []
+    return sorted(nm for nm in src_out if nm not in misses and _g(nm) in bad)
+
+
+def _blockers_for(board_pcb, moves, st, pool, log=print, label='joint re-fan'):
+    """The nets of `pool` whose copper stands in the room `moves` need
+    (`source_realize.blockers_of`), capped at SRC_REFAN_MAX and reported."""
+    free, pinned = [], set()
+    for nm, mv in moves.items():
+        mov, pin = sr.blockers_of(board_pcb, mv, st['byname'][nm][0], st['byname'], pool)
+        free += [b for b in mov if b not in free]
+        pinned |= set(pin)
+    if len(free) > SRC_REFAN_MAX:
+        log(f'    {label}: {len(free)} blocker(s), capping at {SRC_REFAN_MAX}: '
+            f'{free[SRC_REFAN_MAX:]} left in place')
+        free = free[:SRC_REFAN_MAX]
+    log(f'    {label}: blockers of {sorted(moves)} = {free or "none"}'
+        + (f'; PINNED (outside the run, immovable): {sorted(pinned)}' if pinned else ''))
+    return free
+
+
+def _realize_group_first(board, src_out, st, names, stem, banned, realized, log=print):
+    """PLAN_PAGES_GROUP: lay the GROUP climbs in an engine call of THEIR OWN,
+    before the round's other source moves, and all or nothing.
+
+    A group is a joint change of launch order, and in a shared call the
+    engine's plan-follow meets it as a crowd: it claims the shallowest balls
+    first, negotiates at most three same-call blockers per ball, and rips
+    whatever stands in the way of the ball it is laying. Measured at K51
+    (`grp13b`): laying the five up/F climbs beside eleven ordinary teeth, the
+    negotiation RIPPED two members of the group (SA0, SA10) to lay SDQ11 and
+    SDQ13 exactly, then re-laid them at level 1 eight millimetres off their
+    asked rows -- a group half laid, which buys nothing and costs a via each.
+    Laid alone with its own blockers freed, the group meets only itself, and
+    `pages_first._nest_assign` has already proved its members do not contend.
+
+    Returns (board, laid, refused): the board to carry on from (the caller's
+    own when nothing landed), the members laid exactly, and the members the
+    engine refused or degraded -- which are banned, while the rest of their
+    group is simply dropped for this round."""
+    grp = {n: m for n, m in src_out.items() if getattr(m, 'group', '')}
+    if not grp:
+        return board, {}, []
+    tags = sorted({m.group for m in grp.values()})
+    free = ([] if not SRC_REFAN_JOINT else
+            _blockers_for(parse_kicad_pcb(board), grp, st, set(names) - set(grp),
+                          log=log, label='group re-fan'))
+    out = f'{stem}.kicad_pcb'
+    res = sr.realize(board, grp, st['src_pad'], st['byname'], st['sref'], out,
+                     guard_names=names, free=free, strict=bool(SRC_REFAN_STRICT))
+    realized.append(res)
+    miss = [nm for nm, e in res['audit'].items() if not e['exact']]
+    for nm in miss:
+        banned.add((nm, sr.move_sig(grp[nm])))
+        if 'face' in (res['audit'][nm].get('lost') or ('face',)):
+            # THE ENGINE REFUSED THE FACE, not the row. Banning the move
+            # signature alone bans one of this net's thirty-odd climbs, so
+            # the next round proposes its neighbour and pays another engine
+            # call for the same answer (K51 SZQ, a ball ten columns deep:
+            # asked the east face at row 57.43, then 59.38, then 59.06 --
+            # "exact move infeasible even alone" each time, because its
+            # end-of-face climb is not a climb at all but an eight
+            # millimetre traverse of the array). One refusal of the FACE
+            # takes the net's end climbs on that face out of the run.
+            banned.add((nm, ('end_climb', grp[nm].direction)))
+    if res['rejected'] or miss:
+        log(f'    group climb {tags}: laid alone, '
+            + (f'REJECTED ({res["rejected"]})' if res['rejected']
+               else f'{sorted(miss)} not laid as asked')
+            + ' -- ALL OR NOTHING: the whole group is dropped this round'
+            + (f' (banned: {sorted(miss)})' if miss else ''))
+        return board, {}, miss
+    log(f'    group climb {tags}: laid alone and EXACT, all {len(grp)} member(s): '
+        + ', '.join(f'{n}@{grp[n].exit_pt[0]:.2f},{grp[n].exit_pt[1]:.2f}' for n in sorted(grp)))
+    if SRC_REFAN_RESEAT:
+        out = _reseat_blockers(out, res, free, st, names, set(grp), stem + '_rs',
+                               realized, log)
+    return out, grp, []
+
+
+def _tooth_move(nm, g):
+    """A menu Move that asks for the tooth a net ALREADY has -- the engine's
+    hint for "put this one back where it was"."""
+    return em.Move(net=nm, kind=g['kind'], direction=g['direction'], layer=g['layer'],
+                   exit_pt=tuple(g['tooth']), vias=g['vias'], legs=[],
+                   site=(tuple(g['site']) if g.get('site') else None))
+
+
+def _reseat_blockers(board, res, free, st, names, pinned, stem, realized, log=print):
+    """Put the freed blockers back where they were, now that the group's
+    copper is standing.
+
+    `realize(free=...)` gives the blockers NO hint on purpose -- they are
+    stripped so the engine has their room to give. What it then does with
+    them is its own business, and at K51 it was total: **ten of ten freed
+    blockers took a different tooth**, and the round judge read the realized
+    board at 373 against the 302 it started from, for a group of four climbs
+    laid exactly. The group's gain is real and small; the scatter it pays
+    for is neither. So a second call re-asks each moved blocker for the
+    tooth it had before, with the group's copper now standing and out of
+    reach: the ones the climbs did not displace go straight back, and the
+    ones that must move degrade a gap or two along their own face instead of
+    being re-invented. Returns the board to carry on from -- the re-seated
+    one, or the caller's when the pass is refused."""
+    moved = {nm: res['original'][nm] for nm in free
+             if res['achieved'].get(nm) and res['original'].get(nm)
+             and res['achieved'][nm]['tooth'] != res['original'][nm]['tooth']}
+    if not moved:
+        return board
+    ask = {nm: _tooth_move(nm, g) for nm, g in moved.items()}
+    out = f'{stem}.kicad_pcb'
+    # STRICT, always: the point of the pass is the tooth the net had, and a
+    # blocker the group's copper has genuinely displaced must be left where
+    # the group call put it rather than dumped on another face. Asked
+    # non-strict, the ladder degraded ten of them and put 23 DRC pairs on
+    # the board, which threw the whole pass away.
+    res2 = sr.realize(board, ask, st['src_pad'], st['byname'], st['sref'], out,
+                      guard_names=[n for n in names if n not in ask], free=(),
+                      strict=True)
+    realized.append(res2)
+    back = [nm for nm in ask if res2['audit'][nm]['exact']]
+    if res2['rejected']:
+        log(f'    re-seat: {len(ask)} displaced blocker(s) asked back, REJECTED '
+            f'({res2["rejected"]}) -- the group board stands as laid')
+        return board
+    log(f'    re-seat: {len(ask)} displaced blocker(s) asked back to their own teeth, '
+        f'{len(back)} exact: {sorted(back)}'
+        + (f'; still elsewhere: {sorted(set(ask) - set(back))}' if len(back) < len(ask) else ''))
+    return out
+
+
+# PLAN_PAGES_TIER (2026-09-15, session 13; THE PLAN item 5): THE BRAID-TIER
+# JUDGE. The round's judge is the braid's COUNT -- a plan-level proxy -- and
+# it is the visible limit of the chain three measured ways: at K51 it cannot
+# separate 115 vias from 129 (floors 314 against 315); on the synthetic
+# harness's `reversed_k28` it prefers a plan that routes 83 to one that
+# routes 54; and this session, it scored a laid GROUP CLIMB at 356 against
+# the 302 of the plan it displaced, while that same board ROUTED 107 against
+# 115 -- an error of 54 count points on a change worth eight vias. So where
+# the count cannot be trusted, route instead: fan out the candidate's
+# destination and hand the whole thing to the braid, and let the copper
+# decide. It costs a destination fanout plus a braid per candidate (~90 s at
+# K51), so it is gated hard:
+#   PLAN_PAGES_TIER=x   a near TIE -- the two counts within x of each other
+#   PLAN_PAGES_TIER_GROUP=1   every GROUP decision, tie or not (a group is a
+#                             whole-plan change and the count's error on it
+#                             is not small, it is systematic)
+#   PLAN_PAGES_TIER_MAX=n     at most n tier ROUTES in a run (default 4:
+#                             two decisions, and a decision needs both sides)
+# The verdict is (open nets, vias) -- completion first, as every grade in
+# this chain is. 0 = off, and the chain is byte-identical.
+PLAN_PAGES_TIER = float(os.environ.get('PLAN_PAGES_TIER', '0') or 0)
+PLAN_PAGES_TIER_GROUP = int(os.environ.get('PLAN_PAGES_TIER_GROUP', '0') or 0)
+PLAN_PAGES_TIER_MAX = int(os.environ.get('PLAN_PAGES_TIER_MAX', '4') or 4)
+PLAN_PAGES_TIER_ATTEMPTS = int(os.environ.get('PLAN_PAGES_TIER_ATTEMPTS', '0') or 0)
+_TIER = {'calls': 0, 'cache': {}}
+
+
+def braid_tier(board, choice, st, names, stem, log=print):
+    """Route a candidate plan and report what the BRAID got (see
+    PLAN_PAGES_TIER). Returns (open, vias) -- lower is better, completion
+    first -- or None when the candidate could not be carried that far.
+
+    **The braid runs at the CHAIN'S OWN attempts by default, and that is
+    load-bearing.** At `BRAID_ATTEMPTS=1` the tier is a cheaper router than
+    the one that will actually route the board, and its `open` term is then
+    not the chain's: measured at K51 it read a candidate 103 vias / 2 open
+    against an incumbent 106 / 1 and rejected it on completion, where the
+    full chain takes that same plan to **107 vias and 0 open**. A judge that
+    penalises a plan for opens the real router would have closed is worse
+    than the count it replaced. `PLAN_PAGES_TIER_ATTEMPTS=n` overrides (1 is
+    the fast, wrong one)."""
+    key = (os.path.abspath(board),
+           tuple(sorted((n, sr.move_sig(m)) for n, m in choice.items())))
+    if key in _TIER['cache']:
+        return _TIER['cache'][key]
+    if _TIER['calls'] >= PLAN_PAGES_TIER_MAX:
+        return None
+    _TIER['calls'] += 1
+    fo = f'{stem}.kicad_pcb'
+    for ext in ('.kicad_pcb', '.kicad_pro'):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(stem + ext)
+    try:
+        fanout_once(fo, names, choice, st['dst_pad'], st['dref'], st['byname'], board)
+    except Exception as e:                       # noqa: BLE001 -- a candidate, not the plan
+        log(f'    braid tier: the destination fanout refused this candidate ({e})')
+        _TIER['cache'][key] = None
+        return None
+    if not os.path.isfile(fo):
+        log('    braid tier: no fanout board for this candidate')
+        _TIER['cache'][key] = None
+        return None
+    out = f'{stem}_t'
+    for ext in ('.kicad_pcb', '.kicad_pro'):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(out + ext)
+    env = dict(os.environ)
+    if PLAN_PAGES_TIER_ATTEMPTS:
+        env['BRAID_ATTEMPTS'] = str(PLAN_PAGES_TIER_ATTEMPTS)
+    subprocess.run([sys.executable, '-u', os.path.join(HERE, 'braid.py'),
+                    '--board', fo, '--dest', st['dref'], '--nets', ','.join(names),
+                    '--out', out], capture_output=True, text=True, env=env)
+    g = subprocess.run([sys.executable, os.path.join(HERE, 'grade_k.py'),
+                        out + '.kicad_pcb', ','.join(names)],
+                       capture_output=True, text=True)
+    txt = g.stdout + g.stderr
+    mo = re.search(r'open=(\d+)', txt)
+    mv = re.search(r'vias=(\d+)', txt)
+    if not mo or not mv or 'BROKEN' in txt:
+        # A GRADE THAT DID NOT REPORT IS NOT A VERDICT (grade_k's own rule):
+        # a missing board reads as "0 open, 0 vias", which would win every
+        # comparison it entered.
+        log('    braid tier: no grade for this candidate -- '
+            + (txt.strip().splitlines() or ['(no output)'])[-1][:120])
+        _TIER['cache'][key] = None
+        return None
+    v = (int(mo.group(1)), int(mv.group(1)))
+    log(f'    braid tier: {os.path.basename(stem)} routed {v[1]} via(s), {v[0]} open')
+    _TIER['cache'][key] = v
+    return v
+
+
 def _chunks(order, depth):
     """`order` split into 2**depth runs of near-equal size, empties dropped."""
     n = max(1, 2 ** max(0, depth))
@@ -2592,6 +2887,11 @@ def batch_rounds(board, st, dst_choice, un, best_key, src_out, names, work, r,
         for nm in misses:
             banned.add((nm, sr.move_sig(src_out[nm])))
         tally['refused'] += len(misses)
+        pull = _group_pullin(src_out, misses)
+        if pull:
+            log(f'    batch: a group climb is incomplete -- all or nothing, dropping its '
+                f'other member(s) too (not banned): {pull}')
+            misses = misses + pull
         cands = []                      # (label, board, laid exactly, moved)
         if not res['rejected']:
             if misses:
@@ -2739,37 +3039,83 @@ def plan(base, names, work):
                     mv = getattr(pages_first.choose, 'last', {}).get('vias', f_)
                 return pf_key(ch, bp_, f_, mv)
             best_key = _key(dst_choice)
+            tier_round = [False]     # the braid has overruled the count here
             if PLAN_BATCH:
                 board, st, dst_choice, un, best_key, src_out = batch_rounds(
                     board, st, dst_choice, un, best_key, src_out, names, work, r,
                     banned, realized, tally, log=print)
             for _k in range(0 if PLAN_BATCH else SRC_RESIDUE_ROUNDS):
                 new_board = f'{work}_srcres{r}_{_k}.kicad_pcb'
-                _free = []
-                if SRC_REFAN_JOINT:
-                    _pcb_now = parse_kicad_pcb(board)
-                    _pin = set()
-                    for _nm, _mv in src_out.items():
-                        _mov, _pinned = sr.blockers_of(
-                            _pcb_now, _mv, st['byname'][_nm][0], st['byname'],
-                            set(names) - set(src_out))
-                        _free += [b for b in _mov if b not in _free]
-                        _pin |= set(_pinned)
-                    if len(_free) > SRC_REFAN_MAX:
-                        print(f'    joint re-fan: {len(_free)} blocker(s), capping at '
-                              f'{SRC_REFAN_MAX}: {_free[SRC_REFAN_MAX:]} left in place')
-                        _free = _free[:SRC_REFAN_MAX]
-                    print(f'    joint re-fan: blockers of {sorted(src_out)} = '
-                          f'{_free or "none"}'
-                          + (f'; PINNED (outside the run, immovable): {sorted(_pin)}'
-                             if _pin else ''))
-                res_r = sr.realize(board, src_out, st['src_pad'], st['byname'], st['sref'], new_board,
-                                   guard_names=names, free=_free,
-                                   strict=bool(SRC_REFAN_STRICT))
-                realized.append(res_r)
-                misses = [nm for nm, e in res_r['audit'].items() if not e['exact']]
-                for nm in misses:
-                    banned.add((nm, sr.move_sig(src_out[nm])))
+                # THE GROUP CLIMBS FIRST, IN A CALL OF THEIR OWN, all or
+                # nothing (_realize_group_first): a group laid beside the
+                # round's other teeth is ripped by the engine's own
+                # negotiation, and half a group is worth nothing
+                from_board, g_laid, _g_ref = _realize_group_first(
+                    board, src_out, st, names, f'{work}_srcres{r}_{_k}g',
+                    banned, realized, log=print)
+                # the group is laid whole or dropped whole, so the rest of
+                # the round is the moves that carry no group tag -- PLUS,
+                # when it is dropped, whatever the plan asked for its members
+                # BEFORE the group displaced them. A group proposal replaces
+                # an ordinary source move, and dropping the group used to
+                # drop that move with it, so a net the plan wanted to move
+                # kept its standing tooth for a reason that had nothing to do
+                # with it (measured at K35: the group was refused by the
+                # engine and the board came out 68 against 60).
+                # IN PLACE, because the ORDER of this dict is load-bearing:
+                # it is the order `_blockers_for` walks (and its `free` list
+                # is capped) and the order the engine receives its hints in,
+                # so rebuilding it with the restored moves appended at the
+                # end gives the engine a different call and different copper.
+                # Measured at K35: the same eleven asks, the same board, and
+                # 69 segments different -- judged 198 against the control's
+                # 181, which is the whole of that rung's regression.
+                rest = {}
+                for n, m in src_out.items():
+                    if not getattr(m, 'group', ''):
+                        rest[n] = m
+                    elif not g_laid and getattr(m, 'replaces', None) is not None:
+                        rest[n] = m.replaces
+                if g_laid:
+                    # A GROUP TAKES THE WHOLE ITERATION. The other moves of
+                    # this plan were chosen against a launch face the group
+                    # has just rearranged, and asking for them on top of it
+                    # is asking for a berth that is no longer there: at K51
+                    # the five remaining moves, laid over the group with only
+                    # three blockers left to free, put 30 DRC pairs on the
+                    # board and the whole round was thrown away. The next
+                    # iteration re-plans against the group's copper and asks
+                    # again for whatever it still wants.
+                    res_r, misses = None, []
+                    new_board, src_out = from_board, dict(g_laid)
+                    if rest:
+                        print(f'  round {r}: the group is laid; the other {len(rest)} move(s) '
+                              f'{sorted(rest)} are left for the next iteration to re-plan')
+                else:
+                    _free = []
+                    if SRC_REFAN_JOINT:
+                        # the group's freshly laid climbs are NOT blockers to
+                        # free: they are the plan. Without this the second
+                        # call stripped and re-fanned the very members the
+                        # first call had laid exactly, with no hint at all
+                        # (K51 grp13f: SA0, SA6, SA12, SCS0 among the seven
+                        # "blockers", all seven of which took a different
+                        # tooth) -- the group was undone in the call after it
+                        # was made.
+                        _free = _blockers_for(parse_kicad_pcb(from_board), rest, st,
+                                              set(names) - set(rest) - set(g_laid),
+                                              log=print)
+                    res_r = sr.realize(from_board, rest, st['src_pad'], st['byname'],
+                                       st['sref'], new_board, guard_names=names,
+                                       free=_free, strict=bool(SRC_REFAN_STRICT))
+                    realized.append(res_r)
+                    misses = [nm for nm, e in res_r['audit'].items() if not e['exact']]
+                    for nm in misses:
+                        banned.add((nm, sr.move_sig(rest[nm])))
+                    src_out = dict(rest)
+                    src_out.update(g_laid)
+                if res_r is None:
+                    res_r = {'rejected': None}
                 line = (f'  round {r}: source residue move(s) realized: {sorted(src_out)}'
                         + (f'; not laid as asked (banned): {misses}' if misses else '')
                         + (f'; REJECTED ({res_r["rejected"]})' if res_r['rejected'] else ''))
@@ -2792,6 +3138,24 @@ def plan(base, names, work):
                 keep_sig = {nm: sr.move_sig(m) for nm, m in dst_choice.items()
                             if nm not in src_out and nm in st2['dmenu']
                             and any(sr.move_sig(mm) == sr.move_sig(m) for mm in st2['dmenu'][nm])}
+                if g_laid and PLAN_PAGES_GROUP_FREE:
+                    # A GROUP IS A WHOLE-PLAN CHANGE, so it is judged against a
+                    # destination free to answer it. Holding every other berth
+                    # is right for ONE realized tooth -- it stops the
+                    # comparison charging that tooth for the greedy's twenty
+                    # other changes -- but a group rearranges the launch order
+                    # of a whole page, and the berths that were chosen against
+                    # the OLD order can only swim on the new one. Measured at
+                    # K51: the four-member group laid exactly was judged 302 ->
+                    # 373 with the berths held, and the same board, its
+                    # destination re-planned by the passes that follow, shipped
+                    # at count 306 and ROUTED 107 -- the best clean K51 this
+                    # chain has produced, against 115 for the plan the judge
+                    # preferred. The judge was not measuring the group; it was
+                    # measuring a destination that could not move.
+                    keep_sig = {}
+                    print(f'  round {r}: the group is a whole-plan change -- the '
+                          f'destination is re-chosen FREE (no held berths) to judge it')
                 ch2, un2 = dest_choice(st2, new_board, src_out=src2, fixed=keep_sig)
                 if not ch2:
                     print(line + '; no destination choice on the new board -- reverted'); break
@@ -2801,9 +3165,52 @@ def plan(base, names, work):
                     import pages_first
                     mv2 = getattr(pages_first.choose, 'last', {}).get('vias', f2)
                 key2 = pf_key(ch2, bp2, f2, mv2)
-                if pf_better(key2, best_key):
-                    print(line + f'; {pf_fmt(best_key, key2)}: KEPT')
+                _force = bool(g_laid) and int(os.environ.get('PLAN_PAGES_GROUP_FORCE', '0') or 0)
+                _ok = pf_better(key2, best_key)
+                _why = ''
+                # THE BRAID DECIDES (PLAN_PAGES_TIER): where the count cannot
+                # be trusted -- a near tie, or any group decision -- route
+                # both plans and compare the copper
+                _near = (PLAN_PAGES_TIER and key2 and best_key
+                         and abs(key2[0] - best_key[0]) <= PLAN_PAGES_TIER)
+                if ((_near or (PLAN_PAGES_TIER_GROUP and g_laid) or tier_round[0])
+                        and not _force):
+                    # both sides or neither (the `a is not None and b is not
+                    # None` below): one routed candidate against an unroutable
+                    # other is not a comparison
+                    a = braid_tier(new_board, ch2, st2, names,
+                                   f'{work}_tier{r}_{_k}a', log=print)
+                    b = braid_tier(board, dst_choice, st, names,
+                                   f'{work}_tier{r}_{_k}b', log=print)
+                    if a is not None and b is not None:
+                        _ok = a < b
+                        _why = (f'  [braid tier: {a[1]} via(s)/{a[0]} open against '
+                                f'{b[1]}/{b[0]} -- the copper decides'
+                                + ('' if _ok == pf_better(key2, best_key)
+                                   else ', AGAINST the count') + ']')
+                _overruled = _ok and not pf_better(key2, best_key)
+                if _ok or _force:
+                    print(line + f'; {pf_fmt(best_key, key2)}: KEPT' + _why
+                          + ('  [PLAN_PAGES_GROUP_FORCE: kept whatever the judge says]'
+                             if _force and not pf_better(key2, best_key) else ''))
                     board, st, dst_choice, un, best_key, src_out = new_board, st2, ch2, un2, key2, src2
+                    if _overruled and not tier_round[0]:
+                        # A TIER VERDICT AND A COUNT BASELINE CANNOT BE MIXED.
+                        # `best_key` is now a count the braid has just
+                        # contradicted, so every later comparison in this
+                        # round would be against a number that means nothing
+                        # -- and at K51 the count is ANTI-correlated on
+                        # exactly this board. Measured, all three ways: the
+                        # round carried on unchanged gives floor 336 and 131
+                        # vias; STOPPED at the overrule, floor 373 and 109
+                        # with one open; and the one intermediate step that
+                        # helped landed floor 358 and 107. There is no
+                        # stopping rule in the count, so the answer is not to
+                        # stop but to change the JUDGE: every later decision
+                        # of this round goes to the braid as well.
+                        print(f'  round {r}: the braid overruled the count -- every '
+                              f'later decision of this round goes to the braid too')
+                        tier_round[0] = True
                     if SRC_REPLAN and not src_out:
                         _res = [nm for nm in dst_choice
                                 if bp2.get(nm, {}).get('page') is None]
@@ -2813,9 +3220,23 @@ def plan(base, names, work):
                             src_out[_pk[1]] = _pk[2]
                 else:
                     print(line + f'; {pf_fmt(best_key, key2)}: '
-                          f'not better -- reverted, moves banned')
+                          f'not better -- reverted, moves banned' + _why)
                     for nm in src_out:
                         banned.add((nm, sr.move_sig(src_out[nm])))
+                    if g_laid and rest:
+                        # A REJECTED GROUP COSTS THE ROUND ITS GROUP, NOT ITS
+                        # OTHER MOVES. A group takes the whole iteration, so
+                        # the round's other source moves were never realized;
+                        # ending the loop here threw them away with it, and
+                        # the run finished short of the plan it had --
+                        # measured at K28 and K41, where the braid tier
+                        # REJECTED the group correctly and the board still
+                        # came out 38 and 91 against 34 and 80, because the
+                        # teeth beside it never went down.
+                        print(f'  round {r}: the group is rejected and banned; the other '
+                              f'{len(rest)} move(s) {sorted(rest)} go to the next iteration')
+                        src_out = rest
+                        continue
                     break
                 if not src_out:
                     break

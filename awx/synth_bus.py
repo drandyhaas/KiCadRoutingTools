@@ -636,10 +636,12 @@ def build(a):
     K = a.k
     depth = max(1, a.depth)
     # rows-2 usable slots a column (the corners are skipped, see face_slots)
-    rows, cols = a.rows or -(-K // depth) + 2, a.cols
-    if (rows - 2) * depth < K:
-        raise SystemExit(f'--rows {rows} (minus 2 corner rows) x --depth {depth} '
-                         f'< K={K}: not enough non-corner balls on the facing face')
+    off = max(0, getattr(a, 'row_offset', 0) or 0)
+    rows, cols = a.rows or -(-K // depth) + 2 + 2 * off, a.cols
+    if (rows - 2 - 2 * off) * depth < K:
+        raise SystemExit(f'--rows {rows} (minus 2 corner rows and 2x{off} free) x '
+                         f'--depth {depth} < K={K}: not enough non-corner balls '
+                         f'on the facing face')
     pi = pattern_perm(a.pattern, K, seed=a.seed, blocks=a.blocks,
                       inversions=a.inversions)
     assert sorted(pi) == list(range(K)), 'the pattern is not a permutation'
@@ -661,7 +663,7 @@ def build(a):
         out = []
         for d in range(depth):
             c = (cols_ - 1 - d) if east else d
-            for r in range(1, rows - 1):
+            for r in range(1 + off, rows - 1 - off):
                 out.append((r, c))
                 if len(out) == n:
                     return out
@@ -734,6 +736,7 @@ def build(a):
         'perm': pi, 'names': names,
         'src': a.src, 'dst': a.dst,
         'rows': rows, 'cols': cols, 'depth': depth, 'gap': a.gap,
+        'row_offset': off,
         'pad': a.pad, 'pad_inner': a.pad_inner, 'margin_y': a.margin_y,
         'dst_rot': a.dst_rot, 'caps': a.caps,
         'crossings': len(edges),
@@ -769,6 +772,19 @@ def main(argv=None):
     ap.add_argument('--blocks', type=int, default=2)
     ap.add_argument('--inversions', type=int, default=None)
     ap.add_argument('--rows', type=int, default=None)
+    ap.add_argument('--row-offset', type=int, default=0,
+                    help='leave this many ball rows FREE at each end of the '
+                         'facing column, above and below the bus (the array '
+                         'grows to fit). The bus otherwise fills the facing '
+                         'column from the first non-corner row to the last, '
+                         'so a launch has nowhere along the face to move TO '
+                         'and an end-of-face climb (fanout_from_plan '
+                         'SRC_CLIMB_END, the group move) has no room to exist '
+                         '-- the harness is inert for it. With free rows the '
+                         'move is available and the planted optimum is '
+                         'unchanged, which is what makes the pair a '
+                         'measurement: the same case at offset 0 is the '
+                         'negative control.')
     ap.add_argument('--cols', type=int, default=4)
     ap.add_argument('--depth', type=int, default=1,
                     help='how many columns deep the bus balls are drawn from '
